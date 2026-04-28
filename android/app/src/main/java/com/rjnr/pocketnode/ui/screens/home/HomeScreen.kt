@@ -147,6 +147,23 @@ fun HomeScreen(
 
     val tipBlockNumberLong = uiState.tipBlockNumber.toLongOrNull() ?: 0L
 
+    // "Don't know your block height?" helper — opens the user's address page
+    // on the CKB explorer so non-technical users can scroll to their first
+    // transaction and read the block number off (#85). Disabled when no
+    // address is loaded yet (pre-init / locked).
+    val onLookupBlockHeight: (() -> Unit)? = uiState.address.takeIf { it.isNotBlank() }?.let { addr ->
+        {
+            val url = buildExplorerAddressUrl(addr, uiState.currentNetwork)
+            try {
+                context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(url)))
+            } catch (_: android.content.ActivityNotFoundException) {
+                scope.launch {
+                    snackbarHostState.showSnackbar("No browser available to open the explorer")
+                }
+            }
+        }
+    }
+
     // Sync options dialog (settings path)
     if (uiState.showSyncOptionsDialog) {
         SyncOptionsDialog(
@@ -157,7 +174,8 @@ fun HomeScreen(
                 viewModel.changeSyncMode(mode, customBlock)
             },
             savedCustomBlockHeight = uiState.savedCustomBlockHeight,
-            tipBlockNumber = tipBlockNumberLong
+            tipBlockNumber = tipBlockNumberLong,
+            onLookupAddressOnExplorer = onLookupBlockHeight
         )
     }
 
@@ -175,7 +193,8 @@ fun HomeScreen(
                     viewModel.changeSyncMode(mode, customBlock)
                 }
             },
-            tipBlockNumber = tipBlockNumberLong
+            tipBlockNumber = tipBlockNumberLong,
+            onLookupAddressOnExplorer = onLookupBlockHeight
         )
     }
 
@@ -1231,6 +1250,19 @@ private fun buildExplorerUrl(txHash: String, network: NetworkType): String {
         NetworkType.TESTNET -> "https://testnet.explorer.nervos.org/transaction"
     }
     return "$base/$txHash"
+}
+
+/**
+ * Address page URL on the public CKB explorer (#85). Used by
+ * SyncOptionsDialog's "Don't know your block height?" helper so non-technical
+ * users can scroll to their first transaction and read the block number off.
+ */
+internal fun buildExplorerAddressUrl(address: String, network: NetworkType): String {
+    val base = when (network) {
+        NetworkType.MAINNET -> "https://explorer.nervos.org/address"
+        NetworkType.TESTNET -> "https://testnet.explorer.nervos.org/address"
+    }
+    return "$base/$address"
 }
 
 @Preview(showBackground = true)
