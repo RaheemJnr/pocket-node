@@ -32,6 +32,7 @@ import com.rjnr.pocketnode.ui.theme.TestnetOrange
 
 private val DaoGreen = Color(0xFF1ED882)
 
+@OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun DaoScreen(
     viewModel: DaoViewModel,
