@@ -96,7 +96,12 @@ data class DaoUiState(
     val activeDeposits: List<DaoDeposit> = emptyList(),
     val completedDeposits: List<DaoDeposit> = emptyList(),
     val selectedTab: DaoTab = DaoTab.ACTIVE,
+    // Initial-load spinner. Driven once on first refresh; subsequent refreshes
+    // surface through `isRefreshing` (the pull-to-refresh indicator) instead.
     val isLoading: Boolean = true,
+    // Pull-to-refresh indicator. Distinct from `isLoading` so the user can
+    // refresh without the screen blanking out into a fullscreen spinner.
+    val isRefreshing: Boolean = false,
     val error: String? = null,
     val pendingAction: DaoAction? = null,
     val requiresAuth: Boolean = false,
