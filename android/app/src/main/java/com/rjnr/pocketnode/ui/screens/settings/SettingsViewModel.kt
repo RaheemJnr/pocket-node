@@ -40,6 +40,9 @@ class SettingsViewModel @Inject constructor(
         val showThemeDialog: Boolean = false,
         val pendingNetworkSwitch: NetworkType? = null,
         val tipBlockNumber: Long = 0L,
+        // Active wallet address — used by SyncOptionsDialog's "look up on explorer"
+        // helper for the CUSTOM mode (#85). Null until the wallet is initialized.
+        val address: String? = null,
         val error: String? = null
     )
 
@@ -52,7 +55,20 @@ class SettingsViewModel @Inject constructor(
         // Keep network in sync with repository's live StateFlow
         viewModelScope.launch {
             repository.network.collect { network ->
-                _uiState.update { it.copy(currentNetwork = network) }
+                _uiState.update {
+                    it.copy(
+                        currentNetwork = network,
+                        // Address derives from network — keep it fresh on switch.
+                        address = repository.getCurrentAddress()
+                    )
+                }
+            }
+        }
+
+        // Track wallet info changes so address updates when the active wallet flips.
+        viewModelScope.launch {
+            repository.walletInfo.collect { _ ->
+                _uiState.update { it.copy(address = repository.getCurrentAddress()) }
             }
         }
 

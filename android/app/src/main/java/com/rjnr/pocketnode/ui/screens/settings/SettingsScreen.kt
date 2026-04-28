@@ -159,12 +159,29 @@ fun SettingsScreen(
 
     // Sync options dialog
     if (uiState.showSyncDialog) {
+        // "Don't know your block height?" helper (#85). Opens the user's
+        // address page on the CKB explorer when CUSTOM is selected.
+        val onLookupBlockHeight: (() -> Unit)? = uiState.address?.takeIf { it.isNotBlank() }?.let { addr ->
+            {
+                val url = com.rjnr.pocketnode.ui.screens.home.buildExplorerAddressUrl(
+                    addr, uiState.currentNetwork
+                )
+                try {
+                    context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(url)))
+                } catch (_: android.content.ActivityNotFoundException) {
+                    scope.launch {
+                        snackbarHostState.showSnackbar("No browser available to open the explorer")
+                    }
+                }
+            }
+        }
         SyncOptionsDialog(
             currentMode = uiState.syncMode,
             onDismiss = { viewModel.hideSyncDialog() },
             onSelectMode = { mode, customBlock -> viewModel.setSyncMode(mode, customBlock) },
             savedCustomBlockHeight = uiState.savedCustomBlockHeight,
-            tipBlockNumber = uiState.tipBlockNumber
+            tipBlockNumber = uiState.tipBlockNumber,
+            onLookupAddressOnExplorer = onLookupBlockHeight
         )
     }
 

@@ -46,7 +46,12 @@ internal fun SyncOptionsDialog(
     description: String = "Choose how much transaction history to sync:",
     availableModes: List<SyncMode> = SyncMode.entries.toList(),
     savedCustomBlockHeight: Long? = null,
-    tipBlockNumber: Long = 0L
+    tipBlockNumber: Long = 0L,
+    // Optional — when supplied and CUSTOM is selected, render a "Don't know
+    // your block height? Look up on explorer" helper that opens the user's
+    // address page in the CKB explorer (#85). Caller owns the URL launch so
+    // this composable stays free of Intent / Network plumbing.
+    onLookupAddressOnExplorer: (() -> Unit)? = null
 ) {
     // If the parent hides currentMode from availableModes, fall back to the first
     // shown option so the dialog never opens with an invisible selection.
@@ -155,6 +160,27 @@ internal fun SyncOptionsDialog(
                             else -> null
                         }
                     )
+
+                    // "Don't know your block height?" helper (#85). Opens the
+                    // CKB explorer at the user's address so they can scroll to
+                    // their first transaction and read the block number off.
+                    if (onLookupAddressOnExplorer != null) {
+                        TextButton(
+                            onClick = onLookupAddressOnExplorer,
+                            contentPadding = androidx.compose.foundation.layout.PaddingValues(0.dp)
+                        ) {
+                            Icon(
+                                Lucide.ExternalLink,
+                                contentDescription = null,
+                                modifier = Modifier.size(16.dp)
+                            )
+                            Spacer(Modifier.width(6.dp))
+                            Text(
+                                text = "Don't know your block height? Look up on explorer",
+                                style = MaterialTheme.typography.bodySmall
+                            )
+                        }
+                    }
                 }
 
                 if (selectedMode == SyncMode.FULL_HISTORY && SyncMode.FULL_HISTORY in availableModes) {
