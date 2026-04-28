@@ -8,6 +8,7 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Lock
 import androidx.compose.material3.*
+import androidx.compose.material3.pulltorefresh.PullToRefreshBox
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -31,6 +32,7 @@ import com.rjnr.pocketnode.ui.theme.TestnetOrange
 
 private val DaoGreen = Color(0xFF1ED882)
 
+@OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun DaoScreen(
     viewModel: DaoViewModel,
@@ -49,103 +51,128 @@ fun DaoScreen(
     Scaffold(
         snackbarHost = { SnackbarHost(snackbarHostState) }
     ) { padding ->
-        Column(
+        // Initial-load fullscreen spinner (only on first ever load — subsequent
+        // refreshes use the PullToRefresh indicator).
+        if (uiState.isLoading) {
+            Box(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .padding(padding),
+                contentAlignment = Alignment.Center
+            ) {
+                CircularProgressIndicator()
+            }
+            return@Scaffold
+        }
+
+        // Whole content lives inside PullToRefreshBox so the user can refresh
+        // from anywhere on the screen (overview card, tabs, list, or the empty
+        // state) without needing to navigate away and back. Single LazyColumn
+        // hosts every section as an `item { ... }` — same pattern as HomeScreen.
+        PullToRefreshBox(
+            isRefreshing = uiState.isRefreshing,
+            onRefresh = { viewModel.refresh() },
             modifier = Modifier
                 .fillMaxSize()
                 .padding(padding)
                 .padding(horizontal = com.rjnr.pocketnode.ui.util.screenHorizontalPadding())
         ) {
-            Spacer(modifier = Modifier.height(16.dp))
-
-            DaoOverviewCard(
-                overview = uiState.overview,
-                availableBalance = availableBalance,
-                networkType = networkType,
-                onDepositClick = { showDepositSheet = true }
-            )
-
-            Spacer(modifier = Modifier.height(16.dp))
-
-            DaoTabRow(
-                selectedTab = uiState.selectedTab,
-                activeCount = uiState.overview.activeCount,
-                completedCount = uiState.overview.completedCount,
-                onTabSelected = viewModel::selectTab
-            )
-
-            Spacer(modifier = Modifier.height(8.dp))
-
-            // Pending action indicator
-            uiState.pendingAction?.let { action ->
-                Surface(
-                    modifier = Modifier.fillMaxWidth(),
-                    shape = RoundedCornerShape(12.dp),
-                    color = PendingAmber.copy(alpha = 0.1f)
-                ) {
-                    Row(
-                        modifier = Modifier.padding(12.dp),
-                        verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.spacedBy(12.dp)
-                    ) {
-                        CircularProgressIndicator(
-                            modifier = Modifier.size(20.dp),
-                            strokeWidth = 2.dp,
-                            color = PendingAmber
-                        )
-                        Text(
-                            text = when (action) {
-                                is DaoAction.Depositing -> "Depositing ${formatCkb(action.amount)} CKB..."
-                                is DaoAction.Withdrawing -> "Withdrawing from DAO..."
-                                is DaoAction.Unlocking -> "Unlocking DAO deposit..."
-                            },
-                            style = MaterialTheme.typography.bodyMedium,
-                            color = PendingAmber
-                        )
-                    }
-                }
-                Spacer(modifier = Modifier.height(8.dp))
-            }
-
             val deposits = when (uiState.selectedTab) {
                 DaoTab.ACTIVE -> uiState.activeDeposits
                 DaoTab.COMPLETED -> uiState.completedDeposits
             }
 
-            if (uiState.isLoading) {
-                Box(
-                    modifier = Modifier.fillMaxSize(),
-                    contentAlignment = Alignment.Center
-                ) {
-                    CircularProgressIndicator()
+            LazyColumn(
+                modifier = Modifier.fillMaxSize(),
+                verticalArrangement = Arrangement.spacedBy(12.dp),
+                contentPadding = PaddingValues(vertical = 16.dp)
+            ) {
+                item("overview") {
+                    DaoOverviewCard(
+                        overview = uiState.overview,
+                        availableBalance = availableBalance,
+                        networkType = networkType,
+                        onDepositClick = { showDepositSheet = true }
+                    )
                 }
-            } else if (deposits.isEmpty() && uiState.selectedTab == DaoTab.ACTIVE) {
-                DaoEmptyState(onDepositClick = { showDepositSheet = true })
-            } else if (deposits.isEmpty()) {
-                Box(
-                    modifier = Modifier.fillMaxSize(),
-                    contentAlignment = Alignment.Center
-                ) {
-                    Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                        Text(
-                            text = "No completed deposits",
-                            style = MaterialTheme.typography.bodyLarge,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant
-                        )
-                        Spacer(modifier = Modifier.height(8.dp))
-                        Text(
-                            text = "Fully unlocked deposits are consumed on-chain. Check your transaction history for past DAO activity.",
-                            style = MaterialTheme.typography.bodySmall,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.6f),
-                            textAlign = TextAlign.Center,
-                            modifier = Modifier.padding(horizontal = 32.dp)
-                        )
+
+                item("tabs") {
+                    DaoTabRow(
+                        selectedTab = uiState.selectedTab,
+                        activeCount = uiState.overview.activeCount,
+                        completedCount = uiState.overview.completedCount,
+                        onTabSelected = viewModel::selectTab
+                    )
+                }
+
+                // Pending action banner — only when an action is in flight.
+                uiState.pendingAction?.let { action ->
+                    item("pending-action") {
+                        Surface(
+                            modifier = Modifier.fillMaxWidth(),
+                            shape = RoundedCornerShape(12.dp),
+                            color = PendingAmber.copy(alpha = 0.1f)
+                        ) {
+                            Row(
+                                modifier = Modifier.padding(12.dp),
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.spacedBy(12.dp)
+                            ) {
+                                CircularProgressIndicator(
+                                    modifier = Modifier.size(20.dp),
+                                    strokeWidth = 2.dp,
+                                    color = PendingAmber
+                                )
+                                Text(
+                                    text = when (action) {
+                                        is DaoAction.Depositing -> "Depositing ${formatCkb(action.amount)} CKB..."
+                                        is DaoAction.Withdrawing -> "Withdrawing from DAO..."
+                                        is DaoAction.Unlocking -> "Unlocking DAO deposit..."
+                                    },
+                                    style = MaterialTheme.typography.bodyMedium,
+                                    color = PendingAmber
+                                )
+                            }
+                        }
                     }
                 }
-            } else {
-                LazyColumn(
-                    verticalArrangement = Arrangement.spacedBy(12.dp),
-                    contentPadding = PaddingValues(vertical = 8.dp)
-                ) {
+
+                if (deposits.isEmpty() && uiState.selectedTab == DaoTab.ACTIVE) {
+                    item("empty-active") {
+                        // fillParentMaxHeight gives the empty-state vertical
+                        // breathing room AND keeps the LazyColumn scrollable so
+                        // pull-to-refresh still detects the gesture.
+                        Box(
+                            modifier = Modifier.fillParentMaxHeight(0.85f),
+                            contentAlignment = Alignment.Center
+                        ) {
+                            DaoEmptyState(onDepositClick = { showDepositSheet = true })
+                        }
+                    }
+                } else if (deposits.isEmpty()) {
+                    item("empty-completed") {
+                        Box(
+                            modifier = Modifier.fillParentMaxHeight(0.6f),
+                            contentAlignment = Alignment.Center
+                        ) {
+                            Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                                Text(
+                                    text = "No completed deposits",
+                                    style = MaterialTheme.typography.bodyLarge,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                                )
+                                Spacer(modifier = Modifier.height(8.dp))
+                                Text(
+                                    text = "Fully unlocked deposits are consumed on-chain. Check your transaction history for past DAO activity.",
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.6f),
+                                    textAlign = TextAlign.Center,
+                                    modifier = Modifier.padding(horizontal = 32.dp)
+                                )
+                            }
+                        }
+                    }
+                } else {
                     items(deposits, key = { "${it.outPoint.txHash}:${it.outPoint.index}" }) { deposit ->
                         DaoDepositCard(
                             deposit = deposit,

@@ -182,6 +182,24 @@ class DaoViewModel @Inject constructor(
         _uiState.update { it.copy(selectedTab = tab) }
     }
 
+    /**
+     * Pull-to-refresh entry point. Distinct from the periodic poll started in
+     * [startPolling] — this fires immediately on user gesture and surfaces
+     * its progress through `isRefreshing` (the PTR indicator) rather than the
+     * fullscreen `isLoading` spinner.
+     */
+    fun refresh() {
+        if (_uiState.value.isRefreshing) return
+        viewModelScope.launch {
+            _uiState.update { it.copy(isRefreshing = true) }
+            try {
+                refreshDaoData()
+            } finally {
+                _uiState.update { it.copy(isRefreshing = false) }
+            }
+        }
+    }
+
     fun clearError() {
         _uiState.update { it.copy(error = null) }
     }
