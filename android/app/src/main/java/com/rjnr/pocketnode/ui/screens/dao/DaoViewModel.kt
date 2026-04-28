@@ -194,9 +194,17 @@ internal fun shouldClearPendingAction(
     is DaoAction.Depositing -> deposits.any {
         it.status == DaoCellStatus.DEPOSITED && it.capacity == pendingAction.amount
     }
-    is DaoAction.Withdrawing -> deposits.any {
-        it.outPoint == pendingAction.outPoint &&
-            (it.status == DaoCellStatus.LOCKED || it.status == DaoCellStatus.UNLOCKABLE)
+    // Phase 1 (Withdraw) consumes the deposit cell on chain — it disappears
+    // from the live cells list, replaced by a NEW withdrawing cell with a
+    // different outPoint. The previous check (`outPoint == pendingAction.outPoint
+    // && status in (LOCKED, UNLOCKABLE)`) could never match because the original
+    // outPoint is gone forever. Spinner stuck. Fix: clear when the original
+    // deposit's outPoint no longer appears as DEPOSITED — that means Phase 1
+    // confirmed and consumed the cell. The new withdrawing cell shows up
+    // separately with its own LOCKED/UNLOCKABLE status; UI surface for the
+    // user is the cell card with "Unlockable in Xd Yh".
+    is DaoAction.Withdrawing -> deposits.none {
+        it.outPoint == pendingAction.outPoint && it.status == DaoCellStatus.DEPOSITED
     }
     is DaoAction.Unlocking -> deposits.none { it.outPoint == pendingAction.outPoint }
 }
