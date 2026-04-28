@@ -157,9 +157,16 @@ class DaoViewModelTest {
     }
 
     @Test
-    fun `shouldClear Withdrawing false when different outPoint is LOCKED`() {
+    fun `shouldClear Withdrawing true when original outPoint is no longer in deposits list`() {
+        // Phase 1 confirms = original deposit cell consumed = its outPoint
+        // disappears from live cells. The new withdrawing cell appears with a
+        // different outPoint (here represented by `otherOutPoint`, LOCKED).
+        // Original behavior treated this as "don't clear" because the strict
+        // outPoint+LOCKED match never hit, leaving the spinner stuck. The
+        // corrected semantic clears when the tracked outPoint is no longer
+        // DEPOSITED — which is true here (it's not in the list at all).
         val deposits = listOf(makeDaoDeposit(outPoint = otherOutPoint, status = DaoCellStatus.LOCKED))
-        assertFalse(shouldClearPendingAction(DaoAction.Withdrawing(testOutPoint), deposits))
+        assertTrue(shouldClearPendingAction(DaoAction.Withdrawing(testOutPoint), deposits))
     }
 
     @Test
