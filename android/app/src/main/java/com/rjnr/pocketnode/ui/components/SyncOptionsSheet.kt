@@ -66,6 +66,7 @@ internal fun SyncOptionsSheet(
     savedCustomBlockHeight: Long? = null,
     tipBlockNumber: Long = 0L,
     onLookupAddressOnExplorer: (() -> Unit)? = null,
+    showHelpIcons: Boolean = true,
 ) {
     val initialMode = remember(currentMode, availableModes) {
         currentMode.takeIf { it in availableModes } ?: availableModes.firstOrNull() ?: currentMode
@@ -106,7 +107,7 @@ internal fun SyncOptionsSheet(
                     isSelected = selectedMode == SyncMode.NEW_WALLET,
                     isRecommended = false,
                     onClick = { selectedMode = SyncMode.NEW_WALLET; showCustomInput = false },
-                    onHelp = { onTopicHelp(EducationTopic.SyncModeNew) },
+                    onHelp = if (showHelpIcons) { { onTopicHelp(EducationTopic.SyncModeNew) } } else null,
                 )
             }
             if (SyncMode.RECENT in availableModes) {
@@ -117,7 +118,7 @@ internal fun SyncOptionsSheet(
                     isSelected = selectedMode == SyncMode.RECENT,
                     isRecommended = true,
                     onClick = { selectedMode = SyncMode.RECENT; showCustomInput = false },
-                    onHelp = { onTopicHelp(EducationTopic.SyncModeRecent) },
+                    onHelp = if (showHelpIcons) { { onTopicHelp(EducationTopic.SyncModeRecent) } } else null,
                 )
             }
             if (SyncMode.CUSTOM in availableModes) {
@@ -128,7 +129,7 @@ internal fun SyncOptionsSheet(
                     isSelected = selectedMode == SyncMode.CUSTOM,
                     isRecommended = false,
                     onClick = { selectedMode = SyncMode.CUSTOM; showCustomInput = true },
-                    onHelp = { onTopicHelp(EducationTopic.SyncModeCustom) },
+                    onHelp = if (showHelpIcons) { { onTopicHelp(EducationTopic.SyncModeCustom) } } else null,
                 )
             }
             if (SyncMode.FULL_HISTORY in availableModes) {
@@ -139,7 +140,7 @@ internal fun SyncOptionsSheet(
                     isSelected = selectedMode == SyncMode.FULL_HISTORY,
                     isRecommended = false,
                     onClick = { selectedMode = SyncMode.FULL_HISTORY; showCustomInput = false },
-                    onHelp = { onTopicHelp(EducationTopic.SyncModeFull) },
+                    onHelp = if (showHelpIcons) { { onTopicHelp(EducationTopic.SyncModeFull) } } else null,
                 )
             }
 
@@ -149,7 +150,7 @@ internal fun SyncOptionsSheet(
                     onValueChange = { customBlockHeight = it.filter(Char::isDigit) },
                     tipBlockNumber = tipBlockNumber,
                     onLookupAddressOnExplorer = onLookupAddressOnExplorer,
-                    onHelp = { onTopicHelp(EducationTopic.BlockHeight) },
+                    onHelp = if (showHelpIcons) { { onTopicHelp(EducationTopic.BlockHeight) } } else null,
                 )
             }
 
@@ -214,7 +215,7 @@ private fun SyncOptionRow(
     isSelected: Boolean,
     isRecommended: Boolean,
     onClick: () -> Unit,
-    onHelp: () -> Unit,
+    onHelp: (() -> Unit)?,
 ) {
     Surface(
         modifier = Modifier
@@ -263,13 +264,15 @@ private fun SyncOptionRow(
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
             }
-            IconButton(onClick = onHelp, modifier = Modifier.size(36.dp)) {
-                Icon(
-                    Lucide.CircleHelp,
-                    contentDescription = stringResource(R.string.common_help_cd),
-                    modifier = Modifier.size(18.dp),
-                    tint = MaterialTheme.colorScheme.onSurfaceVariant,
-                )
+            if (onHelp != null) {
+                IconButton(onClick = onHelp, modifier = Modifier.size(36.dp)) {
+                    Icon(
+                        Lucide.CircleHelp,
+                        contentDescription = stringResource(R.string.common_help_cd),
+                        modifier = Modifier.size(18.dp),
+                        tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
             }
         }
     }
@@ -281,7 +284,7 @@ private fun CustomBlockInput(
     onValueChange: (String) -> Unit,
     tipBlockNumber: Long,
     onLookupAddressOnExplorer: (() -> Unit)?,
-    onHelp: () -> Unit,
+    onHelp: (() -> Unit)?,
 ) {
     Spacer(Modifier.height(4.dp))
     Card(
@@ -329,12 +332,14 @@ private fun CustomBlockInput(
                 else -> null
             },
         )
-        IconButton(onClick = onHelp) {
-            Icon(
-                Lucide.CircleHelp,
-                contentDescription = stringResource(R.string.common_help_cd),
-                modifier = Modifier.size(18.dp),
-            )
+        if (onHelp != null) {
+            IconButton(onClick = onHelp) {
+                Icon(
+                    Lucide.CircleHelp,
+                    contentDescription = stringResource(R.string.common_help_cd),
+                    modifier = Modifier.size(18.dp),
+                )
+            }
         }
     }
 

@@ -240,7 +240,11 @@ fun MnemonicImportScreen(
             availableModes = listOf(SyncMode.RECENT, SyncMode.CUSTOM),
             onDismiss = { viewModel.skipSyncSelection() },
             onSelectMode = { mode, height -> viewModel.onSyncModeSelected(mode, height) },
+            // Help icons are intentionally hidden in the post-import flow:
+            // re-opening the sheet from an EducationSheet stack is risky in
+            // this constrained context, so we suppress the affordance entirely.
             onTopicHelp = {},
+            showHelpIcons = false,
             tipBlockNumber = uiState.tipBlockNumber
         )
     }
