@@ -45,6 +45,7 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import kotlinx.coroutines.launch
 import androidx.compose.ui.Alignment
@@ -59,6 +60,7 @@ import androidx.compose.ui.unit.sp
 import androidx.core.content.ContextCompat
 import androidx.hilt.navigation.compose.hiltViewModel
 import com.composables.icons.lucide.ChevronRight
+import com.composables.icons.lucide.CircleHelp
 import com.composables.icons.lucide.Download
 import com.composables.icons.lucide.Github
 import com.composables.icons.lucide.Info
@@ -74,10 +76,14 @@ import com.rjnr.pocketnode.BuildConfig
 import com.rjnr.pocketnode.data.gateway.models.NetworkType
 import com.rjnr.pocketnode.data.gateway.models.SyncMode
 import com.rjnr.pocketnode.data.gateway.models.displayName
+import com.rjnr.pocketnode.R
 import com.rjnr.pocketnode.ui.components.SyncOptionsSheet
 import com.rjnr.pocketnode.data.wallet.SyncStrategy
 import com.rjnr.pocketnode.data.wallet.ThemeMode
+import com.rjnr.pocketnode.ui.education.EducationSheet
+import com.rjnr.pocketnode.ui.education.EducationTopic
 import com.rjnr.pocketnode.ui.theme.CkbWalletTheme
+import androidx.compose.ui.res.stringResource
 import com.rjnr.pocketnode.ui.theme.PendingAmber
 
 private const val GITHUB_URL = "https://github.com/RaheemJnr/pocket-node/"
@@ -92,12 +98,19 @@ fun SettingsScreen(
     onNavigateToSecuritySettings: () -> Unit = {},
     onNavigateToImport: () -> Unit = {},
     onNavigateToWalletManager: () -> Unit = {},
+    onNavigateToFaq: (anchor: String?) -> Unit = {},
     viewModel: SettingsViewModel = hiltViewModel()
 ) {
     val uiState by viewModel.uiState.collectAsState()
     val context = LocalContext.current
     val snackbarHostState = remember { SnackbarHostState() }
     val scope = rememberCoroutineScope()
+
+    // Education sheet hoisted at root so it composes alongside other dialogs/sheets.
+    // `resumeSyncSheet` lets us reopen SyncOptionsSheet after EducationSheet dismisses
+    // when the user opened education from inside the sync sheet (Task 3.4 close-and-reopen).
+    var educationTopic by rememberSaveable { mutableStateOf<EducationTopic?>(null) }
+    var resumeSyncSheet by rememberSaveable { mutableStateOf(false) }
 
     // Notification permission explanation dialog + system permission launcher
     var showNotificationExplanation by remember { mutableStateOf(false) }
@@ -179,7 +192,12 @@ fun SettingsScreen(
             currentMode = uiState.syncMode,
             onDismiss = { viewModel.hideSyncDialog() },
             onSelectMode = { mode, customBlock -> viewModel.setSyncMode(mode, customBlock) },
-            onTopicHelp = {},
+            onTopicHelp = { topic ->
+                // Close-and-reopen: dismiss the sync sheet, mark for resume, then open education.
+                viewModel.hideSyncDialog()
+                resumeSyncSheet = true
+                educationTopic = topic
+            },
             savedCustomBlockHeight = uiState.savedCustomBlockHeight,
             tipBlockNumber = uiState.tipBlockNumber,
             onLookupAddressOnExplorer = onLookupBlockHeight
@@ -286,6 +304,27 @@ fun SettingsScreen(
         )
     }
 
+    // EducationSheet — opens from SyncOptionsSheet help icons. On dismiss, if the user
+    // came from the sync sheet, reopen it so they don't lose their place.
+    educationTopic?.let { topic ->
+        EducationSheet(
+            topic = topic,
+            onDismiss = {
+                val resume = resumeSyncSheet
+                educationTopic = null
+                if (resume) {
+                    resumeSyncSheet = false
+                    viewModel.showSyncDialog()
+                }
+            },
+            onOpenFaq = { anchor ->
+                educationTopic = null
+                resumeSyncSheet = false
+                onNavigateToFaq(anchor)
+            },
+        )
+    }
+
     LaunchedEffect(uiState.error) {
         uiState.error?.let { error ->
             snackbarHostState.showSnackbar(error)
@@ -302,6 +341,7 @@ fun SettingsScreen(
         onNavigateToNodeStatus,
         context,
         onNavigateToWalletManager = onNavigateToWalletManager,
+        onNavigateToFaq = { onNavigateToFaq(null) },
         showSyncDialog = { viewModel.showSyncDialog() },
         showSyncStrategyDialog = { viewModel.showSyncStrategyDialog() },
         requestNetworkSwitch = {
@@ -334,6 +374,7 @@ private fun SettingsScreenUI(
     onNavigateToNodeStatus: () -> Unit,
     context: Context,
     onNavigateToWalletManager: () -> Unit = {},
+    onNavigateToFaq: () -> Unit = {},
     showSyncDialog: () -> Unit,
     showSyncStrategyDialog: () -> Unit = {},
     requestNetworkSwitch: (NetworkType) -> Unit,
@@ -469,6 +510,14 @@ private fun SettingsScreenUI(
 
             // ── ABOUT ─────────────────────────────────────────────────────
             item { SectionHeader("ABOUT") }
+
+            item {
+                SettingsLinkRow(
+                    icon = Lucide.CircleHelp,
+                    title = stringResource(R.string.settings_help_faq),
+                    onClick = onNavigateToFaq
+                )
+            }
 
             item {
                 SettingsValueRow(

@@ -127,4 +127,8 @@
     <string name="home_sync_status_up_to_date">Up to date</string>
     <!-- endregion -->
 
+    <!-- region: Settings -->
+    <string name="settings_help_faq">Help &amp; FAQ</string>
+    <!-- endregion -->
+
 </resources>
