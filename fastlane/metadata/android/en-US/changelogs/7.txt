@@ -1,4 +1,4 @@
-v1.6.0:
+v1.5.1:
 - New first-run sync coachmark explaining what your phone is doing
 - Help (?) icons on Home + sync mode picker, opening plain-language explainers
 - New FAQ screen at Settings → Help & FAQ (10 entries, deep-linked from help icons)
