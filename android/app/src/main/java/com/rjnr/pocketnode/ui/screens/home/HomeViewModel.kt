@@ -23,6 +23,7 @@ import com.rjnr.pocketnode.data.wallet.WalletRepository
 import com.rjnr.pocketnode.ui.components.WalletGroup
 import dagger.hilt.android.lifecycle.HiltViewModel
 import kotlinx.coroutines.channels.Channel
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.*
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
@@ -93,6 +94,17 @@ class HomeViewModel @Inject constructor(
 
     private fun formatFiat(ckb: Double, price: Double): String =
         String.format(Locale.US, "≈ $%.2f USD", ckb * price)
+
+    // 1-second clock tick used by the sync coachmark combine. Cancelled with
+    // viewModelScope. Kept as a class-level Flow (rather than a suspend loop) so
+    // we can compose it into `combine` cleanly. Declared before `init` because
+    // the init block references it.
+    private val coachmarkClockTick = flow {
+        while (true) {
+            emit(System.currentTimeMillis())
+            delay(1_000)
+        }
+    }
 
     init {
         checkBackupStatus()
@@ -191,6 +203,28 @@ class HomeViewModel @Inject constructor(
                 refreshWalletBalances(wallets)
             }
         }
+
+        // Sync coachmark visibility (#90): show first-run education when sync has
+        // been catching up for at least the grace period. Combines the prefs flag,
+        // the repository SyncProgress, and a 1-second clock tick so the UI updates
+        // as soon as the elapsed-time threshold is crossed without waiting for the
+        // next progress emission.
+        combine(
+            walletPreferences.hasSeenSyncCoachmarkFlow,
+            repository.syncProgress,
+            coachmarkClockTick,
+        ) { seen, progress, nowMs ->
+            val catching = progress.isSyncing && progress.percentage < 100
+            shouldShowSyncCoachmark(
+                seen = seen,
+                isCatchingUp = catching,
+                firstCatchingUpAtMs = progress.firstCatchingUpAtMs,
+                nowMs = nowMs,
+            )
+        }
+            .distinctUntilChanged()
+            .onEach { show -> _uiState.update { it.copy(showSyncCoachmark = show) } }
+            .launchIn(viewModelScope)
     }
 
     private suspend fun initializeWallet() {
@@ -733,9 +767,49 @@ class HomeViewModel @Inject constructor(
         }
     }
 
+    /**
+     * Called by the UI when the user dismisses the sync coachmark (e.g. taps
+     * "Got it"). Persists the seen flag; the combined flow re-emits `false` on
+     * the next clock tick and the UI clears.
+     *
+     * Note: [com.rjnr.pocketnode.data.wallet.WalletPreferences.markSyncCoachmarkSeen]
+     * is non-suspend (writes via SharedPreferences.edit().apply()), so no
+     * coroutine wrapper is needed.
+     */
+    fun onCoachmarkDismissed() {
+        walletPreferences.markSyncCoachmarkSeen()
+    }
+
     override fun onCleared() {
         super.onCleared()
         updateDownloader.cleanup()
+    }
+
+    companion object {
+        private const val COACHMARK_GRACE_MS = 2_000L
+
+        /**
+         * True when the user has not seen the sync coachmark yet AND sync has been
+         * actively catching up for at least [COACHMARK_GRACE_MS]. The grace prevents
+         * the coachmark from flashing for NEW_WALLET sync mode that completes in
+         * milliseconds.
+         *
+         * Defensive: returns false when [firstCatchingUpAtMs] is null even if
+         * [isCatchingUp] is true. Negative deltas (clock skew / frozen test clocks)
+         * are coerced to 0 and treated as "still in grace".
+         */
+        fun shouldShowSyncCoachmark(
+            seen: Boolean,
+            isCatchingUp: Boolean,
+            firstCatchingUpAtMs: Long?,
+            nowMs: Long,
+        ): Boolean {
+            if (seen) return false
+            if (!isCatchingUp) return false
+            val firstAt = firstCatchingUpAtMs ?: return false
+            val elapsed = (nowMs - firstAt).coerceAtLeast(0)
+            return elapsed >= COACHMARK_GRACE_MS
+        }
     }
 }
 
@@ -777,5 +851,6 @@ data class HomeUiState(
     val showPostDepositReminder: Boolean = false,
     val isSwitchingWallet: Boolean = false,
     val savedCustomBlockHeight: Long? = null,
-    val walletBalances: Map<String, String> = emptyMap()
+    val walletBalances: Map<String, String> = emptyMap(),
+    val showSyncCoachmark: Boolean = false
 )
