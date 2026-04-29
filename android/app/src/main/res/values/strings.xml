@@ -35,4 +35,30 @@
     <string name="account_selector_active_cd">Active</string>
     <!-- endregion -->
 
+    <!-- region: Education -->
+    <string name="edu_sync_title">Why is the app syncing?</string>
+    <string name="edu_sync_body">Your phone is checking the blockchain itself, no middleman server. The first sync takes about 2 minutes; after that, updates are quick.</string>
+
+    <string name="edu_sync_mode_new_title">New wallet</string>
+    <string name="edu_sync_mode_new_body">Pick this if you have never received CKB before. Instant — no past activity to find.</string>
+
+    <string name="edu_sync_mode_recent_title">Recent activity</string>
+    <string name="edu_sync_mode_recent_body">Pick this if you used a CKB wallet in the last month. Takes about 2 minutes; finds activity from the last 30 days.</string>
+
+    <string name="edu_sync_mode_custom_title">From a specific date</string>
+    <string name="edu_sync_mode_custom_body">Pick this if you know roughly when your first CKB transaction was. You will enter a block number — we will help you find it from the explorer.</string>
+
+    <string name="edu_sync_mode_full_title">All history</string>
+    <string name="edu_sync_mode_full_body">Pick this only if you need every transaction since CKB launched. Slow — can take hours on mainnet.</string>
+
+    <string name="edu_block_height_title">What is a block height?</string>
+    <string name="edu_block_height_body">A block is one batch of transactions on the blockchain. The block height is just the count of how many blocks exist so far. Higher numbers are more recent.</string>
+
+    <string name="edu_activity_title">About transactions</string>
+    <string name="edu_activity_body">Sent and received transactions appear here. A transaction shows as Pending until the network confirms it — usually under a minute. Tap a row to see details.</string>
+
+    <string name="edu_open_faq">Open FAQ</string>
+    <string name="edu_got_it">Got it</string>
+    <!-- endregion -->
+
 </resources>
