@@ -6,4 +6,13 @@
     <string name="empty"></string>
     <!-- endregion -->
 
+    <!-- region: SecurityBanner -->
+    <string name="security_banner_secure_wallet">Secure your wallet</string>
+    <string name="security_banner_set_up_pin">Set up a PIN to protect your wallet</string>
+    <string name="security_banner_back_up_phrase">Back up your recovery phrase</string>
+    <string name="security_banner_action_set_up_security">Set up security</string>
+    <string name="security_banner_action_set_up_pin">Set up PIN</string>
+    <string name="security_banner_action_back_up_now">Back up now</string>
+    <!-- endregion -->
+
 </resources>
