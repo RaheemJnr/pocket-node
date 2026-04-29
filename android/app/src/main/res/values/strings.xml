@@ -4,6 +4,7 @@
     <!-- region: common -->
     <string name="app_name">Pocket Node</string>
     <string name="empty"></string>
+    <string name="common_back_cd">Back</string>
     <!-- endregion -->
 
     <!-- region: SecurityBanner -->
@@ -125,6 +126,7 @@
     <string name="home_activity_section_title">Activity</string>
     <string name="home_sync_status_catching_up">Catching up…</string>
     <string name="home_sync_status_up_to_date">Up to date</string>
+    <string name="home_sync_chip_syncing">Syncing</string>
     <!-- endregion -->
 
     <!-- region: Settings -->

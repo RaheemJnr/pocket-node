@@ -421,7 +421,7 @@ fun HomeScreen(
                 },
                 actions = {
                     if (uiState.isSyncing) {
-                        SyncingChip(syncedToBlock = uiState.syncedToBlock)
+                        SyncingChip()
                     } else {
                         SyncedChip()
                     }
@@ -919,7 +919,7 @@ private fun SyncProgressBar(
 }
 
 @Composable
-private fun SyncingChip(syncedToBlock: String?) {
+private fun SyncingChip() {
     Surface(
         shape = RoundedCornerShape(12.dp),
         color = MaterialTheme.colorScheme.surfaceVariant,
@@ -935,8 +935,10 @@ private fun SyncingChip(syncedToBlock: String?) {
                 strokeWidth = 1.5.dp,
                 color = MaterialTheme.colorScheme.primary
             )
+            // Plain-language status — no block height (#90).
+            // Power users can find block height on Node Status.
             Text(
-                text = "Block ${syncedToBlock ?: "—"}",
+                text = stringResource(R.string.home_sync_chip_syncing),
                 style = MaterialTheme.typography.labelSmall,
                 color = MaterialTheme.colorScheme.primary
             )
