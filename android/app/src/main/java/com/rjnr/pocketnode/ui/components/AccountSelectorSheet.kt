@@ -32,6 +32,7 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
@@ -39,6 +40,7 @@ import com.composables.icons.lucide.Check
 import com.composables.icons.lucide.ChevronDown
 import com.composables.icons.lucide.ChevronUp
 import com.composables.icons.lucide.Lucide
+import com.rjnr.pocketnode.R
 import com.rjnr.pocketnode.data.database.entity.WalletEntity
 
 data class WalletGroup(
@@ -76,7 +78,7 @@ fun AccountSelectorSheet(
                 verticalAlignment = Alignment.CenterVertically
             ) {
                 Text(
-                    text = "Select account",
+                    text = stringResource(R.string.account_selector_title),
                     style = MaterialTheme.typography.titleMedium,
                     fontWeight = FontWeight.SemiBold
                 )
@@ -84,7 +86,7 @@ fun AccountSelectorSheet(
                     onDismiss()
                     onManageWallets()
                 }) {
-                    Text("Manage")
+                    Text(stringResource(R.string.account_selector_manage))
                 }
             }
 
@@ -143,7 +145,10 @@ private fun WalletGroupSection(
                 )
                 Icon(
                     imageVector = if (isExpanded) Lucide.ChevronUp else Lucide.ChevronDown,
-                    contentDescription = if (isExpanded) "Collapse" else "Expand",
+                    contentDescription = stringResource(
+                        if (isExpanded) R.string.account_selector_collapse_cd
+                        else R.string.account_selector_expand_cd
+                    ),
                     modifier = Modifier.size(16.dp),
                     tint = MaterialTheme.colorScheme.onSurfaceVariant
                 )
@@ -250,7 +255,7 @@ private fun AccountRow(
             if (isActive) {
                 Icon(
                     imageVector = Lucide.Check,
-                    contentDescription = "Active",
+                    contentDescription = stringResource(R.string.account_selector_active_cd),
                     modifier = Modifier.size(20.dp),
                     tint = MaterialTheme.colorScheme.primary
                 )

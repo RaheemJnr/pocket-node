@@ -15,6 +15,8 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.res.stringResource
+import com.rjnr.pocketnode.R
 import com.rjnr.pocketnode.ui.util.Bip39WordList
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -42,7 +44,7 @@ fun MnemonicWordInput(
         OutlinedTextField(
             value = value,
             onValueChange = onValueChange,
-            label = { Text("#${index + 1}") },
+            label = { Text(stringResource(R.string.mnemonic_word_index_label, index + 1)) },
             modifier = Modifier
                 .fillMaxWidth()
                 .menuAnchor(MenuAnchorType.PrimaryEditable),

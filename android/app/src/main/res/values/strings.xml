@@ -1,3 +1,38 @@
-<resources>
+<?xml version="1.0" encoding="utf-8"?>
+<resources xmlns:tools="http://schemas.android.com/tools" tools:locale="en">
+
+    <!-- region: common -->
     <string name="app_name">Pocket Node</string>
+    <string name="empty"></string>
+    <!-- endregion -->
+
+    <!-- region: SecurityBanner -->
+    <string name="security_banner_secure_wallet">Secure your wallet</string>
+    <string name="security_banner_set_up_pin">Set up a PIN to protect your wallet</string>
+    <string name="security_banner_back_up_phrase">Back up your recovery phrase</string>
+    <string name="security_banner_action_set_up_security">Set up security</string>
+    <string name="security_banner_action_set_up_pin">Set up PIN</string>
+    <string name="security_banner_action_back_up_now">Back up now</string>
+    <!-- endregion -->
+
+    <!-- region: UpdateDialog -->
+    <string name="update_dialog_title">Update Available</string>
+    <string name="update_dialog_action_update_now">Update Now</string>
+    <string name="update_dialog_action_later">Later</string>
+    <string name="update_dialog_version_available">Version %1$s is available.</string>
+    <string name="update_dialog_download_size">\n\nDownload size: %1$s MB</string>
+    <!-- endregion -->
+
+    <!-- region: MnemonicWordInput -->
+    <string name="mnemonic_word_index_label">#%1$d</string>
+    <!-- endregion -->
+
+    <!-- region: AccountSelectorSheet -->
+    <string name="account_selector_title">Select account</string>
+    <string name="account_selector_manage">Manage</string>
+    <string name="account_selector_collapse_cd">Collapse</string>
+    <string name="account_selector_expand_cd">Expand</string>
+    <string name="account_selector_active_cd">Active</string>
+    <!-- endregion -->
+
 </resources>
