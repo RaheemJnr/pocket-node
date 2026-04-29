@@ -141,6 +141,7 @@ fun HomeScreen(
     val coachmarkRegistry: CoachmarkRegistry = rememberCoachmarkRegistry()
     var educationTopic by rememberSaveable { mutableStateOf<EducationTopic?>(null) }
     var resumeSyncSheet by rememberSaveable { mutableStateOf(false) }
+    var resumePostImportSheet by rememberSaveable { mutableStateOf(false) }
 
     // Collect one-shot nav events from the ViewModel (e.g. retry-failed-tx).
     LaunchedEffect(Unit) {
@@ -211,8 +212,8 @@ fun HomeScreen(
     if (uiState.showPostImportSyncDialog) {
         SyncOptionsSheet(
             currentMode = SyncMode.RECENT,
-            title = "Choose Sync Start Point",
-            description = "Select how far back to sync your imported wallet's history. If your wallet is older than 30 days, choose Custom.",
+            title = stringResource(R.string.home_post_import_sync_title),
+            description = stringResource(R.string.home_post_import_sync_description),
             availableModes = listOf(SyncMode.RECENT, SyncMode.CUSTOM),
             onDismiss = { viewModel.hidePostImportSyncDialog() },
             onSelectMode = { mode, customBlock ->
@@ -222,7 +223,11 @@ fun HomeScreen(
                 }
             },
             onTopicHelp = { topic ->
+                // Close-and-reopen via the post-import flag so dismissing the
+                // education sheet brings the post-import picker back, not the
+                // settings picker.
                 viewModel.hidePostImportSyncDialog()
+                resumePostImportSheet = true
                 educationTopic = topic
             },
             tipBlockNumber = tipBlockNumberLong,
@@ -519,16 +524,20 @@ fun HomeScreen(
             EducationSheet(
                 topic = topic,
                 onDismiss = {
-                    val resume = resumeSyncSheet
+                    val resumeSettings = resumeSyncSheet
+                    val resumePostImport = resumePostImportSheet
                     educationTopic = null
-                    if (resume) {
-                        resumeSyncSheet = false
-                        viewModel.showSyncOptions()
+                    resumeSyncSheet = false
+                    resumePostImportSheet = false
+                    when {
+                        resumePostImport -> viewModel.showPostImportSyncDialog()
+                        resumeSettings -> viewModel.showSyncOptions()
                     }
                 },
                 onOpenFaq = { anchor ->
                     educationTopic = null
                     resumeSyncSheet = false
+                    resumePostImportSheet = false
                     onNavigateToFaq(anchor)
                 },
             )

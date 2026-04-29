@@ -78,8 +78,15 @@ class HomeViewModel @Inject constructor(
      * the user taps the explorer-lookup link, gets briefly killed by the OEM
      * memory manager / auth gate, and returns. Without this the dialog closes
      * silently and the user lands on Home instead of where they were. (#90)
+     *
+     * Both flows go through `SyncOptionsSheet` and both expose the explorer
+     * lookup, so both must be restored: the settings/runtime change flow
+     * (`showSyncOptionsDialog`) AND the post-import flow that asks the user
+     * to choose a sync start point right after wallet creation/import
+     * (`showPostImportSyncDialog`).
      */
     private val SAVED_KEY_SHOW_SYNC_OPTIONS = "showSyncOptionsDialog"
+    private val SAVED_KEY_SHOW_POST_IMPORT_SYNC = "showPostImportSyncDialog"
 
     // Skip-overlapping guard for refreshTransactionsOnly. The fn is called from
     // refresh(), the syncProgress observer (silent), and wallet switches; under
@@ -93,6 +100,7 @@ class HomeViewModel @Inject constructor(
         // back on Home instead of the dialog they were filling out (#90).
         HomeUiState(
             showSyncOptionsDialog = savedStateHandle.get<Boolean>(SAVED_KEY_SHOW_SYNC_OPTIONS) ?: false,
+            showPostImportSyncDialog = savedStateHandle.get<Boolean>(SAVED_KEY_SHOW_POST_IMPORT_SYNC) ?: false,
         )
     )
     val uiState: StateFlow<HomeUiState> = _uiState.asStateFlow()
@@ -640,6 +648,13 @@ class HomeViewModel @Inject constructor(
      */
     fun hidePostImportSyncDialog() {
         _uiState.update { it.copy(showPostImportSyncDialog = false) }
+        savedStateHandle[SAVED_KEY_SHOW_POST_IMPORT_SYNC] = false
+    }
+
+    /** Open the post-import sync mode dialog (used by Education close-and-reopen). */
+    fun showPostImportSyncDialog() {
+        _uiState.update { it.copy(showPostImportSyncDialog = true) }
+        savedStateHandle[SAVED_KEY_SHOW_POST_IMPORT_SYNC] = true
     }
 
     /**
@@ -652,11 +667,13 @@ class HomeViewModel @Inject constructor(
             repository.importWallet(privateKeyHex)
                 .onSuccess { info ->
                     Log.d(TAG, "Wallet imported successfully: ${info.testnetAddress}")
+                    val showPostImport = repository.currentNetwork == NetworkType.MAINNET
                     _uiState.update { it.copy(
                         walletInfo = info,
                         isLoading = false,
-                        showPostImportSyncDialog = repository.currentNetwork == NetworkType.MAINNET
+                        showPostImportSyncDialog = showPostImport,
                     ) }
+                    savedStateHandle[SAVED_KEY_SHOW_POST_IMPORT_SYNC] = showPostImport
                     registerAndRefresh()
                 }
                 .onFailure { error ->
