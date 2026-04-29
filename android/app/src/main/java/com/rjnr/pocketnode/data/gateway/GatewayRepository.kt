@@ -216,6 +216,15 @@ class GatewayRepository @Inject constructor(
     // --- Sync progress tracking ---
     private val syncProgressTracker = SyncProgressTracker()
     private var syncPollingJob: Job? = null
+
+    // Generation token bumped on every start/stop of sync polling. In-flight
+    // getAccountStatus().onSuccess lambdas capture the generation at the start
+    // of each iteration and refuse to write `firstCatchingUpAtMs` /
+    // `_syncProgress` if it's stale — coroutine cancellation is cooperative,
+    // so without this gate a successful HTTP response that returned just
+    // before stopSyncPolling() could resurrect the cleared state. (#90)
+    @Volatile
+    private var syncPollingGeneration: Long = 0L
     private var wasSyncing = false
     // Process-lifetime edge-tracker for the first time the wallet entered
     // "catching up" (actively downloading blocks). Used by the HomeViewModel
@@ -2449,6 +2458,8 @@ class GatewayRepository @Inject constructor(
     fun startSyncPolling() {
         if (syncPollingJob?.isActive == true) return
 
+        val generation = ++syncPollingGeneration
+
         syncPollingJob = scope.launch {
             Log.d(TAG, "Starting centralized sync polling")
             while (true) {
@@ -2465,6 +2476,12 @@ class GatewayRepository @Inject constructor(
 
                 getAccountStatus()
                     .onSuccess { status ->
+                        // Generation gate: refuse to publish state if stopSyncPolling()
+                        // (or a fresh start) has bumped the generation since this
+                        // iteration began. Prevents in-flight responses that returned
+                        // just before cancel() from resurrecting cleared state.
+                        if (generation != syncPollingGeneration) return@onSuccess
+
                         val syncedBlock = status.syncedToBlock.toLongOrNull() ?: 0L
                         val tipBlock = status.tipNumber.toLongOrNull() ?: 0L
 
@@ -2508,6 +2525,9 @@ class GatewayRepository @Inject constructor(
      * Stop centralized sync polling. Resets tracker state.
      */
     fun stopSyncPolling() {
+        // Bump the generation FIRST so any in-flight onSuccess lambda sees a
+        // mismatch and refuses to write before we clear state below.
+        syncPollingGeneration++
         syncPollingJob?.cancel()
         syncPollingJob = null
         syncProgressTracker.reset()
