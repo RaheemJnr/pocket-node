@@ -61,4 +61,38 @@
     <string name="edu_got_it">Got it</string>
     <!-- endregion -->
 
+    <!-- region: FAQ -->
+    <string name="faq_screen_title">Help &amp; FAQ</string>
+
+    <string name="faq_sync_title">Why is the app syncing?</string>
+    <string name="faq_sync_body">Pocket Node runs a CKB light client on your phone — there is no central server you have to trust. To know your balance and your history, the app needs to download a portion of the blockchain. The first sync takes a couple of minutes. After that, the app stays up to date in the background and feels instant.</string>
+
+    <string name="faq_sync_mode_title">Which sync mode should I pick?</string>
+    <string name="faq_sync_mode_body">If this is your first wallet, pick New wallet — there is no past activity to find. If you used a CKB wallet in the last month, Recent activity is the right pick. From a specific date is for users restoring a wallet older than a month and who know roughly when they started. All history downloads everything since CKB launched and is slow — only pick it if you actually need every transaction.</string>
+
+    <string name="faq_block_height_title">What is a block height?</string>
+    <string name="faq_block_height_body">A block is one batch of transactions on the blockchain. The block height is just the count of how many blocks exist so far — block 1 is the first block ever, block 18,300,000 is much more recent. You do not need to memorise these numbers; the app uses them only to know how far along the sync is.</string>
+
+    <string name="faq_activity_title">Why doesn\'t my balance update instantly?</string>
+    <string name="faq_activity_body">Your phone has to hear about a transaction from the network before showing it. New transactions usually appear within seconds. If your balance looks wrong, pull down to refresh; if the app is still syncing, wait for the sync to finish first.</string>
+
+    <string name="faq_pending_title">What does \"Pending\" mean on a transaction?</string>
+    <string name="faq_pending_body">Pending means your transaction has been sent to the network but not yet included in a block. The network usually picks it up within a minute. If a transaction stays Pending for several minutes, you can retry it from the transaction details.</string>
+
+    <string name="faq_confirmations_title">What are confirmations?</string>
+    <string name="faq_confirmations_body">Once your transaction is in a block, more blocks are added on top of it over time. Each new block is one confirmation. More confirmations means it is increasingly impossible to reverse. For most everyday amounts, one or two confirmations is enough.</string>
+
+    <string name="faq_balance_delay_title">I just received CKB — why don\'t I see it yet?</string>
+    <string name="faq_balance_delay_body">Your phone has to hear about the incoming transaction from the network. Pull down on the home screen to refresh. If the sender just sent it seconds ago, give it a minute — most transactions show up almost immediately, but the network can be busy.</string>
+
+    <string name="faq_safe_during_sync_title">Is my CKB safe while the app is syncing?</string>
+    <string name="faq_safe_during_sync_body">Yes. Your CKB lives on the blockchain, not in the app. Sync only catches your phone up on what already happened. Closing the app, restarting your phone, or being offline does not put your funds at risk — only losing your recovery phrase does.</string>
+
+    <string name="faq_close_during_sync_title">What happens if I close the app during sync?</string>
+    <string name="faq_close_during_sync_body">Sync resumes from where it left off the next time you open the app. You can close the app, lock your phone, or switch tasks at any time. If you have background sync turned on in Settings, the app will keep syncing for a short while after you close it.</string>
+
+    <string name="faq_internet_required_title">Why does the app need internet?</string>
+    <string name="faq_internet_required_body">To check the blockchain itself, your phone has to talk to other CKB nodes around the world. The app does not send your private keys anywhere — those stay on your phone. Without internet, the app can show you your last known balance but cannot send or receive new transactions.</string>
+    <!-- endregion -->
+
 </resources>
