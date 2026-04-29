@@ -265,6 +265,10 @@ class WalletPreferences @Inject constructor(
     // That's benign: old un-namespaced keys are already gone, it just re-sets default to MAINNET.
     fun clear() {
         prefs.edit().clear().apply()
+        // Re-synchronize StateFlows seeded from prefs at construction so observers
+        // don't read stale state until process restart.
+        _hasSeenSyncCoachmark.value = false
+        _themeMode.value = readThemeMode()
     }
 
     /**
