@@ -1,0 +1,10 @@
+v1.5.1:
+- New first-run sync coachmark explaining what your phone is doing
+- Help (?) icons on Home + sync mode picker, opening plain-language explainers
+- New FAQ screen at Settings → Help & FAQ (10 entries, deep-linked from help icons)
+- Sync mode picker rewritten as a bottom sheet with "Pick this if…" guidance per option
+- Block height removed from Home (still on Node Status for power users)
+- Sync card now shows progress as "Catching up from current to tip"
+- Sync sheet survives Chrome explorer round-trip without losing the user's selection
+- Node Status no longer freezes on stale block number after a sync mode change
+- strings.xml infrastructure laid down for non-English locales (tracked in #132)
