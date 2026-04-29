@@ -59,6 +59,7 @@
 
     <string name="edu_open_faq">Open FAQ</string>
     <string name="edu_got_it">Got it</string>
+    <string name="coachmark_sync_body">Setting up — about 2 minutes. Your phone is checking the blockchain itself, no middleman server.</string>
     <!-- endregion -->
 
     <!-- region: FAQ -->
