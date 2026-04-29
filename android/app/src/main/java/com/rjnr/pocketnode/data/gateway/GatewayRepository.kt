@@ -2512,6 +2512,12 @@ class GatewayRepository @Inject constructor(
         syncPollingJob = null
         syncProgressTracker.reset()
         wasSyncing = false
+        // Clear the coachmark grace tracker (#90) so a subsequent
+        // startSyncPolling() restarts the 2s grace from a clean clock.
+        // Also strip the timestamp from the last-emitted SyncProgress so
+        // HomeViewModel's combine doesn't see stale state during the gap.
+        firstCatchingUpAtMs = null
+        _syncProgress.value = _syncProgress.value.copy(firstCatchingUpAtMs = null)
         Log.d(TAG, "Stopped centralized sync polling")
     }
 
