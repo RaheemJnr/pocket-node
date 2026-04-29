@@ -124,6 +124,9 @@
     <!-- region: HomeSync -->
     <string name="home_sync_section_title">Sync</string>
     <string name="home_activity_section_title">Activity</string>
+    <!-- %1$s and %2$s are formatted block numbers (current synced / tip).
+         The values are emboldened by AnnotatedString in Compose. -->
+    <string name="home_sync_status_catching_up_from_to">Catching up from %1$s to %2$s</string>
     <string name="home_sync_status_catching_up">Catching up…</string>
     <string name="home_sync_status_up_to_date">Up to date</string>
     <string name="home_sync_chip_syncing">Syncing</string>

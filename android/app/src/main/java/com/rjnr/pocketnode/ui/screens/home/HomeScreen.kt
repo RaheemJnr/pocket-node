@@ -63,6 +63,9 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalClipboardManager
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.AnnotatedString
+import androidx.compose.ui.text.SpanStyle
+import androidx.compose.ui.text.buildAnnotatedString
+import androidx.compose.ui.text.withStyle
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
@@ -659,6 +662,8 @@ fun HomeScreenUI(
                     SyncProgressBar(
                         syncProgress = uiState.syncProgress,
                         isSyncing = uiState.isSyncing,
+                        syncedToBlock = uiState.syncedToBlock,
+                        tipBlockNumber = uiState.tipBlockNumber,
                         onHelp = { onTopicHelp(EducationTopic.Sync) },
                         modifier = Modifier.coachmarkAnchor("sync_card"),
                     )
@@ -876,6 +881,8 @@ private fun BackupReminderBanner(
 private fun SyncProgressBar(
     syncProgress: Double,
     isSyncing: Boolean,
+    syncedToBlock: String?,
+    tipBlockNumber: String,
     onHelp: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
@@ -904,19 +911,55 @@ private fun SyncProgressBar(
             color = MaterialTheme.colorScheme.primary,
             trackColor = MaterialTheme.colorScheme.surfaceVariant
         )
-        // Plain-language status — no block height (#90).
-        // Power users can find block height on Node Status.
-        Text(
-            text = if (isSyncing) {
-                stringResource(R.string.home_sync_status_catching_up)
-            } else {
-                stringResource(R.string.home_sync_status_up_to_date)
-            },
-            style = MaterialTheme.typography.bodySmall,
-            color = MaterialTheme.colorScheme.onSurfaceVariant
-        )
+        if (isSyncing) {
+            val current = syncedToBlock?.takeIf { it.isNotBlank() }
+                ?.toLongOrNull()?.let { formatBlockNumber(it) } ?: "—"
+            val tip = tipBlockNumber.takeIf { it.isNotBlank() }
+                ?.toLongOrNull()?.let { formatBlockNumber(it) } ?: "—"
+            Text(
+                text = catchingUpAnnotated(current = current, tip = tip),
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+        } else {
+            Text(
+                text = stringResource(R.string.home_sync_status_up_to_date),
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+        }
     }
 }
+
+/**
+ * Build an AnnotatedString of the form
+ * "Catching up from <bold>current</bold> to <bold>tip</bold>"
+ * by splitting the localized template on the two `%s` placeholders.
+ */
+@Composable
+private fun catchingUpAnnotated(current: String, tip: String): AnnotatedString {
+    val template = stringResource(R.string.home_sync_status_catching_up_from_to)
+    return buildAnnotatedString {
+        // Locate the two placeholders in the template so we can replace them
+        // with bold spans without losing the surrounding localized prose.
+        val firstIdx = template.indexOf("%1\$s")
+        val secondIdx = template.indexOf("%2\$s")
+        if (firstIdx < 0 || secondIdx < 0 || secondIdx <= firstIdx) {
+            // Defensive fallback: bold both values appended to a plain prefix.
+            append(template.replace("%1\$s", current).replace("%2\$s", tip))
+            return@buildAnnotatedString
+        }
+        append(template.substring(0, firstIdx))
+        withStyle(SpanStyle(fontWeight = FontWeight.SemiBold)) { append(current) }
+        append(template.substring(firstIdx + 4, secondIdx))
+        withStyle(SpanStyle(fontWeight = FontWeight.SemiBold)) { append(tip) }
+        append(template.substring(secondIdx + 4))
+    }
+}
+
+/** Format a block height with thousands separators, e.g. 18,300,000. */
+private fun formatBlockNumber(n: Long): String =
+    java.text.NumberFormat.getInstance(java.util.Locale.US).format(n)
 
 @Composable
 private fun SyncingChip() {
