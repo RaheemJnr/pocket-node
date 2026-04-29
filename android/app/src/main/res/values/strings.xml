@@ -96,4 +96,28 @@
     <string name="faq_internet_required_body">To check the blockchain itself, your phone has to talk to other CKB nodes around the world. The app does not send your private keys anywhere — those stay on your phone. Without internet, the app can show you your last known balance but cannot send or receive new transactions.</string>
     <!-- endregion -->
 
+    <!-- region: SyncOptions -->
+    <string name="sync_options_title">Choose sync mode</string>
+    <string name="sync_options_description">How much past activity should your phone download?</string>
+    <string name="sync_mode_new_title">New wallet</string>
+    <string name="sync_mode_new_pick_if">Pick this if you have never received CKB before. Instant — no past activity to find.</string>
+    <string name="sync_mode_recent_title">Recent activity</string>
+    <string name="sync_mode_recent_pick_if">Pick this if you used a CKB wallet in the last month. About 2 min, finds activity from the last 30 days.</string>
+    <string name="sync_mode_recent_recommended">Recommended</string>
+    <string name="sync_mode_custom_title">From a specific date</string>
+    <string name="sync_mode_custom_pick_if">Pick this if you know roughly when your first CKB transaction was. You will enter a block number — we will help you find it.</string>
+    <string name="sync_mode_full_title">All history</string>
+    <string name="sync_mode_full_pick_if">Pick this only if you need every transaction since CKB launched. Slow — can take hours on mainnet.</string>
+    <string name="sync_custom_warning">Transactions before this block won\'t appear in history, but your balance will still be correct.</string>
+    <string name="sync_custom_block_label">Block Height</string>
+    <string name="sync_custom_block_placeholder">e.g., 12000000</string>
+    <string name="sync_custom_invalid">Invalid block height</string>
+    <string name="sync_custom_exceeds_tip">Exceeds current tip (%1$d). Enter a lower value.</string>
+    <string name="sync_full_warning">Full history sync may take a long time on mainnet (18M+ blocks).</string>
+    <string name="sync_explorer_lookup">Don\'t know your block height? Look up on explorer</string>
+    <string name="common_apply">Apply</string>
+    <string name="common_cancel">Cancel</string>
+    <string name="common_help_cd">Help</string>
+    <!-- endregion -->
+
 </resources>

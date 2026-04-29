@@ -74,7 +74,7 @@ import com.rjnr.pocketnode.BuildConfig
 import com.rjnr.pocketnode.data.gateway.models.NetworkType
 import com.rjnr.pocketnode.data.gateway.models.SyncMode
 import com.rjnr.pocketnode.data.gateway.models.displayName
-import com.rjnr.pocketnode.ui.components.SyncOptionsDialog
+import com.rjnr.pocketnode.ui.components.SyncOptionsSheet
 import com.rjnr.pocketnode.data.wallet.SyncStrategy
 import com.rjnr.pocketnode.data.wallet.ThemeMode
 import com.rjnr.pocketnode.ui.theme.CkbWalletTheme
@@ -175,10 +175,11 @@ fun SettingsScreen(
                 }
             }
         }
-        SyncOptionsDialog(
+        SyncOptionsSheet(
             currentMode = uiState.syncMode,
             onDismiss = { viewModel.hideSyncDialog() },
             onSelectMode = { mode, customBlock -> viewModel.setSyncMode(mode, customBlock) },
+            onTopicHelp = {},
             savedCustomBlockHeight = uiState.savedCustomBlockHeight,
             tipBlockNumber = uiState.tipBlockNumber,
             onLookupAddressOnExplorer = onLookupBlockHeight

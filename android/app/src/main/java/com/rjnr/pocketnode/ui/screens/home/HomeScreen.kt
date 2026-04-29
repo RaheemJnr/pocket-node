@@ -83,7 +83,7 @@ import com.rjnr.pocketnode.data.gateway.models.displayName
 import com.composables.icons.lucide.ChevronDown
 import com.rjnr.pocketnode.ui.components.SecurityBanner
 import com.rjnr.pocketnode.ui.components.SecurityBannerState
-import com.rjnr.pocketnode.ui.components.SyncOptionsDialog
+import com.rjnr.pocketnode.ui.components.SyncOptionsSheet
 import com.rjnr.pocketnode.ui.components.UpdateDialog
 import com.rjnr.pocketnode.ui.components.AccountSelectorSheet
 import com.rjnr.pocketnode.ui.components.WalletAvatar
@@ -164,24 +164,25 @@ fun HomeScreen(
         }
     }
 
-    // Sync options dialog (settings path)
+    // Sync options sheet (settings path)
     if (uiState.showSyncOptionsDialog) {
-        SyncOptionsDialog(
+        SyncOptionsSheet(
             currentMode = uiState.currentSyncMode,
             onDismiss = { viewModel.hideSyncOptions() },
             onSelectMode = { mode, customBlock ->
                 viewModel.hideSyncOptions()
                 viewModel.changeSyncMode(mode, customBlock)
             },
+            onTopicHelp = {},
             savedCustomBlockHeight = uiState.savedCustomBlockHeight,
             tipBlockNumber = tipBlockNumberLong,
             onLookupAddressOnExplorer = onLookupBlockHeight
         )
     }
 
-    // Post-import sync mode dialog (mainnet only)
+    // Post-import sync mode sheet (mainnet only)
     if (uiState.showPostImportSyncDialog) {
-        SyncOptionsDialog(
+        SyncOptionsSheet(
             currentMode = SyncMode.RECENT,
             title = "Choose Sync Start Point",
             description = "Select how far back to sync your imported wallet's history. If your wallet is older than 30 days, choose Custom.",
@@ -193,6 +194,7 @@ fun HomeScreen(
                     viewModel.changeSyncMode(mode, customBlock)
                 }
             },
+            onTopicHelp = {},
             tipBlockNumber = tipBlockNumberLong,
             onLookupAddressOnExplorer = onLookupBlockHeight
         )

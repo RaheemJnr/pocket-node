@@ -22,7 +22,7 @@ import com.rjnr.pocketnode.data.gateway.models.SyncMode
 import com.rjnr.pocketnode.data.wallet.MnemonicManager
 import com.rjnr.pocketnode.data.wallet.WalletRepository
 import com.rjnr.pocketnode.ui.components.MnemonicWordInput
-import com.rjnr.pocketnode.ui.components.SyncOptionsDialog
+import com.rjnr.pocketnode.ui.components.SyncOptionsSheet
 import com.rjnr.pocketnode.ui.util.Bip39WordList
 import dagger.hilt.android.lifecycle.HiltViewModel
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -233,13 +233,14 @@ fun MnemonicImportScreen(
 
     // Post-import sync mode dialog (mainnet only)
     if (uiState.showSyncModeDialog) {
-        SyncOptionsDialog(
+        SyncOptionsSheet(
             currentMode = SyncMode.RECENT,
             title = "Choose Sync Start Point",
             description = "Select how far back to sync your wallet history. If your wallet is older than 30 days, choose Custom to enter a specific block height.",
             availableModes = listOf(SyncMode.RECENT, SyncMode.CUSTOM),
             onDismiss = { viewModel.skipSyncSelection() },
             onSelectMode = { mode, height -> viewModel.onSyncModeSelected(mode, height) },
+            onTopicHelp = {},
             tipBlockNumber = uiState.tipBlockNumber
         )
     }
