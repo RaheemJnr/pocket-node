@@ -62,33 +62,35 @@ class NodeStatusViewModel @Inject constructor(
     }
 
     private suspend fun updateStatus() {
-        try {
-            val peersRaw = repository.getPeers() ?: ""
-            val tipRaw = repository.getTipHeader() ?: ""
-            val scripts = repository.getScripts() ?: ""
+        // Each repository call is wrapped individually so a transient JNI
+        // failure (common during sync-mode restart, where the light client
+        // briefly throws while the new mode initializes) does not freeze the
+        // displayed state on the previous mode's stale values. Without this,
+        // the outer catch would short-circuit before _uiState.update and the
+        // old tipHeader/peers would stick around indefinitely. (#90)
+        val tipRaw = runCatching { repository.getTipHeader() ?: "" }.getOrDefault("")
+        val peersRaw = runCatching { repository.getPeers() ?: "" }.getOrDefault("")
+        val scripts = runCatching { repository.getScripts() ?: "" }.getOrDefault("")
 
-            val parsedTip = runCatching {
-                json.decodeFromString<JniHeaderView>(tipRaw)
-            }.getOrNull()
+        val parsedTip = runCatching {
+            if (tipRaw.isBlank()) null else json.decodeFromString<JniHeaderView>(tipRaw)
+        }.getOrNull()
 
-            val parsedPeers = runCatching {
-                json.decodeFromString<List<JniRemoteNode>>(peersRaw)
-            }.getOrDefault(emptyList())
+        val parsedPeers = runCatching {
+            if (peersRaw.isBlank()) emptyList() else json.decodeFromString<List<JniRemoteNode>>(peersRaw)
+        }.getOrDefault(emptyList())
 
-            val dbSize = withContext(Dispatchers.IO) {
-                runCatching { DatabaseMaintenanceUtil.getDatabaseSizeBytes(appDatabase) }.getOrDefault(0L)
-            }
+        val dbSize = withContext(Dispatchers.IO) {
+            runCatching { DatabaseMaintenanceUtil.getDatabaseSizeBytes(appDatabase) }.getOrDefault(0L)
+        }
 
-            _uiState.update {
-                it.copy(
-                    tipHeader = parsedTip,
-                    peers = parsedPeers,
-                    scriptsJson = scripts,
-                    dbSizeBytes = dbSize
-                )
-            }
-        } catch (e: Exception) {
-            Log.e("NodeStatusVM", "Error updating status", e)
+        _uiState.update {
+            it.copy(
+                tipHeader = parsedTip,
+                peers = parsedPeers,
+                scriptsJson = scripts,
+                dbSizeBytes = dbSize
+            )
         }
     }
 

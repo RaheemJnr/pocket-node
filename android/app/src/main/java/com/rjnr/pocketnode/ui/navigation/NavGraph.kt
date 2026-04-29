@@ -17,6 +17,7 @@ import com.rjnr.pocketnode.ui.screens.auth.AuthScreen
 import com.rjnr.pocketnode.ui.screens.auth.InitialPinSetupScreen
 import com.rjnr.pocketnode.ui.screens.auth.PinEntryScreen
 import com.rjnr.pocketnode.ui.screens.auth.PinMode
+import com.rjnr.pocketnode.ui.screens.help.FaqScreen
 import com.rjnr.pocketnode.ui.screens.onboarding.MnemonicBackupScreen
 import com.rjnr.pocketnode.ui.screens.onboarding.MnemonicImportScreen
 import com.rjnr.pocketnode.ui.screens.receive.ReceiveScreen
@@ -62,6 +63,10 @@ sealed class Screen(val route: String) {
     }
     object AddWallet : Screen("add_wallet")
     object InitialPinSetup : Screen("initial_pin_setup")
+    object Faq : Screen("faq?anchor={anchor}") {
+        fun routeWithAnchor(anchor: String?): String =
+            if (anchor.isNullOrBlank()) "faq" else "faq?anchor=$anchor"
+    }
 }
 
 sealed class BottomTab(val route: String, val label: String) {
@@ -315,6 +320,9 @@ fun CkbNavGraph(
                 onNavigateToWalletManager = {
                     navController.navigate(Screen.WalletManager.route)
                 },
+                onNavigateToFaq = { anchor ->
+                    navController.navigate(Screen.Faq.routeWithAnchor(anchor))
+                },
                 daoPinVerified = daoPinVerified,
             )
         }
@@ -501,6 +509,19 @@ fun CkbNavGraph(
                     }
                 }
             )
+        }
+
+        composable(
+            route = Screen.Faq.route,
+            arguments = listOf(
+                navArgument("anchor") {
+                    type = NavType.StringType
+                    nullable = true
+                    defaultValue = null
+                }
+            ),
+        ) {
+            FaqScreen(onBack = { navController.popBackStack() })
         }
     }
 }

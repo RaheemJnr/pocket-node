@@ -248,12 +248,27 @@ class WalletPreferences @Inject constructor(
         prefs.edit().putString(KEY_SYNC_STRATEGY, strategy.name).apply()
     }
 
+    // --- Sync coachmark (first-run education, global) ---
+
+    private val _hasSeenSyncCoachmark =
+        MutableStateFlow(prefs.getBoolean(KEY_SYNC_COACHMARK_SEEN, false))
+    val hasSeenSyncCoachmarkFlow: StateFlow<Boolean> = _hasSeenSyncCoachmark.asStateFlow()
+
+    fun markSyncCoachmarkSeen() {
+        prefs.edit().putBoolean(KEY_SYNC_COACHMARK_SEEN, true).apply()
+        _hasSeenSyncCoachmark.value = true
+    }
+
     // --- Utilities ---
 
     // Clearing prefs removes KEY_SELECTED_NETWORK, so migrateIfNeeded() re-runs on next startup.
     // That's benign: old un-namespaced keys are already gone, it just re-sets default to MAINNET.
     fun clear() {
         prefs.edit().clear().apply()
+        // Re-synchronize StateFlows seeded from prefs at construction so observers
+        // don't read stale state until process restart.
+        _hasSeenSyncCoachmark.value = false
+        _themeMode.value = readThemeMode()
     }
 
     /**
@@ -308,5 +323,6 @@ class WalletPreferences @Inject constructor(
         private const val KEY_POST_DEPOSIT_REMINDER_SHOWN_PREFIX = "post_deposit_reminder_shown_"
         private const val KEY_LAST_VACUUM_AT = "last_vacuum_at"
         private const val KEY_SYNC_PROGRESS_MIGRATED = "sync_progress_migrated_to_room_v7"
+        private const val KEY_SYNC_COACHMARK_SEEN = "sync_coachmark_seen"
     }
 }

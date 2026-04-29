@@ -23,6 +23,7 @@ import com.rjnr.pocketnode.data.wallet.WalletRepository
 import com.rjnr.pocketnode.ui.components.WalletGroup
 import dagger.hilt.android.lifecycle.HiltViewModel
 import kotlinx.coroutines.channels.Channel
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.*
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
@@ -68,8 +69,24 @@ class HomeViewModel @Inject constructor(
     private val pinManager: PinManager,
     private val authManager: AuthManager,
     private val cacheManager: CacheManager,
-    private val walletPreferences: com.rjnr.pocketnode.data.wallet.WalletPreferences
+    private val walletPreferences: com.rjnr.pocketnode.data.wallet.WalletPreferences,
+    private val savedStateHandle: androidx.lifecycle.SavedStateHandle,
 ) : ViewModel() {
+
+    /**
+     * Survives process death so the sync-options bottom sheet re-opens after
+     * the user taps the explorer-lookup link, gets briefly killed by the OEM
+     * memory manager / auth gate, and returns. Without this the dialog closes
+     * silently and the user lands on Home instead of where they were. (#90)
+     *
+     * Both flows go through `SyncOptionsSheet` and both expose the explorer
+     * lookup, so both must be restored: the settings/runtime change flow
+     * (`showSyncOptionsDialog`) AND the post-import flow that asks the user
+     * to choose a sync start point right after wallet creation/import
+     * (`showPostImportSyncDialog`).
+     */
+    private val SAVED_KEY_SHOW_SYNC_OPTIONS = "showSyncOptionsDialog"
+    private val SAVED_KEY_SHOW_POST_IMPORT_SYNC = "showPostImportSyncDialog"
 
     // Skip-overlapping guard for refreshTransactionsOnly. The fn is called from
     // refresh(), the syncProgress observer (silent), and wallet switches; under
@@ -77,7 +94,15 @@ class HomeViewModel @Inject constructor(
     // duplicate JNI/Room round-trip — the second caller bails immediately.
     private val txRefreshMutex = Mutex()
 
-    private val _uiState = MutableStateFlow(HomeUiState())
+    private val _uiState = MutableStateFlow(
+        // Restore the sync-options dialog visibility across process death so
+        // the explorer-lookup → Chrome → return flow doesn't drop the user
+        // back on Home instead of the dialog they were filling out (#90).
+        HomeUiState(
+            showSyncOptionsDialog = savedStateHandle.get<Boolean>(SAVED_KEY_SHOW_SYNC_OPTIONS) ?: false,
+            showPostImportSyncDialog = savedStateHandle.get<Boolean>(SAVED_KEY_SHOW_POST_IMPORT_SYNC) ?: false,
+        )
+    )
     val uiState: StateFlow<HomeUiState> = _uiState.asStateFlow()
 
     // One-shot nav events (e.g. retry-failed-tx → SendScreen with prefill).
@@ -93,6 +118,17 @@ class HomeViewModel @Inject constructor(
 
     private fun formatFiat(ckb: Double, price: Double): String =
         String.format(Locale.US, "≈ $%.2f USD", ckb * price)
+
+    // 1-second clock tick used by the sync coachmark combine. Cancelled with
+    // viewModelScope. Kept as a class-level Flow (rather than a suspend loop) so
+    // we can compose it into `combine` cleanly. Declared before `init` because
+    // the init block references it.
+    private val coachmarkClockTick = flow {
+        while (true) {
+            emit(System.currentTimeMillis())
+            delay(1_000)
+        }
+    }
 
     init {
         checkBackupStatus()
@@ -191,6 +227,28 @@ class HomeViewModel @Inject constructor(
                 refreshWalletBalances(wallets)
             }
         }
+
+        // Sync coachmark visibility (#90): show first-run education when sync has
+        // been catching up for at least the grace period. Combines the prefs flag,
+        // the repository SyncProgress, and a 1-second clock tick so the UI updates
+        // as soon as the elapsed-time threshold is crossed without waiting for the
+        // next progress emission.
+        combine(
+            walletPreferences.hasSeenSyncCoachmarkFlow,
+            repository.syncProgress,
+            coachmarkClockTick,
+        ) { seen, progress, nowMs ->
+            val catching = progress.isSyncing && progress.percentage < 100
+            shouldShowSyncCoachmark(
+                seen = seen,
+                isCatchingUp = catching,
+                firstCatchingUpAtMs = progress.firstCatchingUpAtMs,
+                nowMs = nowMs,
+            )
+        }
+            .distinctUntilChanged()
+            .onEach { show -> _uiState.update { it.copy(showSyncCoachmark = show) } }
+            .launchIn(viewModelScope)
     }
 
     private suspend fun initializeWallet() {
@@ -490,6 +548,7 @@ class HomeViewModel @Inject constructor(
      */
     fun showSyncOptions() {
         _uiState.update { it.copy(showSyncOptionsDialog = true) }
+        savedStateHandle[SAVED_KEY_SHOW_SYNC_OPTIONS] = true
     }
 
     /**
@@ -497,6 +556,7 @@ class HomeViewModel @Inject constructor(
      */
     fun hideSyncOptions() {
         _uiState.update { it.copy(showSyncOptionsDialog = false) }
+        savedStateHandle[SAVED_KEY_SHOW_SYNC_OPTIONS] = false
     }
 
     /**
@@ -588,6 +648,13 @@ class HomeViewModel @Inject constructor(
      */
     fun hidePostImportSyncDialog() {
         _uiState.update { it.copy(showPostImportSyncDialog = false) }
+        savedStateHandle[SAVED_KEY_SHOW_POST_IMPORT_SYNC] = false
+    }
+
+    /** Open the post-import sync mode dialog (used by Education close-and-reopen). */
+    fun showPostImportSyncDialog() {
+        _uiState.update { it.copy(showPostImportSyncDialog = true) }
+        savedStateHandle[SAVED_KEY_SHOW_POST_IMPORT_SYNC] = true
     }
 
     /**
@@ -600,11 +667,13 @@ class HomeViewModel @Inject constructor(
             repository.importWallet(privateKeyHex)
                 .onSuccess { info ->
                     Log.d(TAG, "Wallet imported successfully: ${info.testnetAddress}")
+                    val showPostImport = repository.currentNetwork == NetworkType.MAINNET
                     _uiState.update { it.copy(
                         walletInfo = info,
                         isLoading = false,
-                        showPostImportSyncDialog = repository.currentNetwork == NetworkType.MAINNET
+                        showPostImportSyncDialog = showPostImport,
                     ) }
+                    savedStateHandle[SAVED_KEY_SHOW_POST_IMPORT_SYNC] = showPostImport
                     registerAndRefresh()
                 }
                 .onFailure { error ->
@@ -733,9 +802,49 @@ class HomeViewModel @Inject constructor(
         }
     }
 
+    /**
+     * Called by the UI when the user dismisses the sync coachmark (e.g. taps
+     * "Got it"). Persists the seen flag; the combined flow re-emits `false` on
+     * the next clock tick and the UI clears.
+     *
+     * Note: [com.rjnr.pocketnode.data.wallet.WalletPreferences.markSyncCoachmarkSeen]
+     * is non-suspend (writes via SharedPreferences.edit().apply()), so no
+     * coroutine wrapper is needed.
+     */
+    fun onCoachmarkDismissed() {
+        walletPreferences.markSyncCoachmarkSeen()
+    }
+
     override fun onCleared() {
         super.onCleared()
         updateDownloader.cleanup()
+    }
+
+    companion object {
+        private const val COACHMARK_GRACE_MS = 2_000L
+
+        /**
+         * True when the user has not seen the sync coachmark yet AND sync has been
+         * actively catching up for at least [COACHMARK_GRACE_MS]. The grace prevents
+         * the coachmark from flashing for NEW_WALLET sync mode that completes in
+         * milliseconds.
+         *
+         * Defensive: returns false when [firstCatchingUpAtMs] is null even if
+         * [isCatchingUp] is true. Negative deltas (clock skew / frozen test clocks)
+         * are coerced to 0 and treated as "still in grace".
+         */
+        fun shouldShowSyncCoachmark(
+            seen: Boolean,
+            isCatchingUp: Boolean,
+            firstCatchingUpAtMs: Long?,
+            nowMs: Long,
+        ): Boolean {
+            if (seen) return false
+            if (!isCatchingUp) return false
+            val firstAt = firstCatchingUpAtMs ?: return false
+            val elapsed = (nowMs - firstAt).coerceAtLeast(0)
+            return elapsed >= COACHMARK_GRACE_MS
+        }
     }
 }
 
@@ -777,5 +886,6 @@ data class HomeUiState(
     val showPostDepositReminder: Boolean = false,
     val isSwitchingWallet: Boolean = false,
     val savedCustomBlockHeight: Long? = null,
-    val walletBalances: Map<String, String> = emptyMap()
+    val walletBalances: Map<String, String> = emptyMap(),
+    val showSyncCoachmark: Boolean = false
 )

@@ -53,8 +53,22 @@ data class SyncProgress(
     val tipBlockNumber: Long = 0L,
     val percentage: Double = 0.0,
     val etaDisplay: String = "",
-    val justReachedTip: Boolean = false
+    val justReachedTip: Boolean = false,
+    val firstCatchingUpAtMs: Long? = null
 )
+
+/**
+ * Edge-trigger first-time tracking for the "catching up" state.
+ *
+ * - When `catching` flips false→true, returns `nowMs` (start of the run).
+ * - While `catching` stays true, returns `prev` unchanged.
+ * - When `catching` is false, returns null.
+ */
+fun computeFirstCatchingUpAtMs(prev: Long?, catching: Boolean, nowMs: Long): Long? = when {
+    !catching -> null
+    prev == null -> nowMs
+    else -> prev
+}
 
 /**
  * Prefill data extracted from a FAILED `pending_broadcasts` row, used to
@@ -202,7 +216,20 @@ class GatewayRepository @Inject constructor(
     // --- Sync progress tracking ---
     private val syncProgressTracker = SyncProgressTracker()
     private var syncPollingJob: Job? = null
+
+    // Generation token bumped on every start/stop of sync polling. In-flight
+    // getAccountStatus().onSuccess lambdas capture the generation at the start
+    // of each iteration and refuse to write `firstCatchingUpAtMs` /
+    // `_syncProgress` if it's stale — coroutine cancellation is cooperative,
+    // so without this gate a successful HTTP response that returned just
+    // before stopSyncPolling() could resurrect the cleared state. (#90)
+    @Volatile
+    private var syncPollingGeneration: Long = 0L
     private var wasSyncing = false
+    // Process-lifetime edge-tracker for the first time the wallet entered
+    // "catching up" (actively downloading blocks). Used by the HomeViewModel
+    // coachmark grace timer (#90). Null whenever we are not catching up.
+    private var firstCatchingUpAtMs: Long? = null
     private val _syncProgress = MutableStateFlow(SyncProgress())
     val syncProgress: StateFlow<SyncProgress> = _syncProgress.asStateFlow()
 
@@ -295,6 +322,7 @@ class GatewayRepository @Inject constructor(
         // report progress / ETA / justReachedTip from the old wallet's syncing window.
         syncProgressTracker.reset()
         wasSyncing = false
+        firstCatchingUpAtMs = null
         _syncProgress.value = SyncProgress()
 
         val walletSyncMode = walletPreferences.getSyncMode(walletId = wallet.walletId)
@@ -2430,6 +2458,8 @@ class GatewayRepository @Inject constructor(
     fun startSyncPolling() {
         if (syncPollingJob?.isActive == true) return
 
+        val generation = ++syncPollingGeneration
+
         syncPollingJob = scope.launch {
             Log.d(TAG, "Starting centralized sync polling")
             while (true) {
@@ -2446,6 +2476,12 @@ class GatewayRepository @Inject constructor(
 
                 getAccountStatus()
                     .onSuccess { status ->
+                        // Generation gate: refuse to publish state if stopSyncPolling()
+                        // (or a fresh start) has bumped the generation since this
+                        // iteration began. Prevents in-flight responses that returned
+                        // just before cancel() from resurrecting cleared state.
+                        if (generation != syncPollingGeneration) return@onSuccess
+
                         val syncedBlock = status.syncedToBlock.toLongOrNull() ?: 0L
                         val tipBlock = status.tipNumber.toLongOrNull() ?: 0L
 
@@ -2455,13 +2491,24 @@ class GatewayRepository @Inject constructor(
                         val justReachedTip = wasSyncing && info.isSynced
                         wasSyncing = !info.isSynced
 
+                        // Edge-track first time we entered "catching up" (actively
+                        // downloading blocks) so HomeViewModel can apply a grace
+                        // period before showing the sync coachmark (#90).
+                        val catching = !info.isSynced && info.percentage < 100
+                        firstCatchingUpAtMs = computeFirstCatchingUpAtMs(
+                            firstCatchingUpAtMs,
+                            catching,
+                            System.currentTimeMillis()
+                        )
+
                         _syncProgress.value = SyncProgress(
                             isSyncing = !info.isSynced,
                             syncedToBlock = syncedBlock,
                             tipBlockNumber = tipBlock,
                             percentage = info.percentage,
                             etaDisplay = info.etaDisplay,
-                            justReachedTip = justReachedTip
+                            justReachedTip = justReachedTip,
+                            firstCatchingUpAtMs = firstCatchingUpAtMs
                         )
                     }
                     .onFailure { e ->
@@ -2478,10 +2525,19 @@ class GatewayRepository @Inject constructor(
      * Stop centralized sync polling. Resets tracker state.
      */
     fun stopSyncPolling() {
+        // Bump the generation FIRST so any in-flight onSuccess lambda sees a
+        // mismatch and refuses to write before we clear state below.
+        syncPollingGeneration++
         syncPollingJob?.cancel()
         syncPollingJob = null
         syncProgressTracker.reset()
         wasSyncing = false
+        // Clear the coachmark grace tracker (#90) so a subsequent
+        // startSyncPolling() restarts the 2s grace from a clean clock.
+        // Also strip the timestamp from the last-emitted SyncProgress so
+        // HomeViewModel's combine doesn't see stale state during the gap.
+        firstCatchingUpAtMs = null
+        _syncProgress.value = _syncProgress.value.copy(firstCatchingUpAtMs = null)
         Log.d(TAG, "Stopped centralized sync polling")
     }
 
