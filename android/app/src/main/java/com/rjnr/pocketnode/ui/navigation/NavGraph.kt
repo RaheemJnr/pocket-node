@@ -1,8 +1,12 @@
 package com.rjnr.pocketnode.ui.navigation
 
+import androidx.compose.foundation.layout.padding
+import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.unit.dp
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
 import androidx.navigation.NavHostController
@@ -62,6 +66,10 @@ sealed class Screen(val route: String) {
     }
     object AddWallet : Screen("add_wallet")
     object InitialPinSetup : Screen("initial_pin_setup")
+    object Faq : Screen("faq?anchor={anchor}") {
+        fun routeWithAnchor(anchor: String?): String =
+            if (anchor.isNullOrBlank()) "faq" else "faq?anchor=$anchor"
+    }
 }
 
 sealed class BottomTab(val route: String, val label: String) {
@@ -500,6 +508,24 @@ fun CkbNavGraph(
                         popUpTo(Screen.Main.route) { inclusive = false }
                     }
                 }
+            )
+        }
+
+        composable(
+            route = Screen.Faq.route,
+            arguments = listOf(
+                navArgument("anchor") {
+                    type = NavType.StringType
+                    nullable = true
+                    defaultValue = null
+                }
+            ),
+        ) { backStack ->
+            val anchor = backStack.arguments?.getString("anchor")
+            // Placeholder: Task 3.6 will replace this with the real FaqScreen.
+            Text(
+                text = "FAQ (anchor=$anchor) — placeholder",
+                modifier = Modifier.padding(16.dp),
             )
         }
     }
