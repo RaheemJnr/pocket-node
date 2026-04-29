@@ -1,6 +1,7 @@
 package com.rjnr.pocketnode.ui.education.coachmark
 
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.compositionLocalOf
 import androidx.compose.runtime.mutableStateMapOf
 import androidx.compose.runtime.remember
@@ -35,6 +36,9 @@ fun rememberCoachmarkRegistry(): CoachmarkRegistry = remember { CoachmarkRegistr
 @Composable
 fun Modifier.coachmarkAnchor(key: String): Modifier {
     val registry = LocalCoachmarkRegistry.current ?: return this
+    DisposableEffect(registry, key) {
+        onDispose { registry.bounds.remove(key) }
+    }
     return this.then(
         Modifier.onGloballyPositioned { coords ->
             registry.bounds[key] = coords.boundsInWindow()
