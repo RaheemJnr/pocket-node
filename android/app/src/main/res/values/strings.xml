@@ -130,6 +130,8 @@
     <string name="home_sync_status_catching_up">Catching up…</string>
     <string name="home_sync_status_up_to_date">Up to date</string>
     <string name="home_sync_chip_syncing">Syncing</string>
+    <string name="home_post_import_sync_title">Choose Sync Start Point</string>
+    <string name="home_post_import_sync_description">Select how far back to sync your imported wallet\'s history. If your wallet is older than 30 days, choose Custom.</string>
     <!-- endregion -->
 
     <!-- region: Settings -->
