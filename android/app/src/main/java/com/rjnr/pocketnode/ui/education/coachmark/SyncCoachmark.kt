@@ -11,19 +11,26 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.Button
+import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Card
+import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.geometry.CornerRadius
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Rect
+import androidx.compose.ui.geometry.RoundRect
 import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.Path
+import androidx.compose.ui.graphics.PathOperation
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.res.stringResource
+import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import com.rjnr.pocketnode.R
 
@@ -46,7 +53,10 @@ fun SyncCoachmark(
     val rect: Rect = registry.bounds[anchorKey] ?: return
     if (rect.width <= 0f || rect.height <= 0f) return
 
-    val scrimColor = Color.Black.copy(alpha = 0.6f)
+    val scrimColor = Color.Black.copy(alpha = 0.65f)
+    val density = LocalDensity.current
+    val cornerRadiusPx = with(density) { 16.dp.toPx() }
+    val spotlightInsetPx = with(density) { 4.dp.toPx() }
 
     Box(
         modifier = Modifier
@@ -54,65 +64,69 @@ fun SyncCoachmark(
             // Swallow taps so taps outside the tooltip don't hit underlying UI.
             .pointerInput(Unit) { detectTapGestures { /* swallow */ } },
     ) {
+        // Single-pass scrim with a rounded-rect cutout for the spotlight.
+        // Using Path.op(Difference) gives us rounded corners around the
+        // anchor that match the sync card's own rounded shape.
         Canvas(modifier = Modifier.fillMaxSize()) {
-            // Top band: above the spotlight, full width.
-            if (rect.top > 0f) {
-                drawRect(
-                    color = scrimColor,
-                    topLeft = Offset(0f, 0f),
-                    size = Size(size.width, rect.top),
+            val full = Path().apply {
+                addRect(Rect(0f, 0f, size.width, size.height))
+            }
+            val spotlight = Path().apply {
+                addRoundRect(
+                    RoundRect(
+                        rect = Rect(
+                            left = rect.left - spotlightInsetPx,
+                            top = rect.top - spotlightInsetPx,
+                            right = rect.right + spotlightInsetPx,
+                            bottom = rect.bottom + spotlightInsetPx,
+                        ),
+                        cornerRadius = CornerRadius(cornerRadiusPx, cornerRadiusPx),
+                    )
                 )
             }
-            // Bottom band: below the spotlight, full width.
-            if (rect.bottom < size.height) {
-                drawRect(
-                    color = scrimColor,
-                    topLeft = Offset(0f, rect.bottom),
-                    size = Size(size.width, size.height - rect.bottom),
-                )
+            val scrim = Path().apply {
+                op(full, spotlight, PathOperation.Difference)
             }
-            // Left band: at spotlight row, left of spotlight.
-            if (rect.left > 0f) {
-                drawRect(
-                    color = scrimColor,
-                    topLeft = Offset(0f, rect.top),
-                    size = Size(rect.left, rect.height),
-                )
-            }
-            // Right band: at spotlight row, right of spotlight.
-            if (rect.right < size.width) {
-                drawRect(
-                    color = scrimColor,
-                    topLeft = Offset(rect.right, rect.top),
-                    size = Size(size.width - rect.right, rect.height),
-                )
-            }
+            drawPath(path = scrim, color = scrimColor)
         }
 
         // Tooltip below the spotlight.
-        val density = LocalDensity.current
-        val tooltipTopDp = with(density) { rect.bottom.toDp() } + 12.dp
+        val tooltipTopDp = with(density) { rect.bottom.toDp() } + 16.dp
         Card(
-            shape = RoundedCornerShape(12.dp),
+            shape = RoundedCornerShape(16.dp),
+            colors = CardDefaults.cardColors(
+                containerColor = MaterialTheme.colorScheme.surface,
+            ),
+            elevation = CardDefaults.cardElevation(defaultElevation = 6.dp),
             modifier = Modifier
                 .align(Alignment.TopStart)
                 .padding(start = 16.dp, end = 16.dp, top = tooltipTopDp)
                 .fillMaxWidth(),
         ) {
             Column(
-                modifier = Modifier.padding(16.dp),
-                verticalArrangement = Arrangement.spacedBy(12.dp),
+                modifier = Modifier.padding(20.dp),
+                verticalArrangement = Arrangement.spacedBy(16.dp),
             ) {
                 Text(
                     text = stringResource(R.string.coachmark_sync_body),
                     style = MaterialTheme.typography.bodyMedium,
+                    color = MaterialTheme.colorScheme.onSurface,
                 )
                 Row(
                     modifier = Modifier.fillMaxWidth(),
                     horizontalArrangement = Arrangement.End,
                 ) {
-                    Button(onClick = onDismiss) {
-                        Text(stringResource(R.string.edu_got_it))
+                    Button(
+                        onClick = onDismiss,
+                        colors = ButtonDefaults.buttonColors(
+                            containerColor = MaterialTheme.colorScheme.primary,
+                            contentColor = MaterialTheme.colorScheme.onPrimary,
+                        ),
+                    ) {
+                        Text(
+                            text = stringResource(R.string.edu_got_it),
+                            fontWeight = FontWeight.Medium,
+                        )
                     }
                 }
             }
