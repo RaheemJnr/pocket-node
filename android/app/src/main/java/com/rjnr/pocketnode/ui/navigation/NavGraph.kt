@@ -1,12 +1,8 @@
 package com.rjnr.pocketnode.ui.navigation
 
-import androidx.compose.foundation.layout.padding
-import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
-import androidx.compose.ui.Modifier
-import androidx.compose.ui.unit.dp
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
 import androidx.navigation.NavHostController
@@ -21,6 +17,7 @@ import com.rjnr.pocketnode.ui.screens.auth.AuthScreen
 import com.rjnr.pocketnode.ui.screens.auth.InitialPinSetupScreen
 import com.rjnr.pocketnode.ui.screens.auth.PinEntryScreen
 import com.rjnr.pocketnode.ui.screens.auth.PinMode
+import com.rjnr.pocketnode.ui.screens.help.FaqScreen
 import com.rjnr.pocketnode.ui.screens.onboarding.MnemonicBackupScreen
 import com.rjnr.pocketnode.ui.screens.onboarding.MnemonicImportScreen
 import com.rjnr.pocketnode.ui.screens.receive.ReceiveScreen
@@ -520,13 +517,8 @@ fun CkbNavGraph(
                     defaultValue = null
                 }
             ),
-        ) { backStack ->
-            val anchor = backStack.arguments?.getString("anchor")
-            // Placeholder: Task 3.6 will replace this with the real FaqScreen.
-            Text(
-                text = "FAQ (anchor=$anchor) — placeholder",
-                modifier = Modifier.padding(16.dp),
-            )
+        ) {
+            FaqScreen(onBack = { navController.popBackStack() })
         }
     }
 }
