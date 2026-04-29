@@ -42,6 +42,7 @@ fun MainScreen(
     onNavigateToPinVerify: () -> Unit = {},
     onNavigateToSecurityChecklist: () -> Unit = {},
     onNavigateToWalletManager: () -> Unit = {},
+    onNavigateToFaq: (anchor: String?) -> Unit = {},
     daoPinVerified: Boolean = false,
 ) {
     val innerNav = rememberNavController()
@@ -109,6 +110,7 @@ fun MainScreen(
                             restoreState = true
                         }
                     },
+                    onNavigateToFaq = onNavigateToFaq,
                 )
             }
             composable(BottomTab.Activity.route) {

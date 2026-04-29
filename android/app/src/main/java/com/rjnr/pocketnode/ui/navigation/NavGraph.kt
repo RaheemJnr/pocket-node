@@ -320,6 +320,9 @@ fun CkbNavGraph(
                 onNavigateToWalletManager = {
                     navController.navigate(Screen.WalletManager.route)
                 },
+                onNavigateToFaq = { anchor ->
+                    navController.navigate(Screen.Faq.routeWithAnchor(anchor))
+                },
                 daoPinVerified = daoPinVerified,
             )
         }

@@ -47,6 +47,7 @@ import androidx.compose.material3.TopAppBar
 import androidx.compose.material3.TopAppBarDefaults
 import androidx.compose.material3.pulltorefresh.PullToRefreshBox
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
@@ -54,6 +55,7 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -69,6 +71,7 @@ import androidx.compose.ui.tooling.preview.Preview
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.hilt.navigation.compose.hiltViewModel
+import com.composables.icons.lucide.CircleHelp
 import com.composables.icons.lucide.Copy
 import com.composables.icons.lucide.ExternalLink
 import com.composables.icons.lucide.FileText
@@ -76,11 +79,13 @@ import com.composables.icons.lucide.Info
 import com.composables.icons.lucide.Lucide
 import com.composables.icons.lucide.TriangleAlert
 import com.composables.icons.lucide.X
+import com.rjnr.pocketnode.R
 import com.rjnr.pocketnode.data.gateway.models.NetworkType
 import com.rjnr.pocketnode.data.gateway.models.SyncMode
 import com.rjnr.pocketnode.data.gateway.models.TransactionRecord
 import com.rjnr.pocketnode.data.gateway.models.displayName
 import com.composables.icons.lucide.ChevronDown
+import androidx.compose.ui.res.stringResource
 import com.rjnr.pocketnode.ui.components.SecurityBanner
 import com.rjnr.pocketnode.ui.components.SecurityBannerState
 import com.rjnr.pocketnode.ui.components.SyncOptionsSheet
@@ -88,6 +93,13 @@ import com.rjnr.pocketnode.ui.components.UpdateDialog
 import com.rjnr.pocketnode.ui.components.AccountSelectorSheet
 import com.rjnr.pocketnode.ui.components.WalletAvatar
 import androidx.compose.material3.rememberModalBottomSheetState
+import com.rjnr.pocketnode.ui.education.EducationSheet
+import com.rjnr.pocketnode.ui.education.EducationTopic
+import com.rjnr.pocketnode.ui.education.coachmark.CoachmarkRegistry
+import com.rjnr.pocketnode.ui.education.coachmark.LocalCoachmarkRegistry
+import com.rjnr.pocketnode.ui.education.coachmark.SyncCoachmark
+import com.rjnr.pocketnode.ui.education.coachmark.coachmarkAnchor
+import com.rjnr.pocketnode.ui.education.coachmark.rememberCoachmarkRegistry
 import com.rjnr.pocketnode.ui.theme.CkbWalletTheme
 import com.rjnr.pocketnode.ui.theme.ErrorRed
 import com.rjnr.pocketnode.ui.theme.SuccessGreen
@@ -107,6 +119,7 @@ fun HomeScreen(
     onNavigateToActivity: () -> Unit = {},
     onNavigateToWalletManager: () -> Unit = {},
     onNavigateToSecurityChecklist: () -> Unit = {},
+    onNavigateToFaq: (anchor: String?) -> Unit = {},
     viewModel: HomeViewModel = hiltViewModel()
 ) {
     val uiState by viewModel.uiState.collectAsState()
@@ -118,6 +131,13 @@ fun HomeScreen(
     var showAccountSelector by remember { mutableStateOf(false) }
     val scope = rememberCoroutineScope()
     val lifecycleOwner = androidx.lifecycle.compose.LocalLifecycleOwner.current
+
+    // Education sheet + coachmark scaffolding (#90).
+    // Hoisted at root so both SyncOptionsSheet call sites and section
+    // header `?` icons share the same state.
+    val coachmarkRegistry: CoachmarkRegistry = rememberCoachmarkRegistry()
+    var educationTopic by rememberSaveable { mutableStateOf<EducationTopic?>(null) }
+    var resumeSyncSheet by rememberSaveable { mutableStateOf(false) }
 
     // Collect one-shot nav events from the ViewModel (e.g. retry-failed-tx).
     LaunchedEffect(Unit) {
@@ -173,7 +193,11 @@ fun HomeScreen(
                 viewModel.hideSyncOptions()
                 viewModel.changeSyncMode(mode, customBlock)
             },
-            onTopicHelp = {},
+            onTopicHelp = { topic ->
+                viewModel.hideSyncOptions()
+                resumeSyncSheet = true
+                educationTopic = topic
+            },
             savedCustomBlockHeight = uiState.savedCustomBlockHeight,
             tipBlockNumber = tipBlockNumberLong,
             onLookupAddressOnExplorer = onLookupBlockHeight
@@ -194,7 +218,10 @@ fun HomeScreen(
                     viewModel.changeSyncMode(mode, customBlock)
                 }
             },
-            onTopicHelp = {},
+            onTopicHelp = { topic ->
+                viewModel.hidePostImportSyncDialog()
+                educationTopic = topic
+            },
             tipBlockNumber = tipBlockNumberLong,
             onLookupAddressOnExplorer = onLookupBlockHeight
         )
@@ -353,6 +380,8 @@ fun HomeScreen(
         )
     }
 
+    CompositionLocalProvider(LocalCoachmarkRegistry provides coachmarkRegistry) {
+    Box(modifier = Modifier.fillMaxSize()) {
     Scaffold(
         containerColor = MaterialTheme.colorScheme.surface,
         topBar = {
@@ -460,7 +489,8 @@ fun HomeScreen(
                     snackbarHostState = snackbarHostState,
                     scope = scope,
                     selectedTransaction = { selectedTransaction = it },
-                    onRetryFailed = { retryDialogTx = it }
+                    onRetryFailed = { retryDialogTx = it },
+                    onTopicHelp = { topic -> educationTopic = topic },
                 )
                 if (uiState.isSwitchingWallet) {
                     LinearProgressIndicator(
@@ -472,6 +502,35 @@ fun HomeScreen(
                 }
             }
         }
+    }
+
+        // Coachmark overlay (above all content)
+        SyncCoachmark(
+            show = uiState.showSyncCoachmark,
+            anchorKey = "sync_card",
+            onDismiss = { viewModel.onCoachmarkDismissed() },
+        )
+
+        // Education sheet (overlay)
+        educationTopic?.let { topic ->
+            EducationSheet(
+                topic = topic,
+                onDismiss = {
+                    val resume = resumeSyncSheet
+                    educationTopic = null
+                    if (resume) {
+                        resumeSyncSheet = false
+                        viewModel.showSyncOptions()
+                    }
+                },
+                onOpenFaq = { anchor ->
+                    educationTopic = null
+                    resumeSyncSheet = false
+                    onNavigateToFaq(anchor)
+                },
+            )
+        }
+    }
     }
 }
 
@@ -493,6 +552,7 @@ fun HomeScreenUI(
     scope: CoroutineScope,
     selectedTransaction: (tx: TransactionRecord) -> Unit,
     onRetryFailed: (tx: TransactionRecord) -> Unit = {},
+    onTopicHelp: (EducationTopic) -> Unit = {},
 ) {
     PullToRefreshBox(
         isRefreshing = uiState.isRefreshing,
@@ -598,8 +658,9 @@ fun HomeScreenUI(
                 item {
                     SyncProgressBar(
                         syncProgress = uiState.syncProgress,
-                        syncedToBlock = uiState.syncedToBlock,
-                        tipBlockNumber = uiState.tipBlockNumber
+                        isSyncing = uiState.isSyncing,
+                        onHelp = { onTopicHelp(EducationTopic.Sync) },
+                        modifier = Modifier.coachmarkAnchor("sync_card"),
                     )
                 }
             }
@@ -611,11 +672,24 @@ fun HomeScreenUI(
                     horizontalArrangement = Arrangement.SpaceBetween,
                     verticalAlignment = Alignment.CenterVertically
                 ) {
-                    Text(
-                        text = "Recent Transactions",
-                        style = MaterialTheme.typography.titleMedium,
-                        fontWeight = FontWeight.SemiBold
-                    )
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Text(
+                            text = stringResource(R.string.home_activity_section_title),
+                            style = MaterialTheme.typography.titleMedium,
+                            fontWeight = FontWeight.SemiBold
+                        )
+                        IconButton(
+                            onClick = { onTopicHelp(EducationTopic.Activity) },
+                            modifier = Modifier.size(36.dp)
+                        ) {
+                            Icon(
+                                imageVector = Lucide.CircleHelp,
+                                contentDescription = stringResource(R.string.common_help_cd),
+                                modifier = Modifier.size(18.dp),
+                                tint = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                        }
+                    }
                     TextButton(onClick = onNavigateToActivity) {
                         Text(
                             text = "See All",
@@ -801,23 +875,43 @@ private fun BackupReminderBanner(
 @Composable
 private fun SyncProgressBar(
     syncProgress: Double,
-    syncedToBlock: String?,
-    tipBlockNumber: String
+    isSyncing: Boolean,
+    onHelp: () -> Unit,
+    modifier: Modifier = Modifier,
 ) {
-    Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+    Column(
+        modifier = modifier,
+        verticalArrangement = Arrangement.spacedBy(4.dp)
+    ) {
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Text(
+                text = stringResource(R.string.home_sync_section_title),
+                style = MaterialTheme.typography.titleSmall,
+                modifier = Modifier.weight(1f),
+            )
+            IconButton(onClick = onHelp, modifier = Modifier.size(36.dp)) {
+                Icon(
+                    imageVector = Lucide.CircleHelp,
+                    contentDescription = stringResource(R.string.common_help_cd),
+                    modifier = Modifier.size(18.dp),
+                    tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+        }
         LinearProgressIndicator(
             progress = { syncProgress.toFloat().coerceIn(0f, 1f) },
             modifier = Modifier.fillMaxWidth(),
             color = MaterialTheme.colorScheme.primary,
             trackColor = MaterialTheme.colorScheme.surfaceVariant
         )
-        val blockLabel = if (tipBlockNumber.isNotEmpty()) {
-            "Block ${syncedToBlock ?: "—"} / ~$tipBlockNumber"
-        } else {
-            "Block ${syncedToBlock ?: "—"}"
-        }
+        // Plain-language status — no block height (#90).
+        // Power users can find block height on Node Status.
         Text(
-            text = blockLabel,
+            text = if (isSyncing) {
+                stringResource(R.string.home_sync_status_catching_up)
+            } else {
+                stringResource(R.string.home_sync_status_up_to_date)
+            },
             style = MaterialTheme.typography.bodySmall,
             color = MaterialTheme.colorScheme.onSurfaceVariant
         )

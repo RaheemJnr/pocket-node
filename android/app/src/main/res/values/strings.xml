@@ -120,4 +120,11 @@
     <string name="common_help_cd">Help</string>
     <!-- endregion -->
 
+    <!-- region: HomeSync -->
+    <string name="home_sync_section_title">Sync</string>
+    <string name="home_activity_section_title">Activity</string>
+    <string name="home_sync_status_catching_up">Catching up…</string>
+    <string name="home_sync_status_up_to_date">Up to date</string>
+    <!-- endregion -->
+
 </resources>
