@@ -53,8 +53,22 @@ data class SyncProgress(
     val tipBlockNumber: Long = 0L,
     val percentage: Double = 0.0,
     val etaDisplay: String = "",
-    val justReachedTip: Boolean = false
+    val justReachedTip: Boolean = false,
+    val firstCatchingUpAtMs: Long? = null
 )
+
+/**
+ * Edge-trigger first-time tracking for the "catching up" state.
+ *
+ * - When `catching` flips false→true, returns `nowMs` (start of the run).
+ * - While `catching` stays true, returns `prev` unchanged.
+ * - When `catching` is false, returns null.
+ */
+fun computeFirstCatchingUpAtMs(prev: Long?, catching: Boolean, nowMs: Long): Long? = when {
+    !catching -> null
+    prev == null -> nowMs
+    else -> prev
+}
 
 /**
  * Prefill data extracted from a FAILED `pending_broadcasts` row, used to
@@ -203,6 +217,10 @@ class GatewayRepository @Inject constructor(
     private val syncProgressTracker = SyncProgressTracker()
     private var syncPollingJob: Job? = null
     private var wasSyncing = false
+    // Process-lifetime edge-tracker for the first time the wallet entered
+    // "catching up" (actively downloading blocks). Used by the HomeViewModel
+    // coachmark grace timer (#90). Null whenever we are not catching up.
+    private var firstCatchingUpAtMs: Long? = null
     private val _syncProgress = MutableStateFlow(SyncProgress())
     val syncProgress: StateFlow<SyncProgress> = _syncProgress.asStateFlow()
 
@@ -295,6 +313,7 @@ class GatewayRepository @Inject constructor(
         // report progress / ETA / justReachedTip from the old wallet's syncing window.
         syncProgressTracker.reset()
         wasSyncing = false
+        firstCatchingUpAtMs = null
         _syncProgress.value = SyncProgress()
 
         val walletSyncMode = walletPreferences.getSyncMode(walletId = wallet.walletId)
@@ -2455,13 +2474,24 @@ class GatewayRepository @Inject constructor(
                         val justReachedTip = wasSyncing && info.isSynced
                         wasSyncing = !info.isSynced
 
+                        // Edge-track first time we entered "catching up" (actively
+                        // downloading blocks) so HomeViewModel can apply a grace
+                        // period before showing the sync coachmark (#90).
+                        val catching = !info.isSynced && info.percentage < 100
+                        firstCatchingUpAtMs = computeFirstCatchingUpAtMs(
+                            firstCatchingUpAtMs,
+                            catching,
+                            System.currentTimeMillis()
+                        )
+
                         _syncProgress.value = SyncProgress(
                             isSyncing = !info.isSynced,
                             syncedToBlock = syncedBlock,
                             tipBlockNumber = tipBlock,
                             percentage = info.percentage,
                             etaDisplay = info.etaDisplay,
-                            justReachedTip = justReachedTip
+                            justReachedTip = justReachedTip,
+                            firstCatchingUpAtMs = firstCatchingUpAtMs
                         )
                     }
                     .onFailure { e ->
