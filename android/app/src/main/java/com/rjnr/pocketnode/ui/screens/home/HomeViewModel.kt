@@ -69,8 +69,17 @@ class HomeViewModel @Inject constructor(
     private val pinManager: PinManager,
     private val authManager: AuthManager,
     private val cacheManager: CacheManager,
-    private val walletPreferences: com.rjnr.pocketnode.data.wallet.WalletPreferences
+    private val walletPreferences: com.rjnr.pocketnode.data.wallet.WalletPreferences,
+    private val savedStateHandle: androidx.lifecycle.SavedStateHandle,
 ) : ViewModel() {
+
+    /**
+     * Survives process death so the sync-options bottom sheet re-opens after
+     * the user taps the explorer-lookup link, gets briefly killed by the OEM
+     * memory manager / auth gate, and returns. Without this the dialog closes
+     * silently and the user lands on Home instead of where they were. (#90)
+     */
+    private val SAVED_KEY_SHOW_SYNC_OPTIONS = "showSyncOptionsDialog"
 
     // Skip-overlapping guard for refreshTransactionsOnly. The fn is called from
     // refresh(), the syncProgress observer (silent), and wallet switches; under
@@ -78,7 +87,14 @@ class HomeViewModel @Inject constructor(
     // duplicate JNI/Room round-trip — the second caller bails immediately.
     private val txRefreshMutex = Mutex()
 
-    private val _uiState = MutableStateFlow(HomeUiState())
+    private val _uiState = MutableStateFlow(
+        // Restore the sync-options dialog visibility across process death so
+        // the explorer-lookup → Chrome → return flow doesn't drop the user
+        // back on Home instead of the dialog they were filling out (#90).
+        HomeUiState(
+            showSyncOptionsDialog = savedStateHandle.get<Boolean>(SAVED_KEY_SHOW_SYNC_OPTIONS) ?: false,
+        )
+    )
     val uiState: StateFlow<HomeUiState> = _uiState.asStateFlow()
 
     // One-shot nav events (e.g. retry-failed-tx → SendScreen with prefill).
@@ -524,6 +540,7 @@ class HomeViewModel @Inject constructor(
      */
     fun showSyncOptions() {
         _uiState.update { it.copy(showSyncOptionsDialog = true) }
+        savedStateHandle[SAVED_KEY_SHOW_SYNC_OPTIONS] = true
     }
 
     /**
@@ -531,6 +548,7 @@ class HomeViewModel @Inject constructor(
      */
     fun hideSyncOptions() {
         _uiState.update { it.copy(showSyncOptionsDialog = false) }
+        savedStateHandle[SAVED_KEY_SHOW_SYNC_OPTIONS] = false
     }
 
     /**

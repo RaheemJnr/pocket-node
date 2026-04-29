@@ -31,6 +31,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -71,11 +72,13 @@ internal fun SyncOptionsSheet(
     val initialMode = remember(currentMode, availableModes) {
         currentMode.takeIf { it in availableModes } ?: availableModes.firstOrNull() ?: currentMode
     }
-    var selectedMode by remember(initialMode) { mutableStateOf(initialMode) }
-    var customBlockHeight by remember(savedCustomBlockHeight) {
+    var selectedMode by rememberSaveable(initialMode) { mutableStateOf(initialMode) }
+    // Use rememberSaveable so the user's typed digits survive the explorer
+    // deeplink → process death → return flow (#90).
+    var customBlockHeight by rememberSaveable(savedCustomBlockHeight) {
         mutableStateOf(savedCustomBlockHeight?.toString() ?: "")
     }
-    var showCustomInput by remember(initialMode) { mutableStateOf(initialMode == SyncMode.CUSTOM) }
+    var showCustomInput by rememberSaveable(initialMode) { mutableStateOf(initialMode == SyncMode.CUSTOM) }
     val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
 
     ModalBottomSheet(onDismissRequest = onDismiss, sheetState = sheetState) {
