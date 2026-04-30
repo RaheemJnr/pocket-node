@@ -63,8 +63,24 @@ class WalletPreferencesTest {
     }
 
     @Test
-    fun `getSyncMode defaults to RECENT for a network with no stored value`() {
-        assertEquals(SyncMode.RECENT, newPrefs().getSyncMode(NetworkType.TESTNET))
+    fun `getSyncMode defaults to NEW_WALLET for a network with no stored value`() {
+        // Default flipped from RECENT to NEW_WALLET in v1.6.0: a fresh wallet
+        // has no past activity to find, so silently scanning the last 30 days
+        // (RECENT) was kicking off pointless re-syncs. Callers that need a
+        // network-aware first-time default should use getSyncModeOrNull.
+        assertEquals(SyncMode.NEW_WALLET, newPrefs().getSyncMode(NetworkType.TESTNET))
+    }
+
+    @Test
+    fun `getSyncModeOrNull returns null when nothing stored`() {
+        assertNull(newPrefs().getSyncModeOrNull(NetworkType.TESTNET))
+    }
+
+    @Test
+    fun `getSyncModeOrNull returns the explicitly stored value`() {
+        val prefs = newPrefs()
+        prefs.setSyncMode(SyncMode.FULL_HISTORY, NetworkType.MAINNET)
+        assertEquals(SyncMode.FULL_HISTORY, prefs.getSyncModeOrNull(NetworkType.MAINNET))
     }
 
     // --- Per-network isolation: custom block height ---

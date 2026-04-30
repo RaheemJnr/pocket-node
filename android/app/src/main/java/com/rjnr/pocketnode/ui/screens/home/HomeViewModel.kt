@@ -323,12 +323,26 @@ class HomeViewModel @Inject constructor(
 
         _uiState.update { it.copy(currentSyncMode = savedSyncMode, savedCustomBlockHeight = savedCustomBlockHeight) }
 
-        // Use saved settings, or network-appropriate default for first-time users.
-        // Testnet defaults to NEW_WALLET (start from tip — testnet is small, no need for history).
-        // Mainnet defaults to RECENT (~30 days of history).
-        val firstTimeSyncMode = if (repository.currentNetwork == NetworkType.TESTNET)
+        // First-registration sync-mode resolution:
+        // 1. If the user has completed an initial sync before, respect their
+        //    last choice (savedSyncMode).
+        // 2. Otherwise, if a per-wallet sync mode has been EXPLICITLY written
+        //    (e.g. by WalletRepository.markFreshWalletSyncMode on createWallet,
+        //    or by the post-import sheet on importWallet), use that. This is
+        //    the path that was being silently overwritten in earlier releases:
+        //    a fresh wallet would get NEW_WALLET written, then a network-default
+        //    heuristic would replace it with RECENT in registerAccount.
+        // 3. Only when neither (1) nor (2) applies (legacy single-wallet
+        //    upgraders, etc.) do we fall back to the network-default heuristic.
+        val activeWid = walletPreferences.getActiveWalletId()?.takeIf { it.isNotBlank() }
+        val explicitSyncMode = walletPreferences.getSyncModeOrNull(walletId = activeWid)
+        val networkDefault = if (repository.currentNetwork == NetworkType.TESTNET)
             SyncMode.NEW_WALLET else SyncMode.RECENT
-        val syncMode = if (hasCompletedInitialSync) savedSyncMode else firstTimeSyncMode
+        val syncMode = when {
+            hasCompletedInitialSync -> savedSyncMode
+            explicitSyncMode != null -> explicitSyncMode
+            else -> networkDefault
+        }
         val customBlockHeight = if (syncMode == SyncMode.CUSTOM) savedCustomBlockHeight else null
 
         Log.d(TAG, "Registering account with sync mode: $syncMode")

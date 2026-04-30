@@ -4,6 +4,7 @@ import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
@@ -58,7 +59,7 @@ fun SyncCoachmark(
     val cornerRadiusPx = with(density) { 16.dp.toPx() }
     val spotlightInsetPx = with(density) { 4.dp.toPx() }
 
-    Box(
+    BoxWithConstraints(
         modifier = Modifier
             .fillMaxSize()
             // Swallow taps so taps outside the tooltip don't hit underlying UI.
@@ -90,8 +91,26 @@ fun SyncCoachmark(
             drawPath(path = scrim, color = scrimColor)
         }
 
-        // Tooltip below the spotlight.
-        val tooltipTopDp = with(density) { rect.bottom.toDp() } + 16.dp
+        // Decide tooltip placement: prefer below the spotlight, but flip above
+        // when there isn't enough room. The bottom-nav bar eats roughly 80dp
+        // of the viewport on Home, and the tooltip itself needs ~140dp for
+        // the body + dismiss button + padding. If the spotlight sits low on
+        // the screen, "below" gets clipped (reported in v1.5.2 smoke).
+        val viewportHeightPx = with(density) { maxHeight.toPx() }
+        val tooltipMinHeightPx = with(density) { 180.dp.toPx() }
+        val showAbove = (viewportHeightPx - rect.bottom) < tooltipMinHeightPx
+
+        val tooltipPadding = if (showAbove) {
+            // Place the card so its BOTTOM edge sits 16dp above rect.top.
+            // Implement as a top padding equal to (rect.top - card_height - 16dp);
+            // Card with wrap_content will hug the spotlight from above.
+            val targetTopPx = (rect.top - tooltipMinHeightPx - with(density) { 16.dp.toPx() })
+                .coerceAtLeast(with(density) { 16.dp.toPx() })
+            with(density) { targetTopPx.toDp() }
+        } else {
+            with(density) { rect.bottom.toDp() } + 16.dp
+        }
+
         Card(
             shape = RoundedCornerShape(16.dp),
             colors = CardDefaults.cardColors(
@@ -100,7 +119,7 @@ fun SyncCoachmark(
             elevation = CardDefaults.cardElevation(defaultElevation = 6.dp),
             modifier = Modifier
                 .align(Alignment.TopStart)
-                .padding(start = 16.dp, end = 16.dp, top = tooltipTopDp)
+                .padding(start = 16.dp, end = 16.dp, top = tooltipPadding)
                 .fillMaxWidth(),
         ) {
             Column(

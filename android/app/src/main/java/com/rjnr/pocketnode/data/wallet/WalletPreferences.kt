@@ -119,17 +119,34 @@ class WalletPreferences @Inject constructor(
 
     // --- Sync mode ---
 
-    fun getSyncMode(network: NetworkType? = null, walletId: String? = null): SyncMode {
+    /**
+     * Returns the explicitly-stored sync mode, or null if no value has ever
+     * been written for this wallet/network. Lets callers distinguish
+     * "user picked RECENT" from "nothing written yet" without re-reading
+     * raw prefs.
+     *
+     * Most call sites should prefer this over [getSyncMode] when handling
+     * the first-registration path, so a freshly-created wallet whose
+     * per-wallet key was set by `markFreshWalletSyncMode` is not silently
+     * overwritten by a network-default heuristic.
+     */
+    fun getSyncModeOrNull(network: NetworkType? = null, walletId: String? = null): SyncMode? {
         val net = network ?: getSelectedNetwork()
         val key = if (walletId != null) walletNetworkKey(walletId, net.name, KEY_SYNC_MODE)
                   else networkKey(KEY_SYNC_MODE, net)
-        val modeName = prefs.getString(key, SyncMode.RECENT.name)
-        return try {
-            SyncMode.valueOf(modeName ?: SyncMode.RECENT.name)
-        } catch (e: IllegalArgumentException) {
-            Log.w(TAG, "Unknown sync mode '$modeName', defaulting to RECENT", e)
-            SyncMode.RECENT
-        }
+        val modeName = prefs.getString(key, null) ?: return null
+        return runCatching { SyncMode.valueOf(modeName) }
+            .onFailure { Log.w(TAG, "Unknown sync mode '$modeName' in prefs", it) }
+            .getOrNull()
+    }
+
+    fun getSyncMode(network: NetworkType? = null, walletId: String? = null): SyncMode {
+        // Default to NEW_WALLET when nothing is explicitly stored. For a fresh
+        // wallet there is no past activity to find, and choosing RECENT here
+        // would silently kick off a 30-day re-scan that the user didn't ask for.
+        // Callers that need a network-aware first-time default should call
+        // [getSyncModeOrNull] and apply their own fallback.
+        return getSyncModeOrNull(network, walletId) ?: SyncMode.NEW_WALLET
     }
 
     fun setSyncMode(mode: SyncMode, network: NetworkType? = null, walletId: String? = null) {
