@@ -1,0 +1,5 @@
+v1.5.2:
+- Fixes app crash on launch when upgrading from v1.5.0 or earlier (Room schema mismatch).
+- Fixes the in-app update notification: previous releases polled the wrong GitHub
+  repo and silently dropped every check. Users on v1.5.0 / v1.5.1 must install
+  v1.5.2 manually once; auto-update works from v1.5.2 onward.
