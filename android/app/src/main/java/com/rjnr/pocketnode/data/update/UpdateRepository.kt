@@ -12,8 +12,12 @@ import javax.inject.Inject
 import javax.inject.Singleton
 
 private const val TAG = "UpdateRepository"
+// Auto-update polls the actual project repo; v1.5.0 + v1.5.1 shipped with a
+// stale fork URL (`AgustaRC/ckb-wallet-gateway`) that 404s, so the in-app
+// "new version available" notification never fired. Users on those releases
+// must manually grab v1.5.2 once; auto-update works from v1.5.2 onward.
 private const val GITHUB_API_URL =
-    "https://api.github.com/repos/AgustaRC/ckb-wallet-gateway/releases/latest"
+    "https://api.github.com/repos/RaheemJnr/pocket-node/releases/latest"
 
 @Serializable
 internal data class GitHubReleaseAsset(

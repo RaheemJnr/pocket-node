@@ -1,5 +1,6 @@
 package com.rjnr.pocketnode.data.database.entity
 
+import androidx.room.ColumnInfo
 import androidx.room.Entity
 import com.rjnr.pocketnode.data.gateway.models.BalanceResponse
 
@@ -8,7 +9,9 @@ import com.rjnr.pocketnode.data.gateway.models.BalanceResponse
     primaryKeys = ["walletId", "network"]
 )
 data class BalanceCacheEntity(
-    val walletId: String,
+    // MIGRATION_2_3 / MIGRATION_3_4 created this column with `DEFAULT ''`.
+    // Annotation must match for Room schema validation. (v1.5.1 hotfix)
+    @ColumnInfo(defaultValue = "''") val walletId: String,
     val network: String,
     val address: String,
     val capacity: String,
