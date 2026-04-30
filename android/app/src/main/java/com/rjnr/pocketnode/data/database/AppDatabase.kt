@@ -37,11 +37,15 @@ import com.rjnr.pocketnode.data.database.entity.WalletEntity
     // so MIGRATION_8_9 is a no-op. Version bump alone is needed to refresh
     // Room's stored identity hash after the entity declarations changed. (#90 / #141)
     version = 9,
-    // Schema export ON (#142). Generates app/schemas/<class>/9.json on every
-    // build. Diff visible in PR review when entity declarations or migration
-    // SQL drifts. The walking-migration test under src/test/ validates that
-    // the entity declarations agree with what the migrations produce on disk.
-    exportSchema = true
+    // Schema export deliberately OFF until the Room 2.8.4 / kotlinx-serialization
+    // 1.8.0 binary incompatibility is resolved (tracked in #149). Enabling it
+    // crashes KSP with AbstractMethodError in Room's bundled
+    // SchemaBundle$$serializer on a clean CI classpath.
+    //
+    // The walking-migration test under src/test/ does the schema-validation
+    // work that exportSchema was meant to enable, so #142's regression-guard
+    // value is preserved. We just lose the JSON diff in PR review.
+    exportSchema = false
 )
 abstract class AppDatabase : RoomDatabase() {
     abstract fun transactionDao(): TransactionDao
