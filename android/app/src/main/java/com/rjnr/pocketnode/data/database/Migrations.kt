@@ -248,3 +248,151 @@ val MIGRATION_7_8 = object : Migration(7, 8) {
         )
     }
 }
+
+/**
+ * v8 -> v9: Converge two divergent v8 schemas (#141 / v1.5.2).
+ *
+ * v1.5.1 had broken entity declarations on TransactionEntity /
+ * BalanceCacheEntity / DaoCellEntity (missing @Index(idx_tx_pending) +
+ * @ColumnInfo(defaultValue = "''") on walletId). Two distinct shapes ended up
+ * in the wild at "v8":
+ *
+ * 1. Upgrade-from-v1.5.0 path: ran MIGRATION_2_3 (which adds walletId with
+ *    `DEFAULT ''`) and MIGRATION_5_6 (which creates a partial idx_tx_pending).
+ *    Both are present on disk.
+ *
+ * 2. Fresh-install-on-v1.5.1 path: Room created the v8 schema directly from
+ *    the v1.5.1 entity declarations, which had neither the column default
+ *    nor the index. So neither is present on disk.
+ *
+ * The v1.5.2 entity declarations (annotated correctly) only validate against
+ * shape 1. Shape 2 users crash with a TableInfo mismatch.
+ *
+ * This migration recreates the three affected tables with the canonical
+ * column DEFAULTs and (re)creates `idx_tx_pending` as a regular index. It is
+ * idempotent against both paths: shape 1 users get the same shape back; shape
+ * 2 users get the missing pieces.
+ */
+val MIGRATION_8_9 = object : Migration(8, 9) {
+    override fun migrate(db: SupportSQLiteDatabase) {
+        // --- transactions -------------------------------------------------
+        db.execSQL(
+            """
+            CREATE TABLE IF NOT EXISTS `transactions_new` (
+                `txHash` TEXT NOT NULL,
+                `blockNumber` TEXT NOT NULL,
+                `blockHash` TEXT NOT NULL,
+                `timestamp` INTEGER NOT NULL,
+                `balanceChange` TEXT NOT NULL,
+                `direction` TEXT NOT NULL,
+                `fee` TEXT NOT NULL,
+                `confirmations` INTEGER NOT NULL,
+                `blockTimestampHex` TEXT,
+                `network` TEXT NOT NULL,
+                `status` TEXT NOT NULL,
+                `isLocal` INTEGER NOT NULL,
+                `cachedAt` INTEGER NOT NULL,
+                `walletId` TEXT NOT NULL DEFAULT '',
+                PRIMARY KEY(`txHash`)
+            )
+            """.trimIndent()
+        )
+        db.execSQL(
+            """
+            INSERT INTO `transactions_new` (
+                `txHash`, `blockNumber`, `blockHash`, `timestamp`,
+                `balanceChange`, `direction`, `fee`, `confirmations`,
+                `blockTimestampHex`, `network`, `status`, `isLocal`,
+                `cachedAt`, `walletId`
+            )
+            SELECT `txHash`, `blockNumber`, `blockHash`, `timestamp`,
+                   `balanceChange`, `direction`, `fee`, `confirmations`,
+                   `blockTimestampHex`, `network`, `status`, `isLocal`,
+                   `cachedAt`, `walletId`
+            FROM `transactions`
+            """.trimIndent()
+        )
+        db.execSQL("DROP TABLE `transactions`")
+        db.execSQL("ALTER TABLE `transactions_new` RENAME TO `transactions`")
+        // Recreate both indices to match what TransactionEntity declares.
+        db.execSQL(
+            "CREATE INDEX IF NOT EXISTS `idx_tx_wallet_network_time` " +
+                "ON `transactions` (`walletId`, `network`, `timestamp` DESC)"
+        )
+        db.execSQL(
+            "CREATE INDEX IF NOT EXISTS `idx_tx_pending` " +
+                "ON `transactions` (`walletId`, `network`, `timestamp` DESC)"
+        )
+
+        // --- balance_cache ------------------------------------------------
+        db.execSQL(
+            """
+            CREATE TABLE IF NOT EXISTS `balance_cache_new` (
+                `walletId` TEXT NOT NULL DEFAULT '',
+                `network` TEXT NOT NULL,
+                `address` TEXT NOT NULL,
+                `capacity` TEXT NOT NULL,
+                `capacityCkb` TEXT NOT NULL,
+                `blockNumber` TEXT NOT NULL,
+                `cachedAt` INTEGER NOT NULL,
+                PRIMARY KEY(`walletId`, `network`)
+            )
+            """.trimIndent()
+        )
+        db.execSQL(
+            "INSERT INTO `balance_cache_new` " +
+                "SELECT `walletId`, `network`, `address`, `capacity`, " +
+                "`capacityCkb`, `blockNumber`, `cachedAt` FROM `balance_cache`"
+        )
+        db.execSQL("DROP TABLE `balance_cache`")
+        db.execSQL("ALTER TABLE `balance_cache_new` RENAME TO `balance_cache`")
+
+        // --- dao_cells ----------------------------------------------------
+        db.execSQL(
+            """
+            CREATE TABLE IF NOT EXISTS `dao_cells_new` (
+                `txHash` TEXT NOT NULL,
+                `index` TEXT NOT NULL,
+                `capacity` INTEGER NOT NULL,
+                `status` TEXT NOT NULL,
+                `depositBlockNumber` INTEGER NOT NULL,
+                `depositBlockHash` TEXT NOT NULL,
+                `depositEpochHex` TEXT,
+                `withdrawBlockNumber` INTEGER,
+                `withdrawBlockHash` TEXT,
+                `withdrawEpochHex` TEXT,
+                `compensation` INTEGER NOT NULL,
+                `unlockEpochHex` TEXT,
+                `depositTimestamp` INTEGER NOT NULL,
+                `network` TEXT NOT NULL,
+                `lastUpdatedAt` INTEGER NOT NULL,
+                `walletId` TEXT NOT NULL DEFAULT '',
+                PRIMARY KEY(`txHash`, `index`)
+            )
+            """.trimIndent()
+        )
+        db.execSQL(
+            """
+            INSERT INTO `dao_cells_new` (
+                `txHash`, `index`, `capacity`, `status`,
+                `depositBlockNumber`, `depositBlockHash`, `depositEpochHex`,
+                `withdrawBlockNumber`, `withdrawBlockHash`, `withdrawEpochHex`,
+                `compensation`, `unlockEpochHex`, `depositTimestamp`,
+                `network`, `lastUpdatedAt`, `walletId`
+            )
+            SELECT `txHash`, `index`, `capacity`, `status`,
+                   `depositBlockNumber`, `depositBlockHash`, `depositEpochHex`,
+                   `withdrawBlockNumber`, `withdrawBlockHash`, `withdrawEpochHex`,
+                   `compensation`, `unlockEpochHex`, `depositTimestamp`,
+                   `network`, `lastUpdatedAt`, `walletId`
+            FROM `dao_cells`
+            """.trimIndent()
+        )
+        db.execSQL("DROP TABLE `dao_cells`")
+        db.execSQL("ALTER TABLE `dao_cells_new` RENAME TO `dao_cells`")
+        db.execSQL(
+            "CREATE INDEX IF NOT EXISTS `idx_dao_wallet_network` " +
+                "ON `dao_cells` (`walletId`, `network`)"
+        )
+    }
+}
