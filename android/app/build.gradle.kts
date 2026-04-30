@@ -24,6 +24,14 @@ android {
         ndk {
             abiFilters += listOf("arm64-v8a", "armeabi-v7a")
         }
+
+        // Room schema export: dump every database version's schema to JSON
+        // so reviewers can see schema drift in PR diffs and so the migration
+        // tests can validate against an explicit reference. The schemas live
+        // under app/schemas/<canonical-class-name>/<version>.json. (#142)
+        ksp {
+            arg("room.schemaLocation", "$projectDir/schemas")
+        }
     }
 
     testOptions {

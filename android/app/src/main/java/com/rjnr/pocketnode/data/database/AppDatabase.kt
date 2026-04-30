@@ -37,7 +37,11 @@ import com.rjnr.pocketnode.data.database.entity.WalletEntity
     // so MIGRATION_8_9 is a no-op. Version bump alone is needed to refresh
     // Room's stored identity hash after the entity declarations changed. (#90 / #141)
     version = 9,
-    exportSchema = false
+    // Schema export ON (#142). Generates app/schemas/<class>/9.json on every
+    // build. Diff visible in PR review when entity declarations or migration
+    // SQL drifts. The walking-migration test under src/test/ validates that
+    // the entity declarations agree with what the migrations produce on disk.
+    exportSchema = true
 )
 abstract class AppDatabase : RoomDatabase() {
     abstract fun transactionDao(): TransactionDao
