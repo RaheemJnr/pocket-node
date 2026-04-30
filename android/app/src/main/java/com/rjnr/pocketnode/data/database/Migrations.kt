@@ -248,3 +248,28 @@ val MIGRATION_7_8 = object : Migration(7, 8) {
         )
     }
 }
+
+/**
+ * v8 -> v9: No-op identity-hash refresh (#141 / v1.5.2).
+ *
+ * v1.5.1 shipped with TransactionEntity / BalanceCacheEntity / DaoCellEntity
+ * declarations that didn't match the post-migration DB shape (missing
+ * @Index(idx_tx_pending) + @ColumnInfo(defaultValue) annotations). The hotfix
+ * adds those annotations so the entity declarations match what the migrations
+ * actually produced.
+ *
+ * The DB shape on disk is unchanged. But Room computes its stored identity
+ * hash from the entity definitions, so any change to those declarations bumps
+ * the hash, and Room refuses to open a DB whose stored hash differs from the
+ * current one even when the schema is identical. Bumping the version + adding
+ * a no-op migration tells Room to refresh its bookkeeping.
+ *
+ * Anyone who briefly opened the v1.5.1 build before it crashed wrote the
+ * old hash to disk; this migration lets v1.5.2 reset it without forcing a
+ * data wipe.
+ */
+val MIGRATION_8_9 = object : Migration(8, 9) {
+    override fun migrate(db: SupportSQLiteDatabase) {
+        // Intentionally empty. See KDoc.
+    }
+}
