@@ -1,5 +1,6 @@
 package com.rjnr.pocketnode.data.database.entity
 
+import androidx.room.ColumnInfo
 import androidx.room.Entity
 import androidx.room.Index
 import androidx.room.PrimaryKey
@@ -11,6 +12,19 @@ import com.rjnr.pocketnode.data.gateway.models.TransactionRecord
         Index(
             value = ["walletId", "network", "timestamp"],
             name = "idx_tx_wallet_network_time",
+            orders = [Index.Order.ASC, Index.Order.ASC, Index.Order.DESC]
+        ),
+        // MIGRATION_5_6 created this index (originally as a partial index keyed
+        // on PENDING rows). Room does not see WHERE clauses via the pragmas it
+        // uses for schema validation, so declaring it here as a regular @Index
+        // matches what Room observes in the migrated schema. Fresh installs get
+        // the regular form; both forms have identical query-planner shape on
+        // the (walletId, network, timestamp DESC) prefix the activity sort
+        // uses. Without this declaration, Room flags the index as an unexpected
+        // extra and crashes on launch after migration. (#90 v1.5.1 hotfix)
+        Index(
+            value = ["walletId", "network", "timestamp"],
+            name = "idx_tx_pending",
             orders = [Index.Order.ASC, Index.Order.ASC, Index.Order.DESC]
         )
     ]
@@ -29,7 +43,10 @@ data class TransactionEntity(
     val status: String,       // "PENDING", "CONFIRMED", "FAILED"
     val isLocal: Boolean,     // true = broadcast but not yet synced
     val cachedAt: Long,
-    val walletId: String = ""
+    // MIGRATION_2_3 added this column with `DEFAULT ''`. Without the
+    // matching @ColumnInfo annotation, Room expects no default and crashes
+    // schema validation after migration. (v1.5.1 hotfix)
+    @ColumnInfo(defaultValue = "''") val walletId: String = ""
 ) {
     fun toTransactionRecord(): TransactionRecord = TransactionRecord(
         txHash = txHash,
