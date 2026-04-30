@@ -152,6 +152,9 @@ dependencies {
     implementation(libs.androidx.material.icons.extended)
     implementation(libs.androidx.navigation.compose)
     implementation(libs.compose.icons.lucide)
+    // Chrome Custom Tabs — keeps explorer-link round-trip inside the app's
+    // task so the OEM auth gate doesn't re-engage on return (#138).
+    implementation(libs.androidx.browser)
     debugImplementation(libs.androidx.ui.tooling)
 
     // Hilt

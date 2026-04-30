@@ -821,16 +821,9 @@ fun TransactionStatusDialog(
                                     } else {
                                         "https://explorer.nervos.org/transaction/"
                                     }
-                                    try {
-                                        context.startActivity(
-                                            Intent(
-                                                Intent.ACTION_VIEW,
-                                                Uri.parse("$explorerBase$txHash")
-                                            )
-                                        )
-                                    } catch (e: android.content.ActivityNotFoundException) {
-                                        // No browser available — silently ignore
-                                    }
+                                    com.rjnr.pocketnode.ui.util.openInBrowser(
+                                        context, "$explorerBase$txHash",
+                                    )
                                 },
                                 contentPadding = PaddingValues(horizontal = 4.dp, vertical = 0.dp)
                             ) {

@@ -178,9 +178,8 @@ fun HomeScreen(
     val onLookupBlockHeight: (() -> Unit)? = uiState.address.takeIf { it.isNotBlank() }?.let { addr ->
         {
             val url = buildExplorerAddressUrl(addr, uiState.currentNetwork)
-            try {
-                context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(url)))
-            } catch (_: android.content.ActivityNotFoundException) {
+            // Custom Tabs first, falls back to ACTION_VIEW under the hood (#138).
+            if (!com.rjnr.pocketnode.ui.util.openInBrowser(context, url)) {
                 scope.launch {
                     snackbarHostState.showSnackbar("No browser available to open the explorer")
                 }
@@ -362,11 +361,7 @@ fun HomeScreen(
                 }
             },
             onOpenExplorer = { url ->
-                try {
-                    context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(url)))
-                } catch (_: android.content.ActivityNotFoundException) {
-                    // No browser available
-                }
+                com.rjnr.pocketnode.ui.util.openInBrowser(context, url)
             },
             onRetry = { tx ->
                 selectedTransaction = null

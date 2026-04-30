@@ -25,6 +25,7 @@ lucide = "1.1.0"
 mockk = "1.13.16"
 coroutinesTest = "1.10.1"
 paging = "3.3.6"
+androidxBrowser = "1.8.0"
 
 [libraries]
 kotlinx-serialization-json = { group = "org.jetbrains.kotlinx", name = "kotlinx-serialization-json", version.ref = "serializationJson" }
@@ -77,6 +78,7 @@ camerax-view = { group = "androidx.camera", name = "camera-view", version.ref = 
 accompanist-permissions = { group = "com.google.accompanist", name = "accompanist-permissions", version.ref = "accompanistPermissions" }
 zxing-core = { module = "com.google.zxing:core", version.ref = "zxing" }
 compose-icons-lucide = { group = "com.composables", name = "icons-lucide", version.ref = "lucide" }
+androidx-browser = { group = "androidx.browser", name = "browser", version.ref = "androidxBrowser" }
 
 # Testing
 mockk = { group = "io.mockk", name = "mockk", version.ref = "mockk" }

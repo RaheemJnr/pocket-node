@@ -278,11 +278,7 @@ fun ActivityScreen(
                         retryDialogTx = failed
                     },
                     onOpenExplorer = { url ->
-                        try {
-                            context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(url)))
-                        } catch (e: android.content.ActivityNotFoundException) {
-                            // No browser available — silently ignore
-                        }
+                        com.rjnr.pocketnode.ui.util.openInBrowser(context, url)
                     }
                 )
             }

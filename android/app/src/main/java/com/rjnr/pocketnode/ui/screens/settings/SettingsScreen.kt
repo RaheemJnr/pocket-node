@@ -179,9 +179,7 @@ fun SettingsScreen(
                 val url = com.rjnr.pocketnode.ui.screens.home.buildExplorerAddressUrl(
                     addr, uiState.currentNetwork
                 )
-                try {
-                    context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(url)))
-                } catch (_: android.content.ActivityNotFoundException) {
+                if (!com.rjnr.pocketnode.ui.util.openInBrowser(context, url)) {
                     scope.launch {
                         snackbarHostState.showSnackbar("No browser available to open the explorer")
                     }
@@ -534,8 +532,9 @@ private fun SettingsScreenUI(
                     title = "Open Source",
                     badgeText = "Github",
                     onClick = {
-                        val intent = Intent(Intent.ACTION_VIEW, Uri.parse(GITHUB_URL))
-                        context.startActivity(intent)
+                        // Custom Tabs keeps the GitHub round-trip inside the app
+                        // task, same reasoning as the explorer launches (#138).
+                        com.rjnr.pocketnode.ui.util.openInBrowser(context, GITHUB_URL)
                     }
                 )
             }
