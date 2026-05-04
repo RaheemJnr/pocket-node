@@ -50,10 +50,6 @@ jobs:
           }
           GSEOF
 
-      - name: Build debug APK
-        working-directory: android
-        run: ./gradlew assembleDebug -x cargoBuild
-
       - name: Run unit tests
         working-directory: android
         run: ./gradlew test -x cargoBuild
