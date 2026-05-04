@@ -71,13 +71,17 @@ jobs:
         uses: actions/github-script@v7
         with:
           script: |
-            await github.rest.issues.createComment({
-              owner: context.repo.owner,
-              repo: context.repo.repo,
-              issue_number: context.issue.number,
-              body: '⚠️ upgrade-smoke skipped: no `pocketnode-prev-jni-debug` artifact on main yet. Run android-ci.yml on main first, then re-run this job.'
-            });
             core.notice('Skipping upgrade-smoke: no prev artifact');
+            // Only post a PR comment when triggered by a pull_request.
+            // workflow_dispatch runs have no issue context — would 404.
+            if (context.eventName === 'pull_request' && context.issue && context.issue.number) {
+              await github.rest.issues.createComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: context.issue.number,
+                body: '⚠️ upgrade-smoke skipped: no `pocketnode-prev-jni-debug` artifact on main yet. Run android-ci.yml on main first, then re-run this job.'
+              });
+            }
 
       - name: Create dummy google-services.json
         if: steps.prev_apk.outputs.found_artifact == 'true'
