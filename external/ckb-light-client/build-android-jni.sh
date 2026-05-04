@@ -56,6 +56,11 @@ echo "NDK Host: $NDK_HOST"
 # Multi-ABI setup (arm64 + armv7 only — x86_64 is emulator-only and excluded from APK)
 RUST_TARGETS=("aarch64-linux-android" "armv7-linux-androideabi")
 ANDROID_ARCHS=("arm64-v8a" "armeabi-v7a")
+if [ "${BUILD_X86_64:-0}" = "1" ]; then
+    RUST_TARGETS+=("x86_64-linux-android")
+    ANDROID_ARCHS+=("x86_64")
+    echo "BUILD_X86_64=1 → also building x86_64-linux-android"
+fi
 
 # Environment common flags
 ROCKSDB_DISABLE_FLAGS="-DROCKSDB_NO_DYNAMIC_EXTENSION -DROCKSDB_LITE"
