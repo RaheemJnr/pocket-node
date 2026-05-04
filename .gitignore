@@ -187,6 +187,11 @@ docs/
 .plans/
 
 # ===================
+# Git worktrees (local only)
+# ===================
+.worktrees/
+
+# ===================
 # Release / Play Store (local only)
 # ===================
 android/app/release/
