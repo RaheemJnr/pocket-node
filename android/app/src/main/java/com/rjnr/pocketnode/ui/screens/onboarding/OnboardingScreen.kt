@@ -14,6 +14,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.hilt.navigation.compose.hiltViewModel
+import com.rjnr.pocketnode.ui.util.uaTestTag
 
 @Composable
 fun OnboardingScreen(
@@ -104,7 +105,8 @@ fun OnboardingScreen(
                 description = "Generate a new wallet with a 12-word recovery phrase.",
                 icon = Lucide.Plus,
                 onClick = { viewModel.createNewWallet() },
-                isLoading = uiState.isLoading
+                isLoading = uiState.isLoading,
+                modifier = Modifier.uaTestTag("onboarding-create-new")
             )
 
             Spacer(modifier = Modifier.height(16.dp))
@@ -136,12 +138,13 @@ private fun OnboardingOption(
     description: String,
     icon: ImageVector,
     onClick: () -> Unit,
-    isLoading: Boolean
+    isLoading: Boolean,
+    modifier: Modifier = Modifier
 ) {
     Card(
         onClick = onClick,
         enabled = !isLoading,
-        modifier = Modifier.fillMaxWidth(),
+        modifier = modifier.fillMaxWidth(),
         colors = CardDefaults.cardColors(
             containerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f)
         ),

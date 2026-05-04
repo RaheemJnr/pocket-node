@@ -51,6 +51,7 @@ import com.rjnr.pocketnode.data.gateway.models.TransactionRecord
 import com.rjnr.pocketnode.ui.theme.ErrorRed
 import com.rjnr.pocketnode.ui.theme.PendingAmber
 import com.rjnr.pocketnode.ui.theme.SuccessGreen
+import com.rjnr.pocketnode.ui.util.uaTestTag
 import com.rjnr.pocketnode.util.formatBlockTimestamp
 import java.util.Locale
 
@@ -67,7 +68,8 @@ fun WalletBalanceCard(
     Surface(
         color = MaterialTheme.colorScheme.surface,
         shape = RoundedCornerShape(24.dp),
-        border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant)
+        border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant),
+        modifier = Modifier.uaTestTag("home-balance-row")
     ) {
         Column(modifier = Modifier.padding(20.dp)) {
             Row(

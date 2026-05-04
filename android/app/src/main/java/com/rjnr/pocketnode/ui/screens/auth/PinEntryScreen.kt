@@ -39,6 +39,7 @@ import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.dp
 import androidx.hilt.navigation.compose.hiltViewModel
 import com.rjnr.pocketnode.data.auth.PinManager
+import com.rjnr.pocketnode.ui.util.uaTestTag
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -200,7 +201,7 @@ fun PinEntryScreen(
                             else -> {
                                 FilledTonalButton(
                                     onClick = { viewModel.onDigitEntered(key[0]) },
-                                    modifier = Modifier.size(72.dp),
+                                    modifier = Modifier.size(72.dp).uaTestTag("pin-keypad-$key"),
                                     shape = CircleShape,
                                     enabled = buttonsEnabled
                                 ) {

@@ -33,6 +33,7 @@ import androidx.compose.ui.unit.dp
 import com.composables.icons.lucide.KeyRound
 import com.composables.icons.lucide.Lucide
 import androidx.compose.material3.Icon
+import com.rjnr.pocketnode.ui.util.uaTestTag
 
 private enum class Phase { INTRO, SETUP, CONFIRM }
 
@@ -150,7 +151,7 @@ private fun IntroBody(
 
         Button(
             onClick = onContinue,
-            modifier = Modifier.fillMaxWidth(),
+            modifier = Modifier.fillMaxWidth().uaTestTag("pin-intro-continue"),
             colors = ButtonDefaults.buttonColors()
         ) {
             Text("Create PIN")
