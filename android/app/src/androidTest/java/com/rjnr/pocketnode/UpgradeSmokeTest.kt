@@ -61,13 +61,21 @@ class UpgradeSmokeTest {
 
         // Two passes (SETUP + CONFIRM). Each pass enters six 1s; the screen
         // auto-submits on the 6th digit and advances to the next phase.
-        repeat(2) {
-            repeat(6) {
+        // Per-iteration wait covers the SETUP→CONFIRM recompose between passes.
+        repeat(2) { pass ->
+            if (pass == 1) {
+                // Defensive: let SETUP→CONFIRM recomposition settle.
+                device.waitForIdle(2_000L)
+            }
+            repeat(6) { i ->
                 val digit = device.wait(
                     Until.findObject(By.res(PKG, "pin-keypad-1")),
-                    5_000L
+                    8_000L
                 )
-                assertNotNull("PIN digit '1' not visible (resource-id pin-keypad-1)", digit)
+                assertNotNull(
+                    "PIN digit '1' not visible at pass=$pass digit=$i (resource-id pin-keypad-1)",
+                    digit
+                )
                 digit.click()
             }
         }
@@ -101,11 +109,12 @@ class UpgradeSmokeTest {
     private fun launchApp() {
         device.pressHome()
         val launcherPkg = device.launcherPackageName
-        assertNotNull(launcherPkg)
+        assertNotNull("UiDevice.launcherPackageName is null — emulator image broken?", launcherPkg)
         device.wait(Until.hasObject(By.pkg(launcherPkg).depth(0)), LAUNCH_TIMEOUT_MS)
 
+        device.executeShellCommand("am force-stop $PKG")
         val intent = ctx.packageManager.getLaunchIntentForPackage(PKG)!!.apply {
-            addFlags(android.content.Intent.FLAG_ACTIVITY_CLEAR_TASK)
+            addFlags(android.content.Intent.FLAG_ACTIVITY_NEW_TASK or android.content.Intent.FLAG_ACTIVITY_CLEAR_TASK)
         }
         ctx.startActivity(intent)
         assertTrue(
