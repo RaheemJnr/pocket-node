@@ -1,0 +1,181 @@
+name: Upgrade Smoke
+
+on:
+  pull_request:
+    branches: [main]
+  workflow_dispatch:        # remove before final merge of harness PR
+
+concurrency:
+  group: upgrade-smoke-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  smoke:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          java-version: '17'
+          distribution: 'temurin'
+
+      - name: Setup Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Setup Android NDK
+        # NDK r27.0.12077973 — matches AGP 8.13.2 default. Bump in lockstep with AGP.
+        run: |
+          sdkmanager --install "ndk;27.0.12077973" >/dev/null
+          echo "ANDROID_NDK_HOME=$ANDROID_HOME/ndk/27.0.12077973" >> $GITHUB_ENV
+
+      - name: Set up Rust (stable + Android targets)
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-linux-android,armv7-linux-androideabi,x86_64-linux-android
+
+      - name: Cache Gradle
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.gradle/caches
+            ~/.gradle/wrapper
+          key: gradle-jni-${{ hashFiles('android/**/*.gradle.kts', 'android/gradle/libs.versions.toml') }}
+          restore-keys: gradle-jni-
+
+      - name: Cache Cargo target
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            external/ckb-light-client/target
+          key: cargo-${{ hashFiles('external/ckb-light-client/Cargo.lock') }}
+          restore-keys: cargo-
+
+      - name: Download prev main APK
+        id: prev_apk
+        uses: dawidd6/action-download-artifact@v6
+        with:
+          workflow: android-ci.yml
+          branch: main
+          name: pocketnode-prev-jni-debug
+          path: prev/
+          if_no_artifact_found: warn
+
+      - name: Skip job if no prev artifact
+        if: steps.prev_apk.outputs.found_artifact != 'true'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            await github.rest.issues.createComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.issue.number,
+              body: '⚠️ upgrade-smoke skipped: no `pocketnode-prev-jni-debug` artifact on main yet. Run android-ci.yml on main first, then re-run this job.'
+            });
+            core.notice('Skipping upgrade-smoke: no prev artifact');
+            process.exit(0);
+
+      - name: Create dummy google-services.json
+        run: |
+          cat > android/app/google-services.json << 'GSEOF'
+          {
+            "project_info": { "project_number": "0", "project_id": "dummy", "storage_bucket": "dummy.appspot.com" },
+            "client": [{ "client_info": { "mobilesdk_app_id": "1:0:android:0", "android_client_info": { "package_name": "com.rjnr.pocketnode" } }, "api_key": [{ "current_key": "dummy" }] }],
+            "configuration_version": "1"
+          }
+          GSEOF
+
+      - name: Build PR APK + androidTest APK
+        working-directory: android
+        env:
+          BUILD_X86_64: "1"
+        run: ./gradlew assembleDebug assembleDebugAndroidTest
+
+      - name: Enable KVM
+        run: |
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm
+
+      - name: Run upgrade-smoke on emulator
+        uses: reactivecircus/android-emulator-runner@v2
+        with:
+          api-level: 34
+          arch: x86_64
+          target: default
+          force-avd-creation: false
+          emulator-options: -no-window -gpu swiftshader_indirect -noaudio -no-boot-anim -camera-back none
+          disable-animations: true
+          script: |
+            set -euo pipefail
+            adb wait-for-device
+            adb shell input keyevent 82 || true
+
+            echo "::group::Install prev APK"
+            adb install -r prev/app-debug.apk
+            echo "::endgroup::"
+
+            echo "::group::Install androidTest APK"
+            adb install -r -t android/app/build/outputs/apk/androidTest/debug/app-debug-androidTest.apk
+            echo "::endgroup::"
+
+            echo "::group::Seed wallet on prev APK"
+            adb shell am instrument -w \
+              -e class com.rjnr.pocketnode.UpgradeSmokeTest#seedFreshWallet \
+              com.rjnr.pocketnode.test/androidx.test.runner.AndroidJUnitRunner | tee seed.log
+            grep -q 'OK (1 test)' seed.log || { echo "Prev APK seed failed; main is broken, not this PR"; exit 1; }
+            echo "::endgroup::"
+
+            echo "::group::Install PR APK over prev (data preserved)"
+            adb install -r android/app/build/outputs/apk/debug/app-debug.apk
+            echo "::endgroup::"
+
+            adb logcat -c
+
+            echo "::group::Assert Home renders post-upgrade"
+            adb shell am instrument -w \
+              -e class com.rjnr.pocketnode.UpgradeSmokeTest#assertHomeAfterUpgrade \
+              com.rjnr.pocketnode.test/androidx.test.runner.AndroidJUnitRunner | tee post.log
+            grep -q 'OK (1 test)' post.log || { echo "Post-upgrade Home assertion failed"; exit 1; }
+            echo "::endgroup::"
+
+            echo "::group::Logcat scan"
+            adb logcat -d > logcat-post.txt
+            if grep -qE 'FATAL EXCEPTION|AndroidRuntime.*FATAL' logcat-post.txt; then
+              echo "FATAL detected in logcat:"
+              grep -E 'FATAL EXCEPTION|AndroidRuntime.*FATAL' logcat-post.txt
+              exit 1
+            fi
+            echo "::endgroup::"
+
+            echo "::group::Process liveness"
+            pid=$(adb shell pidof com.rjnr.pocketnode | tr -d '\r' || true)
+            if [ -z "$pid" ]; then
+              echo "com.rjnr.pocketnode not running after smoke"
+              exit 1
+            fi
+            echo "pid=$pid"
+            echo "::endgroup::"
+
+            echo "::group::Final screenshot"
+            adb shell screencap -p /sdcard/post.png
+            adb pull /sdcard/post.png post.png
+            echo "::endgroup::"
+
+      - name: Upload smoke artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: upgrade-smoke-artifacts
+          path: |
+            seed.log
+            post.log
+            logcat-post.txt
+            post.png
+          if-no-files-found: warn
+          retention-days: 7
