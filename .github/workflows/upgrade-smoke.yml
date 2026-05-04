@@ -78,9 +78,9 @@ jobs:
               body: '⚠️ upgrade-smoke skipped: no `pocketnode-prev-jni-debug` artifact on main yet. Run android-ci.yml on main first, then re-run this job.'
             });
             core.notice('Skipping upgrade-smoke: no prev artifact');
-            process.exit(0);
 
       - name: Create dummy google-services.json
+        if: steps.prev_apk.outputs.found_artifact == 'true'
         run: |
           cat > android/app/google-services.json << 'GSEOF'
           {
@@ -91,18 +91,21 @@ jobs:
           GSEOF
 
       - name: Build PR APK + androidTest APK
+        if: steps.prev_apk.outputs.found_artifact == 'true'
         working-directory: android
         env:
           BUILD_X86_64: "1"
         run: ./gradlew assembleDebug assembleDebugAndroidTest
 
       - name: Enable KVM
+        if: steps.prev_apk.outputs.found_artifact == 'true'
         run: |
           echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules
           sudo udevadm control --reload-rules
           sudo udevadm trigger --name-match=kvm
 
       - name: Run upgrade-smoke on emulator
+        if: steps.prev_apk.outputs.found_artifact == 'true'
         uses: reactivecircus/android-emulator-runner@v2
         with:
           api-level: 34
@@ -132,10 +135,10 @@ jobs:
             echo "::endgroup::"
 
             echo "::group::Install PR APK over prev (data preserved)"
+            adb shell am force-stop com.rjnr.pocketnode
+            adb logcat -c   # Cover Room migration during the first post-upgrade launch.
             adb install -r android/app/build/outputs/apk/debug/app-debug.apk
             echo "::endgroup::"
-
-            adb logcat -c
 
             echo "::group::Assert Home renders post-upgrade"
             adb shell am instrument -w \
@@ -154,7 +157,7 @@ jobs:
             echo "::endgroup::"
 
             echo "::group::Process liveness"
-            pid=$(adb shell pidof com.rjnr.pocketnode | tr -d '\r' || true)
+            pid=$(adb shell pidof com.rjnr.pocketnode 2>/dev/null | tr -d '\r' || true)
             if [ -z "$pid" ]; then
               echo "com.rjnr.pocketnode not running after smoke"
               exit 1
