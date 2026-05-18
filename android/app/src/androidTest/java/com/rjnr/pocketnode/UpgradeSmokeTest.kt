@@ -58,8 +58,11 @@ class UpgradeSmokeTest {
     val failureCapture: TestWatcher = object : TestWatcher() {
         override fun failed(e: Throwable, description: Description) {
             val tag = description.methodName
+            // Instrumentation runs inside the TARGET app's process (com.rjnr.pocketnode),
+            // so the calling-package check on scoped-storage paths matches the target,
+            // not the test app. Use targetContext so the path is permitted.
             val outDir = InstrumentationRegistry.getInstrumentation()
-                .context
+                .targetContext
                 .externalCacheDir
                 ?: return
             outDir.mkdirs()
