@@ -135,7 +135,7 @@ class UpgradeSmokeTest {
             repeat(6) { i ->
                 assertTrue(
                     "PIN digit '1' not clickable at pass=$pass digit=$i",
-                    clickByRes("pin-keypad-1")
+                    clickDigit1()
                 )
             }
         }
@@ -193,6 +193,32 @@ class UpgradeSmokeTest {
      * below the fold; Compose only emits accessibility nodes for visible
      * content, so off-screen testTags would otherwise be invisible to UA.
      */
+    /**
+     * Click the "1" digit on the PIN keypad. Tries the `pin-keypad-1` resource-id
+     * first; falls back to clickable `text="1"`. Compose's semantic-merge behavior
+     * occasionally drops the resource-id on the top keypad row on smaller CI
+     * viewports, but the Text composable's text content is always emitted.
+     */
+    private fun clickDigit1(timeoutMs: Long = 8_000L): Boolean {
+        if (clickByRes("pin-keypad-1", timeoutMs, attempts = 3)) return true
+        // Fallback: by visible text + clickable. Restrict to the app package
+        // so we don't accidentally match a "1" elsewhere on screen.
+        repeat(4) {
+            if (!device.wait(Until.hasObject(By.text("1").pkg(PKG).clickable(true)), 3_000L)) {
+                return@repeat
+            }
+            try {
+                val node = device.findObject(By.text("1").pkg(PKG).clickable(true))
+                    ?: return@repeat
+                node.click()
+                return true
+            } catch (_: androidx.test.uiautomator.StaleObjectException) {
+                device.waitForIdle(200L)
+            }
+        }
+        return false
+    }
+
     private fun clickByRes(res: String, timeoutMs: Long = 8_000L, attempts: Int = 6): Boolean {
         if (!device.wait(Until.hasObject(By.res(res)), timeoutMs)) {
             // Try scrolling: maybe the node is below the fold and Compose
