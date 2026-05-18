@@ -7,13 +7,19 @@ import androidx.test.core.app.ApplicationProvider
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
 import androidx.test.uiautomator.By
+import androidx.test.uiautomator.Direction
 import androidx.test.uiautomator.UiDevice
 import androidx.test.uiautomator.Until
 import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertTrue
 import org.junit.Before
+import org.junit.Rule
 import org.junit.Test
+import org.junit.rules.TestWatcher
+import org.junit.runner.Description
 import org.junit.runner.RunWith
+import java.io.File
+import java.io.FileOutputStream
 
 private const val PKG = "com.rjnr.pocketnode"
 private const val LAUNCH_TIMEOUT_MS = 10_000L
@@ -38,6 +44,41 @@ class UpgradeSmokeTest {
     }
 
     /**
+     * Capture screenshot + window dump BEFORE instrumentation cleanup tears
+     * the app down. The workflow's post-instrument trap fires too late —
+     * by then `am instrument` has force-stopped the app and the screen is
+     * back to the launcher.
+     *
+     * Files land in the *instrumentation* app's external cache
+     * (/sdcard/Android/data/com.rjnr.pocketnode.test/cache/) which is
+     * writable without WRITE_EXTERNAL_STORAGE on scoped-storage APIs and
+     * adb-pullable from the host runner.
+     */
+    @Rule
+    @JvmField
+    val failureCapture: TestWatcher = object : TestWatcher() {
+        override fun failed(e: Throwable, description: Description) {
+            val tag = description.methodName
+            // Instrumentation runs inside the TARGET app's process (com.rjnr.pocketnode),
+            // so the calling-package check on scoped-storage paths matches the target,
+            // not the test app. Use targetContext so the path is permitted.
+            val outDir = InstrumentationRegistry.getInstrumentation()
+                .targetContext
+                .externalCacheDir
+                ?: return
+            outDir.mkdirs()
+            try {
+                device.takeScreenshot(File(outDir, "fail-$tag.png"))
+            } catch (_: Throwable) { /* best-effort */ }
+            try {
+                FileOutputStream(File(outDir, "fail-$tag.xml")).use { out ->
+                    device.dumpWindowHierarchy(out)
+                }
+            } catch (_: Throwable) { /* best-effort */ }
+        }
+    }
+
+    /**
      * Run against the previous-main APK before the upgrade install.
      * Walks Recover-from-Seed-Phrase with a hardcoded BIP39 dev mnemonic so the
      * seed is deterministic and the test can skip the random-mnemonic verify
@@ -57,12 +98,12 @@ class UpgradeSmokeTest {
 
         assertTrue(
             "Onboarding recover tile not found — prev APK is broken, not this PR",
-            clickByRes("onboarding-recover", ONBOARDING_TIMEOUT_MS)
+            clickButton("onboarding-recover", "Recover from Seed Phrase", ONBOARDING_TIMEOUT_MS)
         )
 
         assertTrue(
             "Import paste button not found",
-            clickByRes("import-paste", ONBOARDING_TIMEOUT_MS)
+            clickButton("import-paste", "Paste from Clipboard", ONBOARDING_TIMEOUT_MS)
         )
 
         // Let the 12 fields populate from the clipboard paste.
@@ -70,18 +111,18 @@ class UpgradeSmokeTest {
 
         assertTrue(
             "Import submit button not found",
-            clickByRes("import-submit", ONBOARDING_TIMEOUT_MS)
+            clickButton("import-submit", "Import Wallet", ONBOARDING_TIMEOUT_MS)
         )
 
         // Import → on mainnet the SyncOptionsSheet pops up with default mode
         // RECENT pre-selected. Apply it to dismiss + trigger nav. On testnet
-        // it doesn't appear; clickByRes returns false and we fall through.
-        clickByRes("sync-sheet-apply", ONBOARDING_TIMEOUT_MS)
+        // it doesn't appear; clickButton returns false and we fall through.
+        clickButton("sync-sheet-apply", "Apply", ONBOARDING_TIMEOUT_MS)
 
         // After import + sync-selection the app shows the PIN intro.
         assertTrue(
             "PIN intro continue button not found",
-            clickByRes("pin-intro-continue", ONBOARDING_TIMEOUT_MS)
+            clickButton("pin-intro-continue", "Create PIN", ONBOARDING_TIMEOUT_MS)
         )
 
         // Two passes (SETUP + CONFIRM). Each pass enters six 1s; the screen
@@ -94,7 +135,7 @@ class UpgradeSmokeTest {
             repeat(6) { i ->
                 assertTrue(
                     "PIN digit '1' not clickable at pass=$pass digit=$i",
-                    clickByRes("pin-keypad-1")
+                    clickDigit1()
                 )
             }
         }
@@ -145,9 +186,65 @@ class UpgradeSmokeTest {
      * recompositions during animations / state changes invalidate UiObject2
      * references between `findObject` and `.click()`; retrying with a fresh
      * lookup handles this without forcing slow `waitForIdle` everywhere.
+     *
+     * If the node isn't initially visible the helper looks for the nearest
+     * scrollable ancestor and scrolls down trying to bring it into view.
+     * Small CI emulator viewports often put long screens' primary buttons
+     * below the fold; Compose only emits accessibility nodes for visible
+     * content, so off-screen testTags would otherwise be invisible to UA.
      */
+    /**
+     * Click a button identified by resource-id OR visible text. Compose's
+     * `testTagsAsResourceId` is unreliable on this codebase under CI's smaller
+     * viewport — some merged buttons emit the tag, others don't. Visible
+     * button text always survives the merge, so it's the safer primary
+     * selector with resource-id as a fast-path.
+     */
+    private fun clickButton(res: String, text: String, timeoutMs: Long = 8_000L): Boolean {
+        if (clickByRes(res, timeoutMs, attempts = 3)) return true
+        // Text fallback. Package-scoped so we don't match status-bar / system UI.
+        repeat(4) {
+            if (!device.wait(Until.hasObject(By.text(text).pkg(PKG)), 3_000L)) {
+                val scrollable = device.findObject(By.scrollable(true))
+                if (scrollable != null) {
+                    try {
+                        scrollable.scrollUntil(Direction.DOWN, Until.findObject(By.text(text).pkg(PKG)))
+                    } catch (_: Throwable) { /* best-effort */ }
+                }
+            }
+            try {
+                // Compose merged button click target is usually higher up than
+                // the Text node itself. Prefer a clickable parent if findable.
+                val node = device.findObject(By.text(text).pkg(PKG).clickable(true))
+                    ?: device.findObject(By.text(text).pkg(PKG))
+                    ?: return@repeat
+                node.click()
+                return true
+            } catch (_: androidx.test.uiautomator.StaleObjectException) {
+                device.waitForIdle(200L)
+            }
+        }
+        return false
+    }
+
+    /** PIN digit "1" is a special case — same fallback strategy as clickButton. */
+    private fun clickDigit1(timeoutMs: Long = 8_000L): Boolean =
+        clickButton("pin-keypad-1", "1", timeoutMs)
+
     private fun clickByRes(res: String, timeoutMs: Long = 8_000L, attempts: Int = 6): Boolean {
-        if (!device.wait(Until.hasObject(By.res(res)), timeoutMs)) return false
+        if (!device.wait(Until.hasObject(By.res(res)), timeoutMs)) {
+            // Try scrolling: maybe the node is below the fold and Compose
+            // hasn't emitted accessibility for it yet.
+            val scrollable = device.findObject(By.scrollable(true))
+            if (scrollable != null) {
+                try {
+                    scrollable.scrollUntil(Direction.DOWN, Until.findObject(By.res(res)))
+                } catch (_: Throwable) {
+                    /* best-effort */
+                }
+            }
+            if (!device.wait(Until.hasObject(By.res(res)), 3_000L)) return false
+        }
         repeat(attempts) {
             try {
                 val node = device.findObject(By.res(res)) ?: return@repeat
