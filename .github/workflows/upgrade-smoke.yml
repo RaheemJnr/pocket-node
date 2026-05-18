@@ -145,6 +145,20 @@ jobs:
             # Multi-line commands are collapsed; \ continuations are not
             # honored by the action's script splitter.
             set -eu
+
+            # Capture UI state on ANY exit so post-mortem has a screenshot +
+            # window dump even if the script bails before the success path.
+            capture_state() {
+              echo "::group::Capturing failure state"
+              adb shell screencap -p /sdcard/post.png 2>/dev/null || true
+              adb pull /sdcard/post.png post.png 2>/dev/null || true
+              adb shell uiautomator dump /sdcard/dump.xml 2>/dev/null || true
+              adb pull /sdcard/dump.xml ui-dump.xml 2>/dev/null || true
+              adb logcat -d > logcat-post.txt 2>/dev/null || true
+              echo "::endgroup::"
+            }
+            trap capture_state EXIT
+
             adb wait-for-device
             adb shell input keyevent 82 || true
 
@@ -190,10 +204,7 @@ jobs:
             echo "pid=$pid"
             echo "::endgroup::"
 
-            echo "::group::Final screenshot"
-            adb shell screencap -p /sdcard/post.png
-            adb pull /sdcard/post.png post.png
-            echo "::endgroup::"
+            # capture_state trap on EXIT handles the final screenshot.
 
       - name: Upload smoke artifacts
         if: always()
@@ -203,6 +214,7 @@ jobs:
           path: |
             seed.log
             post.log
+            ui-dump.xml
             logcat-post.txt
             post.png
           if-no-files-found: warn
