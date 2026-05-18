@@ -98,12 +98,12 @@ class UpgradeSmokeTest {
 
         assertTrue(
             "Onboarding recover tile not found — prev APK is broken, not this PR",
-            clickByRes("onboarding-recover", ONBOARDING_TIMEOUT_MS)
+            clickButton("onboarding-recover", "Recover from Seed Phrase", ONBOARDING_TIMEOUT_MS)
         )
 
         assertTrue(
             "Import paste button not found",
-            clickByRes("import-paste", ONBOARDING_TIMEOUT_MS)
+            clickButton("import-paste", "Paste from Clipboard", ONBOARDING_TIMEOUT_MS)
         )
 
         // Let the 12 fields populate from the clipboard paste.
@@ -111,18 +111,18 @@ class UpgradeSmokeTest {
 
         assertTrue(
             "Import submit button not found",
-            clickByRes("import-submit", ONBOARDING_TIMEOUT_MS)
+            clickButton("import-submit", "Import Wallet", ONBOARDING_TIMEOUT_MS)
         )
 
         // Import → on mainnet the SyncOptionsSheet pops up with default mode
         // RECENT pre-selected. Apply it to dismiss + trigger nav. On testnet
-        // it doesn't appear; clickByRes returns false and we fall through.
-        clickByRes("sync-sheet-apply", ONBOARDING_TIMEOUT_MS)
+        // it doesn't appear; clickButton returns false and we fall through.
+        clickButton("sync-sheet-apply", "Apply", ONBOARDING_TIMEOUT_MS)
 
         // After import + sync-selection the app shows the PIN intro.
         assertTrue(
             "PIN intro continue button not found",
-            clickByRes("pin-intro-continue", ONBOARDING_TIMEOUT_MS)
+            clickButton("pin-intro-continue", "Create PIN", ONBOARDING_TIMEOUT_MS)
         )
 
         // Two passes (SETUP + CONFIRM). Each pass enters six 1s; the screen
@@ -194,21 +194,29 @@ class UpgradeSmokeTest {
      * content, so off-screen testTags would otherwise be invisible to UA.
      */
     /**
-     * Click the "1" digit on the PIN keypad. Tries the `pin-keypad-1` resource-id
-     * first; falls back to clickable `text="1"`. Compose's semantic-merge behavior
-     * occasionally drops the resource-id on the top keypad row on smaller CI
-     * viewports, but the Text composable's text content is always emitted.
+     * Click a button identified by resource-id OR visible text. Compose's
+     * `testTagsAsResourceId` is unreliable on this codebase under CI's smaller
+     * viewport — some merged buttons emit the tag, others don't. Visible
+     * button text always survives the merge, so it's the safer primary
+     * selector with resource-id as a fast-path.
      */
-    private fun clickDigit1(timeoutMs: Long = 8_000L): Boolean {
-        if (clickByRes("pin-keypad-1", timeoutMs, attempts = 3)) return true
-        // Fallback: by visible text + clickable. Restrict to the app package
-        // so we don't accidentally match a "1" elsewhere on screen.
+    private fun clickButton(res: String, text: String, timeoutMs: Long = 8_000L): Boolean {
+        if (clickByRes(res, timeoutMs, attempts = 3)) return true
+        // Text fallback. Package-scoped so we don't match status-bar / system UI.
         repeat(4) {
-            if (!device.wait(Until.hasObject(By.text("1").pkg(PKG).clickable(true)), 3_000L)) {
-                return@repeat
+            if (!device.wait(Until.hasObject(By.text(text).pkg(PKG)), 3_000L)) {
+                val scrollable = device.findObject(By.scrollable(true))
+                if (scrollable != null) {
+                    try {
+                        scrollable.scrollUntil(Direction.DOWN, Until.findObject(By.text(text).pkg(PKG)))
+                    } catch (_: Throwable) { /* best-effort */ }
+                }
             }
             try {
-                val node = device.findObject(By.text("1").pkg(PKG).clickable(true))
+                // Compose merged button click target is usually higher up than
+                // the Text node itself. Prefer a clickable parent if findable.
+                val node = device.findObject(By.text(text).pkg(PKG).clickable(true))
+                    ?: device.findObject(By.text(text).pkg(PKG))
                     ?: return@repeat
                 node.click()
                 return true
@@ -218,6 +226,10 @@ class UpgradeSmokeTest {
         }
         return false
     }
+
+    /** PIN digit "1" is a special case — same fallback strategy as clickButton. */
+    private fun clickDigit1(timeoutMs: Long = 8_000L): Boolean =
+        clickButton("pin-keypad-1", "1", timeoutMs)
 
     private fun clickByRes(res: String, timeoutMs: Long = 8_000L, attempts: Int = 6): Boolean {
         if (!device.wait(Until.hasObject(By.res(res)), timeoutMs)) {
