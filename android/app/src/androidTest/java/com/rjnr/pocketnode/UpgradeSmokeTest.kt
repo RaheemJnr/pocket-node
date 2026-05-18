@@ -129,13 +129,15 @@ class UpgradeSmokeTest {
         // auto-submits on the 6th digit and advances to the next phase.
         repeat(2) { pass ->
             if (pass == 1) {
-                // Defensive: let SETUP→CONFIRM recomposition settle.
-                device.waitForIdle(2_000L)
+                // Defensive: let SETUP→CONFIRM recomposition settle. The
+                // auto-submit animation and screen swap can take ~3s on a
+                // loaded CI emulator.
+                device.waitForIdle(4_000L)
             }
             repeat(6) { i ->
                 assertTrue(
                     "PIN digit '1' not clickable at pass=$pass digit=$i",
-                    clickDigit1()
+                    clickDigit1(timeoutMs = 12_000L)
                 )
             }
         }
@@ -213,9 +215,13 @@ class UpgradeSmokeTest {
                 }
             }
             try {
-                // Compose merged button click target is usually higher up than
-                // the Text node itself. Prefer a clickable parent if findable.
-                val node = device.findObject(By.text(text).pkg(PKG).clickable(true))
+                // Compose merged button: the clickable node is the parent of the
+                // Text. Find the clickable ancestor explicitly via hasDescendant
+                // — clicking the Text node itself doesn't trigger the Button's
+                // onClick in Compose, so direct text-click was racy.
+                val node = device.findObject(
+                    By.clickable(true).pkg(PKG).hasDescendant(By.text(text))
+                ) ?: device.findObject(By.text(text).pkg(PKG).clickable(true))
                     ?: device.findObject(By.text(text).pkg(PKG))
                     ?: return@repeat
                 node.click()
