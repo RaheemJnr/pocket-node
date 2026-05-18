@@ -32,15 +32,37 @@ if [ -z "$ANDROID_NDK_HOME" ] || [ ! -d "$ANDROID_NDK_HOME" ]; then
     exit 1
 fi
 
-CLANG_PATH=$(find "$ANDROID_NDK_HOME" -name "clang" -type f | head -n 1)
-if [ -z "$CLANG_PATH" ]; then
-    if [ -f "$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/darwin-x86_64/bin/clang" ]; then
-         CLANG_PATH="$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/darwin-x86_64/bin/clang"
+# Try a list of known toolchain layouts first (fast, deterministic). Fall back
+# to a recursive find if none match. The recursive find handles symlinks and
+# nested-extract layouts; the explicit paths handle the common case quickly
+# and survive when the NDK is laid out under a nested wrapper directory
+# (some hosted-toolcache extractors do this).
+CLANG_PATH=""
+for candidate in \
+    "$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin/clang" \
+    "$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/darwin-x86_64/bin/clang" \
+    "$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/darwin-arm64/bin/clang" \
+    "$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/windows-x86_64/bin/clang.exe" \
+    ; do
+    if [ -x "$candidate" ]; then
+        CLANG_PATH="$candidate"
+        break
     fi
+done
+
+if [ -z "$CLANG_PATH" ]; then
+    # Fallback: recursive search. Drop -type f so symlinks count, and resolve
+    # nested wrapper directories that some extractors create.
+    CLANG_PATH=$(find -L "$ANDROID_NDK_HOME" -name 'clang' -executable 2>/dev/null | head -n 1)
 fi
 
 if [ -z "$CLANG_PATH" ]; then
     echo "ERROR: clang not found in NDK"
+    echo "ANDROID_NDK_HOME=$ANDROID_NDK_HOME"
+    echo "Top-level contents:"
+    ls -la "$ANDROID_NDK_HOME" 2>/dev/null || true
+    echo "Toolchains layout (if present):"
+    ls -la "$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/" 2>/dev/null || true
     exit 1
 fi
 
