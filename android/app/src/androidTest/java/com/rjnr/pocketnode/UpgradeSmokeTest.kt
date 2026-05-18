@@ -46,19 +46,28 @@ class UpgradeSmokeTest {
      * Capture screenshot + window dump BEFORE instrumentation cleanup tears
      * the app down. The workflow's post-instrument trap fires too late —
      * by then `am instrument` has force-stopped the app and the screen is
-     * back to the launcher. Files land on /sdcard so the workflow trap
-     * can pull them.
+     * back to the launcher.
+     *
+     * Files land in the *instrumentation* app's external cache
+     * (/sdcard/Android/data/com.rjnr.pocketnode.test/cache/) which is
+     * writable without WRITE_EXTERNAL_STORAGE on scoped-storage APIs and
+     * adb-pullable from the host runner.
      */
     @Rule
     @JvmField
     val failureCapture: TestWatcher = object : TestWatcher() {
         override fun failed(e: Throwable, description: Description) {
             val tag = description.methodName
+            val outDir = InstrumentationRegistry.getInstrumentation()
+                .context
+                .externalCacheDir
+                ?: return
+            outDir.mkdirs()
             try {
-                device.takeScreenshot(File("/sdcard/fail-$tag.png"))
+                device.takeScreenshot(File(outDir, "fail-$tag.png"))
             } catch (_: Throwable) { /* best-effort */ }
             try {
-                FileOutputStream("/sdcard/fail-$tag.xml").use { out ->
+                FileOutputStream(File(outDir, "fail-$tag.xml")).use { out ->
                     device.dumpWindowHierarchy(out)
                 }
             } catch (_: Throwable) { /* best-effort */ }

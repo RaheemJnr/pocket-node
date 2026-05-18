@@ -19,11 +19,13 @@ capture_state() {
   adb pull /sdcard/dump.xml ui-dump.xml 2>/dev/null || true
   # The TestWatcher rule inside UpgradeSmokeTest grabs screenshot + UI
   # dump on failure — pull both so post-mortem sees the actual state
-  # at the moment the assertion fired.
-  adb pull /sdcard/fail-seedFreshWallet.png fail-seedFreshWallet.png 2>/dev/null || true
-  adb pull /sdcard/fail-seedFreshWallet.xml fail-seedFreshWallet.xml 2>/dev/null || true
-  adb pull /sdcard/fail-assertHomeAfterUpgrade.png fail-assertHomeAfterUpgrade.png 2>/dev/null || true
-  adb pull /sdcard/fail-assertHomeAfterUpgrade.xml fail-assertHomeAfterUpgrade.xml 2>/dev/null || true
+  # at the moment the assertion fired. Files live in the instrumentation
+  # app's external cache (scoped-storage friendly).
+  TEST_CACHE=/sdcard/Android/data/com.rjnr.pocketnode.test/cache
+  adb pull "$TEST_CACHE/fail-seedFreshWallet.png" fail-seedFreshWallet.png 2>/dev/null || true
+  adb pull "$TEST_CACHE/fail-seedFreshWallet.xml" fail-seedFreshWallet.xml 2>/dev/null || true
+  adb pull "$TEST_CACHE/fail-assertHomeAfterUpgrade.png" fail-assertHomeAfterUpgrade.png 2>/dev/null || true
+  adb pull "$TEST_CACHE/fail-assertHomeAfterUpgrade.xml" fail-assertHomeAfterUpgrade.xml 2>/dev/null || true
   adb logcat -d > logcat-post.txt 2>/dev/null || true
   echo "::endgroup::"
 }
