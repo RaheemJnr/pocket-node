@@ -1,9 +1,9 @@
 package com.rjnr.pocketnode.ui.education.coachmark
 
+import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.layout.Arrangement
-import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
@@ -21,10 +21,8 @@ import androidx.compose.runtime.Composable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.geometry.CornerRadius
-import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Rect
 import androidx.compose.ui.geometry.RoundRect
-import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.Path
 import androidx.compose.ui.graphics.PathOperation
@@ -40,8 +38,19 @@ import com.rjnr.pocketnode.R
  * via [Modifier.coachmarkAnchor]. Reads its anchor bounds from
  * [LocalCoachmarkRegistry] by [anchorKey].
  *
- * The scrim swallows taps so users cannot interact with backgrounded UI;
- * dismissal is the tooltip's "Got it" button.
+ * Tooltip placement is fixed ABOVE the spotlight. The earlier flip-below
+ * branch was unreliable on standard handsets — the sync card sits in the
+ * lower half of Home, the bottom-nav bar plus gesture indicator eat ~90dp,
+ * and the tooltip's Got-it button kept getting clipped, leaving users with
+ * no way to dismiss. Placing above the spotlight is always safe because
+ * there is room between the wallet balance card and the sync card.
+ *
+ * Dismissal paths:
+ *   - Tap the "Got it" button inside the tooltip card.
+ *   - Tap anywhere on the dimmed scrim (taps inside the tooltip itself are
+ *     swallowed by the card's own pointerInput so reading text never
+ *     accidentally dismisses).
+ *   - System back press.
  */
 @Composable
 fun SyncCoachmark(
@@ -54,6 +63,8 @@ fun SyncCoachmark(
     val rect: Rect = registry.bounds[anchorKey] ?: return
     if (rect.width <= 0f || rect.height <= 0f) return
 
+    BackHandler(enabled = true, onBack = onDismiss)
+
     val scrimColor = Color.Black.copy(alpha = 0.65f)
     val density = LocalDensity.current
     val cornerRadiusPx = with(density) { 16.dp.toPx() }
@@ -62,8 +73,10 @@ fun SyncCoachmark(
     BoxWithConstraints(
         modifier = Modifier
             .fillMaxSize()
-            // Swallow taps so taps outside the tooltip don't hit underlying UI.
-            .pointerInput(Unit) { detectTapGestures { /* swallow */ } },
+            // Tap on scrim dismisses. The tooltip Card below swallows its own
+            // taps via a nested pointerInput so reading the body text does not
+            // accidentally close the overlay.
+            .pointerInput(Unit) { detectTapGestures { onDismiss() } },
     ) {
         // Single-pass scrim with a rounded-rect cutout for the spotlight.
         // Using Path.op(Difference) gives us rounded corners around the
@@ -91,25 +104,16 @@ fun SyncCoachmark(
             drawPath(path = scrim, color = scrimColor)
         }
 
-        // Decide tooltip placement: prefer below the spotlight, but flip above
-        // when there isn't enough room. The bottom-nav bar eats roughly 80dp
-        // of the viewport on Home, and the tooltip itself needs ~140dp for
-        // the body + dismiss button + padding. If the spotlight sits low on
-        // the screen, "below" gets clipped (reported in v1.5.2 smoke).
-        val viewportHeightPx = with(density) { maxHeight.toPx() }
+        // Place the tooltip ABOVE the spotlight always. Card uses
+        // wrap_content height, so we set a top padding equal to the
+        // spotlight's top edge minus an estimated card height minus 16dp.
+        // The coerceAtLeast keeps the card from running into the status bar
+        // on cramped screens, in which case it docks 16dp from the top edge.
         val tooltipMinHeightPx = with(density) { 180.dp.toPx() }
-        val showAbove = (viewportHeightPx - rect.bottom) < tooltipMinHeightPx
-
-        val tooltipPadding = if (showAbove) {
-            // Place the card so its BOTTOM edge sits 16dp above rect.top.
-            // Implement as a top padding equal to (rect.top - card_height - 16dp);
-            // Card with wrap_content will hug the spotlight from above.
-            val targetTopPx = (rect.top - tooltipMinHeightPx - with(density) { 16.dp.toPx() })
-                .coerceAtLeast(with(density) { 16.dp.toPx() })
-            with(density) { targetTopPx.toDp() }
-        } else {
-            with(density) { rect.bottom.toDp() } + 16.dp
-        }
+        val gapPx = with(density) { 16.dp.toPx() }
+        val safeTopPx = with(density) { 16.dp.toPx() }
+        val targetTopPx = (rect.top - tooltipMinHeightPx - gapPx).coerceAtLeast(safeTopPx)
+        val tooltipPadding = with(density) { targetTopPx.toDp() }
 
         Card(
             shape = RoundedCornerShape(16.dp),
@@ -120,7 +124,8 @@ fun SyncCoachmark(
             modifier = Modifier
                 .align(Alignment.TopStart)
                 .padding(start = 16.dp, end = 16.dp, top = tooltipPadding)
-                .fillMaxWidth(),
+                .fillMaxWidth()
+                .pointerInput(Unit) { detectTapGestures { /* swallow */ } },
         ) {
             Column(
                 modifier = Modifier.padding(20.dp),
