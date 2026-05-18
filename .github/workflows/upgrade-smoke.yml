@@ -31,10 +31,19 @@ jobs:
         uses: android-actions/setup-android@v3
 
       - name: Setup Android NDK
-        # NDK r27.0.12077973 — matches AGP 8.13.2 default. Bump in lockstep with AGP.
-        run: |
-          sdkmanager --install "ndk;27.0.12077973" >/dev/null
-          echo "ANDROID_NDK_HOME=$ANDROID_HOME/ndk/27.0.12077973" >> $GITHUB_ENV
+        # NDK r27c (27.0.12077973) — matches AGP 8.13.2 default. Bump in
+        # lockstep with AGP. nttld/setup-ndk handles license + full extraction;
+        # sdkmanager produced partial installs missing the llvm toolchain
+        # ("clang not found in NDK").
+        id: setup-ndk
+        uses: nttld/setup-ndk@v1
+        with:
+          ndk-version: r27c
+          add-to-path: false
+      - name: Export ANDROID_NDK_HOME
+        env:
+          NDK_PATH: ${{ steps.setup-ndk.outputs.ndk-path }}
+        run: echo "ANDROID_NDK_HOME=$NDK_PATH" >> $GITHUB_ENV
 
       - name: Set up Rust (stable + Android targets)
         uses: dtolnay/rust-toolchain@stable
