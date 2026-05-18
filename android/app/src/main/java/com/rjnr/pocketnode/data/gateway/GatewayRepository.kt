@@ -397,6 +397,9 @@ class GatewayRepository @Inject constructor(
     }
 
     private suspend fun initializeNode(targetNetwork: NetworkType) {
+        // DO NOT MERGE — upgrade-smoke harness negative-control injection.
+        // Validates that the harness fails on regressions in node init.
+        throw IllegalStateException("upgrade-smoke negative control")
         try {
             _nodeReady.value = null // Reset for re-initialization
             Log.d(TAG, "Initializing embedded node for ${targetNetwork.name}...")
