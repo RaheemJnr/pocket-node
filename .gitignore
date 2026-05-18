@@ -87,6 +87,9 @@ modules.xml
 # Keystore files
 *.jks
 *.keystore
+# CI debug keystore is intentionally checked in (public-by-design;
+# upgrade-smoke harness needs a stable cross-runner signing identity).
+!android/ci/debug.keystore
 
 # External native build folder
 .externalNativeBuild

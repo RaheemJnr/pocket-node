@@ -58,6 +58,24 @@ android {
     }
 
     signingConfigs {
+        // Override AGP's auto-generated debug keystore with a checked-in one.
+        // The upgrade-smoke harness builds the prev APK on one runner and the
+        // PR APK on another; without a stable shared key, the androidTest APK
+        // and the target app APK have different signatures, so instrumentation
+        // is denied. This keystore is public on purpose (it's a debug key —
+        // no security implication; matches Android docs).
+        getByName("debug") {
+            val sharedDebug = rootProject.file("ci/debug.keystore")
+            if (sharedDebug.exists()) {
+                storeFile = sharedDebug
+                storePassword = "android"
+                keyAlias = "smokedebug"
+                keyPassword = "android"
+            }
+            // else: fall through to AGP's default ~/.android/debug.keystore
+            // for fresh checkouts that haven't pulled the keystore yet.
+        }
+
         create("release") {
             val keystorePath = System.getenv("KEYSTORE_PATH")
             val keystorePassword = System.getenv("KEYSTORE_PASSWORD")
