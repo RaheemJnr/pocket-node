@@ -12,6 +12,7 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.RowScope
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
@@ -522,7 +523,10 @@ private fun SettingsScreenUI(
                     icon = Lucide.Info,
                     title = "Version",
                     value = BuildConfig.VERSION_NAME,
-                    onClick = null
+                    onClick = null,
+                    trailing = if (BuildConfig.DEBUG) {
+                        { DebugBuildPill(gitSha = BuildConfig.GIT_SHA) }
+                    } else null
                 )
             }
 
@@ -662,7 +666,8 @@ fun SettingsValueRow(
     title: String,
     value: String,
     onClick: (() -> Unit)?,
-    valueColor: Color = MaterialTheme.colorScheme.primary
+    valueColor: Color = MaterialTheme.colorScheme.primary,
+    trailing: (@Composable RowScope.() -> Unit)? = null
 ) {
     Row(
         modifier = Modifier
@@ -689,14 +694,41 @@ fun SettingsValueRow(
                 fontWeight = FontWeight.Medium
             )
         }
-        Text(
-            value,
-            color = valueColor,
-            fontSize = 14.sp,
-            fontWeight = FontWeight.Medium
-        )
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Text(
+                value,
+                color = valueColor,
+                fontSize = 14.sp,
+                fontWeight = FontWeight.Medium
+            )
+            if (trailing != null) {
+                Spacer(modifier = Modifier.width(8.dp))
+                trailing()
+            }
+        }
     }
     HorizontalDivider(color = MaterialTheme.colorScheme.surfaceVariant, thickness = 1.dp)
+}
+
+/**
+ * Pill rendered in the Settings → Version row of debug builds only. Shows
+ * "DEBUG • <short SHA>" so testers can report exactly which commit they're
+ * running. Hidden in release per `BuildConfig.DEBUG`.
+ */
+@Composable
+fun DebugBuildPill(gitSha: String) {
+    Surface(
+        color = MaterialTheme.colorScheme.errorContainer,
+        shape = RoundedCornerShape(100.dp)
+    ) {
+        Text(
+            text = "DEBUG • $gitSha",
+            modifier = Modifier.padding(horizontal = 10.dp, vertical = 2.dp),
+            color = MaterialTheme.colorScheme.onErrorContainer,
+            fontSize = 11.sp,
+            fontWeight = FontWeight.Bold
+        )
+    }
 }
 
 @Composable

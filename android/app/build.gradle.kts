@@ -32,6 +32,17 @@ android {
             "\"https://api.github.com/repos/RaheemJnr/pocket-node/releases/latest\""
         )
 
+        // Short git SHA injected at build time so debug APKs can be traced
+        // back to the exact commit they were built from. Surfaced in the
+        // Settings → Version row as part of the [DEBUG • abc1234] pill.
+        // Falls back to "unknown" on shallow clones or when git is absent.
+        val gitSha = runCatching {
+            providers.exec {
+                commandLine("git", "rev-parse", "--short", "HEAD")
+            }.standardOutput.asText.get().trim()
+        }.getOrDefault("unknown")
+        buildConfigField("String", "GIT_SHA", "\"$gitSha\"")
+
         // Only include ARM ABIs — x86_64 is emulator-only and adds ~29 MB.
         // CI's upgrade-smoke harness opts in via BUILD_X86_64=1 (matched in
         // external/ckb-light-client/build-android-jni.sh).
