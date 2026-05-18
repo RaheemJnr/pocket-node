@@ -123,6 +123,7 @@ fun HomeScreen(
     onNavigateToWalletManager: () -> Unit = {},
     onNavigateToSecurityChecklist: () -> Unit = {},
     onNavigateToFaq: (anchor: String?) -> Unit = {},
+    onNavigateToNodeStatus: () -> Unit = {},
     viewModel: HomeViewModel = hiltViewModel()
 ) {
     val uiState by viewModel.uiState.collectAsState()
@@ -486,6 +487,7 @@ fun HomeScreen(
                     onNavigateToDao = onNavigateToDao,
                     onNavigateToActivity = onNavigateToActivity,
                     onNavigateToSecurityChecklist = onNavigateToSecurityChecklist,
+                    onNavigateToNodeStatus = onNavigateToNodeStatus,
                     dismissBackupReminder = { viewModel.dismissBackupReminder() },
                     onToggleBalanceVisibility = { viewModel.toggleBalanceVisibility() },
                     clipboardManager = clipboardManager,
@@ -552,6 +554,7 @@ fun HomeScreenUI(
     onNavigateToDao: () -> Unit = {},
     onNavigateToActivity: () -> Unit = {},
     onNavigateToSecurityChecklist: () -> Unit = {},
+    onNavigateToNodeStatus: () -> Unit = {},
     dismissBackupReminder: () -> Unit,
     onToggleBalanceVisibility: () -> Unit,
     clipboardManager: androidx.compose.ui.platform.ClipboardManager,
@@ -609,6 +612,7 @@ fun HomeScreenUI(
                     peerCount = uiState.peerCount,
                     isBalanceHidden = uiState.isBalanceHidden,
                     onToggleVisibility = onToggleBalanceVisibility,
+                    onPeersClick = onNavigateToNodeStatus,
                     onCopyAddress = {
                         clipboardManager.setText(AnnotatedString(uiState.address))
                         scope.launch {
