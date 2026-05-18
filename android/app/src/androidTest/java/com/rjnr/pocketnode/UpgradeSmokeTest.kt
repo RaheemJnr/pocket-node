@@ -1,5 +1,7 @@
 package com.rjnr.pocketnode
 
+import android.content.ClipData
+import android.content.ClipboardManager
 import android.content.Context
 import androidx.test.core.app.ApplicationProvider
 import androidx.test.ext.junit.runners.AndroidJUnit4
@@ -18,6 +20,11 @@ private const val LAUNCH_TIMEOUT_MS = 10_000L
 private const val ONBOARDING_TIMEOUT_MS = 15_000L
 private const val POST_UPGRADE_HOME_TIMEOUT_MS = 30_000L
 
+// Standard BIP39 dev mnemonic. 11×"abandon" + "about" is a valid checksum.
+// Hardcoded so the seed is deterministic across runs.
+private const val TEST_MNEMONIC =
+    "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about"
+
 @RunWith(AndroidJUnit4::class)
 class UpgradeSmokeTest {
 
@@ -32,56 +39,68 @@ class UpgradeSmokeTest {
 
     /**
      * Run against the previous-main APK before the upgrade install.
-     * Walks onboarding (Create New Wallet → PIN intro → setup PIN → confirm PIN)
-     * and asserts the home-balance-row resource-id is visible. That means real
-     * key material was written and Room/EncryptedSharedPrefs hold prior-version
-     * state for the upgrade migration to chew on.
+     * Walks Recover-from-Seed-Phrase with a hardcoded BIP39 dev mnemonic so the
+     * seed is deterministic and the test can skip the random-mnemonic verify
+     * step of the create-new flow. After import + PIN setup the home-balance-row
+     * resource-id must be visible — that means real key material was written
+     * and Room/EncryptedSharedPrefs hold prior-version state for the upgrade
+     * migration to chew on.
      */
     @Test
     fun seedFreshWallet() {
+        // Seed clipboard before launching so the Paste button on the import
+        // screen sees TEST_MNEMONIC.
+        val cm = ctx.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
+        cm.setPrimaryClip(ClipData.newPlainText("upgrade-smoke", TEST_MNEMONIC))
+
         launchApp()
 
-        val createTile = device.wait(
-            Until.findObject(By.res(PKG, "onboarding-create-new")),
-            ONBOARDING_TIMEOUT_MS
+        assertTrue(
+            "Onboarding recover tile not found — prev APK is broken, not this PR",
+            clickByRes("onboarding-recover", ONBOARDING_TIMEOUT_MS)
         )
-        assertNotNull(
-            "Onboarding create-new tile not found — prev APK is broken, not this PR",
-            createTile
-        )
-        createTile.click()
 
-        // After wallet creation completes the app shows the PIN intro.
-        val pinIntro = device.wait(
-            Until.findObject(By.res(PKG, "pin-intro-continue")),
-            ONBOARDING_TIMEOUT_MS
+        assertTrue(
+            "Import paste button not found",
+            clickByRes("import-paste", ONBOARDING_TIMEOUT_MS)
         )
-        assertNotNull("PIN intro continue button not found", pinIntro)
-        pinIntro.click()
+
+        // Let the 12 fields populate from the clipboard paste.
+        device.waitForIdle(1_500L)
+
+        assertTrue(
+            "Import submit button not found",
+            clickByRes("import-submit", ONBOARDING_TIMEOUT_MS)
+        )
+
+        // Import → on mainnet the SyncOptionsSheet pops up with default mode
+        // RECENT pre-selected. Apply it to dismiss + trigger nav. On testnet
+        // it doesn't appear; clickByRes returns false and we fall through.
+        clickByRes("sync-sheet-apply", ONBOARDING_TIMEOUT_MS)
+
+        // After import + sync-selection the app shows the PIN intro.
+        assertTrue(
+            "PIN intro continue button not found",
+            clickByRes("pin-intro-continue", ONBOARDING_TIMEOUT_MS)
+        )
 
         // Two passes (SETUP + CONFIRM). Each pass enters six 1s; the screen
         // auto-submits on the 6th digit and advances to the next phase.
-        // Per-iteration wait covers the SETUP→CONFIRM recompose between passes.
         repeat(2) { pass ->
             if (pass == 1) {
                 // Defensive: let SETUP→CONFIRM recomposition settle.
                 device.waitForIdle(2_000L)
             }
             repeat(6) { i ->
-                val digit = device.wait(
-                    Until.findObject(By.res(PKG, "pin-keypad-1")),
-                    8_000L
+                assertTrue(
+                    "PIN digit '1' not clickable at pass=$pass digit=$i",
+                    clickByRes("pin-keypad-1")
                 )
-                assertNotNull(
-                    "PIN digit '1' not visible at pass=$pass digit=$i (resource-id pin-keypad-1)",
-                    digit
-                )
-                digit.click()
             }
         }
 
         val balanceRow = device.wait(
-            Until.findObject(By.res(PKG, "home-balance-row")),
+            Until.findObject(By.res("home-balance-row")),
             ONBOARDING_TIMEOUT_MS
         )
         assertNotNull("Home balance row not found after onboarding", balanceRow)
@@ -96,8 +115,23 @@ class UpgradeSmokeTest {
     fun assertHomeAfterUpgrade() {
         launchApp()
 
+        // Post-upgrade the wallet is PIN-locked behind AuthScreen, which shows
+        // a biometric prompt + "Use PIN" fallback. On a non-enrolled emulator
+        // only "Use PIN" appears; tap it to reach the keypad.
+        clickByRes("auth-use-pin", 10_000L)
+
+        // PIN entry (1×6, auto-submits on the 6th digit).
+        if (device.wait(Until.hasObject(By.res("pin-keypad-1")), 10_000L)) {
+            repeat(6) {
+                assertTrue(
+                    "PIN digit '1' not clickable on post-upgrade unlock",
+                    clickByRes("pin-keypad-1")
+                )
+            }
+        }
+
         val balanceRow = device.wait(
-            Until.findObject(By.res(PKG, "home-balance-row")),
+            Until.findObject(By.res("home-balance-row")),
             POST_UPGRADE_HOME_TIMEOUT_MS
         )
         assertNotNull(
@@ -106,13 +140,35 @@ class UpgradeSmokeTest {
         )
     }
 
+    /**
+     * Click a node by resource-id, retrying on StaleObjectException. Compose
+     * recompositions during animations / state changes invalidate UiObject2
+     * references between `findObject` and `.click()`; retrying with a fresh
+     * lookup handles this without forcing slow `waitForIdle` everywhere.
+     */
+    private fun clickByRes(res: String, timeoutMs: Long = 8_000L, attempts: Int = 6): Boolean {
+        if (!device.wait(Until.hasObject(By.res(res)), timeoutMs)) return false
+        repeat(attempts) {
+            try {
+                val node = device.findObject(By.res(res)) ?: return@repeat
+                node.click()
+                return true
+            } catch (_: androidx.test.uiautomator.StaleObjectException) {
+                device.waitForIdle(300L)
+            }
+        }
+        return false
+    }
+
     private fun launchApp() {
         device.pressHome()
         val launcherPkg = device.launcherPackageName
         assertNotNull("UiDevice.launcherPackageName is null — emulator image broken?", launcherPkg)
         device.wait(Until.hasObject(By.pkg(launcherPkg).depth(0)), LAUNCH_TIMEOUT_MS)
 
-        device.executeShellCommand("am force-stop $PKG")
+        // NB: don't `am force-stop $PKG` here — instrumentation runs inside the
+        // target app's process, so force-stopping it kills the test itself.
+        // The workflow handles cold-start between instrument calls externally.
         val intent = ctx.packageManager.getLaunchIntentForPackage(PKG)!!.apply {
             addFlags(android.content.Intent.FLAG_ACTIVITY_NEW_TASK or android.content.Intent.FLAG_ACTIVITY_CLEAR_TASK)
         }

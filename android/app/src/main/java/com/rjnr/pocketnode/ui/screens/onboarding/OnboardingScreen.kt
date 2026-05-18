@@ -116,7 +116,8 @@ fun OnboardingScreen(
                 description = "Import wallet using your 12-word recovery phrase.",
                 icon = Lucide.KeyRound,
                 onClick = onNavigateToImport,
-                isLoading = uiState.isLoading
+                isLoading = uiState.isLoading,
+                modifier = Modifier.uaTestTag("onboarding-recover")
             )
 
             Spacer(modifier = Modifier.height(32.dp))

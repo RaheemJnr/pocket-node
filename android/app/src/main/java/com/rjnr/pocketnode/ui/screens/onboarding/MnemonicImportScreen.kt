@@ -10,6 +10,7 @@ import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalClipboardManager
+import com.rjnr.pocketnode.ui.util.uaTestTag
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.hilt.navigation.compose.hiltViewModel
@@ -286,7 +287,7 @@ fun MnemonicImportScreen(
                         viewModel.pasteMnemonic(text)
                     }
                 },
-                modifier = Modifier.fillMaxWidth()
+                modifier = Modifier.fillMaxWidth().uaTestTag("import-paste")
             ) {
                 Icon(Lucide.ClipboardPaste, contentDescription = null, modifier = Modifier.size(18.dp))
                 Spacer(Modifier.width(8.dp))
@@ -324,7 +325,7 @@ fun MnemonicImportScreen(
             // Import button
             Button(
                 onClick = { viewModel.importMnemonic() },
-                modifier = Modifier.fillMaxWidth(),
+                modifier = Modifier.fillMaxWidth().uaTestTag("import-submit"),
                 enabled = !uiState.isImporting && uiState.words.all { it.isNotBlank() }
             ) {
                 if (uiState.isImporting) {

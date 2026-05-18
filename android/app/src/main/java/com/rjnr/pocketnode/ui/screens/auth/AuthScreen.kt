@@ -10,6 +10,7 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import com.composables.icons.lucide.*
+import com.rjnr.pocketnode.ui.util.uaTestTag
 import androidx.compose.material3.Button
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
@@ -134,7 +135,7 @@ fun AuthScreen(
             if (uiState.showPinFallback) {
                 OutlinedButton(
                     onClick = onNavigateToPinVerify,
-                    modifier = Modifier.fillMaxWidth()
+                    modifier = Modifier.fillMaxWidth().uaTestTag("auth-use-pin")
                 ) {
                     Text("Use PIN")
                 }
