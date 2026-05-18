@@ -125,21 +125,31 @@ class UpgradeSmokeTest {
             clickButton("pin-intro-continue", "Create PIN", ONBOARDING_TIMEOUT_MS)
         )
 
-        // Two passes (SETUP + CONFIRM). Each pass enters six 1s; the screen
-        // auto-submits on the 6th digit and advances to the next phase.
-        repeat(2) { pass ->
-            if (pass == 1) {
-                // Defensive: let SETUP→CONFIRM recomposition settle. The
-                // auto-submit animation and screen swap can take ~3s on a
-                // loaded CI emulator.
-                device.waitForIdle(4_000L)
-            }
-            repeat(6) { i ->
-                assertTrue(
-                    "PIN digit '1' not clickable at pass=$pass digit=$i",
-                    clickDigit1(timeoutMs = 12_000L)
-                )
-            }
+        // SETUP phase: enter six 1s. Auto-submits on the 6th digit and
+        // advances to CONFIRM.
+        repeat(6) { i ->
+            assertTrue(
+                "PIN digit '1' not clickable at SETUP digit=$i",
+                clickDigitWithRetry(attempts = 3)
+            )
+        }
+
+        // Phase-transition sync: wait for the CONFIRM screen's title text
+        // to appear instead of a blind waitForIdle. The keypad nodes can be
+        // briefly unaddressable during the swap, so this gate is the only
+        // reliable signal that pass=1 should start clicking.
+        assertTrue(
+            "SETUP→CONFIRM transition didn't complete — was a SETUP click missed?",
+            device.wait(Until.hasObject(By.text("Confirm PIN").pkg(PKG)), 15_000L)
+        )
+        device.waitForIdle(1_500L)
+
+        // CONFIRM phase: enter the same six 1s.
+        repeat(6) { i ->
+            assertTrue(
+                "PIN digit '1' not clickable at CONFIRM digit=$i",
+                clickDigitWithRetry(attempts = 3)
+            )
         }
 
         val balanceRow = device.wait(
@@ -236,6 +246,22 @@ class UpgradeSmokeTest {
     /** PIN digit "1" is a special case — same fallback strategy as clickButton. */
     private fun clickDigit1(timeoutMs: Long = 8_000L): Boolean =
         clickButton("pin-keypad-1", "1", timeoutMs)
+
+    /**
+     * Click the "1" digit with extra outer retry. Compose recomposes the
+     * keypad on phase transitions and during dot-indicator updates, briefly
+     * stripping addressable accessibility nodes. clickButton has internal
+     * retries but a clean outer retry with waitForIdle in between has
+     * proved necessary on slow CI x86_64 emulators.
+     */
+    private fun clickDigitWithRetry(attempts: Int = 3, timeoutMs: Long = 12_000L): Boolean {
+        repeat(attempts) { attempt ->
+            if (clickDigit1(timeoutMs)) return true
+            // Recompose / animation pause before retrying.
+            device.waitForIdle(1_500L)
+        }
+        return false
+    }
 
     private fun clickByRes(res: String, timeoutMs: Long = 8_000L, attempts: Int = 6): Boolean {
         if (!device.wait(Until.hasObject(By.res(res)), timeoutMs)) {
