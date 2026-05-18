@@ -92,6 +92,7 @@ fun MainScreen(
                     onNavigateToBackup = onNavigateToBackup,
                     onNavigateToSecurityChecklist = onNavigateToSecurityChecklist,
                     onNavigateToWalletManager = onNavigateToWalletManager,
+                    onNavigateToNodeStatus = onNavigateToNodeStatus,
                     onNavigateToDao = {
                         innerNav.navigate(BottomTab.DAO.route) {
                             popUpTo(innerNav.graph.findStartDestination().id) {

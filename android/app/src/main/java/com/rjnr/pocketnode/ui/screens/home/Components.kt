@@ -63,7 +63,8 @@ fun WalletBalanceCard(
     peerCount: Int,
     isBalanceHidden: Boolean = false,
     onToggleVisibility: () -> Unit = {},
-    onCopyAddress: () -> Unit
+    onCopyAddress: () -> Unit,
+    onPeersClick: () -> Unit = {}
 ) {
     Surface(
         color = MaterialTheme.colorScheme.surface,
@@ -145,19 +146,33 @@ fun WalletBalanceCard(
                         )
                     }
                 }
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    Icon(
-                        Lucide.Users,
-                        contentDescription = null,
-                        tint = if (peerCount > 0) MaterialTheme.colorScheme.primary else PendingAmber,
-                        modifier = Modifier.size(14.dp)
-                    )
-                    Spacer(modifier = Modifier.width(8.dp))
-                    Text(
-                        text = "$peerCount peers connected",
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant
-                    )
+                // Tappable shortcut to NodeStatus — same affordance shape as
+                // the address copy chip so the row reads as two parallel
+                // actions (#131).
+                Surface(
+                    color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.05f),
+                    shape = RoundedCornerShape(12.dp)
+                ) {
+                    Row(
+                        modifier = Modifier
+                            .clickable(onClick = onPeersClick)
+                            .padding(horizontal = 12.dp, vertical = 8.dp)
+                            .uaTestTag("home-peers-shortcut"),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Icon(
+                            Lucide.Users,
+                            contentDescription = null,
+                            tint = if (peerCount > 0) MaterialTheme.colorScheme.primary else PendingAmber,
+                            modifier = Modifier.size(14.dp)
+                        )
+                        Spacer(modifier = Modifier.width(8.dp))
+                        Text(
+                            text = "$peerCount peers connected",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
                 }
             }
         }
