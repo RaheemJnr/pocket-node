@@ -7,6 +7,7 @@ import androidx.test.core.app.ApplicationProvider
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
 import androidx.test.uiautomator.By
+import androidx.test.uiautomator.Direction
 import androidx.test.uiautomator.UiDevice
 import androidx.test.uiautomator.Until
 import org.junit.Assert.assertNotNull
@@ -185,9 +186,27 @@ class UpgradeSmokeTest {
      * recompositions during animations / state changes invalidate UiObject2
      * references between `findObject` and `.click()`; retrying with a fresh
      * lookup handles this without forcing slow `waitForIdle` everywhere.
+     *
+     * If the node isn't initially visible the helper looks for the nearest
+     * scrollable ancestor and scrolls down trying to bring it into view.
+     * Small CI emulator viewports often put long screens' primary buttons
+     * below the fold; Compose only emits accessibility nodes for visible
+     * content, so off-screen testTags would otherwise be invisible to UA.
      */
     private fun clickByRes(res: String, timeoutMs: Long = 8_000L, attempts: Int = 6): Boolean {
-        if (!device.wait(Until.hasObject(By.res(res)), timeoutMs)) return false
+        if (!device.wait(Until.hasObject(By.res(res)), timeoutMs)) {
+            // Try scrolling: maybe the node is below the fold and Compose
+            // hasn't emitted accessibility for it yet.
+            val scrollable = device.findObject(By.scrollable(true))
+            if (scrollable != null) {
+                try {
+                    scrollable.scrollUntil(Direction.DOWN, Until.findObject(By.res(res)))
+                } catch (_: Throwable) {
+                    /* best-effort */
+                }
+            }
+            if (!device.wait(Until.hasObject(By.res(res)), 3_000L)) return false
+        }
         repeat(attempts) {
             try {
                 val node = device.findObject(By.res(res)) ?: return@repeat
