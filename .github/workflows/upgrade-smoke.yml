@@ -3,7 +3,6 @@ name: Upgrade Smoke
 on:
   pull_request:
     branches: [main]
-  workflow_dispatch:        # remove before final merge of harness PR
 
 concurrency:
   group: upgrade-smoke-${{ github.ref }}
