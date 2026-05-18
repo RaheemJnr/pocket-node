@@ -1,6 +1,7 @@
 package com.rjnr.pocketnode.data.update
 
 import android.util.Log
+import com.rjnr.pocketnode.BuildConfig
 import io.ktor.client.HttpClient
 import io.ktor.client.request.get
 import io.ktor.client.request.header
@@ -16,8 +17,9 @@ private const val TAG = "UpdateRepository"
 // stale fork URL (`AgustaRC/ckb-wallet-gateway`) that 404s, so the in-app
 // "new version available" notification never fired. Users on those releases
 // must manually grab v1.5.2 once; auto-update works from v1.5.2 onward.
-private const val GITHUB_API_URL =
-    "https://api.github.com/repos/RaheemJnr/pocket-node/releases/latest"
+// Now sourced from BuildConfig (#142B) so the canonical repo identity is
+// reviewed alongside versionCode/versionName.
+private val GITHUB_API_URL: String = BuildConfig.RELEASES_API_URL
 
 @Serializable
 internal data class GitHubReleaseAsset(
