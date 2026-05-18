@@ -138,7 +138,13 @@ jobs:
           emulator-options: -no-window -gpu swiftshader_indirect -noaudio -no-boot-anim -camera-back none
           disable-animations: true
           script: |
-            set -euo pipefail
+            # reactivecircus/android-emulator-runner executes this under
+            # /usr/bin/sh (dash on ubuntu-latest). Dash supports -eu but not
+            # -o pipefail. The tee | grep patterns below survive without it
+            # because each grep reads a file on the next line, not from a pipe.
+            # Multi-line commands are collapsed; \ continuations are not
+            # honored by the action's script splitter.
+            set -eu
             adb wait-for-device
             adb shell input keyevent 82 || true
 
@@ -151,22 +157,18 @@ jobs:
             echo "::endgroup::"
 
             echo "::group::Seed wallet on prev APK"
-            adb shell am instrument -w \
-              -e class com.rjnr.pocketnode.UpgradeSmokeTest#seedFreshWallet \
-              com.rjnr.pocketnode.test/androidx.test.runner.AndroidJUnitRunner | tee seed.log
+            adb shell am instrument -w -e class com.rjnr.pocketnode.UpgradeSmokeTest#seedFreshWallet com.rjnr.pocketnode.test/androidx.test.runner.AndroidJUnitRunner | tee seed.log
             grep -q 'OK (1 test)' seed.log || { echo "Prev APK seed failed; main is broken, not this PR"; exit 1; }
             echo "::endgroup::"
 
             echo "::group::Install PR APK over prev (data preserved)"
             adb shell am force-stop com.rjnr.pocketnode
-            adb logcat -c   # Cover Room migration during the first post-upgrade launch.
+            adb logcat -c
             adb install -r android/app/build/outputs/apk/debug/app-debug.apk
             echo "::endgroup::"
 
             echo "::group::Assert Home renders post-upgrade"
-            adb shell am instrument -w \
-              -e class com.rjnr.pocketnode.UpgradeSmokeTest#assertHomeAfterUpgrade \
-              com.rjnr.pocketnode.test/androidx.test.runner.AndroidJUnitRunner | tee post.log
+            adb shell am instrument -w -e class com.rjnr.pocketnode.UpgradeSmokeTest#assertHomeAfterUpgrade com.rjnr.pocketnode.test/androidx.test.runner.AndroidJUnitRunner | tee post.log
             grep -q 'OK (1 test)' post.log || { echo "Post-upgrade Home assertion failed"; exit 1; }
             echo "::endgroup::"
 
