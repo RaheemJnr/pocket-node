@@ -1,4 +1,6 @@
 v1.6.0:
-- External links (block explorer, GitHub) now open in an in-app browser tab. Returning to the wallet keeps you in the same task, so your phone's lock or face unlock doesn't re-engage on the way back.
+- External links (block explorer, GitHub) now open in an in-app browser tab. Returning to the wallet keeps you in the same task, so your phone's lock or face unlock does not re-engage on the way back.
 - Fixes a bug where your sync mode choice on first wallet registration could be silently overwritten back to the default.
-- Sync mode tooltip on Home now flips above the icon when there's not enough room below, so it stays readable on shorter screens.
+- Sync mode tooltip on Home now flips above the icon when there is not enough room below, so it stays readable on shorter screens.
+- Peers connected indicator on Home is now tappable and opens Node Status directly, no more navigating through Settings.
+- Removed the repeating "Protect your funds" pop-up. The home banner still surfaces backup and PIN setup.
