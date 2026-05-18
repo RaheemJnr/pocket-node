@@ -20,9 +20,14 @@ android {
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
 
-        // Only include ARM ABIs — x86_64 is emulator-only and adds ~29 MB
+        // Only include ARM ABIs — x86_64 is emulator-only and adds ~29 MB.
+        // CI's upgrade-smoke harness opts in via BUILD_X86_64=1 (matched in
+        // external/ckb-light-client/build-android-jni.sh).
         ndk {
             abiFilters += listOf("arm64-v8a", "armeabi-v7a")
+            if (System.getenv("BUILD_X86_64") == "1") {
+                abiFilters += "x86_64"
+            }
         }
 
         // ksp { arg("room.schemaLocation", "$projectDir/schemas") } is
@@ -207,6 +212,12 @@ dependencies {
     testImplementation("androidx.test:core:1.6.1")
     testImplementation(libs.mockk)
     testImplementation(libs.kotlinx.coroutines.test)
+
+    // Instrumented tests
+    androidTestImplementation("androidx.test.ext:junit:1.2.1")
+    androidTestImplementation("androidx.test:runner:1.6.2")
+    androidTestImplementation("androidx.test:rules:1.6.1")
+    androidTestImplementation("androidx.test.uiautomator:uiautomator:2.3.0")
 }
 
 tasks.register<Exec>("cargoBuild") {

@@ -1,6 +1,7 @@
 package com.rjnr.pocketnode.ui.components
 
 import androidx.compose.foundation.clickable
+import com.rjnr.pocketnode.ui.util.uaTestTag
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
@@ -202,6 +203,7 @@ internal fun SyncOptionsSheet(
                     },
                     enabled = selectedMode != SyncMode.CUSTOM ||
                         (parsedHeight != null && parsedHeight > 0 && withinTip),
+                    modifier = Modifier.uaTestTag("sync-sheet-apply"),
                 ) {
                     Text(stringResource(R.string.common_apply))
                 }
