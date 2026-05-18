@@ -110,8 +110,6 @@ class HomeViewModel @Inject constructor(
     private val _navEvents = Channel<HomeNavEvent>(Channel.BUFFERED)
     val navEvents = _navEvents.receiveAsFlow()
 
-    private var previousBalanceWasZero = true
-
     // Tracks the last successful CKB/USD fetch so we can throttle
     // refresh-on-foreground and the 5-min ticker (#117 deferred items).
     private var lastPriceFetchAt: Long = 0L
@@ -179,25 +177,6 @@ class HomeViewModel @Inject constructor(
                         fiatBalance = fiat ?: current.fiatBalance
                     )
                 }
-                // Post-deposit reminder: trigger when balance goes from zero to
-                // non-zero and the wallet is not fully secured. Per-wallet
-                // "already shown" flag prevents the dialog from re-appearing on
-                // every VM init for an already-funded unsecured wallet — the
-                // `previousBalanceWasZero` field always starts true on init, so
-                // without persistence the cached/synced balance emission re-trips
-                // the condition every reopen. (#116)
-                val hasPin = _uiState.value.hasPinOrBiometrics
-                val hasBackup = _uiState.value.hasMnemonicBackup
-                val activeId = _uiState.value.wallets.find { it.isActive }?.walletId.orEmpty()
-                val alreadyShown = activeId.isNotEmpty()
-                    && walletPreferences.isPostDepositReminderShown(activeId)
-                if (previousBalanceWasZero && ckb > 0.0 && (!hasPin || !hasBackup) && !alreadyShown) {
-                    if (activeId.isNotEmpty()) {
-                        walletPreferences.setPostDepositReminderShown(activeId)
-                    }
-                    _uiState.update { it.copy(showPostDepositReminder = true) }
-                }
-                previousBalanceWasZero = (ckb == 0.0)
             }
         }
 
@@ -626,10 +605,6 @@ class HomeViewModel @Inject constructor(
         _uiState.update { it.copy(showBackupReminder = false) }
     }
 
-    fun dismissPostDepositReminder() {
-        _uiState.update { it.copy(showPostDepositReminder = false) }
-    }
-
     fun toggleBalanceVisibility() {
         _uiState.update { it.copy(isBalanceHidden = !it.isBalanceHidden) }
     }
@@ -897,7 +872,6 @@ data class HomeUiState(
     val showInstallPermissionNeeded: Boolean = false,
     val hasPinOrBiometrics: Boolean = false,
     val hasMnemonicBackup: Boolean = false,
-    val showPostDepositReminder: Boolean = false,
     val isSwitchingWallet: Boolean = false,
     val savedCustomBlockHeight: Long? = null,
     val walletBalances: Map<String, String> = emptyMap(),

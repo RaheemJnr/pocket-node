@@ -292,31 +292,6 @@ fun HomeScreen(
         )
     }
 
-    // Post-deposit security reminder
-    if (uiState.showPostDepositReminder) {
-        AlertDialog(
-            onDismissRequest = { viewModel.dismissPostDepositReminder() },
-            title = { Text("Protect your funds") },
-            text = {
-                Text(
-                    "You now have funds in this wallet. Set up a PIN and write down " +
-                        "your recovery phrase to protect them."
-                )
-            },
-            confirmButton = {
-                Button(onClick = {
-                    viewModel.dismissPostDepositReminder()
-                    onNavigateToSecurityChecklist()
-                }) { Text("Secure now") }
-            },
-            dismissButton = {
-                TextButton(onClick = { viewModel.dismissPostDepositReminder() }) {
-                    Text("Later")
-                }
-            }
-        )
-    }
-
     LaunchedEffect(uiState.error) {
         uiState.error?.let { error ->
             snackbarHostState.showSnackbar(error)
