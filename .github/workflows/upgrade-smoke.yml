@@ -9,6 +9,11 @@ concurrency:
   group: upgrade-smoke-${{ github.ref }}
   cancel-in-progress: true
 
+# Skip-path posts a comment on the PR when no prev artifact exists.
+permissions:
+  contents: read
+  pull-requests: write
+
 jobs:
   smoke:
     runs-on: ubuntu-latest
@@ -74,13 +79,19 @@ jobs:
             core.notice('Skipping upgrade-smoke: no prev artifact');
             // Only post a PR comment when triggered by a pull_request.
             // workflow_dispatch runs have no issue context — would 404.
+            // Soft-fail the API call so a missing pull-requests:write
+            // permission doesn't turn the skip-path into a job failure.
             if (context.eventName === 'pull_request' && context.issue && context.issue.number) {
-              await github.rest.issues.createComment({
-                owner: context.repo.owner,
-                repo: context.repo.repo,
-                issue_number: context.issue.number,
-                body: '⚠️ upgrade-smoke skipped: no `pocketnode-prev-jni-debug` artifact on main yet. Run android-ci.yml on main first, then re-run this job.'
-              });
+              try {
+                await github.rest.issues.createComment({
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  issue_number: context.issue.number,
+                  body: '⚠️ upgrade-smoke skipped: no `pocketnode-prev-jni-debug` artifact on main yet. Run android-ci.yml on main first, then re-run this job.'
+                });
+              } catch (e) {
+                core.warning(`Could not post skip comment: ${e.message}`);
+              }
             }
 
       - name: Create dummy google-services.json
