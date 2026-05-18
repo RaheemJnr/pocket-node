@@ -11,10 +11,19 @@ set -euo pipefail
 
 capture_state() {
   echo "::group::Capturing failure state"
+  # Post-instrumentation state (likely launcher; instrumentation cleanup
+  # tore down the app before this trap fired). Useful as a sanity check.
   adb shell screencap -p /sdcard/post.png 2>/dev/null || true
   adb pull /sdcard/post.png post.png 2>/dev/null || true
   adb shell uiautomator dump /sdcard/dump.xml 2>/dev/null || true
   adb pull /sdcard/dump.xml ui-dump.xml 2>/dev/null || true
+  # The TestWatcher rule inside UpgradeSmokeTest grabs screenshot + UI
+  # dump on failure — pull both so post-mortem sees the actual state
+  # at the moment the assertion fired.
+  adb pull /sdcard/fail-seedFreshWallet.png fail-seedFreshWallet.png 2>/dev/null || true
+  adb pull /sdcard/fail-seedFreshWallet.xml fail-seedFreshWallet.xml 2>/dev/null || true
+  adb pull /sdcard/fail-assertHomeAfterUpgrade.png fail-assertHomeAfterUpgrade.png 2>/dev/null || true
+  adb pull /sdcard/fail-assertHomeAfterUpgrade.xml fail-assertHomeAfterUpgrade.xml 2>/dev/null || true
   adb logcat -d > logcat-post.txt 2>/dev/null || true
   echo "::endgroup::"
 }

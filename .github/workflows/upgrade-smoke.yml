@@ -151,6 +151,8 @@ jobs:
             seed.log
             post.log
             ui-dump.xml
+            fail-*.png
+            fail-*.xml
             logcat-post.txt
             post.png
           if-no-files-found: warn

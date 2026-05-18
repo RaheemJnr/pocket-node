@@ -12,8 +12,13 @@ import androidx.test.uiautomator.Until
 import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertTrue
 import org.junit.Before
+import org.junit.Rule
 import org.junit.Test
+import org.junit.rules.TestWatcher
+import org.junit.runner.Description
 import org.junit.runner.RunWith
+import java.io.File
+import java.io.FileOutputStream
 
 private const val PKG = "com.rjnr.pocketnode"
 private const val LAUNCH_TIMEOUT_MS = 10_000L
@@ -35,6 +40,29 @@ class UpgradeSmokeTest {
     fun setUp() {
         device = UiDevice.getInstance(InstrumentationRegistry.getInstrumentation())
         ctx = ApplicationProvider.getApplicationContext()
+    }
+
+    /**
+     * Capture screenshot + window dump BEFORE instrumentation cleanup tears
+     * the app down. The workflow's post-instrument trap fires too late —
+     * by then `am instrument` has force-stopped the app and the screen is
+     * back to the launcher. Files land on /sdcard so the workflow trap
+     * can pull them.
+     */
+    @Rule
+    @JvmField
+    val failureCapture: TestWatcher = object : TestWatcher() {
+        override fun failed(e: Throwable, description: Description) {
+            val tag = description.methodName
+            try {
+                device.takeScreenshot(File("/sdcard/fail-$tag.png"))
+            } catch (_: Throwable) { /* best-effort */ }
+            try {
+                FileOutputStream("/sdcard/fail-$tag.xml").use { out ->
+                    device.dumpWindowHierarchy(out)
+                }
+            } catch (_: Throwable) { /* best-effort */ }
+        }
     }
 
     /**
