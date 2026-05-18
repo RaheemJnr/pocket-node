@@ -79,11 +79,8 @@ if grep -qE 'FATAL EXCEPTION|AndroidRuntime.*FATAL' logcat-post.txt; then
 fi
 echo "::endgroup::"
 
-echo "::group::Process liveness"
-pid=$(adb shell pidof com.rjnr.pocketnode 2>/dev/null | tr -d '\r' || true)
-if [ -z "$pid" ]; then
-  echo "com.rjnr.pocketnode not running after smoke"
-  exit 1
-fi
-echo "pid=$pid"
-echo "::endgroup::"
+# pidof check intentionally omitted: `am instrument -w` cleanup tears
+# down the target process after the test finishes, so pidof is always
+# empty here. assertHomeAfterUpgrade passing already proves the process
+# was alive when the Home composable rendered — that's the only window
+# we care about.
