@@ -1,5 +1,6 @@
 package com.rjnr.pocketnode.data.update
 
+import com.rjnr.pocketnode.BuildConfig
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNull
@@ -67,5 +68,31 @@ class UpdateRepositoryTest {
     fun `findApkAsset returns null for empty list`() {
         val result = UpdateRepository.findApkAsset(emptyList())
         assertNull(result)
+    }
+
+    // --- BuildConfig.RELEASES_API_URL self-check (#142B) ---
+    // Guards against a future typo or rebase mishap reintroducing the
+    // v1.5.0/v1.5.1 regression where the auto-update poll targeted the wrong
+    // GitHub repo. Build-time string lives in app/build.gradle.kts; if either
+    // diverges, this test fails.
+
+    @Test
+    fun `RELEASES_API_URL targets the canonical project repo`() {
+        assertEquals(
+            "https://api.github.com/repos/RaheemJnr/pocket-node/releases/latest",
+            BuildConfig.RELEASES_API_URL
+        )
+    }
+
+    @Test
+    fun `RELEASES_API_URL is a GitHub releases-latest endpoint`() {
+        assertTrue(
+            "RELEASES_API_URL must point at GitHub's releases-latest endpoint",
+            BuildConfig.RELEASES_API_URL.startsWith("https://api.github.com/repos/")
+        )
+        assertTrue(
+            "RELEASES_API_URL must end with /releases/latest",
+            BuildConfig.RELEASES_API_URL.endsWith("/releases/latest")
+        )
     }
 }

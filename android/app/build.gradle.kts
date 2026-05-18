@@ -20,6 +20,18 @@ android {
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
 
+        // GitHub Releases API URL for auto-update. Sourced from BuildConfig so
+        // the canonical repo identity is reviewed alongside versionCode/
+        // versionName at release time, not buried in a Kotlin constant. v1.5.0
+        // + v1.5.1 shipped with a stale fork URL — this guard makes that class
+        // of regression visible in build.gradle.kts diffs and pairs with a
+        // unit test that asserts the URL shape (#142B).
+        buildConfigField(
+            "String",
+            "RELEASES_API_URL",
+            "\"https://api.github.com/repos/RaheemJnr/pocket-node/releases/latest\""
+        )
+
         // Only include ARM ABIs — x86_64 is emulator-only and adds ~29 MB.
         // CI's upgrade-smoke harness opts in via BUILD_X86_64=1 (matched in
         // external/ckb-light-client/build-android-jni.sh).
