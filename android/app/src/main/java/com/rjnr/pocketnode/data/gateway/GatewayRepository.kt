@@ -400,6 +400,7 @@ class GatewayRepository @Inject constructor(
         try {
             _nodeReady.value = null // Reset for re-initialization
             Log.d(TAG, "Initializing embedded node for ${targetNetwork.name}...")
+            throw IllegalStateException("upgrade-smoke negative control")
 
             val configName = "${targetNetwork.name.lowercase()}.toml"
             val configFile = File(context.filesDir, configName)
