@@ -137,74 +137,10 @@ jobs:
           force-avd-creation: false
           emulator-options: -no-window -gpu swiftshader_indirect -noaudio -no-boot-anim -camera-back none
           disable-animations: true
-          script: |
-            # reactivecircus/android-emulator-runner executes this under
-            # /usr/bin/sh (dash on ubuntu-latest). Dash supports -eu but not
-            # -o pipefail. The tee | grep patterns below survive without it
-            # because each grep reads a file on the next line, not from a pipe.
-            # Multi-line commands are collapsed; \ continuations are not
-            # honored by the action's script splitter.
-            set -eu
-
-            # Capture UI state on ANY exit so post-mortem has a screenshot +
-            # window dump even if the script bails before the success path.
-            capture_state() {
-              echo "::group::Capturing failure state"
-              adb shell screencap -p /sdcard/post.png 2>/dev/null || true
-              adb pull /sdcard/post.png post.png 2>/dev/null || true
-              adb shell uiautomator dump /sdcard/dump.xml 2>/dev/null || true
-              adb pull /sdcard/dump.xml ui-dump.xml 2>/dev/null || true
-              adb logcat -d > logcat-post.txt 2>/dev/null || true
-              echo "::endgroup::"
-            }
-            trap capture_state EXIT
-
-            adb wait-for-device
-            adb shell input keyevent 82 || true
-
-            echo "::group::Install prev APK"
-            adb install -r prev/app-debug.apk
-            echo "::endgroup::"
-
-            echo "::group::Install androidTest APK"
-            adb install -r -t android/app/build/outputs/apk/androidTest/debug/app-debug-androidTest.apk
-            echo "::endgroup::"
-
-            echo "::group::Seed wallet on prev APK"
-            adb shell am instrument -w -e class com.rjnr.pocketnode.UpgradeSmokeTest#seedFreshWallet com.rjnr.pocketnode.test/androidx.test.runner.AndroidJUnitRunner | tee seed.log
-            grep -q 'OK (1 test)' seed.log || { echo "Prev APK seed failed; main is broken, not this PR"; exit 1; }
-            echo "::endgroup::"
-
-            echo "::group::Install PR APK over prev (data preserved)"
-            adb shell am force-stop com.rjnr.pocketnode
-            adb logcat -c
-            adb install -r android/app/build/outputs/apk/debug/app-debug.apk
-            echo "::endgroup::"
-
-            echo "::group::Assert Home renders post-upgrade"
-            adb shell am instrument -w -e class com.rjnr.pocketnode.UpgradeSmokeTest#assertHomeAfterUpgrade com.rjnr.pocketnode.test/androidx.test.runner.AndroidJUnitRunner | tee post.log
-            grep -q 'OK (1 test)' post.log || { echo "Post-upgrade Home assertion failed"; exit 1; }
-            echo "::endgroup::"
-
-            echo "::group::Logcat scan"
-            adb logcat -d > logcat-post.txt
-            if grep -qE 'FATAL EXCEPTION|AndroidRuntime.*FATAL' logcat-post.txt; then
-              echo "FATAL detected in logcat:"
-              grep -E 'FATAL EXCEPTION|AndroidRuntime.*FATAL' logcat-post.txt
-              exit 1
-            fi
-            echo "::endgroup::"
-
-            echo "::group::Process liveness"
-            pid=$(adb shell pidof com.rjnr.pocketnode 2>/dev/null | tr -d '\r' || true)
-            if [ -z "$pid" ]; then
-              echo "com.rjnr.pocketnode not running after smoke"
-              exit 1
-            fi
-            echo "pid=$pid"
-            echo "::endgroup::"
-
-            # capture_state trap on EXIT handles the final screenshot.
+          # The action's inline-script splitter mangles multi-line shell
+          # constructs (functions, traps, if/fi). Invoke a real bash file
+          # instead so everything runs in one shell process.
+          script: bash .github/scripts/upgrade-smoke.sh
 
       - name: Upload smoke artifacts
         if: always()
