@@ -611,11 +611,33 @@ class GatewayRepository @Inject constructor(
     suspend fun hasWallet(): Boolean = keyManager.hasWallet()
 
     /**
+     * Resolve the active wallet type from durable state before making startup
+     * routing decisions. During a cold start [activeWalletType] may still hold
+     * its constructor default while repository initialization is running in the
+     * background, so trusting only the in-memory value can misclassify raw-key
+     * wallets as mnemonic wallets.
+     */
+    private suspend fun resolveActiveWalletType(): String {
+        val activeWallet = walletDao.getActive()
+            ?: activeWalletId.takeIf { it.isNotBlank() }?.let { walletDao.getById(it) }
+
+        if (activeWallet != null) {
+            activeWalletId = activeWallet.walletId
+            activeWalletType = activeWallet.type
+            return activeWallet.type
+        }
+
+        // Legacy single-wallet fallback for installs that have not been migrated
+        // into Room yet. KeyManager defaults unknown legacy wallets to raw-key.
+        return keyManager.getWalletType().also { activeWalletType = it }
+    }
+
+    /**
      * Returns true if the current wallet is a mnemonic wallet that hasn't completed backup verification.
      * Used by MainActivity to gate access to the dashboard until backup is done.
      */
     suspend fun needsMnemonicBackup(): Boolean {
-        return activeWalletType == KeyManager.WALLET_TYPE_MNEMONIC
+        return resolveActiveWalletType() == KeyManager.WALLET_TYPE_MNEMONIC
             && !hasMnemonicBackupForActiveWallet()
     }
 
