@@ -294,6 +294,15 @@ class SendViewModel @Inject constructor(
                 }
                 return
             }
+            is WalletKeyReader.Result.KeyInvalidated -> {
+                _uiState.update {
+                    it.copy(
+                        error = "Biometric enrollment changed — re-import this wallet from its recovery phrase to continue",
+                        isLoading = false,
+                    )
+                }
+                return
+            }
             is WalletKeyReader.Result.Success -> {
                 proceedWithSend(amountShannons, capturedAddress, readResult.privateKey)
             }

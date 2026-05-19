@@ -1,5 +1,6 @@
 package com.rjnr.pocketnode.data.wallet
 
+import android.security.keystore.KeyPermanentlyInvalidatedException
 import android.util.Log
 import androidx.fragment.app.FragmentActivity
 import com.rjnr.pocketnode.data.auth.AuthManager
@@ -48,6 +49,13 @@ class WalletKeyReader @Inject constructor(
         data class AuthError(val errorCode: Int, val message: CharSequence) : Result()
         /** Wallet row missing, decrypt failed, or unknown kdfVersion. */
         data class NotAvailable(val reason: String) : Result()
+        /**
+         * The V2 Keystore key has been invalidated because the user changed
+         * biometric enrollment (added/removed a fingerprint or face).
+         * Recovery requires re-importing the wallet from the recovery
+         * phrase — the encrypted bundle on disk is unrecoverable.
+         */
+        object KeyInvalidated : Result()
     }
 
     sealed class MaterialResult {
@@ -60,6 +68,7 @@ class WalletKeyReader @Inject constructor(
         object Cancelled : MaterialResult()
         data class AuthError(val errorCode: Int, val message: CharSequence) : MaterialResult()
         data class NotAvailable(val reason: String) : MaterialResult()
+        object KeyInvalidated : MaterialResult()
     }
 
     /**
@@ -132,7 +141,12 @@ class WalletKeyReader @Inject constructor(
     ): MaterialResult {
         val entity = keyMaterialDao.getByWalletId(walletId)
             ?: return MaterialResult.NotAvailable("no key_material row for $walletId")
-        val cipher = encryptionManager.newDecryptCipherV2(entity.iv)
+        val cipher = try {
+            encryptionManager.newDecryptCipherV2(entity.iv)
+        } catch (e: KeyPermanentlyInvalidatedException) {
+            Log.w(TAG, "V2 key invalidated by biometric enrollment change for $walletId")
+            return MaterialResult.KeyInvalidated
+        }
         val authResult = authManager.authenticateForCipher(
             activity = activity,
             cipher = cipher,
@@ -174,7 +188,16 @@ class WalletKeyReader @Inject constructor(
     ): Result {
         val entity = keyMaterialDao.getByWalletId(walletId)
             ?: return Result.NotAvailable("no key_material row for $walletId")
-        val cipher = encryptionManager.newDecryptCipherV2(entity.iv)
+        val cipher = try {
+            encryptionManager.newDecryptCipherV2(entity.iv)
+        } catch (e: KeyPermanentlyInvalidatedException) {
+            // User changed biometric enrollment — the V2 key was wiped by
+            // Keystore (setInvalidatedByBiometricEnrollment=true). The
+            // ciphertext on disk is unrecoverable; caller must surface a
+            // re-import flow to the user.
+            Log.w(TAG, "V2 key invalidated by biometric enrollment change for $walletId")
+            return Result.KeyInvalidated
+        }
         val authResult = authManager.authenticateForCipher(
             activity = activity,
             cipher = cipher,

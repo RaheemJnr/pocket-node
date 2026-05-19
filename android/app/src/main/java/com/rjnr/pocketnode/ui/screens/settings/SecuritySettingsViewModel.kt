@@ -30,7 +30,26 @@ data class SecuritySettingsUiState(
     val canRemovePin: Boolean = false,
     val biometricStatusText: String = "",
     val isAuthBeforeSendEnabled: Boolean = false,
-    val error: String? = null
+    val error: String? = null,
+    /**
+     * Non-null when the user is being asked to confirm that adding or
+     * removing a biometric enrollment will invalidate their V2 wallet
+     * keys. The dialog explains the consequence and offers a
+     * cancel/proceed choice (#213 sub-PR 6). When the user proceeds, the
+     * wallet remains usable only via recovery-phrase re-import.
+     */
+    val biometricEnrollmentWarning: BiometricEnrollmentWarning? = null,
+)
+
+/**
+ * State for the biometric-enrollment warning modal shown when the user
+ * is about to enable biometric on a device that already has wallets.
+ * The V2 Keystore key uses `setInvalidatedByBiometricEnrollment(true)`,
+ * so any future change to enrolled biometrics wipes the key and the
+ * wallet can only be recovered from its mnemonic.
+ */
+data class BiometricEnrollmentWarning(
+    val enabling: Boolean,
 )
 
 @HiltViewModel
@@ -108,6 +127,35 @@ class SecuritySettingsViewModel @Inject constructor(
             _uiState.update { it.copy(error = "Set a PIN first to enable biometric unlock") }
             return
         }
+        // The V2 Keystore key is configured with
+        // setInvalidatedByBiometricEnrollment(true), so any later change
+        // to enrolled biometrics will wipe the key. Warn the user once
+        // here so they understand they MUST keep their recovery phrase
+        // backed up; if they later add or remove a fingerprint, the
+        // wallet becomes unreadable except via re-import (#213 sub-PR 6).
+        viewModelScope.launch {
+            if (walletDao.count() > 0) {
+                _uiState.update {
+                    it.copy(biometricEnrollmentWarning = BiometricEnrollmentWarning(enabled))
+                }
+            } else {
+                applyBiometricToggle(enabled)
+            }
+        }
+    }
+
+    /** Called from the warning dialog when the user accepts the trade-off. */
+    fun confirmBiometricEnrollmentWarning() {
+        val warning = _uiState.value.biometricEnrollmentWarning ?: return
+        applyBiometricToggle(warning.enabling)
+        _uiState.update { it.copy(biometricEnrollmentWarning = null) }
+    }
+
+    fun dismissBiometricEnrollmentWarning() {
+        _uiState.update { it.copy(biometricEnrollmentWarning = null) }
+    }
+
+    private fun applyBiometricToggle(enabled: Boolean) {
         authManager.setBiometricEnabled(enabled)
         _uiState.update { it.copy(isBiometricEnabled = enabled, error = null) }
     }
