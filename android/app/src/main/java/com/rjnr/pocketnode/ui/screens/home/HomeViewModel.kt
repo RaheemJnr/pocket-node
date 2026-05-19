@@ -873,7 +873,13 @@ class HomeViewModel @Inject constructor(
 
     override fun onCleared() {
         super.onCleared()
-        updateDownloader.cleanup()
+        // Do NOT call updateDownloader.cleanup() here. The downloader is a
+        // @Singleton owned at app scope; the banner above the bottom nav
+        // (driven by UpdateBannerViewModel in MainScreen) is what surfaces
+        // its state. Cancelling here would kill an in-flight update the
+        // moment HomeScreen unmounts (e.g. configuration change, swap to
+        // Activity tab). The downloader cleans itself up on init for stale
+        // APKs and on cancel/resetState for in-flight ones.
     }
 
     companion object {

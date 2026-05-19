@@ -33,6 +33,9 @@ class UpdateBannerViewModel @Inject constructor(
     /** User tapped Later/Dismiss to hide a terminal banner. */
     fun dismiss() = updateDownloader.resetState()
 
+    /** User tapped "Tap to retry" on a failed download. */
+    fun retry() = updateDownloader.retry()
+
     /**
      * Called from MainScreen's lifecycle observer when the activity resumes.
      * If we were Installing and the user came back (cancelled / install

@@ -83,7 +83,7 @@ fun MainScreen(
                     state = updateDownloadState,
                     onInstallClick = { updateBannerVm.installNow() },
                     onCancelClick = { updateBannerVm.cancel() },
-                    onRetryClick = { updateBannerVm.dismiss() },
+                    onRetryClick = { updateBannerVm.retry() },
                     onDismissClick = { updateBannerVm.dismiss() },
                 )
                 NavigationBar(

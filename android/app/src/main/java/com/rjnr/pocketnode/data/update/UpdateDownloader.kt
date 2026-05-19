@@ -22,11 +22,13 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.cancelAndJoin
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
 import java.io.File
+import java.io.IOException
 import javax.inject.Inject
 import javax.inject.Singleton
 
@@ -89,6 +91,12 @@ class UpdateDownloader @Inject constructor(
     private val _state = MutableStateFlow<DownloadState>(DownloadState.Idle)
     val state: StateFlow<DownloadState> = _state.asStateFlow()
 
+    // Cached download arguments so a Failed → Retry tap can restart the
+    // same download without forcing the user back through the version
+    // dialog. Cleared after a successful queue and on resetState.
+    private var lastApkUrl: String? = null
+    private var lastTotalBytesHint: Long = -1L
+
     init {
         // Reclaim disk on process start. After a successful install the new
         // app process boots, this init runs, and the stale ~39 MB APK we left
@@ -108,6 +116,18 @@ class UpdateDownloader @Inject constructor(
 
     fun resetState() {
         _state.value = DownloadState.Idle
+        lastApkUrl = null
+        lastTotalBytesHint = -1L
+    }
+
+    /**
+     * Re-run the last attempted download. Called from the banner's "Tap
+     * to retry" affordance on the Failed state. Bails silently if no
+     * download has ever been queued (no URL cached).
+     */
+    fun retry() {
+        val url = lastApkUrl ?: return
+        downloadAndInstall(apkUrl = url, totalBytesHint = lastTotalBytesHint)
     }
 
     /**
@@ -122,17 +142,27 @@ class UpdateDownloader @Inject constructor(
      * trivial via Job.cancel.
      */
     fun downloadAndInstall(apkUrl: String, totalBytesHint: Long = -1L) {
-        cleanup()
-        _state.value = DownloadState.Downloading(0L, totalBytesHint.coerceAtLeast(0L))
+        // Remember args for Retry. Set before the launch so a quick
+        // Failed→Retry cycle finds the URL even if the job's catch block
+        // has not run yet.
+        lastApkUrl = apkUrl
+        lastTotalBytesHint = totalBytesHint
 
-        downloadJob = scope.launch {
+        // Capture and replace the previous job atomically. The new job
+        // awaits the old one's cancellation before touching the APK path,
+        // so the old coroutine's CancellationException handler cannot
+        // delete the file the new run wrote (race noted in PR #175 review).
+        val previousJob = downloadJob
+        val newJob = scope.launch {
+            previousJob?.cancelAndJoin()
+            cleanupStaleApk()
+            _state.value = DownloadState.Downloading(0L, totalBytesHint.coerceAtLeast(0L))
+
             val apkFile = File(
                 context.getExternalFilesDir(Environment.DIRECTORY_DOWNLOADS),
                 APK_FILE_NAME
             )
             apkFile.parentFile?.mkdirs()
-            // Wipe any partial file from a prior aborted attempt.
-            if (apkFile.exists()) apkFile.delete()
 
             try {
                 httpClient.prepareGet(apkUrl) {
@@ -148,6 +178,15 @@ class UpdateDownloader @Inject constructor(
                         )
                     }
                 }.execute { response ->
+                    // expectSuccess = false on this client, so non-2xx
+                    // responses arrive here as plain HttpResponse. Without
+                    // this check, a 404/403 HTML error page would be
+                    // written to apkFile and we would mark it ReadyToInstall
+                    // — surfacing a malformed APK to the system installer.
+                    val status = response.status.value
+                    if (status !in 200..299) {
+                        throw IOException("Update download failed with HTTP $status")
+                    }
                     val channel: ByteReadChannel = response.bodyAsChannel()
                     apkFile.outputStream().use { out ->
                         val buf = ByteArray(DOWNLOAD_BUFFER_BYTES)
@@ -164,7 +203,10 @@ class UpdateDownloader @Inject constructor(
             } catch (e: CancellationException) {
                 Log.d(TAG, "Download cancelled")
                 if (apkFile.exists()) apkFile.delete()
-                _state.value = DownloadState.Idle
+                // Do not touch _state here. If a newer download has already
+                // started, it owns the state; resetting to Idle would clear
+                // the replacement banner. The fresh job sets Downloading at
+                // its start, overwriting any stale Idle anyway.
                 throw e
             } catch (e: HttpRequestTimeoutException) {
                 Log.w(TAG, "Download timed out", e)
@@ -176,6 +218,7 @@ class UpdateDownloader @Inject constructor(
                 _state.value = DownloadState.Failed(e.message ?: "Download failed")
             }
         }
+        downloadJob = newJob
     }
 
     /**
@@ -194,6 +237,8 @@ class UpdateDownloader @Inject constructor(
     fun cancel() {
         downloadJob?.cancel()
         downloadJob = null
+        lastApkUrl = null
+        lastTotalBytesHint = -1L
         val apkFile = File(
             context.getExternalFilesDir(Environment.DIRECTORY_DOWNLOADS),
             APK_FILE_NAME

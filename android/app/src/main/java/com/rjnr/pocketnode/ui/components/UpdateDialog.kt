@@ -68,7 +68,8 @@ fun InstallPermissionDialog(
         text = {
             Text(
                 "Android needs your permission to install updates for Pocket Node. " +
-                    "Open settings, toggle \"Allow from this source\" on, then come back and tap Update again."
+                    "Open settings, toggle \"Allow from this source\" on, then return to Pocket Node. " +
+                    "The update will resume automatically."
             )
         },
         confirmButton = {
