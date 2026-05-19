@@ -3,6 +3,7 @@ package com.rjnr.pocketnode.data.database
 import androidx.room.Database
 import androidx.room.RoomDatabase
 import com.rjnr.pocketnode.data.database.dao.BalanceCacheDao
+import com.rjnr.pocketnode.data.database.dao.ContactDao
 import com.rjnr.pocketnode.data.database.dao.DaoCellDao
 import com.rjnr.pocketnode.data.database.dao.HeaderCacheDao
 import com.rjnr.pocketnode.data.database.dao.KeyMaterialDao
@@ -69,5 +70,5 @@ abstract class AppDatabase : RoomDatabase() {
     abstract fun keyMaterialDao(): KeyMaterialDao
     abstract fun syncProgressDao(): SyncProgressDao
     abstract fun pendingBroadcastDao(): PendingBroadcastDao
-    // contactDao() added in #190 alongside the ContactDao interface.
+    abstract fun contactDao(): ContactDao
 }
