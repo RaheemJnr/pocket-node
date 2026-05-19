@@ -65,8 +65,19 @@ fun WalletSettingsScreen(
     val uiState by viewModel.uiState.collectAsState()
     val snackbarHostState = remember { SnackbarHostState() }
     val clipboardManager = androidx.compose.ui.platform.LocalClipboardManager.current
+    val context = androidx.compose.ui.platform.LocalContext.current
     var showSeedPhrase by rememberSaveable { mutableStateOf(false) }
     var showAddAccountDialog by remember { mutableStateOf(false) }
+
+    // V2-aware: route the "view recovery phrase" / "view private key"
+    // taps through the activity-bound entry point so a CryptoObject
+    // BiometricPrompt fires for V2 wallets (#213 sub-PR 5). V1 wallets
+    // fall through to the silent loadSensitiveData() inside the VM.
+    fun unlockSensitive() {
+        val activity = context as? androidx.fragment.app.FragmentActivity
+        if (activity != null) viewModel.loadSensitiveData(activity)
+        else viewModel.loadSensitiveData()
+    }
 
     LaunchedEffect(uiState.deleted) {
         if (uiState.deleted) onNavigateBack()
@@ -135,7 +146,12 @@ fun WalletSettingsScreen(
                 Button(
                     onClick = {
                         if (accountName.isNotBlank()) {
-                            viewModel.addSubAccount(accountName.trim())
+                            val activity = context as? androidx.fragment.app.FragmentActivity
+                            if (activity != null) {
+                                viewModel.addSubAccount(activity, accountName.trim())
+                            } else {
+                                viewModel.addSubAccount(accountName.trim())
+                            }
                             showAddAccountDialog = false
                         }
                     },
@@ -323,7 +339,7 @@ fun WalletSettingsScreen(
                                     onNavigateToPinVerify()
                                 } else {
                                     showSeedPhrase = true
-                                    viewModel.loadSensitiveData()
+                                    unlockSensitive()
                                 }
                             }
                         )
@@ -411,7 +427,7 @@ fun WalletSettingsScreen(
                                     onNavigateToPinVerify()
                                 } else {
                                     showPrivateKey = true
-                                    viewModel.loadSensitiveData()
+                                    unlockSensitive()
                                 }
                             }
                         )

@@ -248,7 +248,13 @@ fun DaoScreen(
             currentApc = uiState.overview.currentApc,
             onDeposit = { amount ->
                 showDepositSheet = false
-                viewModel.deposit(amount)
+                // V2-aware: passing the host FragmentActivity lets the VM
+                // drive a BiometricPrompt CryptoObject for V2 wallets when
+                // signing the DAO deposit (#213 sub-PR 5). V1 wallets fall
+                // through the same path with no extra prompt.
+                val activity = context as? FragmentActivity
+                if (activity != null) viewModel.depositWithActivity(activity, amount)
+                else viewModel.deposit(amount)
             },
             onDismiss = { showDepositSheet = false }
         )
@@ -273,7 +279,9 @@ fun DaoScreen(
             },
             confirmButton = {
                 Button(onClick = {
-                    viewModel.withdraw(deposit)
+                    val activity = context as? FragmentActivity
+                    if (activity != null) viewModel.withdrawWithActivity(activity, deposit)
+                    else viewModel.withdraw(deposit)
                     withdrawTarget = null
                 }) {
                     Text("Withdraw")
@@ -303,7 +311,9 @@ fun DaoScreen(
             },
             confirmButton = {
                 Button(onClick = {
-                    viewModel.unlock(deposit)
+                    val activity = context as? FragmentActivity
+                    if (activity != null) viewModel.unlockWithActivity(activity, deposit)
+                    else viewModel.unlock(deposit)
                     unlockTarget = null
                 }) {
                     Text("Unlock")

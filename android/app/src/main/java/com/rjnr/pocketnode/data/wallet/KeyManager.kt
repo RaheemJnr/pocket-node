@@ -328,6 +328,42 @@ class KeyManager @Inject constructor(
         )
     }
 
+    /**
+     * Recover a wallet's lock script from a cached CKB address without
+     * touching key material. Used by init/sync paths that previously read
+     * the private key just to compute the lock args (those reads would
+     * now require a BiometricPrompt for V2 wallets and crash app startup).
+     *
+     * The bech32 address encodes the same args+codeHash+hashType triple
+     * that [deriveLockScript] would produce, so the round-trip is exact.
+     */
+    fun deriveLockScriptFromAddress(address: String): Script {
+        return AddressUtils.decode(address)
+    }
+
+    /**
+     * Derive [WalletInfo] from a Room [com.rjnr.pocketnode.data.database.entity.WalletEntity]'s
+     * cached addresses. No key access required — safe to call for V2
+     * wallets during app boot, wallet switch, and multi-wallet sync setup.
+     *
+     * `publicKey` is returned as an empty string because the address-only
+     * path cannot recover the SECP256K1 public key. Callers that need the
+     * raw public key (currently none — see #213 sub-PR 5 audit) must
+     * obtain the private key explicitly via [WalletKeyReader].
+     */
+    fun deriveWalletInfoFromEntity(
+        wallet: com.rjnr.pocketnode.data.database.entity.WalletEntity
+    ): WalletInfo {
+        val address = wallet.testnetAddress.ifBlank { wallet.mainnetAddress }
+        val script = deriveLockScriptFromAddress(address)
+        return WalletInfo(
+            publicKey = "",
+            script = script,
+            testnetAddress = wallet.testnetAddress,
+            mainnetAddress = wallet.mainnetAddress,
+        )
+    }
+
     suspend fun sign(message: ByteArray): ByteArray {
         val keyPair = getKeyPair()
         val signatureData = Sign.signMessage(message, keyPair)

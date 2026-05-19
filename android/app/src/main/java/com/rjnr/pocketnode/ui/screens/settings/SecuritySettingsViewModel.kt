@@ -143,8 +143,26 @@ class SecuritySettingsViewModel @Inject constructor(
             try {
                 val wallets = walletDao.getAll()
                 for (wallet in wallets) {
-                    val privateKey = keyManager.getPrivateKeyForWallet(wallet.walletId) ?: continue
-                    val mnemonic = keyManager.getMnemonicForWallet(wallet.walletId)
+                    // V2 wallets require a BiometricPrompt per read. Skip
+                    // them silently here — the user will populate the
+                    // backup when they next reveal their recovery phrase
+                    // (which already prompts for biometric). Without this
+                    // skip, the loop would crash on the first V2 wallet
+                    // with V2KeyMaterialRequiresAuthException (#213 sub-PR 5).
+                    val privateKey = try {
+                        keyManager.getPrivateKeyForWallet(wallet.walletId) ?: continue
+                    } catch (e: Exception) {
+                        android.util.Log.i(
+                            "SecuritySettingsVM",
+                            "Skipping V2-protected wallet ${wallet.walletId} during PIN backup",
+                        )
+                        continue
+                    }
+                    val mnemonic = try {
+                        keyManager.getMnemonicForWallet(wallet.walletId)
+                    } catch (e: Exception) {
+                        null
+                    }
                     val material = KeyMaterial(
                         privateKey = privateKey.joinToString("") { "%02x".format(it) },
                         mnemonic = mnemonic?.joinToString(" "),

@@ -1,5 +1,6 @@
 package com.rjnr.pocketnode.ui.screens.dao
 
+import androidx.fragment.app.FragmentActivity
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.rjnr.pocketnode.data.auth.AuthManager
@@ -7,6 +8,8 @@ import com.rjnr.pocketnode.data.auth.AuthMethod
 import com.rjnr.pocketnode.data.auth.PinManager
 import com.rjnr.pocketnode.data.gateway.GatewayRepository
 import com.rjnr.pocketnode.data.gateway.models.*
+import com.rjnr.pocketnode.data.wallet.WalletKeyReader
+import com.rjnr.pocketnode.data.wallet.WalletRepository
 import dagger.hilt.android.lifecycle.HiltViewModel
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -23,7 +26,9 @@ import javax.inject.Inject
 class DaoViewModel @Inject constructor(
     private val repository: GatewayRepository,
     private val authManager: AuthManager,
-    private val pinManager: PinManager
+    private val pinManager: PinManager,
+    private val walletKeyReader: WalletKeyReader,
+    private val walletRepository: WalletRepository,
 ) : ViewModel() {
 
     private val _uiState = MutableStateFlow(DaoUiState())
@@ -143,6 +148,27 @@ class DaoViewModel @Inject constructor(
         }
     }
 
+    /**
+     * V2-aware deposit entry point. Reads the active wallet's private
+     * key via [WalletKeyReader] (which drives a BiometricPrompt
+     * CryptoObject on V2 wallets, or returns silently for V1), then
+     * invokes the overload of [GatewayRepository.depositToDao] that
+     * accepts an explicit key — avoiding a second key read inside the
+     * repository (#213 sub-PR 5).
+     */
+    fun depositWithActivity(activity: FragmentActivity, amountShannons: Long) {
+        viewModelScope.launch {
+            executeDaoOperationWithActivity(
+                activity = activity,
+                pendingAction = DaoAction.Depositing(amountShannons),
+                promptTitle = "Authenticate to deposit",
+                promptSubtitle = "Verify your identity to lock CKB in Nervos DAO",
+            ) { privateKey ->
+                repository.depositToDao(amountShannons, privateKey)
+            }
+        }
+    }
+
     /** Clear auth UI state but keep pendingDepositAmount (for PIN navigation fallback). */
     fun dismissAuthPrompt() {
         _uiState.update { it.copy(requiresAuth = false, authMethod = null) }
@@ -166,6 +192,20 @@ class DaoViewModel @Inject constructor(
         }
     }
 
+    /** V2-aware withdraw entry point. See [depositWithActivity]. */
+    fun withdrawWithActivity(activity: FragmentActivity, deposit: DaoDeposit) {
+        viewModelScope.launch {
+            executeDaoOperationWithActivity(
+                activity = activity,
+                pendingAction = DaoAction.Withdrawing(deposit.outPoint),
+                promptTitle = "Authenticate to withdraw",
+                promptSubtitle = "Verify your identity to begin Nervos DAO withdrawal",
+            ) { privateKey ->
+                repository.withdrawFromDao(deposit.outPoint, privateKey)
+            }
+        }
+    }
+
     fun unlock(deposit: DaoDeposit) {
         _uiState.update { it.copy(pendingAction = DaoAction.Unlocking(deposit.outPoint)) }
         viewModelScope.launch {
@@ -174,6 +214,58 @@ class DaoViewModel @Inject constructor(
                     _uiState.update {
                         it.copy(error = e.message, pendingAction = null)
                     }
+                }
+        }
+    }
+
+    /** V2-aware unlock entry point. See [depositWithActivity]. */
+    fun unlockWithActivity(activity: FragmentActivity, deposit: DaoDeposit) {
+        viewModelScope.launch {
+            executeDaoOperationWithActivity(
+                activity = activity,
+                pendingAction = DaoAction.Unlocking(deposit.outPoint),
+                promptTitle = "Authenticate to unlock",
+                promptSubtitle = "Verify your identity to claim your CKB and DAO compensation",
+            ) { privateKey ->
+                repository.unlockDao(deposit.outPoint, privateKey)
+            }
+        }
+    }
+
+    private suspend inline fun executeDaoOperationWithActivity(
+        activity: FragmentActivity,
+        pendingAction: DaoAction,
+        promptTitle: String,
+        promptSubtitle: String,
+        crossinline operation: suspend (ByteArray) -> Result<String>,
+    ) {
+        val walletId = walletRepository.activeWalletIdSnapshot()
+        if (walletId.isNullOrEmpty()) {
+            _uiState.update { it.copy(error = "No active wallet", pendingAction = null) }
+            return
+        }
+        _uiState.update {
+            it.copy(requiresAuth = false, authMethod = null, pendingAction = pendingAction)
+        }
+        when (val read = walletKeyReader.readPrivateKey(
+            activity = activity,
+            walletId = walletId,
+            promptTitle = promptTitle,
+            promptSubtitle = promptSubtitle,
+        )) {
+            is WalletKeyReader.Result.Cancelled ->
+                _uiState.update { it.copy(pendingAction = null) }
+            is WalletKeyReader.Result.AuthError ->
+                _uiState.update {
+                    it.copy(error = "Authentication failed: ${read.message}", pendingAction = null)
+                }
+            is WalletKeyReader.Result.NotAvailable ->
+                _uiState.update {
+                    it.copy(error = "Cannot read wallet key: ${read.reason}", pendingAction = null)
+                }
+            is WalletKeyReader.Result.Success ->
+                operation(read.privateKey).onFailure { e ->
+                    _uiState.update { it.copy(error = e.message, pendingAction = null) }
                 }
         }
     }

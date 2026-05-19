@@ -1,15 +1,18 @@
 package com.rjnr.pocketnode.ui.screens.wallet
 
 import android.util.Log
+import androidx.fragment.app.FragmentActivity
 import androidx.lifecycle.SavedStateHandle
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.rjnr.pocketnode.data.auth.PinManager
 import com.rjnr.pocketnode.data.database.dao.DaoCellDao
+import com.rjnr.pocketnode.data.database.dao.KeyMaterialDao
 import com.rjnr.pocketnode.data.database.dao.TransactionDao
 import com.rjnr.pocketnode.data.database.dao.WalletDao
 import com.rjnr.pocketnode.data.database.entity.WalletEntity
 import com.rjnr.pocketnode.data.wallet.KeyManager
+import com.rjnr.pocketnode.data.wallet.WalletKeyReader
 import com.rjnr.pocketnode.data.wallet.WalletPreferences
 import com.rjnr.pocketnode.data.wallet.WalletRepository
 import dagger.hilt.android.lifecycle.HiltViewModel
@@ -32,7 +35,9 @@ class WalletSettingsViewModel @Inject constructor(
     private val pinManager: PinManager,
     private val daoCellDao: DaoCellDao,
     private val transactionDao: TransactionDao,
-    private val walletPreferences: WalletPreferences
+    private val walletPreferences: WalletPreferences,
+    private val walletKeyReader: WalletKeyReader,
+    private val keyMaterialDao: KeyMaterialDao,
 ) : ViewModel() {
 
     private val walletId: String = savedStateHandle["walletId"] ?: ""
@@ -198,11 +203,20 @@ class WalletSettingsViewModel @Inject constructor(
     fun getMnemonic(): List<String>? = _uiState.value.mnemonicWords
 
     /**
-     * Load private key and mnemonic from Room into UiState.
+     * Load private key and mnemonic from Room into UiState (V1 path).
      * Called when seed phrase is unlocked (PIN verified or no PIN required).
+     * For V2 wallets the activity-aware overload [loadSensitiveData(activity)]
+     * must be used — otherwise the V2 read throws and the seed phrase view
+     * shows blank fields (#213 sub-PR 5).
      */
     fun loadSensitiveData() {
         viewModelScope.launch {
+            if (keyMaterialDao.getKdfVersion(walletId) == 2) {
+                _uiState.update {
+                    it.copy(error = "Reopen this screen — biometric unlock required for V2 wallets")
+                }
+                return@launch
+            }
             try {
                 val keyHex = keyManager.getPrivateKeyForWallet(walletId)?.let { bytes ->
                     bytes.joinToString("") { "%02x".format(it) }
@@ -220,6 +234,45 @@ class WalletSettingsViewModel @Inject constructor(
         }
     }
 
+    /**
+     * V2-aware variant of [loadSensitiveData]. For V2 wallets, drives a
+     * BiometricPrompt CryptoObject via [WalletKeyReader] to decrypt the
+     * bundled key+mnemonic. For V1 wallets, falls back to the silent
+     * path so existing PIN-only flows keep working. The mnemonic is
+     * pulled from the same V2 bundle, so V2 reads cost exactly one prompt.
+     */
+    fun loadSensitiveData(activity: FragmentActivity) {
+        viewModelScope.launch {
+            val kdf = keyMaterialDao.getKdfVersion(walletId)
+            if (kdf != 2) {
+                loadSensitiveData()
+                return@launch
+            }
+            // V2 path: single BiometricPrompt CryptoObject unlocks the
+            // bundle that contains both the private key and the mnemonic.
+            // No second prompt needed for the mnemonic display.
+            when (val result = walletKeyReader.readKeyMaterial(
+                activity = activity,
+                walletId = walletId,
+                promptTitle = "View recovery phrase",
+                promptSubtitle = "Verify your identity to display this wallet's secrets",
+            )) {
+                is WalletKeyReader.MaterialResult.Cancelled,
+                is WalletKeyReader.MaterialResult.AuthError -> {
+                    _uiState.update { it.copy(error = "Authentication cancelled") }
+                }
+                is WalletKeyReader.MaterialResult.NotAvailable -> {
+                    _uiState.update { it.copy(error = "Cannot read wallet key: ${result.reason}") }
+                }
+                is WalletKeyReader.MaterialResult.Success -> {
+                    val keyHex = result.privateKey.joinToString("") { "%02x".format(it) }
+                    val words = result.mnemonic?.split(" ")
+                    _uiState.update { it.copy(privateKeyHex = keyHex, mnemonicWords = words) }
+                }
+            }
+        }
+    }
+
     // -- Sub-accounts --
 
     fun addSubAccount(name: String) {
@@ -229,6 +282,48 @@ class WalletSettingsViewModel @Inject constructor(
             } catch (e: Exception) {
                 Log.e(TAG, "Failed to create sub-account", e)
                 _uiState.update { it.copy(error = "Failed to create account: ${e.message}") }
+            }
+        }
+    }
+
+    /**
+     * V2-aware sub-account creation. For V2 parent wallets, reads the
+     * parent's mnemonic via [WalletKeyReader] (one BiometricPrompt
+     * CryptoObject), then passes it as `parentMnemonicOverride` to
+     * [WalletRepository.createSubAccount] so the repository doesn't
+     * attempt a second (silent, failing) read.
+     */
+    fun addSubAccount(activity: FragmentActivity, name: String) {
+        viewModelScope.launch {
+            val kdf = keyMaterialDao.getKdfVersion(walletId)
+            if (kdf != 2) {
+                addSubAccount(name)
+                return@launch
+            }
+            when (val result = walletKeyReader.readKeyMaterial(
+                activity = activity,
+                walletId = walletId,
+                promptTitle = "Authenticate to add account",
+                promptSubtitle = "Verify your identity to derive a new sub-account",
+            )) {
+                is WalletKeyReader.MaterialResult.Cancelled,
+                is WalletKeyReader.MaterialResult.AuthError ->
+                    _uiState.update { it.copy(error = "Authentication cancelled") }
+                is WalletKeyReader.MaterialResult.NotAvailable ->
+                    _uiState.update { it.copy(error = "Cannot read parent wallet: ${result.reason}") }
+                is WalletKeyReader.MaterialResult.Success -> {
+                    val words = result.mnemonic?.split(" ")
+                    if (words.isNullOrEmpty()) {
+                        _uiState.update { it.copy(error = "Parent wallet has no mnemonic") }
+                        return@launch
+                    }
+                    try {
+                        walletRepository.createSubAccount(walletId, name, parentMnemonicOverride = words)
+                    } catch (e: Exception) {
+                        Log.e(TAG, "Failed to create V2 sub-account", e)
+                        _uiState.update { it.copy(error = "Failed to create account: ${e.message}") }
+                    }
+                }
             }
         }
     }
