@@ -77,7 +77,19 @@ fun AuthScreen(
     }
 
     LaunchedEffect(uiState.authSuccess) {
-        if (uiState.authSuccess) onAuthSuccess()
+        if (uiState.authSuccess) {
+            // Run the V2 migration (one BiometricPrompt per V1 wallet)
+            // before letting the user past the unlock screen (#213 sub-PR 5).
+            // The user is already in an "authenticating" mindset, which is
+            // the least jarring time to ask for more prompts. No-op for
+            // fresh installs / V2-already-complete states.
+            val activity = context as? FragmentActivity
+            if (activity != null) {
+                viewModel.runMigrationIfNeeded(activity) { onAuthSuccess() }
+            } else {
+                onAuthSuccess()
+            }
+        }
     }
 
     LaunchedEffect(uiState.error) {

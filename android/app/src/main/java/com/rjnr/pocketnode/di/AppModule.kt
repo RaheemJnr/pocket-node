@@ -175,6 +175,17 @@ object AppModule {
 
     @Provides
     @Singleton
+    fun provideKeystoreV2MigrationHelper(
+        keyMaterialDao: KeyMaterialDao,
+        encryptionManager: KeystoreEncryptionManager,
+        @Named("migrationPrefs") migrationPrefs: SharedPreferences
+    ): com.rjnr.pocketnode.data.migration.KeystoreV2MigrationHelper =
+        com.rjnr.pocketnode.data.migration.KeystoreV2MigrationHelper(
+            keyMaterialDao, encryptionManager, migrationPrefs
+        )
+
+    @Provides
+    @Singleton
     fun provideCacheManager(
         transactionDao: TransactionDao,
         balanceCacheDao: BalanceCacheDao

@@ -222,15 +222,26 @@ class WalletRepository @Inject constructor(
     /**
      * Create a sub-account derived from a parent mnemonic wallet.
      * Derives a new key at the next account index from the parent's mnemonic.
+     *
+     * If [parentMnemonicOverride] is provided, the parent's mnemonic is
+     * not read from key storage — useful when the caller has already
+     * unlocked it via BiometricPrompt (V2 wallets). When null, the parent
+     * mnemonic is read silently from V1 storage, which will throw for V2
+     * parents (#213 sub-PR 5).
      */
-    suspend fun createSubAccount(parentWalletId: String, name: String): WalletEntity {
+    suspend fun createSubAccount(
+        parentWalletId: String,
+        name: String,
+        parentMnemonicOverride: List<String>? = null,
+    ): WalletEntity {
         val parent = walletDao.getById(parentWalletId)
             ?: throw IllegalArgumentException("Parent wallet not found")
         require(parent.type == KeyManager.WALLET_TYPE_MNEMONIC) {
             "Sub-accounts require a mnemonic wallet"
         }
 
-        val parentMnemonic = keyManager.getMnemonicForWallet(parentWalletId)
+        val parentMnemonic = parentMnemonicOverride
+            ?: keyManager.getMnemonicForWallet(parentWalletId)
             ?: throw IllegalStateException("Parent mnemonic not found")
 
         // Use max existing sub-account index + 1 to avoid index collisions after deletions

@@ -311,9 +311,10 @@ class GatewayRepository @Inject constructor(
     suspend fun onActiveWalletChanged(wallet: WalletEntity) {
         activeWalletId = wallet.walletId
         activeWalletType = wallet.type
-        val privateKey = keyManager.getPrivateKeyForWallet(wallet.walletId)
-            ?: throw Exception("No key for wallet ${wallet.walletId}")
-        val info = keyManager.deriveWalletInfo(privateKey)
+        // Address-only derivation: avoids a BiometricPrompt for V2 wallets
+        // on every wallet switch. Lock script + addresses round-trip from
+        // the cached WalletEntity, no key material needed (#213 sub-PR 5).
+        val info = keyManager.deriveWalletInfoFromEntity(wallet)
         _walletInfo.value = info
         _balance.value = null  // Clear old wallet's balance immediately
         _isRegistered.value = false
@@ -587,16 +588,16 @@ class GatewayRepository @Inject constructor(
      */
     suspend fun initializeWallet(): Result<WalletInfo> = runCatching {
         if (keyManager.hasWallet()) {
-            // Use wallet-scoped keys for the active wallet, not global legacy prefs
+            // Use wallet-scoped addresses for the active wallet, not global legacy prefs.
+            // Address-only derivation here (no key read) so V2 wallets boot without a
+            // BiometricPrompt — the sign path will prompt when actually needed (#213).
             val info = if (activeWalletId.isNotEmpty()) {
-                val privateKey = keyManager.getPrivateKeyForWallet(activeWalletId)
-                    ?: throw Exception("No key for active wallet $activeWalletId")
-                // Set activeWalletType from Room entity
                 val activeWallet = walletDao.getActive()
-                activeWalletType = activeWallet?.type ?: KeyManager.WALLET_TYPE_MNEMONIC
-                keyManager.deriveWalletInfo(privateKey)
+                    ?: throw Exception("No key for active wallet $activeWalletId")
+                activeWalletType = activeWallet.type
+                keyManager.deriveWalletInfoFromEntity(activeWallet)
             } else {
-                keyManager.getWalletInfo() // fallback for legacy single-wallet
+                keyManager.getWalletInfo() // fallback for legacy single-wallet (V1 only)
             }
             _walletInfo.value = info
             info
@@ -2100,7 +2101,19 @@ class GatewayRepository @Inject constructor(
         )
     }
 
-    suspend fun depositToDao(amountShannons: Long): Result<String> = runCatching {
+    suspend fun depositToDao(amountShannons: Long): Result<String> =
+        depositToDao(amountShannons, privateKey = getPrivateKey())
+
+    /**
+     * V2-aware overload: caller supplies the private key already
+     * unlocked via BiometricPrompt CryptoObject. Used by [DaoViewModel]
+     * when the active wallet is on `kdfVersion=2` and requires explicit
+     * user authentication per signing operation (#213 sub-PR 5).
+     */
+    suspend fun depositToDao(
+        amountShannons: Long,
+        privateKey: ByteArray,
+    ): Result<String> = runCatching {
         val info = _walletInfo.value ?: throw Exception("No wallet")
         val net = _network.value
 
@@ -2109,7 +2122,6 @@ class GatewayRepository @Inject constructor(
         }
 
         val cellsResponse = getCells().getOrThrow()
-        val privateKey = getPrivateKey()
 
         val tx = transactionBuilder.buildDaoDeposit(
             amountShannons = amountShannons,
@@ -2128,7 +2140,14 @@ class GatewayRepository @Inject constructor(
         txHash
     }
 
-    suspend fun withdrawFromDao(depositOutPoint: OutPoint): Result<String> = runCatching {
+    suspend fun withdrawFromDao(depositOutPoint: OutPoint): Result<String> =
+        withdrawFromDao(depositOutPoint, privateKey = getPrivateKey())
+
+    /** V2-aware overload — see [depositToDao]. */
+    suspend fun withdrawFromDao(
+        depositOutPoint: OutPoint,
+        privateKey: ByteArray,
+    ): Result<String> = runCatching {
         val info = _walletInfo.value ?: throw Exception("No wallet")
         val net = _network.value
         val address = getCurrentAddress() ?: throw Exception("No address")
@@ -2137,8 +2156,6 @@ class GatewayRepository @Inject constructor(
         val deposits = getDaoDeposits().getOrThrow()
         val deposit = deposits.find { it.outPoint == depositOutPoint }
             ?: throw Exception("Deposit not found")
-
-        val privateKey = getPrivateKey()
 
         require(deposit.depositBlockHash.isNotBlank()) {
             "Deposit block hash unavailable. Please retry after sync."
@@ -2175,8 +2192,13 @@ class GatewayRepository @Inject constructor(
         txHash
     }
 
+    suspend fun unlockDao(withdrawingOutPoint: OutPoint): Result<String> =
+        unlockDao(withdrawingOutPoint, privateKey = getPrivateKey())
+
+    /** V2-aware overload — see [depositToDao]. */
     suspend fun unlockDao(
-        withdrawingOutPoint: OutPoint
+        withdrawingOutPoint: OutPoint,
+        privateKey: ByteArray,
     ): Result<String> = runCatching {
         val info = _walletInfo.value ?: throw Exception("No wallet")
         val net = _network.value
@@ -2196,8 +2218,6 @@ class GatewayRepository @Inject constructor(
         }
         val withdrawBlockHash = deposit.withdrawBlockHash
             ?: throw Exception("Withdraw block hash unavailable. Please retry after sync.")
-
-        val privateKey = getPrivateKey()
 
         // Get headers for max withdraw calculation (cache-first)
         val depositHeader = getOrFetchHeader(depositBlockHash)
@@ -2409,18 +2429,22 @@ class GatewayRepository @Inject constructor(
             tip.number.removePrefix("0x").toLong(16)
         } else 0L
 
-        // Per-wallet derivation is independent CPU+IO work (Room read for the
-        // private key, blake2b hash for the lock script). Run them concurrently
-        // so a 5-wallet ALL_WALLETS sync doesn't pay the cost serially.
+        // Per-wallet lock-script recovery. Previously read the private key
+        // to hash → pubkey hash → lock args, which now requires a
+        // BiometricPrompt for V2 wallets. The cached WalletEntity already
+        // has the address, which round-trips to the exact same Script via
+        // AddressUtils.decode (#213 sub-PR 5). No key access needed.
         val pairs = coroutineScope {
             wallets.map { wallet ->
                 async(Dispatchers.IO) {
-                    val privateKey = keyManager.getPrivateKeyForWallet(wallet.walletId) ?: run {
-                        Log.w(TAG, "No key for wallet ${wallet.walletId}, skipping script registration")
+                    val lockScript = try {
+                        keyManager.deriveLockScriptFromAddress(
+                            wallet.testnetAddress.ifBlank { wallet.mainnetAddress }
+                        )
+                    } catch (e: Exception) {
+                        Log.w(TAG, "Cannot decode address for wallet ${wallet.walletId}, skipping", e)
                         return@async null
                     }
-                    val publicKey = keyManager.derivePublicKey(privateKey)
-                    val lockScript = keyManager.deriveLockScript(publicKey)
 
                     // Resume from saved per-wallet progress, or calculate from sync mode if first sync
                     val savedBlock = getWalletSyncBlock(wallet.walletId)

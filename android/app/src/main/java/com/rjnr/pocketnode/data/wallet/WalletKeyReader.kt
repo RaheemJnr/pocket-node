@@ -50,6 +50,18 @@ class WalletKeyReader @Inject constructor(
         data class NotAvailable(val reason: String) : Result()
     }
 
+    sealed class MaterialResult {
+        data class Success(
+            val privateKey: ByteArray,
+            val mnemonic: String?,
+            val walletType: String,
+            val mnemonicBackedUp: Boolean,
+        ) : MaterialResult()
+        object Cancelled : MaterialResult()
+        data class AuthError(val errorCode: Int, val message: CharSequence) : MaterialResult()
+        data class NotAvailable(val reason: String) : MaterialResult()
+    }
+
     /**
      * Read the private key for [walletId]. Picks the V1 or V2 code path
      * based on the row's `kdfVersion`. V2 prompts the user via
@@ -73,6 +85,78 @@ class WalletKeyReader @Inject constructor(
             1 -> readV1(walletId)
             2 -> readV2(activity, walletId, promptTitle, promptSubtitle)
             else -> Result.NotAvailable("unknown kdfVersion=$kdfVersion")
+        }
+    }
+
+    /**
+     * Like [readPrivateKey] but returns the full key material bundle —
+     * private key, mnemonic, walletType, mnemonicBackedUp — in a single
+     * V2 cipher operation. Used by call sites that need both pieces (e.g.
+     * the seed-phrase reveal screen, or sub-account derivation that needs
+     * the parent's mnemonic).
+     *
+     * V2 cost: exactly one BiometricPrompt regardless of how much of the
+     * bundle the caller uses. V1 cost: silent, same as [readPrivateKey].
+     */
+    suspend fun readKeyMaterial(
+        activity: FragmentActivity,
+        walletId: String,
+        promptTitle: String,
+        promptSubtitle: String,
+    ): MaterialResult {
+        val kdfVersion = keyMaterialDao.getKdfVersion(walletId)
+            ?: return MaterialResult.NotAvailable("no key_material row for $walletId")
+        return when (kdfVersion) {
+            1 -> readMaterialV1(walletId)
+            2 -> readMaterialV2(activity, walletId, promptTitle, promptSubtitle)
+            else -> MaterialResult.NotAvailable("unknown kdfVersion=$kdfVersion")
+        }
+    }
+
+    private suspend fun readMaterialV1(walletId: String): MaterialResult {
+        val data = keyStoreMigrationHelper.readDecryptedKey(walletId)
+            ?: return MaterialResult.NotAvailable("V1 decrypt failed for $walletId")
+        return MaterialResult.Success(
+            privateKey = Numeric.hexStringToByteArray(data.privateKeyHex),
+            mnemonic = data.mnemonic,
+            walletType = data.walletType,
+            mnemonicBackedUp = data.mnemonicBackedUp,
+        )
+    }
+
+    private suspend fun readMaterialV2(
+        activity: FragmentActivity,
+        walletId: String,
+        promptTitle: String,
+        promptSubtitle: String,
+    ): MaterialResult {
+        val entity = keyMaterialDao.getByWalletId(walletId)
+            ?: return MaterialResult.NotAvailable("no key_material row for $walletId")
+        val cipher = encryptionManager.newDecryptCipherV2(entity.iv)
+        val authResult = authManager.authenticateForCipher(
+            activity = activity,
+            cipher = cipher,
+            title = promptTitle,
+            subtitle = promptSubtitle,
+        )
+        return when (authResult) {
+            is AuthManager.CipherAuthResult.Cancelled -> MaterialResult.Cancelled
+            is AuthManager.CipherAuthResult.Error ->
+                MaterialResult.AuthError(authResult.errorCode, authResult.errString)
+            is AuthManager.CipherAuthResult.Success -> {
+                val data = try {
+                    keyStoreMigrationHelper.readDecryptedKey(walletId, authResult.cipher)
+                } catch (e: Exception) {
+                    Log.e(TAG, "V2 material decrypt failed for $walletId", e)
+                    null
+                } ?: return MaterialResult.NotAvailable("V2 decrypt failed for $walletId")
+                MaterialResult.Success(
+                    privateKey = Numeric.hexStringToByteArray(data.privateKeyHex),
+                    mnemonic = data.mnemonic,
+                    walletType = data.walletType,
+                    mnemonicBackedUp = data.mnemonicBackedUp,
+                )
+            }
         }
     }
 
