@@ -25,6 +25,7 @@
 pub mod callbacks;
 pub mod dao;
 pub mod lifecycle;
+pub mod panic_guard;
 pub mod query;
 pub mod rpc_handler;
 pub mod types;

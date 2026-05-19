@@ -3,6 +3,7 @@
 //! Implements init/start/stop/status functions that mirror light-client-bin/src/subcmds.rs
 
 use super::callbacks::invoke_status_callback;
+use super::panic_guard::guard_jni;
 use super::types::*;
 use crate::protocols::{
     FilterProtocol, LightClientProtocol, Peers, PendingTxs, RelayProtocol, SyncProtocol,
@@ -45,6 +46,7 @@ pub extern "C" fn Java_com_nervosnetwork_ckblightclient_LightClientNative_native
     config_path_jstr: JString,
     status_callback: JObject,
 ) -> jboolean {
+    guard_jni(JNI_FALSE, move || {
     // Check if already initialized
     if is_initialized() {
         error!("Already initialized!");
@@ -295,6 +297,7 @@ pub extern "C" fn Java_com_nervosnetwork_ckblightclient_LightClientNative_native
     let _ = invoke_status_callback("initialized", "");
 
     JNI_TRUE
+    })
 }
 
 /// Load config from TOML file
@@ -313,23 +316,25 @@ pub extern "C" fn Java_com_nervosnetwork_ckblightclient_LightClientNative_native
     _env: JNIEnv,
     _class: JClass,
 ) -> jboolean {
-    // Check if initialized
-    if !is_state(STATE_INIT) {
-        error!("Not in INIT state! Current state: {}", get_state());
-        return JNI_FALSE;
-    }
+    guard_jni(JNI_FALSE, || {
+        // Check if initialized
+        if !is_state(STATE_INIT) {
+            error!("Not in INIT state! Current state: {}", get_state());
+            return JNI_FALSE;
+        }
 
-    info!("Starting CKB Light Client...");
+        info!("Starting CKB Light Client...");
 
-    // Transition to RUNNING
-    set_state(STATE_RUNNING);
+        // Transition to RUNNING
+        set_state(STATE_RUNNING);
 
-    info!("CKB Light Client started successfully!");
+        info!("CKB Light Client started successfully!");
 
-    // Notify status callback
-    let _ = invoke_status_callback("running", "");
+        // Notify status callback
+        let _ = invoke_status_callback("running", "");
 
-    JNI_TRUE
+        JNI_TRUE
+    })
 }
 
 /// JNI: Stop the light client
@@ -343,30 +348,32 @@ pub extern "C" fn Java_com_nervosnetwork_ckblightclient_LightClientNative_native
     _env: JNIEnv,
     _class: JClass,
 ) -> jboolean {
-    // Check if running
-    if !is_state(STATE_RUNNING) {
-        warn!("Not in RUNNING state! Current state: {}", get_state());
-        return JNI_FALSE;
-    }
+    guard_jni(JNI_FALSE, || {
+        // Check if running
+        if !is_state(STATE_RUNNING) {
+            warn!("Not in RUNNING state! Current state: {}", get_state());
+            return JNI_FALSE;
+        }
 
-    info!("Stopping CKB Light Client...");
+        info!("Stopping CKB Light Client...");
 
-    // Broadcast exit signals to all services
-    broadcast_exit_signals();
+        // Broadcast exit signals to all services
+        broadcast_exit_signals();
 
-    // Wait for all CKB services to exit
-    info!("Waiting for services to exit...");
-    wait_all_ckb_services_exit();
+        // Wait for all CKB services to exit
+        info!("Waiting for services to exit...");
+        wait_all_ckb_services_exit();
 
-    // Transition to STOPPED
-    set_state(STATE_STOPPED);
+        // Transition to STOPPED
+        set_state(STATE_STOPPED);
 
-    info!("CKB Light Client stopped successfully!");
+        info!("CKB Light Client stopped successfully!");
 
-    // Notify status callback
-    let _ = invoke_status_callback("stopped", "");
+        // Notify status callback
+        let _ = invoke_status_callback("stopped", "");
 
-    JNI_TRUE
+        JNI_TRUE
+    })
 }
 
 /// JNI: Get current status
@@ -380,5 +387,5 @@ pub extern "C" fn Java_com_nervosnetwork_ckblightclient_LightClientNative_native
     _env: JNIEnv,
     _class: JClass,
 ) -> jint {
-    get_state() as jint
+    guard_jni(STATE_STOPPED as jint, || get_state() as jint)
 }

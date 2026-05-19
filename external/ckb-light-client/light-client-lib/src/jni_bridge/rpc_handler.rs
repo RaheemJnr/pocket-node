@@ -2,6 +2,7 @@
 //!
 //! Provides direct JNI methods for RPC calls instead of HTTP server
 
+use super::panic_guard::guard_jni;
 use super::types::*;
 use crate::service::ScriptStatus;
 use ckb_jsonrpc_types::{BlockView, HeaderView};
@@ -80,6 +81,7 @@ pub extern "C" fn Java_com_nervosnetwork_ckblightclient_LightClientNative_callRp
     _class: JClass,
     method_jstr: JString,
 ) -> jstring {
+    guard_jni(std::ptr::null_mut(), move || {
     // Get method name
     let method: String = match env.get_string(&method_jstr) {
         Ok(s) => s.into(),
@@ -200,4 +202,5 @@ pub extern "C" fn Java_com_nervosnetwork_ckblightclient_LightClientNative_callRp
             jni_rpc_error!(&mut env, -32601, error_msg)
         }
     }
+    })
 }

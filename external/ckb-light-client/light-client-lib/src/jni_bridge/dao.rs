@@ -5,6 +5,7 @@
 //! - Calculating max withdrawable capacity (deposit + compensation)
 //! - Calculating unlock epoch (since value for phase 2)
 
+use super::panic_guard::guard_jni;
 use jni::objects::{JClass, JString};
 use jni::sys::{jlong, jstring};
 use jni::JNIEnv;
@@ -62,6 +63,7 @@ pub extern "C" fn Java_com_nervosnetwork_ckblightclient_LightClientNative_native
     _class: JClass,
     dao_hex: JString,
 ) -> jstring {
+    guard_jni(std::ptr::null_mut(), move || {
     let dao_str = match get_string(&mut env, &dao_hex) {
         Some(s) => s,
         None => return ptr::null_mut(),
@@ -79,10 +81,27 @@ pub extern "C" fn Java_com_nervosnetwork_ckblightclient_LightClientNative_native
         }
     };
 
-    let c = u64::from_le_bytes(bytes[0..8].try_into().unwrap());
-    let ar = u64::from_le_bytes(bytes[8..16].try_into().unwrap());
-    let s = u64::from_le_bytes(bytes[16..24].try_into().unwrap());
-    let u = u64::from_le_bytes(bytes[24..32].try_into().unwrap());
+    // Slicing into 8-byte chunks of a verified 32-byte vec cannot fail; the
+    // pattern match still avoids the unwrap-as-panic-landmine in FFI context.
+    let chunks: Option<[[u8; 8]; 4]> = (|| {
+        Some([
+            bytes[0..8].try_into().ok()?,
+            bytes[8..16].try_into().ok()?,
+            bytes[16..24].try_into().ok()?,
+            bytes[24..32].try_into().ok()?,
+        ])
+    })();
+    let [c_buf, ar_buf, s_buf, u_buf] = match chunks {
+        Some(arr) => arr,
+        None => {
+            error!("DAO field chunk conversion failed");
+            return ptr::null_mut();
+        }
+    };
+    let c = u64::from_le_bytes(c_buf);
+    let ar = u64::from_le_bytes(ar_buf);
+    let s = u64::from_le_bytes(s_buf);
+    let u = u64::from_le_bytes(u_buf);
 
     let json = format!(
         r#"{{"c":"0x{:x}","ar":"0x{:x}","s":"0x{:x}","u":"0x{:x}"}}"#,
@@ -90,6 +109,7 @@ pub extern "C" fn Java_com_nervosnetwork_ckblightclient_LightClientNative_native
     );
 
     dao_to_jstring(&mut env, &json)
+    })
 }
 
 /// Calculate max withdrawable capacity (deposit + compensation).
@@ -103,6 +123,7 @@ pub extern "C" fn Java_com_nervosnetwork_ckblightclient_LightClientNative_native
     deposit_capacity: jlong,
     occupied_capacity: jlong,
 ) -> jlong {
+    guard_jni(-1, move || {
     let deposit_dao_str = match get_string(&mut env, &deposit_header_dao_hex) {
         Some(s) => s,
         None => return -1,
@@ -162,6 +183,7 @@ pub extern "C" fn Java_com_nervosnetwork_ckblightclient_LightClientNative_native
     }
 
     max_withdraw as jlong
+    })
 }
 
 /// Calculate the since value (absolute epoch) for phase 2 unlock.
@@ -173,6 +195,7 @@ pub extern "C" fn Java_com_nervosnetwork_ckblightclient_LightClientNative_native
     deposit_epoch_hex: JString,
     withdraw_epoch_hex: JString,
 ) -> jstring {
+    guard_jni(std::ptr::null_mut(), move || {
     let deposit_str = match get_string(&mut env, &deposit_epoch_hex) {
         Some(s) => s,
         None => return ptr::null_mut(),
@@ -259,4 +282,5 @@ pub extern "C" fn Java_com_nervosnetwork_ckblightclient_LightClientNative_native
 
     let result = format!("0x{:x}", since_value);
     dao_to_jstring(&mut env, &result)
+    })
 }
