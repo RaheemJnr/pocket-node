@@ -87,15 +87,16 @@ android {
                 keyAlias = keyAliasEnv
                 keyPassword = keyPasswordEnv
             } else {
-                if (keystorePath != null) {
-                    logger.warn("KEYSTORE_PATH is set but other signing env vars are missing — falling back to debug keystore")
-                }
-                // Fall back to debug keystore for local dev
-                val debugKeystore = signingConfigs.getByName("debug")
-                storeFile = debugKeystore.storeFile
-                storePassword = debugKeystore.storePassword
-                keyAlias = debugKeystore.keyAlias
-                keyPassword = debugKeystore.keyPassword
+                val missingVars = listOf(
+                    "KEYSTORE_PATH" to keystorePath,
+                    "KEYSTORE_PASSWORD" to keystorePassword,
+                    "KEY_ALIAS" to keyAliasEnv,
+                    "KEY_PASSWORD" to keyPasswordEnv
+                ).filter { it.second == null }.map { it.first }
+
+                throw GradleException(
+                    "Release signing is required. Missing environment variables: ${missingVars.joinToString(", ")}"
+                )
             }
         }
     }
