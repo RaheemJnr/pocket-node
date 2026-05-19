@@ -11,6 +11,7 @@ import com.rjnr.pocketnode.data.database.dao.SyncProgressDao
 import com.rjnr.pocketnode.data.database.dao.TransactionDao
 import com.rjnr.pocketnode.data.database.dao.WalletDao
 import com.rjnr.pocketnode.data.database.entity.BalanceCacheEntity
+import com.rjnr.pocketnode.data.database.entity.ContactEntity
 import com.rjnr.pocketnode.data.database.entity.DaoCellEntity
 import com.rjnr.pocketnode.data.database.entity.HeaderCacheEntity
 import com.rjnr.pocketnode.data.database.entity.KeyMaterialEntity
@@ -28,7 +29,8 @@ import com.rjnr.pocketnode.data.database.entity.WalletEntity
         WalletEntity::class,
         KeyMaterialEntity::class,
         SyncProgressEntity::class,
-        PendingBroadcastEntity::class
+        PendingBroadcastEntity::class,
+        ContactEntity::class,
     ],
     // Bumped from 8 to 9 in v1.5.2 because TransactionEntity / BalanceCacheEntity
     // / DaoCellEntity gained @Index(idx_tx_pending) + @ColumnInfo(defaultValue)
@@ -42,7 +44,12 @@ import com.rjnr.pocketnode.data.database.entity.WalletEntity
     // (legacy unrestricted V1 keystore key); the v1.6.x → v1.7.0 migration
     // re-encrypts them under the auth-bound V2 keystore key and bumps each
     // row to version 2. See `KeystoreV2MigrationHelper` and #213.
-    version = 10,
+    //
+    // Bumped from 10 to 11 for the M4 Phase 2 address book (#189). Adds
+    // the `contacts` table with indices on address and walletId. No
+    // existing column changed; MIGRATION_10_11 is a single CREATE TABLE
+    // + 2 CREATE INDEX.
+    version = 11,
     // Schema export deliberately OFF until the Room 2.8.4 / kotlinx-serialization
     // 1.8.0 binary incompatibility is resolved (tracked in #149). Enabling it
     // crashes KSP with AbstractMethodError in Room's bundled
@@ -62,4 +69,5 @@ abstract class AppDatabase : RoomDatabase() {
     abstract fun keyMaterialDao(): KeyMaterialDao
     abstract fun syncProgressDao(): SyncProgressDao
     abstract fun pendingBroadcastDao(): PendingBroadcastDao
+    // contactDao() added in #190 alongside the ContactDao interface.
 }

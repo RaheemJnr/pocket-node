@@ -85,6 +85,27 @@ class WalkingMigrationTest {
     }
 
     /**
+     * v10 → v11 path (#189 address book): bootstrap a v10 SQLite file
+     * and confirm MIGRATION_10_11 creates the contacts table with both
+     * indices, after which schema validation passes.
+     */
+    @Test
+    fun `v10 walks to v11 successfully and creates contacts table`() {
+        bootstrapV10()
+        openViaRoomAndValidate()
+        val db = openedRoomDb!!.openHelper.readableDatabase
+        db.query("SELECT name FROM sqlite_master WHERE type='table' AND name='contacts'").use { c ->
+            assertTrue("contacts table missing after MIGRATION_10_11", c.moveToNext())
+        }
+        db.query("SELECT name FROM sqlite_master WHERE type='index' AND name='idx_contacts_address'").use { c ->
+            assertTrue("idx_contacts_address missing", c.moveToNext())
+        }
+        db.query("SELECT name FROM sqlite_master WHERE type='index' AND name='idx_contacts_walletId'").use { c ->
+            assertTrue("idx_contacts_walletId missing", c.moveToNext())
+        }
+    }
+
+    /**
      * v1.6.x → v1.7.0 path: bootstrap a v9 SQLite file (no `kdfVersion`
      * column on `key_material`) and confirm MIGRATION_9_10 adds the
      * column with default 1, then Room schema validation passes.
@@ -129,7 +150,7 @@ class WalkingMigrationTest {
                 .addMigrations(
                     MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4, MIGRATION_4_5,
                     MIGRATION_5_6, MIGRATION_6_7, MIGRATION_7_8, noOpMigration8To9,
-                    MIGRATION_9_10,
+                    MIGRATION_9_10, MIGRATION_10_11,
                 )
                 .build()
             openedRoomDb = db
@@ -159,7 +180,7 @@ class WalkingMigrationTest {
             .addMigrations(
                 MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4, MIGRATION_4_5,
                 MIGRATION_5_6, MIGRATION_6_7, MIGRATION_7_8, MIGRATION_8_9,
-                MIGRATION_9_10,
+                MIGRATION_9_10, MIGRATION_10_11,
             )
             .build()
         openedRoomDb = db
@@ -175,6 +196,33 @@ class WalkingMigrationTest {
      * version 8 so when Room subsequently opens it at version 9,
      * `onUpgrade` fires and runs MIGRATION_8_9.
      */
+    /**
+     * Bootstrap a v10 SQLite file: applies MIGRATION_8_9 + MIGRATION_9_10
+     * over the v8 shape so the on-disk DB matches what a real
+     * upgraded-to-v10 user has. The key thing for MIGRATION_10_11
+     * coverage is that the `contacts` table does NOT exist yet.
+     */
+    private fun bootstrapV10() {
+        val factory = FrameworkSQLiteOpenHelperFactory()
+        val callback = object : SupportSQLiteOpenHelper.Callback(10) {
+            override fun onCreate(db: SupportSQLiteDatabase) {
+                createV8Tables(db, pathA = true)
+                MIGRATION_8_9.migrate(db)
+                MIGRATION_9_10.migrate(db)
+                db.execSQL("CREATE TABLE IF NOT EXISTS room_master_table (id INTEGER PRIMARY KEY,identity_hash TEXT)")
+                db.execSQL("INSERT OR REPLACE INTO room_master_table VALUES(42, 'bootstrap-v10')")
+            }
+            override fun onUpgrade(db: SupportSQLiteDatabase, oldV: Int, newV: Int) = Unit
+        }
+        val config = SupportSQLiteOpenHelper.Configuration.builder(ctx)
+            .name(dbName)
+            .callback(callback)
+            .build()
+        val helper = factory.create(config)
+        helper.writableDatabase.close()
+        helper.close()
+    }
+
     /**
      * Bootstrap a v9 SQLite file: same as `bootstrapV8(pathA = true)` but
      * also applies the MIGRATION_8_9 changes inline so the on-disk shape

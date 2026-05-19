@@ -416,3 +416,37 @@ val MIGRATION_9_10 = object : Migration(9, 10) {
         )
     }
 }
+
+/**
+ * Adds the `contacts` table for the M4 Phase 2 address book (#189).
+ *
+ * The schema mirrors the [com.rjnr.pocketnode.data.database.entity.ContactEntity]
+ * declaration exactly: PK on `id`, two single-column indices on
+ * `address` and `walletId`, and defaults for `lastUsedAt` / `useCount`
+ * so smart-suggestion ranking has stable starting values. Existing
+ * rows are unaffected — this is a pure additive migration.
+ */
+val MIGRATION_10_11 = object : Migration(10, 11) {
+    override fun migrate(db: SupportSQLiteDatabase) {
+        db.execSQL(
+            """
+            CREATE TABLE IF NOT EXISTS `contacts` (
+                `id` TEXT NOT NULL,
+                `walletId` TEXT,
+                `name` TEXT NOT NULL,
+                `address` TEXT NOT NULL,
+                `network` TEXT NOT NULL,
+                `notes` TEXT,
+                `tags` TEXT,
+                `createdAt` INTEGER NOT NULL,
+                `updatedAt` INTEGER NOT NULL,
+                `lastUsedAt` INTEGER DEFAULT NULL,
+                `useCount` INTEGER NOT NULL DEFAULT 0,
+                PRIMARY KEY(`id`)
+            )
+            """.trimIndent()
+        )
+        db.execSQL("CREATE INDEX IF NOT EXISTS `idx_contacts_address` ON `contacts` (`address`)")
+        db.execSQL("CREATE INDEX IF NOT EXISTS `idx_contacts_walletId` ON `contacts` (`walletId`)")
+    }
+}
