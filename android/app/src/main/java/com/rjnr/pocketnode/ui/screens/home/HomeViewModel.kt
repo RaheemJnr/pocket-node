@@ -110,6 +110,13 @@ class HomeViewModel @Inject constructor(
     private val _navEvents = Channel<HomeNavEvent>(Channel.BUFFERED)
     val navEvents = _navEvents.receiveAsFlow()
 
+    // Captures a pending APK download URL + size when the user is sent to
+    // Android settings to grant install-from-unknown-sources. On ON_RESUME
+    // we check `canInstallPackages()` and start the download automatically
+    // so the user does not have to wait for the next launch / re-tap Update.
+    private var pendingUpdateApkUrl: String? = null
+    private var pendingUpdateApkSize: Long = 0L
+
     // Tracks the last successful CKB/USD fetch so we can throttle
     // refresh-on-foreground and the 5-min ticker (#117 deferred items).
     private var lastPriceFetchAt: Long = 0L
@@ -779,16 +786,76 @@ class HomeViewModel @Inject constructor(
 
     fun startUpdate() {
         val info = _uiState.value.updateInfo ?: return
-        _uiState.update { it.copy(showUpdateDialog = false) }
 
-        if (info.apkDownloadUrl != null && updateDownloader.canInstallPackages()) {
-            updateDownloader.downloadAndInstall(info.apkDownloadUrl)
-        } else if (info.apkDownloadUrl != null) {
-            _uiState.update { it.copy(showInstallPermissionNeeded = true) }
-        } else {
-            // No APK asset — open the GitHub release page in browser
+        if (info.apkDownloadUrl == null) {
+            // No APK asset attached to this release. Nothing safe to do
+            // without surprising the user with a browser jump; just close.
             _uiState.update { it.copy(showUpdateDialog = false) }
+            return
         }
+
+        if (!updateDownloader.canInstallPackages()) {
+            // Cannot proceed until the user grants "install from unknown
+            // sources" for this app. Hide the update dialog and show the
+            // permission prompt instead. Previously this flag was set but
+            // never rendered, so tapping Update did nothing.
+            _uiState.update {
+                it.copy(
+                    showUpdateDialog = false,
+                    showInstallPermissionNeeded = true,
+                )
+            }
+            return
+        }
+
+        // Close the dialog. The UpdateProgressBanner at MainScreen scope
+        // takes over and surfaces progress + install CTA.
+        _uiState.update { it.copy(showUpdateDialog = false) }
+        updateDownloader.downloadAndInstall(
+            apkUrl = info.apkDownloadUrl,
+            totalBytesHint = info.fileSize,
+        )
+    }
+
+    /**
+     * Dismiss the install-from-unknown-sources prompt without opening
+     * settings. The user can re-trigger the update flow from the dialog
+     * later when they are ready.
+     */
+    fun dismissInstallPermission() {
+        _uiState.update { it.copy(showInstallPermissionNeeded = false) }
+        pendingUpdateApkUrl = null
+        pendingUpdateApkSize = 0L
+    }
+
+    /**
+     * Open the system settings screen that lets the user grant install
+     * permission for this app. Captures the pending download details so
+     * [retryPendingUpdateIfPermissionGranted] can resume automatically on
+     * ON_RESUME once the user returns with permission granted.
+     */
+    fun openInstallPermissionSettings(launch: (android.content.Intent) -> Unit) {
+        val info = _uiState.value.updateInfo
+        pendingUpdateApkUrl = info?.apkDownloadUrl
+        pendingUpdateApkSize = info?.fileSize ?: 0L
+        _uiState.update { it.copy(showInstallPermissionNeeded = false) }
+        launch(updateDownloader.getInstallPermissionIntent())
+    }
+
+    /**
+     * Called from the HomeScreen lifecycle observer when the activity
+     * resumes. If we previously sent the user to Android settings to grant
+     * "install from unknown sources" and they returned with the permission
+     * now granted, kick off the download automatically instead of forcing
+     * them to re-tap Update.
+     */
+    fun retryPendingUpdateIfPermissionGranted() {
+        val url = pendingUpdateApkUrl ?: return
+        if (!updateDownloader.canInstallPackages()) return
+        val size = pendingUpdateApkSize
+        pendingUpdateApkUrl = null
+        pendingUpdateApkSize = 0L
+        updateDownloader.downloadAndInstall(apkUrl = url, totalBytesHint = size)
     }
 
     /**
@@ -806,7 +873,13 @@ class HomeViewModel @Inject constructor(
 
     override fun onCleared() {
         super.onCleared()
-        updateDownloader.cleanup()
+        // Do NOT call updateDownloader.cleanup() here. The downloader is a
+        // @Singleton owned at app scope; the banner above the bottom nav
+        // (driven by UpdateBannerViewModel in MainScreen) is what surfaces
+        // its state. Cancelling here would kill an in-flight update the
+        // moment HomeScreen unmounts (e.g. configuration change, swap to
+        // Activity tab). The downloader cleans itself up on init for stale
+        // APKs and on cancel/resetState for in-flight ones.
     }
 
     companion object {

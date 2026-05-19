@@ -164,6 +164,10 @@ fun HomeScreen(
             if (event == androidx.lifecycle.Lifecycle.Event.ON_RESUME) {
                 viewModel.refreshSecurityState()
                 viewModel.refreshPriceIfStale()
+                // If we sent the user to Android settings to grant install
+                // permission, resume the download automatically when they
+                // come back instead of making them re-tap Update.
+                viewModel.retryPendingUpdateIfPermissionGranted()
             }
         }
         lifecycleOwner.lifecycle.addObserver(observer)
@@ -284,12 +288,29 @@ fun HomeScreen(
         )
     }
 
-    // Update dialog
+    // Confirmation dialog announcing a new version. After the user taps
+    // Update Now this closes, the download proceeds in the background, and
+    // the persistent banner above the bottom navigation surfaces progress
+    // and the install CTA.
     if (uiState.showUpdateDialog && uiState.updateInfo != null) {
         UpdateDialog(
             updateInfo = uiState.updateInfo!!,
             onUpdate = { viewModel.startUpdate() },
-            onDismiss = { viewModel.dismissUpdate() }
+            onDismiss = { viewModel.dismissUpdate() },
+        )
+    }
+
+    // Install-from-unknown-sources permission prompt. Previously the
+    // ViewModel raised this flag with no UI bound to it, so users who
+    // hadn't granted the permission tapped Update and got nothing.
+    if (uiState.showInstallPermissionNeeded) {
+        com.rjnr.pocketnode.ui.components.InstallPermissionDialog(
+            onGrant = {
+                viewModel.openInstallPermissionSettings { intent ->
+                    context.startActivity(intent)
+                }
+            },
+            onDismiss = { viewModel.dismissInstallPermission() },
         )
     }
 
