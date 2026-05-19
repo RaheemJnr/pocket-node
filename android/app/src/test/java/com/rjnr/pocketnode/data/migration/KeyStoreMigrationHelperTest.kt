@@ -101,4 +101,53 @@ class KeyStoreMigrationHelperTest {
         val result = helper.readDecryptedKey("nonexistent")
         assertNull(result)
     }
+
+    @Test
+    fun `readDecryptedKey throws on V2 row when no cipher supplied`() = runTest {
+        // Seed a V1 row, then migrate it to V2 via the V2 helper. After
+        // migration the V1 readDecryptedKey overload must refuse with
+        // V2KeyMaterialRequiresAuthException rather than silently returning
+        // garbage from the V1 cipher applied to a V2 ciphertext.
+        helper.migrateWallet("alpha", "aa".repeat(32), "alpha mnemonic", "mnemonic", false)
+        val v2Helper = KeystoreV2MigrationHelper(keyMaterialDao, encryptionManager, migrationPrefs)
+        v2Helper.migrateWallet("alpha", encryptionManager.newEncryptCipherV2()).getOrThrow()
+
+        try {
+            helper.readDecryptedKey("alpha")
+            fail("Expected V2KeyMaterialRequiresAuthException")
+        } catch (e: V2KeyMaterialRequiresAuthException) {
+            assertTrue(e.message?.contains("alpha") == true)
+        }
+    }
+
+    @Test
+    fun `readDecryptedKey with cipher returns V2 bundle data`() = runTest {
+        helper.migrateWallet("beta", "bb".repeat(32), "beta mnemonic", "mnemonic", true)
+        val v2Helper = KeystoreV2MigrationHelper(keyMaterialDao, encryptionManager, migrationPrefs)
+        v2Helper.migrateWallet("beta", encryptionManager.newEncryptCipherV2()).getOrThrow()
+
+        val entity = keyMaterialDao.getByWalletId("beta")!!
+        val decryptCipher = encryptionManager.newDecryptCipherV2(entity.iv)
+
+        val result = helper.readDecryptedKey("beta", decryptCipher)
+        assertNotNull(result)
+        assertEquals("bb".repeat(32), result!!.privateKeyHex)
+        assertEquals("beta mnemonic", result.mnemonic)
+        assertEquals("mnemonic", result.walletType)
+        assertTrue(result.mnemonicBackedUp)
+    }
+
+    @Test
+    fun `readDecryptedKey with cipher still reads V1 rows`() = runTest {
+        // A caller that doesn't know which kdf the wallet is on can pass a
+        // V2 cipher unconditionally during migration. V1 rows fall through
+        // to the V1 path; the supplied cipher is unused but not an error.
+        helper.migrateWallet("gamma", "cc".repeat(32), null, "raw_key", false)
+        val v2Cipher = encryptionManager.newDecryptCipherV2(ByteArray(12))
+
+        val result = helper.readDecryptedKey("gamma", v2Cipher)
+        assertNotNull(result)
+        assertEquals("cc".repeat(32), result!!.privateKeyHex)
+        assertNull(result.mnemonic)
+    }
 }
