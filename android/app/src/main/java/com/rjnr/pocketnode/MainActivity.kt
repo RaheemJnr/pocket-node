@@ -71,7 +71,6 @@ class MainActivity : FragmentActivity() {
             when {
                 keyManager.wasResetDueToCorruption() -> Screen.Recovery.route
                 !cachedHasWallet -> Screen.Onboarding.route
-                repository.needsMnemonicBackup() -> Screen.MnemonicBackup.route
                 !pinManager.hasPin() -> Screen.InitialPinSetup.route
                 else -> Screen.Auth.route
             }
@@ -109,7 +108,10 @@ class MainActivity : FragmentActivity() {
                     CkbNavGraph(
                         navController = navController,
                         startDestination = startDestination,
-                        pinManager = pinManager
+                        pinManager = pinManager,
+                        needsMnemonicBackup = {
+                            runBlocking { repository.needsMnemonicBackup() }
+                        }
                     )
                 }
                 }
