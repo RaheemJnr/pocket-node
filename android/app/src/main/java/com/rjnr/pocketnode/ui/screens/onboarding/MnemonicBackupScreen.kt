@@ -14,9 +14,7 @@ import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.platform.LocalClipboardManager
 import androidx.compose.ui.platform.LocalView
-import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
@@ -27,7 +25,6 @@ import androidx.lifecycle.viewModelScope
 import com.rjnr.pocketnode.data.gateway.GatewayRepository
 import com.rjnr.pocketnode.util.toHex
 import dagger.hilt.android.lifecycle.HiltViewModel
-import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -72,10 +69,17 @@ class MnemonicBackupViewModel @Inject constructor(
 
             val words = repository.getMnemonic()
             if (words.isNullOrEmpty()) {
-                // For raw_key or sub-account wallets, this is expected — not an error
-                val privateKeyHex = try {
-                    repository.getPrivateKey().toHex()
-                } catch (_: Exception) { null }
+                // For raw_key or sub-account wallets, this is expected — not an error.
+                // Only raw-key wallets need the private key for the dedicated raw-key backup screen.
+                val privateKeyHex = if (walletType == "raw_key" && !isSubAccount) {
+                    try {
+                        repository.getPrivateKey().toHex()
+                    } catch (_: Exception) {
+                        null
+                    }
+                } else {
+                    null
+                }
                 _uiState.update { it.copy(privateKeyHex = privateKeyHex) }
                 return@launch
             }
@@ -91,13 +95,8 @@ class MnemonicBackupViewModel @Inject constructor(
                 val choices = mutableListOf(correct).apply { addAll(decoys) }
                 choices.apply { shuffle(random) }.toList()
             }
-            val privateKeyHex = try {
-                repository.getPrivateKey().toHex()
-            } catch (_: Exception) {
-                null
-            }
             _uiState.update {
-                it.copy(words = words, privateKeyHex = privateKeyHex, verifyPositions = positions, verifyOptions = options)
+                it.copy(words = words, verifyPositions = positions, verifyOptions = options)
             }
         }
     }
@@ -222,8 +221,6 @@ fun MnemonicBackupScreen(
             simplified -> {
                 MnemonicDisplayStep(
                     words = uiState.words,
-                    privateKeyHex = uiState.privateKeyHex,
-                    snackbarHostState = snackbarHostState,
                     onNext = {
                         viewModel.markBackedUpAndComplete()
                         onNavigateBack()
@@ -237,8 +234,6 @@ fun MnemonicBackupScreen(
                 when (uiState.currentStep) {
                     1 -> MnemonicDisplayStep(
                         words = uiState.words,
-                        privateKeyHex = uiState.privateKeyHex,
-                        snackbarHostState = snackbarHostState,
                         onNext = { viewModel.advanceToVerify() },
                         modifier = Modifier.padding(padding)
                     )
@@ -263,15 +258,10 @@ fun MnemonicBackupScreen(
 @Composable
 private fun MnemonicDisplayStep(
     words: List<String>,
-    privateKeyHex: String?,
-    snackbarHostState: SnackbarHostState,
     onNext: () -> Unit,
     nextButtonLabel: String = "I've Written Them Down",
     modifier: Modifier = Modifier
 ) {
-    val clipboardManager = LocalClipboardManager.current
-    val scope = rememberCoroutineScope()
-
     Column(
         modifier = modifier
             .fillMaxSize()
@@ -336,32 +326,6 @@ private fun MnemonicDisplayStep(
                         )
                     }
                 }
-            }
-        }
-
-        // Copy Private Key
-        if (privateKeyHex != null) {
-            OutlinedButton(
-                onClick = {
-                    val keyValue = "0x$privateKeyHex"
-                    clipboardManager.setText(AnnotatedString(keyValue))
-                    scope.launch {
-                        snackbarHostState.showSnackbar("Private key copied — clipboard will be cleared in 30s")
-                        delay(30_000L)
-                        if (clipboardManager.getText()?.text == keyValue) {
-                            clipboardManager.setText(AnnotatedString(""))
-                        }
-                    }
-                },
-                modifier = Modifier.fillMaxWidth()
-            ) {
-                Icon(
-                    Lucide.KeyRound,
-                    contentDescription = null,
-                    modifier = Modifier.size(18.dp)
-                )
-                Spacer(Modifier.width(8.dp))
-                Text("Copy Private Key")
             }
         }
 
