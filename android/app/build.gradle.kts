@@ -86,18 +86,10 @@ android {
                 storePassword = keystorePassword
                 keyAlias = keyAliasEnv
                 keyPassword = keyPasswordEnv
-            } else {
-                val missingVars = listOf(
-                    "KEYSTORE_PATH" to keystorePath,
-                    "KEYSTORE_PASSWORD" to keystorePassword,
-                    "KEY_ALIAS" to keyAliasEnv,
-                    "KEY_PASSWORD" to keyPasswordEnv
-                ).filter { it.second == null }.map { it.first }
-
-                throw GradleException(
-                    "Release signing is required. Missing environment variables: ${missingVars.joinToString(", ")}"
-                )
             }
+            // else: intentionally leave release signingConfig unconfigured.
+            // Missing env validation is deferred to task-graph time below so
+            // debug/test/sync workflows still work without release secrets.
         }
     }
 
@@ -154,6 +146,28 @@ android {
 
 // Pinned to the version mockk transitively brings in. Preloaded as a -javaagent
 // for unit tests so MockK works on JDK 21+ without self-attach.
+
+
+gradle.taskGraph.whenReady {
+    val needsReleaseSigning = allTasks.any { task ->
+        task.name.contains("Release") && (
+            task.name.startsWith("assemble") ||
+                task.name.startsWith("bundle") ||
+                task.name.startsWith("package")
+            )
+    }
+
+    if (needsReleaseSigning) {
+        val missingVars = listOf("KEYSTORE_PATH", "KEYSTORE_PASSWORD", "KEY_ALIAS", "KEY_PASSWORD")
+            .filter { System.getenv(it) == null }
+        if (missingVars.isNotEmpty()) {
+            throw GradleException(
+                "Release signing requires env vars: ${missingVars.joinToString(", ")}"
+            )
+        }
+    }
+}
+
 val byteBuddyAgent: Configuration by configurations.creating
 
 dependencies {
