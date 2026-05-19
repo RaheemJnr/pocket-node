@@ -143,8 +143,25 @@ fun PinEntryScreen(
 
             Spacer(modifier = Modifier.height(16.dp))
 
-            // Error / lockout messages
+            // Error / lockout / verifying messages
             when {
+                uiState.isVerifying -> {
+                    Row(
+                        verticalAlignment = androidx.compose.ui.Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        androidx.compose.material3.CircularProgressIndicator(
+                            modifier = Modifier.size(14.dp),
+                            strokeWidth = 2.dp,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                        Text(
+                            text = "Verifying...",
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            style = MaterialTheme.typography.bodySmall
+                        )
+                    }
+                }
                 uiState.isLockedOut -> {
                     Text(
                         text = "Too many attempts. Try again in ${uiState.lockoutRemainingSeconds}s",
@@ -170,8 +187,8 @@ fun PinEntryScreen(
 
             Spacer(modifier = Modifier.weight(1f))
 
-            // Number pad
-            val buttonsEnabled = !uiState.isLockedOut
+            // Number pad — disabled during lockout AND while the KDF is computing.
+            val buttonsEnabled = !uiState.isLockedOut && !uiState.isVerifying
             val digits = listOf(
                 listOf("1", "2", "3"),
                 listOf("4", "5", "6"),
