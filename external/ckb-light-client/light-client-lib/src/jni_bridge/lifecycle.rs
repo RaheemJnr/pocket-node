@@ -1,6 +1,21 @@
 //! Lifecycle management for JNI bridge
 //!
-//! Implements init/start/stop/status functions that mirror light-client-bin/src/subcmds.rs
+//! Implements init/start/stop/status functions that mirror light-client-bin/src/subcmds.rs.
+//!
+//! ## Init invariants
+//!
+//! `nativeInit` populates the `JAVA_VM` and `STATUS_CALLBACK` `OnceLock`s
+//! only *after* every other fallible step has succeeded. This guarantees:
+//!
+//! - If init returns `JNI_FALSE`, neither callback nor JavaVM is populated,
+//!   so a retry runs cleanly without colliding with leftover state from the
+//!   previous attempt.
+//! - The `GlobalRef` held for the status callback is dropped automatically
+//!   on the early-return paths, so failure cannot leak JVM references.
+//!
+//! Note: `nativeStop` cannot reset any `OnceLock` (the type has no API to
+//! do so), so in-process network switching is not supported. See #218 for
+//! the app-side mitigation (force process restart on network switch).
 
 use super::callbacks::invoke_status_callback;
 use super::panic_guard::guard_jni;
@@ -53,7 +68,13 @@ pub extern "C" fn Java_com_nervosnetwork_ckblightclient_LightClientNative_native
         return JNI_FALSE;
     }
 
-    // Get JavaVM for callbacks
+    // Acquire VM and status callback handles up front, but hold them in local
+    // variables until the rest of init succeeds. The audit finding "partial-
+    // init unrecoverable" (#186 High 4) was caused by setting these OnceLocks
+    // early: a failure later in init would leave them populated, blocking
+    // every retry attempt. By deferring the .set() calls until all fallible
+    // work has succeeded, a transient init failure drops the local variables
+    // (releasing the GlobalRef) and retry starts cleanly.
     let vm = match env.get_java_vm() {
         Ok(vm) => vm,
         Err(e) => {
@@ -62,13 +83,6 @@ pub extern "C" fn Java_com_nervosnetwork_ckblightclient_LightClientNative_native
         }
     };
 
-    // Store JavaVM
-    if JAVA_VM.set(vm).is_err() {
-        eprintln!("Failed to store JavaVM");
-        return JNI_FALSE;
-    }
-
-    // Create global ref for status callback
     let status_callback_ref = match env.new_global_ref(status_callback) {
         Ok(r) => r,
         Err(e) => {
@@ -76,12 +90,6 @@ pub extern "C" fn Java_com_nervosnetwork_ckblightclient_LightClientNative_native
             return JNI_FALSE;
         }
     };
-
-    // Store status callback
-    if STATUS_CALLBACK.set(status_callback_ref).is_err() {
-        eprintln!("Failed to store status callback");
-        return JNI_FALSE;
-    }
 
     // Initialize Android logger
     android_logger::init_once(
@@ -287,6 +295,18 @@ pub extern "C" fn Java_com_nervosnetwork_ckblightclient_LightClientNative_native
     info!("Starting RPC server on {}...", run_env.rpc.listen_address);
     // Note: RPC server implementation would go here
     // For now, we're skipping RPC server startup to keep the implementation focused
+
+    // All fallible init has succeeded. Populate the JavaVM and status callback
+    // OnceLocks last so that a failure above this point would have left both
+    // unset, allowing retry. (See audit #186 Finding High 4.)
+    if JAVA_VM.set(vm).is_err() {
+        error!("Failed to store JavaVM (already set?)");
+        return JNI_FALSE;
+    }
+    if STATUS_CALLBACK.set(status_callback_ref).is_err() {
+        error!("Failed to store status callback (already set?)");
+        return JNI_FALSE;
+    }
 
     // Set state to INIT
     set_state(STATE_INIT);
