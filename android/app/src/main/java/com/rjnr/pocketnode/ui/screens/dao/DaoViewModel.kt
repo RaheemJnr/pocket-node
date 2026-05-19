@@ -263,6 +263,13 @@ class DaoViewModel @Inject constructor(
                 _uiState.update {
                     it.copy(error = "Cannot read wallet key: ${read.reason}", pendingAction = null)
                 }
+            is WalletKeyReader.Result.KeyInvalidated ->
+                _uiState.update {
+                    it.copy(
+                        error = "Biometric enrollment changed — re-import this wallet from its recovery phrase to continue",
+                        pendingAction = null,
+                    )
+                }
             is WalletKeyReader.Result.Success ->
                 operation(read.privateKey).onFailure { e ->
                     _uiState.update { it.copy(error = e.message, pendingAction = null) }

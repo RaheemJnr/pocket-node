@@ -65,6 +65,35 @@ fun SecuritySettingsScreen(
         }
     }
 
+    // V2 Keystore key is invalidated whenever the user adds/removes a
+    // biometric enrollment (setInvalidatedByBiometricEnrollment=true).
+    // Surface this trade-off the first time the user touches the
+    // biometric toggle while wallets exist on the device (#213 sub-PR 6).
+    uiState.biometricEnrollmentWarning?.let { warning ->
+        AlertDialog(
+            onDismissRequest = { viewModel.dismissBiometricEnrollmentWarning() },
+            title = { Text(if (warning.enabling) "Enable biometric unlock?" else "Disable biometric unlock?") },
+            text = {
+                Text(
+                    "Pocket Node binds your wallet keys to your current biometrics. " +
+                    "If you later add or remove a fingerprint or face, the keys on this device are wiped " +
+                    "and the wallet can only be recovered from its recovery phrase.\n\n" +
+                    "Make sure your recovery phrase is written down somewhere safe before you continue."
+                )
+            },
+            confirmButton = {
+                Button(onClick = { viewModel.confirmBiometricEnrollmentWarning() }) {
+                    Text("Continue")
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { viewModel.dismissBiometricEnrollmentWarning() }) {
+                    Text("Cancel")
+                }
+            }
+        )
+    }
+
     if (showRemoveDialog) {
         if (!uiState.canRemovePin) {
             AlertDialog(

@@ -264,6 +264,11 @@ class WalletSettingsViewModel @Inject constructor(
                 is WalletKeyReader.MaterialResult.NotAvailable -> {
                     _uiState.update { it.copy(error = "Cannot read wallet key: ${result.reason}") }
                 }
+                is WalletKeyReader.MaterialResult.KeyInvalidated -> {
+                    _uiState.update {
+                        it.copy(error = "Biometric enrollment changed — re-import this wallet to view its recovery phrase")
+                    }
+                }
                 is WalletKeyReader.MaterialResult.Success -> {
                     val keyHex = result.privateKey.joinToString("") { "%02x".format(it) }
                     val words = result.mnemonic?.split(" ")
@@ -311,6 +316,10 @@ class WalletSettingsViewModel @Inject constructor(
                     _uiState.update { it.copy(error = "Authentication cancelled") }
                 is WalletKeyReader.MaterialResult.NotAvailable ->
                     _uiState.update { it.copy(error = "Cannot read parent wallet: ${result.reason}") }
+                is WalletKeyReader.MaterialResult.KeyInvalidated ->
+                    _uiState.update {
+                        it.copy(error = "Biometric enrollment changed — re-import the parent wallet to create sub-accounts")
+                    }
                 is WalletKeyReader.MaterialResult.Success -> {
                     val words = result.mnemonic?.split(" ")
                     if (words.isNullOrEmpty()) {
