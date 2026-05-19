@@ -109,16 +109,30 @@ android {
                 storePassword = keystorePassword
                 keyAlias = keyAliasEnv
                 keyPassword = keyPasswordEnv
-            } else {
-                if (keystorePath != null) {
-                    logger.warn("KEYSTORE_PATH is set but other signing env vars are missing — falling back to debug keystore")
-                }
-                // Fall back to debug keystore for local dev
-                val debugKeystore = signingConfigs.getByName("debug")
-                storeFile = debugKeystore.storeFile
-                storePassword = debugKeystore.storePassword
-                keyAlias = debugKeystore.keyAlias
-                keyPassword = debugKeystore.keyPassword
+            }
+            // else: leave release signingConfig unconfigured. The previous
+            // fallback to the checked-in public debug keystore was a real
+            // signing-key exposure for any locally-built release APK. Missing
+            // env validation is deferred to task-graph time below so debug,
+            // test, and IDE sync flows still work without release secrets.
+        }
+    }
+
+    gradle.taskGraph.whenReady {
+        val needsReleaseSigning = allTasks.any { task ->
+            task.name.contains("Release") && (
+                task.name.startsWith("assemble") ||
+                    task.name.startsWith("bundle") ||
+                    task.name.startsWith("package")
+                )
+        }
+        if (needsReleaseSigning) {
+            val missingVars = listOf("KEYSTORE_PATH", "KEYSTORE_PASSWORD", "KEY_ALIAS", "KEY_PASSWORD")
+                .filter { System.getenv(it) == null }
+            if (missingVars.isNotEmpty()) {
+                throw GradleException(
+                    "Release signing requires env vars: ${missingVars.joinToString(", ")}"
+                )
             }
         }
     }
