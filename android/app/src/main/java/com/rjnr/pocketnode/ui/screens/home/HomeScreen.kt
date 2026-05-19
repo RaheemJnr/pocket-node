@@ -266,20 +266,6 @@ fun HomeScreen(
         )
     }
 
-    // Backup dialog
-    if (uiState.showBackupDialog && uiState.privateKeyHex != null) {
-        BackupWalletDialog(
-            privateKeyHex = uiState.privateKeyHex!!,
-            onDismiss = { viewModel.hideBackup() },
-            onCopy = {
-                clipboardManager.setText(AnnotatedString(uiState.privateKeyHex!!))
-                scope.launch {
-                    snackbarHostState.showSnackbar("Private key copied to clipboard")
-                }
-            }
-        )
-    }
-
     // Import dialog
     if (uiState.showImportDialog) {
         ImportWalletDialog(
@@ -730,51 +716,6 @@ fun HomeScreenUI(
             }
         }
     }
-}
-
-@Composable
-private fun BackupWalletDialog(
-    privateKeyHex: String,
-    onDismiss: () -> Unit,
-    onCopy: () -> Unit
-) {
-    AlertDialog(
-        onDismissRequest = onDismiss,
-        title = { Text("Backup Wallet", fontWeight = FontWeight.Bold) },
-        text = {
-            Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
-                Text(
-                    "This is your private key. Anyone with this key can access your funds. Store it securely!",
-                    style = MaterialTheme.typography.bodyMedium,
-                    color = MaterialTheme.colorScheme.error
-                )
-
-                Card(
-                    colors = CardDefaults.cardColors(
-                        containerColor = MaterialTheme.colorScheme.surfaceVariant
-                    )
-                ) {
-                    Text(
-                        text = privateKeyHex,
-                        modifier = Modifier.padding(16.dp),
-                        fontFamily = FontFamily.Monospace,
-                        fontSize = 12.sp,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant
-                    )
-                }
-            }
-        },
-        confirmButton = {
-            Button(onClick = onCopy) {
-                Text("Copy Key")
-            }
-        },
-        dismissButton = {
-            TextButton(onClick = onDismiss) {
-                Text("Close")
-            }
-        }
-    )
 }
 
 @Composable

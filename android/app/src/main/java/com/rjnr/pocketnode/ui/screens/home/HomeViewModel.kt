@@ -559,24 +559,6 @@ class HomeViewModel @Inject constructor(
         savedStateHandle[SAVED_KEY_SHOW_SYNC_OPTIONS] = false
     }
 
-    /**
-     * Show the backup wallet dialog with the private key (raw key wallets only).
-     * For mnemonic wallets, HomeScreen navigates to MnemonicBackupScreen directly.
-     */
-    fun showBackup() {
-        if (isMnemonicWallet()) return // handled by navigation in HomeScreen
-        viewModelScope.launch {
-            try {
-                val privateKey = repository.getPrivateKey()
-                val hex = org.nervos.ckb.utils.Numeric.toHexStringNoPrefix(privateKey)
-                _uiState.update { it.copy(privateKeyHex = hex, showBackupDialog = true) }
-            } catch (e: Exception) {
-                Log.e(TAG, "Failed to get private key for backup", e)
-                _uiState.update { it.copy(error = "Failed to access wallet keys") }
-            }
-        }
-    }
-
     private fun checkBackupStatus() {
         viewModelScope.launch {
             val type = repository.getWalletType()
@@ -617,13 +599,6 @@ class HomeViewModel @Inject constructor(
     }
 
     fun isMnemonicWallet(): Boolean = _uiState.value.walletType == KeyManager.WALLET_TYPE_MNEMONIC
-
-    /**
-     * Hide the backup wallet dialog
-     */
-    fun hideBackup() {
-        _uiState.update { it.copy(showBackupDialog = false, privateKeyHex = null) }
-    }
 
     /**
      * Show the import wallet dialog
@@ -927,8 +902,6 @@ data class HomeUiState(
     val error: String? = null,
     val currentSyncMode: SyncMode = SyncMode.RECENT,
     val showSyncOptionsDialog: Boolean = false,
-    val showBackupDialog: Boolean = false,
-    val privateKeyHex: String? = null,
     val showImportDialog: Boolean = false,
     val showPostImportSyncDialog: Boolean = false,
     val showBackupReminder: Boolean = false,
