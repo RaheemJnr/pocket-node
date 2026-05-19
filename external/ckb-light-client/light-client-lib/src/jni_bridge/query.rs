@@ -3,6 +3,7 @@
 //! Provides 17 query APIs matching WASM implementation.
 //! All functions return JSON strings for complex types, or null on error.
 
+use super::panic_guard::guard_jni;
 use super::types::*;
 use crate::service::{
     Cell, CellType, CellsCapacity, FetchStatus, LocalNode, Pagination, RemoteNode, 
@@ -56,6 +57,7 @@ pub extern "C" fn Java_com_nervosnetwork_ckblightclient_LightClientNative_native
     mut env: JNIEnv,
     _class: JClass,
 ) -> jstring {
+    guard_jni(std::ptr::null_mut(), move || {
     check_running!(env);
 
     let swc = match STORAGE_WITH_DATA.get() {
@@ -70,6 +72,7 @@ pub extern "C" fn Java_com_nervosnetwork_ckblightclient_LightClientNative_native
     let header_view: HeaderView = tip_header.into_view().into();
 
     to_jstring(&mut env, &header_view)
+    })
 }
 
 /// Get genesis block
@@ -78,6 +81,7 @@ pub extern "C" fn Java_com_nervosnetwork_ckblightclient_LightClientNative_native
     mut env: JNIEnv,
     _class: JClass,
 ) -> jstring {
+    guard_jni(std::ptr::null_mut(), move || {
     check_running!(env);
 
     let swc = match STORAGE_WITH_DATA.get() {
@@ -94,6 +98,7 @@ pub extern "C" fn Java_com_nervosnetwork_ckblightclient_LightClientNative_native
     let core_block_view: ckb_types::core::BlockView = genesis_block.into_view();
     let block_view: BlockView = core_block_view.into();
     to_jstring(&mut env, &block_view)
+    })
 }
 
 /// Get header by hash
@@ -103,6 +108,7 @@ pub extern "C" fn Java_com_nervosnetwork_ckblightclient_LightClientNative_native
     _class: JClass,
     hash: JString,
 ) -> jstring {
+    guard_jni(std::ptr::null_mut(), move || {
     check_running!(env);
 
     let hash_str: String = match env.get_string(&hash) {
@@ -130,7 +136,15 @@ pub extern "C" fn Java_com_nervosnetwork_ckblightclient_LightClientNative_native
         }
     };
 
-    let hash = packed::Byte32::from_slice(h256.as_bytes()).expect("H256 to Byte32");
+    // H256 is always 32 bytes so the conversion cannot fail in practice;
+    // pattern-match anyway to avoid an FFI panic landmine.
+    let hash = match packed::Byte32::from_slice(h256.as_bytes()) {
+        Ok(h) => h,
+        Err(e) => {
+            error!("nativeGetHeader: Byte32 conversion failed: {}", e);
+            return ptr::null_mut();
+        }
+    };
 
     match swc.storage().get_header(&hash) {
         Some(header) => {
@@ -139,6 +153,7 @@ pub extern "C" fn Java_com_nervosnetwork_ckblightclient_LightClientNative_native
         }
         None => ptr::null_mut(),
     }
+    })
 }
 
 /// Get header by block number (two-hop lookup: BlockNumber → BlockHash → Header)
@@ -149,6 +164,7 @@ pub extern "C" fn Java_com_nervosnetwork_ckblightclient_LightClientNative_native
     _class: JClass,
     block_number: JString,
 ) -> jstring {
+    guard_jni(std::ptr::null_mut(), move || {
     check_running!(env);
 
     let number_str: String = match env.get_string(&block_number) {
@@ -209,6 +225,7 @@ pub extern "C" fn Java_com_nervosnetwork_ckblightclient_LightClientNative_native
             ptr::null_mut()
         }
     }
+    })
 }
 
 /// Fetch header (with fetch status)
@@ -218,6 +235,7 @@ pub extern "C" fn Java_com_nervosnetwork_ckblightclient_LightClientNative_native
     _class: JClass,
     hash: JString,
 ) -> jstring {
+    guard_jni(std::ptr::null_mut(), move || {
     check_running!(env);
 
     let hash_str: String = match env.get_string(&hash) {
@@ -253,7 +271,13 @@ pub extern "C" fn Java_com_nervosnetwork_ckblightclient_LightClientNative_native
         }
     };
 
-    let hash = packed::Byte32::from_slice(h256.as_bytes()).expect("H256 to Byte32");
+    let hash = match packed::Byte32::from_slice(h256.as_bytes()) {
+        Ok(h) => h,
+        Err(e) => {
+            error!("nativeFetchHeader: Byte32 conversion failed: {}", e);
+            return ptr::null_mut();
+        }
+    };
 
     let fetch_status: FetchStatus<HeaderView> =
         if let Some(header) = swc.storage().get_header(&hash) {
@@ -283,6 +307,7 @@ pub extern "C" fn Java_com_nervosnetwork_ckblightclient_LightClientNative_native
         };
 
     to_jstring(&mut env, &fetch_status)
+    })
 }
 
 /// Set scripts
@@ -293,6 +318,7 @@ pub extern "C" fn Java_com_nervosnetwork_ckblightclient_LightClientNative_native
     scripts_json: JString,
     command: i32,
 ) -> jni::sys::jboolean {
+    guard_jni(jni::sys::JNI_FALSE, move || {
     if !is_running() {
         warn!("Light client not running");
         return jni::sys::JNI_FALSE;
@@ -361,6 +387,7 @@ pub extern "C" fn Java_com_nervosnetwork_ckblightclient_LightClientNative_native
     peers.clear_matched_blocks(&mut matched_blocks);
 
     jni::sys::JNI_TRUE
+    })
 }
 
 /// Get scripts
@@ -369,6 +396,7 @@ pub extern "C" fn Java_com_nervosnetwork_ckblightclient_LightClientNative_native
     mut env: JNIEnv,
     _class: JClass,
 ) -> jstring {
+    guard_jni(std::ptr::null_mut(), move || {
     check_running!(env);
 
     let swc = match STORAGE_WITH_DATA.get() {
@@ -393,6 +421,7 @@ pub extern "C" fn Java_com_nervosnetwork_ckblightclient_LightClientNative_native
         })
         .collect();
     to_jstring(&mut env, &scripts)
+    })
 }
 
 /// Get local node info
@@ -401,6 +430,7 @@ pub extern "C" fn Java_com_nervosnetwork_ckblightclient_LightClientNative_native
     mut env: JNIEnv,
     _class: JClass,
 ) -> jstring {
+    guard_jni(std::ptr::null_mut(), move || {
     check_running!(env);
 
     let net_controller = match NET_CONTROL.get() {
@@ -431,6 +461,7 @@ pub extern "C" fn Java_com_nervosnetwork_ckblightclient_LightClientNative_native
     };
 
     to_jstring(&mut env, &node_info)
+    })
 }
 
 /// Get peers
@@ -439,6 +470,7 @@ pub extern "C" fn Java_com_nervosnetwork_ckblightclient_LightClientNative_native
     mut env: JNIEnv,
     _class: JClass,
 ) -> jstring {
+    guard_jni(std::ptr::null_mut(), move || {
     check_running!(env);
 
     let net_controller = match NET_CONTROL.get() {
@@ -478,6 +510,7 @@ pub extern "C" fn Java_com_nervosnetwork_ckblightclient_LightClientNative_native
     }
 
     to_jstring(&mut env, &remote_nodes)
+    })
 }
 
 // TODO: Implement remaining 10 APIs:
@@ -503,6 +536,7 @@ pub extern "C" fn Java_com_nervosnetwork_ckblightclient_LightClientNative_native
     limit: jni::sys::jint,
     cursor_jstr: JString,
 ) -> jstring {
+    guard_jni(std::ptr::null_mut(), move || {
     check_running!(env);
 
     let search_key_str: String = match env.get_string(&search_key_json) {
@@ -629,6 +663,7 @@ pub extern "C" fn Java_com_nervosnetwork_ckblightclient_LightClientNative_native
     };
 
     to_jstring(&mut env, &result)
+    })
 }
 
 #[no_mangle]
@@ -640,6 +675,7 @@ pub extern "C" fn Java_com_nervosnetwork_ckblightclient_LightClientNative_native
     limit: jni::sys::jint,
     cursor_jstr: JString,
 ) -> jstring {
+    guard_jni(std::ptr::null_mut(), move || {
 
     check_running!(env);
 
@@ -790,6 +826,7 @@ pub extern "C" fn Java_com_nervosnetwork_ckblightclient_LightClientNative_native
     };
 
     to_jstring(&mut env, &result)
+    })
 }
 
 #[no_mangle]
@@ -798,6 +835,7 @@ pub extern "C" fn Java_com_nervosnetwork_ckblightclient_LightClientNative_native
     _class: JClass,
     search_key_json: JString,
 ) -> jstring {
+    guard_jni(std::ptr::null_mut(), move || {
 
     check_running!(env);
 
@@ -873,6 +911,7 @@ pub extern "C" fn Java_com_nervosnetwork_ckblightclient_LightClientNative_native
     };
 
     to_jstring(&mut env, &result)
+    })
 }
 
 #[no_mangle]
@@ -881,6 +920,7 @@ pub extern "C" fn Java_com_nervosnetwork_ckblightclient_LightClientNative_native
     _class: JClass,
     tx_json: JString,
 ) -> jstring {
+    guard_jni(std::ptr::null_mut(), move || {
     check_running!(env);
 
     let tx_str: String = match env.get_string(&tx_json) {
@@ -929,17 +969,25 @@ pub extern "C" fn Java_com_nervosnetwork_ckblightclient_LightClientNative_native
         }
     };
 
-    // Add to pending transactions
-    swc.pending_txs()
-        .write()
-        .expect("pending_txs lock is poisoned")
-        .push(tx_view.clone(), cycles);
+    // Add to pending transactions. Recover from poisoning rather than
+    // double-panic on a lock that was poisoned by a prior panic — a
+    // re-panic across the FFI boundary is undefined behavior.
+    let mut pending_write = match swc.pending_txs().write() {
+        Ok(g) => g,
+        Err(poisoned) => {
+            error!("pending_txs write lock poisoned; recovering: {:?}", poisoned);
+            poisoned.into_inner()
+        }
+    };
+    pending_write.push(tx_view.clone(), cycles);
+    drop(pending_write);
 
     debug!("Transaction added to pending pool: {}", tx_view.hash());
 
     // Return the transaction hash
     let tx_hash: H256 = tx_view.hash().unpack();
     to_jstring(&mut env, &tx_hash)
+    })
 }
 
 #[no_mangle]
@@ -948,6 +996,7 @@ pub extern "C" fn Java_com_nervosnetwork_ckblightclient_LightClientNative_native
     _class: JClass,
     hash: JString,
 ) -> jstring {
+    guard_jni(std::ptr::null_mut(), move || {
     check_running!(env);
 
     let hash_str: String = match env.get_string(&hash) {
@@ -968,13 +1017,28 @@ pub extern "C" fn Java_com_nervosnetwork_ckblightclient_LightClientNative_native
             return ptr::null_mut();
         }
     };
-    let byte32 = packed::Byte32::from_slice(tx_hash.as_bytes()).expect("H256 to Byte32");
+    let byte32 = match packed::Byte32::from_slice(tx_hash.as_bytes()) {
+        Ok(b) => b,
+        Err(e) => {
+            error!("Byte32 conversion failed: {}", e);
+            return ptr::null_mut();
+        }
+    };
 
     let swc = match STORAGE_WITH_DATA.get() {
         Some(s) => s,
         None => {
             error!("nativeGetTransaction: storage not initialized");
             return ptr::null_mut();
+        }
+    };
+
+    // Recover from poisoning rather than double-panic across the FFI boundary.
+    let pending_read = match swc.pending_txs().read() {
+        Ok(g) => g,
+        Err(poisoned) => {
+            error!("nativeGetTransaction: pending_txs read lock poisoned; recovering");
+            poisoned.into_inner()
         }
     };
 
@@ -988,7 +1052,7 @@ pub extern "C" fn Java_com_nervosnetwork_ckblightclient_LightClientNative_native
                 status: crate::service::Status::Committed,
             },
         }
-    } else if let Some((transaction, cycles, _)) = swc.pending_txs().read().expect("pending_txs lock").get(&byte32) {
+    } else if let Some((transaction, cycles, _)) = pending_read.get(&byte32) {
         debug!("nativeGetTransaction: found pending tx {}", hash_str);
         crate::service::TransactionWithStatus {
             transaction: Some(transaction.into_view().into()),
@@ -1011,6 +1075,7 @@ pub extern "C" fn Java_com_nervosnetwork_ckblightclient_LightClientNative_native
     };
 
     to_jstring(&mut env, &result)
+    })
 }
 
 #[no_mangle]
@@ -1019,6 +1084,7 @@ pub extern "C" fn Java_com_nervosnetwork_ckblightclient_LightClientNative_native
     _class: JClass,
     hash: JString,
 ) -> jstring {
+    guard_jni(std::ptr::null_mut(), move || {
     check_running!(env);
 
     let hash_str: String = match env.get_string(&hash) {
@@ -1038,7 +1104,13 @@ pub extern "C" fn Java_com_nervosnetwork_ckblightclient_LightClientNative_native
             return ptr::null_mut();
         }
     };
-    let byte32 = packed::Byte32::from_slice(tx_hash.as_bytes()).expect("H256 to Byte32");
+    let byte32 = match packed::Byte32::from_slice(tx_hash.as_bytes()) {
+        Ok(b) => b,
+        Err(e) => {
+            error!("Byte32 conversion failed: {}", e);
+            return ptr::null_mut();
+        }
+    };
 
     let swc = match STORAGE_WITH_DATA.get() {
         Some(s) => s,
@@ -1064,8 +1136,16 @@ pub extern "C" fn Java_com_nervosnetwork_ckblightclient_LightClientNative_native
         return to_jstring(&mut env, &fetch_status);
     }
 
-    // 2. Check if tx is in pending pool
-    if let Some((transaction, cycles, _)) = swc.pending_txs().read().expect("pending_txs lock").get(&byte32) {
+    // 2. Check if tx is in pending pool. Recover from poisoning to avoid
+    // double-panic across the FFI boundary.
+    let pending_read = match swc.pending_txs().read() {
+        Ok(g) => g,
+        Err(poisoned) => {
+            error!("nativeFetchTransaction: pending_txs read lock poisoned; recovering");
+            poisoned.into_inner()
+        }
+    };
+    if let Some((transaction, cycles, _)) = pending_read.get(&byte32) {
         debug!("nativeFetchTransaction: tx {} is pending", hash_str);
         let tws = crate::service::TransactionWithStatus {
             transaction: Some(transaction.into_view().into()),
@@ -1122,6 +1202,7 @@ pub extern "C" fn Java_com_nervosnetwork_ckblightclient_LightClientNative_native
         };
 
     to_jstring(&mut env, &fetch_status)
+    })
 }
 
 #[no_mangle]
@@ -1130,7 +1211,9 @@ pub extern "C" fn Java_com_nervosnetwork_ckblightclient_LightClientNative_native
     _class: JClass,
     _tx_json: JString,
 ) -> jstring {
+    guard_jni(std::ptr::null_mut(), move || {
     // TODO: Implement
     warn!("nativeEstimateCycles not yet implemented");
     ptr::null_mut()
+    })
 }
