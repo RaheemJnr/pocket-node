@@ -84,13 +84,18 @@ sealed class BottomTab(val route: String, val label: String) {
 fun CkbNavGraph(
     navController: NavHostController,
     startDestination: String = Screen.Onboarding.route,
-    pinManager: PinManager
+    pinManager: PinManager,
+    needsMnemonicBackup: () -> Boolean = { false }
 ) {
     // PIN is mandatory: if the user doesn't have one yet, any "go to Main" action
-    // must first pass through PIN setup. See MainActivity startup gate for the
-    // cold-start path.
-    fun destinationAfterWalletReady(): String =
-        if (pinManager.hasPin()) Screen.Main.route else Screen.InitialPinSetup.route
+    // must first pass through PIN setup. Once a PIN exists, mnemonic backup is
+    // enforced after authentication/setup so recovery material is not shown from
+    // the unauthenticated startup path.
+    fun destinationAfterWalletReady(): String = when {
+        !pinManager.hasPin() -> Screen.InitialPinSetup.route
+        needsMnemonicBackup() -> Screen.MnemonicBackup.createRoute()
+        else -> Screen.Main.route
+    }
 
     NavHost(
         navController = navController,
@@ -148,7 +153,7 @@ fun CkbNavGraph(
         composable(Screen.Auth.route) {
             AuthScreen(
                 onAuthSuccess = {
-                    navController.navigate(Screen.Main.route) {
+                    navController.navigate(destinationAfterWalletReady()) {
                         popUpTo(Screen.Auth.route) { inclusive = true }
                     }
                 },
@@ -489,7 +494,7 @@ fun CkbNavGraph(
         composable(Screen.InitialPinSetup.route) {
             InitialPinSetupScreen(
                 onPinCreated = {
-                    navController.navigate(Screen.Main.route) {
+                    navController.navigate(destinationAfterWalletReady()) {
                         popUpTo(navController.graph.id) { inclusive = true }
                         launchSingleTop = true
                     }
