@@ -58,7 +58,8 @@ class KeyStoreMigrationHelperTest {
         assertFalse(entity.mnemonicBackedUp)
 
         // Decrypt and verify round-trip
-        val decryptedKey = encryptionManager.decrypt(entity.encryptedPrivateKey, entity.iv)
+        val decryptCipher = encryptionManager.newDecryptCipher(entity.iv)
+        val decryptedKey = encryptionManager.decryptWithCipher(decryptCipher, entity.encryptedPrivateKey)
         assertEquals("aabb".repeat(16), String(decryptedKey, Charsets.UTF_8))
     }
 

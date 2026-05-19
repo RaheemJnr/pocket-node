@@ -27,11 +27,13 @@ class KeyStoreMigrationHelper(
         mnemonicBackedUp: Boolean
     ) {
         val keyBytes = privateKeyHex.toByteArray(Charsets.UTF_8)
-        val (encryptedKey, iv) = encryptionManager.encrypt(keyBytes)
+        val keyCipher = encryptionManager.newEncryptCipher()
+        val (encryptedKey, iv) = encryptionManager.encryptWithCipher(keyCipher, keyBytes)
 
         val mnemonicWithIv = mnemonic?.let {
             val mnemonicBytes = it.toByteArray(Charsets.UTF_8)
-            val (encMnemonic, mnemonicIv) = encryptionManager.encrypt(mnemonicBytes)
+            val mnemonicCipher = encryptionManager.newEncryptCipher()
+            val (encMnemonic, mnemonicIv) = encryptionManager.encryptWithCipher(mnemonicCipher, mnemonicBytes)
             mnemonicIv + encMnemonic // 12-byte IV prefix + ciphertext
         }
 
@@ -52,13 +54,18 @@ class KeyStoreMigrationHelper(
         val entity = keyMaterialDao.getByWalletId(walletId) ?: return null
 
         return try {
-            val keyBytes = encryptionManager.decrypt(entity.encryptedPrivateKey, entity.iv)
+            val keyCipher = encryptionManager.newDecryptCipher(entity.iv)
+            val keyBytes = encryptionManager.decryptWithCipher(keyCipher, entity.encryptedPrivateKey)
             val privateKeyHex = String(keyBytes, Charsets.UTF_8)
 
             val mnemonic = entity.encryptedMnemonic?.let { combined ->
                 val mnemonicIv = combined.sliceArray(0 until 12)
                 val mnemonicCiphertext = combined.sliceArray(12 until combined.size)
-                String(encryptionManager.decrypt(mnemonicCiphertext, mnemonicIv), Charsets.UTF_8)
+                val mnemonicCipher = encryptionManager.newDecryptCipher(mnemonicIv)
+                String(
+                    encryptionManager.decryptWithCipher(mnemonicCipher, mnemonicCiphertext),
+                    Charsets.UTF_8
+                )
             }
 
             DecryptedKeyData(
