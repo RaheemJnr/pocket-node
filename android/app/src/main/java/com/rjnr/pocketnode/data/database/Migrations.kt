@@ -396,3 +396,23 @@ val MIGRATION_8_9 = object : Migration(8, 9) {
         )
     }
 }
+
+/**
+ * 9 → 10: add `kdfVersion` column to `key_material` for the v1.6.x → v1.7.0
+ * Keystore auth-binding migration (#213).
+ *
+ * All existing rows are tagged version 1 (legacy unrestricted V1 Keystore
+ * key). `KeystoreV2MigrationHelper` re-encrypts each row under the new
+ * auth-bound V2 Keystore key and bumps the column to 2.
+ *
+ * `ALTER TABLE ADD COLUMN` is safe: SQLite appends the column with the
+ * declared default value for every existing row in one statement. No
+ * table recreate is needed since the rest of the schema is unchanged.
+ */
+val MIGRATION_9_10 = object : Migration(9, 10) {
+    override fun migrate(db: SupportSQLiteDatabase) {
+        db.execSQL(
+            "ALTER TABLE `key_material` ADD COLUMN `kdfVersion` INTEGER NOT NULL DEFAULT 1"
+        )
+    }
+}

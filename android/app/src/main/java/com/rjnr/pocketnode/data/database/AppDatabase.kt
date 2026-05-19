@@ -36,7 +36,13 @@ import com.rjnr.pocketnode.data.database.entity.WalletEntity
     // produced this exact shape; the annotations just declare it correctly),
     // so MIGRATION_8_9 is a no-op. Version bump alone is needed to refresh
     // Room's stored identity hash after the entity declarations changed. (#90 / #141)
-    version = 9,
+    //
+    // Bumped from 9 to 10 for v1.7.0 because KeyMaterialEntity gained the
+    // `kdfVersion` column (default 1). Existing rows are tagged version 1
+    // (legacy unrestricted V1 keystore key); the v1.6.x → v1.7.0 migration
+    // re-encrypts them under the auth-bound V2 keystore key and bumps each
+    // row to version 2. See `KeystoreV2MigrationHelper` and #213.
+    version = 10,
     // Schema export deliberately OFF until the Room 2.8.4 / kotlinx-serialization
     // 1.8.0 binary incompatibility is resolved (tracked in #149). Enabling it
     // crashes KSP with AbstractMethodError in Room's bundled
