@@ -11,6 +11,23 @@ import javax.crypto.spec.GCMParameterSpec
 import javax.inject.Inject
 import javax.inject.Singleton
 
+/**
+ * AES-256-GCM wrapper around the Android Keystore-backed wallet encryption key.
+ *
+ * ## API surface
+ *
+ * Callers must build a `Cipher` (via [newEncryptCipher] or [newDecryptCipher])
+ * and then invoke [encryptWithCipher] / [decryptWithCipher]. The separation
+ * exists because the Keystore is moving to per-operation user-authentication
+ * binding (see #213). A future change will require callers to thread the
+ * Cipher through `BiometricPrompt.CryptoObject(cipher)` before they call
+ * `doFinal`; isolating cipher-acquisition from cipher-use makes that change
+ * mechanical.
+ *
+ * For the moment the spec on the underlying [SecretKey] is unchanged — the
+ * Cipher is usable without a separate auth step. The audit-binding flags
+ * land in the follow-up sub-PR.
+ */
 @Singleton
 class KeystoreEncryptionManager @Inject constructor() {
 
@@ -19,17 +36,31 @@ class KeystoreEncryptionManager @Inject constructor() {
     private val secretKey: SecretKey
         get() = testKey ?: getOrCreateKeystoreKey()
 
-    fun encrypt(plaintext: ByteArray): Pair<ByteArray, ByteArray> {
+    /** Returns a fresh `Cipher` in ENCRYPT_MODE, ready for [encryptWithCipher]. */
+    fun newEncryptCipher(): Cipher {
         val cipher = Cipher.getInstance(CIPHER_TRANSFORM)
         cipher.init(Cipher.ENCRYPT_MODE, secretKey)
-        val iv = cipher.iv
-        val ciphertext = cipher.doFinal(plaintext)
-        return Pair(ciphertext, iv)
+        return cipher
     }
 
-    fun decrypt(ciphertext: ByteArray, iv: ByteArray): ByteArray {
+    /** Returns a fresh `Cipher` in DECRYPT_MODE for the given IV, ready for [decryptWithCipher]. */
+    fun newDecryptCipher(iv: ByteArray): Cipher {
         val cipher = Cipher.getInstance(CIPHER_TRANSFORM)
         cipher.init(Cipher.DECRYPT_MODE, secretKey, GCMParameterSpec(GCM_TAG_BITS, iv))
+        return cipher
+    }
+
+    /**
+     * Encrypt `plaintext` using a Cipher obtained from [newEncryptCipher].
+     * Returns (ciphertext, iv).
+     */
+    fun encryptWithCipher(cipher: Cipher, plaintext: ByteArray): Pair<ByteArray, ByteArray> {
+        val ciphertext = cipher.doFinal(plaintext)
+        return Pair(ciphertext, cipher.iv)
+    }
+
+    /** Decrypt `ciphertext` using a Cipher obtained from [newDecryptCipher]. */
+    fun decryptWithCipher(cipher: Cipher, ciphertext: ByteArray): ByteArray {
         return cipher.doFinal(ciphertext)
     }
 
