@@ -5,6 +5,7 @@ import androidx.lifecycle.viewModelScope
 import com.rjnr.pocketnode.data.auth.AuthManager
 import com.rjnr.pocketnode.data.auth.PinManager
 import dagger.hilt.android.lifecycle.HiltViewModel
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -12,6 +13,7 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import javax.inject.Inject
 
 enum class PinMode { SETUP, CONFIRM, VERIFY }
@@ -25,6 +27,12 @@ data class PinUiState(
     val lockoutRemainingSeconds: Int = 0,
     val remainingAttempts: Int = PinManager.MAX_ATTEMPTS,
     val pinComplete: Boolean = false,
+    /**
+     * True while the Argon2id KDF is computing the PIN hash. The PIN entry
+     * surface shows a spinner during this window (~300-600 ms on a real
+     * device). Used to block further keypad input while a verify is in flight.
+     */
+    val isVerifying: Boolean = false,
     val title: String = "Enter PIN",
     val subtitle: String? = null
 )
@@ -75,7 +83,9 @@ class PinViewModel @Inject constructor(
 
     fun onDigitEntered(digit: Char) {
         val current = _uiState.value
-        if (current.isLockedOut || current.enteredDigits.length >= PinManager.PIN_LENGTH) return
+        if (current.isLockedOut || current.isVerifying ||
+            current.enteredDigits.length >= PinManager.PIN_LENGTH
+        ) return
 
         val newDigits = current.enteredDigits + digit
         _uiState.update { it.copy(enteredDigits = newDigits, isError = false, errorMessage = null) }
@@ -87,40 +97,50 @@ class PinViewModel @Inject constructor(
 
     fun onDeleteDigit() {
         val current = _uiState.value
-        if (current.enteredDigits.isEmpty()) return
+        if (current.isVerifying || current.enteredDigits.isEmpty()) return
         _uiState.update { it.copy(enteredDigits = current.enteredDigits.dropLast(1)) }
     }
 
     private fun handlePinSubmit(pin: String) {
-        when (_uiState.value.mode) {
+        val mode = _uiState.value.mode
+        when (mode) {
             PinMode.SETUP -> {
                 _uiState.update { it.copy(pinComplete = true) }
             }
 
             PinMode.CONFIRM -> {
-                if (pin == setupPin) {
-                    pinManager.setPin(pin)
+                if (pin != setupPin) {
+                    showError("PINs don't match. Try again.")
+                    return
+                }
+                _uiState.update { it.copy(isVerifying = true) }
+                viewModelScope.launch {
+                    // Argon2id KDF takes ~300-600 ms on a real device. Run off
+                    // the main thread so the keypad doesn't freeze.
+                    withContext(Dispatchers.Default) { pinManager.setPin(pin) }
                     // Seed the session PIN so KeyManager.writeBackupIfPinAvailable can
                     // immediately encrypt KeyBackupManager material for any future
                     // wallet create/import / mnemonic-backed-up writes.
                     authManager.setSessionPin(pin.toCharArray())
-                    _uiState.update { it.copy(pinComplete = true) }
-                } else {
-                    showError("PINs don't match. Try again.")
+                    _uiState.update { it.copy(isVerifying = false, pinComplete = true) }
                 }
             }
 
             PinMode.VERIFY -> {
-                if (pinManager.verifyPin(pin)) {
-                    authManager.setSessionPin(pin.toCharArray())
-                    _uiState.update { it.copy(pinComplete = true) }
-                } else {
-                    val remaining = pinManager.getRemainingAttempts()
+                _uiState.update { it.copy(isVerifying = true) }
+                viewModelScope.launch {
+                    val ok = withContext(Dispatchers.Default) { pinManager.verifyPin(pin) }
+                    if (ok) {
+                        authManager.setSessionPin(pin.toCharArray())
+                        _uiState.update { it.copy(isVerifying = false, pinComplete = true) }
+                        return@launch
+                    }
+
+                    _uiState.update { it.copy(isVerifying = false) }
                     if (pinManager.isLockedOut()) {
                         startLockoutTimer()
                     } else {
-//                        showError("Wrong PIN. $remaining attempts remaining.")
-//                        _uiState.update { it.copy(remainingAttempts = remaining) }
+                        val remaining = pinManager.getRemainingAttempts()
                         _uiState.update {
                             it.copy(
                                 isError = true,
@@ -129,11 +149,8 @@ class PinViewModel @Inject constructor(
                                 remainingAttempts = remaining
                             )
                         }
-                        viewModelScope.launch {
-                            delay(500)
-                            _uiState.update { it.copy(isError = false) }
-                        }
-
+                        delay(500)
+                        _uiState.update { it.copy(isError = false) }
                     }
                 }
             }
