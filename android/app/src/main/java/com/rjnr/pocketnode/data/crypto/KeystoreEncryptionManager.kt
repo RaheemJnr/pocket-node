@@ -192,6 +192,10 @@ class KeystoreEncryptionManager @Inject constructor() {
 
     /** Delete the V1 (unrestricted) Keystore key. Called by the migration after re-encryption finishes. */
     fun deleteV1Key() {
+        if (testKey != null) {
+            testKey = null
+            return
+        }
         val keyStore = KeyStore.getInstance(KEYSTORE_PROVIDER)
         keyStore.load(null)
         if (keyStore.containsAlias(KEY_ALIAS)) {
@@ -201,6 +205,7 @@ class KeystoreEncryptionManager @Inject constructor() {
 
     /** True if the V1 (unrestricted) Keystore key is still present. */
     fun hasV1Key(): Boolean {
+        if (testKey != null || testKeyV2 != null) return testKey != null
         val keyStore = KeyStore.getInstance(KEYSTORE_PROVIDER)
         keyStore.load(null)
         return keyStore.containsAlias(KEY_ALIAS)
@@ -208,6 +213,7 @@ class KeystoreEncryptionManager @Inject constructor() {
 
     /** True if the V2 (auth-bound) Keystore key has been generated. */
     fun hasV2Key(): Boolean {
+        if (testKey != null || testKeyV2 != null) return testKeyV2 != null
         val keyStore = KeyStore.getInstance(KEYSTORE_PROVIDER)
         keyStore.load(null)
         return keyStore.containsAlias(KEY_ALIAS_V2)

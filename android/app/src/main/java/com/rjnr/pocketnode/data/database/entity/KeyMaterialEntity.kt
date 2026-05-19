@@ -1,5 +1,6 @@
 package com.rjnr.pocketnode.data.database.entity
 
+import androidx.room.ColumnInfo
 import androidx.room.Entity
 import androidx.room.PrimaryKey
 
@@ -11,7 +12,26 @@ data class KeyMaterialEntity(
     val iv: ByteArray,
     val walletType: String,
     val mnemonicBackedUp: Boolean,
-    val updatedAt: Long
+    val updatedAt: Long,
+    /**
+     * KDF version for the key material encryption.
+     *
+     * - **1** (legacy, v1.6.x and earlier): encrypted under the unrestricted V1
+     *   Keystore key (`pocket_node_key_material`). `encryptedPrivateKey` holds
+     *   just the private key ciphertext; `encryptedMnemonic` (if non-null) is
+     *   `mnemonicIv + mnemonicCiphertext`. `iv` is the private key IV.
+     * - **2** (v1.7.0+): encrypted under the auth-bound V2 Keystore key
+     *   (`pocket_node_key_material_v2`). `encryptedPrivateKey` holds a single
+     *   bundle ciphertext (JSON of `WalletKeyBundle` with both private key
+     *   and mnemonic); `encryptedMnemonic` is always null; `iv` is the bundle
+     *   IV. Decrypting V2 requires a fresh BiometricPrompt-bound CryptoObject.
+     *
+     * Rows added on a fresh v1.7.0 install start at version 2. Existing v1.6.x
+     * rows enter v1.7.0 at version 1 and are migrated to version 2 on first
+     * launch (one BiometricPrompt per wallet).
+     */
+    @ColumnInfo(defaultValue = "1")
+    val kdfVersion: Int = 1
 ) {
     override fun equals(other: Any?): Boolean {
         if (this === other) return true
@@ -27,7 +47,8 @@ data class KeyMaterialEntity(
             iv.contentEquals(other.iv) &&
             walletType == other.walletType &&
             mnemonicBackedUp == other.mnemonicBackedUp &&
-            updatedAt == other.updatedAt
+            updatedAt == other.updatedAt &&
+            kdfVersion == other.kdfVersion
     }
 
     override fun hashCode(): Int {
@@ -38,6 +59,7 @@ data class KeyMaterialEntity(
         result = 31 * result + walletType.hashCode()
         result = 31 * result + mnemonicBackedUp.hashCode()
         result = 31 * result + updatedAt.hashCode()
+        result = 31 * result + kdfVersion.hashCode()
         return result
     }
 }

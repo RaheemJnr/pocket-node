@@ -85,6 +85,24 @@ class WalkingMigrationTest {
     }
 
     /**
+     * v1.6.x → v1.7.0 path: bootstrap a v9 SQLite file (no `kdfVersion`
+     * column on `key_material`) and confirm MIGRATION_9_10 adds the
+     * column with default 1, then Room schema validation passes.
+     */
+    @Test
+    fun `v9 walks to v10 successfully and adds kdfVersion column`() {
+        bootstrapV9()
+        openViaRoomAndValidate()
+        // Re-open and inspect: kdfVersion column exists with DEFAULT 1.
+        val db = openedRoomDb!!.openHelper.readableDatabase
+        db.query("PRAGMA table_info(`key_material`)").use { c ->
+            val names = mutableListOf<String>()
+            while (c.moveToNext()) names.add(c.getString(c.getColumnIndexOrThrow("name")))
+            assertTrue("kdfVersion column missing after MIGRATION_9_10: $names", names.contains("kdfVersion"))
+        }
+    }
+
+    /**
      * Regression guard for the v1.5.1 → v1.5.2 hotfix (#143).
      *
      * If `MIGRATION_8_9` is reverted to a no-op (which is what the first
@@ -111,6 +129,7 @@ class WalkingMigrationTest {
                 .addMigrations(
                     MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4, MIGRATION_4_5,
                     MIGRATION_5_6, MIGRATION_6_7, MIGRATION_7_8, noOpMigration8To9,
+                    MIGRATION_9_10,
                 )
                 .build()
             openedRoomDb = db
@@ -140,6 +159,7 @@ class WalkingMigrationTest {
             .addMigrations(
                 MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4, MIGRATION_4_5,
                 MIGRATION_5_6, MIGRATION_6_7, MIGRATION_7_8, MIGRATION_8_9,
+                MIGRATION_9_10,
             )
             .build()
         openedRoomDb = db
@@ -155,6 +175,33 @@ class WalkingMigrationTest {
      * version 8 so when Room subsequently opens it at version 9,
      * `onUpgrade` fires and runs MIGRATION_8_9.
      */
+    /**
+     * Bootstrap a v9 SQLite file: same as `bootstrapV8(pathA = true)` but
+     * also applies the MIGRATION_8_9 changes inline so the on-disk shape
+     * matches what a real upgraded-to-v9 user has. The key thing for
+     * MIGRATION_9_10 coverage is that `key_material` has no `kdfVersion`
+     * column.
+     */
+    private fun bootstrapV9() {
+        val factory = FrameworkSQLiteOpenHelperFactory()
+        val callback = object : SupportSQLiteOpenHelper.Callback(9) {
+            override fun onCreate(db: SupportSQLiteDatabase) {
+                createV8Tables(db, pathA = true)
+                MIGRATION_8_9.migrate(db)
+                db.execSQL("CREATE TABLE IF NOT EXISTS room_master_table (id INTEGER PRIMARY KEY,identity_hash TEXT)")
+                db.execSQL("INSERT OR REPLACE INTO room_master_table VALUES(42, 'bootstrap-v9')")
+            }
+            override fun onUpgrade(db: SupportSQLiteDatabase, oldV: Int, newV: Int) = Unit
+        }
+        val config = SupportSQLiteOpenHelper.Configuration.builder(ctx)
+            .name(dbName)
+            .callback(callback)
+            .build()
+        val helper = factory.create(config)
+        helper.writableDatabase.close()
+        helper.close()
+    }
+
     private fun bootstrapV8(pathA: Boolean) {
         val factory = FrameworkSQLiteOpenHelperFactory()
         val callback = object : SupportSQLiteOpenHelper.Callback(8) {
