@@ -211,7 +211,20 @@ fun SendScreen(
         updateRecipient = viewModel::updateRecipient,
         updateAmount = viewModel::updateAmount,
         setMaxAmount = viewModel::setMaxAmount,
-        sendTransaction = viewModel::sendTransaction
+        sendTransaction = {
+            // V2-aware send: pass the host FragmentActivity so the
+            // ViewModel can drive a CryptoObject-bound BiometricPrompt
+            // for wallets on kdfVersion=2 (#213). V1 wallets fall back to
+            // the legacy non-CryptoObject biometric gate via the existing
+            // requiresAuth state. Compose previews don't have a
+            // FragmentActivity, so they keep using the no-arg overload.
+            val activity = context as? FragmentActivity
+            if (activity != null) {
+                viewModel.sendTransaction(activity)
+            } else {
+                viewModel.sendTransaction()
+            }
+        }
     )
 }
 

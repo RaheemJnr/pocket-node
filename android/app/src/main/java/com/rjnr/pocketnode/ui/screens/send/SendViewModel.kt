@@ -1,16 +1,19 @@
 package com.rjnr.pocketnode.ui.screens.send
 
 import android.util.Log
+import androidx.fragment.app.FragmentActivity
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.rjnr.pocketnode.data.auth.AuthManager
 import com.rjnr.pocketnode.data.auth.PinManager
+import com.rjnr.pocketnode.data.database.dao.KeyMaterialDao
 import com.rjnr.pocketnode.data.database.entity.WalletEntity
 import com.rjnr.pocketnode.data.gateway.GatewayRepository
 import com.rjnr.pocketnode.data.gateway.models.NetworkType
 import com.rjnr.pocketnode.data.gateway.models.TransactionStatusResponse
 import com.rjnr.pocketnode.data.transaction.TransactionBuilder
 import com.rjnr.pocketnode.data.wallet.KeyManager
+import com.rjnr.pocketnode.data.wallet.WalletKeyReader
 import com.rjnr.pocketnode.data.wallet.WalletRepository
 import com.rjnr.pocketnode.util.sanitizeAmount
 import dagger.hilt.android.lifecycle.HiltViewModel
@@ -57,7 +60,9 @@ class SendViewModel @Inject constructor(
     private val transactionBuilder: TransactionBuilder,
     private val authManager: AuthManager,
     private val pinManager: PinManager,
-    private val walletRepository: WalletRepository
+    private val walletRepository: WalletRepository,
+    private val walletKeyReader: WalletKeyReader,
+    private val keyMaterialDao: KeyMaterialDao,
 ) : ViewModel() {
 
     private val _uiState = MutableStateFlow(SendUiState())
@@ -158,39 +163,86 @@ class SendViewModel @Inject constructor(
         updateAmount(formatted.ifEmpty { "0" })
     }
 
+    /**
+     * Legacy entry point (V1 wallets). Kept so non-Compose callers and
+     * tests that don't have a `FragmentActivity` still work. On a V2
+     * wallet this returns an error — Compose callers should use the
+     * [sendTransaction] overload that accepts an activity.
+     */
     fun sendTransaction() {
-        val state = _uiState.value
+        viewModelScope.launch {
+            if (peekActiveKdfVersion() == 2) {
+                _uiState.update {
+                    it.copy(error = "This wallet requires biometric unlock; reopen Send and try again")
+                }
+                return@launch
+            }
+            sendTransactionV1OrFallback()
+        }
+    }
 
+    /**
+     * V2-aware entry point. If the active wallet is on kdfVersion=2,
+     * acquires the private key via [WalletKeyReader] which drives the
+     * BiometricPrompt CryptoObject dance. Otherwise falls back to the
+     * V1 flow (which itself may show a non-CryptoObject biometric gate
+     * via the existing `requiresAuth` state, unchanged from v1.6.x).
+     */
+    fun sendTransaction(activity: FragmentActivity) {
+        viewModelScope.launch {
+            if (!validateInputs()) return@launch
+
+            val kdfVersion = peekActiveKdfVersion()
+            if (kdfVersion == 2) {
+                executeSendV2(activity)
+            } else {
+                sendTransactionV1OrFallback()
+            }
+        }
+    }
+
+    private suspend fun peekActiveKdfVersion(): Int? {
+        val walletId = walletPreferencesActiveId() ?: return null
+        return runCatching { keyMaterialDao.getKdfVersion(walletId) }.getOrNull()
+    }
+
+    private fun walletPreferencesActiveId(): String? {
+        return walletRepository.activeWalletIdSnapshot()?.takeIf { it.isNotEmpty() }
+    }
+
+    private fun validateInputs(): Boolean {
+        val state = _uiState.value
         if (state.recipientAddress.isBlank()) {
             _uiState.update { it.copy(error = "Please enter recipient address") }
-            return
+            return false
         }
-
         if (state.amountCkb.isBlank()) {
             _uiState.update { it.copy(error = "Please enter amount") }
-            return
+            return false
         }
-
         val amountShannons = try {
             BigDecimal(state.amountCkb).setScale(8, RoundingMode.DOWN)
                 .multiply(BigDecimal(100_000_000)).toLong()
         } catch (e: Exception) {
             _uiState.update { it.copy(error = "Invalid amount") }
-            return
+            return false
         }
-
         val minCapacity = 61_00000000L
         if (amountShannons < minCapacity) {
             _uiState.update { it.copy(error = "Minimum transfer is 61 CKB") }
-            return
+            return false
         }
-
         if (amountShannons > state.availableBalance) {
             _uiState.update { it.copy(error = "Insufficient balance") }
-            return
+            return false
         }
+        return true
+    }
 
-        // Check if authentication is required before sending
+    private fun sendTransactionV1OrFallback() {
+        if (!validateInputs()) return
+
+        // Check if authentication is required before sending (V1 path).
         if (authManager.isAuthBeforeSendEnabled() && pinManager.hasPin()) {
             val method = if (authManager.isBiometricEnabled() && authManager.isBiometricEnrolled()) {
                 AuthMethod.BIOMETRIC
@@ -202,6 +254,96 @@ class SendViewModel @Inject constructor(
         }
 
         executeSend()
+    }
+
+    private suspend fun executeSendV2(activity: FragmentActivity) {
+        val state = _uiState.value
+        val amountShannons = BigDecimal(state.amountCkb).setScale(8, RoundingMode.DOWN)
+            .multiply(BigDecimal(100_000_000)).toLong()
+
+        val capturedAddress = repository.getCurrentAddress()
+        if (capturedAddress == null) {
+            _uiState.update { it.copy(error = "Wallet not initialized") }
+            return
+        }
+
+        val walletId = walletPreferencesActiveId() ?: run {
+            _uiState.update { it.copy(error = "No active wallet") }
+            return
+        }
+
+        when (val readResult = walletKeyReader.readPrivateKey(
+            activity = activity,
+            walletId = walletId,
+            promptTitle = "Authenticate to Send",
+            promptSubtitle = "Verify your identity to send CKB",
+        )) {
+            is WalletKeyReader.Result.Cancelled -> {
+                _uiState.update { it.copy(error = null, isLoading = false) }
+                return
+            }
+            is WalletKeyReader.Result.AuthError -> {
+                _uiState.update {
+                    it.copy(error = "Authentication failed: ${readResult.message}", isLoading = false)
+                }
+                return
+            }
+            is WalletKeyReader.Result.NotAvailable -> {
+                _uiState.update {
+                    it.copy(error = "Cannot read wallet key: ${readResult.reason}", isLoading = false)
+                }
+                return
+            }
+            is WalletKeyReader.Result.Success -> {
+                proceedWithSend(amountShannons, capturedAddress, readResult.privateKey)
+            }
+        }
+    }
+
+    private suspend fun proceedWithSend(
+        amountShannons: Long,
+        capturedAddress: String,
+        privateKey: ByteArray,
+    ) {
+        val state = _uiState.value
+        _uiState.update {
+            it.copy(
+                isLoading = true,
+                error = null,
+                transactionState = TransactionState.SENDING,
+                statusMessage = "Building transaction..."
+            )
+        }
+        try {
+            _uiState.update { it.copy(statusMessage = "Broadcasting transaction...") }
+            val txHash = repository.prepareAndSend(
+                fromAddress = capturedAddress,
+                toAddress = state.recipientAddress,
+                amountShannons = amountShannons,
+                privateKey = privateKey,
+            ).getOrThrow()
+            _uiState.update {
+                it.copy(
+                    isLoading = false,
+                    txHash = txHash,
+                    recipientAddress = "",
+                    amountCkb = "",
+                    transactionState = TransactionState.PENDING,
+                    statusMessage = "Transaction submitted. Waiting for confirmation..."
+                )
+            }
+            startPollingTransactionStatus(txHash, capturedAddress)
+        } catch (e: Exception) {
+            Log.e(TAG, "V2 send failed", e)
+            _uiState.update {
+                it.copy(
+                    isLoading = false,
+                    error = parseErrorMessage(e),
+                    transactionState = TransactionState.FAILED,
+                    statusMessage = "Transaction failed"
+                )
+            }
+        }
     }
 
     fun executeSend() {

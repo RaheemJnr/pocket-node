@@ -32,6 +32,16 @@ class WalletRepository @Inject constructor(
 ) {
     val walletsFlow: Flow<List<WalletEntity>> = walletDao.getAllFlow()
 
+    /**
+     * Synchronous snapshot of the currently-active walletId, or null if
+     * no wallet has been selected yet. Reads from
+     * [WalletPreferences.getActiveWalletId] directly so it can be called
+     * outside a coroutine; the underlying SharedPreferences read is fast.
+     * Used by V2-aware call sites that need to peek the kdfVersion before
+     * deciding whether a BiometricPrompt CryptoObject step is required.
+     */
+    fun activeWalletIdSnapshot(): String? = walletPreferences.getActiveWalletId()
+
     fun getActiveWallet(): Flow<WalletEntity?> = walletDao.getActiveWallet()
 
     fun getAllWallets(): Flow<List<WalletEntity>> = walletDao.getAllWallets()

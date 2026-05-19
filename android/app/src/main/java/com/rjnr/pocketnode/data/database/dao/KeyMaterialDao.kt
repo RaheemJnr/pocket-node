@@ -37,4 +37,13 @@ interface KeyMaterialDao {
 
     @Query("SELECT COUNT(*) FROM key_material WHERE kdfVersion = 2")
     suspend fun countV2Wallets(): Int
+
+    /**
+     * Peek the kdfVersion of a single wallet without loading its
+     * ciphertext columns. Used by V2-aware call sites to decide whether
+     * a BiometricPrompt CryptoObject step is needed before reading the
+     * private key. Returns null when the wallet has no key_material row.
+     */
+    @Query("SELECT kdfVersion FROM key_material WHERE walletId = :walletId")
+    suspend fun getKdfVersion(walletId: String): Int?
 }

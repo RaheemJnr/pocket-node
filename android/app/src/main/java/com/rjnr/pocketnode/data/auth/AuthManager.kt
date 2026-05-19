@@ -7,9 +7,15 @@ import android.os.Build
 import androidx.annotation.VisibleForTesting
 import androidx.biometric.BiometricManager
 import androidx.biometric.BiometricManager.Authenticators
+import androidx.biometric.BiometricPrompt
+import androidx.core.content.ContextCompat
+import androidx.fragment.app.FragmentActivity
 import dagger.hilt.android.qualifiers.ApplicationContext
+import javax.crypto.Cipher
 import javax.inject.Inject
 import javax.inject.Singleton
+import kotlin.coroutines.resume
+import kotlinx.coroutines.suspendCancellableCoroutine
 
 @Singleton
 class AuthManager @Inject constructor(
@@ -101,6 +107,113 @@ class AuthManager @Inject constructor(
             Authenticators.DEVICE_CREDENTIAL
         } else {
             Authenticators.BIOMETRIC_STRONG
+        }
+    }
+
+    /**
+     * Outcome of a BiometricPrompt CryptoObject-bound authentication.
+     *
+     * `Success` carries the same [Cipher] the caller passed in, now unlocked
+     * by the Android Keystore. The caller must run `cipher.doFinal(...)`
+     * before any process boundary — Keystore will not honor it for a fresh
+     * `doFinal` later because V2 keys are configured with
+     * `setUserAuthenticationParameters(0, ...)` (per-operation auth).
+     *
+     * `Cancelled` is returned on user-cancel and negative-button press. The
+     * caller is responsible for routing to a fallback (PIN, navigation).
+     *
+     * `Error` carries the BiometricPrompt error code and message. The auth
+     * was rejected by the framework — distinguished from cancel so the UI
+     * can show a transient error (e.g. "Too many attempts, try again later").
+     */
+    sealed class CipherAuthResult {
+        data class Success(val cipher: Cipher) : CipherAuthResult()
+        object Cancelled : CipherAuthResult()
+        data class Error(val errorCode: Int, val errString: CharSequence) : CipherAuthResult()
+    }
+
+    /**
+     * Prompt the user via BiometricPrompt and return the same [cipher] back
+     * once Keystore has authorized it. Used by the V2 (auth-bound) wallet
+     * key path: the caller obtains an uninitialized-for-`doFinal` Cipher
+     * via `KeystoreEncryptionManager.newEncryptCipherV2` /
+     * `newDecryptCipherV2`, runs it through this helper, and only then
+     * passes it to `encryptWithCipher` / `decryptWithCipher`.
+     *
+     * The prompt always uses [getAllowedAuthenticators] so users without
+     * biometrics can fall back to the device PIN/pattern set in Android
+     * Settings. The negative-button text is only shown for biometric-only
+     * prompts; [Authenticators.DEVICE_CREDENTIAL] disallows it.
+     *
+     * Suspending: the coroutine is resumed when the framework callback
+     * fires. Cancelling the coroutine cancels the in-flight prompt.
+     */
+    suspend fun authenticateForCipher(
+        activity: FragmentActivity,
+        cipher: Cipher,
+        title: String,
+        subtitle: String,
+        negativeButtonText: String = "Cancel"
+    ): CipherAuthResult = suspendCancellableCoroutine { cont ->
+        val executor = ContextCompat.getMainExecutor(activity)
+        val prompt = BiometricPrompt(
+            activity,
+            executor,
+            object : BiometricPrompt.AuthenticationCallback() {
+                override fun onAuthenticationSucceeded(result: BiometricPrompt.AuthenticationResult) {
+                    val authedCipher = result.cryptoObject?.cipher
+                    if (authedCipher != null) {
+                        cont.resume(CipherAuthResult.Success(authedCipher))
+                    } else {
+                        // Defensive: framework returned success without a
+                        // CryptoObject. Should not happen when we pass one
+                        // in, but treat it as an error rather than silently
+                        // forging a Success with the un-authenticated cipher
+                        // (which would fail later at doFinal).
+                        cont.resume(
+                            CipherAuthResult.Error(
+                                BiometricPrompt.ERROR_VENDOR,
+                                "Authenticator returned no CryptoObject"
+                            )
+                        )
+                    }
+                }
+
+                override fun onAuthenticationError(errorCode: Int, errString: CharSequence) {
+                    val outcome = when (errorCode) {
+                        BiometricPrompt.ERROR_USER_CANCELED,
+                        BiometricPrompt.ERROR_NEGATIVE_BUTTON,
+                        BiometricPrompt.ERROR_CANCELED -> CipherAuthResult.Cancelled
+                        else -> CipherAuthResult.Error(errorCode, errString)
+                    }
+                    cont.resume(outcome)
+                }
+            }
+        )
+
+        val allowed = getAllowedAuthenticators()
+        val builder = BiometricPrompt.PromptInfo.Builder()
+            .setTitle(title)
+            .setSubtitle(subtitle)
+            .setAllowedAuthenticators(allowed)
+        // DEVICE_CREDENTIAL cannot coexist with a negative button — the
+        // framework throws IllegalArgumentException. The fallback button is
+        // only meaningful for biometric-only prompts.
+        if ((allowed and Authenticators.DEVICE_CREDENTIAL) == 0) {
+            builder.setNegativeButtonText(negativeButtonText)
+        }
+
+        try {
+            prompt.authenticate(builder.build(), BiometricPrompt.CryptoObject(cipher))
+        } catch (e: IllegalStateException) {
+            // The framework rejects authenticate() (e.g. fragment already
+            // destroyed). Surface as Error so the caller sees a deterministic
+            // failure rather than a hung coroutine.
+            cont.resume(CipherAuthResult.Error(BiometricPrompt.ERROR_VENDOR, e.message ?: "prompt failed"))
+        }
+
+        cont.invokeOnCancellation {
+            try { prompt.cancelAuthentication() } catch (_: Exception) {}
         }
     }
 
