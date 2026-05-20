@@ -13,9 +13,11 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import com.rjnr.pocketnode.R
 import com.rjnr.pocketnode.data.gateway.DaoConstants
 import com.rjnr.pocketnode.util.sanitizeAmount
 
@@ -243,7 +245,7 @@ fun DepositBottomSheet(
                     modifier = Modifier.weight(1f),
                     shape = RoundedCornerShape(12.dp)
                 ) {
-                    Text("Cancel")
+                    Text(stringResource(R.string.dao_sheet_cancel))
                 }
                 Button(
                     onClick = { onDeposit(amountShannons) },
@@ -251,7 +253,7 @@ fun DepositBottomSheet(
                     modifier = Modifier.weight(1f),
                     shape = RoundedCornerShape(12.dp)
                 ) {
-                    Text("Deposit")
+                    Text(stringResource(R.string.dao_sheet_deposit))
                 }
             }
         }

@@ -213,6 +213,29 @@
     <string name="node_status_export_logs">Export Logs</string>
     <!-- endregion -->
 
+    <!-- region: DAO -->
+    <string name="dao_auth_biometric_title">Authenticate to Deposit</string>
+    <string name="dao_auth_biometric_subtitle">Verify your identity to deposit to Nervos DAO</string>
+    <string name="dao_auth_biometric_negative">Use PIN</string>
+    <string name="dao_withdraw_title">Withdraw from DAO</string>
+    <string name="dao_withdraw_deposit_amount">Deposit: %1$s CKB</string>
+    <string name="dao_withdraw_earned">Earned: +%1$s CKB</string>
+    <string name="dao_withdraw_confirm">Withdraw</string>
+    <string name="dao_withdraw_cancel">Cancel</string>
+    <string name="dao_unlock_title">Unlock DAO Deposit</string>
+    <string name="dao_unlock_compensation">Compensation: +%1$s CKB</string>
+    <string name="dao_unlock_total">Total received: %1$s CKB</string>
+    <string name="dao_unlock_fee">Fee: ~0.001 CKB</string>
+    <string name="dao_unlock_confirm">Unlock</string>
+    <string name="dao_unlock_cancel">Cancel</string>
+    <string name="dao_deposit_cta">Deposit</string>
+    <string name="dao_make_first_deposit">Make First Deposit</string>
+    <string name="dao_card_withdraw">Withdraw</string>
+    <string name="dao_card_unlock">Unlock</string>
+    <string name="dao_sheet_cancel">Cancel</string>
+    <string name="dao_sheet_deposit">Deposit</string>
+    <!-- endregion -->
+
     <!-- region: Contacts (M4 Phase 2) -->
     <string name="contacts_title">Address Book</string>
     <string name="contacts_search_placeholder">Search name or address</string>

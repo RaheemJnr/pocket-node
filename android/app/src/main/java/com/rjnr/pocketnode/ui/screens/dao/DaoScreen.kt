@@ -21,6 +21,8 @@ import androidx.core.content.ContextCompat
 import androidx.fragment.app.FragmentActivity
 import com.rjnr.pocketnode.data.auth.AuthMethod
 import com.rjnr.pocketnode.data.gateway.models.DaoAction
+import androidx.compose.ui.res.stringResource
+import com.rjnr.pocketnode.R
 import com.rjnr.pocketnode.data.gateway.models.DaoDeposit
 import com.rjnr.pocketnode.data.gateway.models.DaoOverview
 import com.rjnr.pocketnode.data.gateway.models.DaoTab
@@ -47,6 +49,12 @@ fun DaoScreen(
     var withdrawTarget by remember { mutableStateOf<DaoDeposit?>(null) }
     var unlockTarget by remember { mutableStateOf<DaoDeposit?>(null) }
     val context = LocalContext.current
+
+    // Captured here so the non-@Composable LaunchedEffect callback below
+    // can reference them (stringResource is @Composable-only).
+    val daoAuthTitle = stringResource(R.string.dao_auth_biometric_title)
+    val daoAuthSubtitle = stringResource(R.string.dao_auth_biometric_subtitle)
+    val daoAuthNegative = stringResource(R.string.dao_auth_biometric_negative)
 
     Scaffold(
         snackbarHost = { SnackbarHost(snackbarHostState) }
@@ -227,9 +235,9 @@ fun DaoScreen(
                     }
                 )
                 val promptInfo = BiometricPrompt.PromptInfo.Builder()
-                    .setTitle("Authenticate to Deposit")
-                    .setSubtitle("Verify your identity to deposit to Nervos DAO")
-                    .setNegativeButtonText("Use PIN")
+                    .setTitle(daoAuthTitle)
+                    .setSubtitle(daoAuthSubtitle)
+                    .setNegativeButtonText(daoAuthNegative)
                     .build()
                 prompt.authenticate(promptInfo)
             }
@@ -264,11 +272,11 @@ fun DaoScreen(
     withdrawTarget?.let { deposit ->
         AlertDialog(
             onDismissRequest = { withdrawTarget = null },
-            title = { Text("Withdraw from DAO") },
+            title = { Text(stringResource(R.string.dao_withdraw_title)) },
             text = {
                 Column {
-                    Text("Deposit: ${formatCkb(deposit.capacity)} CKB")
-                    Text("Earned: +${formatCkb(deposit.compensation)} CKB")
+                    Text(stringResource(R.string.dao_withdraw_deposit_amount, formatCkb(deposit.capacity)))
+                    Text(stringResource(R.string.dao_withdraw_earned, formatCkb(deposit.compensation)))
                     Spacer(modifier = Modifier.height(8.dp))
                     Text(
                         text = "Your funds will remain locked until the current 180-epoch cycle ends.",
@@ -284,12 +292,12 @@ fun DaoScreen(
                     else viewModel.withdraw(deposit)
                     withdrawTarget = null
                 }) {
-                    Text("Withdraw")
+                    Text(stringResource(R.string.dao_withdraw_confirm))
                 }
             },
             dismissButton = {
                 TextButton(onClick = { withdrawTarget = null }) {
-                    Text("Cancel")
+                    Text(stringResource(R.string.dao_withdraw_cancel))
                 }
             }
         )
@@ -300,13 +308,13 @@ fun DaoScreen(
         val totalReceived = deposit.capacity + deposit.compensation
         AlertDialog(
             onDismissRequest = { unlockTarget = null },
-            title = { Text("Unlock DAO Deposit") },
+            title = { Text(stringResource(R.string.dao_unlock_title)) },
             text = {
                 Column {
-                    Text("Deposit: ${formatCkb(deposit.capacity)} CKB")
-                    Text("Compensation: +${formatCkb(deposit.compensation)} CKB")
-                    Text("Total received: ${formatCkb(totalReceived)} CKB")
-                    Text("Fee: ~0.001 CKB")
+                    Text(stringResource(R.string.dao_withdraw_deposit_amount, formatCkb(deposit.capacity)))
+                    Text(stringResource(R.string.dao_unlock_compensation, formatCkb(deposit.compensation)))
+                    Text(stringResource(R.string.dao_unlock_total, formatCkb(totalReceived)))
+                    Text(stringResource(R.string.dao_unlock_fee))
                 }
             },
             confirmButton = {
@@ -316,12 +324,12 @@ fun DaoScreen(
                     else viewModel.unlock(deposit)
                     unlockTarget = null
                 }) {
-                    Text("Unlock")
+                    Text(stringResource(R.string.dao_unlock_confirm))
                 }
             },
             dismissButton = {
                 TextButton(onClick = { unlockTarget = null }) {
-                    Text("Cancel")
+                    Text(stringResource(R.string.dao_unlock_cancel))
                 }
             }
         )
@@ -413,7 +421,7 @@ private fun DaoOverviewCard(
                 modifier = Modifier.fillMaxWidth(),
                 shape = RoundedCornerShape(12.dp)
             ) {
-                Text("Deposit")
+                Text(stringResource(R.string.dao_deposit_cta))
             }
         }
     }
@@ -503,7 +511,7 @@ private fun DaoEmptyState(onDepositClick: () -> Unit) {
             onClick = onDepositClick,
             shape = RoundedCornerShape(12.dp)
         ) {
-            Text("Make First Deposit")
+            Text(stringResource(R.string.dao_make_first_deposit))
         }
 
         Spacer(modifier = Modifier.height(16.dp))
