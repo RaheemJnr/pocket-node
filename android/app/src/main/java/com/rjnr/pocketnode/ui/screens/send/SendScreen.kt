@@ -70,6 +70,7 @@ import androidx.compose.ui.tooling.preview.Preview
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.hilt.navigation.compose.hiltViewModel
+import com.composables.icons.lucide.BookUser
 import com.composables.icons.lucide.Check
 import com.composables.icons.lucide.ChevronLeft
 import com.composables.icons.lucide.CircleAlert
@@ -374,7 +375,7 @@ private fun SendScreenUI(
                     }
                 )
                 Icon(
-                    imageVector = Lucide.Users,
+                    imageVector = Lucide.BookUser,
                     contentDescription = stringResource(R.string.send_contact_picker_cd),
                     modifier = Modifier.clickable { onOpenContactPicker() }
                 )

@@ -224,8 +224,23 @@ class SendViewModel @Inject constructor(
         }
     }
 
-    /** Snapshot of recent contacts for the picker sheet's empty-query state. */
-    suspend fun recentContacts(): List<ContactEntity> = contactRepository.recentlyUsed()
+    /**
+     * Snapshot for the picker sheet's empty-query state. Returns the
+     * full address book (alphabetical) with `recentlyUsed` floated to
+     * the top — so a freshly-added contact (useCount=0) still appears,
+     * while frequently-used recipients stay one tap away.
+     *
+     * Earlier this returned just `recentlyUsed()`, which surfaced
+     * nothing for new wallets / new contacts (bug: empty picker even
+     * when contacts exist).
+     */
+    suspend fun recentContacts(): List<ContactEntity> {
+        val recent = contactRepository.recentlyUsed()
+        val all = contactRepository.listAll()
+        if (recent.isEmpty()) return all
+        val recentIds = recent.map { it.id }.toSet()
+        return recent + all.filter { it.id !in recentIds }
+    }
 
     /** Snapshot of contacts matching [query] for the picker sheet search. */
     suspend fun searchContacts(query: String): List<ContactEntity> =
