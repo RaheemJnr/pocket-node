@@ -280,6 +280,14 @@ class GatewayRepository @Inject constructor(
         // starts from its own baseline. Otherwise ACTIVE_ONLY switches can spuriously
         // report progress / ETA / justReachedTip from the old wallet's syncing window.
         syncProgressTracker.reset()
+        // Seed the percentage baseline with the registered light-client start
+        // block so the first sample doesn't anchor the math to a transient
+        // syncedToBlock=0 reading during peer warm-up (#150).
+        val lightStart = syncProgressDao.get(wallet.walletId, currentNetwork.name)
+            ?.lightStartBlockNumber ?: 0L
+        if (lightStart > 0) {
+            syncProgressTracker.seedStartHeight(lightStart)
+        }
         wasSyncing = false
         firstCatchingUpAtMs = null
         _syncProgress.value = SyncProgress()
@@ -1976,6 +1984,16 @@ class GatewayRepository @Inject constructor(
 
                         val syncedBlock = status.syncedToBlock.toLongOrNull() ?: 0L
                         val tipBlock = status.tipNumber.toLongOrNull() ?: 0L
+
+                        // Diagnostic for the production sync-stall reports (#150).
+                        // Logged once every poll cycle so support can see the
+                        // delta between syncedBlock and tipBlock in logcat
+                        // without enabling verbose JNI logging.
+                        Log.i(
+                            TAG,
+                            "syncPoll synced=$syncedBlock tip=$tipBlock " +
+                                "delta=${tipBlock - syncedBlock} progress=${status.syncProgress}"
+                        )
 
                         syncProgressTracker.recordSample(syncedBlock, System.currentTimeMillis())
                         val info = syncProgressTracker.calculate(tipBlock)

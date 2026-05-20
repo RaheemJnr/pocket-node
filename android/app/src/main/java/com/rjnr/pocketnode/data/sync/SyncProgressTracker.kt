@@ -24,7 +24,30 @@ class SyncProgressTracker {
     private val samples = mutableListOf<Sample>()
     private var startHeight: Long? = null
 
-    /** Record a new block height observation. First call captures startHeight. */
+    /**
+     * Seed the percentage baseline with the wallet's registered light-client
+     * start block (from `sync_progress.lightStartBlockNumber`). Called once
+     * per wallet activation, before the polling loop starts feeding samples.
+     *
+     * Previously the first sample's blockHeight was used as the baseline. On
+     * a 2021 wallet that path silently anchors to whatever the light client
+     * reports first — often 0 during peer warm-up — which makes
+     * `percentage = (current - 0) / (tip - 0)` lie about real progress for
+     * the first poll cycle. Seeding with the registered start block fixes
+     * the math from sample #1.
+     *
+     * Safe to call multiple times; later calls overwrite the baseline only
+     * when the new value is non-zero. This handles the wallet-switch case
+     * where the persisted lightStartBlock may temporarily be unknown.
+     */
+    fun seedStartHeight(startBlock: Long) {
+        if (startBlock > 0) {
+            startHeight = startBlock
+        }
+    }
+
+    /** Record a new block height observation. First call captures startHeight
+     *  iff [seedStartHeight] wasn't called first. */
     fun recordSample(blockHeight: Long, timestampMs: Long) {
         if (startHeight == null) {
             startHeight = blockHeight
