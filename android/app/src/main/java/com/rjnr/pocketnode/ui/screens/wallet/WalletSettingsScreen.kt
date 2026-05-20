@@ -55,6 +55,7 @@ import com.composables.icons.lucide.Plus
 import androidx.compose.ui.res.stringResource
 import com.rjnr.pocketnode.R
 import com.rjnr.pocketnode.data.database.entity.WalletEntity
+import com.rjnr.pocketnode.ui.util.resolveString
 import com.rjnr.pocketnode.ui.components.WalletAvatar
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -86,8 +87,8 @@ fun WalletSettingsScreen(
     }
 
     LaunchedEffect(uiState.error) {
-        uiState.error?.let {
-            snackbarHostState.showSnackbar(it)
+        uiState.error?.let { msg ->
+            snackbarHostState.showSnackbar(msg.resolveString(context))
             viewModel.clearError()
         }
     }

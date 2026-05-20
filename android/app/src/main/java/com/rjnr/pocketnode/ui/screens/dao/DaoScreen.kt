@@ -24,6 +24,7 @@ import com.rjnr.pocketnode.data.gateway.models.DaoAction
 import androidx.compose.ui.res.stringResource
 import com.rjnr.pocketnode.R
 import com.rjnr.pocketnode.data.gateway.models.DaoDeposit
+import com.rjnr.pocketnode.ui.util.resolveString
 import com.rjnr.pocketnode.data.gateway.models.DaoOverview
 import com.rjnr.pocketnode.data.gateway.models.DaoTab
 import com.rjnr.pocketnode.data.gateway.models.NetworkType
@@ -196,7 +197,7 @@ fun DaoScreen(
     // Snackbar for errors
     uiState.error?.let { error ->
         LaunchedEffect(error) {
-            snackbarHostState.showSnackbar(error)
+            snackbarHostState.showSnackbar(error.resolveString(context))
             viewModel.clearError()
         }
     }

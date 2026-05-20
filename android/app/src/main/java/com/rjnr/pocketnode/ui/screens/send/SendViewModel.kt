@@ -41,7 +41,7 @@ data class SendUiState(
     val recipientAddress: String = "",
     val amountCkb: String = "",
     val isLoading: Boolean = false,
-    val error: String? = null,
+    val error: com.rjnr.pocketnode.ui.util.UiMessage? = null,
     val txHash: String? = null,
     val availableBalance: Long = 0L,
     val estimatedFee: Long = 0L,
@@ -170,7 +170,7 @@ class SendViewModel @Inject constructor(
                         it.copy(
                             networkType = network,
                             isLoading = false,
-                            error = "Network changed. Transaction cancelled.",
+                            error = com.rjnr.pocketnode.ui.util.UiMessage.Resource(com.rjnr.pocketnode.R.string.vm_error_network_changed_tx_cancelled),
                             transactionState = TransactionState.FAILED,
                             statusMessage = "Transaction cancelled due to network switch"
                         )
@@ -298,7 +298,7 @@ class SendViewModel @Inject constructor(
         viewModelScope.launch {
             if (peekActiveKdfVersion() == 2) {
                 _uiState.update {
-                    it.copy(error = "This wallet requires biometric unlock; reopen Send and try again")
+                    it.copy(error = com.rjnr.pocketnode.ui.util.UiMessage.Resource(com.rjnr.pocketnode.R.string.vm_error_send_v2_reopen))
                 }
                 return@launch
             }
@@ -338,27 +338,27 @@ class SendViewModel @Inject constructor(
     private fun validateInputs(): Boolean {
         val state = _uiState.value
         if (state.recipientAddress.isBlank()) {
-            _uiState.update { it.copy(error = "Please enter recipient address") }
+            _uiState.update { it.copy(error = com.rjnr.pocketnode.ui.util.UiMessage.Resource(com.rjnr.pocketnode.R.string.vm_error_enter_recipient)) }
             return false
         }
         if (state.amountCkb.isBlank()) {
-            _uiState.update { it.copy(error = "Please enter amount") }
+            _uiState.update { it.copy(error = com.rjnr.pocketnode.ui.util.UiMessage.Resource(com.rjnr.pocketnode.R.string.vm_error_enter_amount)) }
             return false
         }
         val amountShannons = try {
             BigDecimal(state.amountCkb).setScale(8, RoundingMode.DOWN)
                 .multiply(BigDecimal(100_000_000)).toLong()
         } catch (e: Exception) {
-            _uiState.update { it.copy(error = "Invalid amount") }
+            _uiState.update { it.copy(error = com.rjnr.pocketnode.ui.util.UiMessage.Resource(com.rjnr.pocketnode.R.string.vm_error_invalid_amount)) }
             return false
         }
         val minCapacity = 61_00000000L
         if (amountShannons < minCapacity) {
-            _uiState.update { it.copy(error = "Minimum transfer is 61 CKB") }
+            _uiState.update { it.copy(error = com.rjnr.pocketnode.ui.util.UiMessage.Resource(com.rjnr.pocketnode.R.string.vm_error_min_transfer)) }
             return false
         }
         if (amountShannons > state.availableBalance) {
-            _uiState.update { it.copy(error = "Insufficient balance") }
+            _uiState.update { it.copy(error = com.rjnr.pocketnode.ui.util.UiMessage.Resource(com.rjnr.pocketnode.R.string.vm_error_insufficient_balance)) }
             return false
         }
         return true
@@ -388,12 +388,12 @@ class SendViewModel @Inject constructor(
 
         val capturedAddress = repository.getCurrentAddress()
         if (capturedAddress == null) {
-            _uiState.update { it.copy(error = "Wallet not initialized") }
+            _uiState.update { it.copy(error = com.rjnr.pocketnode.ui.util.UiMessage.Resource(com.rjnr.pocketnode.R.string.vm_error_wallet_not_initialized)) }
             return
         }
 
         val walletId = walletPreferencesActiveId() ?: run {
-            _uiState.update { it.copy(error = "No active wallet") }
+            _uiState.update { it.copy(error = com.rjnr.pocketnode.ui.util.UiMessage.Resource(com.rjnr.pocketnode.R.string.vm_error_no_active_wallet)) }
             return
         }
 
@@ -409,20 +409,20 @@ class SendViewModel @Inject constructor(
             }
             is WalletKeyReader.Result.AuthError -> {
                 _uiState.update {
-                    it.copy(error = "Authentication failed: ${readResult.message}", isLoading = false)
+                    it.copy(error = com.rjnr.pocketnode.ui.util.UiMessage.Resource(com.rjnr.pocketnode.R.string.vm_error_auth_failed_with_reason, listOf(readResult.message.toString())), isLoading = false)
                 }
                 return
             }
             is WalletKeyReader.Result.NotAvailable -> {
                 _uiState.update {
-                    it.copy(error = "Cannot read wallet key: ${readResult.reason}", isLoading = false)
+                    it.copy(error = com.rjnr.pocketnode.ui.util.UiMessage.Resource(com.rjnr.pocketnode.R.string.vm_error_cannot_read_wallet_key, listOf(readResult.reason)), isLoading = false)
                 }
                 return
             }
             is WalletKeyReader.Result.KeyInvalidated -> {
                 _uiState.update {
                     it.copy(
-                        error = "Biometric enrollment changed — re-import this wallet from its recovery phrase to continue",
+                        error = com.rjnr.pocketnode.ui.util.UiMessage.Resource(com.rjnr.pocketnode.R.string.vm_error_biometric_changed_send),
                         isLoading = false,
                     )
                 }
@@ -475,7 +475,7 @@ class SendViewModel @Inject constructor(
             _uiState.update {
                 it.copy(
                     isLoading = false,
-                    error = parseErrorMessage(e),
+                    error = com.rjnr.pocketnode.ui.util.UiMessage.Raw(parseErrorMessage(e)),
                     transactionState = TransactionState.FAILED,
                     statusMessage = "Transaction failed"
                 )
@@ -491,7 +491,7 @@ class SendViewModel @Inject constructor(
             BigDecimal(state.amountCkb).setScale(8, RoundingMode.DOWN)
                 .multiply(BigDecimal(100_000_000)).toLong()
         } catch (e: Exception) {
-            _uiState.update { it.copy(error = "Invalid amount") }
+            _uiState.update { it.copy(error = com.rjnr.pocketnode.ui.util.UiMessage.Resource(com.rjnr.pocketnode.R.string.vm_error_invalid_amount)) }
             return
         }
 
@@ -499,13 +499,13 @@ class SendViewModel @Inject constructor(
         val capturedAddress = repository.getCurrentAddress()
 
         if (capturedAddress == null) {
-            _uiState.update { it.copy(error = "Wallet not initialized") }
+            _uiState.update { it.copy(error = com.rjnr.pocketnode.ui.util.UiMessage.Resource(com.rjnr.pocketnode.R.string.vm_error_wallet_not_initialized)) }
             return
         }
 
         sendJob = viewModelScope.launch {
             val capturedKey = try { repository.getPrivateKey() } catch (e: Exception) {
-                _uiState.update { it.copy(error = "Failed to access wallet keys: ${e.message}") }
+                _uiState.update { it.copy(error = com.rjnr.pocketnode.ui.util.UiMessage.Resource(com.rjnr.pocketnode.R.string.vm_error_access_keys_failed, listOf(e.message ?: ""))) }
                 return@launch
             }
             _uiState.update {
@@ -562,7 +562,7 @@ class SendViewModel @Inject constructor(
                 _uiState.update {
                     it.copy(
                         isLoading = false,
-                        error = userFriendlyError,
+                        error = com.rjnr.pocketnode.ui.util.UiMessage.Raw(userFriendlyError),
                         transactionState = TransactionState.FAILED,
                         statusMessage = "Transaction failed"
                     )

@@ -61,6 +61,7 @@ import com.composables.icons.lucide.Wallet
 import androidx.compose.ui.res.stringResource
 import com.rjnr.pocketnode.R
 import com.rjnr.pocketnode.ui.components.MnemonicWordInput
+import com.rjnr.pocketnode.ui.util.resolveString
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -81,9 +82,10 @@ fun AddWalletScreen(
         }
     }
 
+    val context = androidx.compose.ui.platform.LocalContext.current
     LaunchedEffect(uiState.error) {
-        uiState.error?.let {
-            snackbarHostState.showSnackbar(it)
+        uiState.error?.let { msg ->
+            snackbarHostState.showSnackbar(msg.resolveString(context))
             viewModel.clearError()
         }
     }

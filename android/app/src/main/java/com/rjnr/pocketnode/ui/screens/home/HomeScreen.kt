@@ -83,6 +83,7 @@ import com.composables.icons.lucide.Lucide
 import com.composables.icons.lucide.TriangleAlert
 import com.composables.icons.lucide.X
 import com.rjnr.pocketnode.R
+import com.rjnr.pocketnode.ui.util.resolveString
 import com.rjnr.pocketnode.data.gateway.models.NetworkType
 import com.rjnr.pocketnode.data.gateway.models.SyncMode
 import com.rjnr.pocketnode.data.gateway.models.TransactionRecord
@@ -302,8 +303,9 @@ fun HomeScreen(
 
     LaunchedEffect(uiState.error) {
         uiState.error?.let { error ->
-            snackbarHostState.showSnackbar(error)
-            Log.e("HomeScreen", "Error: $error")
+            val resolved = error.resolveString(context)
+            snackbarHostState.showSnackbar(resolved)
+            Log.e("HomeScreen", "Error: $resolved")
             viewModel.clearError()
         }
     }

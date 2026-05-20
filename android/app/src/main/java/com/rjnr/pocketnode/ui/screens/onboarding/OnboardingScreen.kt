@@ -14,6 +14,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.hilt.navigation.compose.hiltViewModel
+import com.rjnr.pocketnode.ui.util.resolveString
 import com.rjnr.pocketnode.ui.util.uaTestTag
 
 @Composable
@@ -33,9 +34,10 @@ fun OnboardingScreen(
         }
     }
 
+    val context = androidx.compose.ui.platform.LocalContext.current
     LaunchedEffect(uiState.error) {
         uiState.error?.let { error ->
-            snackbarHostState.showSnackbar(error)
+            snackbarHostState.showSnackbar(error.resolveString(context))
             viewModel.clearError()
         }
     }

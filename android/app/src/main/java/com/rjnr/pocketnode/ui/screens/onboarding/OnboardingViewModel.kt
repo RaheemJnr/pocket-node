@@ -18,7 +18,7 @@ private const val TAG = "OnboardingViewModel"
 
 data class OnboardingUiState(
     val isLoading: Boolean = false,
-    val error: String? = null,
+    val error: com.rjnr.pocketnode.ui.util.UiMessage? = null,
     val isWalletCreated: Boolean = false,
     val wasCorrupted: Boolean = false,
     /**
@@ -64,7 +64,9 @@ class OnboardingViewModel @Inject constructor(
         if (!canCreateV2BoundKey()) {
             _uiState.update {
                 it.copy(
-                    error = "Set a screen lock (PIN, pattern, password, or biometric) in Android Settings, then try again. Pocket Node uses your device lock to protect your wallet keys.",
+                    error = com.rjnr.pocketnode.ui.util.UiMessage.Resource(
+                        com.rjnr.pocketnode.R.string.vm_error_no_device_credential,
+                    ),
                     noDeviceCredential = true,
                 )
             }
@@ -79,7 +81,12 @@ class OnboardingViewModel @Inject constructor(
                 _uiState.update { it.copy(isLoading = false, isWalletCreated = true) }
             } catch (e: Exception) {
                 Log.e(TAG, "Wallet creation failed", e)
-                _uiState.update { it.copy(isLoading = false, error = e.message) }
+                _uiState.update {
+                    it.copy(
+                        isLoading = false,
+                        error = e.message?.let(com.rjnr.pocketnode.ui.util.UiMessage::Raw),
+                    )
+                }
             }
         }
     }

@@ -97,7 +97,7 @@ class WalletSettingsViewModel @Inject constructor(
                 loadWallet()
                 _uiState.update { it.copy(isEditing = false) }
             } catch (e: Exception) {
-                _uiState.update { it.copy(error = "Failed to rename: ${e.message}") }
+                _uiState.update { it.copy(error = com.rjnr.pocketnode.ui.util.UiMessage.Resource(com.rjnr.pocketnode.R.string.vm_error_rename_failed, listOf(e.message ?: ""))) }
             }
         }
     }
@@ -107,13 +107,13 @@ class WalletSettingsViewModel @Inject constructor(
     fun requestDelete() {
         val wallet = _uiState.value.wallet ?: return
         if (wallet.isActive) {
-            _uiState.update { it.copy(error = "Cannot delete the active wallet. Switch to another wallet first.") }
+            _uiState.update { it.copy(error = com.rjnr.pocketnode.ui.util.UiMessage.Resource(com.rjnr.pocketnode.R.string.vm_error_cannot_delete_active)) }
             return
         }
         viewModelScope.launch {
             val count = walletRepository.walletCount()
             if (count <= 1) {
-                _uiState.update { it.copy(error = "Cannot delete the last wallet. Create another wallet first.") }
+                _uiState.update { it.copy(error = com.rjnr.pocketnode.ui.util.UiMessage.Resource(com.rjnr.pocketnode.R.string.vm_error_cannot_delete_last)) }
                 return@launch
             }
 
@@ -123,7 +123,15 @@ class WalletSettingsViewModel @Inject constructor(
             val subAccounts = walletDao.getSubAccountsList(walletId)
             if (subAccounts.isNotEmpty()) {
                 _uiState.update {
-                    it.copy(error = "This wallet has ${subAccounts.size} sub-account${if (subAccounts.size > 1) "s" else ""}. Delete them first before removing the parent.")
+                    it.copy(
+                        error = if (subAccounts.size == 1)
+                            com.rjnr.pocketnode.ui.util.UiMessage.Resource(com.rjnr.pocketnode.R.string.vm_error_delete_sub_accounts_first_one)
+                        else
+                            com.rjnr.pocketnode.ui.util.UiMessage.Resource(
+                                com.rjnr.pocketnode.R.string.vm_error_delete_sub_accounts_first_other,
+                                listOf(subAccounts.size),
+                            ),
+                    )
                 }
                 return@launch
             }
@@ -164,7 +172,7 @@ class WalletSettingsViewModel @Inject constructor(
             } catch (e: Exception) {
                 Log.e(TAG, "Failed to delete wallet", e)
                 _uiState.update {
-                    it.copy(showDeleteConfirm = false, error = "Delete failed: ${e.message}")
+                    it.copy(showDeleteConfirm = false, error = com.rjnr.pocketnode.ui.util.UiMessage.Resource(com.rjnr.pocketnode.R.string.vm_error_delete_failed, listOf(e.message ?: "")))
                 }
             }
         }
@@ -213,7 +221,7 @@ class WalletSettingsViewModel @Inject constructor(
         viewModelScope.launch {
             if (keyMaterialDao.getKdfVersion(walletId) == 2) {
                 _uiState.update {
-                    it.copy(error = "Reopen this screen — biometric unlock required for V2 wallets")
+                    it.copy(error = com.rjnr.pocketnode.ui.util.UiMessage.Resource(com.rjnr.pocketnode.R.string.vm_error_reopen_for_biometric))
                 }
                 return@launch
             }
@@ -259,14 +267,14 @@ class WalletSettingsViewModel @Inject constructor(
             )) {
                 is WalletKeyReader.MaterialResult.Cancelled,
                 is WalletKeyReader.MaterialResult.AuthError -> {
-                    _uiState.update { it.copy(error = "Authentication cancelled") }
+                    _uiState.update { it.copy(error = com.rjnr.pocketnode.ui.util.UiMessage.Resource(com.rjnr.pocketnode.R.string.vm_error_auth_cancelled)) }
                 }
                 is WalletKeyReader.MaterialResult.NotAvailable -> {
-                    _uiState.update { it.copy(error = "Cannot read wallet key: ${result.reason}") }
+                    _uiState.update { it.copy(error = com.rjnr.pocketnode.ui.util.UiMessage.Resource(com.rjnr.pocketnode.R.string.vm_error_cannot_read_wallet_key, listOf(result.reason))) }
                 }
                 is WalletKeyReader.MaterialResult.KeyInvalidated -> {
                     _uiState.update {
-                        it.copy(error = "Biometric enrollment changed — re-import this wallet to view its recovery phrase")
+                        it.copy(error = com.rjnr.pocketnode.ui.util.UiMessage.Resource(com.rjnr.pocketnode.R.string.vm_error_biometric_changed_self))
                     }
                 }
                 is WalletKeyReader.MaterialResult.Success -> {
@@ -286,7 +294,7 @@ class WalletSettingsViewModel @Inject constructor(
                 walletRepository.createSubAccount(walletId, name)
             } catch (e: Exception) {
                 Log.e(TAG, "Failed to create sub-account", e)
-                _uiState.update { it.copy(error = "Failed to create account: ${e.message}") }
+                _uiState.update { it.copy(error = com.rjnr.pocketnode.ui.util.UiMessage.Resource(com.rjnr.pocketnode.R.string.vm_error_create_account_failed, listOf(e.message ?: ""))) }
             }
         }
     }
@@ -313,24 +321,24 @@ class WalletSettingsViewModel @Inject constructor(
             )) {
                 is WalletKeyReader.MaterialResult.Cancelled,
                 is WalletKeyReader.MaterialResult.AuthError ->
-                    _uiState.update { it.copy(error = "Authentication cancelled") }
+                    _uiState.update { it.copy(error = com.rjnr.pocketnode.ui.util.UiMessage.Resource(com.rjnr.pocketnode.R.string.vm_error_auth_cancelled)) }
                 is WalletKeyReader.MaterialResult.NotAvailable ->
-                    _uiState.update { it.copy(error = "Cannot read parent wallet: ${result.reason}") }
+                    _uiState.update { it.copy(error = com.rjnr.pocketnode.ui.util.UiMessage.Resource(com.rjnr.pocketnode.R.string.vm_error_cannot_read_parent, listOf(result.reason))) }
                 is WalletKeyReader.MaterialResult.KeyInvalidated ->
                     _uiState.update {
-                        it.copy(error = "Biometric enrollment changed — re-import the parent wallet to create sub-accounts")
+                        it.copy(error = com.rjnr.pocketnode.ui.util.UiMessage.Resource(com.rjnr.pocketnode.R.string.vm_error_biometric_changed_parent))
                     }
                 is WalletKeyReader.MaterialResult.Success -> {
                     val words = result.mnemonic?.split(" ")
                     if (words.isNullOrEmpty()) {
-                        _uiState.update { it.copy(error = "Parent wallet has no mnemonic") }
+                        _uiState.update { it.copy(error = com.rjnr.pocketnode.ui.util.UiMessage.Resource(com.rjnr.pocketnode.R.string.vm_error_parent_no_mnemonic)) }
                         return@launch
                     }
                     try {
                         walletRepository.createSubAccount(walletId, name, parentMnemonicOverride = words)
                     } catch (e: Exception) {
                         Log.e(TAG, "Failed to create V2 sub-account", e)
-                        _uiState.update { it.copy(error = "Failed to create account: ${e.message}") }
+                        _uiState.update { it.copy(error = com.rjnr.pocketnode.ui.util.UiMessage.Resource(com.rjnr.pocketnode.R.string.vm_error_create_account_failed, listOf(e.message ?: ""))) }
                     }
                 }
             }
@@ -353,7 +361,7 @@ data class WalletSettingsUiState(
     val daoDepositAmount: String = "",
     val pendingTxCount: Int = 0,
     val deleted: Boolean = false,
-    val error: String? = null,
+    val error: com.rjnr.pocketnode.ui.util.UiMessage? = null,
     val seedPhraseUnlocked: Boolean = false,
     val privateKeyHex: String? = null,
     val mnemonicWords: List<String>? = null

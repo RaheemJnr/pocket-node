@@ -250,7 +250,7 @@ class HomeViewModel @Inject constructor(
             .onFailure { error ->
                 Log.e(TAG, "Wallet initialization failed", error)
                 _uiState.update {
-                    it.copy(error = error.message, isLoading = false)
+                    it.copy(error = error.message?.let(com.rjnr.pocketnode.ui.util.UiMessage::Raw), isLoading = false)
                 }
             }
     }
@@ -345,7 +345,7 @@ class HomeViewModel @Inject constructor(
             }
             .onFailure { error ->
                 Log.e(TAG, "Registration failed", error)
-                _uiState.update { it.copy(error = "Registration failed: ${error.message}") }
+                _uiState.update { it.copy(error = com.rjnr.pocketnode.ui.util.UiMessage.Resource(com.rjnr.pocketnode.R.string.vm_error_registration_failed, listOf(error.message ?: ""))) }
             }
     }
 
@@ -453,7 +453,7 @@ class HomeViewModel @Inject constructor(
                     Log.e(TAG, "Failed to fetch transactions", error)
                     if (!silent) {
                         _uiState.update {
-                            it.copy(error = "Failed to load transactions: ${error.message}")
+                            it.copy(error = com.rjnr.pocketnode.ui.util.UiMessage.Resource(com.rjnr.pocketnode.R.string.vm_error_load_transactions_failed, listOf(error.message ?: "")))
                         }
                     }
                 }
@@ -490,7 +490,7 @@ class HomeViewModel @Inject constructor(
                 }
                 .onFailure { e ->
                     Log.e(TAG, "retryFailedTransaction failed for $txHash", e)
-                    _uiState.update { it.copy(error = "Couldn't retry: ${e.message}") }
+                    _uiState.update { it.copy(error = com.rjnr.pocketnode.ui.util.UiMessage.Resource(com.rjnr.pocketnode.R.string.vm_error_retry_failed, listOf(e.message ?: ""))) }
                 }
         }
     }
@@ -536,7 +536,7 @@ class HomeViewModel @Inject constructor(
                         it.copy(
                             isLoading = false,
                             isSyncing = false,
-                            error = "Failed to change sync mode: ${error.message}"
+                            error = com.rjnr.pocketnode.ui.util.UiMessage.Resource(com.rjnr.pocketnode.R.string.vm_error_sync_mode_change_failed_home, listOf(error.message ?: ""))
                         )
                     }
                 }
@@ -652,7 +652,7 @@ class HomeViewModel @Inject constructor(
                     _uiState.update { 
                         it.copy(
                             isLoading = false, 
-                            error = "Import failed: ${error.message}"
+                            error = com.rjnr.pocketnode.ui.util.UiMessage.Resource(com.rjnr.pocketnode.R.string.vm_error_import_failed, listOf(error.message ?: ""))
                         ) 
                     }
                 }
@@ -682,7 +682,7 @@ class HomeViewModel @Inject constructor(
                 refresh()
             } catch (e: Exception) {
                 Log.e(TAG, "Failed to switch wallet", e)
-                _uiState.update { it.copy(isSwitchingWallet = false, error = "Failed to switch wallet: ${e.message}") }
+                _uiState.update { it.copy(isSwitchingWallet = false, error = com.rjnr.pocketnode.ui.util.UiMessage.Resource(com.rjnr.pocketnode.R.string.vm_error_switch_wallet_failed, listOf(e.message ?: ""))) }
             }
         }
     }
@@ -733,7 +733,7 @@ class HomeViewModel @Inject constructor(
                     _uiState.update {
                         it.copy(
                             isSyncing = false,
-                            error = "Network switch failed: ${error.message}"
+                            error = com.rjnr.pocketnode.ui.util.UiMessage.Resource(com.rjnr.pocketnode.R.string.vm_error_network_switch_failed, listOf(error.message ?: ""))
                         )
                     }
                 }
@@ -899,7 +899,7 @@ data class HomeUiState(
     val ckbUsdPrice: Double? = null,
     val peerCount: Int = 0,
     val transactions: List<TransactionRecord> = emptyList(),
-    val error: String? = null,
+    val error: com.rjnr.pocketnode.ui.util.UiMessage? = null,
     val currentSyncMode: SyncMode = SyncMode.RECENT,
     val showSyncOptionsDialog: Boolean = false,
     val showImportDialog: Boolean = false,

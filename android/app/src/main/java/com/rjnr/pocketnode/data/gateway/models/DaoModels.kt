@@ -102,7 +102,7 @@ data class DaoUiState(
     // Pull-to-refresh indicator. Distinct from `isLoading` so the user can
     // refresh without the screen blanking out into a fullscreen spinner.
     val isRefreshing: Boolean = false,
-    val error: String? = null,
+    val error: com.rjnr.pocketnode.ui.util.UiMessage? = null,
     val pendingAction: DaoAction? = null,
     val requiresAuth: Boolean = false,
     val authMethod: AuthMethod? = null

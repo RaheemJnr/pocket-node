@@ -102,7 +102,7 @@ class DaoViewModel @Inject constructor(
             }
             .onFailure { e ->
                 _uiState.update {
-                    it.copy(error = e.message, isLoading = false)
+                    it.copy(error = e.message?.let(com.rjnr.pocketnode.ui.util.UiMessage::Raw), isLoading = false)
                 }
             }
     }
@@ -132,7 +132,7 @@ class DaoViewModel @Inject constructor(
         val amount = amountShannons ?: pendingDepositAmount
         pendingDepositAmount = 0L
         if (amount <= 0L) {
-            _uiState.update { it.copy(error = "Invalid deposit amount", requiresAuth = false, authMethod = null) }
+            _uiState.update { it.copy(error = com.rjnr.pocketnode.ui.util.UiMessage.Resource(com.rjnr.pocketnode.R.string.vm_error_invalid_deposit_amount), requiresAuth = false, authMethod = null) }
             return
         }
         _uiState.update {
@@ -142,7 +142,7 @@ class DaoViewModel @Inject constructor(
             repository.depositToDao(amount)
                 .onFailure { e ->
                     _uiState.update {
-                        it.copy(error = e.message, pendingAction = null)
+                        it.copy(error = e.message?.let(com.rjnr.pocketnode.ui.util.UiMessage::Raw), pendingAction = null)
                     }
                 }
         }
@@ -186,7 +186,7 @@ class DaoViewModel @Inject constructor(
             repository.withdrawFromDao(deposit.outPoint)
                 .onFailure { e ->
                     _uiState.update {
-                        it.copy(error = e.message, pendingAction = null)
+                        it.copy(error = e.message?.let(com.rjnr.pocketnode.ui.util.UiMessage::Raw), pendingAction = null)
                     }
                 }
         }
@@ -212,7 +212,7 @@ class DaoViewModel @Inject constructor(
             repository.unlockDao(withdrawingOutPoint = deposit.outPoint)
                 .onFailure { e ->
                     _uiState.update {
-                        it.copy(error = e.message, pendingAction = null)
+                        it.copy(error = e.message?.let(com.rjnr.pocketnode.ui.util.UiMessage::Raw), pendingAction = null)
                     }
                 }
         }
@@ -241,7 +241,7 @@ class DaoViewModel @Inject constructor(
     ) {
         val walletId = walletRepository.activeWalletIdSnapshot()
         if (walletId.isNullOrEmpty()) {
-            _uiState.update { it.copy(error = "No active wallet", pendingAction = null) }
+            _uiState.update { it.copy(error = com.rjnr.pocketnode.ui.util.UiMessage.Resource(com.rjnr.pocketnode.R.string.vm_error_no_active_wallet), pendingAction = null) }
             return
         }
         _uiState.update {
@@ -257,22 +257,22 @@ class DaoViewModel @Inject constructor(
                 _uiState.update { it.copy(pendingAction = null) }
             is WalletKeyReader.Result.AuthError ->
                 _uiState.update {
-                    it.copy(error = "Authentication failed: ${read.message}", pendingAction = null)
+                    it.copy(error = com.rjnr.pocketnode.ui.util.UiMessage.Resource(com.rjnr.pocketnode.R.string.vm_error_auth_failed_with_reason, listOf(read.message.toString())), pendingAction = null)
                 }
             is WalletKeyReader.Result.NotAvailable ->
                 _uiState.update {
-                    it.copy(error = "Cannot read wallet key: ${read.reason}", pendingAction = null)
+                    it.copy(error = com.rjnr.pocketnode.ui.util.UiMessage.Resource(com.rjnr.pocketnode.R.string.vm_error_cannot_read_wallet_key, listOf(read.reason)), pendingAction = null)
                 }
             is WalletKeyReader.Result.KeyInvalidated ->
                 _uiState.update {
                     it.copy(
-                        error = "Biometric enrollment changed — re-import this wallet from its recovery phrase to continue",
+                        error = com.rjnr.pocketnode.ui.util.UiMessage.Resource(com.rjnr.pocketnode.R.string.vm_error_biometric_changed_send),
                         pendingAction = null,
                     )
                 }
             is WalletKeyReader.Result.Success ->
                 operation(read.privateKey).onFailure { e ->
-                    _uiState.update { it.copy(error = e.message, pendingAction = null) }
+                    _uiState.update { it.copy(error = e.message?.let(com.rjnr.pocketnode.ui.util.UiMessage::Raw), pendingAction = null) }
                 }
         }
     }
