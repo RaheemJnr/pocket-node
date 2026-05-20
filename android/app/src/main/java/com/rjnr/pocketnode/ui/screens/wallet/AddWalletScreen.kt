@@ -58,6 +58,8 @@ import com.composables.icons.lucide.Lucide
 import com.composables.icons.lucide.Plus
 import com.composables.icons.lucide.Users
 import com.composables.icons.lucide.Wallet
+import androidx.compose.ui.res.stringResource
+import com.rjnr.pocketnode.R
 import com.rjnr.pocketnode.ui.components.MnemonicWordInput
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -94,7 +96,7 @@ fun AddWalletScreen(
                     IconButton(onClick = {
                         if (selectedMode == 0) onNavigateBack() else selectedMode = 0
                     }) {
-                        Icon(Lucide.ArrowLeft, contentDescription = "Back")
+                        Icon(Lucide.ArrowLeft, contentDescription = stringResource(R.string.common_back_cd))
                     }
                 },
                 colors = TopAppBarDefaults.topAppBarColors(
@@ -188,7 +190,7 @@ private fun NewWalletForm(uiState: AddWalletUiState, viewModel: AddWalletViewMod
     OutlinedTextField(
         value = uiState.name,
         onValueChange = { viewModel.updateName(it) },
-        label = { Text("Wallet Name") },
+        label = { Text(stringResource(R.string.add_wallet_name_label)) },
         modifier = Modifier.fillMaxWidth(),
         singleLine = true
     )
@@ -201,7 +203,7 @@ private fun NewWalletForm(uiState: AddWalletUiState, viewModel: AddWalletViewMod
         if (uiState.isLoading) {
             CircularProgressIndicator(modifier = Modifier.size(20.dp), strokeWidth = 2.dp)
         } else {
-            Text("Create Wallet")
+            Text(stringResource(R.string.add_wallet_create))
         }
     }
 }
@@ -213,7 +215,7 @@ private fun ImportMnemonicForm(uiState: AddWalletUiState, viewModel: AddWalletVi
     OutlinedTextField(
         value = uiState.name,
         onValueChange = { viewModel.updateName(it) },
-        label = { Text("Wallet Name") },
+        label = { Text(stringResource(R.string.add_wallet_name_label)) },
         modifier = Modifier.fillMaxWidth(),
         singleLine = true
     )
@@ -227,7 +229,7 @@ private fun ImportMnemonicForm(uiState: AddWalletUiState, viewModel: AddWalletVi
     ) {
         Icon(Lucide.ClipboardPaste, contentDescription = null, modifier = Modifier.size(18.dp))
         Spacer(Modifier.width(8.dp))
-        Text("Paste from Clipboard")
+        Text(stringResource(R.string.add_wallet_paste))
     }
     Spacer(Modifier.height(12.dp))
 
@@ -259,7 +261,7 @@ private fun ImportMnemonicForm(uiState: AddWalletUiState, viewModel: AddWalletVi
         if (uiState.isLoading) {
             CircularProgressIndicator(modifier = Modifier.size(20.dp), strokeWidth = 2.dp)
         } else {
-            Text("Import Wallet")
+            Text(stringResource(R.string.add_wallet_import))
         }
     }
 }
@@ -269,7 +271,7 @@ private fun ImportKeyForm(uiState: AddWalletUiState, viewModel: AddWalletViewMod
     OutlinedTextField(
         value = uiState.name,
         onValueChange = { viewModel.updateName(it) },
-        label = { Text("Wallet Name") },
+        label = { Text(stringResource(R.string.add_wallet_name_label)) },
         modifier = Modifier.fillMaxWidth(),
         singleLine = true
     )
@@ -277,10 +279,10 @@ private fun ImportKeyForm(uiState: AddWalletUiState, viewModel: AddWalletViewMod
     OutlinedTextField(
         value = uiState.importPrivateKey,
         onValueChange = { viewModel.updateImportPrivateKey(it) },
-        label = { Text("Private Key (hex)") },
+        label = { Text(stringResource(R.string.add_wallet_private_key_label)) },
         modifier = Modifier.fillMaxWidth(),
         singleLine = true,
-        placeholder = { Text("0x...") }
+        placeholder = { Text(stringResource(R.string.add_wallet_private_key_placeholder)) }
     )
     Spacer(Modifier.height(16.dp))
     Button(
@@ -291,7 +293,7 @@ private fun ImportKeyForm(uiState: AddWalletUiState, viewModel: AddWalletViewMod
         if (uiState.isLoading) {
             CircularProgressIndicator(modifier = Modifier.size(20.dp), strokeWidth = 2.dp)
         } else {
-            Text("Import Key")
+            Text(stringResource(R.string.add_wallet_import_key))
         }
     }
 }
@@ -305,7 +307,7 @@ private fun SubAccountForm(uiState: AddWalletUiState, viewModel: AddWalletViewMo
     OutlinedTextField(
         value = uiState.name,
         onValueChange = { viewModel.updateName(it) },
-        label = { Text("Account Name") },
+        label = { Text(stringResource(R.string.add_wallet_account_name_label)) },
         modifier = Modifier.fillMaxWidth(),
         singleLine = true
     )
@@ -319,8 +321,8 @@ private fun SubAccountForm(uiState: AddWalletUiState, viewModel: AddWalletViewMo
             value = selectedParent?.name ?: "",
             onValueChange = {},
             readOnly = true,
-            label = { Text("Parent Wallet") },
-            placeholder = { Text("Select a mnemonic wallet") },
+            label = { Text(stringResource(R.string.add_wallet_parent_label)) },
+            placeholder = { Text(stringResource(R.string.add_wallet_parent_placeholder)) },
             trailingIcon = { ExposedDropdownMenuDefaults.TrailingIcon(expanded = dropdownExpanded) },
             modifier = Modifier
                 .menuAnchor(MenuAnchorType.PrimaryNotEditable)
@@ -332,7 +334,7 @@ private fun SubAccountForm(uiState: AddWalletUiState, viewModel: AddWalletViewMo
         ) {
             if (uiState.parentWallets.isEmpty()) {
                 DropdownMenuItem(
-                    text = { Text("No mnemonic wallets available") },
+                    text = { Text(stringResource(R.string.add_wallet_no_parents)) },
                     onClick = { dropdownExpanded = false },
                     enabled = false
                 )
@@ -358,7 +360,7 @@ private fun SubAccountForm(uiState: AddWalletUiState, viewModel: AddWalletViewMo
         if (uiState.isLoading) {
             CircularProgressIndicator(modifier = Modifier.size(20.dp), strokeWidth = 2.dp)
         } else {
-            Text("Create Sub-Account")
+            Text(stringResource(R.string.add_wallet_create_sub_account))
         }
     }
 }

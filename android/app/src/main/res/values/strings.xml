@@ -213,6 +213,42 @@
     <string name="node_status_export_logs">Export Logs</string>
     <!-- endregion -->
 
+    <!-- region: WalletManager -->
+    <string name="wallet_manager_title">Wallets</string>
+    <string name="wallet_manager_add_cd">Add Wallet</string>
+    <string name="wallet_manager_add_short">Add</string>
+    <string name="wallet_manager_settings_cd">Settings</string>
+    <!-- endregion -->
+
+    <!-- region: AddWallet -->
+    <string name="add_wallet_name_label">Wallet Name</string>
+    <string name="add_wallet_create">Create Wallet</string>
+    <string name="add_wallet_paste">Paste from Clipboard</string>
+    <string name="add_wallet_import">Import Wallet</string>
+    <string name="add_wallet_private_key_label">Private Key (hex)</string>
+    <string name="add_wallet_private_key_placeholder">0x…</string>
+    <string name="add_wallet_import_key">Import Key</string>
+    <string name="add_wallet_account_name_label">Account Name</string>
+    <string name="add_wallet_parent_label">Parent Wallet</string>
+    <string name="add_wallet_parent_placeholder">Select a mnemonic wallet</string>
+    <string name="add_wallet_no_parents">No mnemonic wallets available</string>
+    <string name="add_wallet_create_sub_account">Create Sub-Account</string>
+    <!-- endregion -->
+
+    <!-- region: WalletSettings -->
+    <string name="wallet_settings_title">Wallet Settings</string>
+    <string name="wallet_settings_delete">Delete</string>
+    <string name="wallet_settings_cancel">Cancel</string>
+    <string name="wallet_settings_new_account_title">New Account</string>
+    <string name="wallet_settings_create">Create</string>
+    <string name="wallet_settings_wallet_name_label">Wallet Name</string>
+    <string name="wallet_settings_save">Save</string>
+    <string name="wallet_settings_edit_name_cd">Edit Name</string>
+    <string name="wallet_settings_hide">Hide</string>
+    <string name="wallet_settings_copy">Copy</string>
+    <string name="wallet_settings_add_account">Add account</string>
+    <!-- endregion -->
+
     <!-- region: DAO -->
     <string name="dao_auth_biometric_title">Authenticate to Deposit</string>
     <string name="dao_auth_biometric_subtitle">Verify your identity to deposit to Nervos DAO</string>

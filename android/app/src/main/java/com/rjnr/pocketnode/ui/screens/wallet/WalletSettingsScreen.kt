@@ -52,6 +52,8 @@ import com.composables.icons.lucide.ChevronRight
 import com.composables.icons.lucide.Lucide
 import com.composables.icons.lucide.Pencil
 import com.composables.icons.lucide.Plus
+import androidx.compose.ui.res.stringResource
+import com.rjnr.pocketnode.R
 import com.rjnr.pocketnode.data.database.entity.WalletEntity
 import com.rjnr.pocketnode.ui.components.WalletAvatar
 
@@ -119,10 +121,10 @@ fun WalletSettingsScreen(
                     colors = ButtonDefaults.buttonColors(
                         containerColor = MaterialTheme.colorScheme.error
                     )
-                ) { Text("Delete") }
+                ) { Text(stringResource(R.string.wallet_settings_delete)) }
             },
             dismissButton = {
-                TextButton(onClick = { viewModel.cancelDelete() }) { Text("Cancel") }
+                TextButton(onClick = { viewModel.cancelDelete() }) { Text(stringResource(R.string.wallet_settings_cancel)) }
             }
         )
     }
@@ -132,12 +134,12 @@ fun WalletSettingsScreen(
         var accountName by remember { mutableStateOf("") }
         AlertDialog(
             onDismissRequest = { showAddAccountDialog = false },
-            title = { Text("New Account") },
+            title = { Text(stringResource(R.string.wallet_settings_new_account_title)) },
             text = {
                 OutlinedTextField(
                     value = accountName,
                     onValueChange = { accountName = it },
-                    label = { Text("Account Name") },
+                    label = { Text(stringResource(R.string.add_wallet_account_name_label)) },
                     singleLine = true,
                     modifier = Modifier.fillMaxWidth()
                 )
@@ -156,10 +158,10 @@ fun WalletSettingsScreen(
                         }
                     },
                     enabled = accountName.isNotBlank()
-                ) { Text("Create") }
+                ) { Text(stringResource(R.string.wallet_settings_create)) }
             },
             dismissButton = {
-                TextButton(onClick = { showAddAccountDialog = false }) { Text("Cancel") }
+                TextButton(onClick = { showAddAccountDialog = false }) { Text(stringResource(R.string.wallet_settings_cancel)) }
             }
         )
     }
@@ -167,10 +169,10 @@ fun WalletSettingsScreen(
     Scaffold(
         topBar = {
             TopAppBar(
-                title = { Text("Wallet Settings") },
+                title = { Text(stringResource(R.string.wallet_settings_title)) },
                 navigationIcon = {
                     IconButton(onClick = onNavigateBack) {
-                        Icon(Lucide.ArrowLeft, contentDescription = "Back")
+                        Icon(Lucide.ArrowLeft, contentDescription = stringResource(R.string.common_back_cd))
                     }
                 },
                 actions = {
@@ -214,7 +216,7 @@ fun WalletSettingsScreen(
                     OutlinedTextField(
                         value = uiState.editName,
                         onValueChange = { viewModel.updateEditName(it) },
-                        label = { Text("Wallet Name") },
+                        label = { Text(stringResource(R.string.wallet_settings_wallet_name_label)) },
                         singleLine = true,
                         modifier = Modifier
                             .fillMaxWidth()
@@ -223,13 +225,13 @@ fun WalletSettingsScreen(
                     Spacer(Modifier.height(8.dp))
                     Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                         OutlinedButton(onClick = { viewModel.cancelEditing() }) {
-                            Text("Cancel")
+                            Text(stringResource(R.string.wallet_settings_cancel))
                         }
                         Button(
                             onClick = { viewModel.saveName() },
                             enabled = uiState.editName.isNotBlank()
                         ) {
-                            Text("Save")
+                            Text(stringResource(R.string.wallet_settings_save))
                         }
                     }
                 } else {
@@ -245,7 +247,7 @@ fun WalletSettingsScreen(
                         Spacer(Modifier.width(4.dp))
                         Icon(
                             Lucide.Pencil,
-                            contentDescription = "Edit Name",
+                            contentDescription = stringResource(R.string.wallet_settings_edit_name_cd),
                             modifier = Modifier.size(16.dp),
                             tint = MaterialTheme.colorScheme.onSurfaceVariant
                         )
@@ -325,7 +327,7 @@ fun WalletSettingsScreen(
                                         showSeedPhrase = false
                                         viewModel.lockSeedPhrase()
                                     }) {
-                                        Text("Hide")
+                                        Text(stringResource(R.string.wallet_settings_hide))
                                     }
                                 }
                             }
@@ -406,13 +408,13 @@ fun WalletSettingsScreen(
                                         OutlinedButton(onClick = {
                                             clipboardManager.setText(androidx.compose.ui.text.AnnotatedString(keyHex))
                                         }) {
-                                            Text("Copy")
+                                            Text(stringResource(R.string.wallet_settings_copy))
                                         }
                                         OutlinedButton(onClick = {
                                             showPrivateKey = false
                                             viewModel.lockSeedPhrase()
                                         }) {
-                                            Text("Hide")
+                                            Text(stringResource(R.string.wallet_settings_hide))
                                         }
                                     }
                                 }
@@ -488,7 +490,7 @@ fun WalletSettingsScreen(
                                 modifier = Modifier.size(16.dp)
                             )
                             Spacer(Modifier.width(4.dp))
-                            Text("Add account")
+                            Text(stringResource(R.string.wallet_settings_add_account))
                         }
                     }
 
