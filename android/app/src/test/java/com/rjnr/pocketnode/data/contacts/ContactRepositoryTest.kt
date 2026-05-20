@@ -57,7 +57,9 @@ class ContactRepositoryTest {
         contactDao = db.contactDao()
         walletRepository = mockk(relaxed = true)
         every { walletRepository.activeWalletIdSnapshot() } returns "wallet-1"
-        repo = ContactRepository(contactDao, walletRepository, nowProvider = { fakeNow })
+        repo = ContactRepository(contactDao, walletRepository).apply {
+            setClockForTest { fakeNow }
+        }
     }
 
     @After

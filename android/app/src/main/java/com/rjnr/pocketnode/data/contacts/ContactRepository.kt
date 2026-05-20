@@ -6,6 +6,7 @@ import com.rjnr.pocketnode.data.database.entity.ContactEntity
 import com.rjnr.pocketnode.data.gateway.models.NetworkType
 import com.rjnr.pocketnode.data.wallet.AddressUtils
 import com.rjnr.pocketnode.data.wallet.WalletRepository
+import androidx.annotation.VisibleForTesting
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.flow
 import kotlinx.coroutines.flow.flowOf
@@ -38,8 +39,18 @@ import javax.inject.Singleton
 class ContactRepository @Inject constructor(
     private val contactDao: ContactDao,
     private val walletRepository: WalletRepository,
-    private val nowProvider: () -> Long = { System.currentTimeMillis() },
 ) {
+
+    /**
+     * Clock injection point for unit tests. Hilt always uses the default
+     * (system clock); tests overwrite this via [setClockForTest] to make
+     * `createdAt`/`updatedAt`/`lastUsedAt` assertions deterministic.
+     */
+    @VisibleForTesting
+    internal var nowProvider: () -> Long = { System.currentTimeMillis() }
+
+    @VisibleForTesting
+    internal fun setClockForTest(provider: () -> Long) { nowProvider = provider }
 
     sealed class ContactError(message: String) : Exception(message) {
         object InvalidAddress : ContactError("Address cannot be decoded")
