@@ -39,9 +39,11 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
 import androidx.hilt.navigation.compose.hiltViewModel
 import com.composables.icons.lucide.ArrowLeft
+import androidx.compose.ui.res.stringResource
 import com.composables.icons.lucide.ChevronRight
 import com.composables.icons.lucide.Lucide
 import com.composables.icons.lucide.Plus
+import com.rjnr.pocketnode.R
 import com.rjnr.pocketnode.ui.components.WalletAvatar
 import com.rjnr.pocketnode.ui.components.WalletGroup
 
@@ -66,10 +68,10 @@ fun WalletManagerScreen(
     Scaffold(
         topBar = {
             TopAppBar(
-                title = { Text("Wallets") },
+                title = { Text(stringResource(R.string.wallet_manager_title)) },
                 navigationIcon = {
                     IconButton(onClick = onNavigateBack) {
-                        Icon(Lucide.ArrowLeft, contentDescription = "Back")
+                        Icon(Lucide.ArrowLeft, contentDescription = stringResource(R.string.common_back_cd))
                     }
                 },
                 colors = TopAppBarDefaults.topAppBarColors(
@@ -79,7 +81,7 @@ fun WalletManagerScreen(
         },
         floatingActionButton = {
             FloatingActionButton(onClick = onNavigateToAddWallet) {
-                Icon(Lucide.Plus, contentDescription = "Add Wallet")
+                Icon(Lucide.Plus, contentDescription = stringResource(R.string.wallet_manager_add_cd))
             }
         },
         snackbarHost = { SnackbarHost(snackbarHostState) }
@@ -160,7 +162,7 @@ private fun WalletGroupCard(
             // "Add" button — only for mnemonic (HD) wallets
             if (group.wallet.type == "mnemonic") {
                 TextButton(onClick = onAddSubAccount) {
-                    Text("Add", style = MaterialTheme.typography.labelMedium)
+                    Text(stringResource(R.string.wallet_manager_add_short), style = MaterialTheme.typography.labelMedium)
                 }
             }
 
@@ -168,7 +170,7 @@ private fun WalletGroupCard(
             IconButton(onClick = onOpenSettings) {
                 Icon(
                     Lucide.ChevronRight,
-                    contentDescription = "Settings",
+                    contentDescription = stringResource(R.string.wallet_manager_settings_cd),
                     modifier = Modifier.size(20.dp)
                 )
             }
