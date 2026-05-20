@@ -429,7 +429,7 @@ private fun SettingsScreenUI(
             item {
                 SettingsLinkRow(
                     icon = Lucide.Users,
-                    title = "Address Book",
+                    title = stringResource(R.string.settings_address_book),
                     onClick = onNavigateToContacts,
                 )
             }

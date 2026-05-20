@@ -25,8 +25,10 @@ import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.remember
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.unit.dp
 import androidx.hilt.navigation.compose.hiltViewModel
+import com.rjnr.pocketnode.R
 import com.composables.icons.lucide.ArrowLeft
 import com.composables.icons.lucide.Lucide
 
@@ -53,10 +55,10 @@ fun EditContactScreen(
     Scaffold(
         topBar = {
             TopAppBar(
-                title = { Text("Edit contact") },
+                title = { Text(stringResource(R.string.edit_contact_title)) },
                 navigationIcon = {
                     IconButton(onClick = onNavigateBack) {
-                        Icon(Lucide.ArrowLeft, contentDescription = "Back")
+                        Icon(Lucide.ArrowLeft, contentDescription = stringResource(R.string.common_back_cd))
                     }
                 },
                 colors = TopAppBarDefaults.topAppBarColors(
@@ -96,7 +98,7 @@ fun EditContactScreen(
                         color = MaterialTheme.colorScheme.onPrimary,
                     )
                 } else {
-                    Text("Save changes")
+                    Text(stringResource(R.string.edit_contact_save))
                 }
             }
         }

@@ -31,10 +31,12 @@ import androidx.compose.runtime.getValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.hilt.navigation.compose.hiltViewModel
+import com.rjnr.pocketnode.R
 import com.composables.icons.lucide.ArrowLeft
 import com.composables.icons.lucide.Lucide
 import com.composables.icons.lucide.Plus
@@ -57,10 +59,10 @@ fun ContactsScreen(
     Scaffold(
         topBar = {
             TopAppBar(
-                title = { Text("Address Book") },
+                title = { Text(stringResource(R.string.contacts_title)) },
                 navigationIcon = {
                     IconButton(onClick = onNavigateBack) {
-                        Icon(Lucide.ArrowLeft, contentDescription = "Back")
+                        Icon(Lucide.ArrowLeft, contentDescription = stringResource(R.string.common_back_cd))
                     }
                 },
                 colors = TopAppBarDefaults.topAppBarColors(
@@ -70,7 +72,7 @@ fun ContactsScreen(
         },
         floatingActionButton = {
             FloatingActionButton(onClick = onNavigateToAdd) {
-                Icon(Lucide.Plus, contentDescription = "Add contact")
+                Icon(Lucide.Plus, contentDescription = stringResource(R.string.contacts_add_cd))
             }
         },
     ) { padding ->
@@ -85,7 +87,7 @@ fun ContactsScreen(
                 modifier = Modifier
                     .fillMaxWidth()
                     .padding(horizontal = 16.dp, vertical = 8.dp),
-                placeholder = { Text("Search name or address") },
+                placeholder = { Text(stringResource(R.string.contacts_search_placeholder)) },
                 leadingIcon = { Icon(Lucide.Search, contentDescription = null) },
                 singleLine = true,
             )
@@ -152,7 +154,7 @@ private fun ContactRow(
         IconButton(onClick = onSend) {
             Icon(
                 imageVector = Lucide.Send,
-                contentDescription = "Send to ${contact.name}",
+                contentDescription = stringResource(R.string.contacts_send_cd, contact.name),
                 tint = MaterialTheme.colorScheme.primary,
             )
         }
@@ -194,12 +196,12 @@ private fun EmptyContacts(onAdd: () -> Unit) {
         )
         Spacer(Modifier.height(16.dp))
         Text(
-            text = "No contacts yet",
+            text = stringResource(R.string.contacts_empty_title),
             style = MaterialTheme.typography.titleMedium,
         )
         Spacer(Modifier.height(8.dp))
         Text(
-            text = "Save addresses you send to often. Tap the + button to add your first contact.",
+            text = stringResource(R.string.contacts_empty_body),
             style = MaterialTheme.typography.bodyMedium,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
         )
@@ -216,7 +218,7 @@ private fun NoSearchMatches(query: String) {
         verticalArrangement = Arrangement.Center,
     ) {
         Text(
-            text = "No contacts match \"$query\"",
+            text = stringResource(R.string.contacts_no_match, query),
             style = MaterialTheme.typography.bodyMedium,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
         )

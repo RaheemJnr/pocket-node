@@ -78,6 +78,8 @@ import com.composables.icons.lucide.Lucide
 import com.composables.icons.lucide.ScanLine
 import com.composables.icons.lucide.TriangleAlert
 import com.composables.icons.lucide.Users
+import androidx.compose.ui.res.stringResource
+import com.rjnr.pocketnode.R
 import com.composables.icons.lucide.X
 import com.rjnr.pocketnode.data.database.entity.WalletEntity
 import com.rjnr.pocketnode.data.gateway.models.NetworkType
@@ -368,7 +370,7 @@ private fun SendScreenUI(
                 )
                 Icon(
                     imageVector = Lucide.Users,
-                    contentDescription = "Pick from contacts",
+                    contentDescription = stringResource(R.string.send_contact_picker_cd),
                     modifier = Modifier.clickable { onOpenContactPicker() }
                 )
                 Icon(
@@ -421,7 +423,7 @@ private fun SendScreenUI(
             uiState.matchedContact?.let { contact ->
                 Spacer(modifier = Modifier.height(4.dp))
                 Text(
-                    text = "Saved as ${contact.name}",
+                    text = stringResource(R.string.send_saved_as, contact.name),
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.primary,
                 )

@@ -16,8 +16,10 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.unit.dp
+import com.rjnr.pocketnode.R
 
 /**
  * Dialog shown after a successful send to a previously-unsaved address
@@ -44,11 +46,11 @@ fun SaveContactDialog(
 
     AlertDialog(
         onDismissRequest = onDismiss,
-        title = { Text("Save to contacts?") },
+        title = { Text(stringResource(R.string.save_contact_dialog_title)) },
         text = {
             Column {
                 Text(
-                    text = "Add this recipient to your address book to send to them faster next time.",
+                    text = stringResource(R.string.save_contact_dialog_body),
                     style = MaterialTheme.typography.bodyMedium,
                 )
                 Spacer(Modifier.height(12.dp))
@@ -56,8 +58,8 @@ fun SaveContactDialog(
                     value = name,
                     onValueChange = { name = it },
                     modifier = Modifier.fillMaxWidth(),
-                    label = { Text("Name") },
-                    placeholder = { Text("e.g. Alice") },
+                    label = { Text(stringResource(R.string.add_contact_field_name)) },
+                    placeholder = { Text(stringResource(R.string.save_contact_dialog_name_placeholder)) },
                     singleLine = true,
                 )
                 Spacer(Modifier.height(8.dp))
@@ -65,7 +67,7 @@ fun SaveContactDialog(
                     value = address,
                     onValueChange = {},
                     modifier = Modifier.fillMaxWidth(),
-                    label = { Text("Address") },
+                    label = { Text(stringResource(R.string.add_contact_field_address)) },
                     enabled = false,
                     textStyle = MaterialTheme.typography.bodySmall.copy(fontFamily = FontFamily.Monospace),
                 )
@@ -74,7 +76,7 @@ fun SaveContactDialog(
                     value = notes,
                     onValueChange = { notes = it },
                     modifier = Modifier.fillMaxWidth(),
-                    label = { Text("Notes (optional)") },
+                    label = { Text(stringResource(R.string.add_contact_field_notes)) },
                     minLines = 2,
                     maxLines = 4,
                 )
@@ -84,10 +86,10 @@ fun SaveContactDialog(
             Button(
                 onClick = { onSave(name.trim(), notes.trim().ifEmpty { null }) },
                 enabled = name.isNotBlank(),
-            ) { Text("Save") }
+            ) { Text(stringResource(R.string.save_contact_dialog_save)) }
         },
         dismissButton = {
-            TextButton(onClick = onDismiss) { Text("Not now") }
+            TextButton(onClick = onDismiss) { Text(stringResource(R.string.save_contact_dialog_dismiss)) }
         },
     )
 }
