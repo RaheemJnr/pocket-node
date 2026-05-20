@@ -8,6 +8,7 @@ import com.rjnr.pocketnode.data.wallet.AddressUtils
 import com.rjnr.pocketnode.data.wallet.WalletRepository
 import androidx.annotation.VisibleForTesting
 import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.firstOrNull
 import kotlinx.coroutines.flow.flow
 import kotlinx.coroutines.flow.flowOf
 import kotlinx.coroutines.flow.flatMapLatest
@@ -69,6 +70,18 @@ class ContactRepository @Inject constructor(
         val walletId = walletRepository.activeWalletIdSnapshot()
         return if (walletId.isNullOrEmpty()) flowOf(emptyList())
         else contactDao.observeAll(walletId)
+    }
+
+    /**
+     * Snapshot of every contact visible to the active wallet, sorted by
+     * name. Differs from [observe] in that callers get a single
+     * suspending read rather than a Flow — useful for one-shot UI
+     * loads like the Send picker sheet.
+     */
+    suspend fun listAll(): List<ContactEntity> {
+        val walletId = walletRepository.activeWalletIdSnapshot()?.takeIf { it.isNotEmpty() }
+            ?: return emptyList()
+        return contactDao.observeAll(walletId).firstOrNull() ?: emptyList()
     }
 
     suspend fun get(id: String): ContactEntity? = contactDao.getById(id)

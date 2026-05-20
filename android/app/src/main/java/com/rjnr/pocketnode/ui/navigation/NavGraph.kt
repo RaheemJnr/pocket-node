@@ -411,11 +411,15 @@ fun CkbNavGraph(
 
         composable(Screen.Scanner.route) {
             QrScannerScreen(
+                // The screen calls both onScanResult AND onNavigateBack on a
+                // successful scan (see QrScannerScreen.kt:85-88). Don't pop
+                // here — onNavigateBack does it. Earlier this lambda also
+                // popped, which double-popped the back stack and dumped the
+                // user on Home after scanning into Send / AddContact.
                 onScanResult = { address ->
                     navController.previousBackStackEntry
                         ?.savedStateHandle
                         ?.set("scanned_address", address)
-                    navController.popBackStack()
                 },
                 onNavigateBack = { navController.popBackStack() }
             )
