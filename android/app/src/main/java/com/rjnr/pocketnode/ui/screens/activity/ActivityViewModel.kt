@@ -38,7 +38,7 @@ private const val TAG = "ActivityViewModel"
 data class ActivityUiState(
     val isLoading: Boolean = false,
     val filter: ActivityViewModel.Filter = ActivityViewModel.Filter.ALL,
-    val error: String? = null,
+    val error: com.rjnr.pocketnode.ui.util.UiMessage? = null,
     val currentNetwork: NetworkType = NetworkType.MAINNET
 )
 
@@ -102,7 +102,14 @@ class ActivityViewModel @Inject constructor(
                 .onFailure { error ->
                     Log.e(TAG, "Failed to refresh cache", error)
                     _uiState.update {
-                        it.copy(isLoading = false, error = error.message ?: "Failed to load transactions")
+                        it.copy(
+                            isLoading = false,
+                            error = error.message?.let(com.rjnr.pocketnode.ui.util.UiMessage::Raw)
+                                ?: com.rjnr.pocketnode.ui.util.UiMessage.Resource(
+                                    com.rjnr.pocketnode.R.string.vm_error_export_failed,
+                                    listOf(""),
+                                ),
+                        )
                     }
                 }
         }
@@ -130,7 +137,14 @@ class ActivityViewModel @Inject constructor(
                 }
                 .onFailure { e ->
                     Log.e(TAG, "retryFailedTransaction failed for $txHash", e)
-                    _uiState.update { it.copy(error = "Couldn't retry: ${e.message}") }
+                    _uiState.update {
+                        it.copy(
+                            error = com.rjnr.pocketnode.ui.util.UiMessage.Resource(
+                                com.rjnr.pocketnode.R.string.vm_error_retry_failed,
+                                listOf(e.message ?: ""),
+                            ),
+                        )
+                    }
                 }
         }
     }
@@ -146,7 +160,14 @@ class ActivityViewModel @Inject constructor(
                 _exportEvent.emit(csv)
             }.onFailure { error ->
                 Log.e(TAG, "Export failed", error)
-                _uiState.update { it.copy(error = "Export failed: ${error.message}") }
+                _uiState.update {
+                    it.copy(
+                        error = com.rjnr.pocketnode.ui.util.UiMessage.Resource(
+                            com.rjnr.pocketnode.R.string.vm_error_export_failed,
+                            listOf(error.message ?: ""),
+                        ),
+                    )
+                }
             }
         }
     }

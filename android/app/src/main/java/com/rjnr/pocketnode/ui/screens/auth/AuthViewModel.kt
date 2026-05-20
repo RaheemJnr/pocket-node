@@ -4,10 +4,12 @@ import android.util.Log
 import androidx.fragment.app.FragmentActivity
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
+import com.rjnr.pocketnode.R
 import com.rjnr.pocketnode.data.auth.AuthManager
 import com.rjnr.pocketnode.data.auth.PinManager
 import com.rjnr.pocketnode.data.migration.KeystoreV2MigrationHelper
 import com.rjnr.pocketnode.data.migration.KeystoreV2MigrationRunner
+import com.rjnr.pocketnode.ui.util.UiMessage
 import dagger.hilt.android.lifecycle.HiltViewModel
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -20,7 +22,7 @@ data class AuthUiState(
     val showBiometricButton: Boolean = false,
     val showPinFallback: Boolean = true,
     val authSuccess: Boolean = false,
-    val error: String? = null,
+    val error: UiMessage? = null,
     /** True while the V2 wallet migration is running per-wallet prompts. */
     val isMigrating: Boolean = false,
 )
@@ -53,7 +55,7 @@ class AuthViewModel @Inject constructor(
     }
 
     fun onBiometricFailed(errorMessage: String) {
-        _uiState.update { it.copy(error = errorMessage) }
+        _uiState.update { it.copy(error = UiMessage.Raw(errorMessage)) }
     }
 
     fun clearError() {
@@ -95,13 +97,13 @@ class AuthViewModel @Inject constructor(
                     is KeystoreV2MigrationRunner.Outcome.NothingToDo -> Unit
                     is KeystoreV2MigrationRunner.Outcome.Cancelled -> {
                         _uiState.update {
-                            it.copy(error = "Wallet security upgrade incomplete; you'll be prompted again next launch")
+                            it.copy(error = UiMessage.Resource(R.string.vm_error_migration_incomplete))
                         }
                     }
                     is KeystoreV2MigrationRunner.Outcome.Failed -> {
                         Log.e(TAG, "Migration failed: ${outcome.reason}")
                         _uiState.update {
-                            it.copy(error = "Wallet security upgrade failed: ${outcome.reason}")
+                            it.copy(error = UiMessage.Resource(R.string.vm_error_migration_failed, listOf(outcome.reason)))
                         }
                     }
                 }
