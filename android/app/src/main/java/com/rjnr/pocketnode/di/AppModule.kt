@@ -19,6 +19,7 @@ import com.rjnr.pocketnode.data.database.MIGRATION_8_9
 import com.rjnr.pocketnode.data.database.MIGRATION_9_10
 import com.rjnr.pocketnode.data.database.MIGRATION_10_11
 import com.rjnr.pocketnode.data.database.dao.BalanceCacheDao
+import com.rjnr.pocketnode.data.database.dao.ContactDao
 import com.rjnr.pocketnode.data.database.dao.DaoCellDao
 import com.rjnr.pocketnode.data.database.dao.HeaderCacheDao
 import com.rjnr.pocketnode.data.database.dao.KeyMaterialDao
@@ -148,6 +149,9 @@ object AppModule {
 
     @Provides
     fun provideKeyMaterialDao(db: AppDatabase): KeyMaterialDao = db.keyMaterialDao()
+
+    @Provides
+    fun provideContactDao(db: AppDatabase): ContactDao = db.contactDao()
 
     @Provides
     fun provideSyncProgressDao(db: AppDatabase): SyncProgressDao = db.syncProgressDao()
