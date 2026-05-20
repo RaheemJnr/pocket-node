@@ -6,7 +6,9 @@ import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.rjnr.pocketnode.data.auth.AuthManager
 import com.rjnr.pocketnode.data.auth.PinManager
+import com.rjnr.pocketnode.data.contacts.ContactRepository
 import com.rjnr.pocketnode.data.database.dao.KeyMaterialDao
+import com.rjnr.pocketnode.data.database.entity.ContactEntity
 import com.rjnr.pocketnode.data.database.entity.WalletEntity
 import com.rjnr.pocketnode.data.gateway.GatewayRepository
 import com.rjnr.pocketnode.data.gateway.models.NetworkType
@@ -50,7 +52,15 @@ data class SendUiState(
     val burnWarning: String? = null,
     val requiresAuth: Boolean = false,
     val authMethod: AuthMethod? = null,
-    val otherWallets: List<WalletEntity> = emptyList()
+    val otherWallets: List<WalletEntity> = emptyList(),
+    /**
+     * Autocomplete suggestions matching the current recipient field.
+     * Populated 200ms after the user stops typing. Empty when the
+     * field is blank or the user has tapped a suggestion. (#196)
+     */
+    val recipientSuggestions: List<ContactEntity> = emptyList(),
+    /** Contact whose address exactly matches the typed recipient. */
+    val matchedContact: ContactEntity? = null,
 )
 
 @HiltViewModel
@@ -63,6 +73,7 @@ class SendViewModel @Inject constructor(
     private val walletRepository: WalletRepository,
     private val walletKeyReader: WalletKeyReader,
     private val keyMaterialDao: KeyMaterialDao,
+    private val contactRepository: ContactRepository,
 ) : ViewModel() {
 
     private val _uiState = MutableStateFlow(SendUiState())
@@ -117,9 +128,54 @@ class SendViewModel @Inject constructor(
         }
     }
 
+    private var suggestionsJob: kotlinx.coroutines.Job? = null
+
     fun updateRecipient(address: String) {
         _uiState.update { it.copy(recipientAddress = address, error = null) }
+        // Debounced autocomplete + saved-contact lookup. Cancel any in-flight
+        // search so each keystroke supersedes the previous one. (#196)
+        suggestionsJob?.cancel()
+        if (address.isBlank()) {
+            _uiState.update { it.copy(recipientSuggestions = emptyList(), matchedContact = null) }
+            return
+        }
+        suggestionsJob = viewModelScope.launch {
+            kotlinx.coroutines.delay(200)
+            val matches = contactRepository.search(address).take(5)
+            val exactMatch = matches.firstOrNull { it.address == address }
+                ?: contactRepository.getByAddress(address)
+            _uiState.update {
+                it.copy(
+                    recipientSuggestions = if (exactMatch != null) emptyList() else matches,
+                    matchedContact = exactMatch,
+                )
+            }
+        }
     }
+
+    /**
+     * Pick a contact from the autocomplete dropdown or the picker sheet.
+     * Fills the recipient field and clears suggestions so the dropdown
+     * dismisses.
+     */
+    fun selectContact(contact: ContactEntity) {
+        suggestionsJob?.cancel()
+        _uiState.update {
+            it.copy(
+                recipientAddress = contact.address,
+                recipientSuggestions = emptyList(),
+                matchedContact = contact,
+                error = null,
+            )
+        }
+    }
+
+    /** Snapshot of recent contacts for the picker sheet's empty-query state. */
+    suspend fun recentContacts(): List<ContactEntity> = contactRepository.recentlyUsed()
+
+    /** Snapshot of contacts matching [query] for the picker sheet search. */
+    suspend fun searchContacts(query: String): List<ContactEntity> =
+        if (query.isBlank()) recentContacts() else contactRepository.search(query)
 
     fun updateAmount(amount: String) {
         val sanitized = sanitizeAmount(amount) ?: return  // silently reject invalid chars
