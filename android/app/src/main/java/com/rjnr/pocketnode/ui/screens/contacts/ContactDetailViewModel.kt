@@ -3,8 +3,10 @@ package com.rjnr.pocketnode.ui.screens.contacts
 import androidx.lifecycle.SavedStateHandle
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
+import com.rjnr.pocketnode.R
 import com.rjnr.pocketnode.data.contacts.ContactRepository
 import com.rjnr.pocketnode.data.database.entity.ContactEntity
+import com.rjnr.pocketnode.ui.util.UiMessage
 import dagger.hilt.android.lifecycle.HiltViewModel
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -27,7 +29,7 @@ class ContactDetailViewModel @Inject constructor(
         val isLoading: Boolean = true,
         val showDeleteConfirm: Boolean = false,
         val deleted: Boolean = false,
-        val error: String? = null,
+        val error: UiMessage? = null,
     )
 
     private val _uiState = MutableStateFlow(UiState())
@@ -51,7 +53,11 @@ class ContactDetailViewModel @Inject constructor(
                 .onSuccess { _uiState.update { it.copy(showDeleteConfirm = false, deleted = true) } }
                 .onFailure { e ->
                     _uiState.update {
-                        it.copy(showDeleteConfirm = false, error = e.message ?: "Could not delete")
+                        it.copy(
+                            showDeleteConfirm = false,
+                            error = e.message?.let(UiMessage::Raw)
+                                ?: UiMessage.Resource(R.string.contact_error_generic_save),
+                        )
                     }
                 }
         }

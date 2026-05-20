@@ -47,6 +47,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.hilt.navigation.compose.hiltViewModel
 import com.rjnr.pocketnode.R
+import com.rjnr.pocketnode.ui.util.resolveString
 import com.composables.icons.lucide.ArrowLeft
 import com.composables.icons.lucide.Copy
 import com.composables.icons.lucide.Lucide
@@ -66,6 +67,7 @@ fun ContactDetailScreen(
     val uiState by viewModel.uiState.collectAsState()
     val snackbarHostState = remember { SnackbarHostState() }
     val clipboard = LocalClipboardManager.current
+    val context = androidx.compose.ui.platform.LocalContext.current
     val scope = rememberCoroutineScopeForSnack()
 
     LaunchedEffect(uiState.deleted) {
@@ -73,8 +75,8 @@ fun ContactDetailScreen(
     }
 
     LaunchedEffect(uiState.error) {
-        uiState.error?.let {
-            snackbarHostState.showSnackbar(it)
+        uiState.error?.let { msg ->
+            snackbarHostState.showSnackbar(msg.resolveString(context))
             viewModel.clearError()
         }
     }
