@@ -122,4 +122,42 @@ class SyncProgressTrackerTest {
 
         assertTrue(info.isSynced)
     }
+
+    @Test
+    fun `seedStartHeight anchors percentage to registered start block (#150)`() {
+        // Pre-#150 the first sample's blockHeight became the baseline.
+        // For a 2021 wallet whose light client reports syncedToBlock=0
+        // on the first poll cycle, that anchored to 0 and the percentage
+        // was momentarily wrong. Seeding with the registered start block
+        // (5_000_000 here) keeps the math truthful from sample #1.
+        tracker.seedStartHeight(startBlock = 5_000_000L)
+        tracker.recordSample(blockHeight = 5_000_100L, timestampMs = 0L)
+        // Tip = 18M, baseline = 5M, current = 5_000_100. Range = 13M,
+        // progress = 100 blocks → ~0.0008%.
+        val info = tracker.calculate(tipHeight = 18_000_000L)
+        assertTrue("expected positive but tiny progress, got ${info.percentage}", info.percentage > 0.0)
+        assertTrue("expected < 1%, got ${info.percentage}", info.percentage < 1.0)
+    }
+
+    @Test
+    fun `seedStartHeight ignored when called with zero`() {
+        // Defensive: a missing sync_progress row resolves to lightStartBlock=0;
+        // seeding with 0 would re-introduce the pre-#150 bug shape.
+        tracker.seedStartHeight(startBlock = 0L)
+        // No seed applied → first sample provides baseline.
+        tracker.recordSample(blockHeight = 5_000_000L, timestampMs = 0L)
+        tracker.recordSample(blockHeight = 5_000_100L, timestampMs = 1000L)
+        val info = tracker.calculate(tipHeight = 18_000_000L)
+        // Baseline = first sample (5M), range = 13M, progress = 100 → tiny.
+        assertTrue(info.percentage > 0.0 && info.percentage < 1.0)
+    }
+
+    @Test
+    fun `seedStartHeight tolerates no-sample state`() {
+        // Edge case: seed then ask immediately. No crash; percentage clamps
+        // to 0 because currentHeight is 0 < startHeight.
+        tracker.seedStartHeight(startBlock = 5_000_000L)
+        val info = tracker.calculate(tipHeight = 18_000_000L)
+        assertEquals(0.0, info.percentage, 0.01)
+    }
 }

@@ -151,8 +151,24 @@ class SyncCoordinator @Inject constructor(
             "setScriptsAndRecord: statuses (${statuses.size}) and walletIds (${walletIds.size}) must be parallel"
         }
         val jsonStr = json.encodeToString(statuses)
+        // Diagnostic for the production sync-stall reports (#150). Logs every
+        // (walletId, startBlock) pair just before the JNI handoff. If a user
+        // reports "stayed at 0", this line tells us deterministically what
+        // block they were actually scanning from. Logged at INFO so it
+        // survives release builds' default log level.
+        statuses.zip(walletIds).forEach { (status, walletId) ->
+            val startBlock = status.blockNumber.removePrefix("0x").toLongOrNull(16) ?: -1L
+            Log.i(
+                TAG,
+                "setScripts cmd=$cmd walletId=$walletId network=${network.name} " +
+                    "startBlock=$startBlock (hex=${status.blockNumber})"
+            )
+        }
         val ok = lightClient.setScripts(jsonStr, cmd)
-        if (!ok) return false
+        if (!ok) {
+            Log.w(TAG, "setScripts cmd=$cmd returned false — light client refused registration")
+            return false
+        }
 
         val now = System.currentTimeMillis()
         val newMapping = mutableMapOf<String, String>()
