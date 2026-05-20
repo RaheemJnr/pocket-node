@@ -113,6 +113,7 @@ class GatewayRepository @Inject constructor(
     private val pendingBroadcastDao: PendingBroadcastDao,
     private val broadcastClient: BroadcastClient,
     private val syncCoordinator: SyncCoordinator,
+    private val daoHeaderResolver: DaoHeaderResolver,
 ) : TipSource {
     private val sendMutex = Mutex()
 
@@ -1728,98 +1729,14 @@ class GatewayRepository @Inject constructor(
         EpochInfo.fromHex(header.epoch)
     }
 
-    /**
-     * Helper: get block hash for a cell by looking up its transaction.
-     * The light client's get_transaction often returns null block_hash,
-     * so we fall back to fetch_transaction which requests from peers.
-     */
-    private suspend fun getBlockHashForCell(txHash: String): String? {
-        // Try local cache first
-        val txJson = LightClientNative.nativeGetTransaction(txHash)
-        if (txJson != null) {
-            val txWithStatus = json.decodeFromString<JniTransactionWithStatus>(txJson)
-            if (txWithStatus.txStatus.blockHash != null) {
-                return txWithStatus.txStatus.blockHash
-            }
-            Log.d(TAG, "  get_transaction found tx but no block_hash, trying fetch_transaction...")
-        } else {
-            Log.d(TAG, "  get_transaction returned null, trying fetch_transaction...")
-        }
+    // DAO chain-state helpers moved to [DaoHeaderResolver] (#106 phase 2).
+    // Thin shims kept so internal call sites stay unchanged. getOrFetchHeader's
+    // network arg is supplied here; resolver itself is network-agnostic.
+    private suspend fun getBlockHashForCell(txHash: String): String? =
+        daoHeaderResolver.getBlockHashForCell(txHash)
 
-        // Fallback: fetch from peers (may need retries as it's async)
-        for (attempt in 1..3) {
-            val fetchJson = LightClientNative.nativeFetchTransaction(txHash)
-            if (fetchJson == null) {
-                Log.w(TAG, "  fetch_transaction returned null on attempt $attempt")
-                break
-            }
-            val fetchResp = json.decodeFromString<JniFetchTransactionResponse>(fetchJson)
-            Log.d(TAG, "  fetch_transaction attempt $attempt: status=${fetchResp.status}")
-            if (fetchResp.status == "fetched" && fetchResp.data != null) {
-                return fetchResp.data.txStatus.blockHash
-            }
-            // "fetching" or "added" — wait and retry
-            if (fetchResp.status == "fetching" || fetchResp.status == "added") {
-                delay(2000)
-            } else {
-                break // unknown status, don't retry
-            }
-        }
-        return null
-    }
-
-    /**
-     * Fetch a block header from peers via nativeFetchHeader with retries.
-     * The light client only stores headers for blocks it has processed locally;
-     * for older blocks we need to request them from the peer network.
-     */
-    private suspend fun fetchHeaderWithRetry(blockHash: String): JniHeaderView? {
-        for (attempt in 1..3) {
-            val fetchJson = LightClientNative.nativeFetchHeader(blockHash)
-            if (fetchJson == null) {
-                Log.w(TAG, "  fetch_header returned null on attempt $attempt")
-                break
-            }
-            val fetchResp = json.decodeFromString<JniFetchHeaderResponse>(fetchJson)
-            Log.d(TAG, "  fetch_header attempt $attempt: status=${fetchResp.status}")
-            if (fetchResp.status == "fetched" && fetchResp.data != null) {
-                return fetchResp.data
-            }
-            if (fetchResp.status == "fetching" || fetchResp.status == "added") {
-                delay(2000)
-            } else {
-                break
-            }
-        }
-        return null
-    }
-
-    /**
-     * Cache-first header lookup: Room DB → local JNI → peer fetch.
-     * Block headers are immutable, so cached results are always valid.
-     */
-    private suspend fun getOrFetchHeader(blockHash: String): JniHeaderView? {
-        // 1. Check Room cache
-        val cached = daoSyncManager.getCachedHeader(blockHash)
-        if (cached != null) {
-            return cached.toJniHeaderView()
-        }
-
-        // 2. Try local JNI (light client may have it in memory)
-        val localJson = LightClientNative.nativeGetHeader(blockHash)
-        if (localJson != null) {
-            val header = json.decodeFromString<JniHeaderView>(localJson)
-            daoSyncManager.cacheHeader(header, currentNetwork.name)
-            return header
-        }
-
-        // 3. Fetch from peers
-        val fetched = fetchHeaderWithRetry(blockHash)
-        if (fetched != null) {
-            daoSyncManager.cacheHeader(fetched, currentNetwork.name)
-        }
-        return fetched
-    }
+    private suspend fun getOrFetchHeader(blockHash: String): JniHeaderView? =
+        daoHeaderResolver.getOrFetchHeader(blockHash, currentNetwork)
 
     suspend fun getDaoDeposits(): Result<List<DaoDeposit>> = runCatching {
         val info = _walletInfo.value ?: throw Exception("No wallet")
