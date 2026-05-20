@@ -61,6 +61,14 @@ data class SendUiState(
     val recipientSuggestions: List<ContactEntity> = emptyList(),
     /** Contact whose address exactly matches the typed recipient. */
     val matchedContact: ContactEntity? = null,
+    /**
+     * Non-null when broadcast succeeded for an address that is NOT in
+     * the user's address book. UI shows a SaveContactDialog with this
+     * address prefilled; user can save or dismiss. Dismiss tracking is
+     * per-address (see [dismissedSavePrompts]) so the dialog never
+     * re-appears for the same recipient. (#197)
+     */
+    val saveContactPromptAddress: String? = null,
 )
 
 @HiltViewModel
@@ -81,6 +89,52 @@ class SendViewModel @Inject constructor(
 
     private var pollingJob: Job? = null
     private var sendJob: Job? = null
+
+    /**
+     * Addresses the user has explicitly dismissed the "Save to contacts?"
+     * prompt for. Lives in the ViewModel (not in UI state) because it's
+     * an interaction history, not a render input. Cleared on process
+     * death, which is acceptable — the user can always re-trigger by
+     * sending again. (#197)
+     */
+    private val dismissedSavePrompts: MutableSet<String> = mutableSetOf()
+
+    /**
+     * Called from broadcast-success paths with the recipient address.
+     * Either bumps the contact's usage counter (if saved) or queues
+     * the save-prompt dialog (if new and not previously dismissed).
+     */
+    private suspend fun afterSendBookkeeping(recipient: String) {
+        val existing = contactRepository.getByAddress(recipient)
+        if (existing != null) {
+            contactRepository.markUsed(recipient)
+            return
+        }
+        if (recipient in dismissedSavePrompts) return
+        _uiState.update { it.copy(saveContactPromptAddress = recipient) }
+    }
+
+    fun saveContactPromptDismissed() {
+        val addr = _uiState.value.saveContactPromptAddress ?: return
+        dismissedSavePrompts.add(addr)
+        _uiState.update { it.copy(saveContactPromptAddress = null) }
+    }
+
+    fun saveContactPromptSubmit(name: String, notes: String?) {
+        val addr = _uiState.value.saveContactPromptAddress ?: return
+        viewModelScope.launch {
+            contactRepository.add(
+                name = name,
+                address = addr,
+                notes = notes?.ifBlank { null },
+                tags = null,
+                activeNetwork = repository.currentNetwork,
+            ).onSuccess {
+                contactRepository.markUsed(addr)
+            }
+            _uiState.update { it.copy(saveContactPromptAddress = null) }
+        }
+    }
 
     companion object {
         private const val TAG = "SendViewModel"
@@ -381,9 +435,10 @@ class SendViewModel @Inject constructor(
         }
         try {
             _uiState.update { it.copy(statusMessage = "Broadcasting transaction...") }
+            val recipient = state.recipientAddress
             val txHash = repository.prepareAndSend(
                 fromAddress = capturedAddress,
-                toAddress = state.recipientAddress,
+                toAddress = recipient,
                 amountShannons = amountShannons,
                 privateKey = privateKey,
             ).getOrThrow()
@@ -397,6 +452,8 @@ class SendViewModel @Inject constructor(
                     statusMessage = "Transaction submitted. Waiting for confirmation..."
                 )
             }
+            // #197: bump useCount for saved contacts, queue save-prompt for new addresses.
+            afterSendBookkeeping(recipient)
             startPollingTransactionStatus(txHash, capturedAddress)
         } catch (e: Exception) {
             Log.e(TAG, "V2 send failed", e)
@@ -454,9 +511,10 @@ class SendViewModel @Inject constructor(
                 _uiState.update { it.copy(statusMessage = "Broadcasting transaction...") }
                 Log.d(TAG, "📡 prepareAndSend: fetching cells, filtering reserved, building, broadcasting...")
 
+                val recipient = state.recipientAddress
                 val txHash = repository.prepareAndSend(
                     fromAddress = capturedAddress,
-                    toAddress = state.recipientAddress,
+                    toAddress = recipient,
                     amountShannons = amountShannons,
                     privateKey = capturedKey
                 ).getOrThrow()
@@ -472,6 +530,9 @@ class SendViewModel @Inject constructor(
                         statusMessage = "Transaction submitted. Waiting for confirmation..."
                     )
                 }
+
+                // #197: usage bump for saved contacts, save-prompt for new ones.
+                afterSendBookkeeping(recipient)
 
                 // Start polling for transaction status using the captured address
                 startPollingTransactionStatus(txHash, capturedAddress)
