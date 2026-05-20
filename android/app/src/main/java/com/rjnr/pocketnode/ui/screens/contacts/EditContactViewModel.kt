@@ -3,7 +3,9 @@ package com.rjnr.pocketnode.ui.screens.contacts
 import androidx.lifecycle.SavedStateHandle
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
+import com.rjnr.pocketnode.R
 import com.rjnr.pocketnode.data.contacts.ContactRepository
+import com.rjnr.pocketnode.ui.util.UiMessage
 import dagger.hilt.android.lifecycle.HiltViewModel
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -28,7 +30,7 @@ class EditContactViewModel @Inject constructor(
         val isLoading: Boolean = true,
         val isSaving: Boolean = false,
         val saved: Boolean = false,
-        val error: String? = null,
+        val error: UiMessage? = null,
     )
 
     private val _uiState = MutableStateFlow(UiState())
@@ -38,7 +40,12 @@ class EditContactViewModel @Inject constructor(
         viewModelScope.launch {
             val contact = contactRepository.get(contactId)
             if (contact == null) {
-                _uiState.update { it.copy(isLoading = false, error = "Contact not found") }
+                _uiState.update {
+                    it.copy(
+                        isLoading = false,
+                        error = UiMessage.Resource(R.string.contact_detail_not_found),
+                    )
+                }
                 return@launch
             }
             _uiState.update {
@@ -69,7 +76,11 @@ class EditContactViewModel @Inject constructor(
                 .onSuccess { _uiState.update { it.copy(isSaving = false, saved = true) } }
                 .onFailure { e ->
                     _uiState.update {
-                        it.copy(isSaving = false, error = e.message ?: "Could not save")
+                        it.copy(
+                            isSaving = false,
+                            error = e.message?.let(UiMessage::Raw)
+                                ?: UiMessage.Resource(R.string.contact_error_generic_save),
+                        )
                     }
                 }
         }

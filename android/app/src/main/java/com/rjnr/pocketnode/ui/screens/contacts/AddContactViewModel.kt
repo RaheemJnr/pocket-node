@@ -2,8 +2,10 @@ package com.rjnr.pocketnode.ui.screens.contacts
 
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
+import com.rjnr.pocketnode.R
 import com.rjnr.pocketnode.data.contacts.ContactRepository
 import com.rjnr.pocketnode.data.gateway.GatewayRepository
+import com.rjnr.pocketnode.ui.util.UiMessage
 import dagger.hilt.android.lifecycle.HiltViewModel
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -24,7 +26,7 @@ class AddContactViewModel @Inject constructor(
         val notes: String = "",
         val isSaving: Boolean = false,
         val saved: Boolean = false,
-        val error: String? = null,
+        val error: UiMessage? = null,
     )
 
     private val _uiState = MutableStateFlow(UiState())
@@ -38,7 +40,7 @@ class AddContactViewModel @Inject constructor(
     fun save() {
         val state = _uiState.value
         if (state.name.isBlank() || state.address.isBlank()) {
-            _uiState.update { it.copy(error = "Name and address are required") }
+            _uiState.update { it.copy(error = UiMessage.Resource(R.string.add_contact_required_error)) }
             return
         }
         _uiState.update { it.copy(isSaving = true, error = null) }
@@ -53,19 +55,25 @@ class AddContactViewModel @Inject constructor(
             result
                 .onSuccess { _uiState.update { it.copy(isSaving = false, saved = true) } }
                 .onFailure { e ->
-                    _uiState.update { it.copy(isSaving = false, error = formatError(e)) }
+                    _uiState.update { it.copy(isSaving = false, error = errorMessage(e)) }
                 }
         }
     }
 
-    private fun formatError(e: Throwable): String = when (e) {
-        is ContactRepository.ContactError.InvalidAddress -> "Address could not be decoded — check the format"
+    private fun errorMessage(e: Throwable): UiMessage = when (e) {
+        is ContactRepository.ContactError.InvalidAddress ->
+            UiMessage.Resource(R.string.contact_error_invalid_address)
         is ContactRepository.ContactError.WrongNetwork ->
-            "This address is for ${e.actual.name.lowercase()}; switch networks or pick a different address"
-        is ContactRepository.ContactError.DuplicateAddress -> "An existing contact already uses this address"
-        is ContactRepository.ContactError.InvalidName -> "Name must be 1-64 characters"
-        is ContactRepository.ContactError.NotesTooLong -> "Notes must be 256 characters or fewer"
-        is ContactRepository.ContactError.NoActiveWallet -> "No active wallet to scope this contact to"
-        else -> e.message ?: "Could not save contact"
+            UiMessage.Resource(R.string.contact_error_wrong_network, listOf(e.actual.name.lowercase()))
+        is ContactRepository.ContactError.DuplicateAddress ->
+            UiMessage.Resource(R.string.contact_error_duplicate)
+        is ContactRepository.ContactError.InvalidName ->
+            UiMessage.Resource(R.string.contact_error_invalid_name)
+        is ContactRepository.ContactError.NotesTooLong ->
+            UiMessage.Resource(R.string.contact_error_notes_too_long)
+        is ContactRepository.ContactError.NoActiveWallet ->
+            UiMessage.Resource(R.string.contact_error_no_active_wallet)
+        else -> e.message?.let { UiMessage.Raw(it) }
+            ?: UiMessage.Resource(R.string.contact_error_generic_save)
     }
 }

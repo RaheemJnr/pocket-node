@@ -25,10 +25,12 @@ import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.remember
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.unit.dp
 import androidx.hilt.navigation.compose.hiltViewModel
 import com.rjnr.pocketnode.R
+import com.rjnr.pocketnode.ui.util.resolveString
 import com.composables.icons.lucide.ArrowLeft
 import com.composables.icons.lucide.Lucide
 
@@ -40,14 +42,15 @@ fun EditContactScreen(
 ) {
     val uiState by viewModel.uiState.collectAsState()
     val snackbarHostState = remember { SnackbarHostState() }
+    val context = LocalContext.current
 
     LaunchedEffect(uiState.saved) {
         if (uiState.saved) onNavigateBack()
     }
 
     LaunchedEffect(uiState.error) {
-        uiState.error?.let {
-            snackbarHostState.showSnackbar(it)
+        uiState.error?.let { msg ->
+            snackbarHostState.showSnackbar(msg.resolveString(context))
             viewModel.clearError()
         }
     }
