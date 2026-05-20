@@ -94,6 +94,45 @@ Use conventional-style prefixes:
 - Ensure CI passes (build + tests)
 - Keep PRs focused — one issue per PR when possible
 
+## Manual Sync-Stall Smoke (#150)
+
+The automated test suite covers the registration path and the detector logic in isolation. The end-to-end behavior — peers connecting, blocks streaming, the UI updating — needs a real device against the live network. Run this once before any release that touches `SyncCoordinator`, `SyncProgressTracker`, `SyncStallDetector`, or the polling loop in `GatewayRepository`.
+
+### Setup
+
+1. Pick a **testnet** seed phrase whose first activity is at least ~3M blocks back (old enough that the light client must actually scan past warm-up before the first balance hit). If you don't have one, request testnet CKB to a fresh address from the faucet, wait a day, then archive that seed for reuse.
+2. Install the debug build: `./gradlew installDebug`.
+3. In the app: **Settings → Network → Testnet** (if not already there). Confirm the app restarts on testnet.
+4. Import the test seed via **Wallets → Add wallet → Import recovery phrase**.
+5. When the post-import sync sheet appears, pick **From a specific date** and enter a block height ~6 months before the wallet's first known activity. (This forces a long scan — the exact pathology V.bit reported.)
+
+### Observe (30 min)
+
+Keep `adb logcat` open in a second terminal, filtered:
+
+```bash
+adb logcat -s SyncCoordinator:I GatewayRepository:I HomeViewModel:D
+```
+
+Watch for:
+
+- [ ] `SyncCoordinator: setScripts cmd=… walletId=… startBlock=…` fires once with the block height you entered (hex form). If `startBlock=0` despite picking CUSTOM, **stop** — that is the regression Step 4's test was supposed to catch.
+- [ ] `GatewayRepository: syncPoll synced=X tip=Y delta=Z progress=P` fires every 5s. `synced` must advance over time, even if slowly.
+- [ ] The Home screen's percentage starts at a non-zero value within a poll cycle or two (Step 3 truthful baseline). If it stays at 0% for >1 minute while logcat shows `synced` advancing, the baseline seed is broken.
+- [ ] After ~5 min of no `synced` advance (rare on testnet, simulate by enabling airplane mode mid-sync), the stall banner appears with "Sync hasn't progressed in N min".
+- [ ] Tap **Use Recent**. The banner clears, the sync mode flips to RECENT, polling resumes from the recent-checkpoint, and balance shows within ~2 min.
+
+### Failure modes to flag
+
+| Symptom | Likely cause |
+|---------|--------------|
+| `startBlock=0` after picking CUSTOM | `WalletPreferences.getCustomBlockHeight` regression or `SyncCoordinator` lookup path broken |
+| UI stuck at 0% while logcat advances | `SyncProgressTracker.seedStartHeight` not being called on wallet load |
+| Banner never fires after airplane-mode test | `SyncStallDetector` baseline reset on every emission, or `showSyncStallBanner` not wired into `HomeUiState` |
+| "Use Recent" button does nothing | `changeSyncMode(RECENT)` short-circuited by `currentSyncMode` guard (#108) — re-check the guard's intent |
+
+If anything in the checklist fails, open an issue with the logcat trace attached.
+
 ## Security
 
 - Never commit secrets, private keys, or keystore files
