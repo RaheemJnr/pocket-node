@@ -14,6 +14,8 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.rjnr.pocketnode.data.gateway.DaoConstants
 import com.rjnr.pocketnode.data.gateway.models.DaoCellStatus
+import androidx.compose.ui.res.stringResource
+import com.rjnr.pocketnode.R
 import com.rjnr.pocketnode.data.gateway.models.DaoDeposit
 import com.rjnr.pocketnode.ui.screens.dao.formatCkb
 import com.rjnr.pocketnode.ui.screens.dao.formatCkbFull
@@ -146,7 +148,7 @@ fun DaoDepositCard(
                             ),
                             contentPadding = PaddingValues(horizontal = 16.dp, vertical = 6.dp)
                         ) {
-                            Text("Withdraw", fontWeight = FontWeight.Medium)
+                            Text(stringResource(R.string.dao_card_withdraw), fontWeight = FontWeight.Medium)
                         }
                     }
                     DaoCellStatus.UNLOCKABLE -> {
@@ -159,7 +161,7 @@ fun DaoDepositCard(
                             ),
                             contentPadding = PaddingValues(horizontal = 16.dp, vertical = 6.dp)
                         ) {
-                            Text("Unlock", fontWeight = FontWeight.Medium)
+                            Text(stringResource(R.string.dao_card_unlock), fontWeight = FontWeight.Medium)
                         }
                     }
                     DaoCellStatus.DEPOSITING, DaoCellStatus.WITHDRAWING, DaoCellStatus.UNLOCKING -> {
