@@ -115,6 +115,7 @@ class GatewayRepository @Inject constructor(
     private val syncCoordinator: SyncCoordinator,
     private val daoHeaderResolver: DaoHeaderResolver,
     private val daoDepositReader: DaoDepositReader,
+    private val lightClient: LightClientReadOnly,
 ) : TipSource {
     private val sendMutex = Mutex()
 
@@ -1117,14 +1118,7 @@ class GatewayRepository @Inject constructor(
         CellsResponse(liveCells, pag.lastCursor)
     }
 
-    private suspend fun currentTipNumberOrZero(): Long = try {
-        val tipStr = LightClientNative.nativeGetTipHeader() ?: return 0L
-        val tip = json.decodeFromString<JniHeaderView>(tipStr)
-        tip.number.removePrefix("0x").toLong(16)
-    } catch (e: Exception) {
-        Log.w(TAG, "currentTipNumberOrZero failed: ${e.message}")
-        0L
-    }
+    private suspend fun currentTipNumberOrZero(): Long = lightClient.currentTipNumberOrZero()
 
     /**
      * Single mutex-guarded prepare-and-send. Runs cell-fetch, reservation
@@ -1702,33 +1696,19 @@ class GatewayRepository @Inject constructor(
         }
     }
 
-    // Status UI methods
-    suspend fun getPeers(): String? = withContext(Dispatchers.IO) {
-        LightClientNative.nativeGetPeers()
-    }
-
-    suspend fun getTipHeader(): String? = withContext(Dispatchers.IO) {
-        LightClientNative.nativeGetTipHeader()
-    }
-
-    suspend fun getScripts(): String? = withContext(Dispatchers.IO) {
-        LightClientNative.nativeGetScripts()
-    }
-
-    suspend fun callRpc(method: String): String? = withContext(Dispatchers.IO) {
-        LightClientNative.callRpc(method)
-    }
+    // Diagnostic / read-only JNI passthroughs moved to [LightClientReadOnly]
+    // (#106 phase 4). Thin shims kept so NodeStatusViewModel and other
+    // consumers don't need a constructor change.
+    suspend fun getPeers(): String? = lightClient.getPeers()
+    suspend fun getTipHeader(): String? = lightClient.getTipHeader()
+    suspend fun getScripts(): String? = lightClient.getScripts()
+    suspend fun callRpc(method: String): String? = lightClient.callRpc(method)
 
     // ========================================
     // DAO Operations
     // ========================================
 
-    suspend fun getCurrentEpoch(): Result<EpochInfo> = runCatching {
-        val headerJson = LightClientNative.nativeGetTipHeader()
-            ?: throw Exception("Failed to get tip header")
-        val header = json.decodeFromString<JniHeaderView>(headerJson)
-        EpochInfo.fromHex(header.epoch)
-    }
+    suspend fun getCurrentEpoch(): Result<EpochInfo> = lightClient.getCurrentEpoch()
 
     // DAO chain-state helpers moved to [DaoHeaderResolver] (#106 phase 2).
     // Thin shims kept so internal call sites stay unchanged. getOrFetchHeader's
