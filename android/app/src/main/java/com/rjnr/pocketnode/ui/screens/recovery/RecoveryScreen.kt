@@ -28,10 +28,12 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.unit.dp
 import androidx.hilt.navigation.compose.hiltViewModel
+import com.rjnr.pocketnode.R
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -45,7 +47,7 @@ fun RecoveryScreen(
 
     Scaffold(
         topBar = {
-            TopAppBar(title = { Text("Wallet Recovery") })
+            TopAppBar(title = { Text(stringResource(R.string.recovery_title)) })
         }
     ) { padding ->
         Column(
@@ -81,7 +83,7 @@ fun RecoveryScreen(
                     OutlinedTextField(
                         value = pinInput,
                         onValueChange = { if (it.length <= 6 && it.all { c -> c.isDigit() }) pinInput = it },
-                        label = { Text("PIN") },
+                        label = { Text(stringResource(R.string.recovery_pin_label)) },
                         keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.NumberPassword),
                         visualTransformation = PasswordVisualTransformation(),
                         singleLine = true,
@@ -104,11 +106,11 @@ fun RecoveryScreen(
                         enabled = pinInput.length == 6,
                         modifier = Modifier.fillMaxWidth()
                     ) {
-                        Text("Recover with PIN")
+                        Text(stringResource(R.string.recovery_with_pin))
                     }
 
                     TextButton(onClick = onMnemonicRestore) {
-                        Text("Use recovery phrase instead")
+                        Text(stringResource(R.string.recovery_use_phrase_instead))
                     }
                 }
 
@@ -122,7 +124,7 @@ fun RecoveryScreen(
                         onClick = onMnemonicRestore,
                         modifier = Modifier.fillMaxWidth()
                     ) {
-                        Text("Enter recovery phrase")
+                        Text(stringResource(R.string.recovery_enter_phrase))
                     }
                 }
 
@@ -154,7 +156,7 @@ fun RecoveryScreen(
                     )
 
                     Button(onClick = onMnemonicRestore, modifier = Modifier.fillMaxWidth()) {
-                        Text("Restore with recovery phrase")
+                        Text(stringResource(R.string.recovery_restore_with_phrase))
                     }
                 }
             }

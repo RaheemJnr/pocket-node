@@ -139,6 +139,38 @@
     <string name="settings_address_book">Address Book</string>
     <!-- endregion -->
 
+    <!-- region: Auth -->
+    <string name="auth_biometric_title">Unlock Pocket Node</string>
+    <string name="auth_biometric_subtitle">Authenticate to access your wallet</string>
+    <string name="auth_biometric_negative">Use PIN</string>
+    <string name="auth_locked_cd">Locked</string>
+    <string name="auth_unlock_fingerprint">Unlock with Fingerprint</string>
+    <string name="auth_use_pin">Use PIN</string>
+    <!-- endregion -->
+
+    <!-- region: Recovery -->
+    <string name="recovery_title">Wallet Recovery</string>
+    <string name="recovery_pin_label">PIN</string>
+    <string name="recovery_with_pin">Recover with PIN</string>
+    <string name="recovery_use_phrase_instead">Use recovery phrase instead</string>
+    <string name="recovery_enter_phrase">Enter recovery phrase</string>
+    <string name="recovery_restore_with_phrase">Restore with recovery phrase</string>
+    <!-- endregion -->
+
+    <!-- region: MnemonicVerify -->
+    <string name="mnemonic_verify_title">Verify Recovery Phrase</string>
+    <string name="mnemonic_verify_enter_word">Enter word</string>
+    <string name="mnemonic_verify_question_progress">Question %1$d of 3</string>
+    <string name="mnemonic_verify_prompt">What is word #%1$d?</string>
+    <string name="mnemonic_verify_incorrect">Incorrect. Try again.</string>
+    <string name="mnemonic_verify_next">Next</string>
+    <string name="mnemonic_verify_verify">Verify</string>
+    <!-- endregion -->
+
+    <!-- region: SecurityChecklist -->
+    <string name="security_checklist_title">Security Setup</string>
+    <!-- endregion -->
+
     <!-- region: Contacts (M4 Phase 2) -->
     <string name="contacts_title">Address Book</string>
     <string name="contacts_search_placeholder">Search name or address</string>

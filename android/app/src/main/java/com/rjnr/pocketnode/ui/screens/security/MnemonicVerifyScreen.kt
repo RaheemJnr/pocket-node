@@ -8,8 +8,10 @@ import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.unit.dp
+import com.rjnr.pocketnode.R
 
 data class QuizQuestion(val wordIndex: Int, val correctWord: String)
 
@@ -35,10 +37,13 @@ fun MnemonicVerifyScreen(
     Scaffold(
         topBar = {
             TopAppBar(
-                title = { Text("Verify Recovery Phrase") },
+                title = { Text(stringResource(R.string.mnemonic_verify_title)) },
                 navigationIcon = {
                     IconButton(onClick = onBack) {
-                        Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "Back")
+                        Icon(
+                            Icons.AutoMirrored.Filled.ArrowBack,
+                            contentDescription = stringResource(R.string.common_back_cd),
+                        )
                     }
                 }
             )
@@ -61,15 +66,23 @@ fun MnemonicVerifyScreen(
             )
 
             Text(
-                text = "Question ${currentQuestionIndex + 1} of 3",
+                text = stringResource(
+                    R.string.mnemonic_verify_question_progress,
+                    currentQuestionIndex + 1,
+                ),
                 style = MaterialTheme.typography.titleMedium
             )
 
             if (currentQuestion != null) {
                 Text(
-                    text = "What is word #${currentQuestion.wordIndex + 1}?",
+                    text = stringResource(
+                        R.string.mnemonic_verify_prompt,
+                        currentQuestion.wordIndex + 1,
+                    ),
                     style = MaterialTheme.typography.headlineSmall
                 )
+
+                val incorrectMsg = stringResource(R.string.mnemonic_verify_incorrect)
 
                 OutlinedTextField(
                     value = answer,
@@ -77,7 +90,7 @@ fun MnemonicVerifyScreen(
                         answer = it.lowercase().trim()
                         error = null
                     },
-                    label = { Text("Enter word") },
+                    label = { Text(stringResource(R.string.mnemonic_verify_enter_word)) },
                     singleLine = true,
                     keyboardOptions = KeyboardOptions(imeAction = ImeAction.Done),
                     isError = error != null,
@@ -96,13 +109,18 @@ fun MnemonicVerifyScreen(
                                 onVerified()
                             }
                         } else {
-                            error = "Incorrect. Try again."
+                            error = incorrectMsg
                         }
                     },
                     enabled = answer.isNotBlank(),
                     modifier = Modifier.fillMaxWidth()
                 ) {
-                    Text(if (currentQuestionIndex < 2) "Next" else "Verify")
+                    Text(
+                        stringResource(
+                            if (currentQuestionIndex < 2) R.string.mnemonic_verify_next
+                            else R.string.mnemonic_verify_verify
+                        )
+                    )
                 }
             }
         }
