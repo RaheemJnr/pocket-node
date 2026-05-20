@@ -220,6 +220,15 @@ fun SendScreen(
         )
     }
 
+    // #197: prompt to save a brand-new recipient after broadcast.
+    uiState.saveContactPromptAddress?.let { addr ->
+        SaveContactDialog(
+            address = addr,
+            onSave = { name, notes -> viewModel.saveContactPromptSubmit(name, notes) },
+            onDismiss = { viewModel.saveContactPromptDismissed() },
+        )
+    }
+
     SendScreenUI(
         onNavigateBack = onNavigateBack,
         uiState = uiState,
