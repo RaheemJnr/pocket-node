@@ -72,6 +72,7 @@ import com.composables.icons.lucide.RefreshCw
 import com.composables.icons.lucide.Shield
 import com.composables.icons.lucide.ShieldCheck
 import com.composables.icons.lucide.Terminal
+import com.composables.icons.lucide.Users
 import com.composables.icons.lucide.Wallet
 import com.rjnr.pocketnode.BuildConfig
 import com.rjnr.pocketnode.data.gateway.models.NetworkType
@@ -99,6 +100,7 @@ fun SettingsScreen(
     onNavigateToSecuritySettings: () -> Unit = {},
     onNavigateToImport: () -> Unit = {},
     onNavigateToWalletManager: () -> Unit = {},
+    onNavigateToContacts: () -> Unit = {},
     onNavigateToFaq: (anchor: String?) -> Unit = {},
     viewModel: SettingsViewModel = hiltViewModel()
 ) {
@@ -340,6 +342,7 @@ fun SettingsScreen(
         onNavigateToNodeStatus,
         context,
         onNavigateToWalletManager = onNavigateToWalletManager,
+        onNavigateToContacts = onNavigateToContacts,
         onNavigateToFaq = { onNavigateToFaq(null) },
         showSyncDialog = { viewModel.showSyncDialog() },
         showSyncStrategyDialog = { viewModel.showSyncStrategyDialog() },
@@ -373,6 +376,7 @@ private fun SettingsScreenUI(
     onNavigateToNodeStatus: () -> Unit,
     context: Context,
     onNavigateToWalletManager: () -> Unit = {},
+    onNavigateToContacts: () -> Unit = {},
     onNavigateToFaq: () -> Unit = {},
     showSyncDialog: () -> Unit,
     showSyncStrategyDialog: () -> Unit = {},
@@ -419,6 +423,14 @@ private fun SettingsScreenUI(
                     icon = Lucide.Wallet,
                     title = "Manage Wallets",
                     onClick = onNavigateToWalletManager
+                )
+            }
+
+            item {
+                SettingsLinkRow(
+                    icon = Lucide.Users,
+                    title = "Address Book",
+                    onClick = onNavigateToContacts,
                 )
             }
 
