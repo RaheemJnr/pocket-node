@@ -171,6 +171,48 @@
     <string name="security_checklist_title">Security Setup</string>
     <!-- endregion -->
 
+    <!-- region: QrScanner -->
+    <string name="qr_scanner_title">Scan QR Code</string>
+    <string name="qr_scanner_close_cd">Close</string>
+    <string name="qr_scanner_grant_permission">Grant Permission</string>
+    <string name="qr_scanner_go_back">Go Back</string>
+    <!-- endregion -->
+
+    <!-- region: Onboarding / MnemonicImport / MnemonicBackup -->
+    <string name="mnemonic_import_title">Recover Wallet</string>
+    <string name="mnemonic_import_paste">Paste from Clipboard</string>
+    <string name="mnemonic_import_have_private_key">Have a private key instead?</string>
+    <string name="mnemonic_import_action">Import Wallet</string>
+    <string name="mnemonic_import_private_key_title">Import Private Key</string>
+    <string name="mnemonic_import_private_key_label">Private Key</string>
+    <string name="mnemonic_import_private_key_placeholder">0x…</string>
+    <string name="mnemonic_import_private_key_action">Import</string>
+    <string name="mnemonic_import_cancel">Cancel</string>
+
+    <string name="mnemonic_backup_verify">Verify</string>
+    <string name="mnemonic_backup_continue">Continue</string>
+    <string name="mnemonic_backup_copy_private_key">Copy Private Key</string>
+    <string name="mnemonic_backup_done">Done</string>
+    <string name="mnemonic_backup_got_it">Got it</string>
+    <!-- endregion -->
+
+    <!-- region: Receive -->
+    <string name="receive_title">Receive CKB</string>
+    <string name="receive_qr_cd">QR Code</string>
+    <string name="receive_protect_title">Protect your wallet</string>
+    <string name="receive_protect_body">You haven\'t backed up your recovery phrase yet. If you lose this device, your funds will be unrecoverable.</string>
+    <string name="receive_protect_back_up">Back up now</string>
+    <string name="receive_protect_dismiss">I understand the risk</string>
+    <!-- endregion -->
+
+    <!-- region: NodeStatus -->
+    <string name="node_status_title">Node Status</string>
+    <string name="node_status_custom_rpc">Custom RPC</string>
+    <string name="node_status_method_label">Method</string>
+    <string name="node_status_call">Call</string>
+    <string name="node_status_export_logs">Export Logs</string>
+    <!-- endregion -->
+
     <!-- region: Contacts (M4 Phase 2) -->
     <string name="contacts_title">Address Book</string>
     <string name="contacts_search_placeholder">Search name or address</string>

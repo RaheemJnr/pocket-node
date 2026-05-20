@@ -21,8 +21,10 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.platform.LocalClipboardManager
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.font.FontFamily
+import com.rjnr.pocketnode.R
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
@@ -50,21 +52,21 @@ fun ReceiveScreen(
     if (showBackupWarning) {
         AlertDialog(
             onDismissRequest = { showBackupWarning = false },
-            title = { Text("Protect your wallet") },
+            title = { Text(stringResource(R.string.receive_protect_title)) },
             text = {
-                Text("You haven't backed up your recovery phrase yet. If you lose this device, your funds will be unrecoverable.")
+                Text(stringResource(R.string.receive_protect_body))
             },
             confirmButton = {
                 Button(onClick = {
                     showBackupWarning = false
                     onNavigateToBackup()
                 }) {
-                    Text("Back up now")
+                    Text(stringResource(R.string.receive_protect_back_up))
                 }
             },
             dismissButton = {
                 TextButton(onClick = { showBackupWarning = false }) {
-                    Text("I understand the risk")
+                    Text(stringResource(R.string.receive_protect_dismiss))
                 }
             }
         )
@@ -98,10 +100,10 @@ fun ReceiveScreen(
         containerColor = MaterialTheme.colorScheme.surface,
         topBar = {
             TopAppBar(
-                title = { Text("Receive CKB") },
+                title = { Text(stringResource(R.string.receive_title)) },
                 navigationIcon = {
                     IconButton(onClick = onNavigateBack) {
-                        Icon(Lucide.ArrowLeft, contentDescription = "Back")
+                        Icon(Lucide.ArrowLeft, contentDescription = stringResource(R.string.common_back_cd))
                     }
                 },
                 colors = TopAppBarDefaults.topAppBarColors(
@@ -303,7 +305,7 @@ private fun QrCodeImage(content: String, modifier: Modifier = Modifier) {
     } else {
         Image(
             bitmap = bmp.asImageBitmap(),
-            contentDescription = "QR Code",
+            contentDescription = stringResource(R.string.receive_qr_cd),
             modifier = modifier
         )
     }

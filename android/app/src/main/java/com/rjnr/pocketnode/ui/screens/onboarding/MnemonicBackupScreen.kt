@@ -20,8 +20,10 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.hilt.navigation.compose.hiltViewModel
+import androidx.compose.ui.res.stringResource
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
+import com.rjnr.pocketnode.R
 import com.rjnr.pocketnode.data.gateway.GatewayRepository
 import com.rjnr.pocketnode.util.toHex
 import dagger.hilt.android.lifecycle.HiltViewModel
@@ -413,7 +415,7 @@ private fun MnemonicVerifyStep(
             modifier = Modifier.fillMaxWidth(),
             enabled = verifyPositions.all { userSelections.containsKey(it) }
         ) {
-            Text("Verify")
+            Text(stringResource(R.string.mnemonic_backup_verify))
         }
     }
 }
@@ -461,7 +463,7 @@ private fun MnemonicSuccessStep(
             onClick = onComplete,
             modifier = Modifier.fillMaxWidth()
         ) {
-            Text("Continue")
+            Text(stringResource(R.string.mnemonic_backup_continue))
         }
     }
 }
@@ -534,7 +536,7 @@ private fun RawKeyBackupInfo(
                         },
                         modifier = Modifier.fillMaxWidth()
                     ) {
-                        Text("Copy Private Key")
+                        Text(stringResource(R.string.mnemonic_backup_copy_private_key))
                     }
                 }
             }
@@ -546,7 +548,7 @@ private fun RawKeyBackupInfo(
             onClick = onNavigateBack,
             modifier = Modifier.fillMaxWidth()
         ) {
-            Text("Done")
+            Text(stringResource(R.string.mnemonic_backup_done))
         }
     }
 }
@@ -590,7 +592,7 @@ private fun SubAccountBackupInfo(
             onClick = onNavigateBack,
             modifier = Modifier.fillMaxWidth()
         ) {
-            Text("Got it")
+            Text(stringResource(R.string.mnemonic_backup_got_it))
         }
     }
 }
