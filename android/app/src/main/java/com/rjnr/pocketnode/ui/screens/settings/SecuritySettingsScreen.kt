@@ -37,8 +37,10 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.unit.dp
 import androidx.hilt.navigation.compose.hiltViewModel
+import com.rjnr.pocketnode.R
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -83,12 +85,12 @@ fun SecuritySettingsScreen(
             },
             confirmButton = {
                 Button(onClick = { viewModel.confirmBiometricEnrollmentWarning() }) {
-                    Text("Continue")
+                    Text(stringResource(R.string.security_settings_continue))
                 }
             },
             dismissButton = {
                 TextButton(onClick = { viewModel.dismissBiometricEnrollmentWarning() }) {
-                    Text("Cancel")
+                    Text(stringResource(R.string.security_settings_cancel))
                 }
             }
         )
@@ -98,7 +100,7 @@ fun SecuritySettingsScreen(
         if (!uiState.canRemovePin) {
             AlertDialog(
                 onDismissRequest = { showRemoveDialog = false },
-                title = { Text("PIN is required") },
+                title = { Text(stringResource(R.string.security_settings_pin_required_title)) },
                 text = {
                     Text(
                         "A PIN is mandatory while you have a wallet. It protects your PIN-encrypted recovery backup.\n\n" +
@@ -106,15 +108,15 @@ fun SecuritySettingsScreen(
                     )
                 },
                 confirmButton = {
-                    Button(onClick = { showRemoveDialog = false }) { Text("OK") }
+                    Button(onClick = { showRemoveDialog = false }) { Text(stringResource(R.string.security_settings_pin_required_ok)) }
                 }
             )
         } else {
             AlertDialog(
                 onDismissRequest = { showRemoveDialog = false },
-                title = { Text("Remove PIN?") },
+                title = { Text(stringResource(R.string.security_settings_remove_pin_title)) },
                 text = {
-                    Text("Your wallet will no longer be locked on launch. This also disables biometric unlock.")
+                    Text(stringResource(R.string.security_settings_remove_pin_body))
                 },
                 confirmButton = {
                     Button(onClick = {
@@ -122,12 +124,12 @@ fun SecuritySettingsScreen(
                         viewModel.setPendingAction(PendingSecurityAction.REMOVE_PIN)
                         onNavigateToPinVerify()
                     }) {
-                        Text("Remove")
+                        Text(stringResource(R.string.security_settings_remove))
                     }
                 },
                 dismissButton = {
                     TextButton(onClick = { showRemoveDialog = false }) {
-                        Text("Cancel")
+                        Text(stringResource(R.string.security_settings_cancel))
                     }
                 }
             )
@@ -138,7 +140,7 @@ fun SecuritySettingsScreen(
         containerColor = MaterialTheme.colorScheme.surface,
         topBar = {
             TopAppBar(
-                title = { Text("Security Settings") },
+                title = { Text(stringResource(R.string.security_settings_title)) },
                 navigationIcon = {
                     IconButton(onClick = onNavigateBack) {
                         Icon(Lucide.ArrowLeft, "Back")
@@ -181,14 +183,14 @@ fun SecuritySettingsScreen(
                                 tint = MaterialTheme.colorScheme.primary,
                                 modifier = Modifier.padding(end = 8.dp)
                             )
-                            Text("PIN is enabled")
+                            Text(stringResource(R.string.security_settings_pin_enabled))
                         }
 
                         Spacer(modifier = Modifier.height(12.dp))
 
                         Row {
                             OutlinedButton(onClick = onNavigateToPinSetup) {
-                                Text("Change PIN")
+                                Text(stringResource(R.string.security_settings_change_pin))
                             }
                             Spacer(modifier = Modifier.width(8.dp))
                             TextButton(onClick = { showRemoveDialog = true }) {
@@ -208,7 +210,7 @@ fun SecuritySettingsScreen(
                         Spacer(modifier = Modifier.height(12.dp))
 
                         Button(onClick = onNavigateToPinSetup) {
-                            Text("Set PIN")
+                            Text(stringResource(R.string.security_settings_set_pin))
                         }
                     }
                 }

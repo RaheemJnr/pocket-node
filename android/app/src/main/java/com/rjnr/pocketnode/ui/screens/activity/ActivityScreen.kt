@@ -67,6 +67,8 @@ import androidx.paging.compose.collectAsLazyPagingItems
 import com.composables.icons.lucide.*
 import com.rjnr.pocketnode.data.gateway.models.NetworkType
 import com.rjnr.pocketnode.data.gateway.models.TransactionRecord
+import androidx.compose.ui.res.stringResource
+import com.rjnr.pocketnode.R
 import com.rjnr.pocketnode.ui.screens.home.HomeNavEvent
 import com.rjnr.pocketnode.ui.theme.ErrorRed
 import com.rjnr.pocketnode.ui.theme.PendingAmber
@@ -107,16 +109,16 @@ fun ActivityScreen(
     retryDialogTx?.let { tx ->
         AlertDialog(
             onDismissRequest = { retryDialogTx = null },
-            title = { Text("Retry transaction?") },
-            text = { Text("This transaction may not have reached the network. Retry?") },
+            title = { Text(stringResource(R.string.activity_retry_dialog_title)) },
+            text = { Text(stringResource(R.string.activity_retry_dialog_body)) },
             confirmButton = {
                 TextButton(onClick = {
                     retryDialogTx = null
                     viewModel.retryFailedTransaction(tx.txHash)
-                }) { Text("Retry") }
+                }) { Text(stringResource(R.string.activity_retry)) }
             },
             dismissButton = {
-                TextButton(onClick = { retryDialogTx = null }) { Text("Cancel") }
+                TextButton(onClick = { retryDialogTx = null }) { Text(stringResource(R.string.activity_cancel)) }
             }
         )
     }
@@ -151,7 +153,7 @@ fun ActivityScreen(
             TopAppBar(
                 title = {
                     Text(
-                        text = "Activity",
+                        text = stringResource(R.string.activity_title),
                         fontWeight = FontWeight.Bold,
                         fontSize = 20.sp
                     )
@@ -160,7 +162,7 @@ fun ActivityScreen(
                     IconButton(onClick = { viewModel.exportTransactions() }) {
                         Icon(
                             imageVector = Lucide.Download,
-                            contentDescription = "Export CSV"
+                            contentDescription = stringResource(R.string.activity_export_csv_cd)
                         )
                     }
                 },
@@ -550,7 +552,7 @@ private fun ErrorState(message: String?, onRetry: () -> Unit) {
                     contentColor = MaterialTheme.colorScheme.onPrimary
                 )
             ) {
-                Text("Retry", fontWeight = FontWeight.SemiBold)
+                Text(stringResource(R.string.activity_retry), fontWeight = FontWeight.SemiBold)
             }
         }
     }
@@ -671,7 +673,7 @@ private fun TransactionDetailSheet(
                 ) {
                     Icon(
                         imageVector = Lucide.Copy,
-                        contentDescription = "Copy TX hash",
+                        contentDescription = stringResource(R.string.activity_copy_tx_cd),
                         modifier = Modifier.size(18.dp),
                         tint = MaterialTheme.colorScheme.onSurfaceVariant
                     )
@@ -682,7 +684,7 @@ private fun TransactionDetailSheet(
                 ) {
                     Icon(
                         imageVector = Lucide.ExternalLink,
-                        contentDescription = "View on explorer",
+                        contentDescription = stringResource(R.string.activity_explorer_cd),
                         modifier = Modifier.size(18.dp),
                         tint = MaterialTheme.colorScheme.primary
                     )
@@ -737,7 +739,7 @@ private fun TransactionDetailSheet(
                         contentColor = MaterialTheme.colorScheme.onError
                     )
                 ) {
-                    Text("Retry Transaction")
+                    Text(stringResource(R.string.activity_retry_transaction))
                 }
             }
         }

@@ -131,6 +131,11 @@ fun SendScreen(
 
     val context = LocalContext.current
 
+    // Captured for the non-@Composable LaunchedEffect callback below.
+    val sendAuthTitle = stringResource(R.string.send_auth_biometric_title)
+    val sendAuthSubtitle = stringResource(R.string.send_auth_biometric_subtitle)
+    val sendAuthNegative = stringResource(R.string.send_auth_biometric_negative)
+
     // Handle PIN auth result
     LaunchedEffect(sendAuthVerified) {
         if (sendAuthVerified) {
@@ -165,9 +170,9 @@ fun SendScreen(
                     }
                 )
                 val promptInfo = BiometricPrompt.PromptInfo.Builder()
-                    .setTitle("Authenticate to Send")
-                    .setSubtitle("Verify your identity to send CKB")
-                    .setNegativeButtonText("Use PIN")
+                    .setTitle(sendAuthTitle)
+                    .setSubtitle(sendAuthSubtitle)
+                    .setNegativeButtonText(sendAuthNegative)
                     .build()
                 prompt.authenticate(promptInfo)
             }
@@ -286,7 +291,7 @@ private fun SendScreenUI(
                     IconButton(onClick = { onNavigateBack() }) {
                         Icon(
                             Lucide.ChevronLeft,
-                            contentDescription = "Back",
+                            contentDescription = stringResource(R.string.common_back_cd),
                             modifier = Modifier.size(28.dp)
                         )
                     }
@@ -375,7 +380,7 @@ private fun SendScreenUI(
                 )
                 Icon(
                     imageVector = Lucide.ScanLine,
-                    contentDescription = "Scan",
+                    contentDescription = stringResource(R.string.send_scan_cd),
                     modifier = Modifier.clickable{onNavigateToScanner()}
                 )
             }
@@ -437,7 +442,7 @@ private fun SendScreenUI(
                         onClick = { showMyWallets = true },
                         enabled = !uiState.isLoading
                     ) {
-                        Text("My Wallets", style = MaterialTheme.typography.labelSmall)
+                        Text(stringResource(R.string.send_my_wallets), style = MaterialTheme.typography.labelSmall)
                     }
                     DropdownMenu(
                         expanded = showMyWallets,
@@ -616,7 +621,7 @@ private fun SendScreenUI(
                     Spacer(modifier = Modifier.width(8.dp))
                     Text(uiState.statusMessage.ifEmpty { "Sending..." })
                 } else {
-                    Text("Send CKB")
+                    Text(stringResource(R.string.send_send_ckb))
                 }
             }
         }
@@ -780,13 +785,13 @@ fun ErrorDialog(
         },
         confirmButton = {
             Button(onClick = onDismiss) {
-                Text("OK")
+                Text(stringResource(R.string.send_ok))
             }
         },
         dismissButton = if (onRetry != null) {
             {
                 OutlinedButton(onClick = onRetry) {
-                    Text("Retry")
+                    Text(stringResource(R.string.send_retry))
                 }
             }
         } else null
@@ -824,7 +829,7 @@ fun TransactionStatusDialog(
                     ) {
                         Icon(
                             imageVector = Lucide.CircleCheck,
-                            contentDescription = "Success",
+                            contentDescription = stringResource(R.string.send_success_cd),
                             modifier = Modifier.size(40.dp),
                             tint = SuccessGreen
                         )
@@ -841,7 +846,7 @@ fun TransactionStatusDialog(
                     ) {
                         Icon(
                             imageVector = Lucide.X,
-                            contentDescription = "Failed",
+                            contentDescription = stringResource(R.string.send_failed_cd),
                             modifier = Modifier.size(40.dp),
                             tint = MaterialTheme.colorScheme.error
                         )
@@ -967,11 +972,11 @@ fun TransactionStatusDialog(
                         containerColor = SuccessGreen
                     )
                 ) {
-                    Text("Done")
+                    Text(stringResource(R.string.send_done))
                 }
             } else if (isFailed) {
                 Button(onClick = onDismiss) {
-                    Text("Close")
+                    Text(stringResource(R.string.send_close))
                 }
             }
         },
@@ -983,7 +988,7 @@ fun TransactionStatusDialog(
                         contentColor = MaterialTheme.colorScheme.outline
                     )
                 ) {
-                    Text("Hide")
+                    Text(stringResource(R.string.send_hide))
                 }
             }
         }

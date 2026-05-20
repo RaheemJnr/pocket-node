@@ -213,6 +213,60 @@
     <string name="node_status_export_logs">Export Logs</string>
     <!-- endregion -->
 
+    <!-- region: SecuritySettings -->
+    <string name="security_settings_title">Security Settings</string>
+    <string name="security_settings_continue">Continue</string>
+    <string name="security_settings_cancel">Cancel</string>
+    <string name="security_settings_pin_required_title">PIN is required</string>
+    <string name="security_settings_pin_required_ok">OK</string>
+    <string name="security_settings_remove_pin_title">Remove PIN?</string>
+    <string name="security_settings_remove_pin_body">Your wallet will no longer be locked on launch. This also disables biometric unlock.</string>
+    <string name="security_settings_remove">Remove</string>
+    <string name="security_settings_pin_enabled">PIN is enabled</string>
+    <string name="security_settings_change_pin">Change PIN</string>
+    <string name="security_settings_set_pin">Set PIN</string>
+    <!-- endregion -->
+
+    <!-- region: Settings extra -->
+    <string name="settings_allow_notifications_title">Allow Notifications</string>
+    <string name="settings_allow">Allow</string>
+    <string name="settings_skip">Skip</string>
+    <string name="settings_switch_network_title">Switch to CKB %1$s?</string>
+    <string name="settings_switch_restart">Switch &amp; Restart</string>
+    <string name="settings_cancel">Cancel</string>
+    <string name="settings_sync_strategy_title">Wallet Sync Strategy</string>
+    <string name="settings_theme_title">Theme</string>
+    <string name="settings_title">Settings</string>
+    <!-- endregion -->
+
+    <!-- region: Send extra -->
+    <string name="send_auth_biometric_title">Authenticate to Send</string>
+    <string name="send_auth_biometric_subtitle">Verify your identity to send CKB</string>
+    <string name="send_auth_biometric_negative">Use PIN</string>
+    <string name="send_scan_cd">Scan</string>
+    <string name="send_my_wallets">My Wallets</string>
+    <string name="send_send_ckb">Send CKB</string>
+    <string name="send_ok">OK</string>
+    <string name="send_retry">Retry</string>
+    <string name="send_success_cd">Success</string>
+    <string name="send_failed_cd">Failed</string>
+    <string name="send_done">Done</string>
+    <string name="send_close">Close</string>
+    <string name="send_hide">Hide</string>
+    <!-- endregion -->
+
+    <!-- region: Activity -->
+    <string name="activity_title">Activity</string>
+    <string name="activity_retry_dialog_title">Retry transaction?</string>
+    <string name="activity_retry_dialog_body">This transaction may not have reached the network. Retry?</string>
+    <string name="activity_retry">Retry</string>
+    <string name="activity_cancel">Cancel</string>
+    <string name="activity_export_csv_cd">Export CSV</string>
+    <string name="activity_copy_tx_cd">Copy TX hash</string>
+    <string name="activity_explorer_cd">View on explorer</string>
+    <string name="activity_retry_transaction">Retry Transaction</string>
+    <!-- endregion -->
+
     <!-- region: WalletManager -->
     <string name="wallet_manager_title">Wallets</string>
     <string name="wallet_manager_add_cd">Add Wallet</string>

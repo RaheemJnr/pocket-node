@@ -141,7 +141,7 @@ fun SettingsScreen(
     if (showNotificationExplanation) {
         AlertDialog(
             onDismissRequest = { showNotificationExplanation = false },
-            title = { Text("Allow Notifications") },
+            title = { Text(stringResource(R.string.settings_allow_notifications_title)) },
             text = {
                 Text(
                     "Pocket Node needs notification permission to show sync progress " +
@@ -156,7 +156,7 @@ fun SettingsScreen(
                     showNotificationExplanation = false
                     notificationPermissionLauncher.launch(Manifest.permission.POST_NOTIFICATIONS)
                 }) {
-                    Text("Allow")
+                    Text(stringResource(R.string.settings_allow))
                 }
             },
             dismissButton = {
@@ -167,7 +167,7 @@ fun SettingsScreen(
                     // ON while sync was silently dead. (#116)
                     showNotificationExplanation = false
                 }) {
-                    Text("Skip")
+                    Text(stringResource(R.string.settings_skip))
                 }
             }
         )
@@ -210,7 +210,7 @@ fun SettingsScreen(
     if (uiState.showNetworkSwitchDialog && pendingSwitch != null) {
         AlertDialog(
             onDismissRequest = { viewModel.cancelNetworkSwitch() },
-            title = { Text("Switch to CKB ${pendingSwitch.displayName}?") },
+            title = { Text(stringResource(R.string.settings_switch_network_title, pendingSwitch.displayName)) },
             text = {
                 Text(
                     "The app will close and reopen on CKB ${pendingSwitch.displayName}. " +
@@ -220,12 +220,12 @@ fun SettingsScreen(
             },
             confirmButton = {
                 Button(onClick = { viewModel.confirmNetworkSwitch() }) {
-                    Text("Switch & Restart")
+                    Text(stringResource(R.string.settings_switch_restart))
                 }
             },
             dismissButton = {
                 TextButton(onClick = { viewModel.cancelNetworkSwitch() }) {
-                    Text("Cancel")
+                    Text(stringResource(R.string.settings_cancel))
                 }
             }
         )
@@ -235,7 +235,7 @@ fun SettingsScreen(
     if (uiState.showSyncStrategyDialog) {
         AlertDialog(
             onDismissRequest = { viewModel.hideSyncStrategyDialog() },
-            title = { Text("Wallet Sync Strategy") },
+            title = { Text(stringResource(R.string.settings_sync_strategy_title)) },
             text = {
                 androidx.compose.foundation.layout.Column {
                     SyncStrategy.entries.forEach { strategy ->
@@ -274,7 +274,7 @@ fun SettingsScreen(
     if (uiState.showThemeDialog) {
         AlertDialog(
             onDismissRequest = { viewModel.hideThemeDialog() },
-            title = { Text("Theme") },
+            title = { Text(stringResource(R.string.settings_theme_title)) },
             text = {
                 androidx.compose.foundation.layout.Column {
                     ThemeMode.entries.forEach { mode ->
@@ -388,7 +388,7 @@ private fun SettingsScreenUI(
         containerColor = MaterialTheme.colorScheme.surface,
         topBar = {
             TopAppBar(
-                title = { Text("Settings", fontWeight = FontWeight.SemiBold) },
+                title = { Text(stringResource(R.string.settings_title), fontWeight = FontWeight.SemiBold) },
                 colors = TopAppBarDefaults.topAppBarColors(
                     containerColor = MaterialTheme.colorScheme.surface
                 )
