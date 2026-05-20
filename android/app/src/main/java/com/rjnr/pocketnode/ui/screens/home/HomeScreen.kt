@@ -245,7 +245,7 @@ fun HomeScreen(
         val targetName = pendingSwitch.displayName
         AlertDialog(
             onDismissRequest = { viewModel.cancelNetworkSwitch() },
-            title = { Text("Switch to $targetName?") },
+            title = { Text(stringResource(R.string.home_switch_network_title, targetName)) },
             text = {
                 Text(
                     "The app will close and reopen on $targetName. " +
@@ -255,12 +255,12 @@ fun HomeScreen(
             },
             confirmButton = {
                 Button(onClick = { viewModel.confirmNetworkSwitch() }) {
-                    Text("Switch & Restart")
+                    Text(stringResource(R.string.home_switch_restart))
                 }
             },
             dismissButton = {
                 TextButton(onClick = { viewModel.cancelNetworkSwitch() }) {
-                    Text("Cancel")
+                    Text(stringResource(R.string.home_cancel))
                 }
             }
         )
@@ -314,16 +314,16 @@ fun HomeScreen(
     retryDialogTx?.let { tx ->
         AlertDialog(
             onDismissRequest = { retryDialogTx = null },
-            title = { Text("Retry transaction?") },
-            text = { Text("This transaction may not have reached the network. Retry?") },
+            title = { Text(stringResource(R.string.home_retry_dialog_title)) },
+            text = { Text(stringResource(R.string.home_retry_dialog_body)) },
             confirmButton = {
                 TextButton(onClick = {
                     retryDialogTx = null
                     viewModel.retryFailedTransaction(tx.txHash)
-                }) { Text("Retry") }
+                }) { Text(stringResource(R.string.home_retry)) }
             },
             dismissButton = {
-                TextButton(onClick = { retryDialogTx = null }) { Text("Cancel") }
+                TextButton(onClick = { retryDialogTx = null }) { Text(stringResource(R.string.home_cancel)) }
             }
         )
     }
@@ -400,7 +400,7 @@ fun HomeScreen(
                         }
                         Icon(
                             Lucide.ChevronDown,
-                            contentDescription = "Switch",
+                            contentDescription = stringResource(R.string.home_switch_cd),
                             modifier = Modifier.size(16.dp)
                         )
                     }
@@ -727,7 +727,7 @@ private fun ImportWalletDialog(
 
     AlertDialog(
         onDismissRequest = onDismiss,
-        title = { Text("Import Wallet", fontWeight = FontWeight.Bold) },
+        title = { Text(stringResource(R.string.home_import_dialog_title), fontWeight = FontWeight.Bold) },
         text = {
             Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
                 Text(
@@ -739,8 +739,8 @@ private fun ImportWalletDialog(
                 OutlinedTextField(
                     value = privateKey,
                     onValueChange = { privateKey = it.trim() },
-                    label = { Text("Private Key (Hex)") },
-                    placeholder = { Text("0x...") },
+                    label = { Text(stringResource(R.string.home_import_private_key_label)) },
+                    placeholder = { Text(stringResource(R.string.home_import_private_key_placeholder)) },
                     modifier = Modifier.fillMaxWidth(),
                     singleLine = true
                 )
@@ -754,12 +754,12 @@ private fun ImportWalletDialog(
                     containerColor = MaterialTheme.colorScheme.error
                 )
             ) {
-                Text("Import & Replace")
+                Text(stringResource(R.string.home_import_replace))
             }
         },
         dismissButton = {
             TextButton(onClick = onDismiss) {
-                Text("Cancel")
+                Text(stringResource(R.string.home_cancel))
             }
         }
     )
@@ -796,7 +796,7 @@ private fun BackupReminderBanner(
                 IconButton(onClick = onDismiss, modifier = Modifier.size(24.dp)) {
                     Icon(
                         imageVector = Lucide.X,
-                        contentDescription = "Dismiss",
+                        contentDescription = stringResource(R.string.home_dismiss_cd),
                         tint = MaterialTheme.colorScheme.onErrorContainer.copy(alpha = 0.6f)
                     )
                 }
@@ -816,7 +816,7 @@ private fun BackupReminderBanner(
                 ),
                 modifier = Modifier.align(Alignment.End)
             ) {
-                Text("Backup Now")
+                Text(stringResource(R.string.home_backup_now))
             }
         }
     }
@@ -1120,7 +1120,7 @@ private fun TransactionDetailSheet(
                 ) {
                     Icon(
                         imageVector = Lucide.Copy,
-                        contentDescription = "Copy TX hash",
+                        contentDescription = stringResource(R.string.home_copy_tx_cd),
                         modifier = Modifier.size(18.dp),
                         tint = MaterialTheme.colorScheme.onSurfaceVariant
                     )
@@ -1131,7 +1131,7 @@ private fun TransactionDetailSheet(
                 ) {
                     Icon(
                         imageVector = Lucide.ExternalLink,
-                        contentDescription = "View on explorer",
+                        contentDescription = stringResource(R.string.home_explorer_cd),
                         modifier = Modifier.size(18.dp),
                         tint = MaterialTheme.colorScheme.primary
                     )
@@ -1187,7 +1187,7 @@ private fun TransactionDetailSheet(
                         contentColor = MaterialTheme.colorScheme.onError
                     )
                 ) {
-                    Text("Retry Transaction")
+                    Text(stringResource(R.string.home_retry_transaction))
                 }
             }
         }
@@ -1237,7 +1237,7 @@ private fun DetailRow(
                 ) {
                     Icon(
                         imageVector = Lucide.Copy,
-                        contentDescription = "Copy",
+                        contentDescription = stringResource(R.string.home_copy_cd),
                         modifier = Modifier.size(16.dp),
                         tint = MaterialTheme.colorScheme.primary
                     )

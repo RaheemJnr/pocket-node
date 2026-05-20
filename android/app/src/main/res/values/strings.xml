@@ -213,6 +213,26 @@
     <string name="node_status_export_logs">Export Logs</string>
     <!-- endregion -->
 
+    <!-- region: Home extra -->
+    <string name="home_switch_network_title">Switch to %1$s?</string>
+    <string name="home_switch_restart">Switch &amp; Restart</string>
+    <string name="home_cancel">Cancel</string>
+    <string name="home_retry_dialog_title">Retry transaction?</string>
+    <string name="home_retry_dialog_body">This transaction may not have reached the network. Retry?</string>
+    <string name="home_retry">Retry</string>
+    <string name="home_switch_cd">Switch</string>
+    <string name="home_import_dialog_title">Import Wallet</string>
+    <string name="home_import_private_key_label">Private Key (Hex)</string>
+    <string name="home_import_private_key_placeholder">0x…</string>
+    <string name="home_import_replace">Import &amp; Replace</string>
+    <string name="home_dismiss_cd">Dismiss</string>
+    <string name="home_backup_now">Backup Now</string>
+    <string name="home_copy_tx_cd">Copy TX hash</string>
+    <string name="home_explorer_cd">View on explorer</string>
+    <string name="home_retry_transaction">Retry Transaction</string>
+    <string name="home_copy_cd">Copy</string>
+    <!-- endregion -->
+
     <!-- region: SecuritySettings -->
     <string name="security_settings_title">Security Settings</string>
     <string name="security_settings_continue">Continue</string>
