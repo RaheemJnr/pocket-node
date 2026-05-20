@@ -10,6 +10,8 @@ import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalClipboardManager
+import androidx.compose.ui.res.stringResource
+import com.rjnr.pocketnode.R
 import com.rjnr.pocketnode.ui.util.uaTestTag
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
@@ -254,7 +256,7 @@ fun MnemonicImportScreen(
         containerColor = MaterialTheme.colorScheme.surface,
         topBar = {
             TopAppBar(
-                title = { Text("Recover Wallet") },
+                title = { Text(stringResource(R.string.mnemonic_import_title)) },
                 navigationIcon = {
                     IconButton(onClick = onNavigateBack) {
                         Icon(Lucide.ChevronLeft, "Back")
@@ -291,7 +293,7 @@ fun MnemonicImportScreen(
             ) {
                 Icon(Lucide.ClipboardPaste, contentDescription = null, modifier = Modifier.size(18.dp))
                 Spacer(Modifier.width(8.dp))
-                Text("Paste from Clipboard")
+                Text(stringResource(R.string.mnemonic_import_paste))
             }
 
             // Adaptive word grid: 2 columns at typical phone widths (≈160dp each),
@@ -319,7 +321,7 @@ fun MnemonicImportScreen(
                 onClick = { viewModel.showPrivateKeyImport() },
                 modifier = Modifier.align(Alignment.CenterHorizontally)
             ) {
-                Text("Have a private key instead?")
+                Text(stringResource(R.string.mnemonic_import_have_private_key))
             }
 
             // Import button
@@ -336,7 +338,7 @@ fun MnemonicImportScreen(
                     )
                     Spacer(Modifier.width(8.dp))
                 }
-                Text("Import Wallet")
+                Text(stringResource(R.string.mnemonic_import_action))
             }
         }
     }
@@ -351,7 +353,7 @@ private fun PrivateKeyImportDialog(
 
     AlertDialog(
         onDismissRequest = onDismiss,
-        title = { Text("Import Private Key", fontWeight = FontWeight.Bold) },
+        title = { Text(stringResource(R.string.mnemonic_import_private_key_title), fontWeight = FontWeight.Bold) },
         text = {
             Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
                 Text(
@@ -361,8 +363,8 @@ private fun PrivateKeyImportDialog(
                 OutlinedTextField(
                     value = privateKey,
                     onValueChange = { privateKey = it.trim() },
-                    label = { Text("Private Key") },
-                    placeholder = { Text("0x...") },
+                    label = { Text(stringResource(R.string.mnemonic_import_private_key_label)) },
+                    placeholder = { Text(stringResource(R.string.mnemonic_import_private_key_placeholder)) },
                     modifier = Modifier.fillMaxWidth(),
                     singleLine = true
                 )
@@ -373,12 +375,12 @@ private fun PrivateKeyImportDialog(
                 onClick = { onImport(privateKey) },
                 enabled = privateKey.length >= 64
             ) {
-                Text("Import")
+                Text(stringResource(R.string.mnemonic_import_private_key_action))
             }
         },
         dismissButton = {
             TextButton(onClick = onDismiss) {
-                Text("Cancel")
+                Text(stringResource(R.string.mnemonic_import_cancel))
             }
         }
     )

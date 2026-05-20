@@ -22,8 +22,10 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalLifecycleOwner
+import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
+import com.rjnr.pocketnode.R
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.core.content.ContextCompat
 import com.google.accompanist.permissions.ExperimentalPermissionsApi
@@ -58,10 +60,10 @@ fun QrScannerScreen(
     Scaffold(
         topBar = {
             TopAppBar(
-                title = { Text("Scan QR Code") },
+                title = { Text(stringResource(R.string.qr_scanner_title)) },
                 navigationIcon = {
                     IconButton(onClick = onNavigateBack) {
-                        Icon(Lucide.X, contentDescription = "Close")
+                        Icon(Lucide.X, contentDescription = stringResource(R.string.qr_scanner_close_cd))
                     }
                 },
                 colors = TopAppBarDefaults.topAppBarColors(
@@ -334,7 +336,7 @@ private fun PermissionRationale(
         Spacer(modifier = Modifier.height(24.dp))
 
         Button(onClick = onRequestPermission) {
-            Text("Grant Permission")
+            Text(stringResource(R.string.qr_scanner_grant_permission))
         }
     }
 }
@@ -367,7 +369,7 @@ private fun PermissionDenied(
         Spacer(modifier = Modifier.height(24.dp))
 
         Button(onClick = onNavigateBack) {
-            Text("Go Back")
+            Text(stringResource(R.string.qr_scanner_go_back))
         }
     }
 }

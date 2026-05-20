@@ -52,11 +52,13 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.tooling.preview.Preview
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import com.rjnr.pocketnode.R
 import androidx.hilt.navigation.compose.hiltViewModel
 import androidx.navigation.NavController
 import com.composables.icons.lucide.ChevronLeft
@@ -79,10 +81,10 @@ fun NodeStatusScreen(
         containerColor = MaterialTheme.colorScheme.surface,
         topBar = {
             TopAppBar(
-                title = { Text("Node Status") },
+                title = { Text(stringResource(R.string.node_status_title)) },
                 navigationIcon = {
                     IconButton(onClick = { navController.popBackStack() }) {
-                        Icon(Lucide.ChevronLeft, contentDescription = "Back")
+                        Icon(Lucide.ChevronLeft, contentDescription = stringResource(R.string.common_back_cd))
                     }
                 },
                 colors = TopAppBarDefaults.topAppBarColors(
@@ -221,7 +223,7 @@ fun StatusTab(uiState: NodeStatusUiState, onCallRpc: (String) -> Unit) {
         // Custom RPC section
         item {
             Spacer(modifier = Modifier.height(8.dp))
-            Text("Custom RPC", style = MaterialTheme.typography.titleMedium)
+            Text(stringResource(R.string.node_status_custom_rpc), style = MaterialTheme.typography.titleMedium)
             Row(
                 modifier = Modifier.fillMaxWidth(),
                 horizontalArrangement = Arrangement.spacedBy(8.dp)
@@ -229,11 +231,11 @@ fun StatusTab(uiState: NodeStatusUiState, onCallRpc: (String) -> Unit) {
                 OutlinedTextField(
                     value = rpcMethod,
                     onValueChange = { rpcMethod = it },
-                    label = { Text("Method") },
+                    label = { Text(stringResource(R.string.node_status_method_label)) },
                     modifier = Modifier.weight(1f)
                 )
                 Button(onClick = { onCallRpc(rpcMethod) }) {
-                    Text("Call")
+                    Text(stringResource(R.string.node_status_call))
                 }
             }
             if (uiState.rpcResult.isNotEmpty()) {
@@ -320,7 +322,7 @@ fun LogsTab(logs: List<String>, onClearLogs: () -> Unit) {
             ) {
                 Icon(Icons.Rounded.Download, null, modifier = Modifier.size(18.dp))
                 Spacer(Modifier.width(8.dp))
-                Text("Export Logs", fontSize = 14.sp)
+                Text(stringResource(R.string.node_status_export_logs), fontSize = 14.sp)
             }
             IconButton(
                 onClick = onClearLogs,
