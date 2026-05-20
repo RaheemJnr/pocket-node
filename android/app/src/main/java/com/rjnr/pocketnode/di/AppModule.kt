@@ -166,6 +166,12 @@ object AppModule {
 
     @Provides
     @Singleton
+    fun provideLightClientBridge(
+        impl: com.rjnr.pocketnode.data.gateway.LightClientNativeBridge,
+    ): com.rjnr.pocketnode.data.gateway.LightClientBridge = impl
+
+    @Provides
+    @Singleton
     @Named("migrationPrefs")
     fun provideMigrationPrefs(@ApplicationContext context: Context): SharedPreferences =
         context.getSharedPreferences("key_migration", Context.MODE_PRIVATE)

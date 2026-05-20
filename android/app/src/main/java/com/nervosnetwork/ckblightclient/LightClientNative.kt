@@ -8,7 +8,22 @@ package com.nervosnetwork.ckblightclient
  */
 object LightClientNative {
     init {
-        System.loadLibrary("ckb_light_client_lib")
+        // On Android the .so is bundled in the APK and load always succeeds.
+        // On JVM (Robolectric unit tests) the library isn't on java.library.path;
+        // swallow the UnsatisfiedLinkError so the object can still initialize.
+        // Tests must mock the native methods before calling them, or they'll
+        // throw the same error at first invocation. Production behavior is
+        // unchanged: on real devices loadLibrary never fails.
+        try {
+            System.loadLibrary("ckb_light_client_lib")
+        } catch (e: UnsatisfiedLinkError) {
+            // Intentionally swallowed for JVM test environments. Logged via
+            // System.err so it surfaces if encountered unexpectedly.
+            System.err.println(
+                "LightClientNative: loadLibrary skipped (${e.message}). " +
+                    "Expected only in JVM test runs; native calls will fail at invocation time."
+            )
+        }
     }
 
     // ========================================

@@ -78,6 +78,26 @@ internal fun balancedFilterAlgorithm(
  * `lastBalancedEligibleSet` is one extra `nativeSetScripts` call, which
  * is idempotent and benign.
  */
+/**
+ * Thin indirection over the two static JNI methods [SyncCoordinator]
+ * touches. Exists so unit tests can fake the JNI surface without
+ * forcing `System.loadLibrary` on the JVM — `external` methods can't
+ * be intercepted by mockk directly. Production: [LightClientNativeBridge].
+ */
+interface LightClientBridge {
+    suspend fun setScripts(scriptsJson: String, command: Int): Boolean
+    suspend fun getTipHeaderRaw(): String?
+}
+
+/** Production bridge — delegates straight to the JNI `external fun`s. */
+@Singleton
+class LightClientNativeBridge @Inject constructor() : LightClientBridge {
+    override suspend fun setScripts(scriptsJson: String, command: Int): Boolean =
+        com.nervosnetwork.ckblightclient.LightClientNative.nativeSetScripts(scriptsJson, command)
+    override suspend fun getTipHeaderRaw(): String? =
+        com.nervosnetwork.ckblightclient.LightClientNative.nativeGetTipHeader()
+}
+
 @Singleton
 class SyncCoordinator @Inject constructor(
     private val walletDao: WalletDao,
@@ -85,6 +105,7 @@ class SyncCoordinator @Inject constructor(
     private val walletPreferences: WalletPreferences,
     private val keyManager: KeyManager,
     private val json: Json,
+    private val lightClient: LightClientBridge,
 ) {
 
     /**
@@ -130,7 +151,7 @@ class SyncCoordinator @Inject constructor(
             "setScriptsAndRecord: statuses (${statuses.size}) and walletIds (${walletIds.size}) must be parallel"
         }
         val jsonStr = json.encodeToString(statuses)
-        val ok = LightClientNative.nativeSetScripts(jsonStr, cmd)
+        val ok = lightClient.setScripts(jsonStr, cmd)
         if (!ok) return false
 
         val now = System.currentTimeMillis()
@@ -274,7 +295,7 @@ class SyncCoordinator @Inject constructor(
             )
         }
 
-        val tipStr = LightClientNative.nativeGetTipHeader()
+        val tipStr = lightClient.getTipHeaderRaw()
         val tipHeight = if (tipStr != null) {
             val tip = json.decodeFromString<JniHeaderView>(tipStr)
             tip.number.removePrefix("0x").toLong(16)
