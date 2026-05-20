@@ -43,7 +43,7 @@ class SettingsViewModel @Inject constructor(
         // Active wallet address — used by SyncOptionsDialog's "look up on explorer"
         // helper for the CUSTOM mode (#85). Null until the wallet is initialized.
         val address: String? = null,
-        val error: String? = null
+        val error: com.rjnr.pocketnode.ui.util.UiMessage? = null,
     )
 
     private val _uiState = MutableStateFlow(UiState())
@@ -144,7 +144,15 @@ class SettingsViewModel @Inject constructor(
         viewModelScope.launch {
             repository.resyncAccount(mode, customBlockHeight)
                 .onFailure { e ->
-                    _uiState.update { it.copy(syncMode = previousMode, error = "Sync mode change failed: ${e.message}") }
+                    _uiState.update {
+                        it.copy(
+                            syncMode = previousMode,
+                            error = com.rjnr.pocketnode.ui.util.UiMessage.Resource(
+                                com.rjnr.pocketnode.R.string.vm_error_sync_mode_change_failed,
+                                listOf(e.message ?: ""),
+                            ),
+                        )
+                    }
                 }
         }
     }
@@ -166,7 +174,14 @@ class SettingsViewModel @Inject constructor(
         viewModelScope.launch {
             repository.switchNetwork(target)
                 .onFailure { e ->
-                    _uiState.update { it.copy(error = "Network switch failed: ${e.message}") }
+                    _uiState.update {
+                        it.copy(
+                            error = com.rjnr.pocketnode.ui.util.UiMessage.Resource(
+                                com.rjnr.pocketnode.R.string.vm_error_network_switch_failed,
+                                listOf(e.message ?: ""),
+                            ),
+                        )
+                    }
                 }
         }
     }

@@ -233,6 +233,15 @@
     <string name="home_copy_cd">Copy</string>
     <!-- endregion -->
 
+    <!-- region: VM errors (#133) -->
+    <string name="vm_error_set_pin_first_send">Set a PIN first to enable send authentication</string>
+    <string name="vm_error_set_pin_first_biometric">Set a PIN first to enable biometric unlock</string>
+    <string name="vm_error_pin_required_remove_wallets">PIN is required while you have a wallet. Delete all wallets first to remove the PIN.</string>
+    <string name="vm_error_pin_required_backups">Cannot remove PIN while encrypted wallet backups exist. Back up your recovery phrase first, then you can remove the PIN.</string>
+    <string name="vm_error_sync_mode_change_failed">Sync mode change failed: %1$s</string>
+    <string name="vm_error_network_switch_failed">Network switch failed: %1$s</string>
+    <!-- endregion -->
+
     <!-- region: SecuritySettings -->
     <string name="security_settings_title">Security Settings</string>
     <string name="security_settings_continue">Continue</string>

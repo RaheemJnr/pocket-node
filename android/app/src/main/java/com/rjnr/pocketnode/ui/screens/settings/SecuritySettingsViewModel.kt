@@ -3,12 +3,14 @@ package com.rjnr.pocketnode.ui.screens.settings
 import androidx.lifecycle.SavedStateHandle
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
+import com.rjnr.pocketnode.R
 import com.rjnr.pocketnode.data.auth.AuthManager
 import com.rjnr.pocketnode.data.auth.PinManager
 import com.rjnr.pocketnode.data.database.dao.WalletDao
 import com.rjnr.pocketnode.data.wallet.KeyBackupManager
 import com.rjnr.pocketnode.data.wallet.KeyManager
 import com.rjnr.pocketnode.data.wallet.KeyMaterial
+import com.rjnr.pocketnode.ui.util.UiMessage
 import dagger.hilt.android.lifecycle.HiltViewModel
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -30,7 +32,7 @@ data class SecuritySettingsUiState(
     val canRemovePin: Boolean = false,
     val biometricStatusText: String = "",
     val isAuthBeforeSendEnabled: Boolean = false,
-    val error: String? = null,
+    val error: UiMessage? = null,
     /**
      * Non-null when the user is being asked to confirm that adding or
      * removing a biometric enrollment will invalidate their V2 wallet
@@ -115,7 +117,7 @@ class SecuritySettingsViewModel @Inject constructor(
 
     fun toggleAuthBeforeSend(enabled: Boolean) {
         if (enabled && !pinManager.hasPin()) {
-            _uiState.update { it.copy(error = "Set a PIN first to enable send authentication") }
+            _uiState.update { it.copy(error = UiMessage.Resource(R.string.vm_error_set_pin_first_send)) }
             return
         }
         authManager.setAuthBeforeSendEnabled(enabled)
@@ -124,7 +126,7 @@ class SecuritySettingsViewModel @Inject constructor(
 
     private fun toggleBiometric(enabled: Boolean) {
         if (enabled && !pinManager.hasPin()) {
-            _uiState.update { it.copy(error = "Set a PIN first to enable biometric unlock") }
+            _uiState.update { it.copy(error = UiMessage.Resource(R.string.vm_error_set_pin_first_biometric)) }
             return
         }
         // The V2 Keystore key is configured with
@@ -166,13 +168,13 @@ class SecuritySettingsViewModel @Inject constructor(
         viewModelScope.launch {
             if (walletDao.count() > 0) {
                 _uiState.update {
-                    it.copy(error = "PIN is required while you have a wallet. Delete all wallets first to remove the PIN.")
+                    it.copy(error = UiMessage.Resource(R.string.vm_error_pin_required_remove_wallets))
                 }
                 return@launch
             }
             if (keyBackupManager.hasAnyBackups()) {
                 _uiState.update {
-                    it.copy(error = "Cannot remove PIN while encrypted wallet backups exist. Back up your recovery phrase first, then you can remove the PIN.")
+                    it.copy(error = UiMessage.Resource(R.string.vm_error_pin_required_backups))
                 }
                 return@launch
             }

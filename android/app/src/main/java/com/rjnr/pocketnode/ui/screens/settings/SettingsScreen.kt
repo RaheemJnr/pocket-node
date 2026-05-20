@@ -79,6 +79,7 @@ import com.rjnr.pocketnode.data.gateway.models.NetworkType
 import com.rjnr.pocketnode.data.gateway.models.SyncMode
 import com.rjnr.pocketnode.data.gateway.models.displayName
 import com.rjnr.pocketnode.R
+import com.rjnr.pocketnode.ui.util.resolveString
 import com.rjnr.pocketnode.ui.components.SyncOptionsSheet
 import com.rjnr.pocketnode.data.wallet.SyncStrategy
 import com.rjnr.pocketnode.data.wallet.ThemeMode
@@ -327,8 +328,8 @@ fun SettingsScreen(
     }
 
     LaunchedEffect(uiState.error) {
-        uiState.error?.let { error ->
-            snackbarHostState.showSnackbar(error)
+        uiState.error?.let { msg ->
+            snackbarHostState.showSnackbar(msg.resolveString(context))
             viewModel.clearError()
         }
     }
