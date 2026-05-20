@@ -28,8 +28,10 @@ import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalClipboardManager
+import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.unit.dp
 import androidx.hilt.navigation.compose.hiltViewModel
+import com.rjnr.pocketnode.R
 import com.composables.icons.lucide.ArrowLeft
 import com.composables.icons.lucide.Clipboard
 import com.composables.icons.lucide.Lucide
@@ -65,10 +67,10 @@ fun AddContactScreen(
     Scaffold(
         topBar = {
             TopAppBar(
-                title = { Text("Add contact") },
+                title = { Text(stringResource(R.string.add_contact_title)) },
                 navigationIcon = {
                     IconButton(onClick = onNavigateBack) {
-                        Icon(Lucide.ArrowLeft, contentDescription = "Back")
+                        Icon(Lucide.ArrowLeft, contentDescription = stringResource(R.string.common_back_cd))
                     }
                 },
                 colors = TopAppBarDefaults.topAppBarColors(
@@ -94,7 +96,7 @@ fun AddContactScreen(
                 addressTrailingIcon = {
                     Box {
                         IconButton(onClick = onNavigateToScanner) {
-                            Icon(Lucide.ScanLine, contentDescription = "Scan QR")
+                            Icon(Lucide.ScanLine, contentDescription = stringResource(R.string.add_contact_scan_cd))
                         }
                     }
                 },
@@ -117,7 +119,7 @@ fun AddContactScreen(
                     modifier = Modifier.size(16.dp),
                 )
                 Spacer(Modifier.size(8.dp))
-                Text("Paste address from clipboard")
+                Text(stringResource(R.string.add_contact_paste))
             }
 
             Spacer(Modifier.height(24.dp))
@@ -134,7 +136,7 @@ fun AddContactScreen(
                         color = MaterialTheme.colorScheme.onPrimary,
                     )
                 } else {
-                    Text("Save contact")
+                    Text(stringResource(R.string.add_contact_save))
                 }
             }
         }

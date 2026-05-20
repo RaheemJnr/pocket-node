@@ -30,11 +30,13 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import com.composables.icons.lucide.Lucide
 import com.composables.icons.lucide.Search
+import com.rjnr.pocketnode.R
 import com.rjnr.pocketnode.data.database.entity.ContactEntity
 
 /**
@@ -73,7 +75,7 @@ fun ContactPickerSheet(
                 .padding(horizontal = 16.dp, vertical = 8.dp),
         ) {
             Text(
-                text = "Send to contact",
+                text = stringResource(R.string.send_contact_picker_title),
                 style = MaterialTheme.typography.titleMedium,
                 fontWeight = FontWeight.SemiBold,
             )
@@ -83,7 +85,7 @@ fun ContactPickerSheet(
                 value = query,
                 onValueChange = { query = it },
                 modifier = Modifier.fillMaxWidth(),
-                placeholder = { Text("Search name or address") },
+                placeholder = { Text(stringResource(R.string.contacts_search_placeholder)) },
                 leadingIcon = { Icon(Lucide.Search, contentDescription = null) },
                 singleLine = true,
             )
@@ -100,9 +102,9 @@ fun ContactPickerSheet(
                 ) {
                     Text(
                         text = if (query.isBlank())
-                            "No saved contacts yet. Add one from Settings → Address Book."
+                            stringResource(R.string.send_contact_picker_empty_no_contacts)
                         else
-                            "No matches for \"$query\"",
+                            stringResource(R.string.send_contact_picker_empty_no_match, query),
                         style = MaterialTheme.typography.bodyMedium,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )

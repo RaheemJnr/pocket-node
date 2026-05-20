@@ -136,6 +136,69 @@
 
     <!-- region: Settings -->
     <string name="settings_help_faq">Help &amp; FAQ</string>
+    <string name="settings_address_book">Address Book</string>
+    <!-- endregion -->
+
+    <!-- region: Contacts (M4 Phase 2) -->
+    <string name="contacts_title">Address Book</string>
+    <string name="contacts_search_placeholder">Search name or address</string>
+    <string name="contacts_add_cd">Add contact</string>
+    <string name="contacts_empty_title">No contacts yet</string>
+    <string name="contacts_empty_body">Save addresses you send to often. Tap the + button to add your first contact.</string>
+    <string name="contacts_no_match">No contacts match \"%1$s\"</string>
+    <string name="contacts_send_cd">Send to %1$s</string>
+
+    <string name="add_contact_title">Add contact</string>
+    <string name="add_contact_save">Save contact</string>
+    <string name="add_contact_paste">Paste address from clipboard</string>
+    <string name="add_contact_field_name">Name</string>
+    <string name="add_contact_field_address">CKB address</string>
+    <string name="add_contact_field_address_placeholder">ckb1… or ckt1…</string>
+    <string name="add_contact_field_notes">Notes (optional)</string>
+    <string name="add_contact_scan_cd">Scan QR</string>
+    <string name="add_contact_required_error">Name and address are required</string>
+
+    <string name="edit_contact_title">Edit contact</string>
+    <string name="edit_contact_save">Save changes</string>
+
+    <string name="contact_detail_title">Contact</string>
+    <string name="contact_detail_network">%1$s network</string>
+    <string name="contact_detail_notes_label">Notes</string>
+    <string name="contact_detail_send_to">Send to %1$s</string>
+    <string name="contact_detail_copy_cd">Copy address</string>
+    <string name="contact_detail_edit_cd">Edit</string>
+    <string name="contact_detail_delete_cd">Delete</string>
+    <string name="contact_detail_copied">Address copied</string>
+    <string name="contact_detail_loading">Loading…</string>
+    <string name="contact_detail_not_found">Contact not found</string>
+    <string name="contact_detail_use_count_one">Sent to 1 time</string>
+    <string name="contact_detail_use_count_other">Sent to %1$d times</string>
+
+    <string name="contact_delete_title">Delete contact?</string>
+    <string name="contact_delete_body">This removes the address book entry. Your sent transactions are unaffected.</string>
+    <string name="contact_delete_confirm">Delete</string>
+    <string name="contact_delete_cancel">Cancel</string>
+
+    <string name="contact_error_invalid_address">Address could not be decoded — check the format</string>
+    <string name="contact_error_wrong_network">This address is for %1$s; switch networks or pick a different address</string>
+    <string name="contact_error_duplicate">An existing contact already uses this address</string>
+    <string name="contact_error_invalid_name">Name must be 1-64 characters</string>
+    <string name="contact_error_notes_too_long">Notes must be 256 characters or fewer</string>
+    <string name="contact_error_no_active_wallet">No active wallet to scope this contact to</string>
+    <string name="contact_error_generic_save">Could not save contact</string>
+    <string name="contact_error_auth_cancelled">Authentication cancelled</string>
+
+    <string name="send_contact_picker_title">Send to contact</string>
+    <string name="send_contact_picker_empty_no_contacts">No saved contacts yet. Add one from Settings → Address Book.</string>
+    <string name="send_contact_picker_empty_no_match">No matches for \"%1$s\"</string>
+    <string name="send_saved_as">Saved as %1$s</string>
+    <string name="send_contact_picker_cd">Pick from contacts</string>
+
+    <string name="save_contact_dialog_title">Save to contacts?</string>
+    <string name="save_contact_dialog_body">Add this recipient to your address book to send to them faster next time.</string>
+    <string name="save_contact_dialog_name_placeholder">e.g. Alice</string>
+    <string name="save_contact_dialog_save">Save</string>
+    <string name="save_contact_dialog_dismiss">Not now</string>
     <!-- endregion -->
 
 </resources>

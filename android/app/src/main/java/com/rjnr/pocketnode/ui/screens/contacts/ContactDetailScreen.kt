@@ -40,11 +40,13 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.platform.LocalClipboardManager
+import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.hilt.navigation.compose.hiltViewModel
+import com.rjnr.pocketnode.R
 import com.composables.icons.lucide.ArrowLeft
 import com.composables.icons.lucide.Copy
 import com.composables.icons.lucide.Lucide
@@ -80,18 +82,20 @@ fun ContactDetailScreen(
     if (uiState.showDeleteConfirm) {
         AlertDialog(
             onDismissRequest = { viewModel.cancelDelete() },
-            title = { Text("Delete contact?") },
-            text = { Text("This removes the address book entry. Your sent transactions are unaffected.") },
+            title = { Text(stringResource(R.string.contact_delete_title)) },
+            text = { Text(stringResource(R.string.contact_delete_body)) },
             confirmButton = {
                 Button(
                     onClick = { viewModel.confirmDelete() },
                     colors = ButtonDefaults.buttonColors(
                         containerColor = MaterialTheme.colorScheme.error,
                     ),
-                ) { Text("Delete") }
+                ) { Text(stringResource(R.string.contact_delete_confirm)) }
             },
             dismissButton = {
-                TextButton(onClick = { viewModel.cancelDelete() }) { Text("Cancel") }
+                TextButton(onClick = { viewModel.cancelDelete() }) {
+                    Text(stringResource(R.string.contact_delete_cancel))
+                }
             },
         )
     }
@@ -99,22 +103,22 @@ fun ContactDetailScreen(
     Scaffold(
         topBar = {
             TopAppBar(
-                title = { Text("Contact") },
+                title = { Text(stringResource(R.string.contact_detail_title)) },
                 navigationIcon = {
                     IconButton(onClick = onNavigateBack) {
-                        Icon(Lucide.ArrowLeft, contentDescription = "Back")
+                        Icon(Lucide.ArrowLeft, contentDescription = stringResource(R.string.common_back_cd))
                     }
                 },
                 actions = {
                     val id = uiState.contact?.id
                     if (id != null) {
                         IconButton(onClick = { onEdit(id) }) {
-                            Icon(Lucide.Pencil, contentDescription = "Edit")
+                            Icon(Lucide.Pencil, contentDescription = stringResource(R.string.contact_detail_edit_cd))
                         }
                         IconButton(onClick = { viewModel.requestDelete() }) {
                             Icon(
                                 imageVector = Lucide.Trash2,
-                                contentDescription = "Delete",
+                                contentDescription = stringResource(R.string.contact_detail_delete_cd),
                                 tint = MaterialTheme.colorScheme.error,
                             )
                         }
@@ -136,7 +140,10 @@ fun ContactDetailScreen(
                 contentAlignment = Alignment.Center,
             ) {
                 Text(
-                    text = if (uiState.isLoading) "Loading…" else "Contact not found",
+                    text = stringResource(
+                        if (uiState.isLoading) R.string.contact_detail_loading
+                        else R.string.contact_detail_not_found
+                    ),
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
             }
@@ -156,7 +163,10 @@ fun ContactDetailScreen(
             )
             Spacer(Modifier.height(4.dp))
             Text(
-                text = "${contact.network.replaceFirstChar { it.uppercase() }} network",
+                text = stringResource(
+                    R.string.contact_detail_network,
+                    contact.network.replaceFirstChar { it.uppercase() },
+                ),
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
@@ -182,11 +192,12 @@ fun ContactDetailScreen(
                         style = MaterialTheme.typography.bodySmall,
                         fontFamily = FontFamily.Monospace,
                     )
+                    val copiedMessage = stringResource(R.string.contact_detail_copied)
                     IconButton(onClick = {
                         clipboard.setText(AnnotatedString(contact.address))
-                        scope.launch { snackbarHostState.showSnackbar("Address copied") }
+                        scope.launch { snackbarHostState.showSnackbar(copiedMessage) }
                     }) {
-                        Icon(Lucide.Copy, contentDescription = "Copy address")
+                        Icon(Lucide.Copy, contentDescription = stringResource(R.string.contact_detail_copy_cd))
                     }
                 }
             }
@@ -194,7 +205,7 @@ fun ContactDetailScreen(
             if (!contact.notes.isNullOrBlank()) {
                 Spacer(Modifier.height(16.dp))
                 Text(
-                    text = "Notes",
+                    text = stringResource(R.string.contact_detail_notes_label),
                     style = MaterialTheme.typography.labelMedium,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
@@ -205,7 +216,10 @@ fun ContactDetailScreen(
             if (contact.useCount > 0) {
                 Spacer(Modifier.height(16.dp))
                 Text(
-                    text = "Sent to ${contact.useCount} time${if (contact.useCount == 1) "" else "s"}",
+                    text = if (contact.useCount == 1)
+                        stringResource(R.string.contact_detail_use_count_one)
+                    else
+                        stringResource(R.string.contact_detail_use_count_other, contact.useCount),
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
@@ -219,7 +233,7 @@ fun ContactDetailScreen(
             ) {
                 Icon(Lucide.Send, contentDescription = null)
                 Spacer(Modifier.size(8.dp))
-                Text("Send to ${contact.name}")
+                Text(stringResource(R.string.contact_detail_send_to, contact.name))
             }
         }
     }

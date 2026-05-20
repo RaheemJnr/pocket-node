@@ -8,7 +8,9 @@ import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.unit.dp
+import com.rjnr.pocketnode.R
 
 /**
  * Shared form fields used by both [AddContactScreen] and
@@ -33,7 +35,7 @@ fun ContactFormFields(
             value = name,
             onValueChange = onNameChange,
             modifier = Modifier.fillMaxWidth(),
-            label = { Text("Name") },
+            label = { Text(stringResource(R.string.add_contact_field_name)) },
             singleLine = true,
         )
         Spacer(Modifier.height(12.dp))
@@ -41,8 +43,8 @@ fun ContactFormFields(
             value = address,
             onValueChange = onAddressChange,
             modifier = Modifier.fillMaxWidth(),
-            label = { Text("CKB address") },
-            placeholder = { Text("ckb1… or ckt1…") },
+            label = { Text(stringResource(R.string.add_contact_field_address)) },
+            placeholder = { Text(stringResource(R.string.add_contact_field_address_placeholder)) },
             singleLine = true,
             enabled = addressEditable,
             trailingIcon = addressTrailingIcon,
@@ -52,7 +54,7 @@ fun ContactFormFields(
             value = notes,
             onValueChange = onNotesChange,
             modifier = Modifier.fillMaxWidth(),
-            label = { Text("Notes (optional)") },
+            label = { Text(stringResource(R.string.add_contact_field_notes)) },
             minLines = 2,
             maxLines = 4,
         )
