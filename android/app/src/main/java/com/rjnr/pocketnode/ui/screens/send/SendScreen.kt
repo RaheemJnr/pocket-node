@@ -77,6 +77,7 @@ import com.composables.icons.lucide.CircleCheck
 import com.composables.icons.lucide.Lucide
 import com.composables.icons.lucide.ScanLine
 import com.composables.icons.lucide.TriangleAlert
+import com.composables.icons.lucide.Users
 import com.composables.icons.lucide.X
 import com.rjnr.pocketnode.data.database.entity.WalletEntity
 import com.rjnr.pocketnode.data.gateway.models.NetworkType
@@ -204,10 +205,27 @@ fun SendScreen(
         )
     }
 
+    var showContactPicker by remember { mutableStateOf(false) }
+    val pickerSheetState = androidx.compose.material3.rememberModalBottomSheetState(skipPartiallyExpanded = true)
+
+    if (showContactPicker) {
+        ContactPickerSheet(
+            sheetState = pickerSheetState,
+            onDismiss = { showContactPicker = false },
+            onContactPicked = { contact ->
+                viewModel.selectContact(contact)
+                showContactPicker = false
+            },
+            loadContacts = { q -> viewModel.searchContacts(q) },
+        )
+    }
+
     SendScreenUI(
         onNavigateBack = onNavigateBack,
         uiState = uiState,
         onNavigateToScanner = onNavigateToScanner,
+        onOpenContactPicker = { showContactPicker = true },
+        onSuggestionPicked = { viewModel.selectContact(it) },
         updateRecipient = viewModel::updateRecipient,
         updateAmount = viewModel::updateAmount,
         setMaxAmount = viewModel::setMaxAmount,
@@ -234,10 +252,12 @@ private fun SendScreenUI(
     onNavigateBack: () -> Unit,
     uiState: SendUiState,
     onNavigateToScanner: () -> Unit,
+    onOpenContactPicker: () -> Unit = {},
+    onSuggestionPicked: (com.rjnr.pocketnode.data.database.entity.ContactEntity) -> Unit = {},
     updateRecipient: (recipientAddress: String) -> Unit,
     updateAmount: (amount: String) -> Unit,
     setMaxAmount: () -> Unit,
-    sendTransaction: () -> Unit
+    sendTransaction: () -> Unit,
 ) {
     Scaffold(
         containerColor = MaterialTheme.colorScheme.surface,
@@ -338,9 +358,63 @@ private fun SendScreenUI(
                     }
                 )
                 Icon(
+                    imageVector = Lucide.Users,
+                    contentDescription = "Pick from contacts",
+                    modifier = Modifier.clickable { onOpenContactPicker() }
+                )
+                Icon(
                     imageVector = Lucide.ScanLine,
                     contentDescription = "Scan",
                     modifier = Modifier.clickable{onNavigateToScanner()}
+                )
+            }
+
+            // Autocomplete suggestions (#196). Hidden when the field has an
+            // exact-match contact or when the user hasn't typed anything yet.
+            if (uiState.recipientSuggestions.isNotEmpty()) {
+                Spacer(modifier = Modifier.height(4.dp))
+                Column(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .background(
+                            MaterialTheme.colorScheme.surfaceVariant,
+                            RoundedCornerShape(8.dp),
+                        ),
+                ) {
+                    uiState.recipientSuggestions.forEach { contact ->
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .clickable { onSuggestionPicked(contact) }
+                                .padding(horizontal = 12.dp, vertical = 8.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                        ) {
+                            Column(modifier = Modifier.weight(1f)) {
+                                Text(
+                                    text = contact.name,
+                                    style = MaterialTheme.typography.bodyMedium,
+                                    fontWeight = FontWeight.Medium,
+                                )
+                                Text(
+                                    text = contact.address.take(20) + "…",
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                )
+                            }
+                        }
+                    }
+                }
+            }
+
+            // Saved-contact inline hint. Shown when the recipient address
+            // exactly matches a contact — useful confirmation that the user
+            // is sending to someone they know.
+            uiState.matchedContact?.let { contact ->
+                Spacer(modifier = Modifier.height(4.dp))
+                Text(
+                    text = "Saved as ${contact.name}",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.primary,
                 )
             }
 
