@@ -92,6 +92,7 @@ import com.composables.icons.lucide.ChevronDown
 import androidx.compose.ui.res.stringResource
 import com.rjnr.pocketnode.ui.components.SecurityBanner
 import com.rjnr.pocketnode.ui.components.SecurityBannerState
+import com.rjnr.pocketnode.ui.components.SyncStallBanner
 import com.rjnr.pocketnode.ui.components.SyncOptionsSheet
 import com.rjnr.pocketnode.ui.components.UpdateDialog
 import com.rjnr.pocketnode.ui.components.AccountSelectorSheet
@@ -480,6 +481,8 @@ fun HomeScreen(
                     selectedTransaction = { selectedTransaction = it },
                     onRetryFailed = { retryDialogTx = it },
                     onTopicHelp = { topic -> educationTopic = topic },
+                    onSyncStallSwitchToRecent = { viewModel.switchToRecentSyncFromStall() },
+                    onSyncStallDismiss = { viewModel.dismissSyncStallBanner() },
                 )
                 if (uiState.isSwitchingWallet) {
                     LinearProgressIndicator(
@@ -547,6 +550,8 @@ fun HomeScreenUI(
     selectedTransaction: (tx: TransactionRecord) -> Unit,
     onRetryFailed: (tx: TransactionRecord) -> Unit = {},
     onTopicHelp: (EducationTopic) -> Unit = {},
+    onSyncStallSwitchToRecent: () -> Unit = {},
+    onSyncStallDismiss: () -> Unit = {},
 ) {
     PullToRefreshBox(
         isRefreshing = uiState.isRefreshing,
@@ -607,6 +612,18 @@ fun HomeScreenUI(
                         }
                     }
                 )
+            }
+
+            // Sync-stall warning banner (#150): syncedToBlock has not advanced
+            // for >= 5 min. Offers one-tap switch to RECENT or dismiss.
+            if (uiState.showSyncStallBanner) {
+                item {
+                    SyncStallBanner(
+                        minutesStalled = uiState.syncStallMinutes,
+                        onSwitchToRecent = onSyncStallSwitchToRecent,
+                        onDismiss = onSyncStallDismiss,
+                    )
+                }
             }
 
             // Sync warning banner

@@ -468,4 +468,11 @@
     <string name="save_contact_dialog_dismiss">Not now</string>
     <!-- endregion -->
 
+    <!-- region: sync stall banner (#150) -->
+    <string name="sync_stall_banner_title">Sync hasn\'t progressed in %1$d min</string>
+    <string name="sync_stall_banner_body">If this wallet has years of history, scanning from that far back is slow. Switch to Recent activity to catch up faster.</string>
+    <string name="sync_stall_banner_action_switch_recent">Use Recent</string>
+    <string name="sync_stall_banner_action_dismiss">Dismiss</string>
+    <!-- endregion -->
+
 </resources>
