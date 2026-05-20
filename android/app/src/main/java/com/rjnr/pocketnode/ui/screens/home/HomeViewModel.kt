@@ -7,6 +7,7 @@ import com.rjnr.pocketnode.data.database.entity.WalletEntity
 import com.rjnr.pocketnode.data.gateway.CacheManager
 import com.rjnr.pocketnode.data.gateway.GatewayRepository
 import com.rjnr.pocketnode.data.gateway.SyncProgress
+import com.rjnr.pocketnode.data.sync.SyncStallDetector
 import com.rjnr.pocketnode.data.gateway.models.NetworkType
 import com.rjnr.pocketnode.data.gateway.models.SyncMode
 import com.rjnr.pocketnode.data.gateway.models.TransactionRecord
@@ -93,6 +94,12 @@ class HomeViewModel @Inject constructor(
     // load these can fire within milliseconds. tryLock means we never queue a
     // duplicate JNI/Room round-trip — the second caller bails immediately.
     private val txRefreshMutex = Mutex()
+
+    // Tracks whether the user has dismissed the stall banner this session.
+    // Reset on sync mode change, wallet switch, network switch (each clears
+    // the detector and re-opens the banner if the new sync also stalls).
+    private var stallBannerDismissed: Boolean = false
+    private val syncStallDetector = SyncStallDetector()
 
     private val _uiState = MutableStateFlow(
         // Restore the sync-options dialog visibility across process death so
@@ -358,12 +365,22 @@ class HomeViewModel @Inject constructor(
     private fun observeSyncProgress() {
         viewModelScope.launch {
             repository.syncProgress.collect { progress ->
+                val stallInfo = syncStallDetector.evaluate(
+                    syncedBlock = progress.syncedToBlock,
+                    tipBlock = progress.tipBlockNumber,
+                    nowMs = System.currentTimeMillis(),
+                )
+                val showStallBanner = stallInfo.isStalled
+                    && progress.isSyncing
+                    && !stallBannerDismissed
                 _uiState.update {
                     it.copy(
                         syncProgress = progress.percentage / 100.0,
                         isSyncing = progress.isSyncing,
                         syncedToBlock = progress.syncedToBlock.toString(),
-                        tipBlockNumber = progress.tipBlockNumber.toString()
+                        tipBlockNumber = progress.tipBlockNumber.toString(),
+                        showSyncStallBanner = showStallBanner,
+                        syncStallMinutes = stallInfo.stalledForMinutes,
                     )
                 }
 
@@ -512,6 +529,8 @@ class HomeViewModel @Inject constructor(
             Log.d(TAG, "Changing sync mode to: $syncMode, customBlock: $customBlockHeight")
 
             repository.stopSyncPolling()
+            syncStallDetector.reset()
+            stallBannerDismissed = false
 
             _uiState.update {
                 it.copy(
@@ -520,7 +539,9 @@ class HomeViewModel @Inject constructor(
                     syncProgress = 0.0,
                     transactions = emptyList(),
                     currentSyncMode = syncMode,
-                    savedCustomBlockHeight = customBlockHeight
+                    savedCustomBlockHeight = customBlockHeight,
+                    showSyncStallBanner = false,
+                    syncStallMinutes = 0L,
                 )
             }
 
@@ -662,7 +683,9 @@ class HomeViewModel @Inject constructor(
     fun switchWallet(walletId: String) {
         viewModelScope.launch {
             try {
-                _uiState.update { it.copy(isSwitchingWallet = true) }
+                syncStallDetector.reset()
+                stallBannerDismissed = false
+                _uiState.update { it.copy(isSwitchingWallet = true, showSyncStallBanner = false, syncStallMinutes = 0L) }
                 walletRepository.switchActiveWallet(walletId)
                 val wallet = walletRepository.getById(walletId) ?: return@launch
                 repository.onActiveWalletChanged(wallet)
@@ -702,6 +725,8 @@ class HomeViewModel @Inject constructor(
         viewModelScope.launch {
             // Cancel active polling before switching
             repository.stopSyncPolling()
+            syncStallDetector.reset()
+            stallBannerDismissed = false
 
             // Clear UI state for fresh network
             _uiState.update {
@@ -715,7 +740,9 @@ class HomeViewModel @Inject constructor(
                     tipBlockNumber = "",
                     peerCount = 0,
                     isSyncing = true,
-                    error = null
+                    error = null,
+                    showSyncStallBanner = false,
+                    syncStallMinutes = 0L,
                 )
             }
 
@@ -846,6 +873,25 @@ class HomeViewModel @Inject constructor(
         walletPreferences.markSyncCoachmarkSeen()
     }
 
+    /**
+     * Hide the sync-stall banner without changing sync mode. Stays hidden
+     * until the user changes sync mode / wallet / network. The detector
+     * itself keeps running and would re-flag if the next reset matches.
+     */
+    fun dismissSyncStallBanner() {
+        stallBannerDismissed = true
+        _uiState.update { it.copy(showSyncStallBanner = false) }
+    }
+
+    /**
+     * One-tap recovery from a stall on a 2021-era wallet (#150): switch to
+     * RECENT sync mode. Delegates to [changeSyncMode] so the polling teardown,
+     * detector reset, and resync run via the existing path.
+     */
+    fun switchToRecentSyncFromStall() {
+        changeSyncMode(SyncMode.RECENT, customBlockHeight = null)
+    }
+
     override fun onCleared() {
         super.onCleared()
         // Do NOT call updateDownloader.cleanup() here. The downloader is a
@@ -921,5 +967,7 @@ data class HomeUiState(
     val isSwitchingWallet: Boolean = false,
     val savedCustomBlockHeight: Long? = null,
     val walletBalances: Map<String, String> = emptyMap(),
-    val showSyncCoachmark: Boolean = false
+    val showSyncCoachmark: Boolean = false,
+    val showSyncStallBanner: Boolean = false,
+    val syncStallMinutes: Long = 0L,
 )
