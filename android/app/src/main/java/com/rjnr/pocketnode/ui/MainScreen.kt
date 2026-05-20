@@ -47,6 +47,7 @@ fun MainScreen(
     onNavigateToPinVerify: () -> Unit = {},
     onNavigateToSecurityChecklist: () -> Unit = {},
     onNavigateToWalletManager: () -> Unit = {},
+    onNavigateToContacts: () -> Unit = {},
     onNavigateToFaq: (anchor: String?) -> Unit = {},
     daoPinVerified: Boolean = false,
 ) {
@@ -169,6 +170,7 @@ fun MainScreen(
                     onNavigateToSecuritySettings = onNavigateToSecuritySettings,
                     onNavigateToImport = onNavigateToImport,
                     onNavigateToWalletManager = onNavigateToWalletManager,
+                    onNavigateToContacts = onNavigateToContacts,
                     onNavigateToFaq = onNavigateToFaq,
                 )
             }

@@ -38,7 +38,22 @@ import com.rjnr.pocketnode.ui.screens.wallet.WalletSettingsViewModel
 sealed class Screen(val route: String) {
     object Home : Screen("home")
     object Main : Screen("main")
-    object Send : Screen("send")
+    object Send : Screen("send") {
+        /** Build a Send route with optional recipient/amount prefill query args. */
+        fun routeWithPrefill(recipient: String?, amountShannons: Long?): String {
+            if (recipient == null && amountShannons == null) return route
+            val r = recipient?.let { android.net.Uri.encode(it) }
+            return buildString {
+                append(route)
+                append("?")
+                if (r != null) append("recipient=$r")
+                if (amountShannons != null) {
+                    if (r != null) append("&")
+                    append("amountShannons=$amountShannons")
+                }
+            }
+        }
+    }
     object Receive : Screen("receive")
     object Scanner : Screen("scanner")
     object NodeStatus : Screen("node_status")
@@ -66,6 +81,14 @@ sealed class Screen(val route: String) {
     object Faq : Screen("faq?anchor={anchor}") {
         fun routeWithAnchor(anchor: String?): String =
             if (anchor.isNullOrBlank()) "faq" else "faq?anchor=$anchor"
+    }
+    object Contacts : Screen("contacts")
+    object AddContact : Screen("contacts/add")
+    object EditContact : Screen("contacts/edit/{id}") {
+        fun createRoute(id: String) = "contacts/edit/$id"
+    }
+    object ContactDetail : Screen("contacts/detail/{id}") {
+        fun createRoute(id: String) = "contacts/detail/$id"
     }
 }
 
@@ -325,6 +348,9 @@ fun CkbNavGraph(
                 onNavigateToWalletManager = {
                     navController.navigate(Screen.WalletManager.route)
                 },
+                onNavigateToContacts = {
+                    navController.navigate(Screen.Contacts.route)
+                },
                 onNavigateToFaq = { anchor ->
                     navController.navigate(Screen.Faq.routeWithAnchor(anchor))
                 },
@@ -527,6 +553,57 @@ fun CkbNavGraph(
             ),
         ) {
             FaqScreen(onBack = { navController.popBackStack() })
+        }
+
+        // -- Address book (#193, #194, #195) --
+
+        composable(Screen.Contacts.route) {
+            com.rjnr.pocketnode.ui.screens.contacts.ContactsScreen(
+                onNavigateBack = { navController.popBackStack() },
+                onNavigateToAdd = { navController.navigate(Screen.AddContact.route) },
+                onNavigateToDetail = { id ->
+                    navController.navigate(Screen.ContactDetail.createRoute(id))
+                },
+                onSendToContact = { address ->
+                    navController.navigate(Screen.Send.routeWithPrefill(address, null))
+                },
+            )
+        }
+
+        composable(Screen.AddContact.route) { backStackEntry ->
+            // Scanner returns to AddContact the same way it returns to Send:
+            // via the previous back stack entry's savedStateHandle.
+            com.rjnr.pocketnode.ui.screens.contacts.AddContactScreen(
+                onNavigateBack = { navController.popBackStack() },
+                onNavigateToScanner = { navController.navigate(Screen.Scanner.route) },
+                scannedAddress = backStackEntry.savedStateHandle.get<String>("scanned_address"),
+            )
+        }
+
+        composable(
+            route = Screen.EditContact.route,
+            arguments = listOf(navArgument("id") { type = NavType.StringType }),
+        ) {
+            com.rjnr.pocketnode.ui.screens.contacts.EditContactScreen(
+                onNavigateBack = { navController.popBackStack() },
+            )
+        }
+
+        composable(
+            route = Screen.ContactDetail.route,
+            arguments = listOf(navArgument("id") { type = NavType.StringType }),
+        ) {
+            com.rjnr.pocketnode.ui.screens.contacts.ContactDetailScreen(
+                onNavigateBack = { navController.popBackStack() },
+                onEdit = { id -> navController.navigate(Screen.EditContact.createRoute(id)) },
+                onSend = { address ->
+                    // Pop back to Contacts then push Send so the back stack
+                    // is Contacts → Send rather than Contacts → Detail → Send.
+                    navController.navigate(Screen.Send.routeWithPrefill(address, null)) {
+                        popUpTo(Screen.ContactDetail.route) { inclusive = true }
+                    }
+                },
+            )
         }
     }
 }
