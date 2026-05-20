@@ -10,6 +10,7 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import com.composables.icons.lucide.*
+import com.rjnr.pocketnode.ui.util.resolveString
 import com.rjnr.pocketnode.ui.util.uaTestTag
 import androidx.compose.material3.Button
 import androidx.compose.material3.Icon
@@ -101,8 +102,8 @@ fun AuthScreen(
     }
 
     LaunchedEffect(uiState.error) {
-        uiState.error?.let {
-            snackbarHostState.showSnackbar(it)
+        uiState.error?.let { msg ->
+            snackbarHostState.showSnackbar(msg.resolveString(context))
             viewModel.clearError()
         }
     }

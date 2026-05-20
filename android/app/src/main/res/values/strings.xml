@@ -234,6 +234,10 @@
     <!-- endregion -->
 
     <!-- region: VM errors (#133) -->
+    <string name="vm_error_migration_incomplete">Wallet security upgrade incomplete; you\'ll be prompted again next launch</string>
+    <string name="vm_error_migration_failed">Wallet security upgrade failed: %1$s</string>
+    <string name="vm_error_retry_failed">Couldn\'t retry: %1$s</string>
+    <string name="vm_error_export_failed">Export failed: %1$s</string>
     <string name="vm_error_set_pin_first_send">Set a PIN first to enable send authentication</string>
     <string name="vm_error_set_pin_first_biometric">Set a PIN first to enable biometric unlock</string>
     <string name="vm_error_pin_required_remove_wallets">PIN is required while you have a wallet. Delete all wallets first to remove the PIN.</string>

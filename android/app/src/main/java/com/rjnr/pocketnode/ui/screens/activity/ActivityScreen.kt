@@ -69,6 +69,7 @@ import com.rjnr.pocketnode.data.gateway.models.NetworkType
 import com.rjnr.pocketnode.data.gateway.models.TransactionRecord
 import androidx.compose.ui.res.stringResource
 import com.rjnr.pocketnode.R
+import com.rjnr.pocketnode.ui.util.resolveString
 import com.rjnr.pocketnode.ui.screens.home.HomeNavEvent
 import com.rjnr.pocketnode.ui.theme.ErrorRed
 import com.rjnr.pocketnode.ui.theme.PendingAmber
@@ -206,14 +207,14 @@ fun ActivityScreen(
                 pagingItems.loadState.refresh is LoadState.Error -> {
                     val errorMsg = (pagingItems.loadState.refresh as LoadState.Error).error.message
                     ErrorState(
-                        message = uiState.error ?: errorMsg,
+                        message = uiState.error?.resolveString(context) ?: errorMsg,
                         onRetry = { viewModel.refreshCache() }
                     )
                 }
 
                 uiState.error != null -> {
                     ErrorState(
-                        message = uiState.error,
+                        message = uiState.error!!.resolveString(context),
                         onRetry = { viewModel.refreshCache() }
                     )
                 }
