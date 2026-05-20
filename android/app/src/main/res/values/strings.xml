@@ -234,6 +234,53 @@
     <!-- endregion -->
 
     <!-- region: VM errors (#133) -->
+    <!-- AddWalletViewModel -->
+    <string name="vm_error_enter_wallet_name">Please enter a wallet name</string>
+    <string name="vm_error_select_parent_wallet">Please select a parent wallet</string>
+    <string name="vm_error_fill_all_words">Please fill in all 12 words</string>
+    <string name="vm_error_words_not_bip39">One or more words are not in the BIP39 wordlist</string>
+    <string name="vm_error_invalid_mnemonic">Invalid mnemonic. Please check your words and try again.</string>
+    <string name="vm_error_invalid_private_key">Private key must be 32 bytes (64 hex characters)</string>
+    <!-- WalletManager / WalletSettings -->
+    <string name="vm_error_switch_wallet_failed">Failed to switch wallet: %1$s</string>
+    <string name="vm_error_rename_failed">Failed to rename: %1$s</string>
+    <string name="vm_error_cannot_delete_active">Cannot delete the active wallet. Switch to another wallet first.</string>
+    <string name="vm_error_cannot_delete_last">Cannot delete the last wallet. Create another wallet first.</string>
+    <string name="vm_error_delete_sub_accounts_first_one">This wallet has 1 sub-account. Delete it first before removing the parent.</string>
+    <string name="vm_error_delete_sub_accounts_first_other">This wallet has %1$d sub-accounts. Delete them first before removing the parent.</string>
+    <string name="vm_error_delete_failed">Delete failed: %1$s</string>
+    <string name="vm_error_reopen_for_biometric">Reopen this screen — biometric unlock required for V2 wallets</string>
+    <string name="vm_error_auth_cancelled">Authentication cancelled</string>
+    <string name="vm_error_cannot_read_wallet_key">Cannot read wallet key: %1$s</string>
+    <string name="vm_error_biometric_changed_self">Biometric enrollment changed — re-import this wallet to view its recovery phrase</string>
+    <string name="vm_error_biometric_changed_parent">Biometric enrollment changed — re-import the parent wallet to create sub-accounts</string>
+    <string name="vm_error_biometric_changed_send">Biometric enrollment changed — re-import this wallet from its recovery phrase to continue</string>
+    <string name="vm_error_create_account_failed">Failed to create account: %1$s</string>
+    <string name="vm_error_parent_no_mnemonic">Parent wallet has no mnemonic</string>
+    <string name="vm_error_cannot_read_parent">Cannot read parent wallet: %1$s</string>
+    <!-- DaoViewModel -->
+    <string name="vm_error_invalid_deposit_amount">Invalid deposit amount</string>
+    <string name="vm_error_no_active_wallet_dao">No active wallet</string>
+    <string name="vm_error_auth_failed_with_reason">Authentication failed: %1$s</string>
+    <!-- HomeViewModel -->
+    <string name="vm_error_registration_failed">Registration failed: %1$s</string>
+    <string name="vm_error_load_transactions_failed">Failed to load transactions: %1$s</string>
+    <string name="vm_error_sync_mode_change_failed_home">Failed to change sync mode: %1$s</string>
+    <string name="vm_error_import_failed">Import failed: %1$s</string>
+    <!-- SendViewModel -->
+    <string name="vm_error_network_changed_tx_cancelled">Network changed. Transaction cancelled.</string>
+    <string name="vm_error_send_v2_reopen">This wallet requires biometric unlock; reopen Send and try again</string>
+    <string name="vm_error_enter_recipient">Please enter recipient address</string>
+    <string name="vm_error_enter_amount">Please enter amount</string>
+    <string name="vm_error_invalid_amount">Invalid amount</string>
+    <string name="vm_error_min_transfer">Minimum transfer is 61 CKB</string>
+    <string name="vm_error_insufficient_balance">Insufficient balance</string>
+    <string name="vm_error_wallet_not_initialized">Wallet not initialized</string>
+    <string name="vm_error_no_active_wallet">No active wallet</string>
+    <string name="vm_error_access_keys_failed">Failed to access wallet keys: %1$s</string>
+    <!-- OnboardingViewModel -->
+    <string name="vm_error_no_device_credential">Set a screen lock (PIN, pattern, password, or biometric) in Android Settings, then try again. Pocket Node uses your device lock to protect your wallet keys.</string>
+
     <string name="vm_error_migration_incomplete">Wallet security upgrade incomplete; you\'ll be prompted again next launch</string>
     <string name="vm_error_migration_failed">Wallet security upgrade failed: %1$s</string>
     <string name="vm_error_retry_failed">Couldn\'t retry: %1$s</string>

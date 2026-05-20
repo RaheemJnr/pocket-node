@@ -5,8 +5,10 @@ import androidx.lifecycle.viewModelScope
 import com.rjnr.pocketnode.data.database.entity.WalletEntity
 import com.rjnr.pocketnode.data.gateway.GatewayRepository
 import com.rjnr.pocketnode.data.wallet.MnemonicManager
+import com.rjnr.pocketnode.R
 import com.rjnr.pocketnode.data.wallet.WalletRepository
 import com.rjnr.pocketnode.ui.util.Bip39WordList
+import com.rjnr.pocketnode.ui.util.UiMessage
 import dagger.hilt.android.lifecycle.HiltViewModel
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -24,7 +26,7 @@ data class AddWalletUiState(
     val importPrivateKey: String = "",
     val createdWallet: WalletEntity? = null,
     val isNewlyGenerated: Boolean = false,
-    val error: String? = null,
+    val error: UiMessage? = null,
     val parentWallets: List<WalletEntity> = emptyList(),
     val selectedParentId: String? = null
 )
@@ -57,11 +59,11 @@ class AddWalletViewModel @Inject constructor(
         val parentId = _uiState.value.selectedParentId
 
         if (name.isBlank()) {
-            _uiState.update { it.copy(error = "Please enter a wallet name") }
+            _uiState.update { it.copy(error = UiMessage.Resource(R.string.vm_error_enter_wallet_name)) }
             return
         }
         if (parentId == null) {
-            _uiState.update { it.copy(error = "Please select a parent wallet") }
+            _uiState.update { it.copy(error = UiMessage.Resource(R.string.vm_error_select_parent_wallet)) }
             return
         }
 
@@ -73,7 +75,7 @@ class AddWalletViewModel @Inject constructor(
                 gatewayRepository.onActiveWalletChanged(wallet)
                 _uiState.update { it.copy(isLoading = false, createdWallet = wallet) }
             }.onFailure { error ->
-                _uiState.update { it.copy(isLoading = false, error = error.message) }
+                _uiState.update { it.copy(isLoading = false, error = error.message?.let(UiMessage::Raw)) }
             }
         }
     }
@@ -145,7 +147,7 @@ class AddWalletViewModel @Inject constructor(
         if (_uiState.value.isLoading) return // prevent double-tap
         val name = _uiState.value.name.trim()
         if (name.isBlank()) {
-            _uiState.update { it.copy(error = "Please enter a wallet name") }
+            _uiState.update { it.copy(error = UiMessage.Resource(R.string.vm_error_enter_wallet_name)) }
             return
         }
 
@@ -162,7 +164,7 @@ class AddWalletViewModel @Inject constructor(
                 gatewayRepository.onActiveWalletChanged(wallet)
                 _uiState.update { it.copy(isLoading = false, createdWallet = wallet, isNewlyGenerated = true) }
             }.onFailure { error ->
-                _uiState.update { it.copy(isLoading = false, error = error.message) }
+                _uiState.update { it.copy(isLoading = false, error = error.message?.let(UiMessage::Raw)) }
             }
         }
     }
@@ -173,19 +175,19 @@ class AddWalletViewModel @Inject constructor(
         val words = _uiState.value.importWords.map { it.trim().lowercase() }
 
         if (name.isBlank()) {
-            _uiState.update { it.copy(error = "Please enter a wallet name") }
+            _uiState.update { it.copy(error = UiMessage.Resource(R.string.vm_error_enter_wallet_name)) }
             return
         }
         if (words.any { it.isEmpty() }) {
-            _uiState.update { it.copy(error = "Please fill in all 12 words") }
+            _uiState.update { it.copy(error = UiMessage.Resource(R.string.vm_error_fill_all_words)) }
             return
         }
         if (words.any { !Bip39WordList.isValidWord(it) }) {
-            _uiState.update { it.copy(error = "One or more words are not in the BIP39 wordlist") }
+            _uiState.update { it.copy(error = UiMessage.Resource(R.string.vm_error_words_not_bip39)) }
             return
         }
         if (!mnemonicManager.validateMnemonic(words)) {
-            _uiState.update { it.copy(error = "Invalid mnemonic. Please check your words and try again.") }
+            _uiState.update { it.copy(error = UiMessage.Resource(R.string.vm_error_invalid_mnemonic)) }
             return
         }
 
@@ -197,7 +199,7 @@ class AddWalletViewModel @Inject constructor(
                 gatewayRepository.onActiveWalletChanged(wallet)
                 _uiState.update { it.copy(isLoading = false, createdWallet = wallet) }
             }.onFailure { error ->
-                _uiState.update { it.copy(isLoading = false, error = error.message) }
+                _uiState.update { it.copy(isLoading = false, error = error.message?.let(UiMessage::Raw)) }
             }
         }
     }
@@ -208,11 +210,11 @@ class AddWalletViewModel @Inject constructor(
         val key = _uiState.value.importPrivateKey.trim()
 
         if (name.isBlank()) {
-            _uiState.update { it.copy(error = "Please enter a wallet name") }
+            _uiState.update { it.copy(error = UiMessage.Resource(R.string.vm_error_enter_wallet_name)) }
             return
         }
         if (key.removePrefix("0x").length != 64) {
-            _uiState.update { it.copy(error = "Private key must be 32 bytes (64 hex characters)") }
+            _uiState.update { it.copy(error = UiMessage.Resource(R.string.vm_error_invalid_private_key)) }
             return
         }
 
@@ -224,7 +226,7 @@ class AddWalletViewModel @Inject constructor(
                 gatewayRepository.onActiveWalletChanged(wallet)
                 _uiState.update { it.copy(isLoading = false, createdWallet = wallet) }
             }.onFailure { error ->
-                _uiState.update { it.copy(isLoading = false, error = error.message) }
+                _uiState.update { it.copy(isLoading = false, error = error.message?.let(UiMessage::Raw)) }
             }
         }
     }

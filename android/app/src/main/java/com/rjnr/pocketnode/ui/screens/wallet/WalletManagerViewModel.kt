@@ -48,7 +48,14 @@ class WalletManagerViewModel @Inject constructor(
                 gatewayRepository.onActiveWalletChanged(wallet)
             } catch (e: Exception) {
                 Log.e(TAG, "Failed to switch wallet", e)
-                _uiState.update { it.copy(error = "Failed to switch wallet: ${e.message}") }
+                _uiState.update {
+                    it.copy(
+                        error = com.rjnr.pocketnode.ui.util.UiMessage.Resource(
+                            com.rjnr.pocketnode.R.string.vm_error_switch_wallet_failed,
+                            listOf(e.message ?: ""),
+                        ),
+                    )
+                }
             }
         }
     }
@@ -60,5 +67,5 @@ class WalletManagerViewModel @Inject constructor(
 
 data class WalletManagerUiState(
     val walletGroups: List<WalletGroup> = emptyList(),
-    val error: String? = null
+    val error: com.rjnr.pocketnode.ui.util.UiMessage? = null,
 )

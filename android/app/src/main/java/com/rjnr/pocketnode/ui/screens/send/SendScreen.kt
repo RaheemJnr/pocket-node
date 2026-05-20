@@ -81,6 +81,7 @@ import com.composables.icons.lucide.TriangleAlert
 import com.composables.icons.lucide.Users
 import androidx.compose.ui.res.stringResource
 import com.rjnr.pocketnode.R
+import com.rjnr.pocketnode.ui.util.resolveString
 import com.composables.icons.lucide.X
 import com.rjnr.pocketnode.data.database.entity.WalletEntity
 import com.rjnr.pocketnode.data.gateway.models.NetworkType
@@ -205,7 +206,7 @@ fun SendScreen(
     // Show error dialog with better UX
     if (uiState.error != null && uiState.transactionState != TransactionState.SENDING) {
         ErrorDialog(
-            errorMessage = uiState.error ?: "An unknown error occurred",
+            errorMessage = uiState.error?.resolveString(context) ?: "An unknown error occurred",
             onDismiss = { viewModel.clearError() },
             onRetry = if (uiState.transactionState == TransactionState.FAILED) {
                 { viewModel.clearError() }
