@@ -27,8 +27,10 @@ import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
+import com.rjnr.pocketnode.R
 import androidx.core.content.ContextCompat
 import androidx.fragment.app.FragmentActivity
 import androidx.hilt.navigation.compose.hiltViewModel
@@ -42,6 +44,12 @@ fun AuthScreen(
     val uiState by viewModel.uiState.collectAsState()
     val snackbarHostState = remember { SnackbarHostState() }
     val context = LocalContext.current
+
+    // Capture localized strings now — the prompt builder runs from a
+    // non-@Composable callback site, which can't call stringResource().
+    val biometricTitle = stringResource(R.string.auth_biometric_title)
+    val biometricSubtitle = stringResource(R.string.auth_biometric_subtitle)
+    val biometricNegative = stringResource(R.string.auth_biometric_negative)
 
     fun launchBiometric() {
         val activity = context as? FragmentActivity ?: return
@@ -63,9 +71,9 @@ fun AuthScreen(
             }
         )
         val promptInfo = BiometricPrompt.PromptInfo.Builder()
-            .setTitle("Unlock Pocket Node")
-            .setSubtitle("Authenticate to access your wallet")
-            .setNegativeButtonText("Use PIN")
+            .setTitle(biometricTitle)
+            .setSubtitle(biometricSubtitle)
+            .setNegativeButtonText(biometricNegative)
             .build()
         prompt.authenticate(promptInfo)
     }
@@ -112,7 +120,7 @@ fun AuthScreen(
         ) {
             Icon(
                 imageVector = Lucide.Lock,
-                contentDescription = "Locked",
+                contentDescription = stringResource(R.string.auth_locked_cd),
                 modifier = Modifier.size(80.dp),
                 tint = MaterialTheme.colorScheme.primary
             )
@@ -138,7 +146,7 @@ fun AuthScreen(
                     onClick = { launchBiometric() },
                     modifier = Modifier.fillMaxWidth()
                 ) {
-                    Text("Unlock with Fingerprint")
+                    Text(stringResource(R.string.auth_unlock_fingerprint))
                 }
 
                 Spacer(modifier = Modifier.height(12.dp))
@@ -149,7 +157,7 @@ fun AuthScreen(
                     onClick = onNavigateToPinVerify,
                     modifier = Modifier.fillMaxWidth().uaTestTag("auth-use-pin")
                 ) {
-                    Text("Use PIN")
+                    Text(stringResource(R.string.auth_use_pin))
                 }
             }
         }

@@ -9,7 +9,9 @@ import androidx.compose.material3.*
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.unit.dp
+import com.rjnr.pocketnode.R
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -32,10 +34,13 @@ fun SecurityChecklistScreen(
     Scaffold(
         topBar = {
             TopAppBar(
-                title = { Text("Security Setup") },
+                title = { Text(stringResource(R.string.security_checklist_title)) },
                 navigationIcon = {
                     IconButton(onClick = onBack) {
-                        Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "Back")
+                        Icon(
+                            Icons.AutoMirrored.Filled.ArrowBack,
+                            contentDescription = stringResource(R.string.common_back_cd),
+                        )
                     }
                 }
             )
