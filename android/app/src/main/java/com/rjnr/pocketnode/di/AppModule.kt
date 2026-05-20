@@ -239,6 +239,7 @@ object AppModule {
         headerCacheDao: HeaderCacheDao,
         syncProgressDao: SyncProgressDao,
         pendingBroadcastDao: PendingBroadcastDao,
-        broadcastClient: BroadcastClient
-    ): GatewayRepository = GatewayRepository(context, keyManager, walletPreferences, json, transactionBuilder, cacheManager, daoSyncManager, walletMigrationHelper, walletDao, appDatabase, headerCacheDao, syncProgressDao, pendingBroadcastDao, broadcastClient)
+        broadcastClient: BroadcastClient,
+        syncCoordinator: com.rjnr.pocketnode.data.gateway.SyncCoordinator,
+    ): GatewayRepository = GatewayRepository(context, keyManager, walletPreferences, json, transactionBuilder, cacheManager, daoSyncManager, walletMigrationHelper, walletDao, appDatabase, headerCacheDao, syncProgressDao, pendingBroadcastDao, broadcastClient, syncCoordinator)
 }
