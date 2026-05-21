@@ -221,9 +221,7 @@ function ClosingCta() {
         </p>
         <div className="flex flex-col items-stretch gap-3 sm:flex-row sm:items-center">
           <Link
-            href="https://github.com/RaheemJnr/pocket-node/releases/latest"
-            target="_blank"
-            rel="noopener noreferrer"
+            href="/download"
             className="group inline-flex items-center justify-center gap-3 rounded-md border border-green bg-green/5 px-8 py-4 font-doto text-sm font-black uppercase leading-none tracking-wider text-green transition-colors hover:bg-green-deep hover:text-green-glow"
           >
             Download for Android
