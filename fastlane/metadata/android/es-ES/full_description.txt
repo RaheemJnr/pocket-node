@@ -1,0 +1,39 @@
+Pocket Node es la primera cartera Android que ejecuta un cliente ligero CKB completo en tu dispositivo. Tu teléfono es el nodo, no una petición al servidor de otra persona.
+
+POR QUÉ POCKET NODE
+
+La mayoría de las carteras CKB, incluidas las etiquetadas como no custodiales, dependen de un indexador remoto para conocer tu saldo. Pocket Node no. El cliente ligero embebido en la app verifica las cabeceras de bloques y los datos de las celdas directamente contra la red Nervos. Sin analíticas. Sin telemetría. Sin conexiones de retorno.
+
+CARACTERÍSTICAS
+
+- Cliente ligero CKB embebido (Rust, en proceso vía JNI) para saldo, historial y difusión de transacciones
+- Frase de recuperación BIP39 de 12 palabras, generada localmente en el primer arranque; también admite importación
+- Multi-cartera con subcuentas HD. Carteras ilimitadas por instalación. Una sola frase principal cubre todas las cuentas derivadas
+- Soporte nativo para Nervos DAO: depósito, retiro en dos fases, seguimiento de compensación por celda (calculado a partir de los campos DAO de las cabeceras de bloque)
+- Libreta de direcciones con sugerencias inteligentes, autocompletado en la pantalla Enviar y aviso de guardar contacto tras cada envío exitoso
+- Derivación de PIN con Argon2id, coste de memoria 64 MB. Bloqueo acumulativo con decaimiento de 24 horas; bloqueo permanente tras 10 fallos
+- Desbloqueo biométrico respaldado por el Android Keystore. Autenticación por operación para firmar transacciones y mostrar la frase de recuperación
+- Cuatro modos de sincronización: Cartera nueva (instantánea), Actividad reciente (unos 2 minutos), Altura de bloque personalizada (con enlace al explorador), Historial completo
+- Detector de sincronización estancada con recuperación de un toque para carteras antiguas
+- Actualizador en la app para quienes instalan desde GitHub Releases
+- Escáner de códigos QR para direcciones del destinatario
+- Mainnet y testnet, intercambiables desde Ajustes
+- Modo oscuro con opciones Sistema, Claro y Oscuro
+
+ALMACENAMIENTO DE CLAVES
+
+Las claves privadas se cifran con una clave AES-256-GCM generada por el Android Keystore y vinculada a la autenticación del usuario. En Android 9 y posteriores, la clave del Keystore está respaldada por hardware mediante el Trusted Execution Environment o el Secure Element. Las claves no pueden extraerse del dispositivo. La firma de transacciones se realiza localmente; las claves privadas nunca abandonan el teléfono.
+
+CÓDIGO ABIERTO
+
+Pocket Node se desarrolló bajo una subvención de la CKB Community DAO. Es totalmente código abierto bajo licencia MIT. Cada línea de código, incluidos el cliente ligero en Rust, el puente JNI y la app Kotlin, es auditable en GitHub.
+
+REQUISITOS
+
+Android 8.0 (Oreo) o posterior. Aproximadamente 100 MB de espacio libre para la app y otros 50 MB a 200 MB para los datos del cliente ligero según el modo de sincronización.
+
+MÁS INFORMACIÓN
+
+Visita pocket-node.com para la guía completa, preguntas frecuentes y código fuente.
+
+Etiquetas: cartera CKB, cartera Nervos, cliente ligero, cartera no custodial, cartera móvil, Nervos DAO, cartera local.
