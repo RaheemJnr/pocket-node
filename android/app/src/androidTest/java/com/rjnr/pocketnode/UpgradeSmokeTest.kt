@@ -281,13 +281,31 @@ class UpgradeSmokeTest {
         from: String,
         maxTaps: Int = 12,
         perTapDelayMs: Long = 250L,
+        postTapsTimeoutMs: Long = 30_000L,
     ): Boolean {
+        // Phase 1: tap until either the title disappears (entry succeeded
+        // and the screen transitioned) or we've dispatched maxTaps. Early
+        // termination matters in SETUP: if 6 of our 8 taps register, the
+        // auto-submit fires at digit 6 and we can stop short of maxTaps.
         repeat(maxTaps) {
             if (!device.hasObject(By.text(from).pkg(PKG))) return true
             clickDigit1(timeoutMs = 2_000L)
             device.waitForIdle(perTapDelayMs)
         }
-        return !device.hasObject(By.text(from).pkg(PKG))
+
+        // Phase 2: stop tapping and wait for the screen to transition off
+        // the named title. On CONFIRM this covers the Argon2id verify
+        // which can take many seconds on a slow x86_64 emulator (no
+        // hardware crypto), plus the navigation animation away from
+        // PinEntryScreen. Without this generous wait the test races the
+        // KDF and reports a false negative — the failure mode that the
+        // first version of this fix hit.
+        val deadline = System.currentTimeMillis() + postTapsTimeoutMs
+        while (System.currentTimeMillis() < deadline) {
+            if (!device.hasObject(By.text(from).pkg(PKG))) return true
+            Thread.sleep(500L)
+        }
+        return false
     }
 
     private fun clickByRes(res: String, timeoutMs: Long = 8_000L, attempts: Int = 6): Boolean {
