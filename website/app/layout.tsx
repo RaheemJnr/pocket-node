@@ -21,7 +21,16 @@ const doto = Doto({
   weight: ['400', '500', '700', '800', '900'],
 })
 
+// metadataBase: resolves relative OG image URLs against the canonical
+// production domain. Without this set, Next.js falls back to
+// http://localhost:3000 at build time and Open Graph images break on
+// every share. Override per-deploy via NEXT_PUBLIC_SITE_URL if the
+// preview build needs a different host.
+const siteUrl =
+  process.env.NEXT_PUBLIC_SITE_URL ?? 'https://pocketnode.app'
+
 export const metadata: Metadata = {
+  metadataBase: new URL(siteUrl),
   title: 'Pocket Node — CKB Light Wallet for Android',
   description:
     'The first Android wallet that runs a full CKB light client on-device. Your keys. Your sync. No middleman.',
@@ -33,6 +42,13 @@ export const metadata: Metadata = {
     description:
       'A native Android wallet that runs a CKB light client on your device. No remote indexer. No custodian.',
     type: 'website',
+    images: ['/icon.png'],
+  },
+  twitter: {
+    card: 'summary_large_image',
+    title: 'Pocket Node — Your phone is the node',
+    description:
+      'A native Android wallet that runs a CKB light client on your device.',
     images: ['/icon.png'],
   },
 }
