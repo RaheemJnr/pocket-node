@@ -185,6 +185,7 @@ coverage/
 docs/*
 !docs/USER_GUIDE.md
 !docs/USER_GUIDE/
+!docs/GRANT_COMPLETION_REPORT.md
 
 # ===================
 # Plans (local only)
