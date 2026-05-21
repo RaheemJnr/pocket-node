@@ -26,13 +26,13 @@ This guide walks through everything you need to use the app, from first install 
 
 Pocket Node is available two ways.
 
-### Google Play Store (recommended)
+### GitHub Release (current)
 
-Search for "Pocket Node" on the Google Play Store and install. Updates arrive automatically through the Play Store like any other app.
+For now, the only way to install Pocket Node is by downloading the APK directly from GitHub. Visit the [releases page](https://github.com/RaheemJnr/pocket-node/releases) and download the `pocket-node-vX.Y.Z.apk` from the latest release.
 
-### GitHub Release sideload
+### Google Play Store (coming soon)
 
-Pocket Node releases are also published on GitHub for users who prefer to install directly without Play Store. Visit the [releases page](https://github.com/RaheemJnr/pocket-node/releases) and download the `pocket-node-vX.Y.Z.apk` from the latest release.
+A Play Store listing is in preparation and will be the recommended install path once it goes live. Until then, GitHub Releases is the official channel.
 
 Tap the APK on your phone. Android will ask whether to allow installs from this source; tap **Settings**, enable **Allow from this source**, then return and tap **Install**.
 
@@ -296,17 +296,17 @@ Each deposit cell in the DAO list shows the current accrued compensation. The nu
 
 Pocket Node ships a new release every two weeks on average. Updates include bug fixes, performance improvements, and new features.
 
-### Play Store
+### In-app updater (current)
 
-If you installed from the Play Store, updates arrive automatically. Open Play Store, search for Pocket Node, and tap **Update** if one is available. Auto-update can be enabled in your Play Store settings.
-
-### In-app updater
-
-If you installed by sideloading from GitHub, the app checks for new GitHub releases on startup and shows a banner at the top of the home screen when a new version is available. Tap **Update** to start the download. The APK downloads in the background; you can keep using the app while it downloads.
+Until the Play Store listing is live, all updates flow through the in-app updater. The app checks for new GitHub releases on startup and shows a banner at the top of the home screen when a new version is available. Tap **Update** to start the download. The APK downloads in the background; you can keep using the app while it downloads.
 
 When the download finishes, tap **Install** on the banner. Android may ask permission to install from unknown sources the first time. After granting, return to the app and the install resumes automatically.
 
 The in-app updater has been stable since v1.6.1. If you are on an older version and the in-app updater is not working reliably, update to the latest version manually from the GitHub releases page once. From then on, future updates work in-app.
+
+### Play Store (coming soon)
+
+Once the Play Store listing is live, users installed via Play Store will receive updates through the normal Play Store channel. The in-app updater will continue to work for GitHub-installed builds.
 
 ### Checking your version
 
@@ -348,7 +348,7 @@ Reopen the app. Your wallet state, sync state, and balance are persisted, so not
 
 If the app crashes immediately on every open:
 
-1. Check that you are on the latest version (uninstall the APK and reinstall from the latest GitHub release or Play Store).
+1. Check that you are on the latest version (uninstall the APK and reinstall from the latest GitHub release).
 2. As a last resort, **before uninstalling**, make sure you have your recovery phrase. Uninstalling deletes all local state including private keys. After reinstall, import your wallet from the recovery phrase.
 
 ### Network switch did not complete
@@ -399,7 +399,7 @@ Switching to a sync mode that starts later than your wallet's first activity mea
 
 **Does Pocket Node work without Google services?**
 
-Yes. The app does not depend on Google Play Services. The Play Store install is just one delivery channel; the APK runs identically when sideloaded from GitHub.
+Yes. The app does not depend on Google Play Services. The APK installed from GitHub Releases is the only delivery channel today, and a future Play Store listing will run the same code.
 
 **How can I report a bug or request a feature?**
 
