@@ -60,6 +60,9 @@ export function Navbar() {
             <NavLink href="/#features">Features</NavLink>
             <NavLink href="/#security">Security</NavLink>
             <NavLink href="/guide">Guide</NavLink>
+            <NavLink href="https://pocket-node-learn-ckb.vercel.app/" external>
+              Learn CKB
+            </NavLink>
             <Link
               href="https://github.com/RaheemJnr/pocket-node/releases/latest"
               target="_blank"
@@ -121,6 +124,13 @@ export function Navbar() {
             <DrawerLink href="/guide" onClick={() => setOpen(false)}>
               User Guide
             </DrawerLink>
+            <DrawerLink
+              href="https://pocket-node-learn-ckb.vercel.app/"
+              onClick={() => setOpen(false)}
+              external
+            >
+              Learn CKB
+            </DrawerLink>
             <DrawerLink href="/privacy" onClick={() => setOpen(false)}>
               Privacy
             </DrawerLink>
@@ -151,10 +161,19 @@ export function Navbar() {
   )
 }
 
-function NavLink({ href, children }: { href: string; children: React.ReactNode }) {
+function NavLink({
+  href,
+  external,
+  children,
+}: {
+  href: string
+  external?: boolean
+  children: React.ReactNode
+}) {
   return (
     <Link
       href={href}
+      {...(external ? { target: '_blank', rel: 'noopener noreferrer' } : {})}
       className="flex h-20 items-center px-5 font-doto text-sm font-black uppercase leading-none tracking-wide text-green/80 transition-colors hover:text-green-glow"
     >
       {children}
