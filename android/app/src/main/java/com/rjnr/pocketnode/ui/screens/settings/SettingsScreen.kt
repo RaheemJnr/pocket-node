@@ -91,6 +91,12 @@ import com.rjnr.pocketnode.ui.theme.PendingAmber
 
 private const val GITHUB_URL = "https://github.com/RaheemJnr/pocket-node/"
 
+// Privacy Policy lives at the canonical public domain. Mirror at
+// docs/PRIVACY.md in the source repository (also published under
+// `https://github.com/RaheemJnr/pocket-node/blob/main/docs/PRIVACY.md`).
+// Update both when policy text changes.
+private const val PRIVACY_URL = "https://pocket-node.com/privacy"
+
 private val ColorAmber = PendingAmber
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -552,6 +558,16 @@ private fun SettingsScreenUI(
                         // Custom Tabs keeps the GitHub round-trip inside the app
                         // task, same reasoning as the explorer launches (#138).
                         com.rjnr.pocketnode.ui.util.openInBrowser(context, GITHUB_URL)
+                    }
+                )
+            }
+
+            item {
+                SettingsLinkRow(
+                    icon = Lucide.ShieldCheck,
+                    title = stringResource(R.string.settings_privacy_policy),
+                    onClick = {
+                        com.rjnr.pocketnode.ui.util.openInBrowser(context, PRIVACY_URL)
                     }
                 )
             }
