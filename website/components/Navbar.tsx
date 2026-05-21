@@ -64,9 +64,7 @@ export function Navbar() {
               Learn CKB
             </NavLink>
             <Link
-              href="https://github.com/RaheemJnr/pocket-node/releases/latest"
-              target="_blank"
-              rel="noopener noreferrer"
+              href="/download"
               className="group flex h-20 items-center gap-3 border-l border-green/40 px-8 font-doto text-sm font-black uppercase leading-none tracking-wide text-green transition-colors hover:bg-green/10"
             >
               Download APK
@@ -145,9 +143,7 @@ export function Navbar() {
 
           <div className="mt-auto border-t border-green/40 p-6">
             <Link
-              href="https://github.com/RaheemJnr/pocket-node/releases/latest"
-              target="_blank"
-              rel="noopener noreferrer"
+              href="/download"
               onClick={() => setOpen(false)}
               className="group flex items-center justify-center gap-3 rounded-md border border-green bg-green/5 px-6 py-4 font-doto text-sm font-black uppercase leading-none tracking-wider text-green transition-colors hover:bg-green-deep hover:text-green-glow"
             >

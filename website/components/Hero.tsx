@@ -38,9 +38,11 @@ export function Hero() {
 
         <div className="flex flex-col items-start gap-3 sm:flex-row sm:items-center">
           <Link
-            href="https://github.com/RaheemJnr/pocket-node/releases/latest"
-            target="_blank"
-            rel="noopener noreferrer"
+            href="/download"
+            // The /download route resolves the latest GitHub release's
+            // .apk asset at request time and 302-redirects to it. The
+            // browser kicks off a normal file download without leaving
+            // the site visually.
             className="group inline-flex items-center gap-3 rounded-md border border-green bg-green/5 px-6 py-4 font-doto text-sm font-black uppercase leading-none tracking-wider text-green transition-colors hover:bg-green-deep hover:text-green-glow"
           >
             Download APK
