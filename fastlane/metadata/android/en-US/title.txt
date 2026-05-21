@@ -1,1 +1,1 @@
-Pocket Node
+Pocket Node: CKB Light Wallet

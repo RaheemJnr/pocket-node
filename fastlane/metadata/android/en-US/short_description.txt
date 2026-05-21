@@ -1,1 +1,1 @@
-Self-sovereign CKB wallet with an embedded light client on your phone.
+CKB light client on your phone. No remote servers. Your keys, your node.
