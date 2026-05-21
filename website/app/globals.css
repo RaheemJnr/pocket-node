@@ -1,0 +1,35 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  html {
+    scroll-behavior: smooth;
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
+  }
+
+  body {
+    @apply bg-bg text-white font-sans antialiased;
+  }
+}
+
+@layer utilities {
+  /* Dot-grid texture used by ckba on header strips. Replace its purple
+     with the brand green at 12% opacity so it reads as a subtle hint
+     rather than a primary surface. */
+  .dot-grid-bg {
+    background-image: radial-gradient(rgba(29, 215, 129, 0.18) 1px, transparent 1px);
+    background-size: 12px 12px;
+  }
+
+  /* Caret arrow used in CTAs (replaces ckba's link.svg mask icon). */
+  .arrow::after {
+    content: '→';
+    margin-left: 0.5rem;
+    transition: transform 200ms ease;
+  }
+  .arrow:hover::after {
+    transform: translateX(2px);
+  }
+}
