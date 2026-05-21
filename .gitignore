@@ -180,9 +180,12 @@ coverage/
 .coverage
 
 # ===================
-# Documentation (local only)
+# Documentation (local only — public docs whitelisted below)
 # ===================
-docs/
+docs/*
+!docs/USER_GUIDE.md
+!docs/USER_GUIDE/
+!docs/GRANT_COMPLETION_REPORT.md
 
 # ===================
 # Plans (local only)
