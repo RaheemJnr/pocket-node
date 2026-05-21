@@ -149,7 +149,7 @@ pocket-node/
 │   └── gradle/libs.versions.toml    Version catalog
 ├── external/
 │   └── ckb-light-client/            Vendored Rust light client + JNI exports
-├── website/                         Static site at pocketnode.app (Vercel)
+├── website/                         Static site at pocket-node.com (Vercel)
 ├── docs/
 │   ├── USER_GUIDE.md                Public end-user guide
 │   └── GRANT_COMPLETION_REPORT.md   M4 / DAO grant completion report
