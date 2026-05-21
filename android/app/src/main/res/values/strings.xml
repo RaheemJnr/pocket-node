@@ -137,6 +137,7 @@
     <!-- region: Settings -->
     <string name="settings_help_faq">Help &amp; FAQ</string>
     <string name="settings_address_book">Address Book</string>
+    <string name="settings_privacy_policy">Privacy Policy</string>
     <!-- endregion -->
 
     <!-- region: Auth -->

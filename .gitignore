@@ -186,6 +186,8 @@ docs/*
 !docs/USER_GUIDE.md
 !docs/USER_GUIDE/
 !docs/GRANT_COMPLETION_REPORT.md
+!docs/PRIVACY.md
+!docs/PLAY_STORE_DATA_SAFETY.md
 
 # ===================
 # Plans (local only)
