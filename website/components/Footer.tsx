@@ -72,6 +72,9 @@ export function Footer() {
             <FooterLink href="https://nervos.org" external>
               Nervos Network
             </FooterLink>
+            <FooterLink href="https://pocket-node-learn-ckb.vercel.app/" external>
+              Learn CKB
+            </FooterLink>
           </FooterColumn>
         </div>
 
