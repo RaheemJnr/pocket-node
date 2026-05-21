@@ -281,7 +281,14 @@ class UpgradeSmokeTest {
         from: String,
         maxTaps: Int = 12,
         perTapDelayMs: Long = 250L,
-        postTapsTimeoutMs: Long = 30_000L,
+        // CI x86_64 emulator has no hardware crypto, so Argon2id with
+        // 64 MB memory cost (the production parameter — see
+        // PinManager.kt) can take 60+ seconds. The previous 30 s bound
+        // caught the failure-time ui-dump showing the CONFIRM screen
+        // with all `pin-keypad-*` nodes `enabled="false"`, i.e. mid-
+        // verify. 90 s is conservative but cheaper than another rerun
+        // cycle to discover the actual ceiling.
+        postTapsTimeoutMs: Long = 90_000L,
     ): Boolean {
         // Phase 1: tap until either the title disappears (entry succeeded
         // and the screen transitioned) or we've dispatched maxTaps. Early
