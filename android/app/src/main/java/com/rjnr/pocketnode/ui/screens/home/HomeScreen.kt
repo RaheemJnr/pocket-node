@@ -180,18 +180,26 @@ fun HomeScreen(
 
     // "Don't know your block height?" helper — opens the user's address page
     // on the CKB explorer so non-technical users can scroll to their first
-    // transaction and read the block number off (#85). Disabled when no
-    // address is loaded yet (pre-init / locked).
+    // transaction and read the block number off (#85).
+    //
+    // Uses an in-process WebView bottom sheet (#139) rather than Custom Tabs:
+    // this flow is round-trip critical (the user needs to come back with a
+    // specific block number in hand), and an OEM memory manager killing a
+    // Custom Tab mid-read forces a full restart. Tx-detail explorer links
+    // elsewhere in the app remain on Custom Tabs because they are fire-and-
+    // forget. Off-host nav inside the sheet escapes to Custom Tabs.
+    var explorerLookupUrl by remember { mutableStateOf<String?>(null) }
     val onLookupBlockHeight: (() -> Unit)? = uiState.address.takeIf { it.isNotBlank() }?.let { addr ->
         {
-            val url = buildExplorerAddressUrl(addr, uiState.currentNetwork)
-            // Custom Tabs first, falls back to ACTION_VIEW under the hood (#138).
-            if (!com.rjnr.pocketnode.ui.util.openInBrowser(context, url)) {
-                scope.launch {
-                    snackbarHostState.showSnackbar("No browser available to open the explorer")
-                }
-            }
+            explorerLookupUrl = buildExplorerAddressUrl(addr, uiState.currentNetwork)
         }
+    }
+
+    explorerLookupUrl?.let { url ->
+        com.rjnr.pocketnode.ui.components.ExplorerWebViewSheet(
+            url = url,
+            onDismiss = { explorerLookupUrl = null },
+        )
     }
 
     // Sync options sheet (settings path)

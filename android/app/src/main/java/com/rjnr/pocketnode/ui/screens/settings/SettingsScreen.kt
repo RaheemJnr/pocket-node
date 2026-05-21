@@ -181,19 +181,18 @@ fun SettingsScreen(
     }
 
     // Sync options dialog
+    var explorerLookupUrl by remember { mutableStateOf<String?>(null) }
     if (uiState.showSyncDialog) {
         // "Don't know your block height?" helper (#85). Opens the user's
         // address page on the CKB explorer when CUSTOM is selected.
+        // Uses the in-process WebView bottom sheet (#139): the lookup flow
+        // is round-trip critical, so Custom Tabs (#138) which is great for
+        // fire-and-forget links is not the right primitive here.
         val onLookupBlockHeight: (() -> Unit)? = uiState.address?.takeIf { it.isNotBlank() }?.let { addr ->
             {
-                val url = com.rjnr.pocketnode.ui.screens.home.buildExplorerAddressUrl(
+                explorerLookupUrl = com.rjnr.pocketnode.ui.screens.home.buildExplorerAddressUrl(
                     addr, uiState.currentNetwork
                 )
-                if (!com.rjnr.pocketnode.ui.util.openInBrowser(context, url)) {
-                    scope.launch {
-                        snackbarHostState.showSnackbar("No browser available to open the explorer")
-                    }
-                }
             }
         }
         SyncOptionsSheet(
@@ -209,6 +208,13 @@ fun SettingsScreen(
             savedCustomBlockHeight = uiState.savedCustomBlockHeight,
             tipBlockNumber = uiState.tipBlockNumber,
             onLookupAddressOnExplorer = onLookupBlockHeight
+        )
+    }
+
+    explorerLookupUrl?.let { url ->
+        com.rjnr.pocketnode.ui.components.ExplorerWebViewSheet(
+            url = url,
+            onDismiss = { explorerLookupUrl = null },
         )
     }
 
