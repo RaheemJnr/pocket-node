@@ -34,6 +34,6 @@ Android 8.0 (Oreo) 或更高版本。应用本身约 100 MB 存储空间,加上�
 
 了解更多
 
-访问 pocketnode.app 获取完整用户指南、常见问题和源代码。
+访问 pocket-node.com 获取完整用户指南、常见问题和源代码。
 
 关键词:CKB 钱包、Nervos 钱包、轻客户端、自托管钱包、移动钱包、Nervos DAO、设备本地钱包。
