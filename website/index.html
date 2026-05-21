@@ -1061,10 +1061,10 @@
         <ul class="navbar-links">
             <li><a href="#features">Features</a></li>
             <li><a href="#security">Security</a></li>
+            <li><a href="#user-guide">Guide</a></li>
             <li><a href="#tech">Technical</a></li>
             <li><a href="/privacy">Privacy</a></li>
             <li><a href="https://github.com/RaheemJnr/pocket-node/issues/new" target="_blank">Feedback</a></li>
-            <li><a href="https://www.figma.com/design/R48OrefCvtluazpCBifKLU/Pocket-Node?m=auto&t=jsy3DBEoWj7XuRDL-1" target="_blank">Figma</a></li>
             <li><a href="https://pocket-node-learn-ckb.vercel.app/" target="_blank">Learn CKB</a></li>
             <li><a href="https://github.com/RaheemJnr/pocket-node" target="_blank" class="btn btn--outline">
                 <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor"><path d="M12 0C5.37 0 0 5.37 0 12c0 5.31 3.435 9.795 8.205 11.385.6.105.825-.255.825-.57 0-.285-.015-1.23-.015-2.235-3.015.555-3.795-.735-4.035-1.41-.135-.345-.72-1.41-1.23-1.695-.42-.225-1.02-.78-.015-.795.945-.015 1.62.87 1.845 1.23 1.08 1.815 2.805 1.305 3.495.99.105-.78.42-1.305.765-1.605-2.67-.3-5.46-1.335-5.46-5.925 0-1.305.465-2.385 1.23-3.225-.12-.3-.54-1.53.12-3.18 0 0 1.005-.315 3.3 1.23.96-.27 1.98-.405 3-.405s2.04.135 3 .405c2.295-1.56 3.3-1.23 3.3-1.23.66 1.65.24 2.88.12 3.18.765.84 1.23 1.905 1.23 3.225 0 4.605-2.805 5.625-5.475 5.925.435.375.81 1.095.81 2.22 0 1.605-.015 2.895-.015 3.3 0 .315.225.69.825.57A12.02 12.02 0 0024 12c0-6.63-5.37-12-12-12z"/></svg>
@@ -1084,10 +1084,10 @@
     </button>
     <a href="#features" onclick="toggleMobileNav()">Features</a>
     <a href="#security" onclick="toggleMobileNav()">Security</a>
+    <a href="#user-guide" onclick="toggleMobileNav()">User Guide</a>
     <a href="#tech" onclick="toggleMobileNav()">Technical</a>
     <a href="/privacy" onclick="toggleMobileNav()">Privacy Policy</a>
     <a href="https://github.com/RaheemJnr/pocket-node/issues/new" target="_blank">Feedback</a>
-    <a href="https://www.figma.com/design/R48OrefCvtluazpCBifKLU/Pocket-Node?m=auto&t=jsy3DBEoWj7XuRDL-1" target="_blank">Figma</a>
     <a href="https://pocket-node-learn-ckb.vercel.app/" target="_blank">Learn CKB</a>
     <a href="https://github.com/RaheemJnr/pocket-node" target="_blank">GitHub</a>
 </div>
@@ -1272,6 +1272,50 @@
                 <h3 class="feature-title">Nervos DAO</h3>
                 <p class="feature-desc">Deposit CKB into the Nervos DAO to earn compensation for secondary issuance. Track deposits, withdrawals, and rewards.</p>
             </div>
+
+            <div class="feature-card animate-on-scroll">
+                <div class="feature-icon">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="8" r="4"/><path d="M20 21v-2a4 4 0 00-3-3.87"/><path d="M4 21v-2a4 4 0 013-3.87"/><circle cx="6" cy="8" r="2.5"/><circle cx="18" cy="8" r="2.5"/></svg>
+                </div>
+                <h3 class="feature-title">Multi-Wallet &amp; HD Sub-Accounts</h3>
+                <p class="feature-desc">Unlimited wallets per install. Sub-accounts derive from a single parent recovery phrase, so one backup covers all of them.</p>
+            </div>
+
+            <div class="feature-card animate-on-scroll">
+                <div class="feature-icon">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M20 21v-2a4 4 0 00-4-4H8a4 4 0 00-4 4v2"/><circle cx="12" cy="7" r="4"/></svg>
+                </div>
+                <h3 class="feature-title">Address Book</h3>
+                <p class="feature-desc">Contacts with smart suggestions and Send-screen autocomplete. After every successful send, the app offers to save the recipient.</p>
+            </div>
+
+            <div class="feature-card animate-on-scroll">
+                <div class="feature-icon">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="23 4 23 10 17 10"/><path d="M20.49 15a9 9 0 11-2.12-9.36L23 10"/></svg>
+                </div>
+                <h3 class="feature-title">In-App Updates</h3>
+                <p class="feature-desc">New releases install in one tap. A Telegram-style banner shows download progress; no manual sideload required after the first install.</p>
+            </div>
+        </div>
+    </div>
+</section>
+
+<!-- ====== USER GUIDE ====== -->
+<section class="user-guide" id="user-guide" style="padding: 100px 0; background: linear-gradient(180deg, var(--bg) 0%, var(--surface) 100%);">
+    <div class="container" style="max-width: 880px; text-align: center;">
+        <p class="section-label animate-on-scroll">Documentation</p>
+        <h2 class="section-title animate-on-scroll">New to Pocket Node?</h2>
+        <p class="section-desc animate-on-scroll" style="margin-bottom: 40px;">
+            The User Guide covers install, recovery-phrase backup, the four sync modes, send and receive, the address book, multi-wallet, Nervos DAO, updates, troubleshooting, an FAQ, and the wallet's security model.
+        </p>
+        <div class="cta-buttons animate-on-scroll" style="justify-content: center; gap: 16px;">
+            <a href="https://github.com/RaheemJnr/pocket-node/blob/main/docs/USER_GUIDE.md" class="btn btn--primary" target="_blank">
+                <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M2 3h6a4 4 0 014 4v14a3 3 0 00-3-3H2z"/><path d="M22 3h-6a4 4 0 00-4 4v14a3 3 0 013-3h7z"/></svg>
+                Read the User Guide
+            </a>
+            <a href="https://github.com/RaheemJnr/pocket-node/blob/main/docs/USER_GUIDE.md#troubleshooting" class="btn btn--outline" target="_blank">
+                Troubleshooting
+            </a>
         </div>
     </div>
 </section>
@@ -1451,6 +1495,8 @@
             <div class="footer-col">
                 <h4>Resources</h4>
                 <ul>
+                    <li><a href="https://github.com/RaheemJnr/pocket-node/blob/main/docs/USER_GUIDE.md" target="_blank">User Guide</a></li>
+                    <li><a href="https://github.com/RaheemJnr/pocket-node/blob/main/docs/GRANT_COMPLETION_REPORT.md" target="_blank">Grant Report</a></li>
                     <li><a href="https://github.com/RaheemJnr/pocket-node" target="_blank">GitHub</a></li>
                     <li><a href="https://nervos.org" target="_blank">Nervos Network</a></li>
                     <li><a href="/privacy">Privacy Policy</a></li>
