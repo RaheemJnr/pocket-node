@@ -125,32 +125,38 @@ class UpgradeSmokeTest {
             clickButton("pin-intro-continue", "Create PIN", ONBOARDING_TIMEOUT_MS)
         )
 
-        // SETUP phase: enter six 1s. Auto-submits on the 6th digit and
-        // advances to CONFIRM.
-        repeat(6) { i ->
-            assertTrue(
-                "PIN digit '1' not clickable at SETUP digit=$i",
-                clickDigitWithRetry(attempts = 3)
-            )
-        }
+        // SETUP phase: tap digit 1 until the SETUP title disappears. This
+        // is the only reliable strategy on slow CI x86_64 emulators: a
+        // fixed `repeat(6)` loop counts dispatched taps, but a single tap
+        // can be silently swallowed during a keypad recomposition (the
+        // accessibility nodes are briefly stripped between dot-indicator
+        // updates). With a fixed loop, 6 dispatched taps can result in
+        // 5 registered digits → auto-submit never fires → "Confirm PIN"
+        // never appears → flake. Polling for title disappearance after
+        // each tap recovers from up to (maxTaps - PIN_LENGTH) swallowed
+        // taps. Over-tapping past 6 is safe: PinViewModel.onDigitEntered
+        // guards on enteredDigits.length >= PIN_LENGTH.
+        assertTrue(
+            "SETUP phase didn't advance — keypad input swallowed during recomposition?",
+            tapDigit1UntilTitleChanges(from = "Create PIN", maxTaps = 12)
+        )
 
-        // Phase-transition sync: wait for the CONFIRM screen's title text
-        // to appear instead of a blind waitForIdle. The keypad nodes can be
-        // briefly unaddressable during the swap, so this gate is the only
-        // reliable signal that pass=1 should start clicking.
+        // Phase-transition sync: confirm we actually landed on CONFIRM and
+        // not some other screen (network switch, error dialog, etc).
         assertTrue(
             "SETUP→CONFIRM transition didn't complete — was a SETUP click missed?",
-            device.wait(Until.hasObject(By.text("Confirm PIN").pkg(PKG)), 15_000L)
+            device.wait(Until.hasObject(By.text("Confirm PIN").pkg(PKG)), 10_000L)
         )
-        device.waitForIdle(1_500L)
+        device.waitForIdle(500L)
 
-        // CONFIRM phase: enter the same six 1s.
-        repeat(6) { i ->
-            assertTrue(
-                "PIN digit '1' not clickable at CONFIRM digit=$i",
-                clickDigitWithRetry(attempts = 3)
-            )
-        }
+        // CONFIRM phase: same polling strategy. The success signal is the
+        // CONFIRM title disappearing as navigation moves the user to Home.
+        // Argon2id verify takes ~300-600 ms during which the keypad is
+        // gated (isVerifying = true); extra taps in that window no-op.
+        assertTrue(
+            "CONFIRM phase didn't complete — keypad input swallowed or PIN mismatch?",
+            tapDigit1UntilTitleChanges(from = "Confirm PIN", maxTaps = 12)
+        )
 
         val balanceRow = device.wait(
             Until.findObject(By.res("home-balance-row")),
@@ -248,17 +254,63 @@ class UpgradeSmokeTest {
         clickButton("pin-keypad-1", "1", timeoutMs)
 
     /**
-     * Click the "1" digit with extra outer retry. Compose recomposes the
-     * keypad on phase transitions and during dot-indicator updates, briefly
-     * stripping addressable accessibility nodes. clickButton has internal
-     * retries but a clean outer retry with waitForIdle in between has
-     * proved necessary on slow CI x86_64 emulators.
+     * Drive PIN entry by tapping digit "1" until the named title text
+     * disappears, indicating the phase has advanced.
+     *
+     * Why this shape: the keypad recomposes on every dot-indicator update.
+     * During recomposition the accessibility tree briefly drops the
+     * `pin-keypad-1` node, so a tap dispatched in that window is silently
+     * swallowed even though `clickButton` returns true. A fixed
+     * `repeat(PIN_LENGTH)` loop counts dispatched taps, not registered
+     * digits, so one swallow per session means auto-submit never fires.
+     *
+     * Polling the screen's title for disappearance gives an authoritative
+     * signal that the underlying state machine actually progressed.
+     * "Create PIN" is shown only in SETUP mode; "Confirm PIN" only in
+     * CONFIRM mode (see PinViewModel.kt). The title swaps the instant the
+     * 6th digit is registered.
+     *
+     * Over-tapping past PIN_LENGTH is safe by construction:
+     * PinViewModel.onDigitEntered guards on
+     * `enteredDigits.length >= PIN_LENGTH` and returns early, so any tap
+     * that lands after the buffer is full is a no-op. Likewise, the
+     * Argon2id verify in CONFIRM sets `isVerifying = true` which gates
+     * the same handler.
      */
-    private fun clickDigitWithRetry(attempts: Int = 3, timeoutMs: Long = 12_000L): Boolean {
-        repeat(attempts) { attempt ->
-            if (clickDigit1(timeoutMs)) return true
-            // Recompose / animation pause before retrying.
-            device.waitForIdle(1_500L)
+    private fun tapDigit1UntilTitleChanges(
+        from: String,
+        maxTaps: Int = 12,
+        perTapDelayMs: Long = 250L,
+        // CI x86_64 emulator has no hardware crypto, so Argon2id with
+        // 64 MB memory cost (the production parameter — see
+        // PinManager.kt) can take 60+ seconds. The previous 30 s bound
+        // caught the failure-time ui-dump showing the CONFIRM screen
+        // with all `pin-keypad-*` nodes `enabled="false"`, i.e. mid-
+        // verify. 90 s is conservative but cheaper than another rerun
+        // cycle to discover the actual ceiling.
+        postTapsTimeoutMs: Long = 90_000L,
+    ): Boolean {
+        // Phase 1: tap until either the title disappears (entry succeeded
+        // and the screen transitioned) or we've dispatched maxTaps. Early
+        // termination matters in SETUP: if 6 of our 8 taps register, the
+        // auto-submit fires at digit 6 and we can stop short of maxTaps.
+        repeat(maxTaps) {
+            if (!device.hasObject(By.text(from).pkg(PKG))) return true
+            clickDigit1(timeoutMs = 2_000L)
+            device.waitForIdle(perTapDelayMs)
+        }
+
+        // Phase 2: stop tapping and wait for the screen to transition off
+        // the named title. On CONFIRM this covers the Argon2id verify
+        // which can take many seconds on a slow x86_64 emulator (no
+        // hardware crypto), plus the navigation animation away from
+        // PinEntryScreen. Without this generous wait the test races the
+        // KDF and reports a false negative — the failure mode that the
+        // first version of this fix hit.
+        val deadline = System.currentTimeMillis() + postTapsTimeoutMs
+        while (System.currentTimeMillis() < deadline) {
+            if (!device.hasObject(By.text(from).pkg(PKG))) return true
+            Thread.sleep(500L)
         }
         return false
     }
