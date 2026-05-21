@@ -152,8 +152,9 @@ pocket-node/
 ├── website/                         Static site at pocketnode.app (Vercel)
 ├── docs/
 │   ├── USER_GUIDE.md                Public end-user guide
-│   ├── GRANT_COMPLETION_REPORT.md   M4 / DAO grant completion report
-│   └── CONTRIBUTING.md sits at repo root
+│   └── GRANT_COMPLETION_REPORT.md   M4 / DAO grant completion report
+├── CONTRIBUTING.md                  Contributor setup + smoke procedures
+├── SECURITY.md                      Threat model + disclosure process
 └── .github/workflows/               CI + release pipelines
 ```
 
@@ -166,9 +167,9 @@ pocket-node/
 | DI | Hilt 2.57.2 |
 | State | StateFlow + MutableStateFlow |
 | Storage | Room 2.8.4 + AndroidKeystore AES-256-GCM |
-| PIN KDF | Argon2id via BouncyCastle 1.70 (no extra dependency; transitive of ckb-sdk-java) |
+| PIN KDF | Argon2id via BouncyCastle 1.70 (version pinned by ckb-sdk-java compatibility) |
 | Serialization | kotlinx.serialization 1.8.0 |
-| Network update | Ktor 3.3.3 (in-app updater download) |
+| Network update | Ktor 3.0.3 (in-app updater download) |
 | Light client | JNI to embedded Rust ckb-light-client |
 | Crypto | CKB SDK Java 4.0.0, BouncyCastle 1.70, secp256k1-kmp 0.21.0 |
 | Auth | AndroidX Biometric 1.1.0 |
@@ -211,7 +212,7 @@ This project is funded by a [CKB Community DAO grant](https://talk.nervos.org/t/
 | M1 | Mainnet ready, BIP39, biometrics, PIN, CI/CD | Done (v1.1.0) |
 | M2 | Nervos DAO integration | Done (v1.3.0 / v1.4.0) |
 | M3 | Multi-wallet, sync optimization, key storage redesign | Done (v1.5.x) |
-| M4 | Security audits, Address Book, Play Store launch | Done (v1.6.x); v1.7.0 + v2.0.0 in flight |
+| M4 | Security audits, Address Book, Play Store launch | Phase 1 + 2 Done (v1.6.x). Phase 3 in flight (v1.7.0 + v2.0.0 launch) |
 
 ## Contributing
 
