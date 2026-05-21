@@ -225,6 +225,15 @@ class WalletPreferences @Inject constructor(
         prefs.edit().putString(KEY_ACTIVE_WALLET_ID, walletId).apply()
     }
 
+    /**
+     * Drop the persisted active-wallet pointer. Used by the Forgot-PIN
+     * factory-reset path so that the active-wallet guard in
+     * [WalletRepository.deleteWallet] does not block bulk deletion.
+     */
+    fun clearActiveWalletId() {
+        prefs.edit().remove(KEY_ACTIVE_WALLET_ID).apply()
+    }
+
     // --- Sync strategy (M3 multi-wallet) ---
 
     fun getSyncStrategy(): SyncStrategy {

@@ -338,4 +338,47 @@ class WalletRepository @Inject constructor(
     }
 
     suspend fun walletCount(): Int = walletDao.count()
+
+    /**
+     * Destructive recovery path for the Forgot-PIN flow. Wipes every
+     * wallet (parents + sub-accounts), all wallet-scoped Room caches,
+     * and all stored key material from the device. Does NOT touch the
+     * PIN itself ([PinManager.removePin] is the caller's responsibility)
+     * or the process JNI state (the caller should restart the process
+     * after this returns to flush the embedded light client).
+     *
+     * The user's funds remain on-chain — only their seed phrase can
+     * restore the wallet after this runs.
+     *
+     * Implementation notes
+     *
+     *   - Iterates the wallet list rather than truncating the Room
+     *     tables because individual [deleteWallet] calls handle each
+     *     wallet's keys, caches, and sub-accounts in a transaction.
+     *     A bulk DELETE would orphan key material under
+     *     EncryptedSharedPreferences / Room key_material.
+     *   - Active-wallet guard in [deleteWallet] is bypassed by
+     *     clearing the active-wallet preference first; this is the
+     *     only place where that guard is intentionally skipped.
+     */
+    suspend fun factoryReset() {
+        // Clear both the preference pointer and the DB row's `isActive`
+        // flag up front so the per-wallet delete loop doesn't re-throw
+        // "Cannot delete the active wallet" on the currently-active row.
+        walletPreferences.clearActiveWalletId()
+        walletDao.deactivateAll()
+        // Snapshot the wallet list before mutation; iterating the live
+        // result would skip rows as deletions land.
+        val parents = walletDao.getAll().filter { it.parentWalletId == null }
+        for (parent in parents) {
+            val subs = walletDao.getSubAccountsList(parent.walletId)
+            for (sub in subs) {
+                runCatching { deleteWallet(sub.walletId) }
+                    .onFailure { Log.w(TAG, "factoryReset: sub ${sub.walletId} delete failed", it) }
+            }
+            runCatching { deleteWallet(parent.walletId) }
+                .onFailure { Log.w(TAG, "factoryReset: parent ${parent.walletId} delete failed", it) }
+        }
+        Log.d(TAG, "factoryReset: ${parents.size} parent wallet(s) wiped")
+    }
 }
