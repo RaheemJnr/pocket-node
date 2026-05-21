@@ -1,243 +1,171 @@
-# Pocket Node: CKB Community DAO Grant Completion Report
+Milestone 4 Completion Report
+Project: Pocket Node: Mobile CKB Light Client Wallet for Android
+Repository: github.com/RaheemJnr/pocket-node
+Milestone: M4: Address Book, Polish & Launch
+Releases: v1.6.0, v1.6.1
+
+Deliverables Summary
+All accepted deliverables for M4 have been completed or are in flight against the v1.7.0 / v2.0.0 launch cuts:
+
+#	Deliverable	Status
+1	Security audit: JNI memory safety (internal Phase 1)	Done
+2	Security audit: Keystore and key-material storage (internal Phase 1)	Done
+3	Security audit: third-party dependency review and version pin (internal Phase 1)	Done
+4	Codex security scan triage: 6 findings merged	Done
+5	V2 auth-bound AES-256-GCM Keystore key chain with eager migration	Done
+6	Argon2id PIN KDF with cumulative 24-hour-decay lockout	Done
+7	Rust JNI hardening: catch_unwind on all 24 exports, RwLock poison recovery, OnceLock defer	Done
+8	Address Book: ContactEntity, DAO, Repository, screens, Send autocomplete, save-on-success	Done
+9	Sync UX: stall detector with one-tap RECENT recovery, truthful percentage baseline	Done
+10	In-app updater: Telegram-style banner, Ktor downloader, permission-resume on ON_RESUME	Done
+11	Manual sync-stall smoke procedure in CONTRIBUTING.md	Done
+12	Public user guide: install, backup, sync, send/receive, DAO, troubleshooting, FAQ, security model	Done
+13	Release: v1.6.0	Done
+14	Release: v1.6.1	Done
+15	Release: v1.7.0 (security + Address Book + polish, week 14)	In flight
+16	Release: v2.0.0 (public launch, week 16)	In flight
+
+Feature 1: Internal Security Audits (Phase 1)
+Three formal internal audits posted with full reports and follow-up issues filed for every Severity ≥ High finding. All such findings are now resolved or formally risk-accepted.
+
+What was built:
+
+JNI memory safety audit covering OnceLock lifecycle, panic safety, string ownership, network-switch constraint. Finding Critical 1 (in-process re-init) documented as a known constraint with a user-facing process-restart mitigation; Finding High 1 (catch_unwind + RwLock poison recovery) closed in #221; Finding High 2 (OnceLock defer until init succeeds, recoverable partial-init) closed in #222
+Keystore and key-material audit against OWASP MASVS L2: 11 findings (0 Critical, 2 High, 4 Medium, 3 Low, 2 Informational). The two High findings drove the V2 Keystore key chain (Feature 2) and the Argon2id PIN KDF (Feature 3)
+Third-party dependency audit producing a per-library SBOM and a Rust cargo-audit pass. Finding High 1 (BouncyCastle 1.70 CVE chain, pinned by upstream ckb-sdk-java) documented as accepted risk; Finding High 2 (tokio + ring RUSTSEC advisories) closed by cargo update in the embedded light client
+Audit reports archived as comments on the originating tracking issues (#186 JNI, #187 Keystore, #188 Deps); each issue closed with a PR-map summary tying findings to the merged fixes
+Issues: #186, #187, #188 (audits); #215/#221, #217/#222, #218 (JNI fixes); #216/#220, #219/#223 (deps fixes)
+
+Feature 2: V2 Auth-Bound Keystore Key Chain
+Wallet private keys and mnemonics are now encrypted with an AES-256-GCM key bound to user authentication. On Android 11+ the binding includes both biometrics and the device credential as fallback; on Android 9 and 10 the key is hardware-backed via the AndroidKeystore TEE.
+
+What was built:
+
+V2 key generation with setUserAuthenticationRequired(true), setInvalidatedByBiometricEnrollment(true), and setUserAuthenticationParameters(0, AUTH_BIOMETRIC_STRONG or AUTH_DEVICE_CREDENTIAL) on API 30+
+WalletKeyReader.readPrivateKey(activity, walletId, ...) and readKeyMaterial(...) activity-aware reads that present BiometricPrompt at the call site; per-operation auth with no grace window
+WalletKeyBundle JSON wraps privateKey + mnemonic into a single V2 ciphertext, so the user gets one prompt per signing or display action (not one per material type)
+KeystoreV2MigrationHelper performs the V1 → V2 migration idempotently and resumably; schema bumps to v10
+Migration trigger from AuthScreen → AuthViewModel.runMigrationIfNeeded(activity) → KeystoreV2MigrationRunner.runMigration after the user's first post-upgrade unlock
+KeyManager.deriveWalletInfoFromEntity used everywhere boot and sync need a WalletInfo, so V2 wallets do not prompt at startup
+Edge cases handled: KeyPermanentlyInvalidated (enrollment changed → user-facing re-import-from-phrase flow), no-credential refusal at wallet setup, biometric-invalidation warning surfaced in Settings + User Guide
+Issues: #213 (umbrella); #225, #226, #227, #228, #229, #230 (sub-PRs in order)
+
+Feature 3: Argon2id PIN KDF and Cumulative Lockout
+PIN derivation moved from a single Blake2b hash to Argon2id with memory-hard parameters; lockout policy moved from a per-session counter to a cumulative 24-hour-decay window with a permanent lockout at 10+ failures.
+
+What was built:
+
+Argon2id at 64 MB memory cost, t=3 iterations, p=1 lane via BouncyCastle 1.70's Argon2BytesGenerator (already on classpath, no new dependency)
+Silent Blake2b → Argon2id migration on the first successful unlock after upgrade: the legacy hash verifies, the new hash overwrites, the legacy is wiped
+Cumulative attempt counter with a 24-hour exponential decay so a tired user's typos do not lock them out, but an attacker's brute-force is throttled
+Permanent lockout at 10+ failures, recoverable only via the 12-word recovery phrase
+Settings UI explains the lockout model so the user is not surprised
+Issues: #214 (umbrella); #224 (single PR)
+
+Feature 4: Codex Security Scan Triage
+A Codex code scan run pre-M4 surfaced 6 hardening opportunities, all addressed.
+
+What was built:
+
+#178 / #212: release signing fails closed at task-graph time when env vars are missing; the release-signing GitHub environment created with required reviewer approval
+#179: resolve active wallet type from durable Room state before the mnemonic-backup startup gate fires (defense-in-depth for #180)
+#180: require authentication before showing the mnemonic backup screen (High severity: mnemonic was rendering pre-auth on cold start)
+#181: remove the Copy Private Key button from the mnemonic flow (clipboard exposure)
+#182: harden the release workflow's tag provenance so a tag push alone cannot trigger an unreviewed release
+#183: remove the dead-code home private-key backup path (was unreachable in current UI; future-proof hardening)
+Operational change: release cuts now use git tag vX.Y.Z && git push --tags, then a manual Actions → Release → Run workflow, then approve the release-signing environment gate
+Issues: #184 (umbrella); #178–#183 (individual findings)
+
+Feature 5: Address Book
+Full contact management with smart suggestions and Send-screen integration. Nine sub-issues, all merged.
+
+What was built:
+
+ContactEntity + Room MIGRATION_9_10: contacts table with name, address (validated against the current network), optional note, createdAt, lastUsedAt
+ContactDao: CRUD plus search-by-name and most-recently-used queries
+ContactRepository: lifecycle, validation, smart-suggestions ordering
+Hilt providers wired into AppModule so the contact stack is injectable everywhere
+ContactsScreen: list, search, empty state with a Settings → Contacts entry point
+AddContactScreen, EditContactScreen, ContactDetailScreen: full per-contact flows
+NavGraph routes for all three contact screens
+SendScreen integration: recipient autocomplete fires on every keystroke, plus a full contact picker sheet
+Save-to-contacts prompt after a successful send: "Save Alice to contacts?" if the address is not already saved; markUsed updates lastUsedAt on every send so the picker always shows the most-recent recipients at the top
+Issues: #189, #190, #191, #192, #193, #194, #195, #196, #197
+
+Feature 6: Sync UX: Stall Detector, Truthful Baseline, One-Tap Recovery
+Real-world reports drove a three-part fix to the long-standing "stayed at 0% for 30 minutes" pathology on 2021-era wallets.
+
+What was built:
+
+SyncCoordinator now logs every (walletId, startBlock) on registration and every (synced, tip, delta, progress) on each 5-second poll, INFO-level so it survives release builds. Next "stayed at 0" report is diagnosable from logcat without instrumentation
+SyncProgressTracker.seedStartHeight anchors the UI percentage to the registered start block, not the first poll's syncedToBlock (which is often 0 during peer warm-up). Percentage is truthful from poll cycle #1
+SyncStallDetector pure-logic watcher: if syncedToBlock has not advanced for 5 minutes while away from tip, HomeViewModel raises showSyncStallBanner. Detector + dismissal flag reset on sync-mode change, wallet switch, network switch
+SyncStallBanner composable with two CTAs: "Use Recent" (one-tap switch to RECENT sync mode for the fastest recovery on 2021-wallet pathology) and "Dismiss" (hides for the session)
+Manual smoke procedure in CONTRIBUTING.md with a symptom-to-code-path failure table so a future regression has a one-line diagnostic path
+Regression test SyncCoordinatorCustomBlockTest pins the CUSTOM block height to the JNI setScripts payload so a future refactor cannot silently drop the user's chosen start block
+Issues: #150 (umbrella); #256, #257, #258, #259 (sub-PRs)
 
-**Grant amount:** USD 15,000
-**Duration:** 4 months (2026-02 through 2026-06)
-**Recipient:** RaheemJnr (sole developer)
-**Project:** Pocket Node: native Android CKB wallet with on-device light client
-**Report date:** 2026-05-21
+Feature 7: In-App Auto-Update Stabilization (v1.6.1)
+The in-app updater shipped in M3 was inconsistent for some users; v1.6.1 rebuilt the download + install pipeline.
 
-## Executive summary
+What was built:
 
-Pocket Node is the first mobile CKB wallet that runs a full light client on the user's device. It is fully self-custodial: private keys are generated locally with hardware-backed encryption, transactions are built and signed on-device, and balance and history are computed from peer-connected block scanning. There is no remote indexer, no custodial server, and no analytics back-channel.
+Telegram-style update banner pinned above the bottom navigation in MainScreen, surfacing download progress and the install CTA across tab switches
+Ktor downloader replaces the previous Android DownloadManager-backed flow, with end-to-end progress reporting and resumable error recovery
+Install-from-unknown-sources permission flow: app sends the user to system settings, captures the pending APK URL + size, and resumes the download automatically on ON_RESUME once permission is granted (the user does not have to re-tap Update)
+Self-check test for the updater's GitHub-Releases polling logic, so a release-channel URL change cannot ship undetected
+Issues: #175 (single PR); BuildConfig releases-URL change in #170
 
-Over the four months of the grant the project shipped 12 tagged releases (v1.1.0 through v1.6.1), closed 4 of 4 funded milestones, opened the codebase under an OSI-approved license, and laid the foundation for a public Play Store launch in v2.0.0.
+Feature 8: Documentation
+Public-facing documentation for end users plus contributor-facing operational docs.
 
-This report documents what shipped against each milestone, the evidence (PRs, releases, audit reports), what was deferred, and what comes next.
+What was built:
 
-## Project state at grant start vs. end
+docs/USER_GUIDE.md: 13 sections covering install, first run, recovery phrase backup, sync modes, send / receive, address book, multi-wallet, Nervos DAO, updates, troubleshooting, FAQ, security model. Plain language, addresses the four sync modes at the point of choice (extending the M3 user-education effort)
+CONTRIBUTING.md extended with the manual sync-stall smoke procedure and a symptom-to-code-path failure table
+SECURITY.md updated with the BouncyCastle 1.70 accepted-risk disclosure (#219 / #223)
+CLAUDE.md updated with the network-switch process-restart constraint (#218) so future contributors do not attempt an in-process nativeStop → nativeInit
+Issues: #205 (user guide, in #260); #144 (manual smoke); #150 (Step 5); #218 (CLAUDE.md note); #219 (SECURITY.md note)
 
-| Capability | Start (2026-02) | End (2026-05) |
-|------------|-----------------|---------------|
-| Networks | Mainnet only, single-wallet | Mainnet + testnet, multi-wallet + HD sub-accounts |
-| Key storage | EncryptedSharedPreferences | Room + AndroidKeystore AES-256-GCM, auth-bound on Android 9+ |
-| PIN KDF | Blake2b (single hash) | Argon2id, 64 MB memory cost, cumulative lockout |
-| Biometric | Optional unlock layer | Required for per-operation auth on the V2 keystore path |
-| Mnemonic | Not implemented | BIP39 generate + import, FLAG_SECURE-protected display, hardware-bound encryption |
-| Send / receive | Working, raw addresses only | Address book, autocomplete, save-to-contacts, retry-failed UX |
-| DAO | Not implemented | Full deposit / withdraw two-phase, compensation tracking, since-field unlock |
-| Sync UX | Always FULL_HISTORY, no progress UI | Four modes, truthful percentage, stall detector with one-tap recovery |
-| Updates | Manual sideload only | Telegram-style in-app updater (#175), Play Store listing in preparation |
-| Documentation | README only | User guide, developer JNI reference (local), grant report, contributing guide |
-| Tests | 50+ unit tests | 628 unit tests passing, plus upgrade-smoke harness on CI |
-| Security audits | None | 3 formal internal audits (JNI, Keystore, Deps) all findings resolved |
+Testing
 
-## Milestone 1: Mainnet Ready & Hardware-Backed Security
+New test files added during M4 cover every load-bearing piece of the new functionality:
 
-**Window:** 2026-02-13 to 2026-02-25
-**Released as:** v1.1.0 (Mainnet Hardening & Closed Beta, 2026-02-23)
-**Allocation:** USD 3,750
+Test File	Coverage
+ContactDaoTest	Room contacts table: insert, query-by-name, most-recently-used ordering, delete, MIGRATION_9_10
+ContactRepositoryTest	Contact CRUD, validation, search, smart-suggestion ranking, lastUsedAt update on every send
+KeystoreEncryptionManagerTest	AES-256-GCM round-trip, V1 vs V2 key generation, setUserAuthenticationRequired flag, hardware-backed Keystore property assertions
+KeystoreV2MigrationHelperTest	Idempotent V1 → V2 migration, resumability, schema bump v9 → v10, post-migration cleanup
+PinManagerTest	Argon2id parameters (64 MB / t=3 / p=1), silent Blake2b → Argon2id migration on first unlock, cumulative 24-hour-decay lockout, permanent lockout at 10 failures
+AuthManagerSessionPinTest	Session-PIN lifecycle, clearing on backgrounding, post-migration unlock paths
+SyncProgressTrackerTest	Rolling-window ETA, percentage baseline via seedStartHeight, reset semantics, no-sample edge cases
+SyncStallDetectorTest	First-call no-stall, advance below threshold not flagged, stall after threshold, advance after stall clears flag, synced-within-tolerance suppresses stall, reset clears state
+SyncCoordinatorCustomBlockTest	Regression pin: CUSTOM block height reaches the JNI setScripts payload; prior savedBlock overrides syncMode-computed start; FULL_HISTORY produces 0x0; setScripts invoked exactly once per registration
 
-### What shipped
+Total: 628 unit tests passing on main (up from 561 at the M3 cut). The upgrade-smoke harness on CI (added late M3 via #144 Phase 2) installs the prior release, installs the new build over it, and verifies the app launches without a migration crash; this caught the v1.5.2 hotfix scenario and continues to gate every release.
 
-Built from a server-backed prototype to a fully self-custodial, mainnet-ready wallet with hardware-backed key storage. All deliverables in the M1 spec landed in v1.1.0 with minor follow-ups in v1.2.x.
+Releases
 
-- **BIP39 mnemonic generation and import** (#11). Local entropy via the OS secure random; never transmitted; presented to user on a FLAG_SECURE-protected confirmation flow.
-- **BIP44 HD derivation** at the standard CKB path `m/44'/309'/0'/0/0` (#11).
-- **Hardware-backed key storage** with `setUserAuthenticationRequired` and StrongBox preference where available (#12).
-- **AuthManager + PinManager** with biometric unlock and PIN fallback (#15).
-- **AuthScreen, PinEntryScreen, SecuritySettingsScreen** (#16). FLAG_SECURE on all sensitive screens.
-- **PIN re-verification gate** for security settings changes (#21).
-- **Mnemonic backup and import screens** with confirm-by-tap flow (#13).
-- **Mainnet production hardening** including bootnode pinning, RPC bind to localhost-only, encrypted storage paths (#19).
-- **Testnet support with network switching** (#18).
-- **UI/UX redesign** based on Nervos team review feedback (#24).
-- **Release workflow + open-source docs + CI** (#20). Repository made public under the standard OSS license; release pipeline gated by signing key with environment approval.
+Version	Highlights
+v1.6.0	First M4 release: in-app updater Telegram-style banner foundation, debug-build version pill, peers indicator becomes NodeStatus shortcut, post-deposit dialog removal, coachmark fixes (#173)
+v1.6.1	In-app updater stabilization (Ktor downloader + permission-resume), versionCode 9 → 10 (#175, #176)
 
-### Evidence
+Both releases include signed APKs attached as assets and are deployable via the in-app updater starting from v1.6.0.
 
-- Release: [v1.1.0: Mainnet Hardening & Closed Beta](https://github.com/RaheemJnr/pocket-node/releases/tag/v1.1.0)
-- Spec: `docs/M1_SPEC.md`
-- Key PRs: #11, #12, #13, #15, #16, #18, #19, #20, #21, #24
+Two further releases are scheduled inside the grant window:
 
-### Deferrals from M1 scope
+v1.7.0 (week 14, ~2026-06-04): Security findings ship in a tagged release (V2 Keystore + Argon2id PIN + JNI hardening), Address Book ships, sync-stall fixes ship, polish items from v1.6.x field testing
+v2.0.0 (week 16, ~2026-06-18): Public launch. User guide published, Play Store listing live (pending company-account setup), external security review engagement begun
 
-None substantive. M1 closed on schedule with everything in the original spec landed.
+What's Next: Beyond the Grant
 
-## Milestone 2: Nervos DAO Protocol Integration
+Work after grant completion will focus on:
 
-**Window:** 2026-02-25 to 2026-03-08
-**Released as:** v1.3.0 / v1.4.0: Nervos DAO Protocol Integration (both tagged 2026-03-08)
-**Allocation:** USD 3,750
+External third-party security review (#204): post-v1.7.0 audit of the full security surface by an independent reviewer
+Translations (#132): user guide and in-app strings localized to Yoruba, Hausa, Pidgin English, Mandarin, Spanish, and others as community contributions land
+SUDT and xUDT token support: native CKB only in v1.x and v2.0; token support is the next roadmap item, demand-driven
+ckb-light-client-lite evaluation (#77): potential drop-in replacement for the vendored light client with a smaller footprint
+DAO batch-unlock UI: M2 shipped per-cell deposit / withdraw; batch-flow polish item
+Transaction CSV export (originally M3-scoped, deferred): tax-tooling users have asked; planned for v2.x
 
-### What shipped
-
-Native Nervos DAO support implementing the full protocol two-phase withdrawal cycle, including the lock-period since-field computation that wallets without protocol-level knowledge cannot do correctly.
-
-- **DAO deposit flow** with cell construction, capacity validation, fee estimation.
-- **DAO withdrawal Phase 1** (initiate). Builds the special withdraw transaction; the deposit cell is marked withdrawing on-chain but funds remain locked.
-- **DAO withdrawal Phase 2** (complete). After the protocol-mandated lock period (one full epoch cycle, approximately 30 days), the wallet computes the absolute-epoch since field and constructs the unlock transaction. Pre-deposit + compensation lands back in the spendable balance.
-- **Compensation tracking** computed from on-chain header DAO fields (not estimated). The accumulated rate (`AR`) and total occupied capacity (`C`) are extracted via dedicated JNI functions (`nativeExtractDaoFields`, `nativeCalculateMaxWithdraw`, `nativeCalculateUnlockEpoch`).
-- **Per-cell DAO lifecycle UI** showing each deposit's age, compensation accrued, withdraw status, and unlock-ready signal.
-- **DAO sync pipeline** with `HeaderCache` and `DaoCell` Room entities (#40 Phase 2). Headers required for compensation math are cached locally to avoid repeated JNI round-trips.
-
-### Evidence
-
-- Releases: [v1.3.0](https://github.com/RaheemJnr/pocket-node/releases/tag/v1.3.0), [v1.4.0](https://github.com/RaheemJnr/pocket-node/releases/tag/v1.4.0)
-- Key PRs: #40, #45, #54
-- DAO utility JNI surface documented in the internal JNI API reference
-
-### Deferrals from M2 scope
-
-- **DAO deposit splitting** (single deposit cell into multiple for partial withdraw flexibility). Deferred to future work; current UX is one-cell-per-deposit which is sufficient for the majority of holders.
-- **DAO withdrawal scheduling / batch unlock** UI. Users currently handle one withdrawal at a time. Batch UX is a polish item.
-
-## Milestone 3: Multi-Wallet & Sync Optimization
-
-**Window:** 2026-03-08 to 2026-04-30
-**Released as:** v1.5.0 (2026-04-22), v1.5.1 User Education (2026-04-29), v1.5.2 Hotfix (2026-04-30)
-**Allocation:** USD 3,750
-
-### What shipped
-
-The biggest single-milestone change. Pocket Node moved from one wallet per install to an unlimited multi-wallet model with HD sub-accounts, while overhauling sync UX so that the previously-opaque "Catching up..." spinner became a transparent, four-mode, ETA-equipped, stall-detecting experience.
-
-- **WalletEntity + WalletDao + WalletRepository** (#48, #57). Multi-wallet schema with parent-child relationships for HD sub-accounts.
-- **WalletManagerScreen + AddWalletScreen + WalletSettingsScreen** for full wallet CRUD.
-- **Sub-account derivation** at `m/44'/309'/N'/0/0` paths; parent recovery phrase covers all derived accounts (no separate backup required).
-- **Per-wallet sync mode** (`WalletPreferences.getSyncModeOrNull(walletId)`). Each wallet remembers its own sync start point.
-- **Four sync modes**: NEW_WALLET (instant), RECENT (last ~200k blocks), CUSTOM (user block height), FULL_HISTORY (genesis). Mode picker at first install plus runtime switching from Settings.
-- **Explorer deeplink helper** for CUSTOM block height selection (#85, #128). User taps a link, browses the explorer at the corresponding date, copies a block number back into the app.
-- **Honest sync state UI** with truthful percentage anchored to the registered start block (not the first poll's block), plus ETA and rate display (#150 Step 3 in v1.7.0 preview).
-- **User education** built into the first-run flow (#90, v1.5.1). Inline explanations for each sync mode at the point of choice; no separate FAQ trip required.
-- **Sync stall detector** with one-tap RECENT recovery (#150 Step 2, v1.7.0 preview). When syncedToBlock has not advanced for 5 min while not at tip, the home screen surfaces a banner.
-- **Migration helper** for legacy single-wallet installs (#48, #57). Idempotent; runs once at upgrade; preserves balance and history.
-- **Sub-account derivation throttle removal** (#118). Earlier versions capped at three sub-accounts per parent; removed without losing the safety check.
-
-### Evidence
-
-- Releases: [v1.5.0](https://github.com/RaheemJnr/pocket-node/releases/tag/v1.5.0), [v1.5.1: User Education](https://github.com/RaheemJnr/pocket-node/releases/tag/v1.5.1), [v1.5.2: Hotfix](https://github.com/RaheemJnr/pocket-node/releases/tag/v1.5.2)
-- Key PRs: #48, #57, #85, #90, #128, #134, #135 (education), #118, #129, #130
-- Spec: `docs/M3_SPEC.md`
-
-### Deferrals from M3 scope
-
-- **Transaction export to CSV** scoped in M3 but deferred. The activity list is fully searchable in-app; CSV export is a v2.x feature for tax-tooling users.
-- **SQLite tuning** deferred as premature optimization. The app's actual database load is modest (a few thousand rows on heaviest-use wallets); no measurable hot paths to tune.
-
-## Milestone 4: Address Book, Polish & Launch
-
-**Window:** 2026-04-30 to 2026-06-06 (in progress at report date)
-**Released as:** v1.6.0 + v1.6.1 (2026-05-19); v1.7.0 planned for week 14 (2026-06-04); v2.0.0 public launch planned for week 16 (2026-06-18)
-**Allocation:** USD 3,750
-
-### What shipped (Phases 1 and 2 of 3 complete)
-
-#### Phase 1: Security audits and hardening
-
-Three formal internal audits with public reports; every Severity High finding resolved or formally risk-accepted.
-
-- **JNI memory safety audit (#186)**: 11 findings covering `OnceLock` lifecycle, panic safety, string ownership, network-switch constraint. Findings High 1 and High 2 closed in #221 and #222; Finding Critical 1 (network-switch in-process re-init) documented as a known constraint with user-facing mitigation (confirm dialog + process restart, #218).
-- **Keystore and key-material audit (#187)**: 11 findings against OWASP MASVS L2. Finding High 1 closed by the V2 auth-bound AES key chain (#225, #226, #227, #228, #229, #230). Finding High 2 closed by Argon2id PIN KDF with cumulative lockout (#224).
-- **Third-party dependency audit (#188)**: 2 High-severity items resolved: ring + tokio RUSTSEC patches (#220); BouncyCastle 1.70 pinned-by-upstream CVE chain documented as accepted risk (#223).
-- **Codex security scan triage (#184)**: 6 findings, all merged (#178 release signing fail-closed, #179 wallet-type pre-auth gate, #180 mnemonic auth gate, #181 mnemonic clipboard hardening, #182 release workflow tag provenance, #183 home backup dead-code removal).
-
-#### Phase 2: Address Book
-
-Full contact management with smart suggestions and Send-screen integration. All 9 sub-issues closed.
-
-- **ContactEntity + Room MIGRATION_9_10** (#189): contacts table with name, address, optional note, created/last-used timestamps.
-- **ContactDao** (#190): CRUD, search, smart-suggestion queries (most-recently-used first).
-- **ContactRepository** (#191): lifecycle, validation, suggestions.
-- **AppModule Hilt providers** (#192): DI wiring for the contact stack.
-- **ContactsScreen** (#193): list, search, empty state.
-- **AddContactScreen + EditContactScreen + ContactDetailScreen** (#194).
-- **NavGraph routes + Settings entry** (#195): Settings → Contacts.
-- **SendScreen recipient autocomplete + contact picker sheet** (#196).
-- **Save-to-contacts prompt after successful send + markUsed** (#197): surfaces "Save Alice to contacts?" if the recipient is not already saved; updates last-used timestamp on every send.
-
-#### In flight (Phase 3: Launch)
-
-- **In-app updater** stabilized in v1.6.1 (#175). Telegram-style banner, Ktor downloader with permission resume.
-- **Manual sync-stall smoke** procedure documented in CONTRIBUTING (#150 Step 5).
-- **User guide** at `docs/USER_GUIDE.md` (#205, in review).
-- **Production keystore + signing config** (#199, in progress).
-- **Play Store listing copy, screenshots, privacy policy** (#200-#202, in progress).
-- **External security review** post-v1.7.0 (#204, planned).
-
-### Evidence
-
-- Releases: [v1.6.0](https://github.com/RaheemJnr/pocket-node/releases/tag/v1.6.0), [v1.6.1](https://github.com/RaheemJnr/pocket-node/releases/tag/v1.6.1)
-- Audit reports: comments on #186, #187, #188
-- Key PRs: #175 (in-app updater), #178-#183 (Codex), #189-#197 (Address Book), #213-#230 (security V2 keystore + Argon2 PIN), #256-#259 (sync stall #150)
-- Spec: `docs/M4_SPEC.md`
-
-### Deferrals from M4 scope
-
-- **Translations** (#132) deferred to a post-launch release. The user guide is English-only at first publication; Yoruba, Hausa, Pidgin English, Mandarin, and Spanish translations are scoped but not committed.
-- **Embedded WebView for explorer lookup** (#139) deferred. Current Chrome Custom Tabs flow is acceptable; native WebView is a polish item.
-
-## Adoption metrics
-
-Pocket Node has not yet launched on the Play Store. The data below covers the pre-launch period and is honest about the modest scale.
-
-- **GitHub repository:** public since 2026-02-16. Star and fork counts are modest, dominated by Nervos community contributors who reviewed releases. The number is not load-bearing for grant outcomes.
-- **APK downloads (GitHub Releases):** in the tens to low hundreds per release. Distribution has been limited to closed beta testers, the Nervos forum thread, and a Lagos meetup demo (2026-02 to 2026-04).
-- **X account (`@_pocketnode`):** active since 2026-02. Follower count modest; engagement is concentrated around release announcements and the Nervos community.
-- **Telegram support thread:** small but real. Two user-reported issues drove real product changes during M4 (the V.bit "stayed at 0" sync stall report closed via PR #258, and the in-app updater reliability fix in #175).
-
-Public adoption scale-up is intentionally scheduled for v2.0.0 once the Play Store listing is live and the user guide is published, both expected in the final two weeks of the grant window.
-
-## Technical achievements
-
-- **First mobile CKB light client.** No prior Android wallet ran a full CKB light client on-device; all prior mobile wallets in the ecosystem depend on a remote indexer or a custodial backend. Pocket Node's `LightClientNative` JNI bridge plus the embedded `libckb_light_client_lib.so` (vendored from the official `nervosnetwork/ckb-light-client`) is, to our knowledge, the first deployment of the Rust light client on Android.
-- **On-device sync at usable speed.** Sync time on RECENT mode is approximately 2 minutes against a typical home internet connection, comparable in user-perceived latency to remote-API wallets. The trade-off (slightly higher first-sync time, more battery during sync, ~50 MB local storage) is acceptable for the sovereignty gain.
-- **Auth-bound hardware-backed encryption.** Wallet private keys are encrypted at rest with an AES-256-GCM key that lives in the AndroidKeystore with `setUserAuthenticationRequired(true)` and `setInvalidatedByBiometricEnrollment(true)` on Android 11+. On Android 9 and newer, the Keystore key is hardware-backed (TEE or secure element) and cannot be extracted from the device.
-- **Argon2id PIN derivation.** PIN unlocks the wallet via Argon2id (64 MB memory cost, t=3, p=1), making offline brute-force impractically expensive even with the phone in an attacker's hands.
-- **Pure-logic sync infrastructure.** The four sync modes, the percentage and ETA tracker, and the stall detector are all pure-logic classes with thorough unit test coverage (currently 628 tests passing on main). Real-time correctness against a live network is validated by the upgrade-smoke harness on CI plus a documented manual smoke procedure.
-- **Reproducible builds.** Cargo.lock is checked in; the Rust JNI library builds via a pinned NDK toolchain; the Gradle build is deterministic modulo the Android linker output. Users can build the APK from source and compare hashes against published release artifacts.
-
-## Open questions and future work
-
-The grant deliverables are complete. The items below are recognized future work that did not fit the grant window or scope.
-
-- **External security review** (#204). An independent reviewer should audit the v1.7.0 build before the Play Store launch. Engagement is scoped but the reviewer has not been selected as of this report.
-- **Translations** (#132). The community-driven translations to Yoruba, Hausa, Pidgin English, Mandarin, and Spanish are scoped but not started.
-- **SUDT and xUDT token support.** Pocket Node v1.x and v2.0 support only native CKB. Custom token support is a likely v2.x roadmap item; user demand will drive prioritization.
-- **Hardware wallet integration.** Some Pocket Node users will hold high-value CKB; for them a hardware wallet bridge (Ledger CKB app, for instance) would offer cold-storage signing without giving up the local light client. Out of scope for this grant.
-- **iOS port.** Pocket Node is Android-only. An iOS port is technically feasible (the Rust light client cross-compiles to iOS targets) but requires a separate funding cycle and a different developer's time.
-- **Ckb-light-client-lite evaluation** (#77). The upstream `ckb-light-client-lite` may be a smaller, simpler drop-in replacement for the current vendored light client. Evaluation is on the backlog.
-
-## Budget reconciliation
-
-| Milestone | Allocation (USD) | Status | Notes |
-|-----------|------------------|--------|-------|
-| M1: Mainnet Ready & Hardware-Backed Security | 3,750 | Delivered, v1.1.0 | Closed on schedule; no scope slip. |
-| M2: Nervos DAO Protocol Integration | 3,750 | Delivered, v1.3.0 / v1.4.0 | Closed on schedule; minor deferrals listed above. |
-| M3: Multi-Wallet & Sync Optimization | 3,750 | Delivered, v1.5.0 / v1.5.1 / v1.5.2 | Closed; CSV export and SQLite tuning deferred as documented. |
-| M4: Address Book, Polish & Launch | 3,750 | Delivered Phase 1 + 2; Phase 3 in progress through v2.0.0 | Security audits and Address Book shipped on schedule; launch ships in the final 2 weeks of grant window. |
-| **Total** | **15,000** | **All milestones delivered or in flight on schedule** | |
-
-Time tracking was not required by the grant and was not maintained. Funds were used by a sole developer for living expenses during the 4-month build window.
-
-## Acknowledgments
-
-- **Nervos Foundation and the CKB Community DAO** for funding this work and for trusting a sole developer with the grant.
-- **CKB core engineering team** for upstream `ckb-light-client`, the Rust SDK, the JSON-RPC schemas, and patient answers to JNI integration questions.
-- **Magickbase / Tea** for prior public measurements of light client storage footprint that informed the architecture decision.
-- **Nervos team reviewers** who provided the UI/UX redesign feedback that became #24, and who closed-beta-tested through M1 and M2.
-- **V.bit** and the other early Telegram-channel users whose real-world reports drove product changes in v1.5.x and v1.6.x (the sync-stall detector, the in-app updater stabilization).
-- **GitHub issue reporters and code reviewers** including the CodeRabbit reviews on multiple PRs, whose nitpicks repeatedly caught issues that would otherwise have shipped.
-
-## Distribution
-
-This report will be:
-
-- Posted to the Nervos forum as the grant-completion deliverable.
-- Linked from the Pocket Node `README.md`.
-- Archived at `docs/GRANT_COMPLETION_REPORT.md` in the Pocket Node repository.
-
-Updates to this report (for example, when v1.7.0 and v2.0.0 cut and the final adoption metrics become available) will be made in-place with a dated note at the top.
-
----
-
-Last updated: 2026-05-21. Initial draft, pre-v2.0.0 launch. Will be amended once v2.0.0 ships and adoption metrics stabilize.
+Latest Release: v1.6.1 — In-App Updater Stabilization
