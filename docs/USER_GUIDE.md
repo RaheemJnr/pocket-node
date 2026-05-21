@@ -64,7 +64,7 @@ The app then prompts you to set up a PIN and (optionally) biometric unlock.
 
 Tap **Import wallet**. You have two options:
 
-- **Recovery phrase**: paste a BIP39 12-word or 24-word phrase. This is the most common case if you are moving from another CKB wallet.
+- **Recovery phrase**: paste a BIP39 12-word phrase. This is the most common case if you are moving from another CKB wallet. (Pocket Node imports 12-word phrases only at this time. If you have a 24-word phrase from another wallet, contact support before attempting import.)
 - **Private key**: paste a 64-character hex private key. Use this only if you have a raw private key from a non-standard source. The recovery phrase route is preferred.
 
 After import, the app asks you to choose a sync mode. See [Sync modes](#sync-modes).
@@ -77,9 +77,15 @@ After 10 failed PIN attempts, the wallet locks permanently and can only be recov
 
 ### Enable biometric unlock (optional)
 
-If your phone has fingerprint or face unlock, you can enable biometric authentication after PIN setup. Biometric unlock is a convenience layer on top of the PIN, not a replacement; the PIN is still required after a reboot, after the wallet has been backgrounded for a long time, or if your biometric enrollment changes (for example, you add a new fingerprint).
+If your phone has fingerprint or face unlock, you can enable biometric authentication after PIN setup. Biometric unlock is a convenience layer on top of the PIN, not a replacement; the PIN is still required after a reboot, after the wallet has been backgrounded for a long time, or for sensitive operations like exporting your recovery phrase.
 
-If your biometric enrollment changes, the app will ask you to confirm with your PIN once before re-enabling biometric unlock. This is by design and protects against a stolen, jailbroken phone with attacker-added biometrics.
+### What happens if your biometric enrollment changes
+
+Pocket Node binds the wallet's encryption key to your current biometric enrollment, using the Android Keystore option `setInvalidatedByBiometricEnrollment(true)`. This is a deliberate security choice: if a thief adds their own fingerprint to your unlocked phone, the wallet's key becomes unusable and your funds remain protected.
+
+The trade-off is that legitimate enrollment changes (adding a finger, re-enrolling face unlock, factory-reset of biometrics) also invalidate the key. When this happens the app will display **"Biometric enrollment changed — re-import this wallet from its recovery phrase to continue"** on the next sensitive action. You must re-import the wallet using your 12-word recovery phrase to recover access.
+
+This is the most important reason to keep your recovery phrase backed up off-device. A PIN-only recovery is not available after enrollment change.
 
 ## Back up your recovery phrase
 
@@ -170,7 +176,9 @@ A CKB cell has a 61 CKB minimum capacity, which is a network rule, not a Pocket 
 
 ### Fee
 
-The default fee is 0.001 CKB (100,000 shannons). This is enough for confirmation under normal network conditions. There is no advanced fee picker because CKB does not have congestion-driven fee markets in the same way other networks do.
+The app computes the fee automatically from the transaction's serialized size, using a rate of 1000 shannons per kilobyte (the standard minimum relay rate on CKB). A typical single-input, two-output send works out to a fee of well under 1000 shannons (0.00001 CKB). There is no advanced fee picker because CKB does not have congestion-driven fee markets in the same way other networks do.
+
+Internally the wallet reserves a larger upper bound (100,000 shannons, 0.001 CKB) during cell selection so that the change output is never miscalculated, but the actual fee debited from your balance is the dynamic estimate, not the reservation.
 
 ### Sync gate
 
@@ -419,7 +427,7 @@ This section is for users who want to understand what Pocket Node trusts, what i
 ### What is trusted
 
 - **Your phone's operating system**: Pocket Node trusts that Android's Keystore is implemented correctly and that the kernel does not leak memory between processes. This is the same trust assumption every Android app makes.
-- **The Rust light client's correctness**: a bug in the light client could cause Pocket Node to compute a wrong balance or accept a wrong header. The light client is open source and audited.
+- **The Rust light client's correctness**: a bug in the light client could cause Pocket Node to compute a wrong balance or accept a wrong header. The light client is open source. The JNI integration layer between Kotlin and Rust has been internally audited as part of Milestone 4 of the CKB DAO grant; the report and resolved findings are visible in issues [#186](https://github.com/RaheemJnr/pocket-node/issues/186), [#187](https://github.com/RaheemJnr/pocket-node/issues/187), and [#188](https://github.com/RaheemJnr/pocket-node/issues/188). A formal third-party security review is planned post-v1.7.0 (tracked in [#204](https://github.com/RaheemJnr/pocket-node/issues/204)).
 - **The CKB network's consensus**: Pocket Node assumes the CKB network is producing valid blocks. If the network is taken over by an attacker controlling more than half of the hash power, all bets are off (this is true for every cryptocurrency wallet).
 
 ### What is not trusted
@@ -443,7 +451,7 @@ This section is for users who want to understand what Pocket Node trusts, what i
 
 ### Source code
 
-Pocket Node is open source under the [GitHub repository](https://github.com/RaheemJnr/pocket-node). The Kotlin app code, the Rust JNI bridge, the build configuration, and the release scripts are all public. Reproducible builds let you verify that a published APK matches the source.
+Pocket Node is open source under the [GitHub repository](https://github.com/RaheemJnr/pocket-node). The Kotlin app code, the Rust JNI bridge, the build configuration, and the release scripts are all public. The build is documented in `CONTRIBUTING.md` and pinned via `Cargo.lock` and a fixed NDK toolchain, so you can build the APK from source on your own machine and compare its signing certificate to the one used in published releases. Fully byte-for-byte reproducible builds (with timestamp normalization and stripped linker variance) are a goal rather than a guarantee at this time; if exact-hash reproduction is critical for your threat model, build from source and run from your own APK rather than relying on the published artifact.
 
 ### Reporting a vulnerability
 
