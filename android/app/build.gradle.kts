@@ -119,13 +119,25 @@ android {
     }
 
     gradle.taskGraph.whenReady {
-        val needsReleaseSigning = allTasks.any { task ->
-            task.name.contains("Release") && (
-                task.name.startsWith("assemble") ||
-                    task.name.startsWith("bundle") ||
-                    task.name.startsWith("package")
-                )
-        }
+        // Identify tasks that actually produce a signed release artifact.
+        // AGP synthesizes a lot of release-named tasks under plain
+        // `./gradlew test` and `./gradlew compileDebug*` invocations
+        // (`packageReleaseResources`, `bundleReleaseClassesToCompileJar`,
+        // `assembleReleaseUnitTest`, etc.). Those tasks stage resources
+        // or classes and never touch the signing config, but broad
+        // name-match heuristics caught them and tripped this gate on
+        // every PR CI run that didn't carry the release-signing secrets.
+        // Enumerate the exact APK / AAB-producing task names instead so
+        // the gate fires only when a real release artifact would be
+        // signed and shipped.
+        val signingTaskNames = setOf(
+            "assembleRelease",
+            "bundleRelease",
+            "packageRelease",
+            "packageReleaseBundle",
+            "packageReleaseUniversalApk",
+        )
+        val needsReleaseSigning = allTasks.any { task -> task.name in signingTaskNames }
         if (needsReleaseSigning) {
             val missingVars = listOf("KEYSTORE_PATH", "KEYSTORE_PASSWORD", "KEY_ALIAS", "KEY_PASSWORD")
                 .filter { System.getenv(it) == null }
