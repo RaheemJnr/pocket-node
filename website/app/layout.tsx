@@ -27,7 +27,7 @@ const doto = Doto({
 // every share. Override per-deploy via NEXT_PUBLIC_SITE_URL if the
 // preview build needs a different host.
 const siteUrl =
-  process.env.NEXT_PUBLIC_SITE_URL ?? 'https://pocketnode.app'
+  process.env.NEXT_PUBLIC_SITE_URL ?? 'https://pocket-node.com'
 
 export const metadata: Metadata = {
   metadataBase: new URL(siteUrl),
