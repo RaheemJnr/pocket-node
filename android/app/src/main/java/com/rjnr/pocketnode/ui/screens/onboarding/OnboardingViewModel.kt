@@ -60,7 +60,13 @@ class OnboardingViewModel @Inject constructor(
     private fun canCreateV2BoundKey(): Boolean =
         authManager.isBiometricEnrolled() || authManager.hasDeviceCredential()
 
-    fun createNewWallet() {
+    /**
+     * Create the first wallet. [name] is captured from the onboarding
+     * "Name your wallet" step (Telegram bug 3); falls back to "My
+     * Wallet" if the user submitted empty so the call never produces a
+     * blank-named wallet row.
+     */
+    fun createNewWallet(name: String = "My Wallet") {
         if (!canCreateV2BoundKey()) {
             _uiState.update {
                 it.copy(
@@ -72,10 +78,11 @@ class OnboardingViewModel @Inject constructor(
             }
             return
         }
+        val trimmed = name.trim().ifBlank { "My Wallet" }
         viewModelScope.launch {
             _uiState.update { it.copy(isLoading = true, error = null) }
             try {
-                val (entity, _) = walletRepository.createWallet("My Wallet")
+                val (entity, _) = walletRepository.createWallet(trimmed)
                 Log.d(TAG, "Created wallet entity: ${entity.walletId}")
                 repository.onActiveWalletChanged(entity)
                 _uiState.update { it.copy(isLoading = false, isWalletCreated = true) }
