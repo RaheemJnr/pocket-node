@@ -35,6 +35,14 @@ fun OnboardingScreen(
     var showNameDialog by remember { mutableStateOf(false) }
     var pendingWalletName by remember { mutableStateOf("My Wallet") }
 
+    // No-device-lock advisory. When the device has neither biometric
+    // enrolled nor a credential set, the V2 Keystore key chain can't
+    // bind the wallet to user auth — the wallet still works, but the
+    // keys are not hardware-protected until the user enrolls something.
+    // Surface this as a warning the user can dismiss to continue, or
+    // route them to Android Settings to enable a lock.
+    var showNoDeviceLockWarning by remember { mutableStateOf(false) }
+
     // After wallet creation, navigate to backup screen (not Home)
     LaunchedEffect(uiState.isWalletCreated) {
         if (uiState.isWalletCreated) {
@@ -114,7 +122,16 @@ fun OnboardingScreen(
                 title = "Create New Wallet",
                 description = "Generate a new wallet with a 12-word recovery phrase.",
                 icon = Lucide.Plus,
-                onClick = { showNameDialog = true },
+                onClick = {
+                    // Intercept the create flow when the device has no
+                    // lock to give the user informed-consent before
+                    // landing on the name dialog. They can still proceed.
+                    if (uiState.noDeviceCredential) {
+                        showNoDeviceLockWarning = true
+                    } else {
+                        showNameDialog = true
+                    }
+                },
                 isLoading = uiState.isLoading,
                 modifier = Modifier.uaTestTag("onboarding-create-new")
             )
@@ -174,6 +191,50 @@ fun OnboardingScreen(
             dismissButton = {
                 TextButton(onClick = { showNameDialog = false }) {
                     Text("Cancel")
+                }
+            },
+        )
+    }
+
+    if (showNoDeviceLockWarning) {
+        AlertDialog(
+            onDismissRequest = { showNoDeviceLockWarning = false },
+            title = { Text("Continue without a device lock?") },
+            text = {
+                Text(
+                    text = "This phone has no PIN, pattern, password, or biometric set. " +
+                        "Your wallet will still work, but the keys cannot be hardware-protected " +
+                        "until you enable a device lock in Android Settings. The app will upgrade " +
+                        "the protection automatically once you do.",
+                    style = MaterialTheme.typography.bodyMedium,
+                )
+            },
+            confirmButton = {
+                TextButton(onClick = {
+                    showNoDeviceLockWarning = false
+                    showNameDialog = true
+                }) {
+                    Text("Continue anyway")
+                }
+            },
+            dismissButton = {
+                Row {
+                    TextButton(onClick = {
+                        showNoDeviceLockWarning = false
+                        // ACTION_SECURITY_SETTINGS lands the user on the
+                        // Security & privacy page on stock Android and on
+                        // most OEM skins. Doesn't deep-link to the lock-
+                        // screen flow but it's two taps from there.
+                        context.startActivity(
+                            android.content.Intent(android.provider.Settings.ACTION_SECURITY_SETTINGS)
+                                .addFlags(android.content.Intent.FLAG_ACTIVITY_NEW_TASK)
+                        )
+                    }) {
+                        Text("Open Settings")
+                    }
+                    TextButton(onClick = { showNoDeviceLockWarning = false }) {
+                        Text("Cancel")
+                    }
                 }
             },
         )
