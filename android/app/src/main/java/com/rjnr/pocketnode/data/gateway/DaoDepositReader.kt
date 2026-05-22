@@ -241,11 +241,35 @@ class DaoDepositReader @Inject constructor(
             }
         }
 
-        // Compute per-deposit APC when enough time has elapsed
+        // Compute per-deposit APC when enough time has elapsed.
+        //
+        // Compensation stops accruing the moment the deposit cell is moved
+        // into the withdrawing state — using wall-clock `now` for the upper
+        // bound on a withdrawing cell understates the realised APC because
+        // we'd divide by a window longer than the actual accrual period.
+        //
+        // For a withdrawing cell: end = withdraw-block timestamp.
+        // For a deposited cell: end = wall-clock now (still accruing).
+        //
+        // Both branches above wrote `depositTimestampMs` to the original
+        // deposit's block timestamp, so the only thing that varies is the
+        // upper bound. The withdraw block header is `cellBlockHeader` in
+        // the isWithdrawing branch (we re-read it earlier in this function).
         if (compensation > 0 && depositTimestampMs > 0 && capacityShannons > 0) {
-            val elapsedDays = (System.currentTimeMillis() - depositTimestampMs) / 86_400_000.0
+            val endTimeMs = if (isWithdrawing) {
+                cellBlockHeader?.timestamp?.removePrefix("0x")?.toLong(16) ?: System.currentTimeMillis()
+            } else {
+                System.currentTimeMillis()
+            }
+            val elapsedDays = (endTimeMs - depositTimestampMs) / 86_400_000.0
             if (elapsedDays >= 1.0) {
                 apc = (compensation.toDouble() / capacityShannons) / (elapsedDays / 365.25) * 100.0
+                Log.d(
+                    TAG,
+                    "APC for $cellId: compensation=$compensation capacity=$capacityShannons " +
+                        "elapsedDays=${"%.2f".format(elapsedDays)} apc=${"%.4f".format(apc)}% " +
+                        "(isWithdrawing=$isWithdrawing)"
+                )
             }
         }
 
