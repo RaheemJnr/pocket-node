@@ -109,10 +109,14 @@ class WalletSettingsViewModel @Inject constructor(
 
     fun requestDelete() {
         val wallet = _uiState.value.wallet ?: return
-        if (wallet.isActive) {
-            _uiState.update { it.copy(error = com.rjnr.pocketnode.ui.util.UiMessage.Resource(com.rjnr.pocketnode.R.string.vm_error_cannot_delete_active)) }
-            return
-        }
+        // No more upfront active-wallet block. The confirmDelete path
+        // auto-switches to a sibling before deleting (PR #273), but
+        // this entry point was still gating on `wallet.isActive`, so
+        // the user hit the dead-end snackbar before ever seeing the
+        // confirmation dialog. Removed so the flow can reach
+        // confirmDelete and use the auto-switch logic.
+        // (Telegram bug 5 follow-up — original fix only covered half
+        // the path.)
         viewModelScope.launch {
             val count = walletRepository.walletCount()
             if (count <= 1) {
