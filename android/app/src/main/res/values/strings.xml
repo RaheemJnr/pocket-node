@@ -147,6 +147,14 @@
     <string name="auth_locked_cd">Locked</string>
     <string name="auth_unlock_fingerprint">Unlock with Fingerprint</string>
     <string name="auth_use_pin">Use PIN</string>
+    <string name="forgot_pin_title">Reset wallet</string>
+    <string name="forgot_pin_back_cd">Back</string>
+    <string name="forgot_pin_heading">Forgot your PIN?</string>
+    <string name="forgot_pin_body">Resetting will erase every wallet, key, and cache stored on this device. The only way to restore access afterwards is your 12-word recovery phrase.</string>
+    <string name="forgot_pin_reassurance">Your CKB stays on the blockchain. Only the device-local data is removed.</string>
+    <string name="forgot_pin_confirm">Erase wallet and start over</string>
+    <string name="forgot_pin_resetting">Resetting…</string>
+    <string name="forgot_pin_cancel">Cancel</string>
     <!-- endregion -->
 
     <!-- region: Recovery -->

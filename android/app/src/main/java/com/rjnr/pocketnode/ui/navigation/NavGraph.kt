@@ -78,6 +78,7 @@ sealed class Screen(val route: String) {
     }
     object AddWallet : Screen("add_wallet")
     object InitialPinSetup : Screen("initial_pin_setup")
+    object ForgotPin : Screen("forgot_pin")
     object Faq : Screen("faq?anchor={anchor}") {
         fun routeWithAnchor(anchor: String?): String =
             if (anchor.isNullOrBlank()) "faq" else "faq?anchor=$anchor"
@@ -264,9 +265,15 @@ fun CkbNavGraph(
                     }
                 },
                 onForgotPin = {
-                    navController.navigate(Screen.MnemonicImport.route) {
-                        popUpTo(Screen.Auth.route) { inclusive = true }
-                    }
+                    // Destructive recovery: route to the confirmation
+                    // screen rather than the regular import flow. Keep
+                    // Auth on the back stack so the user can return if
+                    // they remember the PIN. The previous wiring popped
+                    // Auth via `inclusive = true` which (a) trapped the
+                    // back arrow and (b) navigated to a screen that
+                    // refused already-imported phrases — the locked-out
+                    // user's recovery path was a dead end.
+                    navController.navigate(Screen.ForgotPin.route)
                 },
                 onNavigateBack = { navController.popBackStack() }
             )
@@ -529,6 +536,12 @@ fun CkbNavGraph(
                         launchSingleTop = true
                     }
                 }
+            )
+        }
+
+        composable(Screen.ForgotPin.route) {
+            com.rjnr.pocketnode.ui.screens.auth.ForgotPinScreen(
+                onBack = { navController.popBackStack() },
             )
         }
 
