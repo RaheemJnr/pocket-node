@@ -74,7 +74,13 @@ fun AddWalletScreen(
     val uiState by viewModel.uiState.collectAsState()
     val snackbarHostState = remember { SnackbarHostState() }
     // 0 = menu, 1 = new wallet, 2 = import mnemonic, 3 = import key, 4 = sub-account
-    var selectedMode by remember { mutableIntStateOf(0) }
+    // When the route carries a `parentId` query arg the user came in from
+    // the WalletManager per-row "Add" button (Telegram bug 2). Skip the
+    // mode picker and land directly on the sub-account form, with the
+    // parent pre-selected by AddWalletViewModel.
+    var selectedMode by remember {
+        mutableIntStateOf(if (viewModel.preselectedParentId != null) 4 else 0)
+    }
 
     LaunchedEffect(uiState.createdWallet) {
         if (uiState.createdWallet != null) {

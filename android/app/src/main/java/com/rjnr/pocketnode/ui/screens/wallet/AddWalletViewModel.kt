@@ -1,5 +1,6 @@
 package com.rjnr.pocketnode.ui.screens.wallet
 
+import androidx.lifecycle.SavedStateHandle
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.rjnr.pocketnode.data.database.entity.WalletEntity
@@ -33,10 +34,21 @@ data class AddWalletUiState(
 
 @HiltViewModel
 class AddWalletViewModel @Inject constructor(
+    savedStateHandle: SavedStateHandle,
     private val walletRepository: WalletRepository,
     private val gatewayRepository: GatewayRepository,
     private val mnemonicManager: MnemonicManager
 ) : ViewModel() {
+
+    /**
+     * Optional parent-wallet hint forwarded from the WalletManager
+     * per-row "Add" button (Telegram bug 2). Null means "user opened
+     * the Add screen from the FAB", in which case we land on the mode
+     * picker. Non-null means "user wanted to add a sub-account to this
+     * specific parent", and we jump straight to the sub-account form
+     * with the parent pre-selected.
+     */
+    val preselectedParentId: String? = savedStateHandle["parentId"]
 
     private val _uiState = MutableStateFlow(AddWalletUiState())
     val uiState: StateFlow<AddWalletUiState> = _uiState.asStateFlow()
@@ -45,7 +57,17 @@ class AddWalletViewModel @Inject constructor(
         viewModelScope.launch {
             val mnemonicRoots = walletRepository.getAll()
                 .filter { it.type == "mnemonic" && it.parentWalletId == null }
-            _uiState.update { it.copy(parentWallets = mnemonicRoots) }
+            _uiState.update {
+                it.copy(
+                    parentWallets = mnemonicRoots,
+                    // Pre-select the parent if the route arg pointed at one
+                    // that still exists. Stale arg (wallet deleted between
+                    // navigation and arrival) silently falls back to no
+                    // selection so the user lands on the parent picker.
+                    selectedParentId = preselectedParentId
+                        ?.takeIf { id -> mnemonicRoots.any { p -> p.walletId == id } },
+                )
+            }
         }
     }
 
