@@ -377,10 +377,10 @@ private fun DaoOverviewCard(
 
             Spacer(modifier = Modifier.height(4.dp))
 
-            Text(
-                text = "APC ~${String.format("%.2f", overview.currentApc)}%",
+            com.rjnr.pocketnode.ui.screens.dao.components.ApcLabel(
+                apc = overview.currentApc,
                 style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
 
             Spacer(modifier = Modifier.height(8.dp))
