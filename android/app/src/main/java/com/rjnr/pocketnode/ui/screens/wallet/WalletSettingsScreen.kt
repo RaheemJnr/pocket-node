@@ -337,13 +337,18 @@ fun WalletSettingsScreen(
                         SettingsActionRow(
                             label = "View seed phrase",
                             onClick = {
-                                if (viewModel.requiresPinForSeedPhrase()) {
-                                    showSeedPhrase = true
-                                    onNavigateToPinVerify()
-                                } else {
-                                    showSeedPhrase = true
-                                    unlockSensitive()
-                                }
+                                // Always biometric (or device credential
+                                // fallback via V2 BiometricPrompt). The
+                                // older PIN-verify branch was the path
+                                // Radoslav flagged on Telegram (bug 1):
+                                // entering a PIN was enough to reveal
+                                // the mnemonic, with no biometric step.
+                                // unlockSensitive() routes V2 wallets
+                                // through `readKeyMaterial` and V1
+                                // wallets through `migrateWalletAndExtract`
+                                // so both end with biometric gating.
+                                showSeedPhrase = true
+                                unlockSensitive()
                             }
                         )
                     }
@@ -425,13 +430,10 @@ fun WalletSettingsScreen(
                         SettingsActionRow(
                             label = "View private key",
                             onClick = {
-                                if (viewModel.requiresPinForSeedPhrase()) {
-                                    showPrivateKey = true
-                                    onNavigateToPinVerify()
-                                } else {
-                                    showPrivateKey = true
-                                    unlockSensitive()
-                                }
+                                // Mirror the seed-phrase reveal: biometric
+                                // only, no PIN-only fast-path.
+                                showPrivateKey = true
+                                unlockSensitive()
                             }
                         )
                     }
