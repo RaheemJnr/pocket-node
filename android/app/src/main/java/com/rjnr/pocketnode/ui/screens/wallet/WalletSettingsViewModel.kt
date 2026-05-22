@@ -38,6 +38,9 @@ class WalletSettingsViewModel @Inject constructor(
     private val walletPreferences: WalletPreferences,
     private val walletKeyReader: WalletKeyReader,
     private val keyMaterialDao: KeyMaterialDao,
+    private val migrationHelper: com.rjnr.pocketnode.data.migration.KeystoreV2MigrationHelper,
+    private val encryptionManager: com.rjnr.pocketnode.data.crypto.KeystoreEncryptionManager,
+    private val authManager: com.rjnr.pocketnode.data.auth.AuthManager,
 ) : ViewModel() {
 
     private val walletId: String = savedStateHandle["walletId"] ?: ""
@@ -297,6 +300,64 @@ class WalletSettingsViewModel @Inject constructor(
     fun loadSensitiveData(activity: FragmentActivity) {
         viewModelScope.launch {
             val kdf = keyMaterialDao.getKdfVersion(walletId)
+            // Lazy V1 → V2 migration on first sensitive-data reveal.
+            // Previously the V1 branch fell through to the silent PIN-
+            // only load, which a Telegram user reported as "mnemonic
+            // readily available" (bug 1). The wallet stays on V1 until
+            // the user re-launches the app and triggers AuthScreen's
+            // migration runner, which is a long window where the
+            // mnemonic is one PIN entry from disclosure.
+            //
+            // The flow now: one BiometricPrompt unlocks a V2 encrypt
+            // cipher; we use it to migrate the row to V2 AND extract
+            // the plaintext bundle in the same cipher operation. After
+            // this method returns once, the wallet is on V2 and all
+            // future reveals follow the standard V2 read path with its
+            // own BiometricPrompt.
+            if (kdf == 1) {
+                val cipher = try {
+                    encryptionManager.newEncryptCipherV2()
+                } catch (e: Throwable) {
+                    Log.e(TAG, "V2 cipher creation failed", e)
+                    _uiState.update { it.copy(error = com.rjnr.pocketnode.ui.util.UiMessage.Resource(com.rjnr.pocketnode.R.string.vm_error_cannot_read_wallet_key, listOf(e.message ?: "cipher"))) }
+                    return@launch
+                }
+                val auth = authManager.authenticateForCipher(
+                    activity = activity,
+                    cipher = cipher,
+                    title = "View recovery phrase",
+                    subtitle = "Verify your identity to display this wallet's secrets",
+                )
+                when (auth) {
+                    is com.rjnr.pocketnode.data.auth.AuthManager.CipherAuthResult.Cancelled -> {
+                        _uiState.update { it.copy(error = com.rjnr.pocketnode.ui.util.UiMessage.Resource(com.rjnr.pocketnode.R.string.vm_error_auth_cancelled)) }
+                        return@launch
+                    }
+                    is com.rjnr.pocketnode.data.auth.AuthManager.CipherAuthResult.Error -> {
+                        _uiState.update { it.copy(error = com.rjnr.pocketnode.ui.util.UiMessage.Resource(com.rjnr.pocketnode.R.string.vm_error_cannot_read_wallet_key, listOf("auth ${auth.errorCode}"))) }
+                        return@launch
+                    }
+                    is com.rjnr.pocketnode.data.auth.AuthManager.CipherAuthResult.Success -> {
+                        val bundle = migrationHelper.migrateWalletAndExtract(walletId, auth.cipher)
+                            .getOrElse { e ->
+                                Log.e(TAG, "V1 → V2 migrate-and-extract failed for $walletId", e)
+                                _uiState.update {
+                                    it.copy(error = com.rjnr.pocketnode.ui.util.UiMessage.Resource(com.rjnr.pocketnode.R.string.vm_error_cannot_read_wallet_key, listOf(e.message ?: "migrate")))
+                                }
+                                return@launch
+                            }
+                        val words = bundle.mnemonic?.split(" ")
+                        _uiState.update {
+                            it.copy(
+                                privateKeyHex = bundle.privateKeyHex,
+                                mnemonicWords = words,
+                                seedPhraseUnlocked = true,
+                            )
+                        }
+                        return@launch
+                    }
+                }
+            }
             if (kdf != 2) {
                 loadSensitiveData()
                 return@launch
@@ -325,7 +386,12 @@ class WalletSettingsViewModel @Inject constructor(
                 is WalletKeyReader.MaterialResult.Success -> {
                     val keyHex = result.privateKey.joinToString("") { "%02x".format(it) }
                     val words = result.mnemonic?.split(" ")
-                    _uiState.update { it.copy(privateKeyHex = keyHex, mnemonicWords = words) }
+                    // seedPhraseUnlocked must flip here so the screen
+                    // gate (`showSeedPhrase && (seedPhraseUnlocked || !requiresPinForSeedPhrase())`)
+                    // shows the mnemonic. Previously this flag was set
+                    // only via onPinVerified, so V2 reveals worked by
+                    // accident only when no PIN was set.
+                    _uiState.update { it.copy(privateKeyHex = keyHex, mnemonicWords = words, seedPhraseUnlocked = true) }
                 }
             }
         }

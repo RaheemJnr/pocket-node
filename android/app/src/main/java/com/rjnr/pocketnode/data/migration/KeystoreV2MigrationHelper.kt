@@ -122,6 +122,67 @@ class KeystoreV2MigrationHelper(
     }
 
     /**
+     * Like [migrateWallet] but also returns the plaintext bundle to the
+     * caller in one BiometricPrompt cycle.
+     *
+     * Use case: the WalletSettings "View seed phrase" flow on a V1
+     * wallet needs to (a) get the mnemonic to the UI and (b) leave the
+     * row on V2 so future reveals are V2-gated. The naive approach is
+     * two prompts (migrate, then read). This variant collapses to one:
+     * the V1 plaintext we decrypt during migration is the same
+     * plaintext the caller wants to display, so we hand it back inside
+     * the same Result.
+     *
+     * The plaintext lives only on the caller's stack — the [Result]
+     * payload is not logged or persisted by this method.
+     */
+    suspend fun migrateWalletAndExtract(
+        walletId: String,
+        v2EncryptCipher: Cipher,
+    ): Result<WalletKeyBundle> {
+        return runCatching {
+            val entity = keyMaterialDao.getByWalletId(walletId)
+                ?: throw IllegalStateException("No key_material row for walletId=$walletId")
+
+            if (entity.kdfVersion == V2_VERSION) {
+                throw IllegalStateException(
+                    "walletId=$walletId is already on V2; use readV2Bundle instead"
+                )
+            }
+            if (entity.kdfVersion != V1_VERSION) {
+                throw IllegalStateException(
+                    "Unknown kdfVersion ${entity.kdfVersion} for walletId=$walletId; refusing to migrate"
+                )
+            }
+
+            val privateKeyHex = decryptV1PrivateKey(entity.encryptedPrivateKey, entity.iv)
+            val mnemonic = entity.encryptedMnemonic?.let { combined ->
+                decryptV1Mnemonic(combined)
+            }
+
+            val bundle = WalletKeyBundle(privateKeyHex = privateKeyHex, mnemonic = mnemonic)
+            val bundleBytes = json.encodeToString(bundle).toByteArray(Charsets.UTF_8)
+
+            val (encryptedBundle, newIv) = encryptionManager.encryptWithCipher(
+                v2EncryptCipher,
+                bundleBytes
+            )
+
+            val migrated = entity.copy(
+                encryptedPrivateKey = encryptedBundle,
+                encryptedMnemonic = null,
+                iv = newIv,
+                kdfVersion = V2_VERSION,
+                updatedAt = nowProvider()
+            )
+            keyMaterialDao.upsert(migrated)
+
+            Log.i(TAG, "Migrated wallet $walletId V1→V2 (extracted plaintext for caller)")
+            bundle
+        }
+    }
+
+    /**
      * After every wallet has been migrated, delete the V1 Keystore key and
      * record the migration-complete flag. Safe to call only when
      * [pendingWalletIds] returns an empty list.
