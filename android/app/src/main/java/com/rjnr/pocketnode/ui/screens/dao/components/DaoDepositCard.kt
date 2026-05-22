@@ -55,10 +55,10 @@ fun DaoDepositCard(
                     )
                     if (deposit.apc > 0.0) {
                         Spacer(modifier = Modifier.width(8.dp))
-                        Text(
-                            text = "APC \u2248 ${"%.2f".format(deposit.apc)}%",
+                        ApcLabel(
+                            apc = deposit.apc,
                             style = MaterialTheme.typography.bodySmall,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
                         )
                     }
                 }
