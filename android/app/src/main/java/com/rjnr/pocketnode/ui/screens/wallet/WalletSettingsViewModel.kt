@@ -167,6 +167,47 @@ class WalletSettingsViewModel @Inject constructor(
     fun confirmDelete() {
         viewModelScope.launch {
             try {
+                val current = _uiState.value.wallet
+                val isActive = current?.isActive == true ||
+                    walletPreferences.getActiveWalletId() == walletId
+
+                if (isActive) {
+                    // Auto-switch to a sibling before delete. The previous
+                    // behaviour was to refuse with "Cannot delete the active
+                    // wallet" — a UX dead-end since the user can't tell what
+                    // "switch first" means when they only see the one
+                    // settings screen. (Telegram bug 5)
+                    val candidates = walletRepository.getAll()
+                        .filter { it.walletId != walletId }
+
+                    if (candidates.isEmpty()) {
+                        // Last wallet on the device. We do NOT delete here
+                        // because doing so would leave the app in a no-
+                        // wallet state without resetting the PIN, which is
+                        // a worse trap than the original guard. Direct the
+                        // user at the Forgot-PIN destructive recovery flow
+                        // which handles wipe + PIN reset + process restart
+                        // together. (Telegram bug 6)
+                        _uiState.update {
+                            it.copy(
+                                showDeleteConfirm = false,
+                                error = com.rjnr.pocketnode.ui.util.UiMessage.Resource(
+                                    com.rjnr.pocketnode.R.string.vm_error_delete_last_wallet,
+                                ),
+                            )
+                        }
+                        return@launch
+                    }
+
+                    // Prefer a parent (top-level) wallet so the user doesn't
+                    // end up on an orphaned-feeling sub-account, but fall
+                    // back to any sibling if all that's left are sub-
+                    // accounts of other parents.
+                    val next = candidates.firstOrNull { it.parentWalletId == null }
+                        ?: candidates.first()
+                    walletRepository.switchActiveWallet(next.walletId)
+                }
+
                 walletRepository.deleteWallet(walletId)
                 _uiState.update { it.copy(showDeleteConfirm = false, deleted = true) }
             } catch (e: Exception) {

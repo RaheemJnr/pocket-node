@@ -52,7 +52,13 @@ import com.rjnr.pocketnode.ui.components.WalletGroup
 @Composable
 fun WalletManagerScreen(
     onNavigateBack: () -> Unit = {},
-    onNavigateToAddWallet: () -> Unit = {},
+    /**
+     * Navigate to the Add Wallet screen. When [parentId] is non-null,
+     * the destination jumps straight to the HD Sub-Account form with
+     * that wallet pre-selected — used by the per-row "Add" button on
+     * each parent wallet card.
+     */
+    onNavigateToAddWallet: (parentId: String?) -> Unit = {},
     onNavigateToWalletDetail: (String) -> Unit = {},
     viewModel: WalletManagerViewModel = hiltViewModel()
 ) {
@@ -82,7 +88,7 @@ fun WalletManagerScreen(
             )
         },
         floatingActionButton = {
-            FloatingActionButton(onClick = onNavigateToAddWallet) {
+            FloatingActionButton(onClick = { onNavigateToAddWallet(null) }) {
                 Icon(Lucide.Plus, contentDescription = stringResource(R.string.wallet_manager_add_cd))
             }
         },
@@ -100,7 +106,14 @@ fun WalletManagerScreen(
             items(uiState.walletGroups, key = { it.wallet.walletId }) { group ->
                 WalletGroupCard(
                     group = group,
-                    onAddSubAccount = { viewModel.switchWallet(group.wallet.walletId) },
+                    // Previously: `viewModel.switchWallet(...)` — that
+                    // silently switched to the wallet that owned the
+                    // button (often already active), so the button
+                    // appeared dead. Navigate to AddWallet with this
+                    // parent pre-selected so the user lands on the
+                    // sub-account form ready to name the new account.
+                    // (Telegram bug 2)
+                    onAddSubAccount = { onNavigateToAddWallet(group.wallet.walletId) },
                     onOpenSettings = { onNavigateToWalletDetail(group.wallet.walletId) }
                 )
             }

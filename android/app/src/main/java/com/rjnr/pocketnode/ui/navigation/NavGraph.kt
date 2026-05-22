@@ -76,7 +76,18 @@ sealed class Screen(val route: String) {
     object WalletDetail : Screen("wallet_detail/{walletId}") {
         fun createRoute(walletId: String) = "wallet_detail/$walletId"
     }
-    object AddWallet : Screen("add_wallet")
+    object AddWallet : Screen("add_wallet?parentId={parentId}") {
+        const val BASE = "add_wallet"
+        /**
+         * Build the route with an optional pre-selected parent wallet.
+         * When [parentId] is non-null AddWalletScreen jumps straight to
+         * the HD Sub-Account form with that wallet selected — the
+         * "Add" button on a parent wallet card uses this to skip the
+         * mode picker and the parent picker.
+         */
+        fun createRoute(parentId: String? = null): String =
+            if (parentId.isNullOrBlank()) BASE else "$BASE?parentId=$parentId"
+    }
     object InitialPinSetup : Screen("initial_pin_setup")
     object ForgotPin : Screen("forgot_pin")
     object Faq : Screen("faq?anchor={anchor}") {
@@ -496,7 +507,9 @@ fun CkbNavGraph(
         composable(Screen.WalletManager.route) {
             WalletManagerScreen(
                 onNavigateBack = { navController.popBackStack() },
-                onNavigateToAddWallet = { navController.navigate(Screen.AddWallet.route) },
+                onNavigateToAddWallet = { parentId ->
+                    navController.navigate(Screen.AddWallet.createRoute(parentId))
+                },
                 onNavigateToWalletDetail = { walletId ->
                     navController.navigate(Screen.WalletDetail.createRoute(walletId))
                 }
@@ -545,7 +558,16 @@ fun CkbNavGraph(
             )
         }
 
-        composable(Screen.AddWallet.route) {
+        composable(
+            route = Screen.AddWallet.route,
+            arguments = listOf(
+                navArgument("parentId") {
+                    type = NavType.StringType
+                    nullable = true
+                    defaultValue = null
+                }
+            ),
+        ) {
             AddWalletScreen(
                 onNavigateBack = { navController.popBackStack() },
                 onWalletCreated = {
