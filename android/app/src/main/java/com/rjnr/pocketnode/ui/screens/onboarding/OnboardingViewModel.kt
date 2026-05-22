@@ -67,17 +67,16 @@ class OnboardingViewModel @Inject constructor(
      * blank-named wallet row.
      */
     fun createNewWallet(name: String = "My Wallet") {
-        if (!canCreateV2BoundKey()) {
-            _uiState.update {
-                it.copy(
-                    error = com.rjnr.pocketnode.ui.util.UiMessage.Resource(
-                        com.rjnr.pocketnode.R.string.vm_error_no_device_credential,
-                    ),
-                    noDeviceCredential = true,
-                )
-            }
-            return
-        }
+        // No more hard block on missing device credential. The previous
+        // gate (introduced in #213 sub-PR 6) refused creation outright
+        // because the V2 Keystore key needs *some* credential to bind to.
+        // In practice the wallet still works without one — it stays on
+        // kdfVersion=1 until a credential is enrolled, at which point the
+        // existing AuthScreen migration runner upgrades it.
+        //
+        // The UI now shows a warning dialog (Cancel / Open Settings /
+        // Continue anyway) when noDeviceCredential is true, so the user
+        // sees an informed consent surface but is not blocked.
         val trimmed = name.trim().ifBlank { "My Wallet" }
         viewModelScope.launch {
             _uiState.update { it.copy(isLoading = true, error = null) }
