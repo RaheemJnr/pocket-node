@@ -27,6 +27,14 @@ fun OnboardingScreen(
     val uiState by viewModel.uiState.collectAsState()
     val snackbarHostState = remember { SnackbarHostState() }
 
+    // "Name your wallet" dialog state. Captured before the wallet is
+    // actually created so the user-supplied name flows through into
+    // WalletRepository.createWallet. The AddWallet flow has always
+    // prompted for a name; this matches that surface so the two
+    // wallet-creation entry points behave consistently (Telegram bug 3).
+    var showNameDialog by remember { mutableStateOf(false) }
+    var pendingWalletName by remember { mutableStateOf("My Wallet") }
+
     // After wallet creation, navigate to backup screen (not Home)
     LaunchedEffect(uiState.isWalletCreated) {
         if (uiState.isWalletCreated) {
@@ -106,7 +114,7 @@ fun OnboardingScreen(
                 title = "Create New Wallet",
                 description = "Generate a new wallet with a 12-word recovery phrase.",
                 icon = Lucide.Plus,
-                onClick = { viewModel.createNewWallet() },
+                onClick = { showNameDialog = true },
                 isLoading = uiState.isLoading,
                 modifier = Modifier.uaTestTag("onboarding-create-new")
             )
@@ -132,6 +140,43 @@ fun OnboardingScreen(
                 textAlign = TextAlign.Center
             )
         }
+    }
+
+    if (showNameDialog) {
+        AlertDialog(
+            onDismissRequest = { showNameDialog = false },
+            title = { Text("Name your wallet") },
+            text = {
+                Column {
+                    Text(
+                        text = "Give this wallet a label so you can spot it if you add more later.",
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                    Spacer(modifier = Modifier.height(12.dp))
+                    OutlinedTextField(
+                        value = pendingWalletName,
+                        onValueChange = { pendingWalletName = it },
+                        singleLine = true,
+                        label = { Text("Wallet name") },
+                        modifier = Modifier.fillMaxWidth(),
+                    )
+                }
+            },
+            confirmButton = {
+                TextButton(onClick = {
+                    showNameDialog = false
+                    viewModel.createNewWallet(pendingWalletName)
+                }) {
+                    Text("Create")
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { showNameDialog = false }) {
+                    Text("Cancel")
+                }
+            },
+        )
     }
 }
 

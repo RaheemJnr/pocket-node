@@ -574,7 +574,14 @@ fun CkbNavGraph(
                     navController.popBackStack(Screen.Main.route, inclusive = false)
                 },
                 onNewMnemonicWalletCreated = {
-                    navController.navigate(Screen.MnemonicBackup.createRoute(simplified = true)) {
+                    // Use the same 3-step backup flow as first-wallet
+                    // onboarding (display → verify → success) instead
+                    // of the `simplified` single-screen shortcut. The
+                    // shortcut was reported as an inconsistency
+                    // (Telegram bug 4): first-wallet creation prompts
+                    // for verification, but adding a new parent wallet
+                    // from inside the app did not. Aligned now.
+                    navController.navigate(Screen.MnemonicBackup.createRoute(simplified = false)) {
                         popUpTo(Screen.Main.route) { inclusive = false }
                     }
                 }
