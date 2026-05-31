@@ -20,7 +20,7 @@ export function Hero() {
         <div className="mb-8 md:mb-12">
           <span className="inline-flex items-center gap-2 border border-green/40 px-3 py-1.5 font-doto text-xs font-black uppercase tracking-widest text-green">
             <span className="block h-2 w-2 bg-green" aria-hidden />
-            v1.7 in flight · open source
+            v1.7 shipped · open source
           </span>
         </div>
 
