@@ -210,45 +210,36 @@ class KeyManager @Inject constructor(
     }
 
     suspend fun getWalletType(): String {
+        // Flag-only read: walletType is a plaintext column. Decrypting the
+        // key bundle here would throw on V2 rows (post-#275 keystore
+        // migration) and crash the auth/nav path.
         val helper = keyStoreMigrationHelper
         if (helper != null) {
-            val data = helper.readDecryptedKey("default")
-            if (data != null) {
-                return data.walletType
-            }
+            helper.getWalletTypeFlag("default")?.let { return it }
         }
         // Fallback to ESP
         return prefs.getString(KEY_WALLET_TYPE, WALLET_TYPE_RAW_KEY) ?: WALLET_TYPE_RAW_KEY
     }
 
     suspend fun hasMnemonicBackup(): Boolean {
+        // Flag-only read; see getWalletType for the V2 reasoning.
         val helper = keyStoreMigrationHelper
         if (helper != null) {
-            val data = helper.readDecryptedKey("default")
-            if (data != null) {
-                return data.mnemonicBackedUp
-            }
+            helper.getMnemonicBackedUpFlag("default")?.let { return it }
         }
         // Fallback to ESP
         return prefs.getBoolean(KEY_MNEMONIC_BACKED_UP, false)
     }
 
     suspend fun setMnemonicBackedUp(backedUp: Boolean) {
+        // Flip the plaintext flag in Room without re-encrypting the
+        // bundle — V2 rows cannot be decrypted without an authenticated
+        // Cipher, and this call site has none. The PIN backup blob keeps
+        // its previous mnemonicBackedUp value until the next mnemonic
+        // reveal (which carries a fresh Cipher and refreshes the blob).
         val helper = keyStoreMigrationHelper
-        if (helper != null) {
-            val data = helper.readDecryptedKey("default")
-            if (data != null) {
-                writeToRoom("default", data.privateKeyHex, data.mnemonic, data.walletType, backedUp)
-                writeBackupIfPinAvailable("default") {
-                    KeyMaterial(
-                        privateKey = data.privateKeyHex,
-                        mnemonic = data.mnemonic,
-                        walletType = data.walletType,
-                        mnemonicBackedUp = backedUp
-                    )
-                }
-                return
-            }
+        if (helper != null && helper.setMnemonicBackedUpFlag("default", backedUp)) {
+            return
         }
         // ESP fallback
         prefs.edit().putBoolean(KEY_MNEMONIC_BACKED_UP, backedUp).commit()
@@ -501,21 +492,10 @@ class KeyManager @Inject constructor(
     }
 
     suspend fun setMnemonicBackedUpForWallet(walletId: String, backedUp: Boolean) {
+        // See [setMnemonicBackedUp] for the V2 flag-only rationale.
         val helper = keyStoreMigrationHelper
-        if (helper != null) {
-            val data = helper.readDecryptedKey(walletId)
-            if (data != null) {
-                writeToRoom(walletId, data.privateKeyHex, data.mnemonic, data.walletType, backedUp)
-                writeBackupIfPinAvailable(walletId) {
-                    KeyMaterial(
-                        privateKey = data.privateKeyHex,
-                        mnemonic = data.mnemonic,
-                        walletType = data.walletType,
-                        mnemonicBackedUp = backedUp
-                    )
-                }
-                return
-            }
+        if (helper != null && helper.setMnemonicBackedUpFlag(walletId, backedUp)) {
+            return
         }
         // ESP fallback
         getWalletPrefs(walletId).edit().putBoolean(KEY_MNEMONIC_BACKED_UP, backedUp).commit()
@@ -531,12 +511,13 @@ class KeyManager @Inject constructor(
     }
 
     suspend fun hasMnemonicBackupForWallet(walletId: String): Boolean {
+        // Flag-only read; see [getWalletType] for the V2 reasoning. The
+        // old code decrypted the bundle just to pull this boolean, which
+        // threw V2KeyMaterialRequiresAuthException on every launch
+        // post-keystore-migration.
         val helper = keyStoreMigrationHelper
         if (helper != null) {
-            val data = helper.readDecryptedKey(walletId)
-            if (data != null) {
-                return data.mnemonicBackedUp
-            }
+            helper.getMnemonicBackedUpFlag(walletId)?.let { return it }
         }
         // Fallback to ESP
         return getWalletPrefs(walletId).getBoolean(KEY_MNEMONIC_BACKED_UP, false)

@@ -1,0 +1,4 @@
+v1.7.1:
+- Corregido el cierre al iniciar tras actualizar de v1.6.x a v1.7.0. Después de la migración del almacén de claves V2, la ruta de navegación post-autenticación descifraba el paquete de claves solo para leer una bandera en texto plano, lo que provocaba el cierre en carteras V2.
+
+Código: github.com/RaheemJnr/pocket-node/releases
