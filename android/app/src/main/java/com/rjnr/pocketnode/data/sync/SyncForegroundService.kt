@@ -103,6 +103,34 @@ class SyncForegroundService : Service() {
         }
     }
 
+    /**
+     * API 34 (Android 14) FGS time-limit callback for short-lived service
+     * types. `dataSync` is capped at ~6h per 24h window. When the system
+     * fires this we MUST stop the FGS or it kills the process with
+     * `ForegroundServiceDidNotStopInTimeException` on the main thread —
+     * a SystemServer-injected RuntimeException that no in-process
+     * try-catch can intercept. matt reported the symptom on a Samsung
+     * S24 Ultra after extended background time.
+     *
+     * Stopping the FGS does NOT stop the sync poll on the repository
+     * scope. If the app is foregrounded again, the next onStartCommand
+     * starts a new FGS instance and the system grants a fresh budget.
+     */
+    override fun onTimeout(startId: Int) {
+        Log.w(TAG, "FGS dataSync timeout received (startId=$startId, API 34 path). Stopping cleanly.")
+        stopSelf(startId)
+    }
+
+    /**
+     * API 35 (Android 15) variant of [onTimeout] that includes the FGS
+     * type. Same behaviour: stop the service before the system kills
+     * the process.
+     */
+    override fun onTimeout(startId: Int, fgsType: Int) {
+        Log.w(TAG, "FGS timeout received (startId=$startId, fgsType=$fgsType, API 35 path). Stopping cleanly.")
+        stopSelf(startId)
+    }
+
     override fun onDestroy() {
         super.onDestroy()
         observeJob?.cancel()
