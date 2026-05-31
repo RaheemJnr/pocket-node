@@ -67,6 +67,32 @@ class KeyStoreMigrationHelper(
     }
 
     /**
+     * Read the plaintext mnemonicBackedUp flag without touching the
+     * encrypted columns. Safe for V2 rows pre-unlock. Returns null when
+     * the wallet has no key_material row (caller falls back to ESP).
+     */
+    suspend fun getMnemonicBackedUpFlag(walletId: String): Boolean? =
+        keyMaterialDao.getMnemonicBackedUp(walletId)
+
+    /**
+     * Read the plaintext walletType column without decrypting. Same
+     * V2-safe contract as [getMnemonicBackedUpFlag].
+     */
+    suspend fun getWalletTypeFlag(walletId: String): String? =
+        keyMaterialDao.getWalletType(walletId)
+
+    /**
+     * Flip the plaintext mnemonicBackedUp flag in-place. Does not
+     * re-encrypt the key bundle, so this works on V2 rows without a
+     * BiometricPrompt. Returns true when a row was updated.
+     */
+    suspend fun setMnemonicBackedUpFlag(walletId: String, backedUp: Boolean): Boolean {
+        if (keyMaterialDao.getKdfVersion(walletId) == null) return false
+        keyMaterialDao.updateMnemonicBackedUp(walletId, backedUp, System.currentTimeMillis())
+        return true
+    }
+
+    /**
      * Read key material for a wallet. V1 (kdfVersion=1) rows decrypt
      * silently under the legacy unrestricted Keystore key. V2 rows throw
      * [V2KeyMaterialRequiresAuthException] — callers must use the overload

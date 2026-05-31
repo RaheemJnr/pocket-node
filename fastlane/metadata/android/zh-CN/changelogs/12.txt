@@ -1,0 +1,4 @@
+v1.7.1:
+- 修复 v1.6.x 升级到 v1.7.0 后的启动崩溃。V2 密钥库迁移后,认证后的导航路径在仅需读取普通标志位时尝试解密密钥包,导致 V2 钱包崩溃。
+
+源代码:github.com/RaheemJnr/pocket-node/releases

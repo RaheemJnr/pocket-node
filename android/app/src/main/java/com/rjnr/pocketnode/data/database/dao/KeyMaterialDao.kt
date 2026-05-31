@@ -46,4 +46,16 @@ interface KeyMaterialDao {
      */
     @Query("SELECT kdfVersion FROM key_material WHERE walletId = :walletId")
     suspend fun getKdfVersion(walletId: String): Int?
+
+    /**
+     * Plaintext flag columns. Safe to read without an authenticated
+     * Cipher — these don't touch the encrypted key/mnemonic ciphertext.
+     * Used by routing/decision code (e.g. "does this wallet need a
+     * mnemonic backup prompt?") that must work on V2 rows pre-unlock.
+     */
+    @Query("SELECT mnemonicBackedUp FROM key_material WHERE walletId = :walletId")
+    suspend fun getMnemonicBackedUp(walletId: String): Boolean?
+
+    @Query("SELECT walletType FROM key_material WHERE walletId = :walletId")
+    suspend fun getWalletType(walletId: String): String?
 }
