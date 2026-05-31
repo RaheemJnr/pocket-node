@@ -150,4 +150,68 @@ class KeyStoreMigrationHelperTest {
         assertEquals("cc".repeat(32), result!!.privateKeyHex)
         assertNull(result.mnemonic)
     }
+
+    // -- Flag-only path (v1.7.1 hotfix regression) --
+    //
+    // The crash that motivated v1.7.1 was KeyManager routing plaintext-flag
+    // reads through readDecryptedKey, which throws V2KeyMaterialRequiresAuthException
+    // after the keystore migration. These tests pin the flag-only accessors so
+    // that future refactors don't reintroduce a decryption call on the
+    // flag-read path.
+
+    @Test
+    fun `getMnemonicBackedUpFlag returns flag on V2 row without decrypting`() = runTest {
+        helper.migrateWallet("v2-flag", "aa".repeat(32), "v2 mnemonic", "mnemonic", true)
+        val v2Helper = KeystoreV2MigrationHelper(keyMaterialDao, encryptionManager, migrationPrefs)
+        v2Helper.migrateWallet("v2-flag", encryptionManager.newEncryptCipherV2()).getOrThrow()
+        // kdfVersion is now 2; readDecryptedKey would throw here.
+
+        assertEquals(true, helper.getMnemonicBackedUpFlag("v2-flag"))
+    }
+
+    @Test
+    fun `getWalletTypeFlag returns walletType on V2 row without decrypting`() = runTest {
+        helper.migrateWallet("v2-type", "bb".repeat(32), "type mnemonic", "mnemonic", false)
+        val v2Helper = KeystoreV2MigrationHelper(keyMaterialDao, encryptionManager, migrationPrefs)
+        v2Helper.migrateWallet("v2-type", encryptionManager.newEncryptCipherV2()).getOrThrow()
+
+        assertEquals("mnemonic", helper.getWalletTypeFlag("v2-type"))
+    }
+
+    @Test
+    fun `getMnemonicBackedUpFlag returns null for missing wallet`() = runTest {
+        assertNull(helper.getMnemonicBackedUpFlag("nonexistent"))
+    }
+
+    @Test
+    fun `getWalletTypeFlag returns null for missing wallet`() = runTest {
+        assertNull(helper.getWalletTypeFlag("nonexistent"))
+    }
+
+    @Test
+    fun `setMnemonicBackedUpFlag flips flag on V2 row without re-encrypting`() = runTest {
+        helper.migrateWallet("v2-set", "cc".repeat(32), "set mnemonic", "mnemonic", false)
+        val v2Helper = KeystoreV2MigrationHelper(keyMaterialDao, encryptionManager, migrationPrefs)
+        v2Helper.migrateWallet("v2-set", encryptionManager.newEncryptCipherV2()).getOrThrow()
+
+        // Capture the V2 ciphertext + iv so we can prove the setter didn't touch them.
+        val before = keyMaterialDao.getByWalletId("v2-set")!!
+        assertEquals(2, before.kdfVersion)
+        assertFalse(before.mnemonicBackedUp)
+
+        val updated = helper.setMnemonicBackedUpFlag("v2-set", true)
+        assertTrue(updated)
+
+        val after = keyMaterialDao.getByWalletId("v2-set")!!
+        assertTrue(after.mnemonicBackedUp)
+        // Bundle ciphertext and iv unchanged — flag flip is plaintext-only.
+        assertArrayEquals(before.encryptedPrivateKey, after.encryptedPrivateKey)
+        assertArrayEquals(before.iv, after.iv)
+        assertEquals(before.kdfVersion, after.kdfVersion)
+    }
+
+    @Test
+    fun `setMnemonicBackedUpFlag returns false for missing wallet`() = runTest {
+        assertFalse(helper.setMnemonicBackedUpFlag("nonexistent", true))
+    }
 }
