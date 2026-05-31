@@ -33,17 +33,33 @@ class SyncForegroundService : Service() {
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         Log.d(TAG, "onStartCommand (flags=$flags, startId=$startId)")
-        startAsForeground()
+        // startForeground can throw on Android 12+ if the system rejects the
+        // start (ForegroundServiceStartNotAllowedException), and on Android 14+
+        // if the service-type declaration is missing or mismatched. Samsung's
+        // bg-restrict ROMs also surface a SecurityException here when waking
+        // from deep sleep. Catching here is critical: an uncaught exception in
+        // onStartCommand crashes the host process. (matt, Telegram, 2026-05)
+        try {
+            startAsForeground()
+        } catch (e: Throwable) {
+            Log.e(TAG, "startForeground failed; stopping self to avoid crash", e)
+            stopSelf(startId)
+            return START_NOT_STICKY
+        }
 
         // Guard against duplicate coroutines on repeated onStartCommand
         if (observeJob?.isActive != true) {
             serviceScope.launch {
-                // Re-init wallet if needed (e.g. after process restart via START_STICKY)
-                if (gatewayRepository.walletInfo.value == null) {
-                    Log.d(TAG, "Wallet not initialized, attempting re-init")
-                    gatewayRepository.initializeWallet()
+                try {
+                    // Re-init wallet if needed (e.g. after process restart via START_STICKY)
+                    if (gatewayRepository.walletInfo.value == null) {
+                        Log.d(TAG, "Wallet not initialized, attempting re-init")
+                        gatewayRepository.initializeWallet()
+                    }
+                    gatewayRepository.startSyncPolling()
+                } catch (e: Throwable) {
+                    Log.e(TAG, "Service-scope sync bootstrap failed", e)
                 }
-                gatewayRepository.startSyncPolling()
             }
             observeProgress()
         }
@@ -64,15 +80,25 @@ class SyncForegroundService : Service() {
     private fun observeProgress() {
         observeJob = serviceScope.launch {
             gatewayRepository.syncProgress.collectLatest { progress ->
-                val notification = if (progress.isSyncing) {
-                    syncNotificationManager.buildSyncingNotification(
-                        progress.percentage.toInt(),
-                        progress.etaDisplay
-                    )
-                } else {
-                    syncNotificationManager.buildSyncedNotification()
+                // NotificationManager.notify() can throw a SecurityException on
+                // Android 13+ when the user revokes POST_NOTIFICATIONS, and on
+                // some Samsung ROMs throws a RemoteException if the system
+                // notification service is briefly unavailable during a
+                // background → foreground transition. Catching here keeps the
+                // sync running even when the notification surface is sick.
+                try {
+                    val notification = if (progress.isSyncing) {
+                        syncNotificationManager.buildSyncingNotification(
+                            progress.percentage.toInt(),
+                            progress.etaDisplay
+                        )
+                    } else {
+                        syncNotificationManager.buildSyncedNotification()
+                    }
+                    syncNotificationManager.notify(notification)
+                } catch (e: Throwable) {
+                    Log.w(TAG, "notification update failed; continuing", e)
                 }
-                syncNotificationManager.notify(notification)
             }
         }
     }

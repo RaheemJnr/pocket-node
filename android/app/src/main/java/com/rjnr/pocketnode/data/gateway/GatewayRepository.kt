@@ -25,6 +25,7 @@ import com.rjnr.pocketnode.data.wallet.SyncStrategy
 import com.nervosnetwork.ckblightclient.LightClientNative
 import dagger.hilt.android.qualifiers.ApplicationContext
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.async
@@ -163,7 +164,23 @@ class GatewayRepository @Inject constructor(
     private val _isSwitchingNetwork = MutableStateFlow(false)
     val isSwitchingNetwork: StateFlow<Boolean> = _isSwitchingNetwork.asStateFlow()
 
-    private val scope = CoroutineScope(Dispatchers.IO)
+    // SupervisorJob: one child failure must not cancel siblings or the scope
+    // itself. Without this, a thrown exception inside any background coroutine
+    // (sync polling JNI calls, DAO header fetches, notification updates) would
+    // cancel every other coroutine and propagate to the Thread default handler,
+    // which in release builds crashes the process. Samsung devices reach this
+    // path readily after long background periods because the OEM memory
+    // manager forces the embedded light client into states that throw on
+    // re-entry (matt, Telegram, 2026-05).
+    //
+    // CoroutineExceptionHandler: logs the throwable instead of letting it
+    // bubble out of the scope. Pairs with the SupervisorJob — together they
+    // turn what used to be a process crash into a single ERROR line in
+    // logcat.
+    private val coroutineExceptionHandler = kotlinx.coroutines.CoroutineExceptionHandler { _, e ->
+        Log.e(TAG, "Uncaught exception in GatewayRepository scope; suppressed to avoid process crash", e)
+    }
+    private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO + coroutineExceptionHandler)
     private val _nodeReady = MutableStateFlow<Boolean?>(null)
     private var activeWalletId: String = walletPreferences.getActiveWalletId() ?: ""
     private var activeWalletType: String = KeyManager.WALLET_TYPE_MNEMONIC
@@ -1963,18 +1980,43 @@ class GatewayRepository @Inject constructor(
         syncPollingJob = scope.launch {
             Log.d(TAG, "Starting centralized sync polling")
             while (true) {
-                // Skip the iteration when no wallet is loaded into repo state.
-                // Happens during normal lifecycle windows: lock screen (PIN not
-                // entered), brief startup race before wallet decryption, after
-                // session clear on background. Without this guard, getAccountStatus
-                // throws "No wallet" on every poll and floods logcat with stack
-                // traces that look like real errors.
-                if (_walletInfo.value == null) {
-                    delay(5_000L)
-                    continue
+                // Wrap each poll iteration so an exception (JNI panic-returned-
+                // null, state mutation race, notification update failure)
+                // doesn't kill the polling loop. Without this, one bad cycle
+                // produces a permanently-stuck "Syncing..." UI even though
+                // the scope's SupervisorJob keeps the process alive. The
+                // catch logs and waits for the next cycle.
+                try {
+                    pollSyncOnce(generation)
+                } catch (e: kotlinx.coroutines.CancellationException) {
+                    throw e // honour structured concurrency
+                } catch (e: Throwable) {
+                    Log.e(TAG, "syncPoll iteration failed; continuing", e)
                 }
+                val delayMs = if (_syncProgress.value.isSyncing) 5_000L else 30_000L
+                delay(delayMs)
+            }
+        }
+    }
 
-                getAccountStatus()
+    /**
+     * Single sync-poll iteration extracted from [startSyncPolling] so the
+     * while loop can wrap each call in a try-catch without losing the
+     * generation-guard semantics. Any throwable inside this function logs
+     * and returns; the loop continues on the next tick.
+     */
+    private suspend fun pollSyncOnce(generation: Long) {
+        // Skip the iteration when no wallet is loaded into repo state.
+        // Happens during normal lifecycle windows: lock screen (PIN not
+        // entered), brief startup race before wallet decryption, after
+        // session clear on background. Without this guard, getAccountStatus
+        // throws "No wallet" on every poll and floods logcat with stack
+        // traces that look like real errors.
+        if (_walletInfo.value == null) {
+            return
+        }
+
+        getAccountStatus()
                     .onSuccess { status ->
                         // Generation gate: refuse to publish state if stopSyncPolling()
                         // (or a fresh start) has bumped the generation since this
@@ -2024,11 +2066,6 @@ class GatewayRepository @Inject constructor(
                     .onFailure { e ->
                         Log.e(TAG, "Sync polling: failed to get account status", e)
                     }
-
-                val delayMs = if (_syncProgress.value.isSyncing) 5_000L else 30_000L
-                delay(delayMs)
-            }
-        }
     }
 
     /**

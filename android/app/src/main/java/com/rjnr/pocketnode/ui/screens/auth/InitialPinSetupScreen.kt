@@ -139,7 +139,7 @@ private fun IntroBody(
         Spacer(Modifier.height(16.dp))
         Reason(
             title = "Protects a backup of your recovery phrase",
-            body = "We keep an encrypted copy of your recovery phrase on this device. Your PIN is the key that unlocks it if something goes wrong."
+            body = "An encrypted copy of your recovery phrase is stored on this device. Your PIN is the key that unlocks it if something goes wrong."
         )
         Spacer(Modifier.height(16.dp))
         Reason(

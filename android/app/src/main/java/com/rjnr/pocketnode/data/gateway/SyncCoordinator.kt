@@ -19,6 +19,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.withContext
 import kotlinx.serialization.encodeToString
 import kotlinx.serialization.json.Json
@@ -311,11 +312,47 @@ class SyncCoordinator @Inject constructor(
             )
         }
 
-        val tipStr = lightClient.getTipHeaderRaw()
-        val tipHeight = if (tipStr != null) {
-            val tip = json.decodeFromString<JniHeaderView>(tipStr)
-            tip.number.removePrefix("0x").toLong(16)
-        } else 0L
+        // Bounded tip-wait: awaitNodeReady() only guarantees init success, not
+        // that a tip header has arrived from peers. On a fresh wallet boot the
+        // light client can be up but tip is still null for several seconds
+        // while it handshakes with peers. If we read tipHeight = 0 in that
+        // window, toFromBlock(NEW_WALLET, ...) falls back to the hardcoded
+        // mainnet checkpoint (~18.3M from the v1.6.0 cut), which by 2026-05
+        // is hundreds of thousands of blocks stale — the user perceives a
+        // "syncing from a million blocks ago" experience instead of the
+        // instant sync NEW_WALLET should deliver.
+        //
+        // Poll the tip header for up to TIP_WAIT_BUDGET_MS before computing
+        // fromBlock; if the budget expires we still fall through to the
+        // checkpoint path so the wallet doesn't hang waiting for peers.
+        // matt (Telegram, 2026-05-28) reported the symptom.
+        val tipDeadline = System.currentTimeMillis() + TIP_WAIT_BUDGET_MS
+        var tipHeight = 0L
+        var tipPolls = 0
+        while (System.currentTimeMillis() < tipDeadline) {
+            val tipStr = lightClient.getTipHeaderRaw()
+            if (tipStr != null) {
+                val parsed = runCatching {
+                    json.decodeFromString<JniHeaderView>(tipStr)
+                        .number.removePrefix("0x").toLong(16)
+                }.getOrNull() ?: 0L
+                if (parsed > 0L) {
+                    tipHeight = parsed
+                    break
+                }
+            }
+            tipPolls++
+            delay(TIP_WAIT_POLL_MS)
+        }
+        if (tipHeight == 0L) {
+            Log.w(
+                TAG,
+                "tip header still null after ${TIP_WAIT_BUDGET_MS}ms ($tipPolls polls); " +
+                    "falling back to checkpoint. fromBlock may be stale."
+            )
+        } else if (tipPolls > 0) {
+            Log.i(TAG, "tip resolved after $tipPolls poll(s): $tipHeight")
+        }
 
         // Per-wallet lock-script recovery. Address-only path — V2 wallets
         // boot without a BiometricPrompt (#213 sub-PR 5). The cached
@@ -399,5 +436,14 @@ class SyncCoordinator @Inject constructor(
          * https://github.com/nervosnetwork/neuron/blob/develop/packages/neuron-wallet/src/block-sync-renderer/sync/light-synchronizer.ts#L22
          */
         const val BALANCED_LAG_THRESHOLD = 100_000L
+
+        /**
+         * How long to wait for a non-null tip header before falling back to
+         * the hardcoded checkpoint when computing NEW_WALLET fromBlock.
+         * 5s covers the typical peer-handshake window on a fresh wallet
+         * boot without blocking the user noticeably if peers are slow.
+         */
+        private const val TIP_WAIT_BUDGET_MS = 5_000L
+        private const val TIP_WAIT_POLL_MS = 200L
     }
 }
