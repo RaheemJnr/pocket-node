@@ -1,0 +1,9 @@
+v1.7.0:
+- Forgot PIN now actually recovers your wallet from your recovery phrase.
+- Viewing your seed phrase requires biometric, not just PIN.
+- "Add" button on Wallets works. Active-wallet delete auto-switches.
+- New wallet creation asks for a name and confirms the recovery phrase.
+- New wallets start syncing at the real tip, not a stale checkpoint.
+- Fixed background sync crashes on Samsung after long backgrounding.
+
+Source: github.com/RaheemJnr/pocket-node/releases
