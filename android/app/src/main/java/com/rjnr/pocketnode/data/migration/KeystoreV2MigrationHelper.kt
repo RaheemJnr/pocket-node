@@ -4,6 +4,7 @@ import android.content.SharedPreferences
 import android.util.Log
 import com.rjnr.pocketnode.data.crypto.KeystoreEncryptionManager
 import com.rjnr.pocketnode.data.database.dao.KeyMaterialDao
+import com.rjnr.pocketnode.data.database.entity.KeyMaterialEntity
 import javax.crypto.Cipher
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.encodeToString
@@ -118,6 +119,45 @@ class KeystoreV2MigrationHelper(
             keyMaterialDao.upsert(migrated)
 
             Log.i(TAG, "Migrated wallet $walletId from V1 to V2")
+        }
+    }
+
+    /**
+     * Write a brand-new wallet row directly at kdfVersion=2. The Cipher must
+     * have been unlocked via BiometricPrompt by the caller. Used by `WalletKeyWriter`
+     * on the new-wallet creation path so that wallets created post-v1.7.0 land
+     * on the auth-bound V2 key from the start rather than transiting V1 (#289).
+     *
+     * Refuses if a key_material row already exists for [walletId]; callers must
+     * not silently overwrite an existing wallet's key material. Use the V1→V2
+     * migration path for legacy wallets.
+     */
+    suspend fun writeNewV2Row(
+        walletId: String,
+        bundle: WalletKeyBundle,
+        v2EncryptCipher: Cipher,
+        walletType: String,
+        mnemonicBackedUp: Boolean,
+    ): Result<Unit> {
+        return runCatching {
+            val existing = keyMaterialDao.getByWalletId(walletId)
+            if (existing != null) {
+                throw IllegalStateException("walletId=$walletId already exists in key_material; refuse to overwrite")
+            }
+            val bundleBytes = json.encodeToString(bundle).toByteArray(Charsets.UTF_8)
+            val (encryptedBundle, newIv) = encryptionManager.encryptWithCipher(v2EncryptCipher, bundleBytes)
+            val entity = KeyMaterialEntity(
+                walletId = walletId,
+                encryptedPrivateKey = encryptedBundle,
+                encryptedMnemonic = null,
+                iv = newIv,
+                walletType = walletType,
+                mnemonicBackedUp = mnemonicBackedUp,
+                updatedAt = nowProvider(),
+                kdfVersion = V2_VERSION,
+            )
+            keyMaterialDao.upsert(entity)
+            Log.i(TAG, "Wrote new V2 wallet row for $walletId")
         }
     }
 

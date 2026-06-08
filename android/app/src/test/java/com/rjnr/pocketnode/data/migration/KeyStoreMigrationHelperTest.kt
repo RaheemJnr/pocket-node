@@ -214,4 +214,38 @@ class KeyStoreMigrationHelperTest {
     fun `setMnemonicBackedUpFlag returns false for missing wallet`() = runTest {
         assertFalse(helper.setMnemonicBackedUpFlag("nonexistent", true))
     }
+
+    // -- writeNewV2Row direct V2 path (v1.7.2 #289) --
+
+    @Test
+    fun `writeNewV2Row writes a row at kdfVersion=2`() = runTest {
+        val v2Helper = KeystoreV2MigrationHelper(keyMaterialDao, encryptionManager, migrationPrefs)
+        val cipher = encryptionManager.newEncryptCipherV2()
+        val bundle = WalletKeyBundle(
+            privateKeyHex = "aa".repeat(32),
+            mnemonic = "test mnemonic words"
+        )
+
+        v2Helper.writeNewV2Row("new-wallet", bundle, cipher, "mnemonic", mnemonicBackedUp = false)
+            .getOrThrow()
+
+        val entity = keyMaterialDao.getByWalletId("new-wallet")
+        assertNotNull(entity)
+        assertEquals(2, entity!!.kdfVersion)
+        assertEquals("mnemonic", entity.walletType)
+        assertFalse(entity.mnemonicBackedUp)
+        assertNull(entity.encryptedMnemonic)  // V2 bundles mnemonic into encryptedPrivateKey
+        assertTrue(entity.iv.size >= 12)
+    }
+
+    @Test
+    fun `writeNewV2Row rejects pre-existing wallet IDs`() = runTest {
+        val v2Helper = KeystoreV2MigrationHelper(keyMaterialDao, encryptionManager, migrationPrefs)
+        val bundle = WalletKeyBundle(privateKeyHex = "aa".repeat(32), mnemonic = "m")
+        v2Helper.writeNewV2Row("dup", bundle, encryptionManager.newEncryptCipherV2(), "mnemonic", false).getOrThrow()
+
+        val secondAttempt = v2Helper.writeNewV2Row("dup", bundle, encryptionManager.newEncryptCipherV2(), "mnemonic", false)
+        assertTrue(secondAttempt.isFailure)
+        assertTrue(secondAttempt.exceptionOrNull()?.message?.contains("already exists") == true)
+    }
 }
