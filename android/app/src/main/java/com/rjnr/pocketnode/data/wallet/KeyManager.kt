@@ -9,6 +9,7 @@ import com.rjnr.pocketnode.data.auth.AuthManager
 import com.rjnr.pocketnode.data.gateway.models.NetworkType
 import com.rjnr.pocketnode.data.gateway.models.Script
 import com.rjnr.pocketnode.data.migration.KeyStoreMigrationHelper
+import com.rjnr.pocketnode.data.migration.WalletKeyBundle
 import androidx.annotation.VisibleForTesting
 import dagger.hilt.android.qualifiers.ApplicationContext
 import org.nervos.ckb.crypto.Blake2b
@@ -53,6 +54,20 @@ class KeyManager @Inject constructor(
     fun clearSessionPin() {
         sessionPin?.let { java.util.Arrays.fill(it, '\u0000') }
         sessionPin = null
+    }
+
+    /**
+     * Pure-crypto plaintext bundle producer. Used by the new V2 write path
+     * (see [WalletKeyWriter]). The caller is responsible for persistence.
+     */
+    fun encodePlaintextBundle(
+        privateKey: ByteArray,
+        mnemonic: List<String>?,
+    ): WalletKeyBundle {
+        return WalletKeyBundle(
+            privateKeyHex = privateKey.joinToString("") { "%02x".format(it) },
+            mnemonic = mnemonic?.joinToString(" "),
+        )
     }
 
     @Inject
