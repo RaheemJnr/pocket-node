@@ -8,8 +8,11 @@ import com.rjnr.pocketnode.data.crypto.KeystoreEncryptionManager
 import com.rjnr.pocketnode.data.database.dao.KeyMaterialDao
 import com.rjnr.pocketnode.data.migration.KeystoreV2MigrationHelper
 import com.rjnr.pocketnode.data.migration.WalletKeyBundle
+import java.util.Arrays
 import javax.inject.Inject
 import javax.inject.Singleton
+import kotlinx.coroutines.NonCancellable
+import kotlinx.coroutines.withContext
 
 /**
  * Activity-aware bridge for writing new wallet key material at kdfVersion=2.
@@ -72,6 +75,10 @@ class WalletKeyWriter @Inject constructor(
      * On step-4 failure: best-effort rollback of the key_material row, then
      * returns [Result.WriteFailed].
      *
+     * Cancellation safety: the post-auth section (Room write + PIN backup + rollback)
+     * runs inside [NonCancellable] so a job cancellation between Room write and
+     * backup write cannot leave an orphan key_material row without a backup blob.
+     *
      * The caller is responsible for the post-persistence entity insert
      * (walletDao.insert, deactivateAll, prefs). On any non-Success Result,
      * the caller must NOT proceed with entity insertion.
@@ -104,47 +111,59 @@ class WalletKeyWriter @Inject constructor(
             is AuthManager.CipherAuthResult.Error ->
                 Result.AuthError(authResult.errorCode, authResult.errString)
             is AuthManager.CipherAuthResult.Success -> {
-                val writeResult = keystoreV2MigrationHelper.writeNewV2Row(
-                    walletId = walletId,
-                    bundle = bundle,
-                    v2EncryptCipher = authResult.cipher,
-                    walletType = walletType,
-                    mnemonicBackedUp = mnemonicBackedUp,
-                )
-                if (writeResult.isFailure) {
-                    return Result.WriteFailed(
-                        writeResult.exceptionOrNull() ?: Exception("writeNewV2Row failed")
+                // Run the Room write + PIN backup + rollback under NonCancellable so a
+                // job cancellation between the two writes cannot orphan a key_material
+                // row without a matching backup blob.
+                withContext(NonCancellable) {
+                    val writeResult = keystoreV2MigrationHelper.writeNewV2Row(
+                        walletId = walletId,
+                        bundle = bundle,
+                        v2EncryptCipher = authResult.cipher,
+                        walletType = walletType,
+                        mnemonicBackedUp = mnemonicBackedUp,
                     )
-                }
-
-                // Best-effort PIN backup. No-op if session PIN absent (first-wallet path).
-                try {
-                    val pin = authManager.getSessionPin()
-                    if (pin != null) {
-                        keyBackupManager.writeBackup(
-                            walletId,
-                            KeyMaterial(
-                                privateKey = bundle.privateKeyHex,
-                                mnemonic = bundle.mnemonic,
-                                walletType = walletType,
-                                mnemonicBackedUp = mnemonicBackedUp,
-                            ),
-                            pin = pin,
+                    if (writeResult.isFailure) {
+                        return@withContext Result.WriteFailed(
+                            writeResult.exceptionOrNull()
+                                ?: IllegalStateException("writeNewV2Row failed")
                         )
                     }
-                } catch (e: Throwable) {
-                    Log.e(TAG, "PIN backup write failed for $walletId; rolling back key_material row", e)
-                    // Best-effort rollback so we don't leave an orphan Room row
-                    // without a matching backup blob.
-                    try {
-                        keyMaterialDao.delete(walletId)
-                    } catch (rollback: Throwable) {
-                        Log.e(TAG, "Rollback of key_material delete also failed for $walletId", rollback)
-                    }
-                    return Result.WriteFailed(e)
-                }
 
-                Result.Success
+                    // Best-effort PIN backup. No-op if session PIN absent (first-wallet path).
+                    val pin = authManager.getSessionPin()
+                    if (pin != null) {
+                        try {
+                            try {
+                                keyBackupManager.writeBackup(
+                                    walletId,
+                                    KeyMaterial(
+                                        privateKey = bundle.privateKeyHex,
+                                        mnemonic = bundle.mnemonic,
+                                        walletType = walletType,
+                                        mnemonicBackedUp = mnemonicBackedUp,
+                                    ),
+                                    pin = pin,
+                                )
+                            } catch (e: Throwable) {
+                                Log.e(TAG, "PIN backup write failed for $walletId; rolling back key_material row", e)
+                                // Best-effort rollback so we don't leave an orphan Room row
+                                // without a matching backup blob.
+                                try {
+                                    keyMaterialDao.delete(walletId)
+                                } catch (rollback: Throwable) {
+                                    Log.e(TAG, "Rollback of key_material delete also failed for $walletId", rollback)
+                                }
+                                return@withContext Result.WriteFailed(e)
+                            }
+                        } finally {
+                            // Zero the defensive copy returned by getSessionPin() so the
+                            // PIN does not linger on the heap after this function returns.
+                            Arrays.fill(pin, ' ')
+                        }
+                    }
+
+                    Result.Success
+                }
             }
         }
     }
