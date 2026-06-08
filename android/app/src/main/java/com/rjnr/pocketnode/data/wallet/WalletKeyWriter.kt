@@ -6,6 +6,7 @@ import androidx.fragment.app.FragmentActivity
 import com.rjnr.pocketnode.data.auth.AuthManager
 import com.rjnr.pocketnode.data.crypto.KeystoreEncryptionManager
 import com.rjnr.pocketnode.data.database.dao.KeyMaterialDao
+import com.rjnr.pocketnode.data.migration.KeyStoreMigrationHelper
 import com.rjnr.pocketnode.data.migration.KeystoreV2MigrationHelper
 import com.rjnr.pocketnode.data.migration.WalletKeyBundle
 import java.util.Arrays
@@ -32,6 +33,7 @@ import kotlinx.coroutines.withContext
 class WalletKeyWriter @Inject constructor(
     private val keyMaterialDao: KeyMaterialDao,
     private val keystoreV2MigrationHelper: KeystoreV2MigrationHelper,
+    private val keyStoreMigrationHelper: KeyStoreMigrationHelper,
     private val encryptionManager: KeystoreEncryptionManager,
     private val authManager: AuthManager,
     private val keyBackupManager: KeyBackupManager,
@@ -48,6 +50,14 @@ class WalletKeyWriter @Inject constructor(
          */
         object KeyInvalidated : Result()
         data class WriteFailed(val cause: Throwable) : Result()
+        /**
+         * V2 Keystore key cannot be created because the device has no
+         * biometric enrollment AND no device PIN/pattern/password. The
+         * onboarding screen should gate on this before reaching the writer
+         * but the result is here as defense-in-depth. Caller surfaces a
+         * dialog directing the user to Android Settings → Security.
+         */
+        object NoSecureLock : Result()
     }
 
     /**
@@ -97,6 +107,20 @@ class WalletKeyWriter @Inject constructor(
         } catch (e: KeyPermanentlyInvalidatedException) {
             Log.w(TAG, "V2 key invalidated when generating cipher for $walletId", e)
             return Result.KeyInvalidated
+        } catch (e: IllegalStateException) {
+            // Android Keystore throws IllegalStateException("Secure lock
+            // screen must be enabled to create keys requiring user
+            // authentication") when the V2 key (setUserAuthenticationRequired
+            // = true) is asked to generate on a device with no biometric
+            // enrolled AND no device PIN/pattern/password. The onboarding
+            // screen gates on this state, but a race (or a third-party
+            // entry point) could still reach here. Surface a typed result
+            // instead of letting the raw exception bubble up as a toast.
+            if (e.message?.contains("Secure lock screen", ignoreCase = true) == true) {
+                Log.w(TAG, "V2 key creation refused: no secure lock on device", e)
+                return Result.NoSecureLock
+            }
+            throw e
         }
 
         val authResult = authManager.authenticateForCipher(
@@ -164,6 +188,49 @@ class WalletKeyWriter @Inject constructor(
 
                     Result.Success
                 }
+            }
+        }
+    }
+
+    /**
+     * Write a new wallet at kdfVersion=1 (software-only encryption, no
+     * BiometricPrompt) for users whose device has no biometric AND no
+     * device PIN/pattern/password set. The Android Keystore refuses to
+     * mint the V2 key in that environment ("Secure lock screen must be
+     * enabled..."), so [persistNewWallet] would otherwise hard-fail and
+     * lock these users out of the app entirely.
+     *
+     * The wallet row is identical to the legacy v1.6.x format: V1 row at
+     * `kdfVersion=1`, encrypted under the unrestricted Keystore key. The
+     * existing AuthScreen migration loop in [AuthViewModel] will pick up
+     * the row and upgrade it to V2 the moment the user enables a device
+     * lock and cold-starts the app.
+     *
+     * Callers gate on [AuthManager.hasDeviceCredential] / biometric
+     * enrollment and pick this method when neither is available; the
+     * Onboarding/MnemonicImport screens surface a "Continue without a
+     * device lock?" dialog with informed-consent copy.
+     */
+    suspend fun persistNewWalletV1Fallback(
+        walletId: String,
+        bundle: WalletKeyBundle,
+        walletType: String,
+        mnemonicBackedUp: Boolean,
+    ): Result {
+        return withContext(NonCancellable) {
+            try {
+                keyStoreMigrationHelper.migrateWallet(
+                    walletId = walletId,
+                    privateKeyHex = bundle.privateKeyHex,
+                    mnemonic = bundle.mnemonic,
+                    walletType = walletType,
+                    mnemonicBackedUp = mnemonicBackedUp,
+                )
+                Log.i(TAG, "Wrote new V1 wallet row for $walletId (no device credential)")
+                Result.Success
+            } catch (e: Throwable) {
+                Log.e(TAG, "V1 fallback write failed for $walletId", e)
+                Result.WriteFailed(e)
             }
         }
     }

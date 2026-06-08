@@ -47,6 +47,9 @@ fun OnboardingScreen(
     // Surface this as a warning the user can dismiss to continue, or
     // route them to Android Settings to enable a lock.
     var showNoDeviceLockWarning by remember { mutableStateOf(false) }
+    // Captured at click time so the dialog's "Continue anyway" knows which
+    // path to resume (Create wallet → name dialog vs Recover → import nav).
+    var pendingNoLockAction by remember { mutableStateOf<(() -> Unit)?>(null) }
 
     // After wallet creation, navigate to backup screen (not Home)
     LaunchedEffect(uiState.isWalletCreated) {
@@ -132,6 +135,7 @@ fun OnboardingScreen(
                     // lock to give the user informed-consent before
                     // landing on the name dialog. They can still proceed.
                     if (uiState.noDeviceCredential) {
+                        pendingNoLockAction = { showNameDialog = true }
                         showNoDeviceLockWarning = true
                     } else {
                         showNameDialog = true
@@ -147,7 +151,18 @@ fun OnboardingScreen(
                 title = "Recover from Seed Phrase",
                 description = "Import wallet using your 12-word recovery phrase.",
                 icon = Lucide.KeyRound,
-                onClick = onNavigateToImport,
+                onClick = {
+                    // Same V2-Keystore informed-consent gate as Create New
+                    // Wallet. The import path also writes via WalletKeyWriter
+                    // and will pick the V1 software-only fallback when the
+                    // device has no lock set.
+                    if (uiState.noDeviceCredential) {
+                        pendingNoLockAction = onNavigateToImport
+                        showNoDeviceLockWarning = true
+                    } else {
+                        onNavigateToImport()
+                    }
+                },
                 isLoading = uiState.isLoading,
                 modifier = Modifier.uaTestTag("onboarding-recover")
             )
@@ -207,17 +222,20 @@ fun OnboardingScreen(
             title = { Text("Continue without a device lock?") },
             text = {
                 Text(
-                    text = "This phone has no PIN, pattern, password, or biometric set. " +
-                        "Your wallet will still work, but the keys cannot be hardware-protected " +
-                        "until you enable a device lock in Android Settings. The app will upgrade " +
-                        "the protection automatically once you do.",
+                    text = "This phone has no PIN, pattern, password, or biometric set.\n\n" +
+                        "Your wallet will still work, but the keys will be stored in a software-only " +
+                        "encryption layer that protects against casual theft of the device but is " +
+                        "not hardware-bound to your fingerprint or PIN.\n\n" +
+                        "If you enable a device lock later, the app will upgrade your wallet to " +
+                        "hardware-backed protection automatically on the next launch.",
                     style = MaterialTheme.typography.bodyMedium,
                 )
             },
             confirmButton = {
                 TextButton(onClick = {
                     showNoDeviceLockWarning = false
-                    showNameDialog = true
+                    pendingNoLockAction?.invoke()
+                    pendingNoLockAction = null
                 }) {
                     Text("Continue anyway")
                 }
@@ -237,7 +255,10 @@ fun OnboardingScreen(
                     }) {
                         Text("Open Settings")
                     }
-                    TextButton(onClick = { showNoDeviceLockWarning = false }) {
+                    TextButton(onClick = {
+                        showNoDeviceLockWarning = false
+                        pendingNoLockAction = null
+                    }) {
                         Text("Cancel")
                     }
                 }
