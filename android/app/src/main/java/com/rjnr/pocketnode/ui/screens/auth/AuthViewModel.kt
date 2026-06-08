@@ -56,6 +56,19 @@ class AuthViewModel @Inject constructor(
         _uiState.update { it.copy(authSuccess = true) }
     }
 
+    /**
+     * Called by [com.rjnr.pocketnode.ui.screens.auth.AuthScreen] when the
+     * user returns from [PinEntryScreen] with a successful PIN verify.
+     * Mirrors [onBiometricSuccess] — both unlock paths must end here so
+     * the AuthScreen `LaunchedEffect(authSuccess)` fires
+     * [runMigrationIfNeeded]. Without this hook the V1→V2 migration loop
+     * was silently dead for any user who didn't use biometric (#289
+     * follow-up bug found during v1.7.3 testing).
+     */
+    fun onPinUnlockSuccess() {
+        _uiState.update { it.copy(authSuccess = true) }
+    }
+
     fun onBiometricFailed(errorMessage: String) {
         _uiState.update { it.copy(error = UiMessage.Raw(errorMessage)) }
     }
