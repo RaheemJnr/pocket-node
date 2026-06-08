@@ -60,11 +60,21 @@ jobs:
 
           echo "Validated release tag $RELEASE_TAG at $TAG_COMMIT."
           echo "release_tag=$RELEASE_TAG" >> "$GITHUB_OUTPUT"
+          echo "tag_commit=$TAG_COMMIT" >> "$GITHUB_OUTPUT"
 
       - name: Checkout validated release tag
+        # Check out the verified commit SHA (not the unqualified tag name).
+        # An unqualified ref can be resolved by Git/checkout-action to a
+        # branch first when a branch shares the tag's short name — an attacker
+        # with branch-create + workflow-dispatch perms could create branch
+        # v1.7.0 alongside tag v1.7.0, dispatch the workflow with input
+        # v1.7.0, pass the tag-provenance validation (which inspects
+        # refs/tags/v1.7.0), and then have checkout resolve to the malicious
+        # branch with release-signing secrets available. SHAs are
+        # unambiguous and cannot be shadowed. (#291)
         uses: actions/checkout@v4
         with:
-          ref: ${{ steps.validate_tag.outputs.release_tag }}
+          ref: ${{ steps.validate_tag.outputs.tag_commit }}
           fetch-depth: 0
 
       - name: Set up JDK 17
