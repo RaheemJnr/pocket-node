@@ -62,11 +62,7 @@ class KeystoreV2MigrationRunnerTest {
     @Test
     fun `runner migrates V1 row inserted after prefs flag was set`() = runTest {
         // Mark migration globally complete first (mimics post-v1.7.0 state).
-        // NOTE: literal string matches KeystoreV2MigrationHelper.KEY_MIGRATION_V2_COMPLETE
-        // at line 238 ("keystore_v2_migration_complete"). If that constant changes,
-        // this test breaks loudly — that's intentional; consider exposing the constant
-        // `internal` to remove the literal.
-        prefs.edit().putBoolean("keystore_v2_migration_complete", true).commit()
+        prefs.edit().putBoolean(KeystoreV2MigrationHelper.KEY_MIGRATION_V2_COMPLETE, true).commit()
 
         // Insert a V1 row AFTER the flag was set (simulates new wallet on v1.7.x).
         legacyHelper.migrateWallet("post-flag-wallet", "aa".repeat(32), "test mnemonic", "mnemonic", false)

@@ -1,6 +1,7 @@
 package com.rjnr.pocketnode.data.migration
 
 import android.content.SharedPreferences
+import android.database.sqlite.SQLiteConstraintException
 import android.util.Log
 import com.rjnr.pocketnode.data.crypto.KeystoreEncryptionManager
 import com.rjnr.pocketnode.data.database.dao.KeyMaterialDao
@@ -140,6 +141,12 @@ class KeystoreV2MigrationHelper(
         mnemonicBackedUp: Boolean,
     ): Result<Unit> {
         return runCatching {
+            // Soft early-exit: keeps the user-friendly exception fast on the
+            // single-threaded happy path. The atomic guard is `insertOrAbort`
+            // below — between this read and that write a concurrent inserter
+            // could land a row, in which case the SQLite UNIQUE constraint on
+            // `walletId` aborts the insert and we translate to the same
+            // IllegalStateException for callers (#289 polish).
             val existing = keyMaterialDao.getByWalletId(walletId)
             if (existing != null) {
                 throw IllegalStateException("walletId=$walletId already exists in key_material; refuse to overwrite")
@@ -156,7 +163,14 @@ class KeystoreV2MigrationHelper(
                 updatedAt = nowProvider(),
                 kdfVersion = V2_VERSION,
             )
-            keyMaterialDao.upsert(entity)
+            try {
+                keyMaterialDao.insertOrAbort(entity)
+            } catch (e: SQLiteConstraintException) {
+                throw IllegalStateException(
+                    "walletId=$walletId already exists in key_material; refuse to overwrite",
+                    e
+                )
+            }
             Log.i(TAG, "Wrote new V2 wallet row for $walletId")
         }
     }
@@ -275,7 +289,7 @@ class KeystoreV2MigrationHelper(
 
     companion object {
         private const val TAG = "KeystoreV2Migration"
-        private const val KEY_MIGRATION_V2_COMPLETE = "keystore_v2_migration_complete"
+        internal const val KEY_MIGRATION_V2_COMPLETE = "keystore_v2_migration_complete"
         const val V1_VERSION = 1
         const val V2_VERSION = 2
     }

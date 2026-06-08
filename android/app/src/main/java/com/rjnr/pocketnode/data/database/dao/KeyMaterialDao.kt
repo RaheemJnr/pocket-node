@@ -15,6 +15,16 @@ interface KeyMaterialDao {
     @Insert(onConflict = OnConflictStrategy.REPLACE)
     suspend fun upsert(entity: KeyMaterialEntity)
 
+    /**
+     * Insert a row, aborting (throwing `android.database.sqlite.SQLiteConstraintException`)
+     * if a row with the same primary key already exists. Used by
+     * `KeystoreV2MigrationHelper.writeNewV2Row` to make the "refuse to overwrite an
+     * existing wallet" guard atomic at the SQLite level rather than relying on a
+     * read-then-write check that can race under concurrent writers (#289 polish).
+     */
+    @Insert(onConflict = OnConflictStrategy.ABORT)
+    suspend fun insertOrAbort(entity: KeyMaterialEntity)
+
     @Query("DELETE FROM key_material WHERE walletId = :walletId")
     suspend fun delete(walletId: String)
 

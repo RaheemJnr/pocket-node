@@ -128,6 +128,10 @@ class KeystoreV2MigrationRunner @Inject constructor(
                     }
                 }
             } catch (e: android.security.keystore.KeyPermanentlyInvalidatedException) {
+                // V2 key was invalidated (typically by biometric enrollment change). Every
+                // subsequent wallet in this run will throw the same — accumulating each as a
+                // per-wallet failure is correct because the resulting Outcome.Failed.reason
+                // ("re-import required") is the right user instruction.
                 Log.w(TAG, "KeyPermanentlyInvalidatedException for $walletId; recording, continuing", e)
                 failedWalletIds += walletId
                 continue
