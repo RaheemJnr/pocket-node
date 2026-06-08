@@ -77,10 +77,10 @@ class AuthViewModel @Inject constructor(
      */
     fun runMigrationIfNeeded(activity: FragmentActivity, onComplete: () -> Unit) {
         viewModelScope.launch {
-            if (migrationHelper.isMigrationComplete()) {
-                onComplete()
-                return@launch
-            }
+            // The `migrationHelper.isMigrationComplete()` short-circuit was removed in
+            // v1.7.2 (#289). Like the runner short-circuit it stranded any V1 row
+            // written after the prefs flag was set. `pendingWalletIds()` is now the
+            // sole source of truth and is safe to call cheaply on every unlock.
             val pending = migrationHelper.pendingWalletIds()
             if (pending.isEmpty()) {
                 // Empty DB (fresh install on v1.7.0) — finalize to mark
