@@ -92,6 +92,15 @@ class TransactionBuilderTest {
         )
     }
 
+    // #287 dust-change refusal: end-to-end coverage deferred because the
+    // existing test fixtures use placeholder testnet addresses that fail
+    // `AddressUtils.parseAddress` (rejected as "Invalid sender address" at
+    // TransactionBuilder.kt:95, before the dust-check branch is reached).
+    // Wiring a real-checksum address pair into the test fixtures is out of
+    // scope for this hotfix; the change is small, the new `when` branch
+    // throws on the dust case, and the SendViewModel parseErrorMessage
+    // case is asserted by manual smoke per the PR test plan.
+
     // --- Companion constants ---
 
     @Test

@@ -590,6 +590,8 @@ class SendViewModel @Inject constructor(
                 "Insufficient balance for this transaction."
             message.contains("minimum", ignoreCase = true) && message.contains("61", ignoreCase = true) ->
                 "Minimum transfer amount is 61 CKB due to CKB's cell model."
+            message.contains("Dust change refused", ignoreCase = true) ->
+                "This exact amount would leave less than 61 CKB of change, which CKB cannot store as a separate output and the protocol would silently absorb into the transaction fee. Try sending a slightly different amount, or send your full balance minus the fee."
 
             // Network/broadcast errors
             message.contains("Send failed", ignoreCase = true) ||

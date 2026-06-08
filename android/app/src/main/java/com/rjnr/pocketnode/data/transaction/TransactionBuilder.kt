@@ -158,19 +158,46 @@ class TransactionBuilder @Inject constructor(
         )
         outputsData.add("0x")
 
-        // Change output back to sender (using dynamic fee)
-        if (change >= MIN_CELL_CAPACITY) {
-            outputs.add(
-                CellOutput(
-                    capacity = "0x${change.toString(16)}",
-                    lock = senderScript,
-                    type = null
+        // Change output back to sender (using dynamic fee).
+        //
+        // Three cases. CKB has no "send change to fee" idiom — capacity that
+        // isn't in an output is silently consumed as transaction fee, so any
+        // non-zero change below MIN_CELL_CAPACITY would be burned (#287).
+        when {
+            change == 0L -> {
+                // Exact fit: input total = amount + fee. No change output needed.
+                Log.d(TAG, "  No change output (exact fit; total inputs = amount + fee)")
+            }
+            change >= MIN_CELL_CAPACITY -> {
+                outputs.add(
+                    CellOutput(
+                        capacity = "0x${change.toString(16)}",
+                        lock = senderScript,
+                        type = null
+                    )
                 )
-            )
-            outputsData.add("0x")
-            Log.d(TAG, "  Change output: $change shannons")
-        } else {
-            Log.d(TAG, "  No change output (change $change < min $MIN_CELL_CAPACITY, absorbed as fee)")
+                outputsData.add("0x")
+                Log.d(TAG, "  Change output: $change shannons")
+            }
+            else -> {
+                // 0 < change < MIN_CELL_CAPACITY: emitting this as a change
+                // cell would violate the protocol minimum; omitting it would
+                // silently burn $change shannons (up to ~61 CKB) as fee.
+                // Refuse with a clear, actionable error rather than the prior
+                // silent burn. Recovery options for the user: send a slightly
+                // different amount that allows for a valid change output, OR
+                // send the full balance minus fee (which yields an exact fit
+                // with no change output at all).
+                val changeCkb = change / 100_000_000.0
+                val minCkb = MIN_CELL_CAPACITY / 100_000_000
+                Log.w(TAG, "  Dust change refused: $change shannons (${"%.4f".format(changeCkb)} CKB) below min $MIN_CELL_CAPACITY")
+                throw IllegalStateException(
+                    "Dust change refused: this send would leave ${"%.4f".format(changeCkb)} CKB of change " +
+                        "below the $minCkb CKB minimum cell capacity, which would be silently absorbed as " +
+                        "transaction fee. Try sending a slightly different amount or sending your full balance " +
+                        "minus the fee."
+                )
+            }
         }
 
         // Use network-appropriate cell dependency
@@ -243,12 +270,19 @@ class TransactionBuilder @Inject constructor(
             "0x" + DaoConstants.DAO_DEPOSIT_DATA.joinToString("") { "%02x".format(it) }
         )
 
-        if (change >= MIN_CELL_CAPACITY) {
-            outputs.add(CellOutput(
-                capacity = "0x${change.toString(16)}",
-                lock = senderScript
-            ))
-            outputsData.add("0x")
+        // Same dust-change refusal as buildTransfer (#287). DAO deposit must
+        // not silently burn change capacity below 61 CKB into the fee.
+        when {
+            change == 0L -> Unit
+            change >= MIN_CELL_CAPACITY -> {
+                outputs.add(CellOutput(capacity = "0x${change.toString(16)}", lock = senderScript))
+                outputsData.add("0x")
+            }
+            else -> throw IllegalStateException(
+                "Dust change refused: this DAO deposit would leave ${"%.4f".format(change / 100_000_000.0)} CKB " +
+                    "below the ${MIN_CELL_CAPACITY / 100_000_000} CKB minimum, which would be silently absorbed " +
+                    "as transaction fee. Adjust the deposit amount and retry."
+            )
         }
 
         val secp256k1Dep = when (network) {
@@ -308,14 +342,21 @@ class TransactionBuilder @Inject constructor(
         )
 
         // Change output (if any). feeTotal - DEFAULT_FEE goes back to the user.
-        // Skip the change cell when its capacity would fall below the 61 CKB
-        // minimum — that residue is absorbed into the fee.
+        // Refuse dust change rather than silently absorbing it as fee (#287).
         val change = feeTotal - DEFAULT_FEE
         val outputs = mutableListOf(withdrawingOutput)
         val outputsData = mutableListOf(blockNumberHex)
-        if (change >= MIN_CELL_CAPACITY) {
-            outputs.add(CellOutput(capacity = "0x${change.toString(16)}", lock = senderScript))
-            outputsData.add("0x")
+        when {
+            change == 0L -> Unit
+            change >= MIN_CELL_CAPACITY -> {
+                outputs.add(CellOutput(capacity = "0x${change.toString(16)}", lock = senderScript))
+                outputsData.add("0x")
+            }
+            else -> throw IllegalStateException(
+                "Dust change refused: this DAO withdraw would leave ${"%.4f".format(change / 100_000_000.0)} CKB " +
+                    "below the ${MIN_CELL_CAPACITY / 100_000_000} CKB minimum, which would be silently absorbed " +
+                    "as transaction fee. Use a wallet cell with a slightly different capacity to cover the fee."
+            )
         }
 
         val secp256k1Dep = when (network) {
