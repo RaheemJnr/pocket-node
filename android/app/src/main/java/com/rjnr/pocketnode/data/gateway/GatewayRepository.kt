@@ -627,62 +627,12 @@ class GatewayRepository @Inject constructor(
 
     fun wasResetDueToCorruption(): Boolean = keyManager.wasResetDueToCorruption()
 
-    /**
-     * Create a brand new wallet and register with optimized sync
-     */
-    suspend fun createNewWallet(): Result<WalletInfo> = runCatching {
-        Log.d(TAG, "🆕 Creating brand new wallet...")
-        val info = keyManager.generateWallet()
-        _walletInfo.value = info
-        
-        // For new wallets, use NEW_WALLET sync mode (starts from checkpoint)
-        registerAccount(syncMode = SyncMode.NEW_WALLET)
-        info
-    }
-
-    /**
-     * Import an existing wallet
-     */
-    suspend fun importExistingWallet(privateKeyHex: String, syncMode: SyncMode = SyncMode.RECENT): Result<WalletInfo> = runCatching {
-        Log.d(TAG, "📥 Importing existing wallet...")
+    suspend fun importWallet(privateKeyHex: String): Result<WalletInfo> = runCatching {
+        Log.d(TAG, "Importing existing wallet...")
         val info = keyManager.importWallet(privateKeyHex)
         _walletInfo.value = info
         _isRegistered.value = false
-        
-        // For imported wallets, we use the provided sync mode (default RECENT)
-        registerAccount(syncMode = syncMode)
-        info
-    }
-
-    suspend fun importWallet(privateKeyHex: String): Result<WalletInfo> = runCatching {
-        importExistingWallet(privateKeyHex).getOrThrow()
-    }
-
-    /**
-     * Create a new wallet with BIP39 mnemonic.
-     * Returns wallet info and the 12/24 mnemonic words for backup.
-     */
-    suspend fun createWalletWithMnemonic(): Result<Pair<WalletInfo, List<String>>> = runCatching {
-        Log.d(TAG, "Creating mnemonic wallet...")
-        val (info, words) = keyManager.generateWalletWithMnemonic()
-        _walletInfo.value = info
-        registerAccount(syncMode = SyncMode.NEW_WALLET)
-        Pair(info, words)
-    }
-
-    /**
-     * Import wallet from BIP39 mnemonic words.
-     */
-    suspend fun importFromMnemonic(
-        words: List<String>,
-        passphrase: String = "",
-        syncMode: SyncMode = SyncMode.RECENT
-    ): Result<WalletInfo> = runCatching {
-        Log.d(TAG, "Importing wallet from mnemonic...")
-        val info = keyManager.importWalletFromMnemonic(words, passphrase)
-        _walletInfo.value = info
-        _isRegistered.value = false
-        registerAccount(syncMode = syncMode)
+        registerAccount(syncMode = SyncMode.RECENT)
         info
     }
 
