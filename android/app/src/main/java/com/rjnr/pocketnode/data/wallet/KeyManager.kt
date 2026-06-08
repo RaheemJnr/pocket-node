@@ -323,24 +323,6 @@ class KeyManager @Inject constructor(
 
     // -- Wallet-scoped key storage (multi-wallet support) --
 
-    suspend fun storeKeysForWallet(walletId: String, privateKey: ByteArray, mnemonic: List<String>?) {
-        val hex = privateKey.joinToString("") { "%02x".format(it) }
-        val walletType = if (mnemonic != null) WALLET_TYPE_MNEMONIC else WALLET_TYPE_RAW_KEY
-
-        // Write to Room (primary) — inlined writeToRoom (deleted in #289 chunk 3.3)
-        keyStoreMigrationHelper?.migrateWallet(walletId, hex, mnemonic?.joinToString(" "), walletType, false)
-
-        // Write to PIN backup (secondary)
-        writeBackupIfPinAvailable(walletId) {
-            KeyMaterial(
-                privateKey = hex,
-                mnemonic = mnemonic?.joinToString(" "),
-                walletType = walletType,
-                mnemonicBackedUp = false
-            )
-        }
-    }
-
     @Deprecated("ESP fallback — remove after one release cycle")
     private fun getWalletPrefs(walletId: String): SharedPreferences {
         val fileName = "ckb_wallet_keys_$walletId"

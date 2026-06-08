@@ -5,12 +5,14 @@ import com.rjnr.pocketnode.data.database.AppDatabase
 import com.rjnr.pocketnode.data.database.DatabaseMaintenanceUtil
 import com.rjnr.pocketnode.data.database.dao.BalanceCacheDao
 import com.rjnr.pocketnode.data.database.dao.DaoCellDao
+import com.rjnr.pocketnode.data.database.dao.KeyMaterialDao
 import com.rjnr.pocketnode.data.database.dao.TransactionDao
 import com.rjnr.pocketnode.data.database.dao.WalletDao
 import com.rjnr.pocketnode.data.database.entity.WalletEntity
 import androidx.room.withTransaction
 import com.rjnr.pocketnode.data.gateway.models.NetworkType
 import com.rjnr.pocketnode.data.gateway.models.SyncMode
+import com.rjnr.pocketnode.data.migration.WalletKeyBundle
 import kotlinx.coroutines.flow.Flow
 import org.nervos.ckb.utils.Numeric
 import java.util.UUID
@@ -28,7 +30,8 @@ class WalletRepository @Inject constructor(
     private val appDatabase: AppDatabase,
     private val transactionDao: TransactionDao,
     private val balanceCacheDao: BalanceCacheDao,
-    private val daoCellDao: DaoCellDao
+    private val daoCellDao: DaoCellDao,
+    private val keyMaterialDao: KeyMaterialDao,
 ) {
     val walletsFlow: Flow<List<WalletEntity>> = walletDao.getAllFlow()
 
@@ -91,16 +94,27 @@ class WalletRepository @Inject constructor(
     }
 
     /**
-     * Create a new mnemonic wallet. Stores keys in wallet-scoped encrypted prefs.
+     * Create a new mnemonic wallet. Persistence of key material is delegated
+     * to the supplied [persistKeys] closure, which the caller wires to
+     * [WalletKeyWriter.persistNewWallet] (the Activity-aware V2 writer).
+     *
+     * The closure receives the [walletId] generated here (so the writer can
+     * pass it to `writeNewV2Row`) and a plaintext [WalletKeyBundle] produced
+     * via [KeyManager.encodePlaintextBundle]. On non-Success a
+     * [WalletKeyWriter.PersistException] is thrown so callers can dispatch on
+     * the typed [WalletKeyWriter.Result] via `result.onFailure { }`.
+     *
+     * NOTE: this no longer returns the freshly generated mnemonic. Callers
+     * that need to display it must split the flow into mnemonic-first
+     * generation + an explicit import call.
      */
     suspend fun createWallet(
         name: String,
-        wordCount: MnemonicManager.WordCount = MnemonicManager.WordCount.TWELVE
-    ): Pair<WalletEntity, List<String>> {
+        persistKeys: suspend (walletId: String, bundle: WalletKeyBundle) -> WalletKeyWriter.Result,
+        wordCount: MnemonicManager.WordCount = MnemonicManager.WordCount.TWELVE,
+    ): Result<WalletEntity> = runCatching {
         validateUniqueName(name)
-        // Derive everything locally. Going through keyManager.generateWalletWithMnemonic
-        // would overwrite the legacy "default" Room key slot (and fire a PIN backup for
-        // "default") on every M3 create, polluting legacy single-wallet fallback paths.
+
         val words = mnemonicManager.generateMnemonic(wordCount)
         val privateKey = mnemonicManager.mnemonicToPrivateKey(words)
         val info = keyManager.deriveWalletInfo(privateKey)
@@ -108,7 +122,11 @@ class WalletRepository @Inject constructor(
         val now = System.currentTimeMillis()
         val colorIndex = walletDao.count() % 8
 
-        keyManager.storeKeysForWallet(walletId, privateKey, words)
+        val bundle = keyManager.encodePlaintextBundle(privateKey, words)
+        val persistResult = persistKeys(walletId, bundle)
+        if (persistResult !is WalletKeyWriter.Result.Success) {
+            throw WalletKeyWriter.PersistException(persistResult)
+        }
 
         val entity = WalletEntity(
             walletId = walletId,
@@ -125,25 +143,33 @@ class WalletRepository @Inject constructor(
             colorIndex = colorIndex
         )
 
-        walletDao.deactivateAll()
-        walletDao.insert(entity)
-        walletPreferences.setActiveWalletId(walletId)
-        markFreshWalletSyncMode(walletId)
+        try {
+            walletDao.deactivateAll()
+            walletDao.insert(entity)
+            walletPreferences.setActiveWalletId(walletId)
+            markFreshWalletSyncMode(walletId)
+        } catch (e: Throwable) {
+            Log.e(TAG, "Post-persist entity insert failed for $walletId; attempting rollback", e)
+            runCatching { keyMaterialDao.delete(walletId) }
+                .onFailure { Log.e(TAG, "Rollback delete failed for $walletId", it) }
+            throw e
+        }
+
         Log.d(TAG, "Created wallet: ${entity.walletId} (${entity.name})")
-        return Pair(entity, words)
+        entity
     }
 
     /**
-     * Import a wallet from a mnemonic phrase.
+     * Import a wallet from a mnemonic phrase. See [createWallet] for the
+     * callback-based persistence contract.
      */
-    suspend fun importWallet(
-        name: String,
+    suspend fun importFromMnemonic(
         words: List<String>,
-        passphrase: String = ""
-    ): WalletEntity {
+        name: String,
+        persistKeys: suspend (walletId: String, bundle: WalletKeyBundle) -> WalletKeyWriter.Result,
+        passphrase: String = "",
+    ): Result<WalletEntity> = runCatching {
         validateUniqueName(name)
-        // Derive locally — see comment in createWallet on why we bypass the legacy
-        // keyManager.importWalletFromMnemonic path.
         require(mnemonicManager.validateMnemonic(words)) { "Invalid mnemonic" }
         val privateKey = mnemonicManager.mnemonicToPrivateKey(words, passphrase)
         val info = keyManager.deriveWalletInfo(privateKey)
@@ -152,8 +178,11 @@ class WalletRepository @Inject constructor(
         val now = System.currentTimeMillis()
         val colorIndex = walletDao.count() % 8
 
-        keyManager.storeKeysForWallet(walletId, privateKey, words)
-        keyManager.setMnemonicBackedUpForWallet(walletId, true)
+        val bundle = keyManager.encodePlaintextBundle(privateKey, words)
+        val persistResult = persistKeys(walletId, bundle)
+        if (persistResult !is WalletKeyWriter.Result.Success) {
+            throw WalletKeyWriter.PersistException(persistResult)
+        }
 
         val entity = WalletEntity(
             walletId = walletId,
@@ -170,22 +199,31 @@ class WalletRepository @Inject constructor(
             colorIndex = colorIndex
         )
 
-        walletDao.deactivateAll()
-        walletDao.insert(entity)
-        walletPreferences.setActiveWalletId(walletId)
+        try {
+            walletDao.deactivateAll()
+            walletDao.insert(entity)
+            walletPreferences.setActiveWalletId(walletId)
+        } catch (e: Throwable) {
+            Log.e(TAG, "Post-persist entity insert failed for $walletId; attempting rollback", e)
+            runCatching { keyMaterialDao.delete(walletId) }
+                .onFailure { Log.e(TAG, "Rollback delete failed for $walletId", it) }
+            throw e
+        }
+
         Log.d(TAG, "Imported wallet: ${entity.walletId} (${entity.name})")
-        return entity
+        entity
     }
 
     /**
-     * Import a wallet from a raw private key hex string.
+     * Import a wallet from a raw private key hex string. See [createWallet]
+     * for the callback-based persistence contract.
      */
     suspend fun importRawKey(
+        privateKeyHex: String,
         name: String,
-        privateKeyHex: String
-    ): WalletEntity {
+        persistKeys: suspend (walletId: String, bundle: WalletKeyBundle) -> WalletKeyWriter.Result,
+    ): Result<WalletEntity> = runCatching {
         validateUniqueName(name)
-        // Parse and derive locally — see comment in createWallet.
         val privateKeyBytes = Numeric.hexStringToByteArray(privateKeyHex)
         require(privateKeyBytes.size == 32) { "Private key must be 32 bytes" }
         val info = keyManager.deriveWalletInfo(privateKeyBytes)
@@ -194,8 +232,11 @@ class WalletRepository @Inject constructor(
         val now = System.currentTimeMillis()
         val colorIndex = walletDao.count() % 8
 
-        keyManager.storeKeysForWallet(walletId, privateKeyBytes, null)
-        keyManager.setMnemonicBackedUpForWallet(walletId, true)
+        val bundle = keyManager.encodePlaintextBundle(privateKeyBytes, mnemonic = null)
+        val persistResult = persistKeys(walletId, bundle)
+        if (persistResult !is WalletKeyWriter.Result.Success) {
+            throw WalletKeyWriter.PersistException(persistResult)
+        }
 
         val entity = WalletEntity(
             walletId = walletId,
@@ -212,39 +253,45 @@ class WalletRepository @Inject constructor(
             colorIndex = colorIndex
         )
 
-        walletDao.deactivateAll()
-        walletDao.insert(entity)
-        walletPreferences.setActiveWalletId(walletId)
+        try {
+            walletDao.deactivateAll()
+            walletDao.insert(entity)
+            walletPreferences.setActiveWalletId(walletId)
+        } catch (e: Throwable) {
+            Log.e(TAG, "Post-persist entity insert failed for $walletId; attempting rollback", e)
+            runCatching { keyMaterialDao.delete(walletId) }
+                .onFailure { Log.e(TAG, "Rollback delete failed for $walletId", it) }
+            throw e
+        }
+
         Log.d(TAG, "Imported raw key wallet: ${entity.walletId} (${entity.name})")
-        return entity
+        entity
     }
 
     /**
      * Create a sub-account derived from a parent mnemonic wallet.
-     * Derives a new key at the next account index from the parent's mnemonic.
      *
-     * If [parentMnemonicOverride] is provided, the parent's mnemonic is
-     * not read from key storage — useful when the caller has already
-     * unlocked it via BiometricPrompt (V2 wallets). When null, the parent
-     * mnemonic is read silently from V1 storage, which will throw for V2
-     * parents (#213 sub-PR 5).
+     * The parent mnemonic is now a mandatory parameter — callers must
+     * pre-unlock the parent via [WalletKeyReader.readKeyMaterial] (which
+     * fires its own BiometricPrompt) and pass the recovered words in. The
+     * previous fallback that silently read V1 storage (and crashed on V2
+     * parents — #213 sub-PR 5) is gone.
+     *
+     * Persistence of the new sub-account's key material flows through
+     * [persistKeys] (same callback contract as [createWallet]).
      */
     suspend fun createSubAccount(
         parentWalletId: String,
         name: String,
-        parentMnemonicOverride: List<String>? = null,
-    ): WalletEntity {
+        parentMnemonic: List<String>,
+        persistKeys: suspend (walletId: String, bundle: WalletKeyBundle) -> WalletKeyWriter.Result,
+    ): Result<WalletEntity> = runCatching {
         val parent = walletDao.getById(parentWalletId)
             ?: throw IllegalArgumentException("Parent wallet not found")
         require(parent.type == KeyManager.WALLET_TYPE_MNEMONIC) {
             "Sub-accounts require a mnemonic wallet"
         }
 
-        val parentMnemonic = parentMnemonicOverride
-            ?: keyManager.getMnemonicForWallet(parentWalletId)
-            ?: throw IllegalStateException("Parent mnemonic not found")
-
-        // Use max existing sub-account index + 1 to avoid index collisions after deletions
         val existingSubs = walletDao.getSubAccountsList(parentWalletId)
         val nextIndex = if (existingSubs.isEmpty()) 1 else existingSubs.maxOf { it.accountIndex } + 1
         val seed = mnemonicManager.mnemonicToSeed(parentMnemonic)
@@ -258,8 +305,12 @@ class WalletRepository @Inject constructor(
         val now = System.currentTimeMillis()
         val colorIndex = walletDao.count() % 8
 
-        // Sub-accounts don't store mnemonic — only the parent holds it
-        keyManager.storeKeysForWallet(walletId, privateKey, null)
+        // Sub-accounts don't store mnemonic — only the parent holds it.
+        val bundle = keyManager.encodePlaintextBundle(privateKey, mnemonic = null)
+        val persistResult = persistKeys(walletId, bundle)
+        if (persistResult !is WalletKeyWriter.Result.Success) {
+            throw WalletKeyWriter.PersistException(persistResult)
+        }
 
         val entity = WalletEntity(
             walletId = walletId,
@@ -276,13 +327,20 @@ class WalletRepository @Inject constructor(
             colorIndex = colorIndex
         )
 
-        walletDao.deactivateAll()
-        walletDao.insert(entity)
-        walletPreferences.setActiveWalletId(walletId)
-        markFreshWalletSyncMode(walletId)
-        Log.d(TAG, "Created sub-account: $walletId (parent: $parentWalletId, index: $nextIndex)")
+        try {
+            walletDao.deactivateAll()
+            walletDao.insert(entity)
+            walletPreferences.setActiveWalletId(walletId)
+            markFreshWalletSyncMode(walletId)
+        } catch (e: Throwable) {
+            Log.e(TAG, "Post-persist sub-account insert failed for $walletId; attempting rollback", e)
+            runCatching { keyMaterialDao.delete(walletId) }
+                .onFailure { Log.e(TAG, "Rollback delete failed for $walletId", it) }
+            throw e
+        }
 
-        return entity
+        Log.d(TAG, "Created sub-account: $walletId (parent: $parentWalletId, index: $nextIndex)")
+        entity
     }
 
     /**
