@@ -60,6 +60,7 @@ class MnemonicImportViewModel @Inject constructor(
     private val mnemonicManager: MnemonicManager,
     private val walletRepository: WalletRepository,
     private val walletKeyWriter: WalletKeyWriter,
+    private val authManager: com.rjnr.pocketnode.data.auth.AuthManager,
 ) : ViewModel() {
 
     private val _uiState = MutableStateFlow(MnemonicImportUiState())
@@ -130,22 +131,37 @@ class MnemonicImportViewModel @Inject constructor(
             return
         }
 
+        // Same V1 software-only fallback as OnboardingViewModel.createNewWallet.
+        // The Welcome screen surfaced an informed-consent "Continue without a
+        // device lock?" dialog before navigating here, so the user has
+        // already opted in. AuthScreen migration loop auto-upgrades the V1
+        // row to V2 when they enable a device lock later (#289 follow-up).
+        val useV1Fallback = !canCreateV2BoundKey()
         viewModelScope.launch {
             _uiState.update { it.copy(isImporting = true, error = null) }
             val result = walletRepository.importFromMnemonic(
                 words = words,
                 name = "Imported Wallet",
                 persistKeys = { walletId, bundle ->
-                    walletKeyWriter.persistNewWallet(
-                        activity = activity,
-                        walletId = walletId,
-                        bundle = bundle,
-                        walletType = KeyManager.WALLET_TYPE_MNEMONIC,
-                        // The user just typed the seed phrase in, so by definition
-                        // they hold a copy of it (or know where it is). Skip the
-                        // post-onboarding backup nag.
-                        mnemonicBackedUp = true,
-                    )
+                    if (useV1Fallback) {
+                        walletKeyWriter.persistNewWalletV1Fallback(
+                            walletId = walletId,
+                            bundle = bundle,
+                            walletType = KeyManager.WALLET_TYPE_MNEMONIC,
+                            mnemonicBackedUp = true,
+                        )
+                    } else {
+                        walletKeyWriter.persistNewWallet(
+                            activity = activity,
+                            walletId = walletId,
+                            bundle = bundle,
+                            walletType = KeyManager.WALLET_TYPE_MNEMONIC,
+                            // The user just typed the seed phrase in, so by definition
+                            // they hold a copy of it (or know where it is). Skip the
+                            // post-onboarding backup nag.
+                            mnemonicBackedUp = true,
+                        )
+                    }
                 },
             )
             result.onSuccess { entity ->
@@ -176,16 +192,26 @@ class MnemonicImportViewModel @Inject constructor(
     }
 
     fun importPrivateKey(activity: FragmentActivity, hex: String) {
+        val useV1Fallback = !canCreateV2BoundKey()
         viewModelScope.launch {
             _uiState.update { it.copy(isImporting = true, showPrivateKeyDialog = false, error = null) }
             val result = walletRepository.importRawKey(hex, "Imported Wallet") { walletId, bundle ->
-                walletKeyWriter.persistNewWallet(
-                    activity = activity,
-                    walletId = walletId,
-                    bundle = bundle,
-                    walletType = KeyManager.WALLET_TYPE_RAW_KEY,
-                    mnemonicBackedUp = false,
-                )
+                if (useV1Fallback) {
+                    walletKeyWriter.persistNewWalletV1Fallback(
+                        walletId = walletId,
+                        bundle = bundle,
+                        walletType = KeyManager.WALLET_TYPE_RAW_KEY,
+                        mnemonicBackedUp = false,
+                    )
+                } else {
+                    walletKeyWriter.persistNewWallet(
+                        activity = activity,
+                        walletId = walletId,
+                        bundle = bundle,
+                        walletType = KeyManager.WALLET_TYPE_RAW_KEY,
+                        mnemonicBackedUp = false,
+                    )
+                }
             }
             result.onSuccess { entity ->
                 Log.d(TAG, "Imported raw key wallet entity: ${entity.walletId}")
@@ -205,6 +231,15 @@ class MnemonicImportViewModel @Inject constructor(
             }
         }
     }
+
+    /**
+     * Same check as OnboardingViewModel.canCreateV2BoundKey: V2 Keystore key
+     * can only be minted on a device with an enrolled biometric OR a device
+     * lock (PIN/pattern/password). Returning false routes the import through
+     * the V1 software-only fallback.
+     */
+    private fun canCreateV2BoundKey(): Boolean =
+        authManager.isBiometricEnrolled() || authManager.hasDeviceCredential()
 
     companion object {
         /**
