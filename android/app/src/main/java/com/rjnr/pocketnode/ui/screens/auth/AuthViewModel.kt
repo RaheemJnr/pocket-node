@@ -85,7 +85,11 @@ class AuthViewModel @Inject constructor(
             if (pending.isEmpty()) {
                 // Empty DB (fresh install on v1.7.0) — finalize to mark
                 // the migration complete so future starts don't re-check.
-                migrationHelper.finalize()
+                // finalize() is unlikely to fail here (nothing to delete on a
+                // fresh install) but log if it does so the failure isn't silent.
+                migrationHelper.finalize().onFailure { e ->
+                    Log.w(TAG, "finalize on empty-pending failed", e)
+                }
                 onComplete()
                 return@launch
             }

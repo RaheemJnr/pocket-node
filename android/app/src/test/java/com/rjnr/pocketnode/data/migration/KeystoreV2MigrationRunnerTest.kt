@@ -94,8 +94,8 @@ class KeystoreV2MigrationRunnerTest {
         } answers { AuthManager.CipherAuthResult.Success(args[1] as Cipher) }
 
         // Spy the real encryption manager so newEncryptCipherV2 throws KPIE on the SECOND call.
-        // pendingWalletIds returns insertion order [wallet-A, wallet-B], so call #1 succeeds for
-        // wallet-A and call #2 throws for wallet-B.
+        // pendingWalletIds returns alphabetical order (KeyMaterialDao.getV1WalletIds uses
+        // `ORDER BY walletId`), so call #1 succeeds for wallet-A and call #2 throws for wallet-B.
         val callCount = java.util.concurrent.atomic.AtomicInteger(0)
         val spiedEm = spyk(encryptionManager)
         every { spiedEm.newEncryptCipherV2() } answers {
