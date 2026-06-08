@@ -223,12 +223,96 @@ class UpdateDownloader @Inject constructor(
 
     /**
      * Called from the banner when the user taps Update on a finished
-     * download. Launches the system package installer.
+     * download. Verifies the APK was signed with our release certificate
+     * (#293) and only then launches the system package installer.
+     *
+     * The signature check is gated on a non-empty
+     * [com.rjnr.pocketnode.BuildConfig.RELEASE_CERT_SHA256] build-time
+     * constant. Debug builds without the env var skip the check (they
+     * can't easily produce signed APKs anyway). Release builds with the
+     * env var configured reject any APK whose signing-cert SHA-256 does
+     * not match — even if the download came from a TLS-pinned URL, this
+     * is the last line of defense against URL substitution and against
+     * a compromised GitHub release channel pushing an APK signed with a
+     * different key.
      */
     fun installNow() {
         if (_state.value !is DownloadState.ReadyToInstall) return
+        val apkFile = File(
+            context.getExternalFilesDir(Environment.DIRECTORY_DOWNLOADS),
+            APK_FILE_NAME
+        )
+        val verification = verifyApkSignature(apkFile)
+        if (verification != SignatureCheck.Ok) {
+            Log.e(TAG, "APK signature verification failed: $verification")
+            _state.value = DownloadState.Failed(
+                "Update file failed signature check. Re-download from pocket-node.com or " +
+                    "github.com/RaheemJnr/pocket-node/releases. (${verification.code})"
+            )
+            return
+        }
         _state.value = DownloadState.Installing
         launchSystemInstaller()
+    }
+
+    /** Result of [verifyApkSignature]. The `code` is a short tag included in the user-facing error message. */
+    internal sealed class SignatureCheck(val code: String) {
+        object Ok : SignatureCheck("ok")
+        object DisabledNoConstant : SignatureCheck("ok-skipped")
+        object ApkMissing : SignatureCheck("apk-missing")
+        object NoSigners : SignatureCheck("no-signers")
+        data class Mismatch(val expected: String, val actual: String) : SignatureCheck("sha-mismatch")
+        data class ReadError(val reason: String) : SignatureCheck("read-error")
+    }
+
+    /**
+     * Read the downloaded APK's signing certificate and compare its
+     * SHA-256 against [com.rjnr.pocketnode.BuildConfig.RELEASE_CERT_SHA256].
+     * Returns [SignatureCheck.Ok] when the expected SHA-256 is configured
+     * AND matches the APK's, or when the expected SHA-256 is empty (debug
+     * convenience; the check intentionally degrades to a no-op in dev).
+     *
+     * Uses the API 28+ `signingInfo` field; on older Android versions
+     * falls back to the deprecated `signatures` array. minSdk is 26, so
+     * both code paths must compile and run.
+     */
+    internal fun verifyApkSignature(apkFile: File): SignatureCheck {
+        if (!apkFile.exists()) return SignatureCheck.ApkMissing
+        val expected = com.rjnr.pocketnode.BuildConfig.RELEASE_CERT_SHA256
+            .replace(":", "")
+            .replace(" ", "")
+            .lowercase()
+        if (expected.isEmpty()) {
+            Log.w(TAG, "RELEASE_CERT_SHA256 not set; skipping APK signature verification (debug build?)")
+            return SignatureCheck.DisabledNoConstant
+        }
+        val certs: Array<android.content.pm.Signature> = try {
+            val flags = if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.P) {
+                android.content.pm.PackageManager.GET_SIGNING_CERTIFICATES
+            } else {
+                @Suppress("DEPRECATION")
+                android.content.pm.PackageManager.GET_SIGNATURES
+            }
+            val info = context.packageManager.getPackageArchiveInfo(apkFile.absolutePath, flags)
+                ?: return SignatureCheck.ReadError("getPackageArchiveInfo returned null")
+            if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.P) {
+                info.signingInfo?.apkContentsSigners ?: emptyArray()
+            } else {
+                @Suppress("DEPRECATION")
+                info.signatures ?: emptyArray()
+            }
+        } catch (e: Throwable) {
+            Log.e(TAG, "Failed to read APK signatures", e)
+            return SignatureCheck.ReadError(e.javaClass.simpleName)
+        }
+        if (certs.isEmpty()) return SignatureCheck.NoSigners
+        val digest = java.security.MessageDigest.getInstance("SHA-256")
+        val actual = digest.digest(certs[0].toByteArray()).joinToString("") { "%02x".format(it) }
+        return if (actual.equals(expected, ignoreCase = true)) {
+            SignatureCheck.Ok
+        } else {
+            SignatureCheck.Mismatch(expected = expected, actual = actual)
+        }
     }
 
     /**

@@ -43,6 +43,16 @@ android {
         }.getOrDefault("unknown")
         buildConfigField("String", "GIT_SHA", "\"$gitSha\"")
 
+        // SHA-256 of the release signing certificate, sourced from the
+        // RELEASE_CERT_SHA256 env var. UpdateDownloader compares this
+        // against the downloaded APK's signing cert before launching
+        // PackageInstaller (#293). Empty string disables the check —
+        // acceptable for debug builds; release builds with an empty
+        // value will surface the missing cert at install time but the
+        // gate is enforced strictly only when the constant is non-empty.
+        val releaseCertSha256 = System.getenv("RELEASE_CERT_SHA256") ?: ""
+        buildConfigField("String", "RELEASE_CERT_SHA256", "\"$releaseCertSha256\"")
+
         // Only include ARM ABIs — x86_64 is emulator-only and adds ~29 MB.
         // CI's upgrade-smoke harness opts in via BUILD_X86_64=1 (matched in
         // external/ckb-light-client/build-android-jni.sh).
