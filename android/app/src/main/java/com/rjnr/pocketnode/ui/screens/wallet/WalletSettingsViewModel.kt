@@ -434,6 +434,9 @@ class WalletSettingsViewModel @Inject constructor(
                         _uiState.update { it.copy(error = com.rjnr.pocketnode.ui.util.UiMessage.Resource(com.rjnr.pocketnode.R.string.vm_error_parent_no_mnemonic)) }
                         return@launch
                     }
+                    // Distinct prompt copy for prompt #2 (sub-account encrypt)
+                    // so the user knows this is securing the NEW sub-account,
+                    // not re-confirming the parent unlock from prompt #1.
                     val result = walletRepository.createSubAccount(walletId, name, parentMnemonic = words) { newWalletId, bundle ->
                         walletKeyWriter.persistNewWallet(
                             activity = activity,
@@ -441,6 +444,8 @@ class WalletSettingsViewModel @Inject constructor(
                             bundle = bundle,
                             walletType = KeyManager.WALLET_TYPE_MNEMONIC,
                             mnemonicBackedUp = false,
+                            promptTitle = "Secure new sub-account",
+                            promptSubtitle = "Encrypt the new account's keys.",
                         )
                     }
                     result.onFailure { e ->

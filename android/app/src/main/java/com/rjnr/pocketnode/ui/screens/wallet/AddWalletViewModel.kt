@@ -158,6 +158,8 @@ class AddWalletViewModel @Inject constructor(
             }
 
             // Prompt #2: persist sub-account at V2 (inside the closure).
+            // Distinct title/subtitle from prompt #1 so the user understands
+            // they're securing the NEW sub-account, not re-confirming the parent.
             val result = walletRepository.createSubAccount(parentId, name, parentMnemonic) { walletId, bundle ->
                 walletKeyWriter.persistNewWallet(
                     activity = activity,
@@ -165,6 +167,8 @@ class AddWalletViewModel @Inject constructor(
                     bundle = bundle,
                     walletType = KeyManager.WALLET_TYPE_MNEMONIC,
                     mnemonicBackedUp = false,
+                    promptTitle = "Secure new sub-account",
+                    promptSubtitle = "Encrypt the new account's keys.",
                 )
             }
             result.onSuccess { wallet ->
