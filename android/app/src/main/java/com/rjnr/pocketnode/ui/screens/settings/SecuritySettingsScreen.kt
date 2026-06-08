@@ -55,10 +55,14 @@ fun SecuritySettingsScreen(
     val snackbarHostState = remember { SnackbarHostState() }
     var showRemoveDialog by remember { mutableStateOf(false) }
     var optimisticBiometric by remember { mutableStateOf<Boolean?>(null) }
+    var optimisticAuthBeforeSend by remember { mutableStateOf<Boolean?>(null) }
 
     // Clear optimistic override when real state arrives
     LaunchedEffect(uiState.isBiometricEnabled) {
         optimisticBiometric = null
+    }
+    LaunchedEffect(uiState.isAuthBeforeSendEnabled) {
+        optimisticAuthBeforeSend = null
     }
 
     val context = androidx.compose.ui.platform.LocalContext.current
@@ -297,9 +301,18 @@ fun SecuritySettingsScreen(
                         }
 
                         Switch(
-                            checked = uiState.isAuthBeforeSendEnabled,
+                            checked = optimisticAuthBeforeSend ?: uiState.isAuthBeforeSendEnabled,
                             onCheckedChange = { enabled ->
-                                viewModel.toggleAuthBeforeSend(enabled)
+                                // Per-operation auth toggle is itself a security state
+                                // change. Both enable AND disable route through
+                                // PinEntryScreen so a local attacker with a brief
+                                // unlocked-session window cannot turn the gate off
+                                // and immediately send (#292).
+                                optimisticAuthBeforeSend = enabled
+                                val action = if (enabled) PendingSecurityAction.ENABLE_AUTH_BEFORE_SEND
+                                    else PendingSecurityAction.DISABLE_AUTH_BEFORE_SEND
+                                viewModel.setPendingAction(action)
+                                onNavigateToPinVerify()
                             },
                             enabled = uiState.hasPin
                         )
