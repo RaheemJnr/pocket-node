@@ -22,7 +22,13 @@ import javax.inject.Inject
 enum class PendingSecurityAction {
     REMOVE_PIN,
     ENABLE_BIOMETRIC,
-    DISABLE_BIOMETRIC
+    DISABLE_BIOMETRIC,
+    // Both enable and disable need a PIN gate. Disabling auth-before-send
+    // is itself a security state change: a local attacker with a brief
+    // unlocked-session window must not be able to turn off the
+    // per-operation gate that protects transaction signing (#292).
+    ENABLE_AUTH_BEFORE_SEND,
+    DISABLE_AUTH_BEFORE_SEND,
 }
 
 data class SecuritySettingsUiState(
@@ -83,6 +89,8 @@ class SecuritySettingsViewModel @Inject constructor(
             PendingSecurityAction.REMOVE_PIN -> removePin()
             PendingSecurityAction.ENABLE_BIOMETRIC -> toggleBiometric(true)
             PendingSecurityAction.DISABLE_BIOMETRIC -> toggleBiometric(false)
+            PendingSecurityAction.ENABLE_AUTH_BEFORE_SEND -> applyAuthBeforeSend(true)
+            PendingSecurityAction.DISABLE_AUTH_BEFORE_SEND -> applyAuthBeforeSend(false)
             null -> {}
         }
         savedStateHandle.remove<String>(KEY_PENDING_ACTION)
@@ -115,7 +123,18 @@ class SecuritySettingsViewModel @Inject constructor(
         }
     }
 
-    fun toggleAuthBeforeSend(enabled: Boolean) {
+    /**
+     * Apply the auth-before-send preference. PRIVATE — invoked only via
+     * [executePendingAction] after the user verifies their PIN in
+     * `PinEntryScreen`. The UI must NOT call this directly; the Switch
+     * `onCheckedChange` handler routes through [setPendingAction] +
+     * navigate-to-PIN-verify to enforce the gate (#292).
+     *
+     * The "no PIN → refuse to enable" pre-check is performed at the screen
+     * layer (the Switch is disabled when `hasPin == false`) and again here
+     * defensively in case the screen wiring drifts.
+     */
+    private fun applyAuthBeforeSend(enabled: Boolean) {
         if (enabled && !pinManager.hasPin()) {
             _uiState.update { it.copy(error = UiMessage.Resource(R.string.vm_error_set_pin_first_send)) }
             return
