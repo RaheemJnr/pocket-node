@@ -627,15 +627,6 @@ class GatewayRepository @Inject constructor(
 
     fun wasResetDueToCorruption(): Boolean = keyManager.wasResetDueToCorruption()
 
-    suspend fun importWallet(privateKeyHex: String): Result<WalletInfo> = runCatching {
-        Log.d(TAG, "Importing existing wallet...")
-        val info = keyManager.importWallet(privateKeyHex)
-        _walletInfo.value = info
-        _isRegistered.value = false
-        registerAccount(syncMode = SyncMode.RECENT)
-        info
-    }
-
     fun getWalletType(): String = activeWalletType
     suspend fun getMnemonic(): List<String>? {
         // Use wallet-scoped mnemonic — never fall back to global prefs

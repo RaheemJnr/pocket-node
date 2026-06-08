@@ -41,6 +41,8 @@ class WalletMigrationHelperTest {
      */
     private lateinit var legacyPrefs: android.content.SharedPreferences
 
+    private lateinit var keyStoreMigrationHelper: KeyStoreMigrationHelper
+
     @Before
     fun setUp() {
         val context = ApplicationProvider.getApplicationContext<Context>()
@@ -53,11 +55,35 @@ class WalletMigrationHelperTest {
         val encryptionManager = KeystoreEncryptionManager.createForTest()
         val migrationPrefs = context.getSharedPreferences("test_wallet_mig", Context.MODE_PRIVATE)
         migrationPrefs.edit().clear().commit()
-        keyManager.keyStoreMigrationHelper = KeyStoreMigrationHelper(db.keyMaterialDao(), encryptionManager, migrationPrefs)
+        keyStoreMigrationHelper = KeyStoreMigrationHelper(db.keyMaterialDao(), encryptionManager, migrationPrefs)
+        keyManager.keyStoreMigrationHelper = keyStoreMigrationHelper
         legacyPrefs = context.getSharedPreferences("ckb_wallet_prefs", Context.MODE_PRIVATE)
         legacyPrefs.edit().clear().commit()
         walletPreferences = WalletPreferences(context)
         helper = WalletMigrationHelper(walletDao, keyManager, walletPreferences, db, db.syncProgressDao())
+    }
+
+    /**
+     * Seed a legacy single-wallet "default" Room row at kdfVersion=1.
+     * Pre-#289 chunk 3 these tests called `keyManager.generateWallet()` /
+     * `generateWalletWithMnemonic()`; those wallet-create paths moved to
+     * [com.rjnr.pocketnode.data.wallet.WalletKeyWriter]. The migration helper
+     * under test reads via `keyManager.{getPrivateKey,getMnemonic,getWalletType,
+     * hasMnemonicBackup}` which consult Room first, so seeding the V1 row
+     * directly reproduces the legacy state the helper expects.
+     */
+    private suspend fun seedLegacyDefaultWallet(
+        privateKeyHex: String,
+        mnemonic: String?,
+        walletType: String,
+    ) {
+        keyStoreMigrationHelper.migrateWallet(
+            walletId = "default",
+            privateKeyHex = privateKeyHex,
+            mnemonic = mnemonic,
+            walletType = walletType,
+            mnemonicBackedUp = false,
+        )
     }
 
     @After
@@ -74,8 +100,12 @@ class WalletMigrationHelperTest {
 
     @Test
     fun `migrates existing single wallet`() = runTest {
-        // Set up a legacy single wallet in KeyManager
-        keyManager.generateWallet()
+        // Set up a legacy single raw-key wallet directly in Room (kdfVersion=1).
+        seedLegacyDefaultWallet(
+            privateKeyHex = "aa".repeat(32),
+            mnemonic = null,
+            walletType = KeyManager.WALLET_TYPE_RAW_KEY,
+        )
         val legacyInfo = keyManager.getWalletInfo()
 
         helper.migrateIfNeeded()
@@ -94,14 +124,18 @@ class WalletMigrationHelperTest {
         assertEquals(legacyInfo.mainnetAddress, wallet.mainnetAddress)
         assertEquals(legacyInfo.testnetAddress, wallet.testnetAddress)
 
-        // Keys should be copied to wallet-scoped ESP
+        // Keys should be copied to wallet-scoped storage
         val scopedKey = keyManager.getPrivateKeyForWallet(activeWalletId)
         assertNotNull(scopedKey)
     }
 
     @Test
     fun `idempotent - no-op when already migrated`() = runTest {
-        keyManager.generateWallet()
+        seedLegacyDefaultWallet(
+            privateKeyHex = "aa".repeat(32),
+            mnemonic = null,
+            walletType = KeyManager.WALLET_TYPE_RAW_KEY,
+        )
 
         helper.migrateIfNeeded()
         val firstWalletId = walletPreferences.getActiveWalletId()
@@ -115,7 +149,12 @@ class WalletMigrationHelperTest {
 
     @Test
     fun `migrates mnemonic wallet with derivation path`() = runTest {
-        keyManager.generateWalletWithMnemonic()
+        val mnemonic = "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about"
+        seedLegacyDefaultWallet(
+            privateKeyHex = "bb".repeat(32),
+            mnemonic = mnemonic,
+            walletType = KeyManager.WALLET_TYPE_MNEMONIC,
+        )
 
         helper.migrateIfNeeded()
 
@@ -125,9 +164,9 @@ class WalletMigrationHelperTest {
         assertEquals("m/44'/309'/0'/0/0", wallet.derivationPath)
 
         // Mnemonic should be copied
-        val mnemonic = keyManager.getMnemonicForWallet(activeWalletId)
-        assertNotNull(mnemonic)
-        assertTrue(mnemonic!!.size >= 12)
+        val migratedMnemonic = keyManager.getMnemonicForWallet(activeWalletId)
+        assertNotNull(migratedMnemonic)
+        assertTrue(migratedMnemonic!!.size >= 12)
     }
 
     @Test

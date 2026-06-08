@@ -20,6 +20,16 @@ import org.robolectric.RobolectricTestRunner
 import org.robolectric.annotation.Config
 import java.io.File
 
+/**
+ * Unit tests for [KeyManager] after the #289 chunk 3 surgery.
+ *
+ * Pre-chunk-3, KeyManager owned wallet creation (generateWallet,
+ * generateWalletWithMnemonic, importWallet, importWalletFromMnemonic).
+ * Those persistence paths moved to [WalletKeyWriter] (covered by
+ * `WalletKeyWriterTest`). What remains here is the pure-crypto surface
+ * (encodePlaintextBundle) and the existing flag-only read/write helpers
+ * for the legacy "default" wallet bucket and per-wallet API.
+ */
 @RunWith(RobolectricTestRunner::class)
 @Config(sdk = [28], manifest = Config.NONE)
 class KeyManagerTest {
@@ -65,162 +75,28 @@ class KeyManagerTest {
         db.close()
     }
 
-    // -- Mnemonic generation --
+    // -- Pure-crypto bundle producer (#289 chunk 3.1) --
 
     @Test
-    fun `generateWalletWithMnemonic returns 12 words and valid wallet info`() = runTest {
-        val (info, words) = keyManager.generateWalletWithMnemonic()
-
-        assertEquals(12, words.size)
-        assertTrue(mnemonicManager.validateMnemonic(words))
-        assertNotNull(info.publicKey)
-        assertTrue(info.mainnetAddress.startsWith("ckb1"))
-        assertTrue(info.testnetAddress.startsWith("ckt1"))
-    }
-
-    @Test
-    fun `generateWalletWithMnemonic sets wallet type to mnemonic`() = runTest {
-        keyManager.generateWalletWithMnemonic()
-        assertEquals(KeyManager.WALLET_TYPE_MNEMONIC, keyManager.getWalletType())
+    fun `encodePlaintextBundle is deterministic for a given key and mnemonic`() {
+        val key = ByteArray(32) { 0xAA.toByte() }
+        val mnemonic = testMnemonic
+        val a = keyManager.encodePlaintextBundle(key, mnemonic)
+        val b = keyManager.encodePlaintextBundle(key, mnemonic)
+        assertEquals(a, b)
+        assertEquals("aa".repeat(32), a.privateKeyHex)
+        assertEquals(testMnemonic.joinToString(" "), a.mnemonic)
     }
 
     @Test
-    fun `generateWallet sets wallet type to raw_key`() = runTest {
-        keyManager.generateWallet()
-        assertEquals(KeyManager.WALLET_TYPE_RAW_KEY, keyManager.getWalletType())
+    fun `encodePlaintextBundle null mnemonic produces null in bundle (raw key wallet)`() {
+        val key = ByteArray(32) { 0xBB.toByte() }
+        val bundle = keyManager.encodePlaintextBundle(key, mnemonic = null)
+        assertEquals("bb".repeat(32), bundle.privateKeyHex)
+        assertNull(bundle.mnemonic)
     }
 
-    // -- Mnemonic storage and retrieval --
-
-    @Test
-    fun `getMnemonic returns stored words after mnemonic generation`() = runTest {
-        val (_, words) = keyManager.generateWalletWithMnemonic()
-        val retrieved = keyManager.getMnemonic()
-        assertEquals(words, retrieved)
-    }
-
-    @Test
-    fun `getMnemonic returns null for raw key wallet`() = runTest {
-        keyManager.generateWallet()
-        assertNull(keyManager.getMnemonic())
-    }
-
-    // -- Mnemonic import --
-
-    @Test
-    fun `importWalletFromMnemonic produces valid wallet`() = runTest {
-        val info = keyManager.importWalletFromMnemonic(testMnemonic)
-
-        assertNotNull(info.publicKey)
-        assertTrue(info.mainnetAddress.startsWith("ckb1"))
-        assertEquals(KeyManager.WALLET_TYPE_MNEMONIC, keyManager.getWalletType())
-    }
-
-    @Test
-    fun `importWalletFromMnemonic is deterministic`() = runTest {
-        val info1 = keyManager.importWalletFromMnemonic(testMnemonic)
-        keyManager.deleteWallet()
-        val info2 = keyManager.importWalletFromMnemonic(testMnemonic)
-
-        assertEquals(info1.publicKey, info2.publicKey)
-        assertEquals(info1.mainnetAddress, info2.mainnetAddress)
-    }
-
-    @Test
-    fun `importWalletFromMnemonic stores mnemonic`() = runTest {
-        keyManager.importWalletFromMnemonic(testMnemonic)
-        assertEquals(testMnemonic, keyManager.getMnemonic())
-    }
-
-    @Test(expected = IllegalArgumentException::class)
-    fun `importWalletFromMnemonic rejects invalid mnemonic`() = runTest {
-        keyManager.importWalletFromMnemonic(listOf("invalid", "words", "here"))
-    }
-
-    // -- Backup status --
-
-    @Test
-    fun `hasMnemonicBackup is false after generation`() = runTest {
-        keyManager.generateWalletWithMnemonic()
-        assertFalse(keyManager.hasMnemonicBackup())
-    }
-
-    @Test
-    fun `setMnemonicBackedUp updates status`() = runTest {
-        keyManager.generateWalletWithMnemonic()
-        assertFalse(keyManager.hasMnemonicBackup())
-
-        keyManager.setMnemonicBackedUp(true)
-        assertTrue(keyManager.hasMnemonicBackup())
-    }
-
-    // -- Delete --
-
-    @Test
-    fun `deleteWallet clears all stored data`() = runTest {
-        keyManager.generateWalletWithMnemonic()
-        assertTrue(keyManager.hasWallet())
-
-        keyManager.deleteWallet()
-        assertFalse(keyManager.hasWallet())
-        assertNull(keyManager.getMnemonic())
-        assertEquals(KeyManager.WALLET_TYPE_RAW_KEY, keyManager.getWalletType())
-    }
-
-    // -- Backward compatibility --
-
-    @Test
-    fun `existing generateWallet still works`() = runTest {
-        val info = keyManager.generateWallet()
-        assertTrue(keyManager.hasWallet())
-        assertNotNull(info.publicKey)
-        assertEquals(KeyManager.WALLET_TYPE_RAW_KEY, keyManager.getWalletType())
-    }
-
-    @Test
-    fun `existing importWallet still works`() = runTest {
-        val hex = "a".repeat(64)
-        val info = keyManager.importWallet(hex)
-        assertTrue(keyManager.hasWallet())
-        assertNotNull(info.publicKey)
-        assertEquals(KeyManager.WALLET_TYPE_RAW_KEY, keyManager.getWalletType())
-    }
-
-    // -- Backup dual-write --
-
-    @Test
-    fun `generateWalletWithMnemonic writes backup when session PIN available`() = runTest {
-        keyManager.setSessionPin("123456".toCharArray())
-        keyManager.generateWalletWithMnemonic()
-        assertTrue(backupManager.hasAnyBackups())
-    }
-
-    @Test
-    fun `generateWalletWithMnemonic skips backup when no session PIN`() = runTest {
-        keyManager.generateWalletWithMnemonic()
-        assertFalse(backupManager.hasAnyBackups())
-    }
-
-    @Test
-    fun `deleteWallet removes backup`() = runTest {
-        keyManager.setSessionPin("123456".toCharArray())
-        keyManager.generateWalletWithMnemonic()
-        assertTrue(backupManager.hasBackup("default"))
-        keyManager.deleteWallet()
-        assertFalse(backupManager.hasBackup("default"))
-    }
-
-    // -- Room storage verification --
-
-    @Test
-    fun `writes go to Room and are readable`() = runTest {
-        keyManager.generateWalletWithMnemonic()
-        // Verify data is in Room via the migration helper
-        val data = migrationHelper.readDecryptedKey("default")
-        assertNotNull(data)
-        assertEquals(KeyManager.WALLET_TYPE_MNEMONIC, data!!.walletType)
-        assertNotNull(data.mnemonic)
-    }
+    // -- ESP fallback read path (legacy single-wallet, kept for pre-migration installs) --
 
     @Test
     fun `ESP fallback works when Room has no data`() = runTest {
