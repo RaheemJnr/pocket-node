@@ -169,7 +169,11 @@ fun CkbNavGraph(
                         launchSingleTop = true
                     }
                 },
-                onNavigateBack = { navController.popBackStack() }
+                onNavigateBack = { navController.popBackStack() },
+                onNavigateToPinVerify = {
+                    navController.navigate(Screen.PinEntry.createRoute("verify"))
+                },
+                pinVerifiedFlow = backStackEntry.savedStateHandle,
             )
         }
 
@@ -261,6 +265,19 @@ fun CkbNavGraph(
                                     navController.popBackStack()
                                 }
                                 previousRoute == Screen.WalletDetail.route -> {
+                                    navController.previousBackStackEntry
+                                        ?.savedStateHandle
+                                        ?.set("pin_verified", true)
+                                    navController.popBackStack()
+                                }
+                                previousRoute != null &&
+                                    (previousRoute == Screen.MnemonicBackup.route ||
+                                        previousRoute.startsWith("${Screen.MnemonicBackup.BASE}?") ||
+                                        previousRoute.startsWith("${Screen.MnemonicBackup.BASE}/")) -> {
+                                    // Raw-key backup PIN gate (#290). The screen
+                                    // consumes the flag in a LaunchedEffect and
+                                    // calls viewModel.onPinVerified() to fetch
+                                    // the key.
                                     navController.previousBackStackEntry
                                         ?.savedStateHandle
                                         ?.set("pin_verified", true)
