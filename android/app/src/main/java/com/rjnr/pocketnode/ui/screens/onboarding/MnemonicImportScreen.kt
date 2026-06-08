@@ -15,6 +15,7 @@ import com.rjnr.pocketnode.R
 import com.rjnr.pocketnode.ui.util.uaTestTag
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
+import androidx.fragment.app.FragmentActivity
 import androidx.hilt.navigation.compose.hiltViewModel
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
@@ -22,7 +23,9 @@ import android.util.Log
 import com.rjnr.pocketnode.data.gateway.GatewayRepository
 import com.rjnr.pocketnode.data.gateway.models.NetworkType
 import com.rjnr.pocketnode.data.gateway.models.SyncMode
+import com.rjnr.pocketnode.data.wallet.KeyManager
 import com.rjnr.pocketnode.data.wallet.MnemonicManager
+import com.rjnr.pocketnode.data.wallet.WalletKeyWriter
 import com.rjnr.pocketnode.data.wallet.WalletRepository
 import com.rjnr.pocketnode.ui.components.MnemonicWordInput
 import com.rjnr.pocketnode.ui.components.SyncOptionsSheet
@@ -55,7 +58,8 @@ private const val TAG = "MnemonicImportVM"
 class MnemonicImportViewModel @Inject constructor(
     private val repository: GatewayRepository,
     private val mnemonicManager: MnemonicManager,
-    private val walletRepository: WalletRepository
+    private val walletRepository: WalletRepository,
+    private val walletKeyWriter: WalletKeyWriter,
 ) : ViewModel() {
 
     private val _uiState = MutableStateFlow(MnemonicImportUiState())
@@ -113,7 +117,7 @@ class MnemonicImportViewModel @Inject constructor(
         }
     }
 
-    fun importMnemonic() {
+    fun importMnemonic(activity: FragmentActivity) {
         val words = _uiState.value.words.map { it.trim().lowercase() }
 
         if (words.any { it.isEmpty() }) {
@@ -128,9 +132,23 @@ class MnemonicImportViewModel @Inject constructor(
 
         viewModelScope.launch {
             _uiState.update { it.copy(isImporting = true, error = null) }
-            try {
-                // Import via WalletRepository so a Room entity is created
-                val entity = walletRepository.importWallet("Imported Wallet", words)
+            val result = walletRepository.importFromMnemonic(
+                words = words,
+                name = "Imported Wallet",
+                persistKeys = { walletId, bundle ->
+                    walletKeyWriter.persistNewWallet(
+                        activity = activity,
+                        walletId = walletId,
+                        bundle = bundle,
+                        walletType = KeyManager.WALLET_TYPE_MNEMONIC,
+                        // The user just typed the seed phrase in, so by definition
+                        // they hold a copy of it (or know where it is). Skip the
+                        // post-onboarding backup nag.
+                        mnemonicBackedUp = true,
+                    )
+                },
+            )
+            result.onSuccess { entity ->
                 Log.d(TAG, "Imported wallet entity: ${entity.walletId}")
                 repository.onActiveWalletChanged(entity)
                 val showDialog = repository.currentNetwork == NetworkType.MAINNET
@@ -141,9 +159,10 @@ class MnemonicImportViewModel @Inject constructor(
                         showSyncModeDialog = showDialog
                     )
                 }
-            } catch (e: Exception) {
-                Log.e(TAG, "Mnemonic import failed", e)
-                _uiState.update { it.copy(isImporting = false, error = e.message) }
+            }.onFailure { error ->
+                Log.e(TAG, "Mnemonic import failed", error)
+                val msg = persistErrorMessageRaw(error)
+                _uiState.update { it.copy(isImporting = false, error = msg) }
             }
         }
     }
@@ -156,12 +175,19 @@ class MnemonicImportViewModel @Inject constructor(
         _uiState.update { it.copy(showPrivateKeyDialog = false) }
     }
 
-    fun importPrivateKey(hex: String) {
+    fun importPrivateKey(activity: FragmentActivity, hex: String) {
         viewModelScope.launch {
             _uiState.update { it.copy(isImporting = true, showPrivateKeyDialog = false, error = null) }
-            try {
-                // Import via WalletRepository so a Room entity is created
-                val entity = walletRepository.importRawKey("Imported Wallet", hex)
+            val result = walletRepository.importRawKey(hex, "Imported Wallet") { walletId, bundle ->
+                walletKeyWriter.persistNewWallet(
+                    activity = activity,
+                    walletId = walletId,
+                    bundle = bundle,
+                    walletType = KeyManager.WALLET_TYPE_RAW_KEY,
+                    mnemonicBackedUp = false,
+                )
+            }
+            result.onSuccess { entity ->
                 Log.d(TAG, "Imported raw key wallet entity: ${entity.walletId}")
                 repository.onActiveWalletChanged(entity)
                 val showDialog = repository.currentNetwork == NetworkType.MAINNET
@@ -172,9 +198,30 @@ class MnemonicImportViewModel @Inject constructor(
                         showSyncModeDialog = showDialog
                     )
                 }
-            } catch (e: Exception) {
-                Log.e(TAG, "Private key import failed", e)
-                _uiState.update { it.copy(isImporting = false, error = e.message) }
+            }.onFailure { error ->
+                Log.e(TAG, "Private key import failed", error)
+                val msg = persistErrorMessageRaw(error)
+                _uiState.update { it.copy(isImporting = false, error = msg) }
+            }
+        }
+    }
+
+    companion object {
+        /**
+         * Same mapping logic as `OnboardingViewModel.persistErrorMessage`
+         * but returns a raw String for the legacy `error: String?` ui-state
+         * shape used by this screen. Cancelled is silent (returns null).
+         */
+        internal fun persistErrorMessageRaw(error: Throwable): String? {
+            val pex = error as? WalletKeyWriter.PersistException
+            return when (val r = pex?.result) {
+                WalletKeyWriter.Result.Cancelled -> null
+                is WalletKeyWriter.Result.AuthError -> "Auth error: ${r.message}"
+                is WalletKeyWriter.Result.WriteFailed ->
+                    "Failed to save wallet: ${r.cause.message ?: "unknown error"}"
+                WalletKeyWriter.Result.KeyInvalidated -> "Wallet keys must be re-imported"
+                null -> error.message
+                else -> error.message
             }
         }
     }
@@ -214,6 +261,9 @@ fun MnemonicImportScreen(
     val uiState by viewModel.uiState.collectAsState()
     val snackbarHostState = remember { SnackbarHostState() }
     val clipboardManager = LocalClipboardManager.current
+    // MainActivity extends FragmentActivity; required to drive the
+    // V2 BiometricPrompt CryptoObject flow on import (#289).
+    val activity = androidx.compose.ui.platform.LocalContext.current as FragmentActivity
 
     LaunchedEffect(uiState.importSuccess) {
         if (uiState.importSuccess) onNavigateToHome()
@@ -230,7 +280,7 @@ fun MnemonicImportScreen(
     if (uiState.showPrivateKeyDialog) {
         PrivateKeyImportDialog(
             onDismiss = { viewModel.hidePrivateKeyImport() },
-            onImport = { viewModel.importPrivateKey(it) }
+            onImport = { viewModel.importPrivateKey(activity, it) }
         )
     }
 
@@ -326,7 +376,7 @@ fun MnemonicImportScreen(
 
             // Import button
             Button(
-                onClick = { viewModel.importMnemonic() },
+                onClick = { viewModel.importMnemonic(activity) },
                 modifier = Modifier.fillMaxWidth().uaTestTag("import-submit"),
                 enabled = !uiState.isImporting && uiState.words.all { it.isNotBlank() }
             ) {

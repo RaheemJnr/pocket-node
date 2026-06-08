@@ -2,7 +2,6 @@ package com.rjnr.pocketnode.data.wallet
 
 import org.junit.Assert.assertFalse
 import org.junit.Test
-import kotlin.reflect.full.declaredFunctions
 
 /**
  * Regression guard for #289 (v1.7.2 keystore V2 short-circuit drop).
@@ -31,7 +30,13 @@ class KeyManagerSurfaceTest {
 
     @Test
     fun `deleted KeyManager wallet-create functions do not reappear`() {
-        val present = KeyManager::class.declaredFunctions.map { it.name }.toSet()
+        // Use plain Java reflection — `kotlin.reflect.full.declaredFunctions` would
+        // pull in `kotlin-reflect` which isn't a runtime dep of this app.
+        // declaredMethods skips inherited/synthetic methods and includes the
+        // Kotlin-mangled name suffixes for suspend functions, but the seven
+        // names we guard against are non-suspend in their deleted form, so
+        // a plain name check is sufficient.
+        val present = KeyManager::class.java.declaredMethods.map { it.name }.toSet()
         val regressions = deletedFunctionNames.intersect(present)
         assertFalse(
             "These KeyManager functions were deleted in v1.7.2 (#289) and must not be " +

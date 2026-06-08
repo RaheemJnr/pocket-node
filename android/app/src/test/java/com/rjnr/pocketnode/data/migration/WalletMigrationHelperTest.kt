@@ -60,7 +60,7 @@ class WalletMigrationHelperTest {
         legacyPrefs = context.getSharedPreferences("ckb_wallet_prefs", Context.MODE_PRIVATE)
         legacyPrefs.edit().clear().commit()
         walletPreferences = WalletPreferences(context)
-        helper = WalletMigrationHelper(walletDao, keyManager, walletPreferences, db, db.syncProgressDao())
+        helper = WalletMigrationHelper(walletDao, keyManager, walletPreferences, db, db.syncProgressDao(), keyStoreMigrationHelper)
     }
 
     /**

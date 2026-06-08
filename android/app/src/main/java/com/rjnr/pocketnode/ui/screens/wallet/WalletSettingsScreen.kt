@@ -149,12 +149,10 @@ fun WalletSettingsScreen(
                 Button(
                     onClick = {
                         if (accountName.isNotBlank()) {
-                            val activity = context as? androidx.fragment.app.FragmentActivity
-                            if (activity != null) {
-                                viewModel.addSubAccount(activity, accountName.trim())
-                            } else {
-                                viewModel.addSubAccount(accountName.trim())
-                            }
+                            // MainActivity extends FragmentActivity; the activity-less
+                            // V1 fallback was removed in v1.7.2 (#289).
+                            val activity = context as androidx.fragment.app.FragmentActivity
+                            viewModel.addSubAccount(activity, accountName.trim())
                             showAddAccountDialog = false
                         }
                     },
