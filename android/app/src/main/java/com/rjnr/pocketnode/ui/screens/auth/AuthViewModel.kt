@@ -7,6 +7,7 @@ import androidx.lifecycle.viewModelScope
 import com.rjnr.pocketnode.R
 import com.rjnr.pocketnode.data.auth.AuthManager
 import com.rjnr.pocketnode.data.auth.PinManager
+import com.rjnr.pocketnode.data.database.dao.WalletDao
 import com.rjnr.pocketnode.data.migration.KeystoreV2MigrationHelper
 import com.rjnr.pocketnode.data.migration.KeystoreV2MigrationRunner
 import com.rjnr.pocketnode.ui.util.UiMessage
@@ -33,6 +34,7 @@ class AuthViewModel @Inject constructor(
     private val pinManager: PinManager,
     private val migrationRunner: KeystoreV2MigrationRunner,
     private val migrationHelper: KeystoreV2MigrationHelper,
+    private val walletDao: WalletDao,
 ) : ViewModel() {
 
     private val _uiState = MutableStateFlow(AuthUiState())
@@ -105,9 +107,19 @@ class AuthViewModel @Inject constructor(
                         }
                     }
                     is KeystoreV2MigrationRunner.Outcome.Failed -> {
-                        Log.e(TAG, "Migration failed: ${outcome.reason}")
+                        Log.e(TAG, "Migration failed: ${outcome.reason} for ${outcome.failedWalletIds}")
+                        val errorMessage = if (outcome.failedWalletIds.isEmpty()) {
+                            "Migration could not complete. Tap an affected wallet to retry, or re-import from your recovery phrase."
+                        } else {
+                            val names = outcome.failedWalletIds.map { id ->
+                                walletDao.getById(id)?.name?.takeIf { it.isNotBlank() } ?: "Wallet ${id.take(8)}"
+                            }
+                            val nameList = names.joinToString(", ")
+                            "Migration could not complete for: $nameList. " +
+                                "Tap an affected wallet to retry, or re-import from your recovery phrase."
+                        }
                         _uiState.update {
-                            it.copy(error = UiMessage.Resource(R.string.vm_error_migration_failed, listOf(outcome.reason)))
+                            it.copy(error = UiMessage.Raw(errorMessage))
                         }
                     }
                 }
