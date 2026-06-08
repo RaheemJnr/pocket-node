@@ -551,7 +551,7 @@ class KeyManager @Inject constructor(
         Log.i(TAG, "ESP files deleted after successful Room migration")
     }
 
-private fun writeBackupIfPinAvailable(walletId: String, buildMaterial: () -> KeyMaterial) {
+    private fun writeBackupIfPinAvailable(walletId: String, buildMaterial: () -> KeyMaterial) {
         val pin = authManager?.getSessionPin() ?: sessionPin ?: return
         val manager = keyBackupManager ?: return
         try {

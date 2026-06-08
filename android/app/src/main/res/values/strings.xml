@@ -230,10 +230,6 @@
     <string name="home_retry_dialog_body">This transaction may not have reached the network. Retry?</string>
     <string name="home_retry">Retry</string>
     <string name="home_switch_cd">Switch</string>
-    <string name="home_import_dialog_title">Import Wallet</string>
-    <string name="home_import_private_key_label">Private Key (Hex)</string>
-    <string name="home_import_private_key_placeholder">0x…</string>
-    <string name="home_import_replace">Import &amp; Replace</string>
     <string name="home_dismiss_cd">Dismiss</string>
     <string name="home_backup_now">Backup Now</string>
     <string name="home_copy_tx_cd">Copy TX hash</string>
@@ -276,7 +272,6 @@
     <string name="vm_error_registration_failed">Registration failed: %1$s</string>
     <string name="vm_error_load_transactions_failed">Failed to load transactions: %1$s</string>
     <string name="vm_error_sync_mode_change_failed_home">Failed to change sync mode: %1$s</string>
-    <string name="vm_error_import_failed">Import failed: %1$s</string>
     <!-- SendViewModel -->
     <string name="vm_error_network_changed_tx_cancelled">Network changed. Transaction cancelled.</string>
     <string name="vm_error_send_v2_reopen">This wallet requires biometric unlock; reopen Send and try again</string>

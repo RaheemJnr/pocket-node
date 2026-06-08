@@ -18,7 +18,6 @@ import org.junit.Test
 import org.junit.runner.RunWith
 import org.robolectric.RobolectricTestRunner
 import org.robolectric.annotation.Config
-import java.io.File
 
 /**
  * Unit tests for [KeyManager] after the #289 chunk 3 surgery.
@@ -36,7 +35,6 @@ class KeyManagerTest {
 
     private lateinit var keyManager: KeyManager
     private lateinit var mnemonicManager: MnemonicManager
-    private lateinit var backupManager: KeyBackupManager
     private lateinit var db: AppDatabase
     private lateinit var migrationHelper: KeyStoreMigrationHelper
 
@@ -50,11 +48,6 @@ class KeyManagerTest {
         keyManager = KeyManager(context, mnemonicManager)
         // Use plain SharedPreferences for testing (EncryptedSharedPreferences needs real KeyStore)
         keyManager.testPrefs = context.getSharedPreferences("test_keys", Context.MODE_PRIVATE)
-        val backupDir = File(context.cacheDir, "test_key_backups")
-        backupDir.deleteRecursively()
-        backupManager = KeyBackupManager(backupDir)
-        backupManager.kdfIterations = 1000
-        keyManager.keyBackupManager = backupManager
 
         // Set up Room-backed KeyStoreMigrationHelper
         db = Room.inMemoryDatabaseBuilder(context, AppDatabase::class.java)
