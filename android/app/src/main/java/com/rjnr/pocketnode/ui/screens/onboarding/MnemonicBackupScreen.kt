@@ -45,13 +45,23 @@ data class MnemonicBackupUiState(
     val verifyPositions: List<Int> = emptyList(),
     val verifyOptions: Map<Int, List<String>> = emptyMap(),
     val userSelections: Map<Int, String> = emptyMap(),
-    val error: String? = null
+    val error: String? = null,
+    /**
+     * True when a raw_key wallet's private key is gated behind PIN entry
+     * (Settings → Backup Wallet path on an install with a PIN set). False
+     * when no PIN exists yet (onboarding edge case for raw-key imports
+     * pre-PIN-setup) or when the PIN has already been verified.
+     */
+    val pinRequiredForPrivateKey: Boolean = false,
+    /** True once the user has revealed the private key in this session. */
+    val privateKeyRevealed: Boolean = false,
 )
 
 @HiltViewModel
 class MnemonicBackupViewModel @Inject constructor(
     private val repository: GatewayRepository,
-    private val walletRepository: com.rjnr.pocketnode.data.wallet.WalletRepository
+    private val walletRepository: com.rjnr.pocketnode.data.wallet.WalletRepository,
+    private val pinManager: com.rjnr.pocketnode.data.auth.PinManager,
 ) : ViewModel() {
 
     private val _uiState = MutableStateFlow(MnemonicBackupUiState())
@@ -72,17 +82,21 @@ class MnemonicBackupViewModel @Inject constructor(
             val words = repository.getMnemonic()
             if (words.isNullOrEmpty()) {
                 // For raw_key or sub-account wallets, this is expected — not an error.
-                // Only raw-key wallets need the private key for the dedicated raw-key backup screen.
-                val privateKeyHex = if (walletType == "raw_key" && !isSubAccount) {
-                    try {
-                        repository.getPrivateKey().toHex()
-                    } catch (_: Exception) {
-                        null
+                // Only raw-key wallets need the private key for the dedicated raw-key
+                // backup screen, and only behind a PIN gate when a PIN exists (#290).
+                if (walletType == "raw_key" && !isSubAccount) {
+                    if (pinManager.hasPin()) {
+                        // Defer the private-key fetch until the user passes PIN
+                        // verification. The screen renders a "Reveal private key"
+                        // button that routes through PinEntryScreen; on return
+                        // [onPinVerified] is invoked and the key is fetched.
+                        _uiState.update { it.copy(pinRequiredForPrivateKey = true) }
+                    } else {
+                        // No PIN set yet (onboarding edge case for raw-key imports).
+                        // Same behaviour as pre-#290: fetch and display directly.
+                        fetchPrivateKey()
                     }
-                } else {
-                    null
                 }
-                _uiState.update { it.copy(privateKeyHex = privateKeyHex) }
                 return@launch
             }
             val random = java.util.Random(System.nanoTime())
@@ -101,6 +115,25 @@ class MnemonicBackupViewModel @Inject constructor(
                 it.copy(words = words, verifyPositions = positions, verifyOptions = options)
             }
         }
+    }
+
+    /**
+     * Called from [MnemonicBackupScreen] after the user returns from
+     * [PinEntryScreen] with a `pin_verified=true` savedStateHandle flag
+     * (#290). Fetches the private key and unmasks the reveal UI.
+     */
+    fun onPinVerified() {
+        if (!_uiState.value.pinRequiredForPrivateKey) return
+        viewModelScope.launch { fetchPrivateKey() }
+    }
+
+    private suspend fun fetchPrivateKey() {
+        val privateKeyHex = try {
+            repository.getPrivateKey().toHex()
+        } catch (_: Exception) {
+            null
+        }
+        _uiState.update { it.copy(privateKeyHex = privateKeyHex, privateKeyRevealed = true) }
     }
 
     fun advanceToVerify() {
@@ -148,11 +181,24 @@ class MnemonicBackupViewModel @Inject constructor(
 fun MnemonicBackupScreen(
     onNavigateToHome: () -> Unit,
     onNavigateBack: () -> Unit,
+    onNavigateToPinVerify: () -> Unit = {},
+    pinVerifiedFlow: androidx.lifecycle.SavedStateHandle? = null,
     simplified: Boolean = false,
     viewModel: MnemonicBackupViewModel = hiltViewModel()
 ) {
     val uiState by viewModel.uiState.collectAsState()
     val snackbarHostState = remember { SnackbarHostState() }
+
+    // Returning from PinEntryScreen: consume the pin_verified flag set by
+    // the verify-mode pop-back path (NavGraph route). On true, fetch the
+    // raw-key wallet's private key and unmask the reveal UI (#290).
+    LaunchedEffect(pinVerifiedFlow) {
+        val verified = pinVerifiedFlow?.get<Boolean>("pin_verified") == true
+        if (verified) {
+            pinVerifiedFlow.remove<Boolean>("pin_verified")
+            viewModel.onPinVerified()
+        }
+    }
 
     // FLAG_SECURE to prevent screenshots of mnemonic
     val view = LocalView.current
@@ -214,6 +260,8 @@ fun MnemonicBackupScreen(
             uiState.walletType == "raw_key" -> {
                 RawKeyBackupInfo(
                     privateKeyHex = uiState.privateKeyHex,
+                    pinRequiredForReveal = uiState.pinRequiredForPrivateKey && !uiState.privateKeyRevealed,
+                    onRequestPinVerify = onNavigateToPinVerify,
                     snackbarHostState = snackbarHostState,
                     onNavigateBack = onNavigateBack,
                     modifier = Modifier.padding(padding)
@@ -473,12 +521,18 @@ private fun MnemonicSuccessStep(
 @Composable
 private fun RawKeyBackupInfo(
     privateKeyHex: String?,
+    pinRequiredForReveal: Boolean,
+    onRequestPinVerify: () -> Unit,
     snackbarHostState: SnackbarHostState,
     onNavigateBack: () -> Unit,
     modifier: Modifier = Modifier
 ) {
     val clipboardManager = androidx.compose.ui.platform.LocalClipboardManager.current
+    val context = androidx.compose.ui.platform.LocalContext.current
     val scope = rememberCoroutineScope()
+    // Reveal-on-tap: after PIN verification the key is in `privateKeyHex` but
+    // the user must explicitly request it to be displayed on screen (#290).
+    var revealedOnScreen by remember { mutableStateOf(false) }
 
     Column(
         modifier = modifier
@@ -506,7 +560,18 @@ private fun RawKeyBackupInfo(
             }
         }
 
-        if (privateKeyHex != null) {
+        if (pinRequiredForReveal) {
+            // PIN gate: user must verify PIN before the VM fetches the key.
+            // Tapping the button navigates to PinEntryScreen; on success the
+            // savedStateHandle "pin_verified" flag flips and the VM's
+            // onPinVerified() is called from the screen's LaunchedEffect.
+            Button(
+                onClick = onRequestPinVerify,
+                modifier = Modifier.fillMaxWidth()
+            ) {
+                Text("Reveal private key")
+            }
+        } else if (privateKeyHex != null) {
             Card(
                 colors = CardDefaults.cardColors(
                     containerColor = MaterialTheme.colorScheme.errorContainer
@@ -519,19 +584,46 @@ private fun RawKeyBackupInfo(
                         color = MaterialTheme.colorScheme.onErrorContainer
                     )
                     Spacer(Modifier.height(8.dp))
-                    val masked = privateKeyHex.take(8) + "••••••••••••••••" + privateKeyHex.takeLast(8)
+                    // Full mask by default — show only the placeholder until the
+                    // user explicitly taps to reveal. Previous behaviour showed
+                    // 16 hex chars (8 leading + 8 trailing) which is enough to
+                    // narrow a brute-force search (#290).
+                    val display = if (revealedOnScreen) privateKeyHex else "•".repeat(privateKeyHex.length)
                     Text(
-                        text = masked,
+                        text = display,
                         style = MaterialTheme.typography.bodySmall,
                         fontFamily = FontFamily.Monospace,
                         color = MaterialTheme.colorScheme.onErrorContainer
                     )
                     Spacer(Modifier.height(12.dp))
+                    TextButton(
+                        onClick = { revealedOnScreen = !revealedOnScreen },
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        Text(if (revealedOnScreen) "Hide" else "Tap to reveal")
+                    }
+                    Spacer(Modifier.height(4.dp))
                     Button(
                         onClick = {
                             clipboardManager.setText(androidx.compose.ui.text.AnnotatedString(privateKeyHex))
                             scope.launch {
-                                snackbarHostState.showSnackbar("Private key copied to clipboard")
+                                snackbarHostState.showSnackbar("Private key copied. Clipboard will clear in 60s.")
+                                // Clipboard timeout to match the mnemonic backup
+                                // behaviour added in #181. 60s window matches the
+                                // standard "ample to paste, short enough to limit
+                                // exposure" trade-off used elsewhere.
+                                kotlinx.coroutines.delay(60_000L)
+                                runCatching {
+                                    val cm = context.getSystemService(android.content.Context.CLIPBOARD_SERVICE)
+                                        as android.content.ClipboardManager
+                                    // Only clear if the clipboard still contains
+                                    // our key — don't blow away something the
+                                    // user copied in the meantime.
+                                    val current = cm.primaryClip?.getItemAt(0)?.text?.toString()
+                                    if (current == privateKeyHex) {
+                                        cm.setPrimaryClip(android.content.ClipData.newPlainText("", ""))
+                                    }
+                                }
                             }
                         },
                         modifier = Modifier.fillMaxWidth()
