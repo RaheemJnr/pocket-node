@@ -1,6 +1,7 @@
 package com.rjnr.pocketnode.data.migration
 
 import android.util.Log
+import androidx.biometric.BiometricPrompt
 import androidx.fragment.app.FragmentActivity
 import com.rjnr.pocketnode.data.auth.AuthManager
 import com.rjnr.pocketnode.data.crypto.KeystoreEncryptionManager
@@ -116,6 +117,21 @@ class KeystoreV2MigrationRunner @Inject constructor(
                     is AuthManager.CipherAuthResult.Error -> {
                         Log.e(TAG, "Auth error code=${authResult.errorCode} for $walletId: ${authResult.errString}")
                         failedWalletIds += walletId
+                        if (authResult.errorCode in SESSION_FATAL_ERROR_CODES) {
+                            // Session-fatal: ERROR_LOCKOUT (~30s), ERROR_LOCKOUT_PERMANENT,
+                            // and the ERROR_HW_*/ERROR_NO_* family all mean the next prompt
+                            // will fail with the same error. Burning through every remaining
+                            // wallet here would turn a transient 30s lockout into "every
+                            // wallet failed, re-import required". Break early instead so
+                            // the user can retry the run later (#289 polish).
+                            val remaining = pending.size - (pending.indexOf(walletId) + 1)
+                            Log.w(TAG, "Session-fatal biometric error code=${authResult.errorCode}; aborting run with $remaining wallets untouched")
+                            return Outcome.Failed(
+                                pendingCount = failedWalletIds.size + remaining,
+                                failedWalletIds = failedWalletIds.toList(),
+                                reason = "Biometric session error (code=${authResult.errorCode}); retry later"
+                            )
+                        }
                         continue
                     }
                     is AuthManager.CipherAuthResult.Success -> {
@@ -154,5 +170,21 @@ class KeystoreV2MigrationRunner @Inject constructor(
 
     companion object {
         private const val TAG = "KeystoreV2Migration"
+
+        /**
+         * Biometric error codes where the next prompt in this session is guaranteed to
+         * fail with the same error. Treat as session-fatal: abort the run rather than
+         * burning the per-wallet failure list against an issue that will only resolve
+         * after the user retries later (lockout) or in a different environment (HW
+         * unavailable / no biometrics enrolled).
+         */
+        private val SESSION_FATAL_ERROR_CODES = setOf(
+            BiometricPrompt.ERROR_LOCKOUT,
+            BiometricPrompt.ERROR_LOCKOUT_PERMANENT,
+            BiometricPrompt.ERROR_HW_NOT_PRESENT,
+            BiometricPrompt.ERROR_HW_UNAVAILABLE,
+            BiometricPrompt.ERROR_NO_BIOMETRICS,
+            BiometricPrompt.ERROR_NO_DEVICE_CREDENTIAL,
+        )
     }
 }

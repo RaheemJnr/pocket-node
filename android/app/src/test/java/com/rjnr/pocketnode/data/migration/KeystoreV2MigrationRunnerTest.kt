@@ -10,6 +10,7 @@ import com.rjnr.pocketnode.data.crypto.KeystoreEncryptionManager
 import com.rjnr.pocketnode.data.database.AppDatabase
 import com.rjnr.pocketnode.data.database.dao.KeyMaterialDao
 import io.mockk.coEvery
+import io.mockk.coVerify
 import io.mockk.every
 import io.mockk.mockk
 import io.mockk.spyk
@@ -114,6 +115,39 @@ class KeystoreV2MigrationRunnerTest {
         }
         assertEquals(2, keyMaterialDao.getByWalletId("wallet-A")!!.kdfVersion)
         assertEquals(1, keyMaterialDao.getByWalletId("wallet-B")!!.kdfVersion)
+    }
+
+    @Test
+    fun `runner breaks loop on ERROR_LOCKOUT and leaves remaining wallets untouched`() = runTest {
+        legacyHelper.migrateWallet("wallet-A", "aa".repeat(32), "mnemonic-a", "mnemonic", false)
+        legacyHelper.migrateWallet("wallet-B", "bb".repeat(32), "mnemonic-b", "mnemonic", false)
+
+        // First (and only) prompt returns ERROR_LOCKOUT. The runner must abort
+        // immediately rather than burning through wallet-B's prompt.
+        coEvery {
+            authManager.authenticateForCipher(any(), any<Cipher>(), any(), any())
+        } answers {
+            AuthManager.CipherAuthResult.Error(
+                androidx.biometric.BiometricPrompt.ERROR_LOCKOUT,
+                "Too many attempts"
+            )
+        }
+
+        val outcome = runner.runMigration(activity)
+
+        when (outcome) {
+            is KeystoreV2MigrationRunner.Outcome.Failed -> {
+                assertEquals(listOf("wallet-A"), outcome.failedWalletIds)
+            }
+            else -> fail("Expected Failed (session-fatal lockout), got $outcome")
+        }
+        // Both wallets are still V1: wallet-A failed authentication, wallet-B was never prompted.
+        assertEquals(1, keyMaterialDao.getByWalletId("wallet-A")!!.kdfVersion)
+        assertEquals(1, keyMaterialDao.getByWalletId("wallet-B")!!.kdfVersion)
+        // Confirm the runner stopped after the first prompt — wallet-B was never touched.
+        coVerify(exactly = 1) {
+            authManager.authenticateForCipher(any(), any<Cipher>(), any(), any())
+        }
     }
 
     @Test
