@@ -30,11 +30,28 @@ class WalletMigrationHelper @Inject constructor(
     private val keyManager: KeyManager,
     private val walletPreferences: WalletPreferences,
     private val database: AppDatabase,
-    private val syncProgressDao: SyncProgressDao
+    private val syncProgressDao: SyncProgressDao,
+    private val keyStoreMigrationHelper: KeyStoreMigrationHelper,
 ) {
     /**
      * Migrate the legacy single-wallet to the multi-wallet Room table.
      * No-op if migration has already run (wallets table is non-empty).
+     *
+     * Post-#289 note: writes a V1 (kdfVersion=1) key_material row by calling
+     * [KeyStoreMigrationHelper.migrateWallet] directly. This is the ONLY
+     * remaining V1-write path in the app — it exists exclusively for the
+     * legacy ESP-to-Room migration on first cold start after an upgrade
+     * from v1.6.x or earlier. Fresh installs from v1.7.2+ never enter
+     * this branch (the wallets table is empty AND there's no legacy ESP
+     * material). The runner-driven V2 migration ([KeystoreV2MigrationRunner])
+     * picks up the freshly-written V1 row on the next cold start (or
+     * immediately, depending on which migration runs first) and upgrades
+     * it to V2 via an authenticated Cipher.
+     *
+     * Why not call the V2 writer directly here? It requires an Activity
+     * for BiometricPrompt, which this helper does not have. Routing legacy
+     * upgrades through V1 → V2 keeps this path Activity-free without
+     * regressing the user-facing migration UX.
      */
     suspend fun migrateIfNeeded() {
         if (walletDao.count() > 0) return  // already migrated
@@ -48,14 +65,18 @@ class WalletMigrationHelper @Inject constructor(
             val mnemonic = keyManager.getMnemonic()
             val walletType = keyManager.getWalletType()
             val walletId = UUID.randomUUID().toString()
+            val mnemonicBackedUp = keyManager.hasMnemonicBackup()
 
-            // Store keys in wallet-scoped prefs
-            keyManager.storeKeysForWallet(walletId, privateKey, mnemonic)
-
-            // Copy backup flag
-            if (keyManager.hasMnemonicBackup()) {
-                keyManager.setMnemonicBackedUpForWallet(walletId, true)
-            }
+            // Write a V1 row directly. See class-level KDoc on migrateIfNeeded
+            // for why we don't go through WalletKeyWriter here.
+            val privateKeyHex = privateKey.joinToString("") { "%02x".format(it) }
+            keyStoreMigrationHelper.migrateWallet(
+                walletId = walletId,
+                privateKeyHex = privateKeyHex,
+                mnemonic = mnemonic?.joinToString(" "),
+                walletType = walletType,
+                mnemonicBackedUp = mnemonicBackedUp,
+            )
 
             val entity = WalletEntity(
                 walletId = walletId,

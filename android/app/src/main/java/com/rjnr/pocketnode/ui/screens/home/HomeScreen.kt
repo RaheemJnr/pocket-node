@@ -35,7 +35,6 @@ import androidx.compose.material3.IconButton
 import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.ModalBottomSheet
-import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.SnackbarDuration
 import androidx.compose.material3.SnackbarHost
@@ -273,14 +272,6 @@ fun HomeScreen(
                     Text(stringResource(R.string.home_cancel))
                 }
             }
-        )
-    }
-
-    // Import dialog
-    if (uiState.showImportDialog) {
-        ImportWalletDialog(
-            onDismiss = { viewModel.hideImport() },
-            onImport = { viewModel.importWallet(it) }
         )
     }
 
@@ -744,54 +735,6 @@ fun HomeScreenUI(
         }
     }
 }
-
-@Composable
-private fun ImportWalletDialog(
-    onDismiss: () -> Unit,
-    onImport: (String) -> Unit
-) {
-    var privateKey by remember { mutableStateOf("") }
-
-    AlertDialog(
-        onDismissRequest = onDismiss,
-        title = { Text(stringResource(R.string.home_import_dialog_title), fontWeight = FontWeight.Bold) },
-        text = {
-            Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
-                Text(
-                    "Warning: Importing a new wallet will REPLACE your current one. Make sure you have backed up your current key!",
-                    style = MaterialTheme.typography.bodyMedium,
-                    color = MaterialTheme.colorScheme.error
-                )
-
-                OutlinedTextField(
-                    value = privateKey,
-                    onValueChange = { privateKey = it.trim() },
-                    label = { Text(stringResource(R.string.home_import_private_key_label)) },
-                    placeholder = { Text(stringResource(R.string.home_import_private_key_placeholder)) },
-                    modifier = Modifier.fillMaxWidth(),
-                    singleLine = true
-                )
-            }
-        },
-        confirmButton = {
-            Button(
-                onClick = { onImport(privateKey) },
-                enabled = privateKey.length >= 64,
-                colors = ButtonDefaults.buttonColors(
-                    containerColor = MaterialTheme.colorScheme.error
-                )
-            ) {
-                Text(stringResource(R.string.home_import_replace))
-            }
-        },
-        dismissButton = {
-            TextButton(onClick = onDismiss) {
-                Text(stringResource(R.string.home_cancel))
-            }
-        }
-    )
-}
-
 
 @Composable
 private fun BackupReminderBanner(

@@ -73,6 +73,9 @@ fun AddWalletScreen(
 ) {
     val uiState by viewModel.uiState.collectAsState()
     val snackbarHostState = remember { SnackbarHostState() }
+    // MainActivity extends FragmentActivity; required for V2 BiometricPrompt (#289).
+    val activity = androidx.compose.ui.platform.LocalContext.current
+        as androidx.fragment.app.FragmentActivity
     // 0 = menu, 1 = new wallet, 2 = import mnemonic, 3 = import key, 4 = sub-account
     // When the route carries a `parentId` query arg the user came in from
     // the WalletManager per-row "Add" button (Telegram bug 2). Skip the
@@ -151,10 +154,10 @@ fun AddWalletScreen(
                     )
                 }
 
-                1 -> NewWalletForm(uiState, viewModel)
-                2 -> ImportMnemonicForm(uiState, viewModel)
-                3 -> ImportKeyForm(uiState, viewModel)
-                4 -> SubAccountForm(uiState, viewModel)
+                1 -> NewWalletForm(uiState, viewModel, activity)
+                2 -> ImportMnemonicForm(uiState, viewModel, activity)
+                3 -> ImportKeyForm(uiState, viewModel, activity)
+                4 -> SubAccountForm(uiState, viewModel, activity)
             }
         }
     }
@@ -194,7 +197,11 @@ private fun OptionCard(
 }
 
 @Composable
-private fun NewWalletForm(uiState: AddWalletUiState, viewModel: AddWalletViewModel) {
+private fun NewWalletForm(
+    uiState: AddWalletUiState,
+    viewModel: AddWalletViewModel,
+    activity: androidx.fragment.app.FragmentActivity,
+) {
     OutlinedTextField(
         value = uiState.name,
         onValueChange = { viewModel.updateName(it) },
@@ -204,7 +211,7 @@ private fun NewWalletForm(uiState: AddWalletUiState, viewModel: AddWalletViewMod
     )
     Spacer(Modifier.height(16.dp))
     Button(
-        onClick = { viewModel.createNewWallet() },
+        onClick = { viewModel.createNewWallet(activity) },
         modifier = Modifier.fillMaxWidth(),
         enabled = !uiState.isLoading
     ) {
@@ -217,7 +224,11 @@ private fun NewWalletForm(uiState: AddWalletUiState, viewModel: AddWalletViewMod
 }
 
 @Composable
-private fun ImportMnemonicForm(uiState: AddWalletUiState, viewModel: AddWalletViewModel) {
+private fun ImportMnemonicForm(
+    uiState: AddWalletUiState,
+    viewModel: AddWalletViewModel,
+    activity: androidx.fragment.app.FragmentActivity,
+) {
     val clipboardManager = LocalClipboardManager.current
 
     OutlinedTextField(
@@ -262,7 +273,7 @@ private fun ImportMnemonicForm(uiState: AddWalletUiState, viewModel: AddWalletVi
     }
     Spacer(Modifier.height(16.dp))
     Button(
-        onClick = { viewModel.importMnemonic() },
+        onClick = { viewModel.importMnemonic(activity) },
         modifier = Modifier.fillMaxWidth(),
         enabled = !uiState.isLoading && uiState.importWords.all { it.isNotBlank() }
     ) {
@@ -275,7 +286,11 @@ private fun ImportMnemonicForm(uiState: AddWalletUiState, viewModel: AddWalletVi
 }
 
 @Composable
-private fun ImportKeyForm(uiState: AddWalletUiState, viewModel: AddWalletViewModel) {
+private fun ImportKeyForm(
+    uiState: AddWalletUiState,
+    viewModel: AddWalletViewModel,
+    activity: androidx.fragment.app.FragmentActivity,
+) {
     OutlinedTextField(
         value = uiState.name,
         onValueChange = { viewModel.updateName(it) },
@@ -294,7 +309,7 @@ private fun ImportKeyForm(uiState: AddWalletUiState, viewModel: AddWalletViewMod
     )
     Spacer(Modifier.height(16.dp))
     Button(
-        onClick = { viewModel.importRawKey() },
+        onClick = { viewModel.importRawKey(activity) },
         modifier = Modifier.fillMaxWidth(),
         enabled = !uiState.isLoading
     ) {
@@ -308,7 +323,11 @@ private fun ImportKeyForm(uiState: AddWalletUiState, viewModel: AddWalletViewMod
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-private fun SubAccountForm(uiState: AddWalletUiState, viewModel: AddWalletViewModel) {
+private fun SubAccountForm(
+    uiState: AddWalletUiState,
+    viewModel: AddWalletViewModel,
+    activity: androidx.fragment.app.FragmentActivity,
+) {
     var dropdownExpanded by remember { mutableStateOf(false) }
     val selectedParent = uiState.parentWallets.firstOrNull { it.walletId == uiState.selectedParentId }
 
@@ -361,7 +380,7 @@ private fun SubAccountForm(uiState: AddWalletUiState, viewModel: AddWalletViewMo
     }
     Spacer(Modifier.height(16.dp))
     Button(
-        onClick = { viewModel.createSubAccount() },
+        onClick = { viewModel.createSubAccount(activity) },
         modifier = Modifier.fillMaxWidth(),
         enabled = !uiState.isLoading
     ) {

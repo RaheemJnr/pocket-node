@@ -1,6 +1,7 @@
 package com.rjnr.pocketnode.data.migration
 
 import android.util.Log
+import androidx.biometric.BiometricPrompt
 import androidx.fragment.app.FragmentActivity
 import com.rjnr.pocketnode.data.auth.AuthManager
 import com.rjnr.pocketnode.data.crypto.KeystoreEncryptionManager
@@ -44,9 +45,21 @@ class KeystoreV2MigrationRunner @Inject constructor(
         object Completed : Outcome()
         /** User cancelled at least one prompt. Remaining wallets are still on V1. */
         data class Cancelled(val pendingCount: Int) : Outcome()
-        /** Auth failed for at least one wallet (not user-cancel). Migration is partial. */
-        data class Failed(val pendingCount: Int, val reason: String) : Outcome()
-        /** Nothing to do — either no wallets exist or migration has already finalized. */
+        /**
+         * Migration partial. [failedWalletIds] lists the wallets that could not be
+         * re-encrypted under V2 (user-cancel per Policy A, auth error, KPIE, or
+         * migrate-write failure). Remaining wallets are still on V1 and a re-run
+         * will retry them. [pendingCount] mirrors `failedWalletIds.size` for
+         * non-per-wallet failures (e.g. `finalize()` failure) `failedWalletIds`
+         * is empty.
+         */
+        data class Failed(
+            val pendingCount: Int,
+            val failedWalletIds: List<String>,
+            val reason: String,
+        ) : Outcome()
+        /** Nothing to do — either no wallets exist or migration has already finalized.
+         *  Kept for binary compat; no longer returned post v1.7.2 (#289). */
         object NothingToDo : Outcome()
     }
 
@@ -68,54 +81,110 @@ class KeystoreV2MigrationRunner @Inject constructor(
         promptTitle: String = "Upgrade wallet security",
         promptSubtitle: String = "Unlock to re-encrypt your wallet keys.",
     ): Outcome {
-        if (helper.isMigrationComplete()) return Outcome.NothingToDo
+        // Note: the `helper.isMigrationComplete()` short-circuit was removed in v1.7.2
+        // (#289). It caused new V1 rows inserted after the prefs flag was set (e.g.
+        // from any wallet creation path that still writes V1) to be silently stranded.
+        // `pendingWalletIds()` is now the sole source of truth.
 
         val pending = helper.pendingWalletIds()
         if (pending.isEmpty()) {
             return helper.finalize().fold(
                 onSuccess = { Outcome.Completed },
-                onFailure = { Outcome.Failed(0, it.message ?: "finalize failed") }
+                onFailure = { Outcome.Failed(0, emptyList(), it.message ?: "finalize failed") }
             )
         }
 
+        val failedWalletIds = mutableListOf<String>()
         for (walletId in pending) {
-            val cipher = encryptionManager.newEncryptCipherV2()
-            val authResult = authManager.authenticateForCipher(
-                activity = activity,
-                cipher = cipher,
-                title = promptTitle,
-                subtitle = promptSubtitle,
-            )
-            when (authResult) {
-                is AuthManager.CipherAuthResult.Cancelled -> {
-                    Log.i(TAG, "User cancelled V2 migration prompt for $walletId")
-                    return Outcome.Cancelled(helper.pendingWalletIds().size)
-                }
-                is AuthManager.CipherAuthResult.Error -> {
-                    Log.e(TAG, "Auth error code=${authResult.errorCode} for $walletId: ${authResult.errString}")
-                    return Outcome.Failed(
-                        helper.pendingWalletIds().size,
-                        "auth error ${authResult.errorCode}: ${authResult.errString}"
-                    )
-                }
-                is AuthManager.CipherAuthResult.Success -> {
-                    val migrate = helper.migrateWallet(walletId, authResult.cipher)
-                    if (migrate.isFailure) {
-                        val msg = migrate.exceptionOrNull()?.message ?: "migrate failed"
-                        Log.e(TAG, "Migrate failed for $walletId: $msg")
-                        return Outcome.Failed(helper.pendingWalletIds().size, msg)
+            try {
+                val cipher = encryptionManager.newEncryptCipherV2()
+                val authResult = authManager.authenticateForCipher(
+                    activity = activity,
+                    cipher = cipher,
+                    title = promptTitle,
+                    subtitle = promptSubtitle,
+                )
+                when (authResult) {
+                    is AuthManager.CipherAuthResult.Cancelled -> {
+                        // Policy A (v1.7.2 #289): cancel accumulates and continues to the
+                        // next wallet. v1.7.x returned Outcome.Cancelled on the first cancel
+                        // which stranded subsequent wallets even when the user was willing
+                        // to authenticate them.
+                        Log.w(TAG, "User cancelled biometric for $walletId; recording, continuing")
+                        failedWalletIds += walletId
+                        continue
+                    }
+                    is AuthManager.CipherAuthResult.Error -> {
+                        Log.e(TAG, "Auth error code=${authResult.errorCode} for $walletId: ${authResult.errString}")
+                        failedWalletIds += walletId
+                        if (authResult.errorCode in SESSION_FATAL_ERROR_CODES) {
+                            // Session-fatal: ERROR_LOCKOUT (~30s), ERROR_LOCKOUT_PERMANENT,
+                            // and the ERROR_HW_*/ERROR_NO_* family all mean the next prompt
+                            // will fail with the same error. Burning through every remaining
+                            // wallet here would turn a transient 30s lockout into "every
+                            // wallet failed, re-import required". Break early instead so
+                            // the user can retry the run later (#289 polish).
+                            val remaining = pending.size - (pending.indexOf(walletId) + 1)
+                            Log.w(TAG, "Session-fatal biometric error code=${authResult.errorCode}; aborting run with $remaining wallets untouched")
+                            return Outcome.Failed(
+                                pendingCount = failedWalletIds.size + remaining,
+                                failedWalletIds = failedWalletIds.toList(),
+                                reason = "Biometric session error (code=${authResult.errorCode}); retry later"
+                            )
+                        }
+                        continue
+                    }
+                    is AuthManager.CipherAuthResult.Success -> {
+                        val migrate = helper.migrateWallet(walletId, authResult.cipher)
+                        if (migrate.isFailure) {
+                            Log.e(TAG, "Migrate failed for $walletId: ${migrate.exceptionOrNull()?.message}")
+                            failedWalletIds += walletId
+                            continue
+                        }
                     }
                 }
+            } catch (e: android.security.keystore.KeyPermanentlyInvalidatedException) {
+                // V2 key was invalidated (typically by biometric enrollment change). Every
+                // subsequent wallet in this run will throw the same — accumulating each as a
+                // per-wallet failure is correct because the resulting Outcome.Failed.reason
+                // ("re-import required") is the right user instruction.
+                Log.w(TAG, "KeyPermanentlyInvalidatedException for $walletId; recording, continuing", e)
+                failedWalletIds += walletId
+                continue
             }
         }
 
-        return helper.finalize().fold(
-            onSuccess = { Outcome.Completed },
-            onFailure = { Outcome.Failed(helper.pendingWalletIds().size, it.message ?: "finalize failed") }
-        )
+        return if (failedWalletIds.isEmpty()) {
+            helper.finalize().fold(
+                onSuccess = { Outcome.Completed },
+                onFailure = { Outcome.Failed(0, emptyList(), it.message ?: "finalize failed") }
+            )
+        } else {
+            Outcome.Failed(
+                pendingCount = failedWalletIds.size,
+                failedWalletIds = failedWalletIds.toList(),
+                reason = "${failedWalletIds.size} wallets could not be migrated; re-import required"
+            )
+        }
     }
 
     companion object {
         private const val TAG = "KeystoreV2Migration"
+
+        /**
+         * Biometric error codes where the next prompt in this session is guaranteed to
+         * fail with the same error. Treat as session-fatal: abort the run rather than
+         * burning the per-wallet failure list against an issue that will only resolve
+         * after the user retries later (lockout) or in a different environment (HW
+         * unavailable / no biometrics enrolled).
+         */
+        private val SESSION_FATAL_ERROR_CODES = setOf(
+            BiometricPrompt.ERROR_LOCKOUT,
+            BiometricPrompt.ERROR_LOCKOUT_PERMANENT,
+            BiometricPrompt.ERROR_HW_NOT_PRESENT,
+            BiometricPrompt.ERROR_HW_UNAVAILABLE,
+            BiometricPrompt.ERROR_NO_BIOMETRICS,
+            BiometricPrompt.ERROR_NO_DEVICE_CREDENTIAL,
+        )
     }
 }

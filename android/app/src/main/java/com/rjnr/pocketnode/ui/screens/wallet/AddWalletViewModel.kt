@@ -1,12 +1,17 @@
 package com.rjnr.pocketnode.ui.screens.wallet
 
+import android.util.Log
+import androidx.fragment.app.FragmentActivity
 import androidx.lifecycle.SavedStateHandle
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.rjnr.pocketnode.data.database.entity.WalletEntity
 import com.rjnr.pocketnode.data.gateway.GatewayRepository
+import com.rjnr.pocketnode.data.wallet.KeyManager
 import com.rjnr.pocketnode.data.wallet.MnemonicManager
 import com.rjnr.pocketnode.R
+import com.rjnr.pocketnode.data.wallet.WalletKeyReader
+import com.rjnr.pocketnode.data.wallet.WalletKeyWriter
 import com.rjnr.pocketnode.data.wallet.WalletRepository
 import com.rjnr.pocketnode.ui.util.Bip39WordList
 import com.rjnr.pocketnode.ui.util.UiMessage
@@ -17,6 +22,8 @@ import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import javax.inject.Inject
+
+private const val TAG = "AddWalletVM"
 
 data class AddWalletUiState(
     val isLoading: Boolean = false,
@@ -37,7 +44,9 @@ class AddWalletViewModel @Inject constructor(
     savedStateHandle: SavedStateHandle,
     private val walletRepository: WalletRepository,
     private val gatewayRepository: GatewayRepository,
-    private val mnemonicManager: MnemonicManager
+    private val mnemonicManager: MnemonicManager,
+    private val walletKeyReader: WalletKeyReader,
+    private val walletKeyWriter: WalletKeyWriter,
 ) : ViewModel() {
 
     /**
@@ -75,7 +84,17 @@ class AddWalletViewModel @Inject constructor(
         _uiState.update { it.copy(selectedParentId = walletId) }
     }
 
-    fun createSubAccount() {
+    /**
+     * V2-aware sub-account creation. Two BiometricPrompt prompts fire,
+     * back-to-back:
+     *
+     *   1. Read parent's mnemonic via [WalletKeyReader.readKeyMaterial]
+     *      (bonus bug fix — the previous flow routed through V1 storage
+     *      and crashed on V2 parents).
+     *   2. Encrypt + persist the new sub-account's key material via
+     *      [WalletKeyWriter.persistNewWallet] (inside [persistKeys]).
+     */
+    fun createSubAccount(activity: FragmentActivity) {
         if (_uiState.value.isLoading) return // prevent double-tap
         val name = _uiState.value.name.trim()
         val parentId = _uiState.value.selectedParentId
@@ -91,13 +110,73 @@ class AddWalletViewModel @Inject constructor(
 
         viewModelScope.launch {
             _uiState.update { it.copy(isLoading = true, error = null) }
-            runCatching {
-                walletRepository.createSubAccount(parentId, name)
-            }.onSuccess { wallet ->
+
+            // Prompt #1: read parent's mnemonic.
+            val readResult = walletKeyReader.readKeyMaterial(
+                activity = activity,
+                walletId = parentId,
+                promptTitle = "Unlock parent wallet",
+                promptSubtitle = "Authentication required to derive a sub-account.",
+            )
+            val parentMnemonic = when (readResult) {
+                is WalletKeyReader.MaterialResult.Success -> {
+                    val words = readResult.mnemonic?.split(" ")
+                    if (words.isNullOrEmpty()) {
+                        _uiState.update {
+                            it.copy(isLoading = false, error = UiMessage.Resource(R.string.vm_error_parent_no_mnemonic))
+                        }
+                        return@launch
+                    }
+                    words
+                }
+                is WalletKeyReader.MaterialResult.Cancelled -> {
+                    // Silent: user dismissed prompt intentionally.
+                    _uiState.update { it.copy(isLoading = false) }
+                    return@launch
+                }
+                is WalletKeyReader.MaterialResult.AuthError -> {
+                    _uiState.update {
+                        it.copy(isLoading = false, error = UiMessage.Raw("Auth error: ${readResult.message}"))
+                    }
+                    return@launch
+                }
+                is WalletKeyReader.MaterialResult.KeyInvalidated -> {
+                    _uiState.update {
+                        it.copy(isLoading = false, error = UiMessage.Resource(R.string.vm_error_biometric_changed_parent))
+                    }
+                    return@launch
+                }
+                is WalletKeyReader.MaterialResult.NotAvailable -> {
+                    _uiState.update {
+                        it.copy(
+                            isLoading = false,
+                            error = UiMessage.Resource(R.string.vm_error_cannot_read_parent, listOf(readResult.reason)),
+                        )
+                    }
+                    return@launch
+                }
+            }
+
+            // Prompt #2: persist sub-account at V2 (inside the closure).
+            // Distinct title/subtitle from prompt #1 so the user understands
+            // they're securing the NEW sub-account, not re-confirming the parent.
+            val result = walletRepository.createSubAccount(parentId, name, parentMnemonic) { walletId, bundle ->
+                walletKeyWriter.persistNewWallet(
+                    activity = activity,
+                    walletId = walletId,
+                    bundle = bundle,
+                    walletType = KeyManager.WALLET_TYPE_MNEMONIC,
+                    mnemonicBackedUp = false,
+                    promptTitle = "Secure new sub-account",
+                    promptSubtitle = "Encrypt the new account's keys.",
+                )
+            }
+            result.onSuccess { wallet ->
                 gatewayRepository.onActiveWalletChanged(wallet)
                 _uiState.update { it.copy(isLoading = false, createdWallet = wallet) }
             }.onFailure { error ->
-                _uiState.update { it.copy(isLoading = false, error = error.message?.let(UiMessage::Raw)) }
+                Log.e(TAG, "Sub-account creation failed", error)
+                _uiState.update { it.copy(isLoading = false, error = persistErrorMessage(error)) }
             }
         }
     }
@@ -165,7 +244,7 @@ class AddWalletViewModel @Inject constructor(
         _uiState.update { it.copy(importPrivateKey = key) }
     }
 
-    fun createNewWallet() {
+    fun createNewWallet(activity: FragmentActivity) {
         if (_uiState.value.isLoading) return // prevent double-tap
         val name = _uiState.value.name.trim()
         if (name.isBlank()) {
@@ -180,18 +259,31 @@ class AddWalletViewModel @Inject constructor(
         // first N stay actively synced when ALL_WALLETS is selected.
         viewModelScope.launch {
             _uiState.update { it.copy(isLoading = true, error = null) }
-            runCatching {
-                walletRepository.createWallet(name)
-            }.onSuccess { (wallet, _) ->
+            val result = walletRepository.createWallet(
+                name = name,
+                persistKeys = { walletId, bundle ->
+                    walletKeyWriter.persistNewWallet(
+                        activity = activity,
+                        walletId = walletId,
+                        bundle = bundle,
+                        walletType = KeyManager.WALLET_TYPE_MNEMONIC,
+                        mnemonicBackedUp = false,
+                    )
+                },
+            )
+            result.onSuccess { wallet ->
                 gatewayRepository.onActiveWalletChanged(wallet)
-                _uiState.update { it.copy(isLoading = false, createdWallet = wallet, isNewlyGenerated = true) }
+                _uiState.update {
+                    it.copy(isLoading = false, createdWallet = wallet, isNewlyGenerated = true)
+                }
             }.onFailure { error ->
-                _uiState.update { it.copy(isLoading = false, error = error.message?.let(UiMessage::Raw)) }
+                Log.e(TAG, "Wallet creation failed", error)
+                _uiState.update { it.copy(isLoading = false, error = persistErrorMessage(error)) }
             }
         }
     }
 
-    fun importMnemonic() {
+    fun importMnemonic(activity: FragmentActivity) {
         if (_uiState.value.isLoading) return // prevent double-tap
         val name = _uiState.value.name.trim()
         val words = _uiState.value.importWords.map { it.trim().lowercase() }
@@ -215,18 +307,30 @@ class AddWalletViewModel @Inject constructor(
 
         viewModelScope.launch {
             _uiState.update { it.copy(isLoading = true, error = null) }
-            runCatching {
-                walletRepository.importWallet(name, words)
-            }.onSuccess { wallet ->
+            val result = walletRepository.importFromMnemonic(
+                words = words,
+                name = name,
+                persistKeys = { walletId, bundle ->
+                    walletKeyWriter.persistNewWallet(
+                        activity = activity,
+                        walletId = walletId,
+                        bundle = bundle,
+                        walletType = KeyManager.WALLET_TYPE_MNEMONIC,
+                        mnemonicBackedUp = true,
+                    )
+                },
+            )
+            result.onSuccess { wallet ->
                 gatewayRepository.onActiveWalletChanged(wallet)
                 _uiState.update { it.copy(isLoading = false, createdWallet = wallet) }
             }.onFailure { error ->
-                _uiState.update { it.copy(isLoading = false, error = error.message?.let(UiMessage::Raw)) }
+                Log.e(TAG, "Mnemonic import failed", error)
+                _uiState.update { it.copy(isLoading = false, error = persistErrorMessage(error)) }
             }
         }
     }
 
-    fun importRawKey() {
+    fun importRawKey(activity: FragmentActivity) {
         if (_uiState.value.isLoading) return // prevent double-tap
         val name = _uiState.value.name.trim()
         val key = _uiState.value.importPrivateKey.trim()
@@ -242,18 +346,44 @@ class AddWalletViewModel @Inject constructor(
 
         viewModelScope.launch {
             _uiState.update { it.copy(isLoading = true, error = null) }
-            runCatching {
-                walletRepository.importRawKey(name, key)
-            }.onSuccess { wallet ->
+            val result = walletRepository.importRawKey(key, name) { walletId, bundle ->
+                walletKeyWriter.persistNewWallet(
+                    activity = activity,
+                    walletId = walletId,
+                    bundle = bundle,
+                    walletType = KeyManager.WALLET_TYPE_RAW_KEY,
+                    mnemonicBackedUp = false,
+                )
+            }
+            result.onSuccess { wallet ->
                 gatewayRepository.onActiveWalletChanged(wallet)
                 _uiState.update { it.copy(isLoading = false, createdWallet = wallet) }
             }.onFailure { error ->
-                _uiState.update { it.copy(isLoading = false, error = error.message?.let(UiMessage::Raw)) }
+                Log.e(TAG, "Raw key import failed", error)
+                _uiState.update { it.copy(isLoading = false, error = persistErrorMessage(error)) }
             }
         }
     }
 
     fun clearError() {
         _uiState.update { it.copy(error = null) }
+    }
+
+    companion object {
+        /** See `OnboardingViewModel.persistErrorMessage` — same shape. */
+        internal fun persistErrorMessage(error: Throwable): UiMessage? {
+            val pex = error as? WalletKeyWriter.PersistException
+            return when (val r = pex?.result) {
+                WalletKeyWriter.Result.Cancelled -> null
+                is WalletKeyWriter.Result.AuthError ->
+                    UiMessage.Raw("Auth error: ${r.message}")
+                is WalletKeyWriter.Result.WriteFailed ->
+                    UiMessage.Raw("Failed to save wallet: ${r.cause.message ?: "unknown error"}")
+                WalletKeyWriter.Result.KeyInvalidated ->
+                    UiMessage.Raw("Wallet keys must be re-imported")
+                null -> error.message?.let(UiMessage::Raw)
+                else -> error.message?.let(UiMessage::Raw)
+            }
+        }
     }
 }

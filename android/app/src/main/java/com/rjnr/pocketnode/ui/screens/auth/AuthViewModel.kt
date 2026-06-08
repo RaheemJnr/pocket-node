@@ -7,6 +7,7 @@ import androidx.lifecycle.viewModelScope
 import com.rjnr.pocketnode.R
 import com.rjnr.pocketnode.data.auth.AuthManager
 import com.rjnr.pocketnode.data.auth.PinManager
+import com.rjnr.pocketnode.data.database.dao.WalletDao
 import com.rjnr.pocketnode.data.migration.KeystoreV2MigrationHelper
 import com.rjnr.pocketnode.data.migration.KeystoreV2MigrationRunner
 import com.rjnr.pocketnode.ui.util.UiMessage
@@ -33,6 +34,7 @@ class AuthViewModel @Inject constructor(
     private val pinManager: PinManager,
     private val migrationRunner: KeystoreV2MigrationRunner,
     private val migrationHelper: KeystoreV2MigrationHelper,
+    private val walletDao: WalletDao,
 ) : ViewModel() {
 
     private val _uiState = MutableStateFlow(AuthUiState())
@@ -77,15 +79,19 @@ class AuthViewModel @Inject constructor(
      */
     fun runMigrationIfNeeded(activity: FragmentActivity, onComplete: () -> Unit) {
         viewModelScope.launch {
-            if (migrationHelper.isMigrationComplete()) {
-                onComplete()
-                return@launch
-            }
+            // The `migrationHelper.isMigrationComplete()` short-circuit was removed in
+            // v1.7.2 (#289). Like the runner short-circuit it stranded any V1 row
+            // written after the prefs flag was set. `pendingWalletIds()` is now the
+            // sole source of truth and is safe to call cheaply on every unlock.
             val pending = migrationHelper.pendingWalletIds()
             if (pending.isEmpty()) {
                 // Empty DB (fresh install on v1.7.0) — finalize to mark
                 // the migration complete so future starts don't re-check.
-                migrationHelper.finalize()
+                // finalize() is unlikely to fail here (nothing to delete on a
+                // fresh install) but log if it does so the failure isn't silent.
+                migrationHelper.finalize().onFailure { e ->
+                    Log.w(TAG, "finalize on empty-pending failed", e)
+                }
                 onComplete()
                 return@launch
             }
@@ -101,9 +107,19 @@ class AuthViewModel @Inject constructor(
                         }
                     }
                     is KeystoreV2MigrationRunner.Outcome.Failed -> {
-                        Log.e(TAG, "Migration failed: ${outcome.reason}")
+                        Log.e(TAG, "Migration failed: ${outcome.reason} for ${outcome.failedWalletIds}")
+                        val errorMessage = if (outcome.failedWalletIds.isEmpty()) {
+                            "Migration could not complete. Tap an affected wallet to retry, or re-import from your recovery phrase."
+                        } else {
+                            val names = outcome.failedWalletIds.map { id ->
+                                walletDao.getById(id)?.name?.takeIf { it.isNotBlank() } ?: "Wallet ${id.take(8)}"
+                            }
+                            val nameList = names.joinToString(", ")
+                            "Migration could not complete for: $nameList. " +
+                                "Tap an affected wallet to retry, or re-import from your recovery phrase."
+                        }
                         _uiState.update {
-                            it.copy(error = UiMessage.Resource(R.string.vm_error_migration_failed, listOf(outcome.reason)))
+                            it.copy(error = UiMessage.Raw(errorMessage))
                         }
                     }
                 }

@@ -9,6 +9,7 @@ import com.rjnr.pocketnode.data.auth.AuthManager
 import com.rjnr.pocketnode.data.gateway.models.NetworkType
 import com.rjnr.pocketnode.data.gateway.models.Script
 import com.rjnr.pocketnode.data.migration.KeyStoreMigrationHelper
+import com.rjnr.pocketnode.data.migration.WalletKeyBundle
 import androidx.annotation.VisibleForTesting
 import dagger.hilt.android.qualifiers.ApplicationContext
 import org.nervos.ckb.crypto.Blake2b
@@ -16,7 +17,6 @@ import org.nervos.ckb.crypto.secp256k1.ECKeyPair
 import org.nervos.ckb.crypto.secp256k1.Sign
 import org.nervos.ckb.utils.Numeric
 import java.math.BigInteger
-import java.security.SecureRandom
 import javax.inject.Inject
 import javax.inject.Singleton
 
@@ -53,6 +53,20 @@ class KeyManager @Inject constructor(
     fun clearSessionPin() {
         sessionPin?.let { java.util.Arrays.fill(it, '\u0000') }
         sessionPin = null
+    }
+
+    /**
+     * Pure-crypto plaintext bundle producer. Used by the new V2 write path
+     * (see [WalletKeyWriter]). The caller is responsible for persistence.
+     */
+    fun encodePlaintextBundle(
+        privateKey: ByteArray,
+        mnemonic: List<String>?,
+    ): WalletKeyBundle {
+        return WalletKeyBundle(
+            privateKeyHex = privateKey.joinToString("") { "%02x".format(it) },
+            mnemonic = mnemonic?.joinToString(" "),
+        )
     }
 
     @Inject
@@ -124,76 +138,6 @@ class KeyManager @Inject constructor(
             if (hasKeys) return true
         }
         return prefs.contains(KEY_PRIVATE_KEY)
-    }
-
-    // -- Existing methods (raw key) --
-
-    suspend fun generateWallet(): WalletInfo {
-        val privateKeyBytes = ByteArray(32)
-        SecureRandom().nextBytes(privateKeyBytes)
-        val privateKey = BigInteger(1, privateKeyBytes)
-
-        savePrivateKey(privateKey, WALLET_TYPE_RAW_KEY)
-        return getWalletInfo()
-    }
-
-    suspend fun importWallet(privateKeyHex: String): WalletInfo {
-        val privateKeyBytes = Numeric.hexStringToByteArray(privateKeyHex)
-        require(privateKeyBytes.size == 32) { "Private key must be 32 bytes" }
-        val privateKey = BigInteger(1, privateKeyBytes)
-
-        savePrivateKey(privateKey, WALLET_TYPE_RAW_KEY)
-        return getWalletInfo()
-    }
-
-    // -- New mnemonic methods --
-
-    suspend fun generateWalletWithMnemonic(
-        wordCount: MnemonicManager.WordCount = MnemonicManager.WordCount.TWELVE
-    ): Pair<WalletInfo, List<String>> {
-        val words = mnemonicManager.generateMnemonic(wordCount)
-        val privateKeyBytes = mnemonicManager.mnemonicToPrivateKey(words)
-        val hex = Numeric.toHexStringNoPrefixZeroPadded(BigInteger(1, privateKeyBytes), 64)
-
-        // Write to Room (primary)
-        writeToRoom("default", hex, words.joinToString(" "), WALLET_TYPE_MNEMONIC, false)
-
-        // Write to PIN backup (secondary)
-        writeBackupIfPinAvailable("default") {
-            KeyMaterial(
-                privateKey = hex,
-                mnemonic = words.joinToString(" "),
-                walletType = WALLET_TYPE_MNEMONIC,
-                mnemonicBackedUp = false
-            )
-        }
-
-        return Pair(getWalletInfo(), words)
-    }
-
-    suspend fun importWalletFromMnemonic(
-        words: List<String>,
-        passphrase: String = ""
-    ): WalletInfo {
-        require(mnemonicManager.validateMnemonic(words)) { "Invalid mnemonic" }
-
-        val privateKeyBytes = mnemonicManager.mnemonicToPrivateKey(words, passphrase)
-        val hex = Numeric.toHexStringNoPrefixZeroPadded(BigInteger(1, privateKeyBytes), 64)
-
-        // Write to Room (primary)
-        writeToRoom("default", hex, words.joinToString(" "), WALLET_TYPE_MNEMONIC, true)
-
-        // Write to PIN backup (secondary)
-        writeBackupIfPinAvailable("default") {
-            KeyMaterial(
-                privateKey = hex,
-                mnemonic = words.joinToString(" "),
-                walletType = WALLET_TYPE_MNEMONIC,
-                mnemonicBackedUp = true
-            )
-        }
-
-        return getWalletInfo()
     }
 
     suspend fun getMnemonic(): List<String>? {
@@ -377,42 +321,7 @@ class KeyManager @Inject constructor(
             .apply()
     }
 
-    private suspend fun savePrivateKey(privateKey: BigInteger, walletType: String) {
-        val hex = Numeric.toHexStringNoPrefixZeroPadded(privateKey, 64)
-
-        // Write to Room (primary)
-        writeToRoom("default", hex, null, walletType, false)
-
-        // Write to PIN backup (secondary)
-        writeBackupIfPinAvailable("default") {
-            KeyMaterial(
-                privateKey = hex,
-                mnemonic = null,
-                walletType = walletType,
-                mnemonicBackedUp = false
-            )
-        }
-    }
-
     // -- Wallet-scoped key storage (multi-wallet support) --
-
-    suspend fun storeKeysForWallet(walletId: String, privateKey: ByteArray, mnemonic: List<String>?) {
-        val hex = privateKey.joinToString("") { "%02x".format(it) }
-        val walletType = if (mnemonic != null) WALLET_TYPE_MNEMONIC else WALLET_TYPE_RAW_KEY
-
-        // Write to Room (primary)
-        writeToRoom(walletId, hex, mnemonic?.joinToString(" "), walletType, false)
-
-        // Write to PIN backup (secondary)
-        writeBackupIfPinAvailable(walletId) {
-            KeyMaterial(
-                privateKey = hex,
-                mnemonic = mnemonic?.joinToString(" "),
-                walletType = walletType,
-                mnemonicBackedUp = false
-            )
-        }
-    }
 
     @Deprecated("ESP fallback — remove after one release cycle")
     private fun getWalletPrefs(walletId: String): SharedPreferences {
@@ -622,17 +531,6 @@ class KeyManager @Inject constructor(
             }
 
         Log.i(TAG, "ESP files deleted after successful Room migration")
-    }
-
-    private suspend fun writeToRoom(
-        walletId: String,
-        privateKeyHex: String,
-        mnemonic: String?,
-        walletType: String,
-        mnemonicBackedUp: Boolean
-    ) {
-        val helper = keyStoreMigrationHelper ?: return
-        helper.migrateWallet(walletId, privateKeyHex, mnemonic, walletType, mnemonicBackedUp)
     }
 
     private fun writeBackupIfPinAvailable(walletId: String, buildMaterial: () -> KeyMaterial) {

@@ -26,6 +26,11 @@ fun OnboardingScreen(
 ) {
     val uiState by viewModel.uiState.collectAsState()
     val snackbarHostState = remember { SnackbarHostState() }
+    // MainActivity extends FragmentActivity, so this cast is safe in production.
+    // Required so OnboardingViewModel can drive the BiometricPrompt CryptoObject
+    // flow for V2 keystore-bound writes (#289).
+    val activity = androidx.compose.ui.platform.LocalContext.current
+        as androidx.fragment.app.FragmentActivity
 
     // "Name your wallet" dialog state. Captured before the wallet is
     // actually created so the user-supplied name flows through into
@@ -183,7 +188,7 @@ fun OnboardingScreen(
             confirmButton = {
                 TextButton(onClick = {
                     showNameDialog = false
-                    viewModel.createNewWallet(pendingWalletName)
+                    viewModel.createNewWallet(activity, pendingWalletName)
                 }) {
                     Text("Create")
                 }

@@ -622,20 +622,6 @@ class HomeViewModel @Inject constructor(
     fun isMnemonicWallet(): Boolean = _uiState.value.walletType == KeyManager.WALLET_TYPE_MNEMONIC
 
     /**
-     * Show the import wallet dialog
-     */
-    fun showImport() {
-        _uiState.update { it.copy(showImportDialog = true) }
-    }
-
-    /**
-     * Hide the import wallet dialog
-     */
-    fun hideImport() {
-        _uiState.update { it.copy(showImportDialog = false) }
-    }
-
-    /**
      * Hide the post-import sync mode dialog
      */
     fun hidePostImportSyncDialog() {
@@ -647,37 +633,6 @@ class HomeViewModel @Inject constructor(
     fun showPostImportSyncDialog() {
         _uiState.update { it.copy(showPostImportSyncDialog = true) }
         savedStateHandle[SAVED_KEY_SHOW_POST_IMPORT_SYNC] = true
-    }
-
-    /**
-     * Import a wallet using a private key
-     */
-    fun importWallet(privateKeyHex: String) {
-        viewModelScope.launch {
-            _uiState.update { it.copy(isLoading = true, showImportDialog = false) }
-            
-            repository.importWallet(privateKeyHex)
-                .onSuccess { info ->
-                    Log.d(TAG, "Wallet imported successfully: ${info.testnetAddress}")
-                    val showPostImport = repository.currentNetwork == NetworkType.MAINNET
-                    _uiState.update { it.copy(
-                        walletInfo = info,
-                        isLoading = false,
-                        showPostImportSyncDialog = showPostImport,
-                    ) }
-                    savedStateHandle[SAVED_KEY_SHOW_POST_IMPORT_SYNC] = showPostImport
-                    registerAndRefresh()
-                }
-                .onFailure { error ->
-                    Log.e(TAG, "Wallet import failed", error)
-                    _uiState.update { 
-                        it.copy(
-                            isLoading = false, 
-                            error = com.rjnr.pocketnode.ui.util.UiMessage.Resource(com.rjnr.pocketnode.R.string.vm_error_import_failed, listOf(error.message ?: ""))
-                        ) 
-                    }
-                }
-        }
     }
 
     fun switchWallet(walletId: String) {
@@ -948,7 +903,6 @@ data class HomeUiState(
     val error: com.rjnr.pocketnode.ui.util.UiMessage? = null,
     val currentSyncMode: SyncMode = SyncMode.RECENT,
     val showSyncOptionsDialog: Boolean = false,
-    val showImportDialog: Boolean = false,
     val showPostImportSyncDialog: Boolean = false,
     val showBackupReminder: Boolean = false,
     val walletType: String = KeyManager.WALLET_TYPE_RAW_KEY,
