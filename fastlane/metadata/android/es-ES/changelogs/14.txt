@@ -1,0 +1,16 @@
+v1.7.3:
+Esta versión cierra seis hallazgos de seguridad del informe del equipo de Nervos.
+
+La pantalla de envío ahora rechaza transmitir una transacción que dejaría menos de 61 CKB de cambio. Antes ese residuo se absorbía silenciosamente como comisión.
+
+Hacer copia de seguridad de una cartera de clave privada ahora requiere verificar el PIN antes de mostrar la clave. La clave queda completamente enmascarada hasta que tocas para revelar, y el portapapeles se borra 60 segundos después de copiar.
+
+Desactivar "Autenticar antes de enviar" ahora requiere volver a introducir tu PIN.
+
+El actualizador integrado verifica el certificado de firma del APK descargado antes de abrir el instalador del sistema.
+
+El flujo de publicación ahora hace checkout del commit verificado en lugar del nombre de etiqueta sin cualificar.
+
+Las carteras creadas en dispositivos sin bloqueo de pantalla ahora funcionan en modo de cifrado por software y se actualizan automáticamente a protección por hardware en cuanto activas un bloqueo de dispositivo.
+
+Código: github.com/RaheemJnr/pocket-node/releases
