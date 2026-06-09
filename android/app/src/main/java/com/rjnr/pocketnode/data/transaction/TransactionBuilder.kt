@@ -188,11 +188,14 @@ class TransactionBuilder @Inject constructor(
                 // different amount that allows for a valid change output, OR
                 // send the full balance minus fee (which yields an exact fit
                 // with no change output at all).
-                val changeCkb = change / 100_000_000.0
+                val changeCkbStr = java.math.BigDecimal(change)
+                    .divide(java.math.BigDecimal(100_000_000))
+                    .stripTrailingZeros()
+                    .toPlainString()
                 val minCkb = MIN_CELL_CAPACITY / 100_000_000
-                Log.w(TAG, "  Dust change refused: $change shannons (${"%.4f".format(changeCkb)} CKB) below min $MIN_CELL_CAPACITY")
+                Log.w(TAG, "  Dust change refused: $change shannons ($changeCkbStr CKB) below min $MIN_CELL_CAPACITY")
                 throw IllegalStateException(
-                    "Dust change refused: this send would leave ${"%.4f".format(changeCkb)} CKB of change " +
+                    "Dust change refused: this send would leave $changeCkbStr CKB of change " +
                         "below the $minCkb CKB minimum cell capacity, which would be silently absorbed as " +
                         "transaction fee. Try sending a slightly different amount or sending your full balance " +
                         "minus the fee."
@@ -278,11 +281,17 @@ class TransactionBuilder @Inject constructor(
                 outputs.add(CellOutput(capacity = "0x${change.toString(16)}", lock = senderScript))
                 outputsData.add("0x")
             }
-            else -> throw IllegalStateException(
-                "Dust change refused: this DAO deposit would leave ${"%.4f".format(change / 100_000_000.0)} CKB " +
-                    "below the ${MIN_CELL_CAPACITY / 100_000_000} CKB minimum, which would be silently absorbed " +
-                    "as transaction fee. Adjust the deposit amount and retry."
-            )
+            else -> {
+                val changeCkbStr = java.math.BigDecimal(change)
+                    .divide(java.math.BigDecimal(100_000_000))
+                    .stripTrailingZeros()
+                    .toPlainString()
+                throw IllegalStateException(
+                    "Dust change refused: this DAO deposit would leave $changeCkbStr CKB " +
+                        "below the ${MIN_CELL_CAPACITY / 100_000_000} CKB minimum, which would be silently absorbed " +
+                        "as transaction fee. Adjust the deposit amount and retry."
+                )
+            }
         }
 
         val secp256k1Dep = when (network) {
@@ -352,11 +361,17 @@ class TransactionBuilder @Inject constructor(
                 outputs.add(CellOutput(capacity = "0x${change.toString(16)}", lock = senderScript))
                 outputsData.add("0x")
             }
-            else -> throw IllegalStateException(
-                "Dust change refused: this DAO withdraw would leave ${"%.4f".format(change / 100_000_000.0)} CKB " +
-                    "below the ${MIN_CELL_CAPACITY / 100_000_000} CKB minimum, which would be silently absorbed " +
-                    "as transaction fee. Use a wallet cell with a slightly different capacity to cover the fee."
-            )
+            else -> {
+                val changeCkbStr = java.math.BigDecimal(change)
+                    .divide(java.math.BigDecimal(100_000_000))
+                    .stripTrailingZeros()
+                    .toPlainString()
+                throw IllegalStateException(
+                    "Dust change refused: this DAO withdraw would leave $changeCkbStr CKB " +
+                        "below the ${MIN_CELL_CAPACITY / 100_000_000} CKB minimum, which would be silently absorbed " +
+                        "as transaction fee. Use a wallet cell with a slightly different capacity to cover the fee."
+                )
+            }
         }
 
         val secp256k1Dep = when (network) {

@@ -146,6 +146,18 @@ class WalletKeyReader @Inject constructor(
         } catch (e: KeyPermanentlyInvalidatedException) {
             Log.w(TAG, "V2 key invalidated by biometric enrollment change for $walletId")
             return MaterialResult.KeyInvalidated
+        } catch (e: IllegalStateException) {
+            // Android Keystore throws this when getOrCreateKeystoreKeyV2 is
+            // asked to mint a key on a device with no secure lock. Should
+            // not normally happen on the V2 read side — the V2 key exists
+            // already if a V2 row was ever written. Defensive catch so a
+            // post-restore or post-keystore-wipe state degrades to
+            // KeyInvalidated (re-import recovery) instead of crashing.
+            if (e.message?.contains("Secure lock screen", ignoreCase = true) == true) {
+                Log.w(TAG, "V2 key missing and cannot be recreated (no secure lock) for $walletId", e)
+                return MaterialResult.KeyInvalidated
+            }
+            throw e
         }
         val authResult = authManager.authenticateForCipher(
             activity = activity,
@@ -197,6 +209,14 @@ class WalletKeyReader @Inject constructor(
             // re-import flow to the user.
             Log.w(TAG, "V2 key invalidated by biometric enrollment change for $walletId")
             return Result.KeyInvalidated
+        } catch (e: IllegalStateException) {
+            // Defense in depth: V2 key missing AND no secure lock to
+            // recreate it. Same degraded path as KPIE — re-import recovers.
+            if (e.message?.contains("Secure lock screen", ignoreCase = true) == true) {
+                Log.w(TAG, "V2 key missing and cannot be recreated (no secure lock) for $walletId", e)
+                return Result.KeyInvalidated
+            }
+            throw e
         }
         val authResult = authManager.authenticateForCipher(
             activity = activity,

@@ -189,7 +189,7 @@ fun CkbNavGraph(
             )
         }
 
-        composable(Screen.Auth.route) {
+        composable(Screen.Auth.route) { backStackEntry ->
             AuthScreen(
                 onAuthSuccess = {
                     navController.navigate(destinationAfterWalletReady()) {
@@ -198,7 +198,8 @@ fun CkbNavGraph(
                 },
                 onNavigateToPinVerify = {
                     navController.navigate(Screen.PinEntry.createRoute("verify"))
-                }
+                },
+                pinUnlockFlow = backStackEntry.savedStateHandle,
             )
         }
 
@@ -281,6 +282,22 @@ fun CkbNavGraph(
                                     navController.previousBackStackEntry
                                         ?.savedStateHandle
                                         ?.set("pin_verified", true)
+                                    navController.popBackStack()
+                                }
+                                previousRoute == Screen.Auth.route -> {
+                                    // User unlocked via PIN from AuthScreen. Pop back
+                                    // to AuthScreen and signal success via savedStateHandle
+                                    // so the AuthScreen LaunchedEffect can flip
+                                    // `authSuccess` and trigger `runMigrationIfNeeded`.
+                                    // Without this hook the V1→V2 migration loop was
+                                    // silently dead for every PIN-only user (#289
+                                    // follow-up bug found during v1.7.3 testing —
+                                    // pre-fix the previous route's `else` branch
+                                    // navigated straight to Screen.Main and popped
+                                    // AuthScreen, so its LaunchedEffect never fired).
+                                    navController.previousBackStackEntry
+                                        ?.savedStateHandle
+                                        ?.set("pin_unlock_success", true)
                                     navController.popBackStack()
                                 }
                                 else -> {

@@ -67,9 +67,22 @@ class WalletKeyWriterTest {
         prefs = ctx.getSharedPreferences("test_v2_writer", Context.MODE_PRIVATE)
         prefs.edit().clear().commit()
         helper = KeystoreV2MigrationHelper(keyMaterialDao, encryptionManager, prefs)
+        // KeyStoreMigrationHelper backs the V1 software-only fallback path
+        // added for users without a device lock. Tests below exercise the V2
+        // path; the V1 helper is wired but not invoked.
+        val v1Helper = com.rjnr.pocketnode.data.migration.KeyStoreMigrationHelper(
+            keyMaterialDao, encryptionManager, prefs
+        )
         authManager = mockk(relaxed = true)
         keyBackupManager = mockk(relaxed = true)
-        writer = WalletKeyWriter(keyMaterialDao, helper, encryptionManager, authManager, keyBackupManager)
+        writer = WalletKeyWriter(
+            keyMaterialDao = keyMaterialDao,
+            keystoreV2MigrationHelper = helper,
+            keyStoreMigrationHelper = v1Helper,
+            encryptionManager = encryptionManager,
+            authManager = authManager,
+            keyBackupManager = keyBackupManager,
+        )
         activity = mockk(relaxed = true)
     }
 

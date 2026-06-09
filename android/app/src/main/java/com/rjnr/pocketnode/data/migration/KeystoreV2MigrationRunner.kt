@@ -151,6 +151,39 @@ class KeystoreV2MigrationRunner @Inject constructor(
                 Log.w(TAG, "KeyPermanentlyInvalidatedException for $walletId; recording, continuing", e)
                 failedWalletIds += walletId
                 continue
+            } catch (e: java.security.InvalidAlgorithmParameterException) {
+                // Android Keystore wraps "Secure lock screen must be enabled to create
+                // keys requiring user authentication" inside InvalidAlgorithmParameterException
+                // when getOrCreateKeystoreKeyV2 fires keyGen.init. Session-fatal: the next
+                // wallet's newEncryptCipherV2 will throw the same. AuthViewModel.runMigrationIfNeeded
+                // pre-checks for credential availability and skips the runner in this case, but
+                // a race (user removed the device lock between check and runMigration) could
+                // still land us here. Abort the run rather than crashing the host process.
+                val cause = e.cause as? IllegalStateException
+                if (cause?.message?.contains("Secure lock screen", ignoreCase = true) == true) {
+                    val remaining = pending.size - pending.indexOf(walletId)
+                    Log.w(TAG, "No secure lock on device; aborting V2 migration with $remaining wallets untouched", e)
+                    return Outcome.Failed(
+                        pendingCount = failedWalletIds.size + remaining,
+                        failedWalletIds = failedWalletIds.toList(),
+                        reason = "Device lock removed mid-run; re-enable in Android Settings and retry"
+                    )
+                }
+                throw e
+            } catch (e: IllegalStateException) {
+                // Same Keystore "Secure lock screen" path on devices/SDKs where the
+                // exception isn't wrapped in InvalidAlgorithmParameterException.
+                // (Observed on API 33 Pixel emulator during v1.7.3 testing.)
+                if (e.message?.contains("Secure lock screen", ignoreCase = true) == true) {
+                    val remaining = pending.size - pending.indexOf(walletId)
+                    Log.w(TAG, "No secure lock on device; aborting V2 migration with $remaining wallets untouched", e)
+                    return Outcome.Failed(
+                        pendingCount = failedWalletIds.size + remaining,
+                        failedWalletIds = failedWalletIds.toList(),
+                        reason = "Device lock removed mid-run; re-enable in Android Settings and retry"
+                    )
+                }
+                throw e
             }
         }
 

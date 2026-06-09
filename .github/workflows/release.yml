@@ -129,6 +129,12 @@ jobs:
           KEYSTORE_PASSWORD: ${{ secrets.KEYSTORE_PASSWORD }}
           KEY_ALIAS: ${{ secrets.KEY_ALIAS }}
           KEY_PASSWORD: ${{ secrets.KEY_PASSWORD }}
+          # Embedded at build time and read by UpdateDownloader.verifyApkSignature
+          # before launching the system installer (#293). The release APK refuses
+          # to install any update whose signing-cert SHA-256 does not match this
+          # value, blocking URL-substitution + same-key release-channel-compromise
+          # attacks at the in-app updater boundary.
+          RELEASE_CERT_SHA256: ${{ secrets.RELEASE_CERT_SHA256 }}
         run: ./gradlew assembleRelease -x cargoBuild
 
       - name: Verify native library is packaged

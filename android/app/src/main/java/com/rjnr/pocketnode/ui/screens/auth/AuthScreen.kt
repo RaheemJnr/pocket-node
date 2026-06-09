@@ -40,11 +40,25 @@ import androidx.hilt.navigation.compose.hiltViewModel
 fun AuthScreen(
     onAuthSuccess: () -> Unit = {},
     onNavigateToPinVerify: () -> Unit = {},
+    pinUnlockFlow: androidx.lifecycle.SavedStateHandle? = null,
     viewModel: AuthViewModel = hiltViewModel()
 ) {
     val uiState by viewModel.uiState.collectAsState()
     val snackbarHostState = remember { SnackbarHostState() }
     val context = LocalContext.current
+
+    // Returning from PinEntryScreen via the verify-mode pop-back path.
+    // NavGraph sets pin_unlock_success=true on AuthScreen's savedStateHandle
+    // when previousRoute was Auth, so we mirror the biometric-success
+    // entrypoint and flip the VM state — that wakes the migration loop
+    // [LaunchedEffect(uiState.authSuccess)] below (#289 follow-up).
+    LaunchedEffect(pinUnlockFlow) {
+        val ok = pinUnlockFlow?.get<Boolean>("pin_unlock_success") == true
+        if (ok) {
+            pinUnlockFlow.remove<Boolean>("pin_unlock_success")
+            viewModel.onPinUnlockSuccess()
+        }
+    }
 
     // Capture localized strings now — the prompt builder runs from a
     // non-@Composable callback site, which can't call stringResource().

@@ -56,6 +56,19 @@ class AuthViewModel @Inject constructor(
         _uiState.update { it.copy(authSuccess = true) }
     }
 
+    /**
+     * Called by [com.rjnr.pocketnode.ui.screens.auth.AuthScreen] when the
+     * user returns from [PinEntryScreen] with a successful PIN verify.
+     * Mirrors [onBiometricSuccess] — both unlock paths must end here so
+     * the AuthScreen `LaunchedEffect(authSuccess)` fires
+     * [runMigrationIfNeeded]. Without this hook the V1→V2 migration loop
+     * was silently dead for any user who didn't use biometric (#289
+     * follow-up bug found during v1.7.3 testing).
+     */
+    fun onPinUnlockSuccess() {
+        _uiState.update { it.copy(authSuccess = true) }
+    }
+
     fun onBiometricFailed(errorMessage: String) {
         _uiState.update { it.copy(error = UiMessage.Raw(errorMessage)) }
     }
@@ -84,6 +97,24 @@ class AuthViewModel @Inject constructor(
             // written after the prefs flag was set. `pendingWalletIds()` is now the
             // sole source of truth and is safe to call cheaply on every unlock.
             val pending = migrationHelper.pendingWalletIds()
+            if (pending.isNotEmpty() &&
+                !authManager.isBiometricEnrolled() &&
+                !authManager.hasDeviceCredential()
+            ) {
+                // V1 row(s) exist but the device has no secure lock — the V2
+                // Keystore key cannot be minted (Android throws
+                // IllegalStateException("Secure lock screen must be enabled...")
+                // from KeyStore2ParameterUtils.getRootSid). Skip the runner;
+                // the migration will succeed automatically the next time the
+                // user enables a device lock and cold-starts. Without this
+                // gate the runner crashes the app on every unlock — found
+                // during v1.7.3 testing after importing a wallet via the
+                // V1 fallback path and switching network (which force-kills
+                // the process and re-enters AuthScreen).
+                Log.i(TAG, "Skipping V1→V2 migration: ${pending.size} pending but no device credential")
+                onComplete()
+                return@launch
+            }
             if (pending.isEmpty()) {
                 // Empty DB (fresh install on v1.7.0) — finalize to mark
                 // the migration complete so future starts don't re-check.

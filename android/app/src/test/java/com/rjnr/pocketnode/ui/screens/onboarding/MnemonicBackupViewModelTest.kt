@@ -43,6 +43,7 @@ class MnemonicBackupViewModelTest {
     private lateinit var repository: GatewayRepository
     private lateinit var walletRepository: WalletRepository
     private lateinit var pinManager: PinManager
+    private lateinit var walletKeyReader: com.rjnr.pocketnode.data.wallet.WalletKeyReader
 
     @Before
     fun setUp() {
@@ -50,6 +51,7 @@ class MnemonicBackupViewModelTest {
         repository = mockk(relaxed = true)
         walletRepository = mockk(relaxed = true)
         pinManager = mockk(relaxed = true)
+        walletKeyReader = mockk(relaxed = true)
     }
 
     @After
@@ -66,7 +68,7 @@ class MnemonicBackupViewModelTest {
         coEvery { repository.getMnemonic() } returns null  // raw_key has no mnemonic
         every { pinManager.hasPin() } returns true
 
-        val vm = MnemonicBackupViewModel(repository, walletRepository, pinManager)
+        val vm = MnemonicBackupViewModel(repository, walletRepository, pinManager, walletKeyReader)
         advanceUntilIdle()
 
         // Pre-PIN: gate is set, private key NOT fetched.
@@ -96,7 +98,7 @@ class MnemonicBackupViewModelTest {
         every { pinManager.hasPin() } returns false
         coEvery { repository.getPrivateKey() } returns byteArrayOf(0xcc.toByte(), 0xdd.toByte())
 
-        val vm = MnemonicBackupViewModel(repository, walletRepository, pinManager)
+        val vm = MnemonicBackupViewModel(repository, walletRepository, pinManager, walletKeyReader)
         advanceUntilIdle()
 
         coVerify(exactly = 1) { repository.getPrivateKey() }
@@ -119,7 +121,7 @@ class MnemonicBackupViewModelTest {
         )
         every { pinManager.hasPin() } returns true
 
-        val vm = MnemonicBackupViewModel(repository, walletRepository, pinManager)
+        val vm = MnemonicBackupViewModel(repository, walletRepository, pinManager, walletKeyReader)
         advanceUntilIdle()
 
         coVerify(exactly = 0) { repository.getPrivateKey() }
@@ -138,7 +140,7 @@ class MnemonicBackupViewModelTest {
         coEvery { repository.getMnemonic() } returns null
         every { pinManager.hasPin() } returns true
 
-        val vm = MnemonicBackupViewModel(repository, walletRepository, pinManager)
+        val vm = MnemonicBackupViewModel(repository, walletRepository, pinManager, walletKeyReader)
         advanceUntilIdle()
 
         coVerify(exactly = 0) { repository.getPrivateKey() }
@@ -154,7 +156,7 @@ class MnemonicBackupViewModelTest {
         every { pinManager.hasPin() } returns false  // no gate
         coEvery { repository.getPrivateKey() } returns byteArrayOf(0x01)
 
-        val vm = MnemonicBackupViewModel(repository, walletRepository, pinManager)
+        val vm = MnemonicBackupViewModel(repository, walletRepository, pinManager, walletKeyReader)
         advanceUntilIdle()
         // One fetch from init (no-PIN path).
         coVerify(exactly = 1) { repository.getPrivateKey() }

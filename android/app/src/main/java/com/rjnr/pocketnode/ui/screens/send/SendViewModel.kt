@@ -265,8 +265,14 @@ class SendViewModel @Inject constructor(
         val minCapacity = 61_00000000L
 
         val warning = if (potentialChange in 1 until minCapacity) {
-            val lostCkb = potentialChange / 100_000_000.0
-            "Warning: Your remaining %.4f CKB is below the 61 CKB minimum and will be lost as a fee.".format(lostCkb)
+            // Strip trailing zeros so "50.0000" reads as "50", "50.5" stays
+            // "50.5", and a precise dust amount like "60.99999500" reads
+            // as "60.999995". Matches typical wallet UX for amounts.
+            val lostCkb = java.math.BigDecimal(potentialChange)
+                .divide(java.math.BigDecimal(100_000_000))
+                .stripTrailingZeros()
+                .toPlainString()
+            "Warning: Your remaining $lostCkb CKB is below the 61 CKB minimum and will be lost as a fee."
         } else {
             null
         }

@@ -77,29 +77,52 @@ class OnboardingViewModel @Inject constructor(
      * retry by tapping again.
      */
     fun createNewWallet(activity: FragmentActivity, name: String = "My Wallet") {
-        // No more hard block on missing device credential. The previous
-        // gate (introduced in #213 sub-PR 6) refused creation outright
-        // because the V2 Keystore key needs *some* credential to bind to.
-        // In practice the wallet still works without one — it stays on
-        // kdfVersion=1 until a credential is enrolled, at which point the
-        // existing AuthScreen migration runner upgrades it.
+        // Post-#289 there is no V1 write path: WalletRepository.createWallet
+        // funnels through WalletKeyWriter → KeystoreV2MigrationHelper.writeNewV2Row
+        // which mints a fresh V2 Keystore key with setUserAuthenticationRequired(true).
+        // Without an enrolled biometric or device credential, the keystore
+        // refuses the key creation with IllegalStateException("Secure lock
+        // screen must be enabled to create keys requiring user authentication").
         //
-        // The UI now shows a warning dialog (Cancel / Open Settings /
-        // Continue anyway) when noDeviceCredential is true, so the user
-        // sees an informed consent surface but is not blocked.
+        // The Screen surfaces a dialog before this fn is reached
+        // (showNoDeviceLockWarning when uiState.noDeviceCredential is true)
+        // directing the user to Android Settings → Security to enable a
+        // device lock. Defense-in-depth: the writer also catches the
+        // IllegalStateException and surfaces a friendly error here in case
+        // the device-credential state changes between the gate check and
+        // the actual key creation (#289 no-secure-lock follow-up).
         val trimmed = name.trim().ifBlank { "My Wallet" }
+        // Re-check at call time, not just at VM init — the user may have
+        // come back from Android Settings after enabling a device lock and
+        // we want to prefer V2 if they did.
+        val useV1Fallback = !canCreateV2BoundKey()
         viewModelScope.launch {
             _uiState.update { it.copy(isLoading = true, error = null) }
             val result = walletRepository.createWallet(
                 name = trimmed,
                 persistKeys = { walletId, bundle ->
-                    walletKeyWriter.persistNewWallet(
-                        activity = activity,
-                        walletId = walletId,
-                        bundle = bundle,
-                        walletType = KeyManager.WALLET_TYPE_MNEMONIC,
-                        mnemonicBackedUp = false,
-                    )
+                    if (useV1Fallback) {
+                        // Software-only V1 path. The Onboarding screen
+                        // already showed an informed-consent dialog
+                        // ("Continue without a device lock?") before we
+                        // reach this point. AuthScreen's migration loop
+                        // will upgrade the row to V2 the moment the user
+                        // enables a device lock and cold-starts the app.
+                        walletKeyWriter.persistNewWalletV1Fallback(
+                            walletId = walletId,
+                            bundle = bundle,
+                            walletType = KeyManager.WALLET_TYPE_MNEMONIC,
+                            mnemonicBackedUp = false,
+                        )
+                    } else {
+                        walletKeyWriter.persistNewWallet(
+                            activity = activity,
+                            walletId = walletId,
+                            bundle = bundle,
+                            walletType = KeyManager.WALLET_TYPE_MNEMONIC,
+                            mnemonicBackedUp = false,
+                        )
+                    }
                 },
             )
             result.onSuccess { entity ->
