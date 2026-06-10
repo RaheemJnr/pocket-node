@@ -80,8 +80,13 @@ class UpdateRepository @Inject constructor(
          * Compares dot-separated integer segments left to right.
          */
         internal fun isNewer(current: String, latest: String): Boolean {
-            val currentParts = current.split(".").mapNotNull { it.toIntOrNull() }
-            val latestParts = latest.split(".").mapNotNull { it.toIntOrNull() }
+            // Parse the leading digit-run of each dot segment so pre-release
+            // suffixes survive: "1.7.3-rc1" -> [1, 7, 3], not [1, 7] (#321).
+            fun parts(v: String) = v.split(".").mapNotNull { seg ->
+                seg.takeWhile { it.isDigit() }.takeIf { it.isNotEmpty() }?.toIntOrNull()
+            }
+            val currentParts = parts(current)
+            val latestParts = parts(latest)
 
             if (currentParts.isEmpty() || latestParts.isEmpty()) return false
 

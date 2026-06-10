@@ -120,7 +120,11 @@ fun DepositBottomSheet(
                     shape = CircleShape,
                     onClick = {
                         val maxCkb = maxDepositable / 100_000_000.0
-                        amountText = "%.8f".format(maxCkb).trimEnd('0').trimEnd('.').ifEmpty { "0" }
+                        // Locale.US — sanitizeAmount rejects comma decimals; on
+                        // de/fr/es devices "%.8f".format(...) emits "0,12" and the
+                        // MAX tap would silently no-op (#321).
+                        amountText = String.format(java.util.Locale.US, "%.8f", maxCkb)
+                            .trimEnd('0').trimEnd('.').ifEmpty { "0" }
                     },
                     enabled = maxDepositable >= DaoConstants.MIN_DEPOSIT_SHANNONS,
                 ) {

@@ -654,7 +654,7 @@ pub extern "C" fn Java_com_nervosnetwork_ckblightclient_LightClientNative_native
                 tx_index: tx_index.into(),
             })
         })
-        .take(limit as usize)
+        .take(limit.max(0) as usize)
         .collect();
 
     let result = Pagination {
@@ -817,7 +817,7 @@ pub extern "C" fn Java_com_nervosnetwork_ckblightclient_LightClientNative_native
                 io_capacity: io_capacity.into(),
             }))
         })
-        .take(limit as usize)
+        .take(limit.max(0) as usize)
         .collect();
 
     let result = Pagination {

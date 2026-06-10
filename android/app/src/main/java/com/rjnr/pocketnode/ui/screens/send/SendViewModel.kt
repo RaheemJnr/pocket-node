@@ -251,7 +251,7 @@ class SendViewModel @Inject constructor(
         val amountShannons = try {
             if (sanitized.isEmpty()) 0L
             else BigDecimal(sanitized).setScale(8, RoundingMode.DOWN)
-                .multiply(BigDecimal(100_000_000)).toLong()
+                .multiply(BigDecimal(100_000_000)).longValueExact()
         } catch (e: Exception) {
             0L
         }
@@ -272,7 +272,8 @@ class SendViewModel @Inject constructor(
                 .divide(java.math.BigDecimal(100_000_000))
                 .stripTrailingZeros()
                 .toPlainString()
-            "Warning: Your remaining $lostCkb CKB is below the 61 CKB minimum and will be lost as a fee."
+            "Heads up: this would leave $lostCkb CKB change, below the 61 CKB minimum cell size. " +
+                "The send will be refused — adjust the amount so the change is 0 or at least 61 CKB."
         } else {
             null
         }
@@ -353,7 +354,7 @@ class SendViewModel @Inject constructor(
         }
         val amountShannons = try {
             BigDecimal(state.amountCkb).setScale(8, RoundingMode.DOWN)
-                .multiply(BigDecimal(100_000_000)).toLong()
+                .multiply(BigDecimal(100_000_000)).longValueExact()
         } catch (e: Exception) {
             _uiState.update { it.copy(error = com.rjnr.pocketnode.ui.util.UiMessage.Resource(com.rjnr.pocketnode.R.string.vm_error_invalid_amount)) }
             return false
@@ -390,7 +391,7 @@ class SendViewModel @Inject constructor(
     private suspend fun executeSendV2(activity: FragmentActivity) {
         val state = _uiState.value
         val amountShannons = BigDecimal(state.amountCkb).setScale(8, RoundingMode.DOWN)
-            .multiply(BigDecimal(100_000_000)).toLong()
+            .multiply(BigDecimal(100_000_000)).longValueExact()
 
         val capturedAddress = repository.getCurrentAddress()
         if (capturedAddress == null) {
@@ -495,7 +496,7 @@ class SendViewModel @Inject constructor(
 
         val amountShannons = try {
             BigDecimal(state.amountCkb).setScale(8, RoundingMode.DOWN)
-                .multiply(BigDecimal(100_000_000)).toLong()
+                .multiply(BigDecimal(100_000_000)).longValueExact()
         } catch (e: Exception) {
             _uiState.update { it.copy(error = com.rjnr.pocketnode.ui.util.UiMessage.Resource(com.rjnr.pocketnode.R.string.vm_error_invalid_amount)) }
             return

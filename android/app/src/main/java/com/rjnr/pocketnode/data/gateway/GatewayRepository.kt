@@ -859,11 +859,15 @@ class GatewayRepository @Inject constructor(
                     if (outpointKey !in spentOutpoints) {
                         // Exclude cells with type scripts (DAO cells, etc.) from available balance
                         // Like Neuron: typeHash IS NULL AND hasData = false
-                        if (cell.output.type != null) {
-                            val cellCapacity = cell.output.capacity.removePrefix("0x").toLong(16)
+                        // Skip a record with an unparseable capacity rather than
+                        // letting one bad value throw and poison the whole balance
+                        // page (#321). toLongOrNull also guards u64 > Long.MAX.
+                        val cellCapacity = cell.output.capacity.removePrefix("0x").toLongOrNull(16)
+                        if (cellCapacity == null) {
+                            Log.w(TAG, "Skipping cell $outpointKey with unparseable capacity ${cell.output.capacity}")
+                        } else if (cell.output.type != null) {
                             Log.d(TAG, "🔒 DAO/typed cell excluded from balance: $outpointKey = $cellCapacity shannons")
                         } else {
-                            val cellCapacity = cell.output.capacity.removePrefix("0x").toLong(16)
                             liveCapacity += cellCapacity
                             liveCellCount++
                             Log.d(TAG, "✅ Live cell: $outpointKey = $cellCapacity shannons")

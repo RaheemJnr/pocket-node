@@ -40,6 +40,15 @@ class UpdateRepositoryTest {
         assertFalse(UpdateRepository.isNewer("", ""))
     }
 
+    @Test
+    fun `isNewer parses pre-release suffixes by leading digits (#321)`() {
+        // "1.7.3-rc1" must read as [1,7,3], not [1,7] — so it is newer than
+        // 1.7.2 and equal to (not newer than) 1.7.3.
+        assertTrue(UpdateRepository.isNewer("1.7.2", "1.7.3-rc1"))
+        assertFalse(UpdateRepository.isNewer("1.7.3-rc1", "1.7.3"))
+        assertFalse(UpdateRepository.isNewer("1.7.3", "1.7.3-rc1"))
+    }
+
     // --- findApkAsset ---
 
     @Test
