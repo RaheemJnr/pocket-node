@@ -17,7 +17,7 @@ pub fn invoke_status_callback(status: &str, data: &str) -> Result<(), Box<dyn st
     let data_str = env.new_string(data)?;
 
     // Call: void onStatusChange(String status, String data)
-    env.call_method(
+    let result = env.call_method(
         callback.as_obj(),
         "onStatusChange",
         "(Ljava/lang/String;Ljava/lang/String;)V",
@@ -25,7 +25,16 @@ pub fn invoke_status_callback(status: &str, data: &str) -> Result<(), Box<dyn st
             jni::objects::JValue::Object(&status_str),
             jni::objects::JValue::Object(&data_str),
         ],
-    )?;
+    );
+
+    // If the Kotlin callback threw, clear the pending Java exception so it
+    // doesn't linger on this attached thread until detach (#321). The current
+    // Kotlin impl only writes a StateFlow and can't throw, but this keeps the
+    // boundary safe if that ever changes.
+    if result.is_err() {
+        let _ = env.exception_clear();
+    }
+    result?;
 
     Ok(())
 }

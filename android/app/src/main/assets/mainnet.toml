@@ -72,6 +72,10 @@ discovery_local_address = false
 # Ensure that itself can continue to serve as a bootnode node
 bootnode_mode = false
 
+# NOTE: the JNI build does NOT start an RPC server (see lifecycle.rs —
+# startup is intentionally skipped). This block is inert. Keep listen_address
+# bound to loopback: if the server is ever wired up, binding elsewhere would
+# expose an unauthenticated API to co-resident apps on the device (#321).
 [rpc]
 # Light client rpc is designed for self hosting, exposing to public network is not recommended and may cause security issues.
 # By default RPC only binds to localhost, thus it only allows accessing from the same machine.
