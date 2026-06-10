@@ -1,11 +1,17 @@
 package com.rjnr.pocketnode.ui.components
 
+import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.heightIn
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.ui.Modifier
 import androidx.compose.ui.res.stringResource
+import androidx.compose.ui.unit.dp
 import com.rjnr.pocketnode.R
 import com.rjnr.pocketnode.data.update.UpdateInfo
 
@@ -30,14 +36,22 @@ fun UpdateDialog(
 
     val versionLine = stringResource(R.string.update_dialog_version_available, updateInfo.latestVersion)
     val notesLine = if (updateInfo.releaseNotes.isNotBlank()) {
-        "\n\n${updateInfo.releaseNotes.take(500)}"
+        "\n\n${updateInfo.releaseNotes}"
     } else ""
     val messageText = versionLine + notesLine + sizeText
 
     AlertDialog(
         onDismissRequest = onDismiss,
         title = { Text(stringResource(R.string.update_dialog_title)) },
-        text = { Text(messageText) },
+        text = {
+            Column(
+                modifier = Modifier
+                    .heightIn(max = 320.dp)
+                    .verticalScroll(rememberScrollState())
+            ) {
+                Text(messageText)
+            }
+        },
         confirmButton = {
             Button(onClick = onUpdate) {
                 Text(stringResource(R.string.update_dialog_action_update_now))
