@@ -1,0 +1,28 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Excludes the wallet's sensitive at-rest data from Android Auto Backup
+  (cloud-backup) AND device-to-device transfer (device-transfer, API 31+).
+
+  android:allowBackup="false" already disables cloud backup and the pre-31
+  D2D path, but on Android 12+ device-transfer is governed independently by
+  this file. Without it, the PIN-encrypted seed backups in key_backups/ —
+  self-contained blobs whose only barrier is a 6-digit PIN — would be copied
+  to a new device during migration and become offline-brute-forceable (#319).
+
+  We exclude:
+   - key_backups/      : PIN-encrypted seed/key backup blobs
+   - ckb_pin_prefs.xml : EncryptedSharedPreferences holding the PIN hash/salt
+   - key_migration.xml : legacy ESP->Room migration bookkeeping
+-->
+<data-extraction-rules>
+    <cloud-backup>
+        <exclude domain="file" path="key_backups/" />
+        <exclude domain="sharedpref" path="ckb_pin_prefs.xml" />
+        <exclude domain="sharedpref" path="key_migration.xml" />
+    </cloud-backup>
+    <device-transfer>
+        <exclude domain="file" path="key_backups/" />
+        <exclude domain="sharedpref" path="ckb_pin_prefs.xml" />
+        <exclude domain="sharedpref" path="key_migration.xml" />
+    </device-transfer>
+</data-extraction-rules>
