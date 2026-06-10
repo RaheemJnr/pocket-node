@@ -70,7 +70,6 @@ import com.rjnr.pocketnode.data.gateway.models.TransactionRecord
 import androidx.compose.ui.res.stringResource
 import com.rjnr.pocketnode.R
 import com.rjnr.pocketnode.ui.util.resolveString
-import com.rjnr.pocketnode.ui.screens.home.HomeNavEvent
 import com.rjnr.pocketnode.ui.theme.ErrorRed
 import com.rjnr.pocketnode.ui.theme.PendingAmber
 import com.rjnr.pocketnode.ui.theme.SuccessGreen
@@ -94,16 +93,6 @@ fun ActivityScreen(
     val context = LocalContext.current
     var pendingCsvContent by remember { mutableStateOf<String?>(null) }
 
-    // Collect one-shot nav events from the ViewModel (e.g. retry-failed-tx).
-    LaunchedEffect(Unit) {
-        viewModel.navEvents.collect { event ->
-            when (event) {
-                is HomeNavEvent.NavigateToSendWithPrefill -> {
-                    onNavigateToSend(event.recipientAddress, event.amountShannons)
-                }
-            }
-        }
-    }
 
     // Retry-failed-tx confirmation. Copy mirrors HomeScreen exactly: FAILED is
     // a heuristic, not proof the network rejected the tx.
