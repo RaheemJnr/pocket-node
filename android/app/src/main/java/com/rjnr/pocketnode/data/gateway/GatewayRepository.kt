@@ -1842,7 +1842,7 @@ class GatewayRepository @Inject constructor(
             depositHeader.dao,
             withdrawHeader.dao,
             deposit.capacity,
-            61_00000000L
+            DaoConstants.DEPOSIT_OCCUPIED_SHANNONS
         )
         if (maxWithdraw < 0) throw Exception("Failed to calculate max withdraw capacity")
 

@@ -273,10 +273,17 @@ pub extern "C" fn Java_com_nervosnetwork_ckblightclient_LightClientNative_native
     let lock_epochs = ((deposited_epochs + 179) / 180) * 180;
     let minimal_unlock_epoch = deposit_number + lock_epochs;
 
-    // Encode as absolute epoch since value (0x20 prefix = absolute epoch flag)
-    // Since field: bits 0-23 = epoch number, bits 24-39 = index (0), bits 40-55 = length (1)
-    // With 0x20 prefix in the top byte for absolute epoch
-    let since_epoch = EpochNumberWithFraction::new(minimal_unlock_epoch, 0, 1);
+    // Encode as absolute epoch since value (0x20 prefix = absolute epoch flag).
+    // dao.c's minimal unlock point is (deposit_number + lock_epochs,
+    // deposit_index, deposit_length) — the fraction must carry the deposit
+    // epoch's index/length, not 0/1, or the on-chain script rejects with
+    // ERROR_INCORRECT_SINCE whenever deposit_index > 0 (#315). Matches
+    // ckb-sdk-rust's minimal_unlock_point.
+    let since_epoch = EpochNumberWithFraction::new(
+        minimal_unlock_epoch,
+        deposit_epoch.index(),
+        deposit_epoch.length(),
+    );
     // Absolute epoch flag: 0x2000000000000000
     let since_value = 0x2000_0000_0000_0000u64 | since_epoch.full_value();
 

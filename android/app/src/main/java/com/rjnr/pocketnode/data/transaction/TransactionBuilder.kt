@@ -423,7 +423,10 @@ class TransactionBuilder @Inject constructor(
             NetworkType.MAINNET -> CellDep.SECP256K1_MAINNET
         }
 
-        // output_type in witness = 8-byte LE index of deposit header in header_deps (index 0)
+        // input_type in witness = 8-byte LE index of the deposit header in
+        // header_deps (index 0). dao.c reads this from WitnessArgs.input_type
+        // (MolReader_WitnessArgs_get_input_type); putting it in output_type
+        // fails script verification (#315).
         val depositHeaderIndex = ByteArray(8) // 8 zero bytes = index 0
 
         val unsignedTx = Transaction(
@@ -435,7 +438,7 @@ class TransactionBuilder @Inject constructor(
             witnesses = listOf("0x")
         )
 
-        return signTransaction(unsignedTx, privateKey, 1, witnessOutputType = depositHeaderIndex)
+        return signTransaction(unsignedTx, privateKey, 1, witnessInputType = depositHeaderIndex)
     }
 
     private fun estimateTransactionSize(tx: Transaction): Int {
@@ -495,14 +498,14 @@ class TransactionBuilder @Inject constructor(
         tx: Transaction,
         privateKey: ByteArray,
         inputCount: Int,
-        witnessOutputType: ByteArray? = null
+        witnessInputType: ByteArray? = null
     ): Transaction {
         // 1. Serialize the raw transaction and compute its hash
         val rawTxBytes = serializeRawTransaction(tx)
         val txHash = blake2bHash(rawTxBytes)
 
         // 2. Create empty witness args (65 zero bytes for signature placeholder)
-        val emptyWitnessArgs = serializeWitnessArgs(ByteArray(65), null, witnessOutputType)
+        val emptyWitnessArgs = serializeWitnessArgs(ByteArray(65), witnessInputType, null)
 
         // 3. Build the signing message
         val blake2b = Blake2b()
@@ -524,7 +527,7 @@ class TransactionBuilder @Inject constructor(
         val signature = signatureData.signature
 
         // 5. Create signed witness
-        val signedWitnessArgs = serializeWitnessArgs(signature, null, witnessOutputType)
+        val signedWitnessArgs = serializeWitnessArgs(signature, witnessInputType, null)
         val signedWitnessHex = "0x" + signedWitnessArgs.joinToString("") { "%02x".format(it) }
 
         // 6. Build witnesses list
