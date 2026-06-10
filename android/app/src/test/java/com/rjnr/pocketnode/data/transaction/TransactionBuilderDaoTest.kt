@@ -249,6 +249,51 @@ class TransactionBuilderDaoTest {
     }
 
     @Test
+    fun `buildDaoUnlock witness carries deposit header index in input_type not output_type (#315)`() {
+        val tx = builder.buildDaoUnlock(
+            withdrawingCell = makeWithdrawingCell(),
+            maxWithdraw = 10_300_000_000L,
+            sinceValue = "0x2000180000b0000a",
+            depositBlockHash = "0x" + "aa".repeat(32),
+            withdrawBlockHash = "0x" + "bb".repeat(32),
+            senderScript = testScript,
+            privateKey = testPrivateKey,
+            network = NetworkType.TESTNET
+        )
+
+        // Parse the molecule WitnessArgs table: [totalSize u32le][off0][off1][off2]
+        // followed by lock / input_type / output_type BytesOpt fields.
+        val witness = tx.witnesses[0].removePrefix("0x")
+            .chunked(2).map { it.toInt(16).toByte() }.toByteArray()
+
+        fun u32le(offset: Int): Int =
+            (witness[offset].toInt() and 0xff) or
+                ((witness[offset + 1].toInt() and 0xff) shl 8) or
+                ((witness[offset + 2].toInt() and 0xff) shl 16) or
+                ((witness[offset + 3].toInt() and 0xff) shl 24)
+
+        val totalSize = u32le(0)
+        val lockOffset = u32le(4)
+        val inputTypeOffset = u32le(8)
+        val outputTypeOffset = u32le(12)
+        assertEquals(witness.size, totalSize)
+
+        // lock = 65-byte signature wrapped in fixvec (4-byte length prefix)
+        assertEquals(65 + 4, inputTypeOffset - lockOffset)
+
+        // input_type = Some(8-byte LE deposit header index 0): fixvec len 8 + 8 zero bytes.
+        // dao.c reads the header index from input_type (MolReader_WitnessArgs_get_input_type);
+        // a None input_type fails on-chain script verification.
+        val inputTypeField = witness.copyOfRange(inputTypeOffset, outputTypeOffset)
+        assertEquals(12, inputTypeField.size)
+        assertEquals(8, (inputTypeField[0].toInt() and 0xff))
+        assertTrue(inputTypeField.copyOfRange(4, 12).all { it == 0.toByte() })
+
+        // output_type = None (zero-length field)
+        assertEquals(totalSize, outputTypeOffset)
+    }
+
+    @Test
     fun `buildDaoUnlock output has no type script`() {
         val tx = builder.buildDaoUnlock(
             withdrawingCell = makeWithdrawingCell(),

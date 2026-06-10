@@ -21,6 +21,13 @@ object DaoConstants {
     const val HOURS_PER_EPOCH = 4
     const val MIN_DEPOSIT_SHANNONS = 10_200_000_000L  // 102 CKB
     const val RESERVE_SHANNONS = 6_200_000_000L       // 62 CKB
+
+    // Occupied capacity of a standard DAO deposit/withdrawing cell:
+    // 8 (capacity) + 53 (secp256k1 lock) + 33 (DAO type) + 8 (data) = 102 bytes.
+    // This is the non-interest-bearing portion in max-withdraw math; passing
+    // anything smaller inflates the computed entitlement and the unlock tx
+    // is rejected on-chain (#315, RFC-0023 worked example).
+    const val DEPOSIT_OCCUPIED_SHANNONS = 10_200_000_000L // 102 CKB
     val DAO_DEPOSIT_DATA = ByteArray(8)                // 8 zero bytes
 
     val DAO_TYPE_SCRIPT = Script(
