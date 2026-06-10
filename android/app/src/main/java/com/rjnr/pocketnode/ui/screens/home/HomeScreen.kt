@@ -145,16 +145,6 @@ fun HomeScreen(
     var resumeSyncSheet by rememberSaveable { mutableStateOf(false) }
     var resumePostImportSheet by rememberSaveable { mutableStateOf(false) }
 
-    // Collect one-shot nav events from the ViewModel (e.g. retry-failed-tx).
-    LaunchedEffect(Unit) {
-        viewModel.navEvents.collect { event ->
-            when (event) {
-                is HomeNavEvent.NavigateToSendWithPrefill -> {
-                    onNavigateToSend(event.recipientAddress, event.amountShannons)
-                }
-            }
-        }
-    }
 
     // Refresh security state (PIN, backup) when returning from setup screens.
     // Also refresh CKB/USD price on foreground if it's stale (#117 deferred —
@@ -1143,10 +1133,10 @@ private fun TransactionDetailSheet(
                 )
             }
 
-            // Retry CTA — only for FAILED plain transfers. DAO deposit/withdraw/unlock
-            // and self-transfers can't be retried via the simple recipient/amount
-            // prefill path (loadFailedForRetry's smallest-output heuristic produces
-            // bogus data for them).
+            // Retry CTA — only for FAILED plain transfers. Retry now re-broadcasts
+            // the original signed bytes (#316), so it's safe regardless of tx type;
+            // the gate stays conservative (plain outgoing transfers) to keep the
+            // CTA off DAO/self-transfer rows until those flows are exercised.
             if (transaction.status == "FAILED" && transaction.isOutgoing() && onRetry != null) {
                 Spacer(modifier = Modifier.height(24.dp))
                 Button(

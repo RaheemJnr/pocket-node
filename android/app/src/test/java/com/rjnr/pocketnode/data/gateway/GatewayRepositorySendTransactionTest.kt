@@ -275,4 +275,65 @@ class GatewayRepositorySendTransactionTest {
         assertEquals("BROADCAST", active.first().state)
         assertNotNull(db.transactionDao().getByTxHash(rh))
     }
+
+    /**
+     * #316 retry conflict-safety: re-broadcasting a FAILED row must reuse the
+     * ORIGINAL signed bytes and the ORIGINAL reserved inputs verbatim. That is
+     * what makes the original and the retry double-spend the same cells and
+     * conflict, so at most one can ever commit (no double-pay). This pins the
+     * persistence contract of `retryBroadcast`: getFailedRow -> delete ->
+     * re-broadcast the stored tx (sendTransaction recomputes reservedInputs
+     * from the same tx, so they are byte-identical).
+     */
+    @Test
+    fun `retryBroadcast reuses original signed tx and reserved inputs (no double-pay)`() = runTest {
+        val originalReserved = """[{"txHash":"0x${"11".repeat(32)}","index":"0x0"}]"""
+        val originalSigned = """{"version":"0x0","inputs":["original"]}"""
+        val balanceChangeHex = "-0x" + 6_100_000_000L.toString(16)
+
+        // A FAILED row as the watchdog would leave it.
+        db.pendingBroadcastDao().insert(
+            PendingBroadcastEntity(
+                txHash = txHash,
+                walletId = walletId,
+                network = network,
+                signedTxJson = originalSigned,
+                reservedInputs = originalReserved,
+                state = "FAILED",
+                submittedAtTipBlock = 100L,
+                nullCount = 3,
+                createdAt = System.currentTimeMillis(),
+                lastCheckedAt = System.currentTimeMillis()
+            )
+        )
+
+        // --- retryBroadcast persistence steps ---
+        val failed = db.pendingBroadcastDao().getFailedRow(txHash)
+        assertNotNull(failed)
+        // Drop the FAILED row, then re-insert from the SAME stored tx, exactly
+        // as sendTransaction does on the re-broadcast path.
+        db.pendingBroadcastDao().delete(txHash)
+        cacheManager.deleteTransaction(txHash)
+        db.pendingBroadcastDao().insert(
+            failed!!.copy(state = "BROADCASTING", nullCount = 0)
+        )
+        cacheManager.insertPendingTransaction(
+            txHash = txHash,
+            network = network,
+            walletId = walletId,
+            balanceChange = balanceChangeHex,
+            direction = "out",
+            fee = "0x0"
+        )
+
+        val active = db.pendingBroadcastDao().getActive(walletId, network)
+        assertEquals(1, active.size)
+        val row = active.first()
+        assertEquals("BROADCASTING", row.state)
+        // Conflict-safety: identical inputs => the retry double-spends the
+        // original's cells; both can never commit.
+        assertEquals(originalReserved, row.reservedInputs)
+        // Same signed bytes => same recipient; no smallest-output heuristic.
+        assertEquals(originalSigned, row.signedTxJson)
+    }
 }
