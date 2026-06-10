@@ -6,10 +6,12 @@ import androidx.fragment.app.FragmentActivity
 import com.rjnr.pocketnode.data.auth.AuthManager
 import com.rjnr.pocketnode.data.crypto.KeystoreEncryptionManager
 import com.rjnr.pocketnode.data.database.dao.KeyMaterialDao
+import com.rjnr.pocketnode.data.migration.DecryptedKeyData
 import com.rjnr.pocketnode.data.migration.KeyStoreMigrationHelper
 import javax.inject.Inject
 import javax.inject.Singleton
 import org.nervos.ckb.utils.Numeric
+import kotlinx.coroutines.launch
 
 /**
  * Activity-aware bridge between a ViewModel and the (V1 or V2)
@@ -39,6 +41,7 @@ class WalletKeyReader @Inject constructor(
     private val keyStoreMigrationHelper: KeyStoreMigrationHelper,
     private val encryptionManager: KeystoreEncryptionManager,
     private val authManager: AuthManager,
+    private val keyBackupManager: KeyBackupManager,
 ) {
 
     sealed class Result {
@@ -176,6 +179,7 @@ class WalletKeyReader @Inject constructor(
                     Log.e(TAG, "V2 material decrypt failed for $walletId", e)
                     null
                 } ?: return MaterialResult.NotAvailable("V2 decrypt failed for $walletId")
+                tryOpportunisticBackup(walletId, data)
                 MaterialResult.Success(
                     privateKey = Numeric.hexStringToByteArray(data.privateKeyHex),
                     mnemonic = data.mnemonic,
@@ -235,10 +239,68 @@ class WalletKeyReader @Inject constructor(
                     Log.e(TAG, "V2 decrypt failed for $walletId", e)
                     null
                 } ?: return Result.NotAvailable("V2 decrypt failed for $walletId")
+                tryOpportunisticBackup(walletId, data)
                 Result.Success(Numeric.hexStringToByteArray(data.privateKeyHex))
             }
         }
     }
+
+    /**
+     * Lazy PIN-encrypted backup population for V2 wallets (#295).
+     *
+     * `SecuritySettingsViewModel.onPinCreated` silently skips V2 wallets in
+     * its post-PIN-setup population loop because writing a backup requires
+     * a biometric-authed read. As a result, V2 wallets created on v1.7.x
+     * have no PIN-recoverable backup blob until the user explicitly reveals
+     * their seed phrase. This means a user who creates a wallet, sets a
+     * PIN, and never reveals the seed has nothing to fall back on for PIN
+     * recovery.
+     *
+     * Fix: any time a V2 read completes successfully, we already hold
+     * the full plaintext material under a biometric prompt the user just
+     * authed — write the backup blob opportunistically if it does not
+     * already exist. Requires a cached session PIN ([AuthManager.getSessionPin]);
+     * skipped silently if the user is biometric-only this session. Failures
+     * are logged and swallowed — backup population is defense-in-depth, not
+     * blocking the caller.
+     */
+    private fun tryOpportunisticBackup(
+        walletId: String,
+        data: DecryptedKeyData,
+    ) {
+        if (keyBackupManager.hasBackup(walletId)) return
+        val sessionPin = authManager.getSessionPin() ?: return
+        // Fire-and-forget on an IO scope: callers invoke the read paths from
+        // viewModelScope on Main, and KeyBackupManager.writeBackup runs a
+        // 600k-iteration PBKDF2 plus a file write -- synchronous execution
+        // would freeze the UI right after the biometric prompt on the user's
+        // first send/reveal (Codex review on #311).
+        backupScope.launch {
+            try {
+                val material = KeyMaterial(
+                    privateKey = data.privateKeyHex,
+                    mnemonic = data.mnemonic,
+                    walletType = data.walletType,
+                    mnemonicBackedUp = data.mnemonicBackedUp,
+                )
+                keyBackupManager.writeBackup(walletId, material, sessionPin)
+                Log.i(TAG, "Opportunistic backup populated for $walletId after V2 read")
+            } catch (e: Throwable) {
+                Log.w(TAG, "Opportunistic backup write failed for $walletId", e)
+            } finally {
+                java.util.Arrays.fill(sessionPin, ' ')
+            }
+        }
+    }
+
+    /**
+     * Process-lifetime scope for opportunistic backup writes. SupervisorJob
+     * so one failed write can't cancel later ones; Dispatchers.IO for the
+     * PBKDF2 + disk work.
+     */
+    private val backupScope = kotlinx.coroutines.CoroutineScope(
+        kotlinx.coroutines.SupervisorJob() + kotlinx.coroutines.Dispatchers.IO
+    )
 
     companion object {
         private const val TAG = "WalletKeyReader"
