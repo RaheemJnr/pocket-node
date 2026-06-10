@@ -11,6 +11,7 @@ import com.rjnr.pocketnode.data.migration.KeyStoreMigrationHelper
 import javax.inject.Inject
 import javax.inject.Singleton
 import org.nervos.ckb.utils.Numeric
+import kotlinx.coroutines.launch
 
 /**
  * Activity-aware bridge between a ViewModel and the (V1 or V2)
@@ -269,21 +270,37 @@ class WalletKeyReader @Inject constructor(
     ) {
         if (keyBackupManager.hasBackup(walletId)) return
         val sessionPin = authManager.getSessionPin() ?: return
-        try {
-            val material = KeyMaterial(
-                privateKey = data.privateKeyHex,
-                mnemonic = data.mnemonic,
-                walletType = data.walletType,
-                mnemonicBackedUp = data.mnemonicBackedUp,
-            )
-            keyBackupManager.writeBackup(walletId, material, sessionPin)
-            Log.i(TAG, "Opportunistic backup populated for $walletId after V2 read")
-        } catch (e: Throwable) {
-            Log.w(TAG, "Opportunistic backup write failed for $walletId", e)
-        } finally {
-            java.util.Arrays.fill(sessionPin, ' ')
+        // Fire-and-forget on an IO scope: callers invoke the read paths from
+        // viewModelScope on Main, and KeyBackupManager.writeBackup runs a
+        // 600k-iteration PBKDF2 plus a file write -- synchronous execution
+        // would freeze the UI right after the biometric prompt on the user's
+        // first send/reveal (Codex review on #311).
+        backupScope.launch {
+            try {
+                val material = KeyMaterial(
+                    privateKey = data.privateKeyHex,
+                    mnemonic = data.mnemonic,
+                    walletType = data.walletType,
+                    mnemonicBackedUp = data.mnemonicBackedUp,
+                )
+                keyBackupManager.writeBackup(walletId, material, sessionPin)
+                Log.i(TAG, "Opportunistic backup populated for $walletId after V2 read")
+            } catch (e: Throwable) {
+                Log.w(TAG, "Opportunistic backup write failed for $walletId", e)
+            } finally {
+                java.util.Arrays.fill(sessionPin, ' ')
+            }
         }
     }
+
+    /**
+     * Process-lifetime scope for opportunistic backup writes. SupervisorJob
+     * so one failed write can't cancel later ones; Dispatchers.IO for the
+     * PBKDF2 + disk work.
+     */
+    private val backupScope = kotlinx.coroutines.CoroutineScope(
+        kotlinx.coroutines.SupervisorJob() + kotlinx.coroutines.Dispatchers.IO
+    )
 
     companion object {
         private const val TAG = "WalletKeyReader"
