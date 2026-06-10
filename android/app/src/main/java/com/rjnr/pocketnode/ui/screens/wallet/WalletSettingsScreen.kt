@@ -57,6 +57,7 @@ import com.rjnr.pocketnode.R
 import com.rjnr.pocketnode.data.database.entity.WalletEntity
 import com.rjnr.pocketnode.ui.util.resolveString
 import com.rjnr.pocketnode.ui.components.WalletAvatar
+import com.rjnr.pocketnode.ui.util.SensitiveClipboard
 import kotlinx.coroutines.launch
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -427,23 +428,12 @@ fun WalletSettingsScreen(
                                     Spacer(Modifier.height(8.dp))
                                     Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                                         OutlinedButton(onClick = {
-                                            clipboardManager.setText(androidx.compose.ui.text.AnnotatedString(keyHex))
+                                            // Timed clear on a process-lifetime scope so it
+                                            // survives navigating away from this screen
+                                            // (#290/#317 + Codex review on #322).
+                                            SensitiveClipboard.copyWithTimeout(context, keyHex)
                                             scope.launch {
                                                 snackbarHostState.showSnackbar("Private key copied. Clipboard will clear in 60s.")
-                                                // Timed clear matching the raw-key copy
-                                                // path in MnemonicBackupScreen (#290/#317).
-                                                kotlinx.coroutines.delay(60_000L)
-                                                runCatching {
-                                                    val cm = context.getSystemService(android.content.Context.CLIPBOARD_SERVICE)
-                                                        as android.content.ClipboardManager
-                                                    // Only clear if the clipboard still holds
-                                                    // our key — don't blow away something the
-                                                    // user copied in the meantime.
-                                                    val current = cm.primaryClip?.getItemAt(0)?.text?.toString()
-                                                    if (current == keyHex) {
-                                                        cm.setPrimaryClip(android.content.ClipData.newPlainText("", ""))
-                                                    }
-                                                }
                                             }
                                         }) {
                                             Text(stringResource(R.string.wallet_settings_copy))

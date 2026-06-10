@@ -755,25 +755,14 @@ private fun RawKeyBackupInfo(
                     Spacer(Modifier.height(4.dp))
                     Button(
                         onClick = {
-                            clipboardManager.setText(androidx.compose.ui.text.AnnotatedString(privateKeyHex))
+                            // Clipboard timeout to match the mnemonic backup
+                            // behaviour added in #181. The clear runs on a
+                            // process-lifetime scope so navigating away from
+                            // this screen can't cancel it (#317 Codex review).
+                            com.rjnr.pocketnode.ui.util.SensitiveClipboard
+                                .copyWithTimeout(context, privateKeyHex)
                             scope.launch {
                                 snackbarHostState.showSnackbar("Private key copied. Clipboard will clear in 60s.")
-                                // Clipboard timeout to match the mnemonic backup
-                                // behaviour added in #181. 60s window matches the
-                                // standard "ample to paste, short enough to limit
-                                // exposure" trade-off used elsewhere.
-                                kotlinx.coroutines.delay(60_000L)
-                                runCatching {
-                                    val cm = context.getSystemService(android.content.Context.CLIPBOARD_SERVICE)
-                                        as android.content.ClipboardManager
-                                    // Only clear if the clipboard still contains
-                                    // our key — don't blow away something the
-                                    // user copied in the meantime.
-                                    val current = cm.primaryClip?.getItemAt(0)?.text?.toString()
-                                    if (current == privateKeyHex) {
-                                        cm.setPrimaryClip(android.content.ClipData.newPlainText("", ""))
-                                    }
-                                }
                             }
                         },
                         modifier = Modifier.fillMaxWidth()
