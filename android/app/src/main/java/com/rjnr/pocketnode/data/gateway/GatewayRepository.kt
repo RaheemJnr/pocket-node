@@ -1087,29 +1087,31 @@ class GatewayRepository @Inject constructor(
     private suspend fun currentTipNumberOrZero(): Long = lightClient.currentTipNumberOrZero()
 
     /**
-     * Single mutex-guarded prepare-and-send. Runs cell-fetch, reservation
-     * filter, build, sign, and pre-broadcast persistence all inside
-     * [sendMutex] — closing the read-filter-insert race that would
-     * otherwise let two rapid sends pick the same input cells (#115).
+     * Single mutex-guarded prepare-and-send shared by plain transfers and DAO
+     * operations (#115, #320). Runs cell-fetch, reservation filter, build,
+     * sign, and pre-broadcast persistence all inside [sendMutex] — closing the
+     * read-filter-insert race that would otherwise let two concurrent sends
+     * (e.g. a transfer and a DAO deposit) pick the same input cells and produce
+     * conflicting transactions.
      *
-     * The JNI broadcast call happens AFTER the mutex is released —
-     * locking that would needlessly serialize all sends. [sendTransaction]
-     * is idempotent on the pre-inserted hash, so it skips the duplicate
-     * insert and just performs the broadcast + post-broadcast CAS.
+     * [build] receives the reservation-filtered spendable cells (live cells
+     * minus inputs reserved by in-flight broadcasts, plus synthesized
+     * change-outputs of pending sends) and the snapshot network, and returns
+     * the signed transaction.
+     *
+     * The JNI broadcast happens AFTER the mutex is released — locking that would
+     * needlessly serialize all sends. [sendTransaction] is idempotent on the
+     * pre-inserted hash, so it skips the duplicate insert and just performs the
+     * broadcast + post-broadcast CAS.
      */
-    suspend fun prepareAndSend(
+    private suspend fun buildReserveAndSend(
         fromAddress: String,
-        toAddress: String,
-        amountShannons: Long,
-        privateKey: ByteArray
-    ): Result<String> = runCatching {
+        build: (availableCells: List<Cell>, network: NetworkType) -> Transaction
+    ): String {
         // Snapshot every piece of sender state at function entry. The user can
         // switch wallet/network mid-send (rare, but possible — Settings is one
-        // tap away); we must not let live `_walletInfo.value` / `currentNetwork`
-        // reads inside the mutex retarget the send to the new wallet while we
-        // persist rows under the old walletId. fromAddress is the authoritative
-        // sender identity here — it was captured by SendViewModel before this
-        // call and we trust it over live repository globals.
+        // tap away); we must not let live reads inside the mutex retarget the
+        // send to the new wallet while we persist rows under the old walletId.
         val senderNetwork = currentNetwork
         val walletId = activeWalletId
         val network = senderNetwork.name
@@ -1118,7 +1120,8 @@ class GatewayRepository @Inject constructor(
 
         val signedTx = sendMutex.withLock {
             // getCells(fromAddress) decodes the address to a script — honors the
-            // snapshot rather than reading _walletInfo.value live.
+            // snapshot rather than reading _walletInfo.value live. It already
+            // excludes typed (DAO/token) cells, so this is regular spendable CKB.
             val cellsResult = getCells(fromAddress).getOrThrow()
             val pending = pendingBroadcastDao.getActive(walletId, network)
             val reserved: Set<OutPoint> = pending
@@ -1160,18 +1163,11 @@ class GatewayRepository @Inject constructor(
             val filtered = liveFiltered + pendingChange
             Log.d(
                 TAG,
-                "prepareAndSend: ${cellsResult.items.size} live, ${reserved.size} reserved, " +
+                "buildReserveAndSend: ${cellsResult.items.size} live, ${reserved.size} reserved, " +
                     "${pendingChange.size} synthetic-change, ${filtered.size} available"
             )
 
-            val signed = transactionBuilder.buildTransfer(
-                fromAddress = fromAddress,
-                toAddress = toAddress,
-                amountShannons = amountShannons,
-                availableCells = filtered,
-                privateKey = privateKey,
-                network = senderNetwork
-            )
+            val signed = build(filtered, senderNetwork)
 
             val txHash = transactionBuilder.computeTxHash(signed)
             val txJson = json.encodeToString(signed)
@@ -1184,7 +1180,7 @@ class GatewayRepository @Inject constructor(
             // hex parser and rendered as 0.)
             val outgoingAmount = signed.cellOutputs
                 .minOfOrNull { it.capacity.removePrefix("0x").toLong(16) }
-                ?: amountShannons
+                ?: 0L
             val balanceChangeHex = "0x${outgoingAmount.toString(16)}"
 
             pendingBroadcastDao.insert(
@@ -1215,7 +1211,30 @@ class GatewayRepository @Inject constructor(
         // sendTransaction owns the JNI call + post-broadcast CAS.
         // Its insert path is idempotent: it sees the row we just inserted
         // and skips re-insertion, then performs broadcast + state CAS.
-        sendTransaction(signedTx).getOrThrow()
+        return sendTransaction(signedTx).getOrThrow()
+    }
+
+    /**
+     * Plain secp256k1 transfer. fromAddress is the authoritative sender
+     * identity (captured by SendViewModel before this call) and is trusted
+     * over live repository globals.
+     */
+    suspend fun prepareAndSend(
+        fromAddress: String,
+        toAddress: String,
+        amountShannons: Long,
+        privateKey: ByteArray
+    ): Result<String> = runCatching {
+        buildReserveAndSend(fromAddress) { availableCells, net ->
+            transactionBuilder.buildTransfer(
+                fromAddress = fromAddress,
+                toAddress = toAddress,
+                amountShannons = amountShannons,
+                availableCells = availableCells,
+                privateKey = privateKey,
+                network = net
+            )
+        }
     }
 
     /**
@@ -1727,27 +1746,27 @@ class GatewayRepository @Inject constructor(
         privateKey: ByteArray,
     ): Result<String> = runCatching {
         val info = _walletInfo.value ?: throw Exception("No wallet")
-        val net = _network.value
+        val address = getCurrentAddress() ?: throw Exception("No address")
 
         require(amountShannons >= DaoConstants.MIN_DEPOSIT_SHANNONS) {
             "Minimum deposit is ${DaoConstants.MIN_DEPOSIT_SHANNONS / 100_000_000} CKB"
         }
 
-        val cellsResponse = getCells().getOrThrow()
-
-        val tx = transactionBuilder.buildDaoDeposit(
-            amountShannons = amountShannons,
-            availableCells = cellsResponse.items,
-            senderScript = info.script,
-            privateKey = privateKey,
-            network = net
-        )
-
-        val txHash = sendTransaction(tx).getOrThrow()
+        // Route through the shared mutex + reservation filter (#320) so a deposit
+        // can't select inputs already reserved by an in-flight transfer.
+        val txHash = buildReserveAndSend(address) { availableCells, net ->
+            transactionBuilder.buildDaoDeposit(
+                amountShannons = amountShannons,
+                availableCells = availableCells,
+                senderScript = info.script,
+                privateKey = privateKey,
+                network = net
+            )
+        }
         Log.d(TAG, "DAO deposit sent: $txHash")
 
         // Track pending deposit in Room so UI shows it before JNI confirms
-        daoSyncManager.insertPendingDeposit(txHash, amountShannons, net.name, walletId = activeWalletId)
+        daoSyncManager.insertPendingDeposit(txHash, amountShannons, currentNetwork.name, walletId = activeWalletId)
 
         txHash
     }
@@ -1761,7 +1780,6 @@ class GatewayRepository @Inject constructor(
         privateKey: ByteArray,
     ): Result<String> = runCatching {
         val info = _walletInfo.value ?: throw Exception("No wallet")
-        val net = _network.value
         val address = getCurrentAddress() ?: throw Exception("No address")
 
         // Find the deposit cell
@@ -1773,13 +1791,9 @@ class GatewayRepository @Inject constructor(
             "Deposit block hash unavailable. Please retry after sync."
         }
 
-        // Fetch normal cells to cover the fee — DAO Phase 1 preserves the
-        // deposit capacity exactly so a fee input cell is mandatory (#119).
-        // getCells already excludes typed (DAO) cells, so this list is only
-        // regular CKB cells safe to spend as fee.
-        val availableCells = getCells(address).getOrThrow().items
-
-        // Build a Cell from the deposit for the transaction builder
+        // Build a Cell from the deposit for the transaction builder. The
+        // deposit cell itself is a DAO (typed) cell and is NOT in getCells'
+        // output, so it isn't subject to the regular-cell reservation filter.
         val depositCell = Cell(
             outPoint = deposit.outPoint,
             capacity = "0x${deposit.capacity.toString(16)}",
@@ -1789,17 +1803,21 @@ class GatewayRepository @Inject constructor(
             data = "0x" + DaoConstants.DAO_DEPOSIT_DATA.joinToString("") { "%02x".format(it) }
         )
 
-        val tx = transactionBuilder.buildDaoWithdraw(
-            depositCell = depositCell,
-            depositBlockNumber = deposit.depositBlockNumber,
-            depositBlockHash = deposit.depositBlockHash,
-            senderScript = info.script,
-            privateKey = privateKey,
-            network = net,
-            availableCells = availableCells
-        )
-
-        val txHash = sendTransaction(tx).getOrThrow()
+        // Route through the shared mutex + reservation filter (#320). DAO Phase 1
+        // preserves the deposit capacity exactly, so a regular fee input cell is
+        // mandatory (#119) — `availableCells` is the reservation-filtered regular
+        // CKB set, ensuring the fee cell isn't one an in-flight transfer reserved.
+        val txHash = buildReserveAndSend(address) { availableCells, net ->
+            transactionBuilder.buildDaoWithdraw(
+                depositCell = depositCell,
+                depositBlockNumber = deposit.depositBlockNumber,
+                depositBlockHash = deposit.depositBlockHash,
+                senderScript = info.script,
+                privateKey = privateKey,
+                network = net,
+                availableCells = availableCells
+            )
+        }
         Log.d(TAG, "DAO withdraw (phase 1) sent: $txHash")
         txHash
     }
@@ -1870,6 +1888,11 @@ class GatewayRepository @Inject constructor(
             network = net
         )
 
+        // Unlock consumes only the withdrawing DAO cell (typed; never returned by
+        // getCells, so no transfer can select it) and pays the fee from that
+        // cell's own capacity — it selects no regular cells, so the
+        // reservation filter doesn't apply. sendTransaction still reserves this
+        // input and serializes the pre-broadcast insert under sendMutex (#320).
         val txHash = sendTransaction(tx).getOrThrow()
         Log.d(TAG, "DAO unlock (phase 2) sent: $txHash")
         txHash
