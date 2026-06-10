@@ -101,6 +101,12 @@ class UpgradeSmokeTest {
             clickButton("onboarding-recover", "Recover from Seed Phrase", ONBOARDING_TIMEOUT_MS)
         )
 
+        // #303 added an informed-consent dialog ("Continue without a device
+        // lock?") that intercepts both Create and Recover when the device has
+        // no lock set — which is always true on the CI emulator. Click through
+        // it; best-effort because a lock-enrolled device never shows it.
+        clickButton("onboarding-no-lock-continue", "Continue anyway", 5_000L)
+
         assertTrue(
             "Import paste button not found",
             clickButton("import-paste", "Paste from Clipboard", ONBOARDING_TIMEOUT_MS)
