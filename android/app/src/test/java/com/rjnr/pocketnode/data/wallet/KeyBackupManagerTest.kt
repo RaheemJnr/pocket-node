@@ -41,8 +41,54 @@ class KeyBackupManagerTest {
     @Before
     fun setUp() {
         manager = KeyBackupManager(tempDir.root)
-        // Use low iteration count for fast tests (production uses 600_000)
+        // Use low cost factors for fast tests. Production uses PBKDF2 600_000
+        // (legacy reads) and Argon2id 64 MB / t=3 / p=4 (current writes).
         manager.kdfIterations = 1_000
+        manager.argon2Iterations = 1
+        manager.argon2MemoryKb = 8
+        manager.argon2Parallelism = 1
+    }
+
+    @Test
+    fun `new backups are written with Argon2id (format v2)`() {
+        manager.writeBackup("wallet1", mnemonicMaterial(), testPin)
+        val versionByte = File(tempDir.root, "wallet1.enc").readBytes()[4]
+        assertEquals(KeyBackupManager.FORMAT_VERSION_ARGON2, versionByte)
+    }
+
+    @Test
+    fun `legacy PBKDF2 (v1) backups remain readable`() {
+        // Hand-craft a v1 blob: PBKDF2-HMAC-SHA256 + AES-256-GCM, the exact
+        // format prior versions wrote. Proves the version byte dispatch keeps
+        // existing user backups recoverable after the Argon2id upgrade.
+        val material = mnemonicMaterial()
+        val salt = ByteArray(KeyBackupManager.SALT_SIZE) { it.toByte() }
+        val iv = ByteArray(KeyBackupManager.IV_SIZE) { (it + 1).toByte() }
+        val plaintext = kotlinx.serialization.json.Json
+            .encodeToString(KeyMaterial.serializer(), material)
+            .toByteArray(Charsets.UTF_8)
+        val spec = javax.crypto.spec.PBEKeySpec(testPin, salt, 1_000, KeyBackupManager.KEY_SIZE_BITS)
+        val secret = javax.crypto.SecretKeyFactory
+            .getInstance(KeyBackupManager.KDF_ALGORITHM).generateSecret(spec)
+        val key = javax.crypto.spec.SecretKeySpec(secret.encoded, "AES")
+        val cipher = javax.crypto.Cipher.getInstance(KeyBackupManager.CIPHER_TRANSFORM)
+        cipher.init(
+            javax.crypto.Cipher.ENCRYPT_MODE, key,
+            javax.crypto.spec.GCMParameterSpec(KeyBackupManager.GCM_TAG_BITS, iv)
+        )
+        val ciphertext = cipher.doFinal(plaintext)
+        File(tempDir.root, "legacy.enc").outputStream().use { out ->
+            out.write(KeyBackupManager.MAGIC)
+            out.write(byteArrayOf(KeyBackupManager.FORMAT_VERSION_PBKDF2))
+            out.write(salt)
+            out.write(iv)
+            out.write(ciphertext)
+        }
+
+        val result = manager.readBackup("legacy", testPin)
+        assertNotNull(result)
+        assertEquals(material.privateKey, result!!.privateKey)
+        assertEquals(material.mnemonic, result.mnemonic)
     }
 
     @Test

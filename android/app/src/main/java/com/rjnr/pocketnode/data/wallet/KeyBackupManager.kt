@@ -5,6 +5,8 @@ import androidx.annotation.VisibleForTesting
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.encodeToString
 import kotlinx.serialization.json.Json
+import org.bouncycastle.crypto.generators.Argon2BytesGenerator
+import org.bouncycastle.crypto.params.Argon2Parameters
 import java.io.File
 import java.security.SecureRandom
 import javax.crypto.Cipher
@@ -31,8 +33,20 @@ class KeyBackupManager @Inject constructor(
 ) {
     private val json = Json { ignoreUnknownKeys = true; encodeDefaults = true }
 
+    // PBKDF2 iteration count — only used when READING legacy v1 backups.
     @VisibleForTesting
     internal var kdfIterations: Int = KDF_ITERATIONS
+
+    // Argon2id parameters for v2 backups. Match PinManager's PIN-hash params
+    // (OWASP ASVS baseline: 64 MB, t=3, p=4). Overridable for fast tests.
+    @VisibleForTesting
+    internal var argon2Iterations: Int = 3
+
+    @VisibleForTesting
+    internal var argon2MemoryKb: Int = 64 * 1024
+
+    @VisibleForTesting
+    internal var argon2Parallelism: Int = 4
 
     init {
         backupDir.mkdirs()
@@ -41,7 +55,8 @@ class KeyBackupManager @Inject constructor(
     fun writeBackup(walletId: String, material: KeyMaterial, pin: CharArray) {
         val salt = ByteArray(SALT_SIZE).also { SecureRandom().nextBytes(it) }
         val iv = ByteArray(IV_SIZE).also { SecureRandom().nextBytes(it) }
-        val key = deriveKey(pin, salt)
+        // New backups are always written with the strongest KDF (Argon2id, v2).
+        val key = deriveKey(pin, salt, FORMAT_VERSION_ARGON2)
 
         val plaintext = json.encodeToString(material).toByteArray(Charsets.UTF_8)
         val cipher = Cipher.getInstance(CIPHER_TRANSFORM)
@@ -53,7 +68,7 @@ class KeyBackupManager @Inject constructor(
 
         tmpFile.outputStream().use { out ->
             out.write(MAGIC)
-            out.write(byteArrayOf(FORMAT_VERSION))
+            out.write(byteArrayOf(FORMAT_VERSION_ARGON2))
             out.write(salt)
             out.write(iv)
             out.write(ciphertext)
@@ -72,11 +87,13 @@ class KeyBackupManager @Inject constructor(
                 Log.w(TAG, "Backup file for $walletId has invalid magic header")
                 return null
             }
+            // Byte 4 selects the KDF: v1 = PBKDF2 (legacy), v2 = Argon2id.
+            val formatVersion = bytes[4]
             val salt = bytes.sliceArray(HEADER_SIZE until HEADER_SIZE + SALT_SIZE)
             val iv = bytes.sliceArray(HEADER_SIZE + SALT_SIZE until HEADER_SIZE + SALT_SIZE + IV_SIZE)
             val ciphertext = bytes.sliceArray(HEADER_SIZE + SALT_SIZE + IV_SIZE until bytes.size)
 
-            val key = deriveKey(pin, salt)
+            val key = deriveKey(pin, salt, formatVersion)
             val cipher = Cipher.getInstance(CIPHER_TRANSFORM)
             cipher.init(Cipher.DECRYPT_MODE, key, GCMParameterSpec(GCM_TAG_BITS, iv))
             val plaintext = cipher.doFinal(ciphertext)
@@ -115,7 +132,8 @@ class KeyBackupManager @Inject constructor(
 
             val salt = ByteArray(SALT_SIZE).also { SecureRandom().nextBytes(it) }
             val iv = ByteArray(IV_SIZE).also { SecureRandom().nextBytes(it) }
-            val key = deriveKey(newPin, salt)
+            // Re-encryption upgrades the blob to the current KDF (Argon2id, v2).
+            val key = deriveKey(newPin, salt, FORMAT_VERSION_ARGON2)
 
             val plaintext = json.encodeToString(material).toByteArray(Charsets.UTF_8)
             val cipher = Cipher.getInstance(CIPHER_TRANSFORM)
@@ -124,7 +142,7 @@ class KeyBackupManager @Inject constructor(
 
             tmpFile.outputStream().use { out ->
                 out.write(MAGIC)
-                out.write(byteArrayOf(FORMAT_VERSION))
+                out.write(byteArrayOf(FORMAT_VERSION_ARGON2))
                 out.write(salt)
                 out.write(iv)
                 out.write(ciphertext)
@@ -148,7 +166,15 @@ class KeyBackupManager @Inject constructor(
 
     private fun backupFile(walletId: String): File = File(backupDir, "$walletId.enc")
 
-    private fun deriveKey(pin: CharArray, salt: ByteArray): SecretKeySpec {
+    /** Derives the AES key for a backup blob using the KDF for [formatVersion]. */
+    private fun deriveKey(pin: CharArray, salt: ByteArray, formatVersion: Byte): SecretKeySpec =
+        when (formatVersion) {
+            FORMAT_VERSION_ARGON2 -> deriveKeyArgon2(pin, salt)
+            FORMAT_VERSION_PBKDF2 -> deriveKeyPbkdf2(pin, salt)
+            else -> throw IllegalStateException("Unknown backup format version $formatVersion")
+        }
+
+    private fun deriveKeyPbkdf2(pin: CharArray, salt: ByteArray): SecretKeySpec {
         val factory = SecretKeyFactory.getInstance(KDF_ALGORITHM)
         val spec = PBEKeySpec(pin, salt, kdfIterations, KEY_SIZE_BITS)
         val secret = factory.generateSecret(spec)
@@ -157,10 +183,32 @@ class KeyBackupManager @Inject constructor(
         return key
     }
 
+    private fun deriveKeyArgon2(pin: CharArray, salt: ByteArray): SecretKeySpec {
+        // Avoid String interning of the PIN.
+        val pinBytes = String(pin).toByteArray(Charsets.UTF_8)
+        try {
+            val params = Argon2Parameters.Builder(Argon2Parameters.ARGON2_id)
+                .withVersion(Argon2Parameters.ARGON2_VERSION_13)
+                .withIterations(argon2Iterations)
+                .withMemoryAsKB(argon2MemoryKb)
+                .withParallelism(argon2Parallelism)
+                .withSalt(salt)
+                .build()
+            val gen = Argon2BytesGenerator().also { it.init(params) }
+            val out = ByteArray(KEY_SIZE_BITS / 8)
+            gen.generateBytes(pinBytes, out)
+            return SecretKeySpec(out, "AES")
+        } finally {
+            pinBytes.fill(0)
+        }
+    }
+
     companion object {
         private const val TAG = "KeyBackupManager"
         val MAGIC = byteArrayOf('P'.code.toByte(), 'N'.code.toByte(), 'B'.code.toByte(), 'K'.code.toByte())
-        const val FORMAT_VERSION: Byte = 1
+        // v1 = PBKDF2-HMAC-SHA256 (read-only legacy); v2 = Argon2id (current).
+        const val FORMAT_VERSION_PBKDF2: Byte = 1
+        const val FORMAT_VERSION_ARGON2: Byte = 2
         const val HEADER_SIZE = 5
         const val SALT_SIZE = 16
         const val IV_SIZE = 12
