@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  DEBUG-ONLY network security config. Permits cleartext to the emulator host
+  (10.0.2.2) and localhost for local development against a dev node. The
+  release build uses src/main's config, which permits no cleartext anywhere
+  (#318). Keep these exemptions out of production.
+-->
+<network-security-config>
+    <domain-config cleartextTrafficPermitted="true">
+        <domain includeSubdomains="true">10.0.2.2</domain>
+        <domain includeSubdomains="true">localhost</domain>
+    </domain-config>
+</network-security-config>

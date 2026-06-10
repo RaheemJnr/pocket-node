@@ -3,7 +3,7 @@ package com.rjnr.pocketnode.data.update
 import android.content.Context
 import android.content.Intent
 import android.net.Uri
-import android.os.Environment
+import android.os.StatFs
 import android.provider.Settings
 import android.util.Log
 import androidx.core.content.FileProvider
@@ -34,7 +34,22 @@ import javax.inject.Singleton
 
 private const val TAG = "UpdateDownloader"
 private const val APK_FILE_NAME = "pocket-node-update.apk"
+private const val APK_SUBDIR = "updates"
 private const val DOWNLOAD_BUFFER_BYTES = 16 * 1024
+
+// Hard ceiling on a downloaded APK regardless of the server-advertised size,
+// so a hostile/compromised endpoint can't fill the data partition and break
+// the light-client store / Room DB (#318). The real APK is ~40 MB.
+private const val MAX_APK_BYTES = 150L * 1024 * 1024
+
+// Hosts the GitHub release asset URL (and its redirect target) may resolve to.
+// browser_download_url lives on github.com; it 302s to the githubusercontent
+// CDN. Anything else is rejected before a single byte is streamed to disk.
+private val ALLOWED_APK_HOSTS = setOf(
+    "github.com",
+    "objects.githubusercontent.com",
+    "release-assets.githubusercontent.com",
+)
 
 /**
  * Visible states for the auto-update download flow. HomeScreen + the
@@ -142,6 +157,16 @@ class UpdateDownloader @Inject constructor(
      * trivial via Job.cancel.
      */
     fun downloadAndInstall(apkUrl: String, totalBytesHint: Long = -1L) {
+        // Reject anything that isn't an HTTPS GitHub release URL before we
+        // queue a download (#318). The signature gate at install is the last
+        // line of defense, but there's no reason to stream attacker-chosen
+        // bytes to disk first.
+        if (!isAllowedApkUrl(apkUrl)) {
+            Log.e(TAG, "Refusing update download from disallowed URL host")
+            _state.value = DownloadState.Failed("Update download blocked: untrusted source.")
+            return
+        }
+
         // Remember args for Retry. Set before the launch so a quick
         // Failed→Retry cycle finds the URL even if the job's catch block
         // has not run yet.
@@ -158,11 +183,28 @@ class UpdateDownloader @Inject constructor(
             cleanupStaleApk()
             _state.value = DownloadState.Downloading(0L, totalBytesHint.coerceAtLeast(0L))
 
-            val apkFile = File(
-                context.getExternalFilesDir(Environment.DIRECTORY_DOWNLOADS),
-                APK_FILE_NAME
-            )
+            val apkFile = apkFile()
             apkFile.parentFile?.mkdirs()
+
+            // Effective byte ceiling: trust the advertised size (+20% slack)
+            // when it's plausible, else the hard cap. Either way never exceed
+            // MAX_APK_BYTES so a lying Content-Length can't fill the disk.
+            val sizeCap = if (totalBytesHint in 1 until MAX_APK_BYTES) {
+                (totalBytesHint + totalBytesHint / 5).coerceAtMost(MAX_APK_BYTES)
+            } else {
+                MAX_APK_BYTES
+            }
+
+            // Free-space guard: refuse if we don't have room for the APK plus
+            // headroom, rather than half-writing and corrupting storage.
+            val free = runCatching {
+                val stat = StatFs(apkFile.parentFile?.absolutePath ?: context.filesDir.absolutePath)
+                stat.availableBytes
+            }.getOrDefault(Long.MAX_VALUE)
+            if (free < sizeCap + 32L * 1024 * 1024) {
+                _state.value = DownloadState.Failed("Not enough free space to download the update.")
+                return@launch
+            }
 
             try {
                 httpClient.prepareGet(apkUrl) {
@@ -190,9 +232,16 @@ class UpdateDownloader @Inject constructor(
                     val channel: ByteReadChannel = response.bodyAsChannel()
                     apkFile.outputStream().use { out ->
                         val buf = ByteArray(DOWNLOAD_BUFFER_BYTES)
+                        var written = 0L
                         while (!channel.isClosedForRead) {
                             val read = channel.readAvailable(buf, 0, buf.size)
                             if (read <= 0) break
+                            written += read
+                            // Abort the moment the stream exceeds the ceiling —
+                            // don't let an endless/oversized body fill the disk.
+                            if (written > sizeCap) {
+                                throw IOException("Update exceeds maximum size ($sizeCap bytes)")
+                            }
                             out.write(buf, 0, read)
                         }
                         out.flush()
@@ -238,10 +287,7 @@ class UpdateDownloader @Inject constructor(
      */
     fun installNow() {
         if (_state.value !is DownloadState.ReadyToInstall) return
-        val apkFile = File(
-            context.getExternalFilesDir(Environment.DIRECTORY_DOWNLOADS),
-            APK_FILE_NAME
-        )
+        val apkFile = apkFile()
         val verification = verifyApkSignature(apkFile)
         if (verification != SignatureCheck.Ok) {
             Log.e(TAG, "APK signature verification failed: $verification")
@@ -323,19 +369,13 @@ class UpdateDownloader @Inject constructor(
         downloadJob = null
         lastApkUrl = null
         lastTotalBytesHint = -1L
-        val apkFile = File(
-            context.getExternalFilesDir(Environment.DIRECTORY_DOWNLOADS),
-            APK_FILE_NAME
-        )
+        val apkFile = apkFile()
         if (apkFile.exists()) apkFile.delete()
         _state.value = DownloadState.Idle
     }
 
     private fun launchSystemInstaller() {
-        val apkFile = File(
-            context.getExternalFilesDir(Environment.DIRECTORY_DOWNLOADS),
-            APK_FILE_NAME
-        )
+        val apkFile = apkFile()
         if (!apkFile.exists()) {
             Log.e(TAG, "APK file not found at ${apkFile.absolutePath}")
             _state.value = DownloadState.Failed("APK file not found after download")
@@ -380,13 +420,29 @@ class UpdateDownloader @Inject constructor(
     }
 
     private fun cleanupStaleApk() {
-        val apkFile = File(
-            context.getExternalFilesDir(Environment.DIRECTORY_DOWNLOADS),
-            APK_FILE_NAME
-        )
+        val apkFile = apkFile()
         if (apkFile.exists()) {
             val deleted = apkFile.delete()
             Log.d(TAG, "cleanupStaleApk: deleted=$deleted size=${apkFile.length()}")
         }
+    }
+
+    /**
+     * The staged-update APK path. Internal storage ([Context.filesDir]) — NOT
+     * external app storage — so no other app can write or swap the file
+     * between our signature check and the system installer's read (#318 TOCTOU,
+     * exploitable on API 26-28 where any WRITE_EXTERNAL_STORAGE holder can
+     * write inside Android/data/<pkg>/). Served to the installer via the
+     * `<files-path>` FileProvider entry.
+     */
+    private fun apkFile(): File = File(File(context.filesDir, APK_SUBDIR), APK_FILE_NAME)
+
+    /** True iff [url] is an HTTPS URL on the GitHub release-asset host allowlist (#318). */
+    @androidx.annotation.VisibleForTesting
+    internal fun isAllowedApkUrl(url: String): Boolean {
+        val parsed = runCatching { Uri.parse(url) }.getOrNull() ?: return false
+        val scheme = parsed.scheme?.lowercase()
+        val host = parsed.host?.lowercase()
+        return scheme == "https" && host != null && host in ALLOWED_APK_HOSTS
     }
 }
