@@ -1,4 +1,10 @@
 <?xml version="1.0" encoding="utf-8"?>
 <paths>
-    <external-files-path name="apk_downloads" path="Download" />
+    <!--
+      Update APKs are staged in internal storage (filesDir/updates/) so no
+      other app can swap the file between the signature check and the system
+      installer's read (#318). Served read-only to the installer via a
+      per-URI grant.
+    -->
+    <files-path name="apk_downloads" path="updates/" />
 </paths>
