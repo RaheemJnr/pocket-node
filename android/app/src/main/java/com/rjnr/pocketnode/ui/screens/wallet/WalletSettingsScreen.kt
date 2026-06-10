@@ -57,6 +57,8 @@ import com.rjnr.pocketnode.R
 import com.rjnr.pocketnode.data.database.entity.WalletEntity
 import com.rjnr.pocketnode.ui.util.resolveString
 import com.rjnr.pocketnode.ui.components.WalletAvatar
+import com.rjnr.pocketnode.ui.util.SensitiveClipboard
+import kotlinx.coroutines.launch
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -69,8 +71,24 @@ fun WalletSettingsScreen(
     val snackbarHostState = remember { SnackbarHostState() }
     val clipboardManager = androidx.compose.ui.platform.LocalClipboardManager.current
     val context = androidx.compose.ui.platform.LocalContext.current
+    val scope = androidx.compose.runtime.rememberCoroutineScope()
     var showSeedPhrase by rememberSaveable { mutableStateOf(false) }
     var showAddAccountDialog by remember { mutableStateOf(false) }
+
+    // FLAG_SECURE: this screen can render the full mnemonic and raw private
+    // key after biometric unlock — block screenshots, screen recording, and
+    // the recents thumbnail, matching MnemonicBackupScreen (#317).
+    val view = androidx.compose.ui.platform.LocalView.current
+    androidx.compose.runtime.DisposableEffect(Unit) {
+        val window = (view.context as? android.app.Activity)?.window
+        window?.setFlags(
+            android.view.WindowManager.LayoutParams.FLAG_SECURE,
+            android.view.WindowManager.LayoutParams.FLAG_SECURE
+        )
+        onDispose {
+            window?.clearFlags(android.view.WindowManager.LayoutParams.FLAG_SECURE)
+        }
+    }
 
     // V2-aware: route the "view recovery phrase" / "view private key"
     // taps through the activity-bound entry point so a CryptoObject
@@ -410,7 +428,13 @@ fun WalletSettingsScreen(
                                     Spacer(Modifier.height(8.dp))
                                     Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                                         OutlinedButton(onClick = {
-                                            clipboardManager.setText(androidx.compose.ui.text.AnnotatedString(keyHex))
+                                            // Timed clear on a process-lifetime scope so it
+                                            // survives navigating away from this screen
+                                            // (#290/#317 + Codex review on #322).
+                                            SensitiveClipboard.copyWithTimeout(context, keyHex)
+                                            scope.launch {
+                                                snackbarHostState.showSnackbar("Private key copied. Clipboard will clear in 60s.")
+                                            }
                                         }) {
                                             Text(stringResource(R.string.wallet_settings_copy))
                                         }

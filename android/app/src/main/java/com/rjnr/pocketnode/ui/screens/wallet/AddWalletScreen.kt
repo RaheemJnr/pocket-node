@@ -39,6 +39,7 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.TopAppBar
 import androidx.compose.material3.TopAppBarDefaults
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
@@ -73,6 +74,21 @@ fun AddWalletScreen(
 ) {
     val uiState by viewModel.uiState.collectAsState()
     val snackbarHostState = remember { SnackbarHostState() }
+
+    // FLAG_SECURE: secret material (mnemonic / raw key) is entered or shown
+    // on this screen — block screenshots, screen recording, and the recents
+    // thumbnail (#317).
+    val secureView = androidx.compose.ui.platform.LocalView.current
+    DisposableEffect(Unit) {
+        val window = (secureView.context as? android.app.Activity)?.window
+        window?.setFlags(
+            android.view.WindowManager.LayoutParams.FLAG_SECURE,
+            android.view.WindowManager.LayoutParams.FLAG_SECURE
+        )
+        onDispose {
+            window?.clearFlags(android.view.WindowManager.LayoutParams.FLAG_SECURE)
+        }
+    }
     // MainActivity extends FragmentActivity; required for V2 BiometricPrompt (#289).
     val activity = androidx.compose.ui.platform.LocalContext.current
         as androidx.fragment.app.FragmentActivity
