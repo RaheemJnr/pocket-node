@@ -72,15 +72,6 @@ fun computeFirstCatchingUpAtMs(prev: Long?, catching: Boolean, nowMs: Long): Lon
 }
 
 /**
- * Prefill data extracted from a FAILED `pending_broadcasts` row, used to
- * pre-populate `SendScreen` when the user taps the Failed chip's retry CTA.
- */
-data class FailedTxPrefill(
-    val recipientAddress: String,
-    val amountShannons: Long
-)
-
-/**
  * Narrow seam over [GatewayRepository] so [com.rjnr.pocketnode.data.sync.BroadcastWatchdog]
  * can be unit-tested without instantiating a full Repository (whose
  * constructor surface is wide). [GatewayRepository] implements this; tests
@@ -1219,27 +1210,35 @@ class GatewayRepository @Inject constructor(
     }
 
     /**
-     * Loads a FAILED `pending_broadcasts` row, decodes the recipient/amount
-     * from its signed tx, and removes the failed-state rows so the retry
-     * doesn't see itself as a reservation. Caller (HomeViewModel) navigates
-     * to SendScreen with the returned prefill.
+     * Retries a FAILED `pending_broadcasts` row by re-broadcasting its
+     * ORIGINAL signed bytes (#316).
      *
-     * Heuristic: smallest-capacity output is the recipient (matches what
-     * `sendTransaction` uses for `balanceChange`). For "send all" txs there's
-     * only one output and the heuristic still resolves correctly.
+     * The previous flow decoded a recipient/amount and prefilled a fresh
+     * send, which re-ran cell selection. Two ways that lost funds:
+     *
+     *  1. Double-pay. A FAILED state is a *heuristic* (still in-pool past the
+     *     commit window, or fetch returned unknown N times) — not proof the
+     *     network rejected the tx. The original could still be alive in a
+     *     remote mempool. If the prefilled retry selected *different* inputs
+     *     and the original later committed, the recipient was paid twice.
+     *  2. Wrong recipient. The prefill guessed the recipient via a
+     *     "smallest-capacity output" heuristic, which is the sender's own
+     *     change whenever change < amount — the retry then paid the sender.
+     *
+     * Re-broadcasting the identical signed tx reuses the exact same inputs, so
+     * the original and the retry conflict and at most one can ever commit — no
+     * double-pay possible — and the recipient is whatever the original tx
+     * already encodes, with no heuristic. We drop the FAILED row first so
+     * [sendTransaction] re-inserts a fresh BROADCASTING row for the same hash
+     * and the watchdog re-tracks it.
      */
-    suspend fun loadFailedForRetry(txHash: String): Result<FailedTxPrefill> = runCatching {
+    suspend fun retryBroadcast(txHash: String): Result<String> = runCatching {
         val row = pendingBroadcastDao.getFailedRow(txHash)
             ?: error("This transaction is too old to retry automatically. Please send a new one.")
         val tx = json.decodeFromString<Transaction>(row.signedTxJson)
-        val recipientOutput = tx.cellOutputs.minByOrNull {
-            it.capacity.removePrefix("0x").toLong(16)
-        } ?: error("Tx has no outputs")
-        val recipientAmount = recipientOutput.capacity.removePrefix("0x").toLong(16)
-        val recipientAddress = AddressUtils.encode(recipientOutput.lock, currentNetwork)
         pendingBroadcastDao.delete(txHash)
         cacheManager.deleteTransaction(txHash)
-        FailedTxPrefill(recipientAddress, recipientAmount)
+        sendTransaction(tx).getOrThrow()
     }
 
     suspend fun sendTransaction(transaction: Transaction): Result<String> = runCatching {

@@ -23,7 +23,6 @@ import com.rjnr.pocketnode.data.wallet.WalletInfo
 import com.rjnr.pocketnode.data.wallet.WalletRepository
 import com.rjnr.pocketnode.ui.components.WalletGroup
 import dagger.hilt.android.lifecycle.HiltViewModel
-import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.*
 import kotlinx.coroutines.launch
@@ -42,23 +41,6 @@ private const val TAG = "HomeViewModel"
 //     bypass the timer and refresh immediately if the cached price is old.
 private const val PRICE_REFRESH_INTERVAL_MS: Long = 5L * 60L * 1000L
 private const val PRICE_STALENESS_THRESHOLD_MS: Long = 60L * 1000L
-
-/**
- * One-shot navigation events from [HomeViewModel]. UI collects via
- * `viewModel.navEvents` and routes the user accordingly. Modeled as a
- * [Channel]-backed flow so each event is delivered exactly once and
- * re-collection (e.g. after config change) doesn't replay stale events.
- */
-sealed class HomeNavEvent {
-    /**
-     * Navigate to SendScreen with prefilled recipient + amount, used by the
-     * Failed-tx retry CTA in the activity list.
-     */
-    data class NavigateToSendWithPrefill(
-        val recipientAddress: String,
-        val amountShannons: Long
-    ) : HomeNavEvent()
-}
 
 @HiltViewModel
 class HomeViewModel @Inject constructor(
@@ -111,11 +93,6 @@ class HomeViewModel @Inject constructor(
         )
     )
     val uiState: StateFlow<HomeUiState> = _uiState.asStateFlow()
-
-    // One-shot nav events (e.g. retry-failed-tx → SendScreen with prefill).
-    // BUFFERED so an event isn't dropped if the UI is mid-recomposition.
-    private val _navEvents = Channel<HomeNavEvent>(Channel.BUFFERED)
-    val navEvents = _navEvents.receiveAsFlow()
 
     // Captures a pending APK download URL + size when the user is sent to
     // Android settings to grant install-from-unknown-sources. On ON_RESUME
@@ -484,27 +461,20 @@ class HomeViewModel @Inject constructor(
     }
 
     /**
-     * Handles a tap on the Failed chip in the activity list. Loads the failed
-     * `pending_broadcasts` row, deletes the failed-state rows so the retry
-     * doesn't see itself as a reservation, and emits a nav event with the
-     * decoded recipient + amount for SendScreen prefill.
+     * Handles a tap on the Failed chip in the activity list. Re-broadcasts the
+     * original signed transaction (#316) — reusing its exact inputs so the
+     * original and the retry conflict and at most one can ever commit (no
+     * double-pay), with no recipient-guessing prefill. On success the row flips
+     * back to a pending broadcast, which the activity flow surfaces reactively.
      */
     fun retryFailedTransaction(txHash: String) {
         viewModelScope.launch {
-            repository.loadFailedForRetry(txHash)
-                .onSuccess { prefill ->
-                    _navEvents.send(
-                        HomeNavEvent.NavigateToSendWithPrefill(
-                            recipientAddress = prefill.recipientAddress,
-                            amountShannons = prefill.amountShannons
-                        )
-                    )
-                    // Drop the row from the in-memory list so the chip disappears
-                    // immediately (the next refresh will confirm the row is gone).
-                    _uiState.update { state ->
-                        state.copy(transactions = state.transactions.filter { it.txHash != txHash })
-                    }
-                }
+            // Drop the Failed chip immediately; the rebroadcast re-inserts a
+            // pending row that the activity flow will resurface.
+            _uiState.update { state ->
+                state.copy(transactions = state.transactions.filter { it.txHash != txHash })
+            }
+            repository.retryBroadcast(txHash)
                 .onFailure { e ->
                     Log.e(TAG, "retryFailedTransaction failed for $txHash", e)
                     _uiState.update { it.copy(error = com.rjnr.pocketnode.ui.util.UiMessage.Resource(com.rjnr.pocketnode.R.string.vm_error_retry_failed, listOf(e.message ?: ""))) }

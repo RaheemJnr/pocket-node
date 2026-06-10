@@ -14,9 +14,7 @@ import com.rjnr.pocketnode.data.gateway.GatewayRepository
 import com.rjnr.pocketnode.data.gateway.models.NetworkType
 import com.rjnr.pocketnode.data.gateway.models.TransactionRecord
 import com.rjnr.pocketnode.data.wallet.WalletPreferences
-import com.rjnr.pocketnode.ui.screens.home.HomeNavEvent
 import dagger.hilt.android.lifecycle.HiltViewModel
-import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -28,7 +26,6 @@ import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.flatMapLatest
 import kotlinx.coroutines.flow.map
-import kotlinx.coroutines.flow.receiveAsFlow
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import javax.inject.Inject
@@ -57,10 +54,6 @@ class ActivityViewModel @Inject constructor(
     private val _exportEvent = MutableSharedFlow<String>()
     val exportEvent: SharedFlow<String> = _exportEvent.asSharedFlow()
 
-    // One-shot nav events (e.g. retry-failed-tx → SendScreen with prefill).
-    // Reuses HomeNavEvent — same nav semantics as the Home tab's retry CTA.
-    private val _navEvents = Channel<HomeNavEvent>(Channel.BUFFERED)
-    val navEvents = _navEvents.receiveAsFlow()
 
     @OptIn(kotlinx.coroutines.ExperimentalCoroutinesApi::class)
     val transactionPagingFlow: Flow<PagingData<TransactionRecord>> = combine(
@@ -120,21 +113,14 @@ class ActivityViewModel @Inject constructor(
     }
 
     /**
-     * Handles a tap on the Failed chip in the activity list. Loads the failed
-     * `pending_broadcasts` row and emits a nav event with the decoded
-     * recipient + amount for SendScreen prefill. Mirrors HomeViewModel.
+     * Handles a tap on the Failed chip in the activity list. Re-broadcasts the
+     * original signed transaction (#316) — reusing its exact inputs so the
+     * original and the retry conflict and at most one can ever commit (no
+     * double-pay), with no recipient-guessing prefill. Mirrors HomeViewModel.
      */
     fun retryFailedTransaction(txHash: String) {
         viewModelScope.launch {
-            repository.loadFailedForRetry(txHash)
-                .onSuccess { prefill ->
-                    _navEvents.send(
-                        HomeNavEvent.NavigateToSendWithPrefill(
-                            recipientAddress = prefill.recipientAddress,
-                            amountShannons = prefill.amountShannons
-                        )
-                    )
-                }
+            repository.retryBroadcast(txHash)
                 .onFailure { e ->
                     Log.e(TAG, "retryFailedTransaction failed for $txHash", e)
                     _uiState.update {
