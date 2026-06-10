@@ -232,11 +232,16 @@ fun OnboardingScreen(
                 )
             },
             confirmButton = {
-                TextButton(onClick = {
-                    showNoDeviceLockWarning = false
-                    pendingNoLockAction?.invoke()
-                    pendingNoLockAction = null
-                }) {
+                TextButton(
+                    onClick = {
+                        showNoDeviceLockWarning = false
+                        pendingNoLockAction?.invoke()
+                        pendingNoLockAction = null
+                    },
+                    // Upgrade-smoke harness clicks through this dialog: the CI
+                    // emulator has no device lock, so it appears on every run.
+                    modifier = Modifier.uaTestTag("onboarding-no-lock-continue")
+                ) {
                     Text("Continue anyway")
                 }
             },
