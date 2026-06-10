@@ -57,6 +57,7 @@ import com.rjnr.pocketnode.R
 import com.rjnr.pocketnode.data.database.entity.WalletEntity
 import com.rjnr.pocketnode.ui.util.resolveString
 import com.rjnr.pocketnode.ui.components.WalletAvatar
+import kotlinx.coroutines.launch
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -69,8 +70,24 @@ fun WalletSettingsScreen(
     val snackbarHostState = remember { SnackbarHostState() }
     val clipboardManager = androidx.compose.ui.platform.LocalClipboardManager.current
     val context = androidx.compose.ui.platform.LocalContext.current
+    val scope = androidx.compose.runtime.rememberCoroutineScope()
     var showSeedPhrase by rememberSaveable { mutableStateOf(false) }
     var showAddAccountDialog by remember { mutableStateOf(false) }
+
+    // FLAG_SECURE: this screen can render the full mnemonic and raw private
+    // key after biometric unlock — block screenshots, screen recording, and
+    // the recents thumbnail, matching MnemonicBackupScreen (#317).
+    val view = androidx.compose.ui.platform.LocalView.current
+    androidx.compose.runtime.DisposableEffect(Unit) {
+        val window = (view.context as? android.app.Activity)?.window
+        window?.setFlags(
+            android.view.WindowManager.LayoutParams.FLAG_SECURE,
+            android.view.WindowManager.LayoutParams.FLAG_SECURE
+        )
+        onDispose {
+            window?.clearFlags(android.view.WindowManager.LayoutParams.FLAG_SECURE)
+        }
+    }
 
     // V2-aware: route the "view recovery phrase" / "view private key"
     // taps through the activity-bound entry point so a CryptoObject
@@ -411,6 +428,23 @@ fun WalletSettingsScreen(
                                     Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                                         OutlinedButton(onClick = {
                                             clipboardManager.setText(androidx.compose.ui.text.AnnotatedString(keyHex))
+                                            scope.launch {
+                                                snackbarHostState.showSnackbar("Private key copied. Clipboard will clear in 60s.")
+                                                // Timed clear matching the raw-key copy
+                                                // path in MnemonicBackupScreen (#290/#317).
+                                                kotlinx.coroutines.delay(60_000L)
+                                                runCatching {
+                                                    val cm = context.getSystemService(android.content.Context.CLIPBOARD_SERVICE)
+                                                        as android.content.ClipboardManager
+                                                    // Only clear if the clipboard still holds
+                                                    // our key — don't blow away something the
+                                                    // user copied in the meantime.
+                                                    val current = cm.primaryClip?.getItemAt(0)?.text?.toString()
+                                                    if (current == keyHex) {
+                                                        cm.setPrimaryClip(android.content.ClipData.newPlainText("", ""))
+                                                    }
+                                                }
+                                            }
                                         }) {
                                             Text(stringResource(R.string.wallet_settings_copy))
                                         }

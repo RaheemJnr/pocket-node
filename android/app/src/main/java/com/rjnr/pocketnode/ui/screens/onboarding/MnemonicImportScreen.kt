@@ -296,6 +296,21 @@ fun MnemonicImportScreen(
     val uiState by viewModel.uiState.collectAsState()
     val snackbarHostState = remember { SnackbarHostState() }
     val clipboardManager = LocalClipboardManager.current
+
+    // FLAG_SECURE: secret material (mnemonic / raw key) is entered or shown
+    // on this screen — block screenshots, screen recording, and the recents
+    // thumbnail (#317).
+    val secureView = androidx.compose.ui.platform.LocalView.current
+    DisposableEffect(Unit) {
+        val window = (secureView.context as? android.app.Activity)?.window
+        window?.setFlags(
+            android.view.WindowManager.LayoutParams.FLAG_SECURE,
+            android.view.WindowManager.LayoutParams.FLAG_SECURE
+        )
+        onDispose {
+            window?.clearFlags(android.view.WindowManager.LayoutParams.FLAG_SECURE)
+        }
+    }
     // MainActivity extends FragmentActivity; required to drive the
     // V2 BiometricPrompt CryptoObject flow on import (#289).
     val activity = androidx.compose.ui.platform.LocalContext.current as FragmentActivity
