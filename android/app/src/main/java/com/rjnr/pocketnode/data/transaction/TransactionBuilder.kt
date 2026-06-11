@@ -14,6 +14,7 @@ import java.io.ByteArrayOutputStream
 import java.math.BigInteger
 import javax.inject.Inject
 import javax.inject.Singleton
+import com.rjnr.pocketnode.util.redactAddress
 
 @Singleton
 class TransactionBuilder @Inject constructor(
@@ -99,9 +100,10 @@ class TransactionBuilder @Inject constructor(
         network: NetworkType
     ): Transaction {
         Log.d(TAG, "🔨 Building transfer transaction")
-        Log.d(TAG, "  From: $fromAddress")
-        Log.d(TAG, "  To: $toAddress")
-        Log.d(TAG, "  Amount: $amountShannons shannons")
+        // Sender + recipient + amount form a payment record — redact the
+        // addresses and drop the amount from debug logcat (#321).
+        Log.d(TAG, "  From: ${fromAddress.redactAddress()}")
+        Log.d(TAG, "  To: ${toAddress.redactAddress()}")
 
         // Validate recipient amount meets minimum cell capacity
         if (amountShannons < MIN_CELL_CAPACITY) {

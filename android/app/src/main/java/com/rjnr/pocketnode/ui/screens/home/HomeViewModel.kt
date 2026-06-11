@@ -31,6 +31,7 @@ import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.jsonArray
 import java.util.Locale
 import javax.inject.Inject
+import com.rjnr.pocketnode.util.redactAddress
 
 private const val TAG = "HomeViewModel"
 
@@ -226,7 +227,7 @@ class HomeViewModel @Inject constructor(
 
         repository.initializeWallet()
             .onSuccess { info ->
-                Log.d(TAG, "Wallet initialized: ${info.testnetAddress}")
+                Log.d(TAG, "Wallet initialized: ${info.testnetAddress.redactAddress()}")
                 _uiState.update { it.copy(walletInfo = info, isLoading = false) }
                 fetchPrice()
                 registerAndRefresh()
