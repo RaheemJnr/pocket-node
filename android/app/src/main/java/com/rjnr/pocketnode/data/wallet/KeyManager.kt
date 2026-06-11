@@ -20,6 +20,25 @@ import java.math.BigInteger
 import javax.inject.Inject
 import javax.inject.Singleton
 
+/**
+ * ## Memory-hygiene boundary (#321 / #335)
+ *
+ * Transient `ByteArray` private keys returned by the read paths are zeroed
+ * by callers after signing (`fill(0)` in SendViewModel and the
+ * GatewayRepository DAO overloads), and KeyBackupManager zeroes its
+ * plaintext buffers around encrypt/decrypt. What canNOT be zeroed on the
+ * JVM, deliberately accepted:
+ *
+ *  - Hex `String`s handed out by EncryptedSharedPreferences / Room TEXT
+ *    columns — immutable, GC-managed.
+ *  - `BigInteger` / `ECKeyPair` internals — the CKB SDK signing API takes
+ *    immutable BigInteger copies of the key.
+ *
+ * The full String→ByteArray storage rewrite (prefs re-encode, Room BLOB
+ * migration, backup format v3) is tracked in #335 and intentionally NOT
+ * bundled into routine changes — a migration bug there is unrecoverable
+ * key loss.
+ */
 @Singleton
 class KeyManager @Inject constructor(
     @ApplicationContext private val context: Context,
