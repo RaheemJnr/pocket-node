@@ -199,6 +199,26 @@ class HomeViewModel @Inject constructor(
             }
         }
 
+        // #286 staleness pill, latched at VM creation (= app open). Fires for
+        // BOTH directions of the failure: bg sync off and the wallet went
+        // stale, AND bg sync ON but the service silently died (OEM kill, 6h
+        // dataSync budget, notification revocation) — the copy differs, the
+        // staleness test doesn't.
+        run {
+            val staleAtOpen = isBgSyncStale(
+                lastSyncedAtMs = walletPreferences.getLastSyncedAt().takeIf { it > 0 },
+                nowMs = System.currentTimeMillis(),
+            )
+            if (staleAtOpen && !walletPreferences.isBgSyncPillDismissed()) {
+                _uiState.update {
+                    it.copy(
+                        showBgSyncStalePill = true,
+                        bgSyncEnabledAtOpen = walletPreferences.isBackgroundSyncEnabled(),
+                    )
+                }
+            }
+        }
+
         // Sync coachmark visibility (#90): show first-run education when sync has
         // been catching up for at least the grace period. Combines the prefs flag,
         // the repository SyncProgress, and a 1-second clock tick so the UI updates
@@ -809,6 +829,24 @@ class HomeViewModel @Inject constructor(
         _uiState.update { it.copy(showSyncStallBanner = false) }
     }
 
+    /** #286 pill: permanent dismissal — informational, not a nag surface. */
+    fun dismissBgSyncStalePill() {
+        walletPreferences.setBgSyncPillDismissed()
+        _uiState.update { it.copy(showBgSyncStalePill = false) }
+    }
+
+    /**
+     * #286 pill enable action (caller has already handled the
+     * POST_NOTIFICATIONS grant). Session-hide only: if the service dies
+     * again later, the enabled-but-stale variant should still be able to
+     * show on a future open.
+     */
+    fun enableBackgroundSyncFromPill() {
+        walletPreferences.setBackgroundSyncEnabled(true)
+        repository.startBackgroundSync()
+        _uiState.update { it.copy(showBgSyncStalePill = false) }
+    }
+
     /**
      * One-tap recovery from a stall on a 2021-era wallet (#150): switch to
      * RECENT sync mode. Delegates to [changeSyncMode] so the polling teardown,
@@ -895,4 +933,8 @@ data class HomeUiState(
     val showSyncCoachmark: Boolean = false,
     val showSyncStallBanner: Boolean = false,
     val syncStallMinutes: Long = 0L,
+    // #286 staleness pill: latched at app open (foreground sync freshens
+    // lastSyncedAt within a minute, so a live check would self-hide).
+    val showBgSyncStalePill: Boolean = false,
+    val bgSyncEnabledAtOpen: Boolean = false,
 )

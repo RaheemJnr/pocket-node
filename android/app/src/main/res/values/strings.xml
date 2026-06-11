@@ -474,6 +474,12 @@
     <!-- endregion -->
 
     <!-- region: sync stall banner (#150) -->
+    <string name="bg_sync_pill_title_off">Balance may be out of date</string>
+    <string name="bg_sync_pill_body_off">Background sync is off, so this wallet only updates while the app is open. Turn it on to stay current.</string>
+    <string name="bg_sync_pill_title_dead">Background sync was interrupted</string>
+    <string name="bg_sync_pill_body_dead">Android or your device\'s battery manager stopped background sync while the app was closed. It has been restarted. If this keeps happening, allow Pocket Node to run unrestricted in battery settings.</string>
+    <string name="bg_sync_pill_action_enable">Enable</string>
+    <string name="bg_sync_pill_action_dismiss">Dismiss</string>
     <string name="sync_stall_banner_title">Sync hasn\'t progressed in %1$d min</string>
     <string name="sync_stall_banner_body">If this wallet has years of history, scanning from that far back is slow. Switch to Recent activity to catch up faster.</string>
     <string name="sync_stall_banner_action_switch_recent">Use Recent</string>

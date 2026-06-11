@@ -481,6 +481,20 @@ private fun SettingsScreenUI(
                 )
             }
 
+            // #286: one-line tradeoff blurb at the point of choice.
+            item {
+                Text(
+                    text = "Keeps your balance fresh while the app is closed, with a small " +
+                        "ongoing notification and some extra battery use. Android may still " +
+                        "pause it after extended background time.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier
+                        .padding(horizontal = 16.dp)
+                        .padding(top = 4.dp, bottom = 8.dp)
+                )
+            }
+
             item {
                 SettingsValueRow(
                     icon = Lucide.RefreshCw,

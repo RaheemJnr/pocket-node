@@ -89,6 +89,7 @@ sealed class Screen(val route: String) {
             if (parentId.isNullOrBlank()) BASE else "$BASE?parentId=$parentId"
     }
     object InitialPinSetup : Screen("initial_pin_setup")
+    object BackgroundSyncOptIn : Screen("bg_sync_opt_in")
     object ForgotPin : Screen("forgot_pin")
     object Faq : Screen("faq?anchor={anchor}") {
         fun routeWithAnchor(anchor: String?): String =
@@ -578,6 +579,20 @@ fun CkbNavGraph(
         composable(Screen.InitialPinSetup.route) {
             InitialPinSetupScreen(
                 onPinCreated = {
+                    // #286: surface background sync at the point of choice,
+                    // right after the mandatory PIN step. The opt-in screen
+                    // self-skips when the preference is already set.
+                    navController.navigate(Screen.BackgroundSyncOptIn.route) {
+                        popUpTo(navController.graph.id) { inclusive = true }
+                        launchSingleTop = true
+                    }
+                }
+            )
+        }
+
+        composable(Screen.BackgroundSyncOptIn.route) {
+            com.rjnr.pocketnode.ui.screens.onboarding.BackgroundSyncOptInScreen(
+                onContinue = {
                     navController.navigate(destinationAfterWalletReady()) {
                         popUpTo(navController.graph.id) { inclusive = true }
                         launchSingleTop = true

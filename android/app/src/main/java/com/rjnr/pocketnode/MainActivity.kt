@@ -119,6 +119,19 @@ class MainActivity : FragmentActivity() {
         }
     }
 
+    override fun onStart() {
+        super.onStart()
+        // Re-arm background sync on every foreground (#286). The FGS dies
+        // silently in three ways the preference can't see — Android 15's 6h
+        // dataSync budget (onTimeout → stopSelf, nothing reschedules), OEM
+        // battery managers, and post-grant notification revocation — leaving
+        // an ON toggle with a dead service. startBackgroundSync() no-ops when
+        // the preference is off and is idempotent when the service is already
+        // running; starting from the foreground also grants a fresh FGS time
+        // budget per the platform rules.
+        repository.startBackgroundSync()
+    }
+
     override fun onStop() {
         super.onStop()
         // Use cached value — avoids blocking main thread on every onStop
