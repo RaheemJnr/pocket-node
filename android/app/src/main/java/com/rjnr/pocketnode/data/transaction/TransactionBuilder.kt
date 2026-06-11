@@ -63,6 +63,25 @@ class TransactionBuilder @Inject constructor(
     }
 
     /**
+     * Max sendable amount for a "send everything" transfer: the sum of all
+     * spendable cell capacities minus the fee for a transaction consuming
+     * EVERY cell as an input with a single output and no change. Pure integer
+     * math throughout — Double loses shannon precision above ~90M CKB (#321),
+     * and a 1-input fee assumption underestimates the fee on fragmented
+     * wallets, making the subsequent Max send fail with insufficient funds.
+     *
+     * Cells with malformed capacity hex are skipped from both the sum and the
+     * input count: buildTransfer could not spend them either.
+     */
+    fun calculateMaxSendable(cells: List<Cell>): Long {
+        val capacities = cells.mapNotNull { it.capacity.removePrefix("0x").toLongOrNull(16) }
+        if (capacities.isEmpty()) return 0L
+        val total = capacities.sum()
+        val fee = estimateTransferFee(inputCount = capacities.size, outputCount = 1)
+        return (total - fee).coerceAtLeast(0L)
+    }
+
+    /**
      * Calculate fee from serialized transaction size using the standard fee rate.
      * fee = ceil(size_bytes * fee_rate / 1000), with a minimum floor.
      */
