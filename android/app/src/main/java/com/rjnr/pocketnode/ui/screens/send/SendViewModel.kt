@@ -504,6 +504,8 @@ class SendViewModel @Inject constructor(
                     statusMessage = "Transaction failed"
                 )
             }
+        } finally {
+            privateKey.fill(0) // transient signing key — zero after use (#321)
         }
     }
 
@@ -593,6 +595,8 @@ class SendViewModel @Inject constructor(
                         statusMessage = "Transaction failed"
                     )
                 }
+            } finally {
+                capturedKey.fill(0) // transient signing key — zero after use (#321)
             }
         }
     }

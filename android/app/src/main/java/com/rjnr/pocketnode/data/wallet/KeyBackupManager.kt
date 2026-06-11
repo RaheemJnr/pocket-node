@@ -2,9 +2,13 @@ package com.rjnr.pocketnode.data.wallet
 
 import android.util.Log
 import androidx.annotation.VisibleForTesting
+import kotlinx.serialization.ExperimentalSerializationApi
 import kotlinx.serialization.Serializable
-import kotlinx.serialization.encodeToString
 import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.decodeFromStream
+import kotlinx.serialization.json.encodeToStream
+import java.io.ByteArrayInputStream
+import java.io.ByteArrayOutputStream
 import org.bouncycastle.crypto.generators.Argon2BytesGenerator
 import org.bouncycastle.crypto.params.Argon2Parameters
 import java.io.File
@@ -58,10 +62,22 @@ class KeyBackupManager @Inject constructor(
         // New backups are always written with the strongest KDF (Argon2id, v2).
         val key = deriveKey(pin, salt, FORMAT_VERSION_ARGON2)
 
-        val plaintext = json.encodeToString(material).toByteArray(Charsets.UTF_8)
-        val cipher = Cipher.getInstance(CIPHER_TRANSFORM)
-        cipher.init(Cipher.ENCRYPT_MODE, key, GCMParameterSpec(GCM_TAG_BITS, iv))
-        val ciphertext = cipher.doFinal(plaintext)
+        // Serialize straight to bytes — no String intermediate for the
+        // plaintext key material — and zero the buffer once encrypted (#321).
+        // Serializer-internal buffers and the Strings inside KeyMaterial
+        // itself are beyond reach on the JVM; see #335 for the full rewrite.
+        val plaintext = ByteArrayOutputStream().use { baos ->
+            @OptIn(ExperimentalSerializationApi::class)
+            json.encodeToStream(material, baos)
+            baos.toByteArray()
+        }
+        val ciphertext = try {
+            val cipher = Cipher.getInstance(CIPHER_TRANSFORM)
+            cipher.init(Cipher.ENCRYPT_MODE, key, GCMParameterSpec(GCM_TAG_BITS, iv))
+            cipher.doFinal(plaintext)
+        } finally {
+            plaintext.fill(0)
+        }
 
         val file = backupFile(walletId)
         val tmpFile = File(file.parent, "${file.name}.tmp")
@@ -98,7 +114,14 @@ class KeyBackupManager @Inject constructor(
             cipher.init(Cipher.DECRYPT_MODE, key, GCMParameterSpec(GCM_TAG_BITS, iv))
             val plaintext = cipher.doFinal(ciphertext)
 
-            json.decodeFromString<KeyMaterial>(String(plaintext, Charsets.UTF_8))
+            // Decode from the byte buffer directly (no plaintext String of the
+            // key material) and zero it after parsing (#321).
+            try {
+                @OptIn(ExperimentalSerializationApi::class)
+                json.decodeFromStream<KeyMaterial>(ByteArrayInputStream(plaintext))
+            } finally {
+                plaintext.fill(0)
+            }
         } catch (e: Exception) {
             Log.w(TAG, "Failed to read backup for $walletId", e)
             null

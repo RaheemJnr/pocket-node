@@ -1743,7 +1743,13 @@ class GatewayRepository @Inject constructor(
     }
 
     suspend fun depositToDao(amountShannons: Long): Result<String> =
-        depositToDao(amountShannons, privateKey = getPrivateKey())
+        getPrivateKey().let { key ->
+            try {
+                depositToDao(amountShannons, privateKey = key)
+            } finally {
+                key.fill(0) // transient signing key — zero after use (#321)
+            }
+        }
 
     /**
      * V2-aware overload: caller supplies the private key already
@@ -1782,7 +1788,13 @@ class GatewayRepository @Inject constructor(
     }
 
     suspend fun withdrawFromDao(depositOutPoint: OutPoint): Result<String> =
-        withdrawFromDao(depositOutPoint, privateKey = getPrivateKey())
+        getPrivateKey().let { key ->
+            try {
+                withdrawFromDao(depositOutPoint, privateKey = key)
+            } finally {
+                key.fill(0) // transient signing key — zero after use (#321)
+            }
+        }
 
     /** V2-aware overload — see [depositToDao]. */
     suspend fun withdrawFromDao(
@@ -1833,7 +1845,13 @@ class GatewayRepository @Inject constructor(
     }
 
     suspend fun unlockDao(withdrawingOutPoint: OutPoint): Result<String> =
-        unlockDao(withdrawingOutPoint, privateKey = getPrivateKey())
+        getPrivateKey().let { key ->
+            try {
+                unlockDao(withdrawingOutPoint, privateKey = key)
+            } finally {
+                key.fill(0) // transient signing key — zero after use (#321)
+            }
+        }
 
     /** V2-aware overload — see [depositToDao]. */
     suspend fun unlockDao(
