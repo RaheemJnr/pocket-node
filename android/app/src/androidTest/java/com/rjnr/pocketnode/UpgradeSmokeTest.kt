@@ -26,6 +26,12 @@ private const val LAUNCH_TIMEOUT_MS = 10_000L
 private const val ONBOARDING_TIMEOUT_MS = 15_000L
 private const val POST_UPGRADE_HOME_TIMEOUT_MS = 30_000L
 
+// Import → PIN-intro transition does real key-derivation work; on a loaded
+// CI x86_64 emulator (no hardware crypto) it can blow well past the ~27 s
+// combined budget of a single clickButton call. Same 90 s ceiling as the
+// Argon2id allowance in tapDigit1UntilTitleChanges, for the same reason.
+private const val PIN_INTRO_DEADLINE_MS = 90_000L
+
 // Standard BIP39 dev mnemonic. 11×"abandon" + "about" is a valid checksum.
 // Hardcoded so the seed is deterministic across runs.
 private const val TEST_MNEMONIC =
@@ -125,10 +131,14 @@ class UpgradeSmokeTest {
         // it doesn't appear; clickButton returns false and we fall through.
         clickButton("sync-sheet-apply", "Apply", ONBOARDING_TIMEOUT_MS)
 
-        // After import + sync-selection the app shows the PIN intro.
+        // After import + sync-selection the app shows the PIN intro. Deadline-
+        // poll instead of a single fixed-timeout lookup: import does real
+        // key-derivation work and the transition can be slow on CI (#330).
+        // Other call sites stay on fixed timeouts deliberately — real
+        // onboarding breaks (#324) should fail loud and fast.
         assertTrue(
             "PIN intro continue button not found",
-            clickButton("pin-intro-continue", "Create PIN", ONBOARDING_TIMEOUT_MS)
+            clickButtonWithin("pin-intro-continue", "Create PIN", PIN_INTRO_DEADLINE_MS)
         )
 
         // SETUP phase: tap digit 1 until the SETUP title disappears. This
@@ -203,6 +213,23 @@ class UpgradeSmokeTest {
             "Home balance row not visible within ${POST_UPGRADE_HOME_TIMEOUT_MS}ms after upgrade",
             balanceRow
         )
+    }
+
+    /**
+     * Deadline-poll wrapper around clickButton for screens that can take a long
+     * time to APPEAR (vs. nodes that exist but go briefly stale). Each cycle
+     * re-runs the full clickButton strategy (resource-id fast path, scroll, text
+     * fallback) with a short per-cycle timeout so a slow transition is absorbed
+     * by repetition rather than one long blind wait. A full miss cycle is ~20 s,
+     * so the deadline is a floor on patience, not a precise budget — the loop
+     * may overshoot by one cycle.
+     */
+    private fun clickButtonWithin(res: String, text: String, deadlineMs: Long): Boolean {
+        val deadline = System.currentTimeMillis() + deadlineMs
+        while (System.currentTimeMillis() < deadline) {
+            if (clickButton(res, text, timeoutMs = 5_000L)) return true
+        }
+        return false
     }
 
     /**
