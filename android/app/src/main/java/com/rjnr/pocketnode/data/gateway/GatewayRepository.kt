@@ -1964,6 +1964,10 @@ class GatewayRepository @Inject constructor(
      * Start centralized sync polling. Idempotent — does nothing if already running.
      * Polls getAccountStatus(), records samples, calculates progress, and emits to syncProgress flow.
      */
+    // Throttle for the lastSyncedAt pref write in the sync poll (#286).
+    @Volatile
+    private var lastSyncedAtWrittenMs = 0L
+
     fun startSyncPolling() {
         if (syncPollingJob?.isActive == true) return
 
@@ -2031,6 +2035,15 @@ class GatewayRepository @Inject constructor(
 
                         syncProgressTracker.recordSample(syncedBlock, System.currentTimeMillis())
                         val info = syncProgressTracker.calculate(tipBlock)
+
+                        // Staleness pill input (#286): persist "last time we
+                        // observed sync progress", throttled to ~1 write/min
+                        // (the poll runs every 5-30s; pref churn is pointless).
+                        val nowMs = System.currentTimeMillis()
+                        if (syncedBlock > 0 && nowMs - lastSyncedAtWrittenMs > 60_000L) {
+                            lastSyncedAtWrittenMs = nowMs
+                            walletPreferences.setLastSyncedAt(nowMs)
+                        }
 
                         val justReachedTip = wasSyncing && info.isSynced
                         wasSyncing = !info.isSynced

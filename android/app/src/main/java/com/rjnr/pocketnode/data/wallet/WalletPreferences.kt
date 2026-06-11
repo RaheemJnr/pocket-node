@@ -209,6 +209,26 @@ class WalletPreferences @Inject constructor(
         prefs.edit().putBoolean(KEY_BACKGROUND_SYNC, enabled).commit()
     }
 
+    /**
+     * Wall-clock of the last observed sync progress (#286). Written by the
+     * sync poll (throttled there to ~1/min); read by the Home staleness
+     * pill. 0 = never synced.
+     */
+    fun getLastSyncedAt(): Long = prefs.getLong(KEY_LAST_SYNCED_AT, 0L)
+
+    fun setLastSyncedAt(timestampMs: Long) {
+        // apply(), not commit(): hot path (sync poll), durability loss of one
+        // sample is harmless.
+        prefs.edit().putLong(KEY_LAST_SYNCED_AT, timestampMs).apply()
+    }
+
+    /** Home staleness pill dismissal (#286) — dismiss is permanent, not a nag. */
+    fun isBgSyncPillDismissed(): Boolean = prefs.getBoolean(KEY_BG_SYNC_PILL_DISMISSED, false)
+
+    fun setBgSyncPillDismissed() {
+        prefs.edit().putBoolean(KEY_BG_SYNC_PILL_DISMISSED, true).apply()
+    }
+
     // --- Database maintenance ---
 
     fun getLastVacuumAt(): Long = prefs.getLong(KEY_LAST_VACUUM_AT, 0L)
@@ -321,6 +341,8 @@ class WalletPreferences @Inject constructor(
         private const val KEY_SYNC_STRATEGY = "sync_strategy"
         private const val KEY_THEME_MODE = "theme_mode"
         private const val KEY_BACKGROUND_SYNC = "background_sync_enabled"
+        private const val KEY_LAST_SYNCED_AT = "last_synced_at_ms"
+        private const val KEY_BG_SYNC_PILL_DISMISSED = "bg_sync_pill_dismissed"
         private const val KEY_LAST_VACUUM_AT = "last_vacuum_at"
         private const val KEY_SYNC_PROGRESS_MIGRATED = "sync_progress_migrated_to_room_v7"
         private const val KEY_SYNC_COACHMARK_SEEN = "sync_coachmark_seen"

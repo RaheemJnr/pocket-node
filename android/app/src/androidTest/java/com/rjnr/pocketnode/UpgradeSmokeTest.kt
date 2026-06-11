@@ -174,6 +174,13 @@ class UpgradeSmokeTest {
             tapDigit1UntilTitleChanges(from = "Confirm PIN", maxTaps = 12)
         )
 
+        // #286 added a background-sync opt-in screen right after PIN setup.
+        // Click through with the foreground-only option. Best-effort, same
+        // pattern as the #303 no-lock dialog: prev APKs that predate #286
+        // never show it, and a hard assert here would fail every smoke run
+        // until a post-#286 build becomes the prev artifact.
+        clickButton("bg-sync-optin-skip", "Only when app is open", 5_000L)
+
         val balanceRow = device.wait(
             Until.findObject(By.res("home-balance-row")),
             ONBOARDING_TIMEOUT_MS
