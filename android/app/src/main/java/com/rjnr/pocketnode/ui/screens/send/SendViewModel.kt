@@ -282,17 +282,32 @@ class SendViewModel @Inject constructor(
     }
 
     fun setMaxAmount() {
-        val balanceShannons = _uiState.value.availableBalance
-        // Max send: 1 input, 1 output (no change — sending everything)
-        val feeShannons = transactionBuilder.estimateTransferFee(inputCount = 1, outputCount = 1)
-        val maxShannons = (balanceShannons - feeShannons).coerceAtLeast(0L)
-        val maxCkb = maxShannons / 100_000_000.0
-        // Locale.US — sanitizeAmount rejects comma decimals; on de/fr/es devices
-        // `"%.8f".format(...)` would emit "0,12345678" and silently drop the prefill.
-        val formatted = String.format(java.util.Locale.US, "%.8f", maxCkb)
-            .trimEnd('0')
-            .trimEnd('.')
-        updateAmount(formatted.ifEmpty { "0" })
+        viewModelScope.launch {
+            // Sending max consumes EVERY spendable cell, so the fee must be
+            // estimated for all of them as inputs — the old 1-input estimate
+            // undershot on fragmented wallets and the Max send then failed
+            // with insufficient funds (#321). getCells is the same source the
+            // send path uses (spent + typed/DAO cells already filtered), so
+            // Max also can't overshoot a balance that includes unspendable
+            // cells.
+            val maxShannons = repository.getCells()
+                .map { transactionBuilder.calculateMaxSendable(it.items) }
+                .getOrElse {
+                    // Cell fetch failed — fall back to displayed balance with
+                    // the 1-input estimate (previous behavior), integer math.
+                    val balance = _uiState.value.availableBalance
+                    val fee = transactionBuilder.estimateTransferFee(inputCount = 1, outputCount = 1)
+                    (balance - fee).coerceAtLeast(0L)
+                }
+            // BigDecimal, not Double: shannon precision is lost above ~90M CKB.
+            // toPlainString always uses '.' regardless of device locale, which
+            // sanitizeAmount requires.
+            val formatted = BigDecimal(maxShannons)
+                .movePointLeft(8)
+                .stripTrailingZeros()
+                .toPlainString()
+            updateAmount(formatted)
+        }
     }
 
     /**
