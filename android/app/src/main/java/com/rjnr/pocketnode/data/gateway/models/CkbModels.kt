@@ -80,7 +80,9 @@ data class Cell(
     val type: Script? = null,
     val data: String = "0x"
 ) {
-    fun capacityAsLong(): Long = capacity.removePrefix("0x").toLong(16)
+    // Malformed node data degrades to 0 instead of crashing balance
+    // flow collectors with NumberFormatException (#321).
+    fun capacityAsLong(): Long = capacity.removePrefix("0x").toLongOrNull(16) ?: 0L
 }
 
 @Serializable
