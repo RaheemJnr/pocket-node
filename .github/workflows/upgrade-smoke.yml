@@ -134,6 +134,9 @@ jobs:
           api-level: 34
           arch: x86_64
           target: default
+          # Default 600 s flakes on slow shared runners — see #330 mode 2
+          # (run 27303458847: "Timeout waiting for emulator to boot").
+          emulator-boot-timeout: 900
           force-avd-creation: false
           emulator-options: -no-window -gpu swiftshader_indirect -noaudio -no-boot-anim -camera-back none
           disable-animations: true
@@ -146,7 +149,10 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: upgrade-smoke-artifacts
+          # Suffix with attempt so a rerun can't clobber/409 the previous
+          # attempt's fail-*.png/xml evidence (upload-artifact@v4 artifacts
+          # are immutable per run).
+          name: upgrade-smoke-artifacts-attempt-${{ github.run_attempt }}
           path: |
             seed.log
             post.log
