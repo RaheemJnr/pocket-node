@@ -82,7 +82,9 @@ data class BalanceResponse(
     @SerialName("capacity_ckb") val capacityCkb: String,
     @SerialName("as_of_block") val asOfBlock: String
 ) {
-    fun capacityAsLong(): Long = capacity.removePrefix("0x").toLong(16)
+    // Malformed node data degrades to 0 instead of crashing balance
+    // flow collectors with NumberFormatException (#321).
+    fun capacityAsLong(): Long = capacity.removePrefix("0x").toLongOrNull(16) ?: 0L
     fun capacityAsCkb(): Double = capacityCkb.toDoubleOrNull() ?: 0.0
 }
 

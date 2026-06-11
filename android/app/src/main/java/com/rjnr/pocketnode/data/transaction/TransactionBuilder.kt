@@ -63,6 +63,25 @@ class TransactionBuilder @Inject constructor(
     }
 
     /**
+     * Max sendable amount for a "send everything" transfer: the sum of all
+     * spendable cell capacities minus the fee for a transaction consuming
+     * EVERY cell as an input with a single output and no change. Pure integer
+     * math throughout — Double loses shannon precision above ~90M CKB (#321),
+     * and a 1-input fee assumption underestimates the fee on fragmented
+     * wallets, making the subsequent Max send fail with insufficient funds.
+     *
+     * Cells with malformed capacity hex are skipped from both the sum and the
+     * input count: buildTransfer could not spend them either.
+     */
+    fun calculateMaxSendable(cells: List<Cell>): Long {
+        val capacities = cells.mapNotNull { it.capacity.removePrefix("0x").toLongOrNull(16) }
+        if (capacities.isEmpty()) return 0L
+        val total = capacities.sum()
+        val fee = estimateTransferFee(inputCount = capacities.size, outputCount = 1)
+        return (total - fee).coerceAtLeast(0L)
+    }
+
+    /**
      * Calculate fee from serialized transaction size using the standard fee rate.
      * fee = ceil(size_bytes * fee_rate / 1000), with a minimum floor.
      */
@@ -459,22 +478,26 @@ class TransactionBuilder @Inject constructor(
     private fun selectCells(cells: List<Cell>, requiredCapacity: Long): Pair<List<Cell>, Long> {
         val sortedCells = cells
             .filter { it.type == null }
-            .sortedByDescending { parseCapacity(it.capacity) }
+            // Malformed capacity hex from the node: skip the cell rather than
+            // abort the whole selection — same treatment as
+            // calculateMaxSendable (#321).
+            .mapNotNull { cell -> parseCapacity(cell.capacity)?.let { cell to it } }
+            .sortedByDescending { (_, capacity) -> capacity }
 
         val selected = mutableListOf<Cell>()
         var total = 0L
 
-        for (cell in sortedCells) {
+        for ((cell, capacity) in sortedCells) {
             if (total >= requiredCapacity) break
             selected.add(cell)
-            total += parseCapacity(cell.capacity)
+            total += capacity
         }
 
         return Pair(selected, total)
     }
 
-    private fun parseCapacity(hex: String): Long {
-        return hex.removePrefix("0x").toLong(16)
+    private fun parseCapacity(hex: String): Long? {
+        return hex.removePrefix("0x").toLongOrNull(16)
     }
 
     /**
@@ -663,7 +686,10 @@ class TransactionBuilder @Inject constructor(
     }
 
     private fun serializeCellInput(input: CellInput): ByteArray {
-        val since = serializeUint64(input.since.removePrefix("0x").toLong(16))
+        val since = serializeUint64(
+            input.since.removePrefix("0x").toLongOrNull(16)
+                ?: throw IllegalArgumentException("Malformed input since '${input.since}' in transaction")
+        )
         val previousOutput = serializeOutPoint(input.previousOutput)
         return since + previousOutput
     }
@@ -695,7 +721,10 @@ class TransactionBuilder @Inject constructor(
     }
 
     private fun serializeCellOutput(output: CellOutput): ByteArray {
-        val capacity = serializeUint64(output.capacity.removePrefix("0x").toLong(16))
+        val capacity = serializeUint64(
+            output.capacity.removePrefix("0x").toLongOrNull(16)
+                ?: throw IllegalArgumentException("Malformed output capacity '${output.capacity}' in transaction")
+        )
         val lock = serializeScript(output.lock)
         val type = serializeScriptOpt(output.type)
         return serializeTable(listOf(capacity, lock, type))

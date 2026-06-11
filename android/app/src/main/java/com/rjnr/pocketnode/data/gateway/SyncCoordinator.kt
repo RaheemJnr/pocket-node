@@ -176,7 +176,9 @@ class SyncCoordinator @Inject constructor(
         statuses.zip(walletIds).forEach { (status, walletId) ->
             if (walletId.isEmpty()) return@forEach
             newMapping[status.script.args] = walletId
-            val startBlock = status.blockNumber.removePrefix("0x").toLong(16)
+            // Malformed block number from the node: skip this script's row
+            // rather than abort registration for every wallet (#321).
+            val startBlock = status.blockNumber.removePrefix("0x").toLongOrNull(16) ?: return@forEach
             // Atomic UPDATE preserves localSavedBlockNumber under concurrent writes
             // from the sync poll's setWalletSyncBlock. Falls through to upsert only
             // when no row exists yet (no race possible — nothing to overwrite).
