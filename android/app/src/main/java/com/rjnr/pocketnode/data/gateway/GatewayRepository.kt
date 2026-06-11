@@ -47,6 +47,7 @@ import kotlinx.serialization.json.decodeFromJsonElement
 import java.io.File
 import javax.inject.Inject
 import javax.inject.Singleton
+import com.rjnr.pocketnode.util.redactAddress
 
 data class SyncProgress(
     val isSyncing: Boolean = false,
@@ -802,7 +803,7 @@ class GatewayRepository @Inject constructor(
         }
 
         val searchKey = JniSearchKey(script = info.script)
-        Log.d(TAG, "🔍 Fetching balance for script: ${json.encodeToString(searchKey)}")
+        Log.d(TAG, "🔍 Fetching balance for script args ${searchKey.script.args.redactAddress()}")
 
         val responseJson = LightClientNative.nativeGetCellsCapacity(json.encodeToString(searchKey))
             ?: throw Exception("Failed to get capacity - null response")
@@ -1024,7 +1025,7 @@ class GatewayRepository @Inject constructor(
         }
         val searchKey = JniSearchKey(script = script)
 
-        Log.d(TAG, "🔍 getCells: Fetching cells for script: ${json.encodeToString(searchKey)}")
+        Log.d(TAG, "🔍 getCells: Fetching cells for script args ${searchKey.script.args.redactAddress()}")
 
         // First, get all transactions to find spent outpoints
         val txJson = LightClientNative.nativeGetTransactions(

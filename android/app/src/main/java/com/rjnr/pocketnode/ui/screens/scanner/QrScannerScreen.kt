@@ -40,6 +40,7 @@ import com.google.zxing.PlanarYUVLuminanceSource
 import com.google.zxing.common.HybridBinarizer
 import com.rjnr.pocketnode.util.extractCkbAddress
 import java.util.concurrent.Executors
+import com.rjnr.pocketnode.util.redactAddress
 
 private const val TAG = "QrScannerScreen"
 
@@ -167,7 +168,7 @@ private fun CameraPreviewWithScanner(
                                     val address = extractCkbAddress(decoded)
                                     if (address != null && !hasScanned) {
                                         hasScanned = true
-                                        Log.d(TAG, "Scanned CKB address: $address")
+                                        Log.d(TAG, "Scanned CKB address: ${address.redactAddress()}")
                                         // Dispatch the result callback to Main —
                                         // the caller invokes navController.popBackStack()
                                         // which mutates LifecycleRegistry state, and

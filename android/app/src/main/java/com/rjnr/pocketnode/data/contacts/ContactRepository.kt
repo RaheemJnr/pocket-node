@@ -16,6 +16,7 @@ import kotlinx.coroutines.ExperimentalCoroutinesApi
 import java.util.UUID
 import javax.inject.Inject
 import javax.inject.Singleton
+import com.rjnr.pocketnode.util.redactAddress
 
 /**
  * Validation and lifecycle wrapper around [ContactDao] for the M4 Phase 2
@@ -215,7 +216,7 @@ class ContactRepository @Inject constructor(
             val match = contactDao.getByAddress(address) ?: return
             contactDao.markUsed(match.id, nowProvider())
         } catch (e: Exception) {
-            Log.w(TAG, "markUsed failed for address=$address", e)
+            Log.w(TAG, "markUsed failed for address=${address.redactAddress()}", e)
         }
     }
 

@@ -27,6 +27,8 @@ import java.math.BigDecimal
 import java.math.RoundingMode
 import com.rjnr.pocketnode.data.auth.AuthMethod
 import javax.inject.Inject
+import com.rjnr.pocketnode.util.redactAddress
+import com.rjnr.pocketnode.util.redactHash
 
 enum class TransactionState {
     IDLE,           // No transaction in progress
@@ -541,9 +543,11 @@ class SendViewModel @Inject constructor(
 
             try {
                 Log.d(TAG, "Starting send transaction flow")
-                Log.d(TAG, "  Recipient: ${state.recipientAddress}")
-                Log.d(TAG, "  Amount: ${state.amountCkb} CKB ($amountShannons shannons)")
-                Log.d(TAG, "  From address: $capturedAddress")
+                // Recipient + amount + sender together are a full payment
+                // record; logcat is adb/bugreport-readable on debug builds.
+                // Redact the addresses, drop the amount (#321).
+                Log.d(TAG, "  Recipient: ${state.recipientAddress.redactAddress()}")
+                Log.d(TAG, "  From address: ${capturedAddress.redactAddress()}")
 
                 _uiState.update { it.copy(statusMessage = "Broadcasting transaction...") }
                 Log.d(TAG, "📡 prepareAndSend: fetching cells, filtering reserved, building, broadcasting...")
@@ -646,7 +650,7 @@ class SendViewModel @Inject constructor(
             var consecutiveUnknowns = 0
             val previousBalance = _uiState.value.availableBalance
 
-            Log.d(TAG, "🔄 Starting to poll for tx status: $txHash (previous balance: $previousBalance)")
+            Log.d(TAG, "🔄 Starting to poll for tx status: ${txHash.redactHash()} (previous balance: $previousBalance)")
 
             while (attempts < MAX_POLLING_ATTEMPTS) {
                 delay(POLLING_INTERVAL_MS)

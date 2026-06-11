@@ -155,8 +155,10 @@ class SyncCoordinator @Inject constructor(
         // Diagnostic for the production sync-stall reports (#150). Logs every
         // (walletId, startBlock) pair just before the JNI handoff. If a user
         // reports "stayed at 0", this line tells us deterministically what
-        // block they were actually scanning from. Logged at INFO so it
-        // survives release builds' default log level.
+        // block they were actually scanning from. NB: release builds strip
+        // ALL android.util.Log calls via proguard -assumenosideeffects, so
+        // this diagnostic only exists in debug builds — use a debug APK when
+        // chasing #150-class sync stalls.
         statuses.zip(walletIds).forEach { (status, walletId) ->
             val startBlock = status.blockNumber.removePrefix("0x").toLongOrNull(16) ?: -1L
             Log.i(
