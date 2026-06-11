@@ -116,7 +116,17 @@ class DaoDepositReader @Inject constructor(
 
         val deposits = mutableListOf<DaoDeposit>()
         for (jniCell in liveDaoCells) {
-            deposits += resolveOneDeposit(jniCell, currentEpoch, network)
+            // One malformed cell (bad capacity/epoch/timestamp hex from the
+            // node) drops that row instead of failing the whole DAO list (#321).
+            runCatching { resolveOneDeposit(jniCell, currentEpoch, network) }
+                .onSuccess { deposits += it }
+                .onFailure {
+                    Log.w(
+                        TAG,
+                        "Skipping unparseable DAO cell " +
+                            "${jniCell.outPoint.txHash.take(20)}...:${jniCell.outPoint.index} — ${it.message}"
+                    )
+                }
         }
         return deposits
     }

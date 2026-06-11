@@ -478,22 +478,26 @@ class TransactionBuilder @Inject constructor(
     private fun selectCells(cells: List<Cell>, requiredCapacity: Long): Pair<List<Cell>, Long> {
         val sortedCells = cells
             .filter { it.type == null }
-            .sortedByDescending { parseCapacity(it.capacity) }
+            // Malformed capacity hex from the node: skip the cell rather than
+            // abort the whole selection — same treatment as
+            // calculateMaxSendable (#321).
+            .mapNotNull { cell -> parseCapacity(cell.capacity)?.let { cell to it } }
+            .sortedByDescending { (_, capacity) -> capacity }
 
         val selected = mutableListOf<Cell>()
         var total = 0L
 
-        for (cell in sortedCells) {
+        for ((cell, capacity) in sortedCells) {
             if (total >= requiredCapacity) break
             selected.add(cell)
-            total += parseCapacity(cell.capacity)
+            total += capacity
         }
 
         return Pair(selected, total)
     }
 
-    private fun parseCapacity(hex: String): Long {
-        return hex.removePrefix("0x").toLong(16)
+    private fun parseCapacity(hex: String): Long? {
+        return hex.removePrefix("0x").toLongOrNull(16)
     }
 
     /**
@@ -682,7 +686,10 @@ class TransactionBuilder @Inject constructor(
     }
 
     private fun serializeCellInput(input: CellInput): ByteArray {
-        val since = serializeUint64(input.since.removePrefix("0x").toLong(16))
+        val since = serializeUint64(
+            input.since.removePrefix("0x").toLongOrNull(16)
+                ?: throw IllegalArgumentException("Malformed input since '${input.since}' in transaction")
+        )
         val previousOutput = serializeOutPoint(input.previousOutput)
         return since + previousOutput
     }
@@ -714,7 +721,10 @@ class TransactionBuilder @Inject constructor(
     }
 
     private fun serializeCellOutput(output: CellOutput): ByteArray {
-        val capacity = serializeUint64(output.capacity.removePrefix("0x").toLong(16))
+        val capacity = serializeUint64(
+            output.capacity.removePrefix("0x").toLongOrNull(16)
+                ?: throw IllegalArgumentException("Malformed output capacity '${output.capacity}' in transaction")
+        )
         val lock = serializeScript(output.lock)
         val type = serializeScriptOpt(output.type)
         return serializeTable(listOf(capacity, lock, type))

@@ -700,7 +700,7 @@ class GatewayRepository @Inject constructor(
         val tipStr = LightClientNative.nativeGetTipHeader()
         val tipHeight = if (tipStr != null) {
             val tip = json.decodeFromString<JniHeaderView>(tipStr)
-            tip.number.removePrefix("0x").toLong(16)
+            tip.number.removePrefix("0x").toLongOrNull(16) ?: 0L
         } else 0L
 
         // Check for existing sync progress to resume from (per-wallet)
@@ -812,7 +812,7 @@ class GatewayRepository @Inject constructor(
         val cap = json.decodeFromString<JniCellsCapacity>(responseJson)
 
         // Convert to balance response
-        var capacityVal = cap.capacity.removePrefix("0x").toLong(16)
+        var capacityVal = cap.capacity.removePrefix("0x").toLongOrNull(16) ?: 0L
 
         // The light client's nativeGetCellsCapacity may include spent cells
         // We need to calculate the true balance by getting live cells only
@@ -885,9 +885,9 @@ class GatewayRepository @Inject constructor(
                     val txPag = json.decodeFromString<JniPagination<JniTxWithCell>>(txJson)
                     if (txPag.objects.isNotEmpty()) {
                         Log.w(TAG, "🔄 Have ${txPag.objects.size} transactions but 0 live cells - triggering rescan")
-                        val earliestBlock = txPag.objects.minOfOrNull {
-                            it.blockNumber.removePrefix("0x").toLong(16)
-                        } ?: 0L
+                        val earliestBlock = txPag.objects
+                            .mapNotNull { it.blockNumber.removePrefix("0x").toLongOrNull(16) }
+                            .minOrNull() ?: 0L
                         val rescanFrom = (earliestBlock - 100).coerceAtLeast(0L)
                         Log.d(TAG, "🔄 Rescan from block $rescanFrom (earliest tx at $earliestBlock)")
 
@@ -936,7 +936,7 @@ class GatewayRepository @Inject constructor(
         val tipJson = LightClientNative.nativeGetTipHeader()
         val tipNumber = if (tipJson != null) {
             val tip = json.decodeFromString<JniHeaderView>(tipJson)
-            tip.number.removePrefix("0x").toLong(16)
+            tip.number.removePrefix("0x").toLongOrNull(16) ?: 0L
         } else {
             0L
         }
@@ -957,7 +957,7 @@ class GatewayRepository @Inject constructor(
         var anyUpdated = false
         scripts.forEach { script ->
             val walletId = syncCoordinator.getWalletIdForScript(script.script.args) ?: return@forEach
-            val block = script.blockNumber.removePrefix("0x").toLong(16)
+            val block = script.blockNumber.removePrefix("0x").toLongOrNull(16) ?: return@forEach
             if (block > getWalletSyncBlock(walletId)) {
                 setWalletSyncBlock(walletId, block)
                 anyUpdated = true
@@ -976,9 +976,9 @@ class GatewayRepository @Inject constructor(
         val activeArgs = _walletInfo.value?.script?.args
         val scriptBlockNumber = if (activeArgs != null) {
             scripts.find { it.script.args == activeArgs }
-                ?.blockNumber?.removePrefix("0x")?.toLong(16) ?: 0L
+                ?.blockNumber?.removePrefix("0x")?.toLongOrNull(16) ?: 0L
         } else {
-            scripts.firstOrNull()?.blockNumber?.removePrefix("0x")?.toLong(16) ?: 0L
+            scripts.firstOrNull()?.blockNumber?.removePrefix("0x")?.toLongOrNull(16) ?: 0L
         }
 
         // Log sync progress for debugging
@@ -1174,7 +1174,7 @@ class GatewayRepository @Inject constructor(
             // for the UI. (Prior code used "-0x..." which broke capacityAsLong's
             // hex parser and rendered as 0.)
             val outgoingAmount = signed.cellOutputs
-                .minOfOrNull { it.capacity.removePrefix("0x").toLong(16) }
+                .mapNotNull { it.capacity.removePrefix("0x").toLongOrNull(16) }.minOrNull()
                 ?: 0L
             val balanceChangeHex = "0x${outgoingAmount.toString(16)}"
 
@@ -1272,7 +1272,9 @@ class GatewayRepository @Inject constructor(
         require(transaction.cellInputs.isNotEmpty()) { "Transaction has no inputs" }
         require(transaction.cellOutputs.isNotEmpty()) { "Transaction has no outputs" }
         for (output in transaction.cellOutputs) {
-            val capacity = output.capacity.removePrefix("0x").toLong(16)
+            val capacity = requireNotNull(output.capacity.removePrefix("0x").toLongOrNull(16)) {
+                "Malformed output capacity '${output.capacity}' in transaction"
+            }
             require(capacity >= TransactionBuilder.MIN_CELL_CAPACITY) {
                 "Output capacity ${capacity / 100_000_000.0} CKB is below minimum 61 CKB"
             }
@@ -1293,7 +1295,7 @@ class GatewayRepository @Inject constructor(
         // For a normal transfer the smallest output is the recipient; for a
         // "send all" there's only one output. Either way: smallest by capacity.
         val outgoingAmount = transaction.cellOutputs
-            .minOfOrNull { it.capacity.removePrefix("0x").toLong(16) }
+            .mapNotNull { it.capacity.removePrefix("0x").toLongOrNull(16) }.minOrNull()
             ?: 0L
         // Positive hex per existing convention; `direction = "out"` carries sign.
         val balanceChangeHex = "0x${outgoingAmount.toString(16)}"
@@ -1407,7 +1409,7 @@ class GatewayRepository @Inject constructor(
                 val tipStr = LightClientNative.nativeGetTipHeader()
                 if (tipStr != null && senderInfo != null) {
                     val tip = json.decodeFromString<JniHeaderView>(tipStr)
-                    val tipNumber = tip.number.removePrefix("0x").toLong(16)
+                    val tipNumber = tip.number.removePrefix("0x").toLongOrNull(16) ?: 0L
                     val rescanFrom = (tipNumber - 10).coerceAtLeast(0L)
                     Log.d(TAG, "🔄 Partial re-register from block $rescanFrom to catch change output")
 
@@ -1463,7 +1465,7 @@ class GatewayRepository @Inject constructor(
             // Net balance change = Sum(Outputs to us) - Sum(Inputs from us)
             var netChangeShannons = 0L
             cellInteractions.forEach { interaction ->
-                val cap = interaction.ioCapacity.removePrefix("0x").toLong(16)
+                val cap = interaction.ioCapacity.removePrefix("0x").toLongOrNull(16) ?: 0L
                 if (interaction.ioType == "output") {
                     netChangeShannons += cap
                 } else {
@@ -1542,7 +1544,7 @@ class GatewayRepository @Inject constructor(
             val (finalDirection, finalAmount) = if (hasDaoOutput) {
                 val daoOutputCapacity = tx.outputs
                     .first { it.type?.codeHash == DaoConstants.DAO_CODE_HASH }
-                    .capacity.removePrefix("0x").toLong(16)
+                    .capacity.removePrefix("0x").toLongOrNull(16) ?: 0L
                 if (tx.headerDeps.isEmpty()) {
                     "dao_deposit" to daoOutputCapacity
                 } else {
@@ -1552,7 +1554,7 @@ class GatewayRepository @Inject constructor(
                 // Unlock: show total CKB returned (deposit + compensation)
                 val totalOutput = cellInteractions
                     .filter { it.ioType == "output" }
-                    .sumOf { it.ioCapacity.removePrefix("0x").toLong(16) }
+                    .sumOf { it.ioCapacity.removePrefix("0x").toLongOrNull(16) ?: 0L }
                 "dao_unlock" to totalOutput
             } else {
                 direction to amount
@@ -1609,14 +1611,18 @@ class GatewayRepository @Inject constructor(
             val tipJson = LightClientNative.nativeGetTipHeader()
             if (tipJson != null) {
                 val tip = json.decodeFromString<JniHeaderView>(tipJson)
-                val tipNumber = tip.number.removePrefix("0x").toLong(16)
+                val tipNumber = tip.number.removePrefix("0x").toLongOrNull(16) ?: 0L
 
                 // Get tx's block header to compute real confirmation depth
                 val txBlockJson = LightClientNative.nativeGetHeader(txWithStatus.txStatus.blockHash!!)
                 if (txBlockJson != null) {
                     val txBlock = json.decodeFromString<JniHeaderView>(txBlockJson)
-                    val txBlockNumber = txBlock.number.removePrefix("0x").toLong(16)
-                    val realConfirmations = (tipNumber - txBlockNumber + 1).coerceAtLeast(1).toInt()
+                    val txBlockNumber = txBlock.number.removePrefix("0x").toLongOrNull(16)
+                    val realConfirmations = if (txBlockNumber != null) {
+                        (tipNumber - txBlockNumber + 1).coerceAtLeast(1).toInt()
+                    } else {
+                        1 // malformed tx-block number; committed means at least 1
+                    }
                     Log.d(TAG, "📈 Tip: $tipNumber, txBlock: $txBlockNumber, confirmations: $realConfirmations")
                     realConfirmations
                 } else {
@@ -1677,7 +1683,7 @@ class GatewayRepository @Inject constructor(
             } else {
                 scripts.firstOrNull()
             }
-            match?.blockNumber?.removePrefix("0x")?.toLong(16) ?: 0L
+            match?.blockNumber?.removePrefix("0x")?.toLongOrNull(16) ?: 0L
         } catch (e: Exception) {
             Log.w(TAG, "Failed to get existing script block: ${e.message}")
             0L
