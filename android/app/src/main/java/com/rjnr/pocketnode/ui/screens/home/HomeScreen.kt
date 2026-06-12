@@ -59,7 +59,9 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.hapticfeedback.HapticFeedbackType
 import androidx.compose.ui.platform.LocalClipboardManager
+import androidx.compose.ui.platform.LocalHapticFeedback
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.SpanStyle
@@ -130,6 +132,7 @@ fun HomeScreen(
 ) {
     val uiState by viewModel.uiState.collectAsState()
     val clipboardManager = LocalClipboardManager.current
+    val haptic = LocalHapticFeedback.current
     val context = LocalContext.current
     val snackbarHostState = remember { SnackbarHostState() }
     var selectedTransaction by remember { mutableStateOf<TransactionRecord?>(null) }
@@ -328,6 +331,7 @@ fun HomeScreen(
             network = uiState.currentNetwork,
             onDismiss = { selectedTransaction = null },
             onCopyTxHash = { txHash ->
+                haptic.performHapticFeedback(HapticFeedbackType.Confirm) // #304
                 clipboardManager.setText(AnnotatedString(txHash))
                 scope.launch {
                     snackbarHostState.showSnackbar(
@@ -547,6 +551,7 @@ fun HomeScreenUI(
     onBgSyncStaleEnable: () -> Unit = {},
     onBgSyncStaleDismiss: () -> Unit = {},
 ) {
+    val homeContentHaptic = LocalHapticFeedback.current
     PullToRefreshBox(
         isRefreshing = uiState.isRefreshing,
         onRefresh = { refresh() },
@@ -597,6 +602,7 @@ fun HomeScreenUI(
                     onToggleVisibility = onToggleBalanceVisibility,
                     onPeersClick = onNavigateToNodeStatus,
                     onCopyAddress = {
+                        homeContentHaptic.performHapticFeedback(HapticFeedbackType.Confirm) // #304
                         clipboardManager.setText(AnnotatedString(uiState.address))
                         scope.launch {
                             snackbarHostState.showSnackbar(

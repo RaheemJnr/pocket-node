@@ -48,6 +48,8 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
+import androidx.compose.ui.hapticfeedback.HapticFeedbackType
+import androidx.compose.ui.platform.LocalHapticFeedback
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -90,6 +92,7 @@ fun ActivityScreen(
     var selectedTransaction by remember { mutableStateOf<TransactionRecord?>(null) }
     var retryDialogTx by remember { mutableStateOf<TransactionRecord?>(null) }
     val clipboardManager = LocalClipboardManager.current
+    val haptic = LocalHapticFeedback.current
     val context = LocalContext.current
     var pendingCsvContent by remember { mutableStateOf<String?>(null) }
 
@@ -263,6 +266,7 @@ fun ActivityScreen(
                     network = uiState.currentNetwork,
                     onDismiss = { selectedTransaction = null },
                     onCopyTxHash = { hash ->
+                        haptic.performHapticFeedback(HapticFeedbackType.Confirm) // #304
                         clipboardManager.setText(AnnotatedString(hash))
                     },
                     onRetry = { failed ->

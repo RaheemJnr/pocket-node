@@ -16,6 +16,8 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import com.composables.icons.lucide.*
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
+import androidx.compose.ui.hapticfeedback.HapticFeedbackType
+import androidx.compose.ui.platform.LocalHapticFeedback
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -107,6 +109,7 @@ private fun CameraPreviewWithScanner(
     onScanResult: (String) -> Unit
 ) {
     val context = LocalContext.current
+    val haptic = LocalHapticFeedback.current
     val lifecycleOwner = LocalLifecycleOwner.current
 
     var flashEnabled by remember { mutableStateOf(false) }
@@ -175,7 +178,10 @@ private fun CameraPreviewWithScanner(
                                         // setCurrentState must be called on the main
                                         // thread (#120 actual crash on Xiaomi 15 Pro:
                                         // IllegalStateException from pool-7-thread-1).
-                                        mainExecutor.execute { onScanResult(address) }
+                                        mainExecutor.execute {
+                                            haptic.performHapticFeedback(HapticFeedbackType.Confirm) // #304
+                                            onScanResult(address)
+                                        }
                                     }
                                 }
                             }
