@@ -68,7 +68,11 @@ data class DaoDeposit(
     val compensationCycleProgress: Float = 0f,
     val cyclePhase: CyclePhase = CyclePhase.NORMAL,
     val depositTimestamp: Long = 0L,  // Unix millis from block header
-    val apc: Double = 0.0             // annualized per-deposit APC %
+    val apc: Double = 0.0,            // annualized per-deposit APC %
+    // #332: deposit known from the Room cache but created BEFORE the script's
+    // current sync window — the light client cannot see it, so compensation/
+    // status may be stale until the user runs a deeper rescan.
+    val outsideSyncWindow: Boolean = false
 )
 
 // -- Aggregate overview --
