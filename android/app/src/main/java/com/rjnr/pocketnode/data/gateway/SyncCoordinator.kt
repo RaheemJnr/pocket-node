@@ -80,6 +80,34 @@ internal fun balancedFilterAlgorithm(
  * is idempotent and benign.
  */
 /**
+ * Clamp PARTIAL setScripts rewinds (#332). For each requested script status,
+ * if the same script (by lock args) is already registered at a HIGHER block,
+ * replace the requested block with the current one. A rewind makes the Rust
+ * light client restart its filter scan from the older block (no monotonic
+ * guard in `update_filter_scripts`, and it clears the matched-block download
+ * queue) — a multi-hour re-scan on long-history wallets. Returns the clamped
+ * list and how many entries were clamped.
+ */
+internal fun clampPartialRewinds(
+    requested: List<JniScriptStatus>,
+    currentBlockByArgs: Map<String, Long>,
+): Pair<List<JniScriptStatus>, Int> {
+    var clampedCount = 0
+    val out = requested.map { status ->
+        val req = status.blockNumber.removePrefix("0x").toLongOrNull(16)
+            ?: return@map status
+        val cur = currentBlockByArgs[status.script.args] ?: return@map status
+        if (req < cur) {
+            clampedCount++
+            status.copy(blockNumber = "0x${cur.toString(16)}")
+        } else {
+            status
+        }
+    }
+    return out to clampedCount
+}
+
+/**
  * Thin indirection over the two static JNI methods [SyncCoordinator]
  * touches. Exists so unit tests can fake the JNI surface without
  * forcing `System.loadLibrary` on the JVM — `external` methods can't
@@ -88,6 +116,7 @@ internal fun balancedFilterAlgorithm(
 interface LightClientBridge {
     suspend fun setScripts(scriptsJson: String, command: Int): Boolean
     suspend fun getTipHeaderRaw(): String?
+    suspend fun getScriptsRaw(): String?
 }
 
 /** Production bridge — delegates straight to the JNI `external fun`s. */
@@ -97,6 +126,8 @@ class LightClientNativeBridge @Inject constructor() : LightClientBridge {
         com.nervosnetwork.ckblightclient.LightClientNative.nativeSetScripts(scriptsJson, command)
     override suspend fun getTipHeaderRaw(): String? =
         com.nervosnetwork.ckblightclient.LightClientNative.nativeGetTipHeader()
+    override suspend fun getScriptsRaw(): String? =
+        com.nervosnetwork.ckblightclient.LightClientNative.nativeGetScripts()
 }
 
 @Singleton
@@ -147,11 +178,33 @@ class SyncCoordinator @Inject constructor(
         walletIds: List<String>,
         cmd: Int,
         network: NetworkType,
+        allowRewind: Boolean = false,
     ): Boolean {
         require(statuses.size == walletIds.size) {
             "setScriptsAndRecord: statuses (${statuses.size}) and walletIds (${walletIds.size}) must be parallel"
         }
-        val jsonStr = json.encodeToString(statuses)
+        // #332: PARTIAL with an older block rewinds the rust filter scan for
+        // hours. Clamp to the currently-registered block per script unless the
+        // caller is an intentional rewind (rescue rescan, find-older-deposits).
+        val effectiveStatuses = if (
+            cmd == LightClientNative.CMD_SET_SCRIPTS_PARTIAL && !allowRewind
+        ) {
+            val currentByArgs = runCatching {
+                lightClient.getScriptsRaw()?.let { raw ->
+                    json.decodeFromString<List<JniScriptStatus>>(raw).associate { st ->
+                        st.script.args to (st.blockNumber.removePrefix("0x").toLongOrNull(16) ?: 0L)
+                    }
+                }
+            }.getOrNull() ?: emptyMap()
+            val (clamped, clampedCount) = clampPartialRewinds(statuses, currentByArgs)
+            if (clampedCount > 0) {
+                Log.w(TAG, "setScripts PARTIAL: clamped $clampedCount rewind(s) to current block (#332)")
+            }
+            clamped
+        } else {
+            statuses
+        }
+        val jsonStr = json.encodeToString(effectiveStatuses)
         // Diagnostic for the production sync-stall reports (#150). Logs every
         // (walletId, startBlock) pair just before the JNI handoff. If a user
         // reports "stayed at 0", this line tells us deterministically what
@@ -159,7 +212,7 @@ class SyncCoordinator @Inject constructor(
         // ALL android.util.Log calls via proguard -assumenosideeffects, so
         // this diagnostic only exists in debug builds — use a debug APK when
         // chasing #150-class sync stalls.
-        statuses.zip(walletIds).forEach { (status, walletId) ->
+        effectiveStatuses.zip(walletIds).forEach { (status, walletId) ->
             val startBlock = status.blockNumber.removePrefix("0x").toLongOrNull(16) ?: -1L
             Log.i(
                 TAG,
@@ -175,7 +228,7 @@ class SyncCoordinator @Inject constructor(
 
         val now = System.currentTimeMillis()
         val newMapping = mutableMapOf<String, String>()
-        statuses.zip(walletIds).forEach { (status, walletId) ->
+        effectiveStatuses.zip(walletIds).forEach { (status, walletId) ->
             if (walletId.isEmpty()) return@forEach
             newMapping[status.script.args] = walletId
             // Malformed block number from the node: skip this script's row
