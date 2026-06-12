@@ -7,10 +7,19 @@ TESTNET network at a local CKB dev node — never commit the override into
 ## Steps
 1. Run a local node + miner (needs `LightClient` + `Filter` in ckb.toml
    `support_protocols`): `./ckb run` and `./ckb miner`.
-2. Copy `testnet-devnet-override.toml.example` to
-   `android/app/src/debug/assets/testnet.toml` (stays untracked), updating the
-   bootnode peer id from `local_node_info` RPC. `max_outbound_peers = 1` is
-   required — the light client needs ceil(max_outbound/2) proved peers.
+2. Create `android/app/src/debug/assets/testnet.toml` (gitignored — keep the
+   real file local only). Start from the production testnet asset and change:
+
+   ```toml
+   chain = "/data/data/com.rjnr.pocketnode/files/dev.toml"
+
+   [network]
+   max_outbound_peers = 1   # light client needs ceil(max_outbound/2) proved peers
+
+   bootnodes = [
+     "/ip4/10.0.2.2/tcp/<P2P_PORT>/p2p/<NODE_ID from local_node_info RPC>"
+   ]
+   ```
 3. Push a **Dummy-PoW** copy of the node's chain spec into the app
    (light client verifies header PoW against its spec; mixed-era dev chains
    fail Eaglesong verification with InvalidNonce(432)):
