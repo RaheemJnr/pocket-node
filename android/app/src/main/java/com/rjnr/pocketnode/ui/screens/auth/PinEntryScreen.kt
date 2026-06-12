@@ -32,6 +32,8 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.remember
+import androidx.compose.ui.hapticfeedback.HapticFeedbackType
+import androidx.compose.ui.platform.LocalHapticFeedback
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -53,6 +55,10 @@ fun PinEntryScreen(
 ) {
     val uiState by viewModel.uiState.collectAsState()
     val shakeOffset = remember { Animatable(0f) }
+    // #304: tactile feedback on every keypad press + on PIN mismatch.
+    // performHapticFeedback respects the system "Touch feedback" setting,
+    // so no app-level toggle is needed.
+    val haptic = LocalHapticFeedback.current
 
     LaunchedEffect(mode, setupPin) {
         viewModel.setMode(mode)
@@ -71,6 +77,7 @@ fun PinEntryScreen(
 
     LaunchedEffect(uiState.isError) {
         if (uiState.isError) {
+            haptic.performHapticFeedback(HapticFeedbackType.Reject)
             for (offset in listOf(10f, -10f, 8f, -8f, 4f, -4f, 0f)) {
                 shakeOffset.animateTo(offset, animationSpec = tween(50))
             }
@@ -205,7 +212,10 @@ fun PinEntryScreen(
                             "" -> Spacer(modifier = Modifier.size(72.dp))
                             "del" -> {
                                 IconButton(
-                                    onClick = { viewModel.onDeleteDigit() },
+                                    onClick = {
+                                        haptic.performHapticFeedback(HapticFeedbackType.KeyboardTap)
+                                        viewModel.onDeleteDigit()
+                                    },
                                     modifier = Modifier.size(72.dp),
                                     enabled = buttonsEnabled && uiState.enteredDigits.isNotEmpty()
                                 ) {
@@ -217,7 +227,10 @@ fun PinEntryScreen(
                             }
                             else -> {
                                 FilledTonalButton(
-                                    onClick = { viewModel.onDigitEntered(key[0]) },
+                                    onClick = {
+                                        haptic.performHapticFeedback(HapticFeedbackType.KeyboardTap)
+                                        viewModel.onDigitEntered(key[0])
+                                    },
                                     modifier = Modifier.size(72.dp).uaTestTag("pin-keypad-$key"),
                                     shape = CircleShape,
                                     enabled = buttonsEnabled

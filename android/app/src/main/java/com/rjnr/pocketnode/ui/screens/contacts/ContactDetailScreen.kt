@@ -36,6 +36,8 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.remember
+import androidx.compose.ui.hapticfeedback.HapticFeedbackType
+import androidx.compose.ui.platform.LocalHapticFeedback
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -67,6 +69,7 @@ fun ContactDetailScreen(
     val uiState by viewModel.uiState.collectAsState()
     val snackbarHostState = remember { SnackbarHostState() }
     val clipboard = LocalClipboardManager.current
+    val haptic = LocalHapticFeedback.current
     val context = androidx.compose.ui.platform.LocalContext.current
     val scope = rememberCoroutineScopeForSnack()
 
@@ -196,6 +199,7 @@ fun ContactDetailScreen(
                     )
                     val copiedMessage = stringResource(R.string.contact_detail_copied)
                     IconButton(onClick = {
+                        haptic.performHapticFeedback(HapticFeedbackType.Confirm) // #304
                         clipboard.setText(AnnotatedString(contact.address))
                         scope.launch { snackbarHostState.showSnackbar(copiedMessage) }
                     }) {
