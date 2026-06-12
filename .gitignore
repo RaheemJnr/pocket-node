@@ -230,3 +230,4 @@ CLAUDE.md
 # schema JSON is present, Room's processor tries to deserialize it for
 # diff comparison and crashes with AbstractMethodError. (#142)
 android/app/schemas/
+android/app/src/debug/assets/
