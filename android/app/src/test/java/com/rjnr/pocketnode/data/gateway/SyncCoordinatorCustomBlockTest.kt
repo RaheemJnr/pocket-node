@@ -72,6 +72,9 @@ class SyncCoordinatorCustomBlockTest {
         }
 
         override suspend fun getTipHeaderRaw(): String? = tipHeaderJson
+        // No scripts registered in the fake — clamp finds nothing to clamp
+        // against, preserving the original pass-through behavior under test.
+        override suspend fun getScriptsRaw(): String? = null
     }
 
     // Real testnet script (from AddressUtilsTest) — encodes to a real CKB

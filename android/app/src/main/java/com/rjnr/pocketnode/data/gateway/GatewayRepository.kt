@@ -916,7 +916,12 @@ class GatewayRepository @Inject constructor(
                                 blockNumber = blockNumberHex
                             )
                         )
-                        setScriptsAndRecord(scriptStatuses, listOf(activeWalletId), LightClientNative.CMD_SET_SCRIPTS_PARTIAL)
+                        setScriptsAndRecord(
+                            scriptStatuses,
+                            listOf(activeWalletId),
+                            LightClientNative.CMD_SET_SCRIPTS_PARTIAL,
+                            allowRewind = true, // rescue rescan IS the intentional rewind
+                        )
                         // Deliberately NOT persisted via setWalletSyncBlock: the
                         // light client's own storage carries the rewind for this
                         // session, and the sync poll's monotonic write records
@@ -1428,6 +1433,14 @@ class GatewayRepository @Inject constructor(
         scope.launch {
             try {
                 delay(5000) // Wait a bit for tx to propagate
+                // #332: on a still-catching-up wallet, re-registering at
+                // tip-10 JUMPS the script forward over unscanned history —
+                // silent balance/history loss. The ongoing scan will find the
+                // change output anyway; only fast-path when already synced.
+                if (_syncProgress.value.isSyncing) {
+                    Log.d(TAG, "Skipping post-send partial re-register: wallet still catching up")
+                    return@launch
+                }
                 val tipStr = LightClientNative.nativeGetTipHeader()
                 if (tipStr != null && senderInfo != null) {
                     val tip = json.decodeFromString<JniHeaderView>(tipStr)
@@ -1960,7 +1973,8 @@ class GatewayRepository @Inject constructor(
         statuses: List<JniScriptStatus>,
         walletIds: List<String>,
         cmd: Int,
-    ): Boolean = syncCoordinator.setScriptsAndRecord(statuses, walletIds, cmd, currentNetwork)
+        allowRewind: Boolean = false,
+    ): Boolean = syncCoordinator.setScriptsAndRecord(statuses, walletIds, cmd, currentNetwork, allowRewind)
 
     private suspend fun maybeReregisterBalanced() {
         syncCoordinator.maybeReregisterBalanced(makeSyncContext())
