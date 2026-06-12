@@ -424,6 +424,17 @@ fun MnemonicImportScreen(
                 Text(stringResource(R.string.mnemonic_import_have_private_key))
             }
 
+            // Heads-up that a SYSTEM credential sheet is about to appear —
+            // users restoring a seed didn't know which password the
+            // "Secure wallet" prompt wanted (knmo, Nervos Talk, 2026-06).
+            Text(
+                text = stringResource(R.string.mnemonic_import_screen_lock_notice),
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                modifier = Modifier.align(Alignment.CenterHorizontally)
+            )
+            Spacer(Modifier.height(4.dp))
+
             // Import button
             Button(
                 onClick = { viewModel.importMnemonic(activity) },

@@ -99,8 +99,12 @@ class WalletKeyWriter @Inject constructor(
         bundle: WalletKeyBundle,
         walletType: String,
         mnemonicBackedUp: Boolean,
+        // Copy must name the credential: users who reached this prompt after a
+        // seed restore did not know WHICH password Android was asking for
+        // (knmo, Nervos Talk, 2026-06). On devices without biometrics the
+        // system sheet goes straight to the screen-lock PIN/pattern/password.
         promptTitle: String = "Secure wallet",
-        promptSubtitle: String = "Unlock to encrypt your wallet keys.",
+        promptSubtitle: String = "Use your phone's screen lock — fingerprint, face, or device PIN — to encrypt this wallet's keys.",
     ): Result {
         val cipher = try {
             encryptionManager.newEncryptCipherV2()
