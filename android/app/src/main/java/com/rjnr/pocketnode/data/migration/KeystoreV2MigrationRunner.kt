@@ -79,7 +79,7 @@ class KeystoreV2MigrationRunner @Inject constructor(
     suspend fun runMigration(
         activity: FragmentActivity,
         promptTitle: String = "Upgrade wallet security",
-        promptSubtitle: String = "Unlock to re-encrypt your wallet keys.",
+        promptSubtitle: String = "Use your phone's screen lock — fingerprint, face, or device PIN — to re-encrypt your wallet keys.",
     ): Outcome {
         // Note: the `helper.isMigrationComplete()` short-circuit was removed in v1.7.2
         // (#289). It caused new V1 rows inserted after the prefs flag was set (e.g.

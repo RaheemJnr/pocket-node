@@ -168,7 +168,7 @@ class AddWalletViewModel @Inject constructor(
                     walletType = KeyManager.WALLET_TYPE_MNEMONIC,
                     mnemonicBackedUp = false,
                     promptTitle = "Secure new sub-account",
-                    promptSubtitle = "Encrypt the new account's keys.",
+                    promptSubtitle = "Use your phone's screen lock to encrypt the new account's keys.",
                 )
             }
             result.onSuccess { wallet ->

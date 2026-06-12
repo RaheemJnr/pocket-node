@@ -474,6 +474,7 @@
     <!-- endregion -->
 
     <!-- region: sync stall banner (#150) -->
+    <string name="mnemonic_import_screen_lock_notice">Next, Android will ask for your screen lock (fingerprint, face, or device PIN) to encrypt your keys on this device.</string>
     <string name="bg_sync_pill_title_off">Balance may be out of date</string>
     <string name="bg_sync_pill_body_off">Background sync is off, so this wallet only updates while the app is open. Turn it on to stay current.</string>
     <string name="bg_sync_pill_title_dead">Background sync was interrupted</string>
