@@ -14,7 +14,13 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.layout.imePadding
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.KeyboardOptions
+import androidx.compose.foundation.verticalScroll
+import androidx.compose.ui.platform.LocalFocusManager
+import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
@@ -88,6 +94,13 @@ internal fun SyncOptionsSheet(
                 .fillMaxWidth()
                 .widthIn(max = centredContentMaxWidth())
                 .align(Alignment.CenterHorizontally)
+                // #332: the numeric keyboard covered the Cancel/Apply row at
+                // the bottom of the sheet — users reported "no confirm
+                // button". imePadding lifts the content above the keyboard;
+                // verticalScroll makes the lifted content reachable on small
+                // screens.
+                .verticalScroll(rememberScrollState())
+                .imePadding()
                 .padding(start = 24.dp, end = 24.dp, top = 8.dp, bottom = 24.dp),
             verticalArrangement = Arrangement.spacedBy(8.dp),
         ) {
@@ -320,6 +333,7 @@ private fun CustomBlockInput(
     val parsedHeight = value.toLongOrNull()
     val exceedsTip = parsedHeight != null && tipBlockNumber > 0 && parsedHeight > tipBlockNumber
     val invalidNumber = value.isNotBlank() && parsedHeight == null
+    val focusManager = LocalFocusManager.current
 
     Row(verticalAlignment = Alignment.CenterVertically) {
         OutlinedTextField(
@@ -327,7 +341,14 @@ private fun CustomBlockInput(
             onValueChange = onValueChange,
             label = { Text(stringResource(R.string.sync_custom_block_label)) },
             placeholder = { Text(stringResource(R.string.sync_custom_block_placeholder)) },
-            keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+            // #332: without an explicit IME action the numeric keyboard's
+            // Enter key did nothing on this singleLine field. Done clears
+            // focus, dropping the keyboard so the Apply button is visible.
+            keyboardOptions = KeyboardOptions(
+                keyboardType = KeyboardType.Number,
+                imeAction = ImeAction.Done,
+            ),
+            keyboardActions = KeyboardActions(onDone = { focusManager.clearFocus() }),
             modifier = Modifier.weight(1f),
             singleLine = true,
             isError = invalidNumber || exceedsTip,
