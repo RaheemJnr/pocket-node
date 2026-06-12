@@ -109,7 +109,11 @@ data class DaoUiState(
     val error: com.rjnr.pocketnode.ui.util.UiMessage? = null,
     val pendingAction: DaoAction? = null,
     val requiresAuth: Boolean = false,
-    val authMethod: AuthMethod? = null
+    val authMethod: AuthMethod? = null,
+    // #332: cached deposits that predate the sync window — drives the
+    // deeper-rescan banner on DaoScreen.
+    val outsideWindowCount: Int = 0,
+    val isDeepRescanning: Boolean = false
 )
 
 // -- DAO header field extraction result --

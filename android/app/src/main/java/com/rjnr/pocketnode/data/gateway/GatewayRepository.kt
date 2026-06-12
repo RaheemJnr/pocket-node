@@ -1751,7 +1751,93 @@ class GatewayRepository @Inject constructor(
     suspend fun getDaoDeposits(): Result<List<DaoDeposit>> = runCatching {
         val info = _walletInfo.value ?: throw Exception("No wallet")
         val currentEpoch = getCurrentEpoch().getOrNull()
-        daoDepositReader.list(info.script, currentEpoch, currentNetwork)
+        val live = daoDepositReader.list(info.script, currentEpoch, currentNetwork)
+        mergeWithCachedDaoDeposits(live)
+    }
+
+    /**
+     * #332 windowing recovery. The light client only indexes cells created
+     * AFTER the script's registered start block, so a DAO deposit older than
+     * the chosen sync window silently vanishes from both the deposit list and
+     * the balance. Mitigation:
+     *  1. write-through: every live scan persists its deposits to dao_cells;
+     *  2. reconcile: cached active deposits INSIDE the window that the live
+     *     scan no longer returns were spent/unlocked — mark COMPLETED;
+     *  3. merge: cached active deposits from BEFORE the window are appended,
+     *     flagged [DaoDeposit.outsideSyncWindow] so the UI can offer the
+     *     deeper-rescan recovery instead of pretending they don't exist.
+     */
+    private suspend fun mergeWithCachedDaoDeposits(live: List<DaoDeposit>): List<DaoDeposit> {
+        val walletId = activeWalletId
+        if (walletId.isEmpty()) return live
+        val network = currentNetwork.name
+        val nowMs = System.currentTimeMillis()
+
+        runCatching {
+            daoSyncManager.upsertDaoCells(live.map { it.toDaoCellEntity(network, walletId, nowMs) })
+        }.onFailure { Log.w(TAG, "DAO write-through failed: ${it.message}") }
+
+        val windowStart = getExistingScriptBlock()
+        val liveKeys = live.map { "${it.outPoint.txHash}:${it.outPoint.index}" }.toSet()
+        val cached = runCatching { daoSyncManager.getActiveDeposits(network, walletId) }
+            .getOrDefault(emptyList())
+
+        val outsideWindow = mutableListOf<DaoDeposit>()
+        for (entity in cached) {
+            val key = "${entity.txHash}:${entity.index}"
+            if (key in liveKeys) continue
+            // DEPOSITING rows are optimistic pre-confirmation inserts with
+            // blockNumber 0 — not windowing victims; leave them alone.
+            if (entity.status == DaoCellStatus.DEPOSITING.name) continue
+            if (windowStart > 0 && entity.depositBlockNumber in 1 until windowStart) {
+                outsideWindow += entity.toOutsideWindowDeposit()
+            } else {
+                // Inside the window yet absent from the live scan: the cell
+                // was spent (withdrawn/unlocked) — retire the cached row so it
+                // doesn't resurrect.
+                runCatching {
+                    daoSyncManager.updateStatus(entity.txHash, entity.index, DaoCellStatus.COMPLETED.name)
+                }
+            }
+        }
+        if (outsideWindow.isNotEmpty()) {
+            Log.i(TAG, "DAO merge: ${outsideWindow.size} cached deposit(s) predate sync window (start=$windowStart)")
+        }
+        return live + outsideWindow
+    }
+
+    /**
+     * User-confirmed deeper rescan to re-index DAO deposits that predate the
+     * current sync window (#332). Rewinds the wallet's lock script to just
+     * before the oldest cached out-of-window deposit. Multi-hour cost on
+     * mainnet — callers must gate behind an explicit confirmation dialog.
+     * Returns the rewind target block.
+     */
+    suspend fun rescanForOlderDaoDeposits(): Result<Long> = runCatching {
+        val info = _walletInfo.value ?: throw Exception("No wallet")
+        val walletId = activeWalletId.takeIf { it.isNotEmpty() } ?: throw Exception("No active wallet")
+        val windowStart = getExistingScriptBlock()
+        val oldest = daoSyncManager.getActiveDeposits(currentNetwork.name, walletId)
+            .filter { it.status != DaoCellStatus.DEPOSITING.name }
+            .filter { windowStart > 0 && it.depositBlockNumber in 1 until windowStart }
+            .minOfOrNull { it.depositBlockNumber }
+            ?: throw Exception("No deposits older than the current sync window")
+        val target = (oldest - 100).coerceAtLeast(0L)
+        val ok = setScriptsAndRecord(
+            listOf(
+                JniScriptStatus(
+                    script = info.script,
+                    scriptType = "lock",
+                    blockNumber = "0x${target.toString(16)}"
+                )
+            ),
+            listOf(walletId),
+            LightClientNative.CMD_SET_SCRIPTS_PARTIAL,
+            allowRewind = true, // explicitly user-initiated rewind
+        )
+        if (!ok) throw Exception("Light client refused script registration")
+        Log.i(TAG, "DAO deep rescan: rewound script to block $target (oldest cached deposit at $oldest)")
+        target
     }
 
 

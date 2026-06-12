@@ -63,6 +63,39 @@ class DaoViewModel @Inject constructor(
         }
     }
 
+    /**
+     * #332: user-confirmed deeper rescan to re-index DAO deposits that
+     * predate the sync window. Multi-hour cost — DaoScreen gates this
+     * behind an explicit confirmation dialog.
+     */
+    fun deepRescanForOlderDeposits() {
+        viewModelScope.launch {
+            _uiState.update { it.copy(isDeepRescanning = true) }
+            repository.rescanForOlderDaoDeposits()
+                .onSuccess { target ->
+                    _uiState.update {
+                        it.copy(
+                            isDeepRescanning = false,
+                            error = com.rjnr.pocketnode.ui.util.UiMessage.Raw(
+                                "Deep rescan started from block $target. " +
+                                    "This can take a while — leave the app open or enable background sync."
+                            )
+                        )
+                    }
+                }
+                .onFailure { e ->
+                    _uiState.update {
+                        it.copy(
+                            isDeepRescanning = false,
+                            error = com.rjnr.pocketnode.ui.util.UiMessage.Raw(
+                                e.message ?: "Deep rescan failed"
+                            )
+                        )
+                    }
+                }
+        }
+    }
+
     private suspend fun refreshDaoData() {
         repository.getDaoDeposits()
             .onSuccess { deposits ->
@@ -93,7 +126,8 @@ class DaoViewModel @Inject constructor(
                         activeDeposits = active,
                         completedDeposits = completed,
                         isLoading = false,
-                        error = null
+                        error = null,
+                        outsideWindowCount = deposits.count { d -> d.outsideSyncWindow }
                     )
                 }
 

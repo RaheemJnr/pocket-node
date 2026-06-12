@@ -47,6 +47,7 @@ fun DaoScreen(
     val networkType by viewModel.networkType.collectAsState()
     val snackbarHostState = remember { SnackbarHostState() }
     var showDepositSheet by remember { mutableStateOf(false) }
+    var showDeepRescanConfirm by remember { mutableStateOf(false) }
     var withdrawTarget by remember { mutableStateOf<DaoDeposit?>(null) }
     var unlockTarget by remember { mutableStateOf<DaoDeposit?>(null) }
     val context = LocalContext.current
@@ -112,6 +113,50 @@ fun DaoScreen(
                         completedCount = uiState.overview.completedCount,
                         onTabSelected = viewModel::selectTab
                     )
+                }
+
+                // #332: cached deposits that predate the sync window. The
+                // light client can't see them, so status/compensation are
+                // stale and they don't count toward live balance — offer the
+                // deeper rescan instead of silently hiding them.
+                if (uiState.outsideWindowCount > 0) {
+                    item("outside-window-banner") {
+                        Card(
+                            modifier = Modifier.fillMaxWidth(),
+                            colors = CardDefaults.cardColors(
+                                containerColor = MaterialTheme.colorScheme.secondaryContainer
+                            )
+                        ) {
+                            Column(
+                                modifier = Modifier.padding(12.dp),
+                                verticalArrangement = Arrangement.spacedBy(8.dp)
+                            ) {
+                                Text(
+                                    text = "${uiState.outsideWindowCount} deposit(s) were made before this wallet's sync window",
+                                    style = MaterialTheme.typography.titleSmall,
+                                    color = MaterialTheme.colorScheme.onSecondaryContainer
+                                )
+                                Text(
+                                    text = "Shown from this device's records. Status and compensation may be " +
+                                        "outdated, and they aren't counted in your live balance. Run a deep " +
+                                        "rescan to re-index them on-chain.",
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = MaterialTheme.colorScheme.onSecondaryContainer
+                                )
+                                Row(
+                                    modifier = Modifier.fillMaxWidth(),
+                                    horizontalArrangement = Arrangement.End
+                                ) {
+                                    Button(
+                                        onClick = { showDeepRescanConfirm = true },
+                                        enabled = !uiState.isDeepRescanning,
+                                    ) {
+                                        Text(if (uiState.isDeepRescanning) "Starting…" else "Deep rescan")
+                                    }
+                                }
+                            }
+                        }
+                    }
                 }
 
                 // Pending action banner — only when an action is in flight.
@@ -192,6 +237,32 @@ fun DaoScreen(
                 }
             }
         }
+    }
+
+    // #332 deep-rescan confirmation: rewinding the script means re-scanning
+    // millions of block filters — hours on mainnet. Never trigger silently.
+    if (showDeepRescanConfirm) {
+        AlertDialog(
+            onDismissRequest = { showDeepRescanConfirm = false },
+            title = { Text("Deep rescan for older deposits?") },
+            text = {
+                Text(
+                    "Your wallet will re-scan the chain from just before your oldest " +
+                        "recorded deposit. On mainnet this can take several hours; the " +
+                        "app stays usable while it runs. Balance and history keep " +
+                        "updating as the scan progresses."
+                )
+            },
+            confirmButton = {
+                Button(onClick = {
+                    showDeepRescanConfirm = false
+                    viewModel.deepRescanForOlderDeposits()
+                }) { Text("Start rescan") }
+            },
+            dismissButton = {
+                TextButton(onClick = { showDeepRescanConfirm = false }) { Text("Cancel") }
+            }
+        )
     }
 
     // Snackbar for errors
