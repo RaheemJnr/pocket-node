@@ -68,7 +68,11 @@ data class DaoDeposit(
     val compensationCycleProgress: Float = 0f,
     val cyclePhase: CyclePhase = CyclePhase.NORMAL,
     val depositTimestamp: Long = 0L,  // Unix millis from block header
-    val apc: Double = 0.0             // annualized per-deposit APC %
+    val apc: Double = 0.0,            // annualized per-deposit APC %
+    // #332: deposit known from the Room cache but created BEFORE the script's
+    // current sync window — the light client cannot see it, so compensation/
+    // status may be stale until the user runs a deeper rescan.
+    val outsideSyncWindow: Boolean = false
 )
 
 // -- Aggregate overview --
@@ -105,7 +109,11 @@ data class DaoUiState(
     val error: com.rjnr.pocketnode.ui.util.UiMessage? = null,
     val pendingAction: DaoAction? = null,
     val requiresAuth: Boolean = false,
-    val authMethod: AuthMethod? = null
+    val authMethod: AuthMethod? = null,
+    // #332: cached deposits that predate the sync window — drives the
+    // deeper-rescan banner on DaoScreen.
+    val outsideWindowCount: Int = 0,
+    val isDeepRescanning: Boolean = false
 )
 
 // -- DAO header field extraction result --
