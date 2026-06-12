@@ -854,6 +854,7 @@ class GatewayRepository @Inject constructor(
                 val cellsPag = json.decodeFromString<JniPagination<JniCell>>(cellsJson)
                 var liveCapacity = 0L
                 var liveCellCount = 0
+                var typedCellCount = 0
 
                 cellsPag.objects.forEach { cell ->
                     val outpointKey = "${cell.outPoint.txHash}:${cell.outPoint.index}"
@@ -867,6 +868,7 @@ class GatewayRepository @Inject constructor(
                         if (cellCapacity == null) {
                             Log.w(TAG, "Skipping cell $outpointKey with unparseable capacity ${cell.output.capacity}")
                         } else if (cell.output.type != null) {
+                            typedCellCount++
                             Log.d(TAG, "🔒 DAO/typed cell excluded from balance: $outpointKey = $cellCapacity shannons")
                         } else {
                             liveCapacity += cellCapacity
@@ -881,10 +883,24 @@ class GatewayRepository @Inject constructor(
                 Log.d(TAG, "💰 Live balance: $liveCellCount cells, $liveCapacity shannons")
                 capacityVal = liveCapacity
 
-                // If we have 0 live cells but transactions exist, trigger rescan
-                if (liveCapacity == 0L && txJson != null) {
+                // Rescue rescan (#332): only for a wallet that is GENUINELY
+                // empty (no spendable AND no typed/DAO cells) yet has history,
+                // at most once per wallet per process, and never while sync is
+                // still catching up. The old `liveCapacity == 0` trigger
+                // counted DAO deposits as nothing and re-fired after every
+                // refresh — rewinding the light client to the wallet's
+                // earliest transaction in an infinite loop.
+                if (txJson != null) {
                     val txPag = json.decodeFromString<JniPagination<JniTxWithCell>>(txJson)
-                    if (txPag.objects.isNotEmpty()) {
+                    if (shouldAttemptZeroCellRescan(
+                            spendableCapacity = liveCapacity,
+                            typedCellCount = typedCellCount,
+                            hasTransactions = txPag.objects.isNotEmpty(),
+                            alreadyAttempted = activeWalletId in balanceRescanAttempted,
+                            isSyncing = _syncProgress.value.isSyncing,
+                        )
+                    ) {
+                        balanceRescanAttempted.add(activeWalletId)
                         Log.w(TAG, "🔄 Have ${txPag.objects.size} transactions but 0 live cells - triggering rescan")
                         val earliestBlock = txPag.objects
                             .mapNotNull { it.blockNumber.removePrefix("0x").toLongOrNull(16) }
@@ -901,7 +917,12 @@ class GatewayRepository @Inject constructor(
                             )
                         )
                         setScriptsAndRecord(scriptStatuses, listOf(activeWalletId), LightClientNative.CMD_SET_SCRIPTS_PARTIAL)
-                        setWalletSyncBlock(activeWalletId, rescanFrom)
+                        // Deliberately NOT persisted via setWalletSyncBlock: the
+                        // light client's own storage carries the rewind for this
+                        // session, and the sync poll's monotonic write records
+                        // progress as it advances. Persisting the regression made
+                        // it survive restarts — re-registering from the rewound
+                        // block forever (#332).
                         Log.d(TAG, "✅ Rescan triggered (partial) - balance should update on next refresh")
                     }
                 }
@@ -1967,6 +1988,11 @@ class GatewayRepository @Inject constructor(
     // Throttle for the lastSyncedAt pref write in the sync poll (#286).
     @Volatile
     private var lastSyncedAtWrittenMs = 0L
+
+    // One rescue rescan per wallet per process (#332) — the rescan itself
+    // takes hours on a long-history wallet; re-firing restarts it.
+    private val balanceRescanAttempted =
+        java.util.Collections.synchronizedSet(mutableSetOf<String>())
 
     fun startSyncPolling() {
         if (syncPollingJob?.isActive == true) return
