@@ -1337,14 +1337,25 @@ class GatewayRepository @Inject constructor(
             transaction.cellInputs.map { it.previousOutput }
         )
 
-        // Compute balanceChange = -(smallest output) for the activity row.
-        // For a normal transfer the smallest output is the recipient; for a
-        // "send all" there's only one output. Either way: smallest by capacity.
-        val outgoingAmount = transaction.cellOutputs
-            .mapNotNull { it.capacity.removePrefix("0x").toLongOrNull(16) }.minOrNull()
-            ?: 0L
+        // Outgoing amount for the activity row. This path (DAO unlock,
+        // failed-send retry) has no input capacities, so it sums the outputs
+        // NOT locked to us — the recipient amount. The old code used
+        // min(all outputs), which returned the CHANGE output whenever
+        // change < amount sent (same bug as buildReserveAndSend; see #350).
+        // Transfers via buildReserveAndSend insert their own (more precise)
+        // net-debit row first and skip the insert below, so this only drives
+        // standalone sends. A self-only tx (DAO unlock) sums to 0 and is
+        // reclassified by the synced row.
+        val ourLock = _walletInfo.value?.script
+        val outgoingOutputs = transaction.cellOutputs.map { output ->
+            OutgoingOutput(
+                capacityShannons = output.capacity.removePrefix("0x").toLongOrNull(16) ?: 0L,
+                isOurs = ourLock != null && output.lock == ourLock,
+                isTyped = output.type != null,
+            )
+        }
         // Positive hex per existing convention; `direction = "out"` carries sign.
-        val balanceChangeHex = "0x${outgoingAmount.toString(16)}"
+        val balanceChangeHex = "0x${recipientOutgoingShannons(outgoingOutputs).toString(16)}"
         val now = System.currentTimeMillis()
 
         Log.d(TAG, "📤 sendTransaction: JSON length=${txJson.length}, preHash=$txHash")

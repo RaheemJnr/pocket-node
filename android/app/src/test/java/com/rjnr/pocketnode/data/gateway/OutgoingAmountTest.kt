@@ -60,6 +60,31 @@ class OutgoingAmountTest {
         assertEquals(10_201 * ckb, out)
     }
 
+    // recipientOutgoingShannons: the output-only fallback for sendTransaction,
+    // which has no access to input capacities (DAO unlock, failed-send retry).
+    // Sums outputs NOT locked to us — the recipient amount.
+
+    @Test
+    fun `recipient-only sums non-ours outputs, ignoring change`() {
+        val out = recipientOutgoingShannons(
+            listOf(
+                OutgoingOutput(150_000 * ckb, isOurs = false, isTyped = false),
+                OutgoingOutput(17_950_29000000L, isOurs = true, isTyped = false),
+            ),
+        )
+        assertEquals(150_000 * ckb, out)
+    }
+
+    @Test
+    fun `recipient-only is zero when every output returns to us`() {
+        // DAO unlock returns funds to self; no recipient leg. Shows 0 briefly,
+        // then the synced row reclassifies it as dao_unlock (incoming).
+        val out = recipientOutgoingShannons(
+            listOf(OutgoingOutput(10_500 * ckb, isOurs = true, isTyped = false)),
+        )
+        assertEquals(0L, out)
+    }
+
     @Test
     fun `never negative`() {
         val out = computeOutgoingShannons(

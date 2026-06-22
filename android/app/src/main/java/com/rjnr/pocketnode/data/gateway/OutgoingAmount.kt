@@ -28,3 +28,14 @@ fun computeOutgoingShannons(
     val change = outputs.filter { it.isOurs && !it.isTyped }.sumOf { it.capacityShannons }
     return (inputs - change).coerceAtLeast(0L)
 }
+
+/**
+ * Output-only outgoing amount: the sum of outputs NOT locked to us (the
+ * recipient amount). Used where input capacities are not available —
+ * `sendTransaction`'s standalone insert (DAO unlock, failed-send retry).
+ * Excludes the fee (which lives in the inputs), so it can read marginally
+ * lower than [computeOutgoingShannons], but it never reports the change
+ * output as the amount sent — the bug this replaces.
+ */
+fun recipientOutgoingShannons(outputs: List<OutgoingOutput>): Long =
+    outputs.filter { !it.isOurs }.sumOf { it.capacityShannons }
