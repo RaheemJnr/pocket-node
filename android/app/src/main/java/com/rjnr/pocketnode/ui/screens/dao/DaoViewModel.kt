@@ -43,6 +43,16 @@ class DaoViewModel @Inject constructor(
     private var pendingDepositAmount: Long = 0L
 
     init {
+        // #347: rehydrate the "Withdrawing from DAO…" banner from the persisted
+        // marker so it survives process death (it was previously in-memory
+        // only). The per-deposit card overlay shows independently via the
+        // repository overlay; this also restores the faster 10s poll cadence.
+        viewModelScope.launch {
+            repository.getInFlightWithdrawOutPoints().firstOrNull()?.let { outPoint ->
+                _uiState.update { it.copy(pendingAction = DaoAction.Withdrawing(outPoint)) }
+            }
+        }
+
         startPolling()
 
         // Refresh DAO deposits when active wallet changes

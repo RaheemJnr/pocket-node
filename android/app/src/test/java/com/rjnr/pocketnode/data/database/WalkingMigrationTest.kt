@@ -106,6 +106,24 @@ class WalkingMigrationTest {
     }
 
     /**
+     * #347: a v10 file walked all the way to v12 must gain the
+     * `pending_dao_withdraws` table + its index (MIGRATION_11_12), with
+     * schema validation passing.
+     */
+    @Test
+    fun `walk to v12 creates pending_dao_withdraws table`() {
+        bootstrapV10()
+        openViaRoomAndValidate()
+        val db = openedRoomDb!!.openHelper.readableDatabase
+        db.query("SELECT name FROM sqlite_master WHERE type='table' AND name='pending_dao_withdraws'").use { c ->
+            assertTrue("pending_dao_withdraws table missing after MIGRATION_11_12", c.moveToNext())
+        }
+        db.query("SELECT name FROM sqlite_master WHERE type='index' AND name='idx_pending_withdraw_wallet_network'").use { c ->
+            assertTrue("idx_pending_withdraw_wallet_network missing", c.moveToNext())
+        }
+    }
+
+    /**
      * v1.6.x → v1.7.0 path: bootstrap a v9 SQLite file (no `kdfVersion`
      * column on `key_material`) and confirm MIGRATION_9_10 adds the
      * column with default 1, then Room schema validation passes.
@@ -150,7 +168,7 @@ class WalkingMigrationTest {
                 .addMigrations(
                     MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4, MIGRATION_4_5,
                     MIGRATION_5_6, MIGRATION_6_7, MIGRATION_7_8, noOpMigration8To9,
-                    MIGRATION_9_10, MIGRATION_10_11,
+                    MIGRATION_9_10, MIGRATION_10_11, MIGRATION_11_12,
                 )
                 .build()
             openedRoomDb = db
@@ -180,7 +198,7 @@ class WalkingMigrationTest {
             .addMigrations(
                 MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4, MIGRATION_4_5,
                 MIGRATION_5_6, MIGRATION_6_7, MIGRATION_7_8, MIGRATION_8_9,
-                MIGRATION_9_10, MIGRATION_10_11,
+                MIGRATION_9_10, MIGRATION_10_11, MIGRATION_11_12,
             )
             .build()
         openedRoomDb = db
