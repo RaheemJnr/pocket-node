@@ -1752,7 +1752,66 @@ class GatewayRepository @Inject constructor(
         val info = _walletInfo.value ?: throw Exception("No wallet")
         val currentEpoch = getCurrentEpoch().getOrNull()
         val live = daoDepositReader.list(info.script, currentEpoch, currentNetwork)
-        mergeWithCachedDaoDeposits(live)
+        applyPendingWithdrawOverlay(mergeWithCachedDaoDeposits(live))
+    }
+
+    /**
+     * #347: overlay in-flight phase-1 withdraws onto the deposit list. The
+     * deposit cell scans as DEPOSITED until the withdraw commits and is
+     * indexed, so without this a just-withdrawn deposit looks withdrawable
+     * again (double-withdraw) and the only "withdrawing" signal — the
+     * in-memory banner — is lost on restart. The persisted marker carries the
+     * state across process death; [resolvePendingWithdraw] decides per marker
+     * whether to overlay WITHDRAWING, or retire it (committed / failed).
+     */
+    private suspend fun applyPendingWithdrawOverlay(deposits: List<DaoDeposit>): List<DaoDeposit> {
+        val walletId = activeWalletId
+        if (walletId.isEmpty()) return deposits
+        val network = currentNetwork.name
+        val withdrawDao = appDatabase.pendingDaoWithdrawDao()
+        val pending = runCatching { withdrawDao.getByWalletAndNetwork(walletId, network) }
+            .getOrDefault(emptyList())
+        if (pending.isEmpty()) return deposits
+
+        fun key(txHash: String, index: String) = "$txHash:$index"
+        val depositedKeys = deposits
+            .filter { it.status == DaoCellStatus.DEPOSITED }
+            .map { key(it.outPoint.txHash, it.outPoint.index) }
+            .toSet()
+
+        val overlayKeys = mutableSetOf<String>()
+        for (p in pending) {
+            val k = key(p.depositTxHash, p.depositIndex)
+            val stillDeposited = k in depositedKeys
+            val txStatus = runCatching {
+                appDatabase.transactionDao().getByTxHash(p.withdrawTxHash)?.status
+            }.getOrNull()
+            when (resolvePendingWithdraw(stillDeposited, txStatus)) {
+                PendingWithdrawResolution.OVERLAY -> if (stillDeposited) overlayKeys.add(k)
+                PendingWithdrawResolution.CLEAR_CONFIRMED,
+                PendingWithdrawResolution.CLEAR_FAILED ->
+                    runCatching { withdrawDao.deleteByDeposit(p.depositTxHash, p.depositIndex) }
+            }
+        }
+        if (overlayKeys.isEmpty()) return deposits
+        return deposits.map {
+            if (key(it.outPoint.txHash, it.outPoint.index) in overlayKeys) {
+                it.copy(status = DaoCellStatus.WITHDRAWING)
+            } else it
+        }
+    }
+
+    /**
+     * Deposit outpoints with an in-flight withdraw (#347) — used by the DAO
+     * screen to rehydrate the "Withdrawing from DAO…" banner after restart.
+     */
+    suspend fun getInFlightWithdrawOutPoints(): List<OutPoint> {
+        val walletId = activeWalletId.takeIf { it.isNotEmpty() } ?: return emptyList()
+        return runCatching {
+            appDatabase.pendingDaoWithdrawDao()
+                .getByWalletAndNetwork(walletId, currentNetwork.name)
+                .map { OutPoint(it.depositTxHash, it.depositIndex) }
+        }.getOrDefault(emptyList())
     }
 
     /**
@@ -1961,6 +2020,23 @@ class GatewayRepository @Inject constructor(
             )
         }
         Log.d(TAG, "DAO withdraw (phase 1) sent: $txHash")
+
+        // #347: persist the in-flight withdraw so the deposit renders as
+        // WITHDRAWING ("Confirming…") across restart and can't be withdrawn
+        // twice. Cleared by applyPendingWithdrawOverlay on commit/failure.
+        runCatching {
+            appDatabase.pendingDaoWithdrawDao().upsert(
+                com.rjnr.pocketnode.data.database.entity.PendingDaoWithdrawEntity(
+                    depositTxHash = depositOutPoint.txHash,
+                    depositIndex = depositOutPoint.index,
+                    withdrawTxHash = txHash,
+                    walletId = activeWalletId,
+                    network = currentNetwork.name,
+                    createdAt = System.currentTimeMillis(),
+                )
+            )
+        }.onFailure { Log.w(TAG, "Failed to persist pending withdraw marker: ${it.message}") }
+
         txHash
     }
 

@@ -8,11 +8,13 @@ import com.rjnr.pocketnode.data.database.dao.DaoCellDao
 import com.rjnr.pocketnode.data.database.dao.HeaderCacheDao
 import com.rjnr.pocketnode.data.database.dao.KeyMaterialDao
 import com.rjnr.pocketnode.data.database.dao.PendingBroadcastDao
+import com.rjnr.pocketnode.data.database.dao.PendingDaoWithdrawDao
 import com.rjnr.pocketnode.data.database.dao.SyncProgressDao
 import com.rjnr.pocketnode.data.database.dao.TransactionDao
 import com.rjnr.pocketnode.data.database.dao.WalletDao
 import com.rjnr.pocketnode.data.database.entity.BalanceCacheEntity
 import com.rjnr.pocketnode.data.database.entity.ContactEntity
+import com.rjnr.pocketnode.data.database.entity.PendingDaoWithdrawEntity
 import com.rjnr.pocketnode.data.database.entity.DaoCellEntity
 import com.rjnr.pocketnode.data.database.entity.HeaderCacheEntity
 import com.rjnr.pocketnode.data.database.entity.KeyMaterialEntity
@@ -32,6 +34,7 @@ import com.rjnr.pocketnode.data.database.entity.WalletEntity
         SyncProgressEntity::class,
         PendingBroadcastEntity::class,
         ContactEntity::class,
+        PendingDaoWithdrawEntity::class,
     ],
     // Bumped from 8 to 9 in v1.5.2 because TransactionEntity / BalanceCacheEntity
     // / DaoCellEntity gained @Index(idx_tx_pending) + @ColumnInfo(defaultValue)
@@ -50,7 +53,11 @@ import com.rjnr.pocketnode.data.database.entity.WalletEntity
     // the `contacts` table with indices on address and walletId. No
     // existing column changed; MIGRATION_10_11 is a single CREATE TABLE
     // + 2 CREATE INDEX.
-    version = 11,
+    //
+    // Bumped from 11 to 12 for #347: adds the `pending_dao_withdraws` table —
+    // durable marker for an in-flight DAO phase-1 withdraw. MIGRATION_11_12 is
+    // a single CREATE TABLE + 1 CREATE INDEX.
+    version = 12,
     // Schema export deliberately OFF until the Room 2.8.4 / kotlinx-serialization
     // 1.8.0 binary incompatibility is resolved (tracked in #149). Enabling it
     // crashes KSP with AbstractMethodError in Room's bundled
@@ -71,4 +78,5 @@ abstract class AppDatabase : RoomDatabase() {
     abstract fun syncProgressDao(): SyncProgressDao
     abstract fun pendingBroadcastDao(): PendingBroadcastDao
     abstract fun contactDao(): ContactDao
+    abstract fun pendingDaoWithdrawDao(): PendingDaoWithdrawDao
 }

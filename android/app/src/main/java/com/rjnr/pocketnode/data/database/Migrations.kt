@@ -426,6 +426,25 @@ val MIGRATION_9_10 = object : Migration(9, 10) {
  * so smart-suggestion ranking has stable starting values. Existing
  * rows are unaffected — this is a pure additive migration.
  */
+val MIGRATION_11_12 = object : Migration(11, 12) {
+    override fun migrate(db: SupportSQLiteDatabase) {
+        db.execSQL(
+            """
+            CREATE TABLE IF NOT EXISTS `pending_dao_withdraws` (
+                `depositTxHash` TEXT NOT NULL,
+                `depositIndex` TEXT NOT NULL,
+                `withdrawTxHash` TEXT NOT NULL,
+                `walletId` TEXT NOT NULL,
+                `network` TEXT NOT NULL,
+                `createdAt` INTEGER NOT NULL,
+                PRIMARY KEY(`depositTxHash`, `depositIndex`)
+            )
+            """.trimIndent()
+        )
+        db.execSQL("CREATE INDEX IF NOT EXISTS `idx_pending_withdraw_wallet_network` ON `pending_dao_withdraws` (`walletId`, `network`)")
+    }
+}
+
 val MIGRATION_10_11 = object : Migration(10, 11) {
     override fun migrate(db: SupportSQLiteDatabase) {
         db.execSQL(
