@@ -113,65 +113,70 @@ fun DaoDepositCard(
 
             Spacer(modifier = Modifier.height(10.dp))
 
-            // Bottom row: date + action button
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.SpaceBetween,
-                verticalAlignment = Alignment.CenterVertically
-            ) {
-                // Deposit date with clock icon
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    Icon(
-                        imageVector = Icons.Outlined.Schedule,
-                        contentDescription = null,
-                        modifier = Modifier.size(14.dp),
-                        tint = MaterialTheme.colorScheme.onSurfaceVariant
-                    )
-                    Spacer(modifier = Modifier.width(4.dp))
-                    Text(
-                        text = formatStatusWithDate(deposit.status, deposit.depositTimestamp),
-                        style = MaterialTheme.typography.bodySmall,
-                        fontSize = 11.sp,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant
-                    )
-                }
+            // Deposit date with clock icon. On its own row — the timestamp is
+            // long ("Deposited 2026-05-23 18:49:27") and previously shared a
+            // SpaceBetween row with the action button, which squeezed
+            // "Withdraw" onto two lines on narrower screens (#304 follow-up).
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Icon(
+                    imageVector = Icons.Outlined.Schedule,
+                    contentDescription = null,
+                    modifier = Modifier.size(14.dp),
+                    tint = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+                Spacer(modifier = Modifier.width(4.dp))
+                Text(
+                    text = formatStatusWithDate(deposit.status, deposit.depositTimestamp),
+                    style = MaterialTheme.typography.bodySmall,
+                    fontSize = 11.sp,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+            }
 
-                // Action button
-                when (deposit.status) {
-                    DaoCellStatus.DEPOSITED -> {
-                        Button(
-                            onClick = onWithdraw,
-                            shape = RoundedCornerShape(8.dp),
-                            colors = ButtonDefaults.buttonColors(
-                                containerColor = DaoGreen,
-                                contentColor = Color.Black
-                            ),
-                            contentPadding = PaddingValues(horizontal = 16.dp, vertical = 6.dp)
-                        ) {
-                            Text(stringResource(R.string.dao_card_withdraw), fontWeight = FontWeight.Medium)
-                        }
+            // Action button (or progress) below the date — full width so the
+            // label can never wrap and the tap target is generous.
+            when (deposit.status) {
+                DaoCellStatus.DEPOSITED -> {
+                    Spacer(modifier = Modifier.height(12.dp))
+                    Button(
+                        onClick = onWithdraw,
+                        modifier = Modifier.fillMaxWidth(),
+                        shape = RoundedCornerShape(8.dp),
+                        colors = ButtonDefaults.buttonColors(
+                            containerColor = DaoGreen,
+                            contentColor = Color.Black
+                        )
+                    ) {
+                        Text(stringResource(R.string.dao_card_withdraw), fontWeight = FontWeight.Medium)
                     }
-                    DaoCellStatus.UNLOCKABLE -> {
-                        Button(
-                            onClick = onUnlock,
-                            shape = RoundedCornerShape(8.dp),
-                            colors = ButtonDefaults.buttonColors(
-                                containerColor = DaoGreen,
-                                contentColor = Color.Black
-                            ),
-                            contentPadding = PaddingValues(horizontal = 16.dp, vertical = 6.dp)
-                        ) {
-                            Text(stringResource(R.string.dao_card_unlock), fontWeight = FontWeight.Medium)
-                        }
+                }
+                DaoCellStatus.UNLOCKABLE -> {
+                    Spacer(modifier = Modifier.height(12.dp))
+                    Button(
+                        onClick = onUnlock,
+                        modifier = Modifier.fillMaxWidth(),
+                        shape = RoundedCornerShape(8.dp),
+                        colors = ButtonDefaults.buttonColors(
+                            containerColor = DaoGreen,
+                            contentColor = Color.Black
+                        )
+                    ) {
+                        Text(stringResource(R.string.dao_card_unlock), fontWeight = FontWeight.Medium)
                     }
-                    DaoCellStatus.DEPOSITING, DaoCellStatus.WITHDRAWING, DaoCellStatus.UNLOCKING -> {
+                }
+                DaoCellStatus.DEPOSITING, DaoCellStatus.WITHDRAWING, DaoCellStatus.UNLOCKING -> {
+                    Spacer(modifier = Modifier.height(12.dp))
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.Center
+                    ) {
                         CircularProgressIndicator(
                             modifier = Modifier.size(24.dp),
                             strokeWidth = 2.dp
                         )
                     }
-                    else -> { /* no action button */ }
                 }
+                else -> { /* no action button */ }
             }
         }
     }
