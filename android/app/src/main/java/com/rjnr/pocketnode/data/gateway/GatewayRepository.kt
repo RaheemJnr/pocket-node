@@ -1198,11 +1198,30 @@ class GatewayRepository @Inject constructor(
 
             // Outgoing amount for activity-row balanceChange. Stored as POSITIVE
             // hex per existing convention; `direction = "out"` carries the sign
-            // for the UI. (Prior code used "-0x..." which broke capacityAsLong's
-            // hex parser and rendered as 0.)
-            val outgoingAmount = signed.cellOutputs
-                .mapNotNull { it.capacity.removePrefix("0x").toLongOrNull(16) }.minOrNull()
-                ?: 0L
+            // for the UI.
+            //
+            // Net debit = Σ(our input capacities) − Σ(our plain-change outputs),
+            // matching the confirmed-row formula. The old code used
+            // min(all outputs), which returned the CHANGE output whenever
+            // change < amount sent — a 150,000 CKB send displayed as
+            // "-17,950.29" until the light client synced and corrected it
+            // (Alex, Telegram). A typed self-output (DAO deposit cell) is
+            // capacity leaving spendable, so it is not counted as change.
+            val inputCapacities = signed.cellInputs.mapNotNull { input ->
+                filtered.find { it.outPoint == input.previousOutput }
+                    ?.capacity?.removePrefix("0x")?.toLongOrNull(16)
+            }
+            val outgoingOutputs = signed.cellOutputs.map { output ->
+                val isOurs = runCatching {
+                    AddressUtils.encode(output.lock, senderNetwork)
+                }.getOrNull() == fromAddress
+                OutgoingOutput(
+                    capacityShannons = output.capacity.removePrefix("0x").toLongOrNull(16) ?: 0L,
+                    isOurs = isOurs,
+                    isTyped = output.type != null,
+                )
+            }
+            val outgoingAmount = computeOutgoingShannons(inputCapacities, outgoingOutputs)
             val balanceChangeHex = "0x${outgoingAmount.toString(16)}"
 
             pendingBroadcastDao.insert(
