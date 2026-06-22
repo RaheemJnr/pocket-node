@@ -1,0 +1,20 @@
+v1.7.4:
+This release fixes the sync and Nervos DAO problems users reported, and adds background sync and haptic feedback.
+
+Sync no longer loops forever on wallets with a long history. Wallets whose balance was entirely in Nervos DAO could get stuck re-scanning the chain endlessly; that is fixed.
+
+The custom block-height field now works. Its Apply button was hidden behind the keyboard and pressing Enter did nothing, so the height could not be set. You can now type a height and apply it.
+
+DAO deposits made before your sync window are no longer invisible. If an older deposit is missing, the DAO screen offers a deep rescan to find it.
+
+Withdrawing from Nervos DAO is reliable. The withdraw no longer hangs as "Withdrawing..." and then forgets it on restart, and a deposit can no longer be accidentally withdrawn twice. The state now survives closing the app.
+
+Completing a DAO unlock now succeeds. A transaction-encoding error previously caused the network to reject the final unlock.
+
+Background sync is now offered as a clear choice right after you set your PIN, instead of being buried in Settings. If your balance may be out of date, the home screen tells you and offers to turn it on.
+
+Security and reliability hardening: clipboard auto-clears after copying a key, the updater verifies the downloaded app's signature, wallet keys are wiped from memory after use, addresses and amounts are kept out of debug logs, and number parsing across balances and DAO is hardened against malformed data.
+
+Polish: the PIN keypad and copy actions now give haptic feedback, the screen-lock prompt explains which password it wants, and the DAO card layout no longer clips the Withdraw button.
+
+Source: github.com/RaheemJnr/pocket-node/releases
