@@ -41,6 +41,28 @@ class SyncStallDetectorTest {
     }
 
     @Test
+    fun `block regression rebaselines and does not report stalled`() {
+        // knmo: a rescue rescan / windowing recovery rewinds the script start
+        // block, so syncedToBlock drops below the prior high-water mark. The
+        // light client is actively scanning forward from the rewound point,
+        // but the old detector saw "not greater than baseline" and falsely
+        // reported a stall after 5 min. A regression must rebaseline.
+        detector.evaluate(19_000_000, 19_500_000, 0L)
+        val rewound = detector.evaluate(18_800_000, 19_500_000, 6L * 60L * 1000L)
+        assertFalse("regression must not be stalled", rewound.isStalled)
+        val advancing = detector.evaluate(18_900_000, 19_500_000, 6L * 60L * 1000L + 60_000L)
+        assertFalse(advancing.isStalled)
+    }
+
+    @Test
+    fun `genuine freeze after a regression still stalls`() {
+        detector.evaluate(19_000_000, 19_500_000, 0L)
+        detector.evaluate(18_800_000, 19_500_000, 1000L) // rewind rebaselines
+        val info = detector.evaluate(18_800_000, 19_500_000, 1000L + 6L * 60L * 1000L)
+        assertTrue(info.isStalled)
+    }
+
+    @Test
     fun `not stalled below threshold`() {
         detector.evaluate(5_000_000, 10_000_000, 0L)
         // Same block 4 minutes later — under 5 min threshold

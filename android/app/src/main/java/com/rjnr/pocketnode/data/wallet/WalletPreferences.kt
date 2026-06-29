@@ -193,6 +193,31 @@ class WalletPreferences @Inject constructor(
         prefs.edit().putBoolean(key, completed).apply()
     }
 
+    // --- Zero-live-cell rescue rescan (#332 / knmo) ---
+    // The rescue rescan rewinds the script to find cells the light client may
+    // have missed. For a wallet whose primary address legitimately has no live
+    // cells (e.g. funds on HD-derived addresses created by another wallet) the
+    // rescan finds nothing. The in-memory once-per-process latch stopped the
+    // within-session loop, but every cold start re-armed and re-rewound, so the
+    // user saw "Catching up from..." on every launch. This persists the attempt
+    // per wallet+network so it does not repeat each launch; cleared only by an
+    // explicit resync.
+
+    fun isZeroCellRescanDone(walletId: String, network: NetworkType? = null): Boolean {
+        val net = network ?: getSelectedNetwork()
+        return prefs.getBoolean(walletNetworkKey(walletId, net.name, KEY_ZERO_CELL_RESCAN_DONE), false)
+    }
+
+    fun setZeroCellRescanDone(walletId: String, network: NetworkType? = null) {
+        val net = network ?: getSelectedNetwork()
+        prefs.edit().putBoolean(walletNetworkKey(walletId, net.name, KEY_ZERO_CELL_RESCAN_DONE), true).apply()
+    }
+
+    fun clearZeroCellRescanDone(walletId: String, network: NetworkType? = null) {
+        val net = network ?: getSelectedNetwork()
+        prefs.edit().remove(walletNetworkKey(walletId, net.name, KEY_ZERO_CELL_RESCAN_DONE)).apply()
+    }
+
     // --- Background sync (global, not per-network) ---
 
     fun isBackgroundSyncEnabled(): Boolean {
@@ -337,6 +362,7 @@ class WalletPreferences @Inject constructor(
         private const val KEY_SYNC_MODE = "sync_mode"
         private const val KEY_CUSTOM_BLOCK_HEIGHT = "custom_block_height"
         private const val KEY_INITIAL_SYNC_COMPLETED = "initial_sync_completed"
+        private const val KEY_ZERO_CELL_RESCAN_DONE = "zero_cell_rescan_done"
         private const val KEY_ACTIVE_WALLET_ID = "active_wallet_id"
         private const val KEY_SYNC_STRATEGY = "sync_strategy"
         private const val KEY_THEME_MODE = "theme_mode"

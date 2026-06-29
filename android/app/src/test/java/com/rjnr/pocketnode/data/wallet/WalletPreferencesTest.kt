@@ -50,6 +50,27 @@ class WalletPreferencesTest {
         assertEquals(NetworkType.MAINNET, newPrefs().getSelectedNetwork())
     }
 
+    // --- Zero-cell rescue rescan flag (knmo: per-launch loop fix) ---
+
+    @Test
+    fun `zero-cell rescan flag defaults false, persists, and clears`() {
+        val prefs = newPrefs()
+        assertFalse(prefs.isZeroCellRescanDone("wallet-1"))
+        prefs.setZeroCellRescanDone("wallet-1")
+        assertTrue("persists across instances", newPrefs().isZeroCellRescanDone("wallet-1"))
+        prefs.clearZeroCellRescanDone("wallet-1")
+        assertFalse(newPrefs().isZeroCellRescanDone("wallet-1"))
+    }
+
+    @Test
+    fun `zero-cell rescan flag is per wallet and per network`() {
+        val prefs = newPrefs()
+        prefs.setZeroCellRescanDone("wallet-1", NetworkType.MAINNET)
+        assertFalse("other wallet unaffected", prefs.isZeroCellRescanDone("wallet-2", NetworkType.MAINNET))
+        assertFalse("other network unaffected", prefs.isZeroCellRescanDone("wallet-1", NetworkType.TESTNET))
+        assertTrue(prefs.isZeroCellRescanDone("wallet-1", NetworkType.MAINNET))
+    }
+
     // --- Per-network isolation: sync mode ---
 
     @Test

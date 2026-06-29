@@ -7,7 +7,8 @@ package com.rjnr.pocketnode.data.sync
  *
  * Contract:
  *  - First [evaluate] call captures the baseline; never reports stalled.
- *  - Every advance (syncedBlock > lastObservedBlock) refreshes the baseline.
+ *  - Any change in syncedBlock (forward OR a rewind from a rescan/windowing
+ *    recovery) refreshes the baseline; only a frozen block accrues stall time.
  *  - When syncedBlock has not advanced for >= [stallThresholdMs] AND we are
  *    not within [SYNC_TOLERANCE] of tip, [StallInfo.isStalled] is true.
  *  - When within tolerance of tip, baseline resets and stall flag clears.
@@ -44,7 +45,13 @@ class SyncStallDetector(
             return StallInfo(false, 0L, syncedBlock, tipBlock)
         }
 
-        if (syncedBlock > lastObservedBlock) {
+        // Rebaseline on ANY change, not just forward. A rescue rescan or
+        // windowing recovery rewinds the registered script start block, so
+        // syncedToBlock drops below the prior high-water mark (knmo). That is
+        // the light client re-scanning forward from an earlier point, not a
+        // stall — treating a regression as "no advance" made the banner fire
+        // while blocks were actively progressing.
+        if (syncedBlock != lastObservedBlock) {
             lastObservedBlock = syncedBlock
             lastAdvanceAtMs = nowMs
             return StallInfo(false, 0L, syncedBlock, tipBlock)
