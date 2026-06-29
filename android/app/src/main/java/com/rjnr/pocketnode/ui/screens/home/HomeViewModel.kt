@@ -508,12 +508,15 @@ class HomeViewModel @Inject constructor(
      * This will re-register with the light client using the new sync settings.
      */
     fun changeSyncMode(syncMode: SyncMode, customBlockHeight: Long? = null) {
-        // No-op when the user re-selects the currently-active mode (no change to
-        // resync against). Without this guard, re-selecting RECENT after a full
-        // sync would wipe progress and re-sync the last 200k blocks. (#108)
-        val current = _uiState.value
-        if (syncMode == current.currentSyncMode && customBlockHeight == current.savedCustomBlockHeight) {
-            Log.d(TAG, "changeSyncMode: same mode + height already active — no-op")
+        // No-op only when the wallet is ACTUALLY registered at this setting, not
+        // merely when the displayed value matches (knmo B, Option 2). The old
+        // guard compared against UI state, which could disagree with what was
+        // really applied (issue C wrote the pref but registered RECENT), so a
+        // re-tap silently no-opped and the restore point needed an app restart.
+        // Original purpose stands: re-selecting an already-applied mode must not
+        // wipe progress and re-sync (#108).
+        if (repository.isSyncSettingApplied(syncMode, customBlockHeight)) {
+            Log.d(TAG, "changeSyncMode: already registered at this setting — no-op")
             return
         }
         viewModelScope.launch {
