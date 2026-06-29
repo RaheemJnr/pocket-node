@@ -109,8 +109,8 @@ fun SecuritySettingsScreen(
                 title = { Text(stringResource(R.string.security_settings_pin_required_title)) },
                 text = {
                     Text(
-                        "A PIN is mandatory while you have a wallet. It protects your PIN-encrypted recovery backup.\n\n" +
-                        "To remove the PIN, first delete every wallet in Wallet Manager. Make sure you have your recovery phrase written down before deleting."
+                        "This is intentional, not an error. Your PIN encrypts the recovery backup that can restore a wallet, so a PIN stays required as long as any wallet exists.\n\n" +
+                        "To remove the PIN, first write down your recovery phrase, then delete every wallet in Wallet Manager. The option becomes available once no wallets remain."
                     )
                 },
                 confirmButton = {
