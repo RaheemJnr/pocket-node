@@ -49,6 +49,7 @@ class AddWalletViewModelTest {
     private lateinit var mnemonicManager: MnemonicManager
     private lateinit var walletKeyReader: WalletKeyReader
     private lateinit var walletKeyWriter: WalletKeyWriter
+    private lateinit var authManager: com.rjnr.pocketnode.data.auth.AuthManager
     private lateinit var activity: FragmentActivity
 
     private val parentMnemonicWords = "abandon abandon abandon abandon abandon abandon " +
@@ -65,6 +66,11 @@ class AddWalletViewModelTest {
         mnemonicManager = mockk(relaxed = true)
         walletKeyReader = mockk(relaxed = true)
         walletKeyWriter = mockk(relaxed = true)
+        authManager = mockk(relaxed = true)
+        // Default: device has a secure lock, so the V2 path runs (matches
+        // the pre-#354 behavior these tests were written against).
+        io.mockk.every { authManager.isBiometricEnrolled() } returns true
+        io.mockk.every { authManager.hasDeviceCredential() } returns true
         activity = mockk(relaxed = true)
     }
 
@@ -80,6 +86,7 @@ class AddWalletViewModelTest {
         mnemonicManager = mnemonicManager,
         walletKeyReader = walletKeyReader,
         walletKeyWriter = walletKeyWriter,
+        authManager = authManager,
     )
 
     @Test

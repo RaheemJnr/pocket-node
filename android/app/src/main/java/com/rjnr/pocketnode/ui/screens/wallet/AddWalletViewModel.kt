@@ -47,7 +47,52 @@ class AddWalletViewModel @Inject constructor(
     private val mnemonicManager: MnemonicManager,
     private val walletKeyReader: WalletKeyReader,
     private val walletKeyWriter: WalletKeyWriter,
+    private val authManager: com.rjnr.pocketnode.data.auth.AuthManager,
 ) : ViewModel() {
+
+    /**
+     * #354: a V2 auth-bound Keystore key needs an enrolled biometric or a
+     * device credential. Without one, key creation throws
+     * IllegalStateException("Secure lock screen must be enabled..."). The
+     * main-wallet flow already falls back to a software-only V1 key in that
+     * case; the add-wallet / sub-account flows did not, so they crashed.
+     * Mirror the same gate here.
+     */
+    private fun canCreateV2BoundKey(): Boolean =
+        authManager.isBiometricEnrolled() || authManager.hasDeviceCredential()
+
+    /**
+     * Persist a new wallet's keys, choosing the V1 software-only fallback when
+     * the device has no secure lock (#354). AuthScreen's migration loop
+     * upgrades the row to V2 once the user enables a device lock.
+     */
+    private suspend fun persistWalletKeys(
+        activity: FragmentActivity,
+        walletId: String,
+        bundle: com.rjnr.pocketnode.data.migration.WalletKeyBundle,
+        walletType: String,
+        mnemonicBackedUp: Boolean,
+        promptTitle: String = "Secure wallet",
+        promptSubtitle: String = "Use your phone's screen lock to encrypt the new wallet's keys.",
+    ): WalletKeyWriter.Result =
+        if (!canCreateV2BoundKey()) {
+            walletKeyWriter.persistNewWalletV1Fallback(
+                walletId = walletId,
+                bundle = bundle,
+                walletType = walletType,
+                mnemonicBackedUp = mnemonicBackedUp,
+            )
+        } else {
+            walletKeyWriter.persistNewWallet(
+                activity = activity,
+                walletId = walletId,
+                bundle = bundle,
+                walletType = walletType,
+                mnemonicBackedUp = mnemonicBackedUp,
+                promptTitle = promptTitle,
+                promptSubtitle = promptSubtitle,
+            )
+        }
 
     /**
      * Optional parent-wallet hint forwarded from the WalletManager
@@ -161,7 +206,7 @@ class AddWalletViewModel @Inject constructor(
             // Distinct title/subtitle from prompt #1 so the user understands
             // they're securing the NEW sub-account, not re-confirming the parent.
             val result = walletRepository.createSubAccount(parentId, name, parentMnemonic) { walletId, bundle ->
-                walletKeyWriter.persistNewWallet(
+                persistWalletKeys(
                     activity = activity,
                     walletId = walletId,
                     bundle = bundle,
@@ -262,7 +307,7 @@ class AddWalletViewModel @Inject constructor(
             val result = walletRepository.createWallet(
                 name = name,
                 persistKeys = { walletId, bundle ->
-                    walletKeyWriter.persistNewWallet(
+                    persistWalletKeys(
                         activity = activity,
                         walletId = walletId,
                         bundle = bundle,
@@ -311,7 +356,7 @@ class AddWalletViewModel @Inject constructor(
                 words = words,
                 name = name,
                 persistKeys = { walletId, bundle ->
-                    walletKeyWriter.persistNewWallet(
+                    persistWalletKeys(
                         activity = activity,
                         walletId = walletId,
                         bundle = bundle,
@@ -347,7 +392,7 @@ class AddWalletViewModel @Inject constructor(
         viewModelScope.launch {
             _uiState.update { it.copy(isLoading = true, error = null) }
             val result = walletRepository.importRawKey(key, name) { walletId, bundle ->
-                walletKeyWriter.persistNewWallet(
+                persistWalletKeys(
                     activity = activity,
                     walletId = walletId,
                     bundle = bundle,
@@ -381,6 +426,8 @@ class AddWalletViewModel @Inject constructor(
                     UiMessage.Raw("Failed to save wallet: ${r.cause.message ?: "unknown error"}")
                 WalletKeyWriter.Result.KeyInvalidated ->
                     UiMessage.Raw("Wallet keys must be re-imported")
+                WalletKeyWriter.Result.NoSecureLock ->
+                    UiMessage.Raw("Could not secure the wallet. Enable a screen lock in device settings and try again.")
                 null -> error.message?.let(UiMessage::Raw)
                 else -> error.message?.let(UiMessage::Raw)
             }
