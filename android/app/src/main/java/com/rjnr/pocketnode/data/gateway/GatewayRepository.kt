@@ -666,7 +666,12 @@ class GatewayRepository @Inject constructor(
     ): Result<Unit> = runCatching {
         when (walletPreferences.getSyncStrategy()) {
             SyncStrategy.ALL_WALLETS, SyncStrategy.BALANCED -> {
-                registerAllWalletScripts()
+                // Persist the chosen mode/height BEFORE registering: the
+                // SyncCoordinator reads the per-wallet pref to compute each
+                // script's start block, so writing it afterwards meant a
+                // first-time CUSTOM selection registered from the stale default
+                // (RECENT = tip-200k) and only took effect on the next launch
+                // (knmo C).
                 if (savePreference) {
                     val wId = activeWalletId.ifEmpty { null }
                     walletPreferences.setSyncMode(syncMode, walletId = wId)
@@ -675,6 +680,7 @@ class GatewayRepository @Inject constructor(
                     }
                     walletPreferences.setInitialSyncCompleted(true, walletId = wId)
                 }
+                registerAllWalletScripts()
             }
             SyncStrategy.ACTIVE_ONLY -> {
                 registerAccount(syncMode, customBlockHeight, savePreference).getOrThrow()
@@ -782,6 +788,23 @@ class GatewayRepository @Inject constructor(
         walletPreferences.clearZeroCellRescanDone(activeWalletId)
         balanceRescanAttempted.remove(activeWalletId)
         return registerAccount(syncMode, customBlockHeight, savePreference = true, forceResync = true)
+    }
+
+    /**
+     * True when the wallet is already registered at this sync setting, so an
+     * Apply tap should be a no-op (knmo B, Option 2). Compares the request
+     * against the APPLIED per-wallet preference + actual registration, not the
+     * UI's displayed value, which could disagree with what was really applied.
+     */
+    fun isSyncSettingApplied(syncMode: SyncMode, customBlockHeight: Long?): Boolean {
+        val wId = activeWalletId.ifEmpty { null }
+        return syncSettingAlreadyApplied(
+            requestedMode = syncMode,
+            requestedHeight = customBlockHeight,
+            appliedMode = walletPreferences.getSyncMode(walletId = wId),
+            appliedHeight = walletPreferences.getCustomBlockHeight(walletId = wId),
+            isRegistered = _isRegistered.value,
+        )
     }
 
     fun hasCompletedInitialSync(): Boolean = walletPreferences.hasCompletedInitialSync(walletId = activeWalletId.ifEmpty { null })
