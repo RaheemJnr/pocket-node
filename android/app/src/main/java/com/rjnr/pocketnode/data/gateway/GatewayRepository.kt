@@ -1791,7 +1791,11 @@ class GatewayRepository @Inject constructor(
         val info = _walletInfo.value ?: throw Exception("No wallet")
         val currentEpoch = getCurrentEpoch().getOrNull()
         val live = daoDepositReader.list(info.script, currentEpoch, currentNetwork)
-        applyPendingWithdrawOverlay(mergeWithCachedDaoDeposits(live))
+        // #357: drop a spent deposit's stale DEPOSITED entry that the light
+        // client still lists alongside its new withdrawing cell, before the
+        // pending-withdraw overlay would paint it a duplicate "Confirming…".
+        val deduped = dedupeWithdrawnDeposits(live)
+        applyPendingWithdrawOverlay(mergeWithCachedDaoDeposits(deduped))
     }
 
     /**
