@@ -2257,7 +2257,12 @@ class GatewayRepository @Inject constructor(
                 } catch (e: Throwable) {
                     Log.e(TAG, "syncPoll iteration failed; continuing", e)
                 }
-                val delayMs = if (_syncProgress.value.isSyncing) 5_000L else 30_000L
+                // Synced cadence is 10s (was 30s): balance only refreshes off
+                // this poll, so a confirmed incoming tx could lag up to ~30s
+                // after "Synced" (#355/#356). The poll is cheap local JNI
+                // (tip header + account status); 10s bounds the lag without
+                // meaningful battery cost. Catch-up stays at 5s.
+                val delayMs = if (_syncProgress.value.isSyncing) 5_000L else 10_000L
                 delay(delayMs)
             }
         }
