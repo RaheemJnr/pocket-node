@@ -128,6 +128,7 @@ fun HomeScreen(
     onNavigateToSecurityChecklist: () -> Unit = {},
     onNavigateToFaq: (anchor: String?) -> Unit = {},
     onNavigateToNodeStatus: () -> Unit = {},
+    onNavigateToSettings: () -> Unit = {},
     viewModel: HomeViewModel = hiltViewModel()
 ) {
     val uiState by viewModel.uiState.collectAsState()
@@ -467,6 +468,7 @@ fun HomeScreen(
                     onNavigateToActivity = onNavigateToActivity,
                     onNavigateToSecurityChecklist = onNavigateToSecurityChecklist,
                     onNavigateToNodeStatus = onNavigateToNodeStatus,
+                    onNavigateToSettings = onNavigateToSettings,
                     dismissBackupReminder = { viewModel.dismissBackupReminder() },
                     onToggleBalanceVisibility = { viewModel.toggleBalanceVisibility() },
                     clipboardManager = clipboardManager,
@@ -538,6 +540,7 @@ fun HomeScreenUI(
     onNavigateToActivity: () -> Unit = {},
     onNavigateToSecurityChecklist: () -> Unit = {},
     onNavigateToNodeStatus: () -> Unit = {},
+    onNavigateToSettings: () -> Unit = {},
     dismissBackupReminder: () -> Unit,
     onToggleBalanceVisibility: () -> Unit,
     clipboardManager: androidx.compose.ui.platform.ClipboardManager,
@@ -587,7 +590,10 @@ fun HomeScreenUI(
             }
 
             item {
-                NetworkBadge(network = uiState.currentNetwork)
+                NetworkBadge(
+                    network = uiState.currentNetwork,
+                    onClick = onNavigateToSettings,
+                )
                 Spacer(Modifier.width(4.dp))
             }
 
@@ -1231,7 +1237,7 @@ private fun DetailRow(
 }
 
 @Composable
-private fun NetworkBadge(network: NetworkType) {
+private fun NetworkBadge(network: NetworkType, onClick: (() -> Unit)? = null) {
     val isTestnet = network == NetworkType.TESTNET
     val backgroundColor = if (isTestnet) TestnetOrange else MaterialTheme.colorScheme.primary
     val textColor = if (isTestnet) Color.White else MaterialTheme.colorScheme.onPrimary
@@ -1241,7 +1247,12 @@ private fun NetworkBadge(network: NetworkType) {
     Surface(
         shape = RoundedCornerShape(12.dp),
         color = backgroundColor,
-        modifier = Modifier.padding(8.dp)
+        // #353: the chip looked tappable but wasn't. Tapping it now opens
+        // Settings, where the network switcher (with its restart-confirm
+        // dialog) lives.
+        modifier = Modifier
+            .padding(8.dp)
+            .then(if (onClick != null) Modifier.clickable { onClick() } else Modifier)
     ) {
         Row(
             modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp),

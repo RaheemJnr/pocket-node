@@ -140,7 +140,24 @@ fun MainScreen(
                         }
                     },
                     onNavigateToActivity = {
+                        // "See All" opens a fresh Activity list on the default
+                        // "All" tab. restoreState is intentionally false here so
+                        // it does NOT restore the tab's last-used filter (e.g.
+                        // Sent) — the #359 report. The Activity bottom tab still
+                        // restores its own state normally.
                         innerNav.navigate(BottomTab.Activity.route) {
+                            popUpTo(innerNav.graph.findStartDestination().id) {
+                                saveState = true
+                            }
+                            launchSingleTop = true
+                            restoreState = false
+                        }
+                    },
+                    onNavigateToFaq = onNavigateToFaq,
+                    onNavigateToSettings = {
+                        // #353: Home network chip routes to the Settings tab,
+                        // where Current Network switches networks.
+                        innerNav.navigate(BottomTab.Settings.route) {
                             popUpTo(innerNav.graph.findStartDestination().id) {
                                 saveState = true
                             }
@@ -148,7 +165,6 @@ fun MainScreen(
                             restoreState = true
                         }
                     },
-                    onNavigateToFaq = onNavigateToFaq,
                 )
             }
             composable(BottomTab.Activity.route) {
