@@ -777,6 +777,10 @@ class GatewayRepository @Inject constructor(
         _isRegistered.value = false
         // Clear saved sync progress when explicitly resyncing (per-wallet)
         setWalletSyncBlock(activeWalletId, 0L)
+        // Re-arm the zero-cell rescue rescan: an explicit resync is the user
+        // deliberately asking us to look again (knmo).
+        walletPreferences.clearZeroCellRescanDone(activeWalletId)
+        balanceRescanAttempted.remove(activeWalletId)
         return registerAccount(syncMode, customBlockHeight, savePreference = true, forceResync = true)
     }
 
@@ -896,11 +900,16 @@ class GatewayRepository @Inject constructor(
                             spendableCapacity = liveCapacity,
                             typedCellCount = typedCellCount,
                             hasTransactions = txPag.objects.isNotEmpty(),
-                            alreadyAttempted = activeWalletId in balanceRescanAttempted,
+                            // Persisted across launches (knmo): without this the
+                            // in-memory set re-armed every cold start and a
+                            // permanently-empty primary rewound on every launch.
+                            alreadyAttempted = activeWalletId in balanceRescanAttempted ||
+                                walletPreferences.isZeroCellRescanDone(activeWalletId),
                             isSyncing = _syncProgress.value.isSyncing,
                         )
                     ) {
                         balanceRescanAttempted.add(activeWalletId)
+                        walletPreferences.setZeroCellRescanDone(activeWalletId)
                         Log.w(TAG, "🔄 Have ${txPag.objects.size} transactions but 0 live cells - triggering rescan")
                         val earliestBlock = txPag.objects
                             .mapNotNull { it.blockNumber.removePrefix("0x").toLongOrNull(16) }
