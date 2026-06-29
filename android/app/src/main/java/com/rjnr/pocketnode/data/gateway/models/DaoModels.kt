@@ -72,7 +72,13 @@ data class DaoDeposit(
     // #332: deposit known from the Room cache but created BEFORE the script's
     // current sync window — the light client cannot see it, so compensation/
     // status may be stale until the user runs a deeper rescan.
-    val outsideSyncWindow: Boolean = false
+    val outsideSyncWindow: Boolean = false,
+    // #357: for a WITHDRAWING cell, the outpoints its phase-1 tx consumed. Used
+    // to drop the original deposit's stale DEPOSITED entry that the light client
+    // still lists for a short window after the withdraw commits (get_cells
+    // surfaces the new withdrawing cell before the spent-outpoint filter catches
+    // up). Transient — never persisted to dao_cells.
+    val consumedDepositOutPoints: List<OutPoint> = emptyList()
 )
 
 // -- Aggregate overview --

@@ -161,6 +161,7 @@ class DaoDepositReader @Inject constructor(
         var lockRemainingHours: Int? = null
         var depositTimestampMs = 0L
         var apc = 0.0
+        var consumedDepositOutPoints: List<com.rjnr.pocketnode.data.gateway.models.OutPoint> = emptyList()
 
         // Get block header for compensation & epoch data (cache-first).
         val blockHash = daoHeaderResolver.getBlockHashForCell(cell.outPoint.txHash)
@@ -195,6 +196,11 @@ class DaoDepositReader @Inject constructor(
                 // Get original deposit header for compensation (cache-first)
                 val withdrawTxJson = LightClientNative.nativeGetTransaction(cell.outPoint.txHash)
                 val withdrawTx = withdrawTxJson?.let { json.decodeFromString<JniTransactionWithStatus>(it) }
+                // #357: record what this phase-1 tx consumed so the caller can
+                // drop the original deposit's stale DEPOSITED entry that the
+                // light client may still list until its spent-filter catches up.
+                consumedDepositOutPoints = withdrawTx?.transaction?.inputs
+                    ?.map { it.previousOutput } ?: emptyList()
                 val origDepositBlockHash = withdrawTx?.transaction?.headerDeps?.firstOrNull()
                 if (origDepositBlockHash != null) {
                     depositBlockHash = origDepositBlockHash
@@ -316,6 +322,7 @@ class DaoDepositReader @Inject constructor(
             cyclePhase = cyclePhaseFromProgress(cycleProgress),
             depositTimestamp = depositTimestampMs,
             apc = apc,
+            consumedDepositOutPoints = consumedDepositOutPoints,
         )
     }
 
