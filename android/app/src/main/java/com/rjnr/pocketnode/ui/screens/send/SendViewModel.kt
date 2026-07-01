@@ -604,48 +604,7 @@ class SendViewModel @Inject constructor(
     /**
      * Parse technical error messages into user-friendly descriptions
      */
-    private fun parseErrorMessage(e: Exception): String {
-        val message = e.message ?: "Unknown error"
-
-        return when {
-            // Cell/UTXO errors
-            message.contains("Failed to get cells", ignoreCase = true) ->
-                "Could not fetch your available funds. Please ensure your wallet is synced and try again."
-            message.contains("No cells available", ignoreCase = true) ||
-            message.contains("Insufficient cells", ignoreCase = true) ->
-                "Not enough funds available. Please wait for your wallet to fully sync."
-
-            // Transaction building errors
-            message.contains("Insufficient balance", ignoreCase = true) ->
-                "Insufficient balance for this transaction."
-            message.contains("minimum", ignoreCase = true) && message.contains("61", ignoreCase = true) ->
-                "Minimum transfer amount is 61 CKB due to CKB's cell model."
-            message.contains("Dust change refused", ignoreCase = true) ->
-                "This exact amount would leave less than 61 CKB of change, which CKB cannot store as a separate output and the protocol would silently absorb into the transaction fee. Try sending a slightly different amount, or send your full balance minus the fee."
-
-            // Network/broadcast errors
-            message.contains("Send failed", ignoreCase = true) ||
-            message.contains("broadcast", ignoreCase = true) ->
-                "Could not broadcast transaction. Please check your network connection and try again."
-            message.contains("verification failed", ignoreCase = true) ->
-                "Transaction verification failed. The transaction may be invalid."
-
-            // Sync errors
-            message.contains("not synced", ignoreCase = true) ||
-            message.contains("sync", ignoreCase = true) ->
-                "Wallet is still syncing. Please wait for sync to complete before sending."
-
-            // JSON/parsing errors (likely a bug)
-            message.contains("json", ignoreCase = true) ||
-            message.contains("parse", ignoreCase = true) ||
-            message.contains("serial", ignoreCase = true) ||
-            message.contains("missing", ignoreCase = true) ->
-                "Internal error processing transaction data. Please try again or restart the app."
-
-            // Generic fallback
-            else -> "Transaction failed: $message"
-        }
-    }
+    private fun parseErrorMessage(e: Exception): String = mapSendErrorMessage(e.message)
 
     private fun startPollingTransactionStatus(txHash: String, address: String) {
         pollingJob?.cancel()
@@ -845,5 +804,64 @@ class SendViewModel @Inject constructor(
         super.onCleared()
         sendJob?.cancel()
         pollingJob?.cancel()
+    }
+}
+
+/**
+ * Maps a raw send/broadcast error to a user-facing message. Pure + top-level
+ * for testability. Order matters: the most specific, actionable causes come
+ * first. The Rust JNI now returns the real rejection reason (via the
+ * "Broadcast rejected: ..." exception), so we no longer blame the network for
+ * what are actually local verification failures (Alex report).
+ */
+internal fun mapSendErrorMessage(raw: String?): String {
+    val message = raw ?: "Unknown error"
+    return when {
+        // Cell/UTXO fetch
+        message.contains("Failed to get cells", ignoreCase = true) ->
+            "Could not fetch your available funds. Please ensure your wallet is synced and try again."
+        message.contains("No cells available", ignoreCase = true) ||
+            message.contains("Insufficient cells", ignoreCase = true) ->
+            "Not enough funds available. Please wait for your wallet to fully sync."
+
+        // Amount/build
+        message.contains("Insufficient balance", ignoreCase = true) ->
+            "Insufficient balance for this transaction."
+        message.contains("minimum", ignoreCase = true) && message.contains("61", ignoreCase = true) ->
+            "Minimum transfer amount is 61 CKB due to CKB's cell model."
+        message.contains("Dust change refused", ignoreCase = true) ->
+            "This exact amount would leave less than 61 CKB of change, which CKB cannot store as a separate output and the protocol would silently absorb into the transaction fee. Try sending a slightly different amount, or send your full balance minus the fee."
+
+        // Broadcast rejected with a real reason (from the JNI). Specific,
+        // actionable causes first.
+        message.contains("Unknown(", ignoreCase = true) ->
+            "This send depends on a previous transaction that hasn't confirmed yet. Wait for it to confirm, or reopen the app and try again."
+        message.contains("Dead(", ignoreCase = true) ->
+            "Some of the coins for this transaction were already spent. Reopen the app to refresh your balance, then try again."
+        message.contains("light client not ready", ignoreCase = true) ->
+            "The wallet is still starting up. Please wait a moment and try again."
+        message.contains("verification failed", ignoreCase = true) ->
+            "The network rejected this transaction. Reopen the app to refresh your wallet, then try again."
+        // Any other broadcast rejection: surface a concise reason instead of a
+        // network message, since these are usually deterministic and local.
+        message.contains("Broadcast rejected", ignoreCase = true) ->
+            "The network rejected this transaction. Please reopen the app and try again."
+        message.contains("Send failed", ignoreCase = true) ||
+            message.contains("broadcast", ignoreCase = true) ->
+            "Could not send the transaction. Please reopen the app and try again."
+
+        // Sync
+        message.contains("not synced", ignoreCase = true) ||
+            message.contains("sync", ignoreCase = true) ->
+            "Wallet is still syncing. Please wait for sync to complete before sending."
+
+        // Data/parsing (likely a bug)
+        message.contains("json", ignoreCase = true) ||
+            message.contains("parse", ignoreCase = true) ||
+            message.contains("serial", ignoreCase = true) ||
+            message.contains("missing", ignoreCase = true) ->
+            "Internal error processing transaction data. Please try again or restart the app."
+
+        else -> "Transaction failed: $message"
     }
 }

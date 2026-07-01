@@ -34,6 +34,23 @@ macro_rules! check_running {
     };
 }
 
+/// Sentinel prefix marking a send-transaction error string returned to Kotlin.
+/// Success returns the JSON-quoted tx hash ("0x..."); an error returns
+/// `__SEND_ERROR__:<reason>` so the caller can surface the real cause instead
+/// of collapsing a null into a misleading "check your network" message.
+const SEND_ERROR_PREFIX: &str = "__SEND_ERROR__:";
+
+/// Build the sentinel error jstring for nativeSendTransaction failures.
+fn send_error_jstring(env: &mut JNIEnv, reason: &str) -> jstring {
+    match env.new_string(format!("{}{}", SEND_ERROR_PREFIX, reason)) {
+        Ok(s) => s.into_raw(),
+        Err(e) => {
+            error!("Failed to create send-error JString: {}", e);
+            ptr::null_mut()
+        }
+    }
+}
+
 /// Helper to create JString from serde result
 fn to_jstring<T: serde::Serialize>(env: &mut JNIEnv, value: &T) -> jstring {
     match serde_json::to_string(value) {
@@ -927,7 +944,7 @@ pub extern "C" fn Java_com_nervosnetwork_ckblightclient_LightClientNative_native
         Ok(s) => s.into(),
         Err(e) => {
             error!("Failed to get transaction string: {}", e);
-            return ptr::null_mut();
+            return send_error_jstring(&mut env, &format!("could not read transaction: {}", e));
         }
     };
 
@@ -935,7 +952,7 @@ pub extern "C" fn Java_com_nervosnetwork_ckblightclient_LightClientNative_native
         Ok(t) => t,
         Err(e) => {
             error!("Failed to parse transaction JSON: {}", e);
-            return ptr::null_mut();
+            return send_error_jstring(&mut env, &format!("malformed transaction: {}", e));
         }
     };
 
@@ -943,7 +960,7 @@ pub extern "C" fn Java_com_nervosnetwork_ckblightclient_LightClientNative_native
         Some(s) => s,
         None => {
             error!("Storage not initialized");
-            return ptr::null_mut();
+            return send_error_jstring(&mut env, "light client not ready (storage not initialized)");
         }
     };
 
@@ -951,7 +968,7 @@ pub extern "C" fn Java_com_nervosnetwork_ckblightclient_LightClientNative_native
         Some(c) => Arc::clone(c),
         None => {
             error!("Consensus not initialized");
-            return ptr::null_mut();
+            return send_error_jstring(&mut env, "light client not ready (consensus not initialized)");
         }
     };
 
@@ -964,8 +981,11 @@ pub extern "C" fn Java_com_nervosnetwork_ckblightclient_LightClientNative_native
     let cycles = match verify_tx(tx_view.clone(), swc, consensus, &last_state) {
         Ok(c) => c,
         Err(e) => {
+            // Return the real reason (e.g. Unknown(OutPoint) for an
+            // unresolvable input, Dead, capacity, or a script error) so the
+            // caller can show it instead of a misleading network message.
             error!("Transaction verification failed: {:?}", e);
-            return ptr::null_mut();
+            return send_error_jstring(&mut env, &format!("verification failed: {:?}", e));
         }
     };
 
