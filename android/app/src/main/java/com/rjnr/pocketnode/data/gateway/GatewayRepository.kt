@@ -1191,7 +1191,17 @@ class GatewayRepository @Inject constructor(
             // matches the sender's lock (= change output going back to us).
             // If a pending tx ultimately FAILs, downstream txs that consumed its
             // synthetic change will also fail and the watchdog times them out.
-            val pendingChange: List<Cell> = pending.flatMap { row ->
+            //
+            // ONLY session-broadcast rows: a synthetic input resolves only if
+            // its creating tx is in the light client's in-memory pending pool,
+            // which is wiped on restart. Persisted rows from a prior session are
+            // not in the pool, so their change would be unresolvable and reject
+            // every send after a reboot (Alex report). The reservation filter
+            // above still uses ALL pending rows so reserved inputs are never
+            // double-spent.
+            val pendingChange: List<Cell> = pending
+                .filter { it.txHash in broadcastedThisSession }
+                .flatMap { row ->
                 val pendingTx = try {
                     json.decodeFromString<Transaction>(row.signedTxJson)
                 } catch (e: Exception) {
@@ -1214,7 +1224,14 @@ class GatewayRepository @Inject constructor(
                     )
                 }
             }
-            val filtered = liveFiltered + pendingChange
+            // Dedup by outpoint, preferring the real (on-chain) cell: once a
+            // pending tx confirms, its change appears in both liveFiltered and
+            // pendingChange for the brief window before the watchdog clears the
+            // row. Selecting the same outpoint twice would build a tx with a
+            // duplicate input and fail. liveFiltered is first, so distinctBy
+            // keeps the real cell.
+            val filtered = (liveFiltered + pendingChange)
+                .distinctBy { "${it.outPoint.txHash}:${it.outPoint.index}" }
             Log.d(
                 TAG,
                 "buildReserveAndSend: ${cellsResult.items.size} live, ${reserved.size} reserved, " +
@@ -1441,7 +1458,24 @@ class GatewayRepository @Inject constructor(
             throw Exception("Send failed - native returned null")
         }
 
+        // The JNI now returns the real rejection reason with a sentinel prefix
+        // instead of null, so we can surface WHY a broadcast was rejected (e.g.
+        // an unresolvable input from a stale pending tx) rather than blaming the
+        // network. Clean up the row we inserted, same as the null path.
+        if (rawResult.startsWith(BROADCAST_ERROR_PREFIX)) {
+            val reason = rawResult.removePrefix(BROADCAST_ERROR_PREFIX)
+            pendingBroadcastDao.delete(txHash)
+            cacheManager.deleteTransaction(txHash)
+            throw Exception("Broadcast rejected: $reason")
+        }
+
         val returnedHash = rawResult.trim('"')
+        // Broadcast accepted → the tx is now in the light client's in-memory
+        // pending pool this session, so its change is safe to spend as synthetic
+        // change until it confirms. Record both key variants (pre-hash and the
+        // returned hash) since the pending_broadcasts row may be keyed by either.
+        broadcastedThisSession.add(txHash)
+        broadcastedThisSession.add(returnedHash)
         if (returnedHash.lowercase() != txHash.lowercase()) {
             // Step 0 verified equality on testnet; this branch should be unreachable.
             // If it fires in production, the tx WAS broadcast under returnedHash but
@@ -2236,6 +2270,16 @@ class GatewayRepository @Inject constructor(
     private val balanceRescanAttempted =
         java.util.Collections.synchronizedSet(mutableSetOf<String>())
 
+    // Tx hashes broadcast in THIS process session. Only these are safe to spend
+    // as synthetic change: a synthetic change cell resolves only if its creating
+    // tx is in the light client's IN-MEMORY pending pool, which is wiped on every
+    // app restart. A PERSISTED pending_broadcasts row from a prior session is not
+    // in the pool, so feeding its change into a new send makes the light client
+    // fail to resolve the input and reject the tx locally — surfacing as the
+    // misleading "Could not broadcast" error that survived reboots (Alex report).
+    private val broadcastedThisSession =
+        java.util.Collections.synchronizedSet(mutableSetOf<String>())
+
     fun startSyncPolling() {
         if (syncPollingJob?.isActive == true) return
 
@@ -2392,6 +2436,10 @@ class GatewayRepository @Inject constructor(
 
     companion object {
         private const val TAG = "GatewayRepository"
+
+        // Matches SEND_ERROR_PREFIX in the Rust JNI (query.rs): nativeSendTransaction
+        // returns "__SEND_ERROR__:<reason>" on a rejected broadcast instead of null.
+        private const val BROADCAST_ERROR_PREFIX = "__SEND_ERROR__:"
 
         // MAX_CONCURRENT_WALLET_SCRIPTS + BALANCED_LAG_THRESHOLD moved to
         // SyncCoordinator (#106). Tests now import SyncCoordinator.BALANCED_LAG_THRESHOLD
