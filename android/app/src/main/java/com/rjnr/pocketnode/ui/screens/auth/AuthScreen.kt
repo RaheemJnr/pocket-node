@@ -21,9 +21,11 @@ import androidx.compose.material3.SnackbarHost
 import androidx.compose.material3.SnackbarHostState
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -66,6 +68,20 @@ fun AuthScreen(
     val biometricSubtitle = stringResource(R.string.auth_biometric_subtitle)
     val biometricNegative = stringResource(R.string.auth_biometric_negative)
 
+    // Hold the in-flight prompt so we can cancel it. The androidx
+    // BiometricPrompt binds to the FragmentActivity, not this composable, so
+    // it outlives Compose navigation. Without cancelling, the auto-launched
+    // prompt kept listening while the user unlocked via PIN and then surfaced
+    // over the Home screen after unlock (reported bug). We cancel it when the
+    // user opts for PIN and when AuthScreen leaves composition (the successful
+    // unlock pops Auth off the back stack, firing onDispose).
+    val activeBiometricPrompt = remember { mutableStateOf<BiometricPrompt?>(null) }
+
+    fun cancelBiometric() {
+        activeBiometricPrompt.value?.cancelAuthentication()
+        activeBiometricPrompt.value = null
+    }
+
     fun launchBiometric() {
         val activity = context as? FragmentActivity ?: return
         val executor = ContextCompat.getMainExecutor(context)
@@ -73,10 +89,12 @@ fun AuthScreen(
             activity, executor,
             object : BiometricPrompt.AuthenticationCallback() {
                 override fun onAuthenticationSucceeded(result: BiometricPrompt.AuthenticationResult) {
+                    activeBiometricPrompt.value = null
                     viewModel.onBiometricSuccess()
                 }
 
                 override fun onAuthenticationError(errorCode: Int, errString: CharSequence) {
+                    activeBiometricPrompt.value = null
                     if (errorCode != BiometricPrompt.ERROR_USER_CANCELED &&
                         errorCode != BiometricPrompt.ERROR_NEGATIVE_BUTTON
                     ) {
@@ -90,6 +108,7 @@ fun AuthScreen(
             .setSubtitle(biometricSubtitle)
             .setNegativeButtonText(biometricNegative)
             .build()
+        activeBiometricPrompt.value = prompt
         prompt.authenticate(promptInfo)
     }
 
@@ -97,6 +116,13 @@ fun AuthScreen(
         if (viewModel.shouldAutoTriggerBiometric()) {
             launchBiometric()
         }
+    }
+
+    // Cancel any pending prompt when AuthScreen is disposed (e.g. after a
+    // successful unlock pops it off the back stack) so it can't reappear
+    // over the next screen.
+    DisposableEffect(Unit) {
+        onDispose { cancelBiometric() }
     }
 
     LaunchedEffect(uiState.authSuccess) {
@@ -169,7 +195,12 @@ fun AuthScreen(
 
             if (uiState.showPinFallback) {
                 OutlinedButton(
-                    onClick = onNavigateToPinVerify,
+                    onClick = {
+                        // Tear down the auto-launched prompt before switching to
+                        // the PIN path so it can't linger and reappear later.
+                        cancelBiometric()
+                        onNavigateToPinVerify()
+                    },
                     modifier = Modifier.fillMaxWidth().uaTestTag("auth-use-pin")
                 ) {
                     Text(stringResource(R.string.auth_use_pin))
