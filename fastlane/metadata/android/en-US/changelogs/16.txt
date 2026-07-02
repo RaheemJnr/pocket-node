@@ -1,0 +1,16 @@
+v1.7.5:
+This release fixes a send failure some users hit after closing and reopening the app, and corrects the amount shown on pending sends.
+
+Sending is reliable again. If you created a send, closed the app before it confirmed, and then tried to send again, the app could fail every time with "Could not broadcast transaction" no matter your network. That stale in-progress send no longer blocks new ones, and it clears itself within about a minute. You do not need to clear app data.
+
+Send errors now tell the truth. If a transaction is ever rejected, the app shows the real reason (for example, waiting on an earlier transaction to confirm, or coins already spent) instead of always blaming your network connection.
+
+Pending sends show the right amount. A large send briefly displayed the change amount instead of what you actually sent; it now shows the correct figure right away.
+
+Sync is steadier. Custom block heights now apply correctly the first time you set them, Apply re-syncs when the setting was not really applied, and sync no longer gets stuck on wallets with no live coins or after the chain rewinds.
+
+Nervos DAO polish: a completed withdraw no longer leaves a stale "Confirming" card on screen.
+
+Faster and smoother: balances refresh sooner after a transaction confirms, sub-account handling is more reliable, See All opens the full activity list, and the network label opens Settings.
+
+Source: github.com/RaheemJnr/pocket-node/releases
