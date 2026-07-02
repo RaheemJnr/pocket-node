@@ -833,7 +833,7 @@ class GatewayRepository @Inject constructor(
         Log.d(TAG, "🔍 Fetching balance for script args ${searchKey.script.args.redactAddress()}")
 
         val responseJson = LightClientNative.nativeGetCellsCapacity(json.encodeToString(searchKey))
-            ?: throw Exception("Failed to get capacity - null response")
+            ?: throw Exception(readPathNullMessage("get balance", lightClientReadyForRead()))
 
         Log.d(TAG, "📊 Raw capacity response: $responseJson")
 
@@ -1110,7 +1110,7 @@ class GatewayRepository @Inject constructor(
             "desc",
             limit,
             cursor
-        ) ?: throw Exception("Failed to get cells - native returned null")
+        ) ?: throw Exception(readPathNullMessage("get cells", lightClientReadyForRead()))
 
         Log.d(TAG, "📦 getCells: Raw response length: ${resultJson.length}")
 
@@ -1139,6 +1139,17 @@ class GatewayRepository @Inject constructor(
     }
 
     private suspend fun currentTipNumberOrZero(): Long = lightClient.currentTipNumberOrZero()
+
+    /**
+     * Readiness probe for the read-path null classifier ([readPathNullMessage]).
+     * A tip header means the light client is up and reporting chain state; its
+     * absence means cold start / still starting up. Only ever called on an
+     * already-failed read, so the extra JNI hop is off the hot path. Any
+     * exception here is treated as "not ready" so we never upgrade a real
+     * outage into a misleading transient message.
+     */
+    private suspend fun lightClientReadyForRead(): Boolean =
+        runCatching { lightClient.getTipHeader() != null }.getOrDefault(false)
 
     /**
      * Single mutex-guarded prepare-and-send shared by plain transfers and DAO
