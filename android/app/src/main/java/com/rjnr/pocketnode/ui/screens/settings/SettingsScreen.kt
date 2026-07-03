@@ -363,6 +363,7 @@ fun SettingsScreen(
             viewModel.requestNetworkSwitch(it)
         },
         showThemeDialog = { viewModel.showThemeDialog() },
+        onCheckForUpdate = { viewModel.checkForUpdate() },
         onToggleBackgroundSync = { enabled ->
             if (enabled && Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
                 val hasPermission = ContextCompat.checkSelfPermission(
@@ -395,6 +396,7 @@ private fun SettingsScreenUI(
     showSyncStrategyDialog: () -> Unit = {},
     requestNetworkSwitch: (NetworkType) -> Unit,
     showThemeDialog: () -> Unit,
+    onCheckForUpdate: () -> Unit = {},
     onToggleBackgroundSync: (Boolean) -> Unit = {}
 ) {
     Scaffold(
@@ -558,14 +560,57 @@ private fun SettingsScreenUI(
             }
 
             item {
+                val updateStatus = uiState.updateStatus
+                val available = updateStatus as? SettingsViewModel.UpdateStatus.Available
                 SettingsValueRow(
                     icon = Lucide.Info,
                     title = "Version",
                     value = BuildConfig.VERSION_NAME,
-                    onClick = null,
-                    trailing = if (BuildConfig.DEBUG) {
-                        { DebugBuildPill(gitSha = BuildConfig.GIT_SHA) }
-                    } else null
+                    // Tapping the row when an update exists opens the release so
+                    // the user can grab it; otherwise it's a static row.
+                    onClick = available?.let { { com.rjnr.pocketnode.ui.util.openInBrowser(context, it.url) } },
+                    trailing = when {
+                        available != null -> {
+                            {
+                                Text(
+                                    text = "Update available",
+                                    color = MaterialTheme.colorScheme.primary,
+                                    fontSize = 12.sp,
+                                    fontWeight = FontWeight.SemiBold
+                                )
+                            }
+                        }
+                        BuildConfig.DEBUG -> {
+                            { DebugBuildPill(gitSha = BuildConfig.GIT_SHA) }
+                        }
+                        else -> null
+                    }
+                )
+            }
+
+            item {
+                val updateStatus = uiState.updateStatus
+                val statusText = when (updateStatus) {
+                    is SettingsViewModel.UpdateStatus.Checking -> "Checking..."
+                    is SettingsViewModel.UpdateStatus.UpToDate -> "Up to date"
+                    is SettingsViewModel.UpdateStatus.Available ->
+                        "Version ${updateStatus.version} available"
+                    is SettingsViewModel.UpdateStatus.Failed -> "Couldn't check. Tap to retry"
+                    is SettingsViewModel.UpdateStatus.Idle -> null
+                }
+                SettingsValueRow(
+                    icon = Lucide.RefreshCw,
+                    title = "Check for updates",
+                    value = statusText.orEmpty(),
+                    valueColor = MaterialTheme.colorScheme.onSurfaceVariant,
+                    onClick = {
+                        val available = updateStatus as? SettingsViewModel.UpdateStatus.Available
+                        if (available != null) {
+                            com.rjnr.pocketnode.ui.util.openInBrowser(context, available.url)
+                        } else {
+                            onCheckForUpdate()
+                        }
+                    }
                 )
             }
 
