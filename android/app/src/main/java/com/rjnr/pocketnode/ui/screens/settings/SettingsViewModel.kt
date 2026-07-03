@@ -2,8 +2,10 @@ package com.rjnr.pocketnode.ui.screens.settings
 
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
+import com.rjnr.pocketnode.BuildConfig
 import com.rjnr.pocketnode.data.auth.PinManager
 import com.rjnr.pocketnode.data.gateway.GatewayRepository
+import com.rjnr.pocketnode.data.update.UpdateRepository
 import com.rjnr.pocketnode.data.gateway.models.NetworkType
 import com.rjnr.pocketnode.data.gateway.models.SyncMode
 import com.rjnr.pocketnode.data.wallet.SyncStrategy
@@ -23,8 +25,18 @@ class SettingsViewModel @Inject constructor(
     private val repository: GatewayRepository,
     private val walletPrefs: WalletPreferences,
     private val pinManager: PinManager,
-    private val walletRepository: WalletRepository
+    private val walletRepository: WalletRepository,
+    private val updateRepository: UpdateRepository,
 ) : ViewModel() {
+
+    /** Update-availability state for the About > Version row (#369). */
+    sealed interface UpdateStatus {
+        data object Idle : UpdateStatus
+        data object Checking : UpdateStatus
+        data object UpToDate : UpdateStatus
+        data class Available(val version: String, val url: String) : UpdateStatus
+        data object Failed : UpdateStatus
+    }
 
     data class UiState(
         val isPinEnabled: Boolean = false,
@@ -43,6 +55,7 @@ class SettingsViewModel @Inject constructor(
         // Active wallet address — used by SyncOptionsDialog's "look up on explorer"
         // helper for the CUSTOM mode (#85). Null until the wallet is initialized.
         val address: String? = null,
+        val updateStatus: UpdateStatus = UpdateStatus.Idle,
         val error: com.rjnr.pocketnode.ui.util.UiMessage? = null,
     )
 
@@ -51,6 +64,7 @@ class SettingsViewModel @Inject constructor(
 
     init {
         loadState()
+        checkForUpdate()
 
         // Keep network in sync with repository's live StateFlow
         viewModelScope.launch {
@@ -206,6 +220,36 @@ class SettingsViewModel @Inject constructor(
             repository.startBackgroundSync()
         } else {
             repository.stopBackgroundSync()
+        }
+    }
+
+    /**
+     * Check GitHub for a newer release and surface it on the About > Version
+     * row. Runs on init and on the manual "Check for updates" tap (#369). The
+     * Home screen already shows an update dialog; this puts the same signal
+     * where users look for it. Non-fatal: failures show a retry-able state.
+     */
+    fun checkForUpdate() {
+        _uiState.update { it.copy(updateStatus = UpdateStatus.Checking) }
+        viewModelScope.launch {
+            updateRepository.checkForUpdate(BuildConfig.VERSION_NAME)
+                .onSuccess { info ->
+                    _uiState.update {
+                        it.copy(
+                            updateStatus = if (info != null) {
+                                UpdateStatus.Available(
+                                    version = info.latestVersion,
+                                    url = info.downloadUrl,
+                                )
+                            } else {
+                                UpdateStatus.UpToDate
+                            }
+                        )
+                    }
+                }
+                .onFailure {
+                    _uiState.update { it.copy(updateStatus = UpdateStatus.Failed) }
+                }
         }
     }
 
