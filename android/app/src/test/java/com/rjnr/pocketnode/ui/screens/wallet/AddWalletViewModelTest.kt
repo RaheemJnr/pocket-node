@@ -107,7 +107,7 @@ class AddWalletViewModelTest {
             walletKeyWriter.persistNewWallet(any(), any(), any(), any(), any(), any(), any())
         }
         coVerify(exactly = 0) {
-            walletRepository.createSubAccount(any(), any(), any(), any())
+            walletRepository.createSubAccount(any(), any(), any(), any(), any())
         }
         coVerify(exactly = 0) { gatewayRepository.onActiveWalletChanged(any()) }
         assertNull(vm.uiState.value.createdWallet)

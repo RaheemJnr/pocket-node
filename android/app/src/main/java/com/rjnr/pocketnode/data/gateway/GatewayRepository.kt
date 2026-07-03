@@ -109,6 +109,7 @@ class GatewayRepository @Inject constructor(
     private val daoHeaderResolver: DaoHeaderResolver,
     private val daoDepositReader: DaoDepositReader,
     private val lightClient: LightClientReadOnly,
+    private val subAccountReconciler: com.rjnr.pocketnode.data.wallet.SubAccountReconciler,
 ) : TipSource {
     private val sendMutex = Mutex()
 
@@ -1040,6 +1041,19 @@ class GatewayRepository @Inject constructor(
         if (anyUpdated && walletPreferences.getSyncStrategy() == SyncStrategy.BALANCED) {
             maybeReregisterBalanced()
         }
+
+        // #82 phase 2: resolve PENDING sub-account discovery candidates.
+        // Their scripts ride along in `scripts` (registered with empty
+        // walletId, so the wallet loop above skips them). Throttled
+        // internally; never allowed to break the status poll.
+        runCatching {
+            subAccountReconciler.reconcile(
+                scannedByArgs = scripts.associate { s ->
+                    s.script.args to (s.blockNumber.removePrefix("0x").toLongOrNull(16) ?: 0L)
+                },
+                tipHeight = tipNumber,
+            )
+        }.onFailure { Log.w(TAG, "Sub-account candidate reconcile failed (non-fatal)", it) }
 
         // Active wallet's block for the sync-progress display below.
         val activeArgs = _walletInfo.value?.script?.args

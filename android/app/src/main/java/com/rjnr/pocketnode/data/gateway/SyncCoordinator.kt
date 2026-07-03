@@ -138,6 +138,7 @@ class SyncCoordinator @Inject constructor(
     private val keyManager: KeyManager,
     private val json: Json,
     private val lightClient: LightClientBridge,
+    private val subAccountCandidateDao: com.rjnr.pocketnode.data.database.dao.SubAccountCandidateDao,
 ) {
 
     /**
@@ -451,13 +452,46 @@ class SyncCoordinator @Inject constructor(
                     }
                     val blockNumberHex = "0x${blockNum.toLongOrNull()?.toString(16) ?: "0"}"
 
-                    wallet.walletId to JniScriptStatus(
+                    val own = wallet.walletId to JniScriptStatus(
                         script = lockScript,
                         scriptType = "lock",
                         blockNumber = blockNumberHex,
                     )
+
+                    // #82 phase 2: register PENDING sub-account discovery
+                    // candidates alongside their parent so the filter sync
+                    // covers them. walletId = "" — setScriptsAndRecord skips
+                    // empty ids for the args→wallet mapping and sync_progress
+                    // rows, so candidates never pollute per-wallet progress.
+                    // Same fromBlock as the parent: candidates scan the same
+                    // window the parent's history does. Capped to bound the
+                    // per-script filter cost; remaining PENDING slots register
+                    // on later cycles as earlier ones resolve FOUND/EMPTY.
+                    // (Degradation note: paths that register only the active
+                    // wallet's script replace the whole set without candidates
+                    // — discovery just pauses until the next ALL registration;
+                    // states are in Room, nothing is lost.)
+                    val candidates = if (wallet.parentWalletId == null &&
+                        wallet.type == KeyManager.WALLET_TYPE_MNEMONIC
+                    ) {
+                        runCatching {
+                            subAccountCandidateDao.getForParent(wallet.walletId)
+                                .filter { it.state == com.rjnr.pocketnode.data.database.entity.SubAccountCandidateEntity.STATE_PENDING }
+                                .take(MAX_CANDIDATE_SCRIPTS_PER_PARENT)
+                                .map { candidate ->
+                                    "" to JniScriptStatus(
+                                        script = lockScript.copy(args = candidate.scriptArgs),
+                                        scriptType = "lock",
+                                        blockNumber = blockNumberHex,
+                                    )
+                                }
+                        }.getOrDefault(emptyList())
+                    } else {
+                        emptyList()
+                    }
+                    listOf(own) + candidates
                 }
-            }.awaitAll().filterNotNull()
+            }.awaitAll().filterNotNull().flatten()
         }
 
         if (pairs.isEmpty()) {
@@ -493,6 +527,14 @@ class SyncCoordinator @Inject constructor(
          * https://github.com/nervosnetwork/neuron/blob/develop/packages/neuron-wallet/src/block-sync-renderer/sync/light-synchronizer.ts#L22
          */
         const val BALANCED_LAG_THRESHOLD = 100_000L
+
+        /**
+         * PENDING discovery candidates registered per parent per cycle (#82).
+         * Each registered script adds filter-sync work in the light client,
+         * so scan the low indices first — sub-accounts are created
+         * contiguously from 1, so the first few cover real usage.
+         */
+        private const val MAX_CANDIDATE_SCRIPTS_PER_PARENT = 5
 
         /**
          * How long to wait for a non-null tip header before falling back to

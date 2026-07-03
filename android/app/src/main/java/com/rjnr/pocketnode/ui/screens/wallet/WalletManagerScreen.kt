@@ -103,6 +103,46 @@ fun WalletManagerScreen(
         ) {
             item { Spacer(Modifier.height(8.dp)) }
 
+            // Discovery restore banner (#82 / #371): sub-account slots from
+            // an imported seed whose scripts have on-chain history.
+            if (uiState.foundCandidates.isNotEmpty()) {
+                item {
+                    val count = uiState.foundCandidates.size
+                    Card(
+                        modifier = Modifier.fillMaxWidth(),
+                        colors = CardDefaults.cardColors(
+                            containerColor = MaterialTheme.colorScheme.primaryContainer
+                        )
+                    ) {
+                        Column(Modifier.padding(16.dp)) {
+                            Text(
+                                text = if (count == 1) "Found 1 sub-account with history"
+                                else "Found $count sub-accounts with history",
+                                style = MaterialTheme.typography.titleSmall,
+                                color = MaterialTheme.colorScheme.onPrimaryContainer
+                            )
+                            Spacer(Modifier.height(4.dp))
+                            Text(
+                                text = "This seed phrase has sub-accounts with on-chain activity. Restore them to see their balances and history.",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onPrimaryContainer
+                            )
+                            Spacer(Modifier.height(8.dp))
+                            androidx.compose.material3.Button(
+                                onClick = {
+                                    (context as? androidx.fragment.app.FragmentActivity)?.let {
+                                        viewModel.restoreFoundSubAccounts(it)
+                                    }
+                                },
+                                enabled = !uiState.isRestoring,
+                            ) {
+                                Text(if (uiState.isRestoring) "Restoring..." else "Restore")
+                            }
+                        }
+                    }
+                }
+            }
+
             items(uiState.walletGroups, key = { it.wallet.walletId }) { group ->
                 WalletGroupCard(
                     group = group,

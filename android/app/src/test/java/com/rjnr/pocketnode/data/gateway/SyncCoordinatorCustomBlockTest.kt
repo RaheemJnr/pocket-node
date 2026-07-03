@@ -107,6 +107,7 @@ class SyncCoordinatorCustomBlockTest {
             keyManager = keyManager,
             json = json,
             lightClient = fakeBridge,
+            subAccountCandidateDao = db.subAccountCandidateDao(),
         )
     }
 

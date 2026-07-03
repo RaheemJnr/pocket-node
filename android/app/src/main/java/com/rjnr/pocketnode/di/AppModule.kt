@@ -262,5 +262,40 @@ object AppModule {
         daoHeaderResolver: com.rjnr.pocketnode.data.gateway.DaoHeaderResolver,
         daoDepositReader: com.rjnr.pocketnode.data.gateway.DaoDepositReader,
         lightClient: com.rjnr.pocketnode.data.gateway.LightClientReadOnly,
-    ): GatewayRepository = GatewayRepository(context, keyManager, walletPreferences, json, transactionBuilder, cacheManager, daoSyncManager, walletMigrationHelper, walletDao, appDatabase, headerCacheDao, syncProgressDao, pendingBroadcastDao, broadcastClient, syncCoordinator, daoHeaderResolver, daoDepositReader, lightClient)
+        subAccountReconciler: com.rjnr.pocketnode.data.wallet.SubAccountReconciler,
+    ): GatewayRepository = GatewayRepository(context, keyManager, walletPreferences, json, transactionBuilder, cacheManager, daoSyncManager, walletMigrationHelper, walletDao, appDatabase, headerCacheDao, syncProgressDao, pendingBroadcastDao, broadcastClient, syncCoordinator, daoHeaderResolver, daoDepositReader, lightClient, subAccountReconciler)
+
+    /**
+     * Production activity probe for sub-account discovery (#82 phase 2):
+     * one nativeGetTransactions(limit=1) against the candidate's lock
+     * script. Null (indeterminate) when the light client returns null —
+     * the reconciler retries on a later pass instead of mis-classifying.
+     */
+    @Provides
+    @Singleton
+    fun provideSubAccountActivityProbe(json: Json): com.rjnr.pocketnode.data.wallet.SubAccountActivityProbe =
+        com.rjnr.pocketnode.data.wallet.SubAccountActivityProbe { scriptArgs ->
+            runCatching {
+                val searchKey = com.rjnr.pocketnode.data.gateway.models.JniSearchKey(
+                    script = com.rjnr.pocketnode.data.gateway.models.Script(
+                        codeHash = com.rjnr.pocketnode.data.gateway.models.Script.SECP256K1_CODE_HASH,
+                        hashType = "type",
+                        args = scriptArgs,
+                    )
+                )
+                val raw = com.nervosnetwork.ckblightclient.LightClientNative.nativeGetTransactions(
+                    json.encodeToString(
+                        com.rjnr.pocketnode.data.gateway.models.JniSearchKey.serializer(),
+                        searchKey,
+                    ),
+                    "desc",
+                    1,
+                    null,
+                ) ?: return@runCatching null
+                val page = json.decodeFromString<
+                    com.rjnr.pocketnode.data.gateway.models.JniPagination<
+                        com.rjnr.pocketnode.data.gateway.models.JniTxWithCell>>(raw)
+                page.objects.isNotEmpty()
+            }.getOrNull()
+        }
 }

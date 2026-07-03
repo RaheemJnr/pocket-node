@@ -197,6 +197,60 @@ class WalletRepositoryTest {
         assertNotEquals(parent.mainnetAddress, sub.mainnetAddress)
     }
 
+    /**
+     * Discovery restore (#82 phase 2): explicitIndex recreates the account
+     * at the EXACT index whose script had history — not max+1. Same index
+     * must derive the same address a manual creation would have, and a
+     * taken index must be refused rather than silently shifted.
+     */
+    @Test
+    fun `createSubAccount explicitIndex restores the requested index`() = runTest {
+        val parentWords = mnemonicManager.generateMnemonic(MnemonicManager.WordCount.TWELVE)
+        val parent = repo.importFromMnemonic(
+            words = parentWords,
+            name = "Parent",
+            persistKeys = { walletId, bundle -> fakePersistV2(walletId, bundle) },
+        ).getOrThrow()
+
+        // Restore index 3 directly (indices 1-2 not yet restored).
+        val sub3 = repo.createSubAccount(
+            parentWalletId = parent.walletId,
+            name = "Sub 3",
+            parentMnemonic = parentWords,
+            explicitIndex = 3,
+            persistKeys = { walletId, bundle -> fakePersistV2(walletId, bundle) },
+        ).getOrThrow()
+        assertEquals(3, sub3.accountIndex)
+        assertEquals("m/44'/309'/3'/0/0", sub3.derivationPath)
+
+        // Same index again: refused.
+        val dup = repo.createSubAccount(
+            parentWalletId = parent.walletId,
+            name = "Sub 3 again",
+            parentMnemonic = parentWords,
+            explicitIndex = 3,
+            persistKeys = { walletId, bundle -> fakePersistV2(walletId, bundle) },
+        )
+        assertTrue(dup.isFailure)
+
+        // Address parity with the derivation contract: restoring index 3
+        // yields the address the discovery candidate's args imply.
+        val expectedArgs = SubAccountDiscovery(mnemonicManager, keyManager)
+            .deriveCandidates(parentWords).first { it.accountIndex == 3 }.scriptArgs
+        val restoredArgs = keyManager.deriveLockScriptFromAddress(sub3.testnetAddress).args
+        assertEquals(expectedArgs, restoredArgs)
+
+        // Default max+1 path still works around the explicit row: next
+        // auto-create lands at 4 (max existing is 3).
+        val sub4 = repo.createSubAccount(
+            parentWalletId = parent.walletId,
+            name = "Sub 4",
+            parentMnemonic = parentWords,
+            persistKeys = { walletId, bundle -> fakePersistV2(walletId, bundle) },
+        ).getOrThrow()
+        assertEquals(4, sub4.accountIndex)
+    }
+
     @Test
     fun `deleteWallet refuses to delete active wallet`() = runTest {
         val wallet1 = repo.createWallet(
