@@ -469,3 +469,25 @@ val MIGRATION_10_11 = object : Migration(10, 11) {
         db.execSQL("CREATE INDEX IF NOT EXISTS `idx_contacts_walletId` ON `contacts` (`walletId`)")
     }
 }
+
+/**
+ * v13 (#82 phase 1): `sub_account_candidates` — derivable-but-unrestored HD
+ * sub-account slots recorded at parent mnemonic import. Public script args
+ * only; no key material. Single CREATE TABLE, no existing shape touched.
+ */
+val MIGRATION_12_13 = object : Migration(12, 13) {
+    override fun migrate(db: SupportSQLiteDatabase) {
+        db.execSQL(
+            """
+            CREATE TABLE IF NOT EXISTS `sub_account_candidates` (
+                `parentWalletId` TEXT NOT NULL,
+                `accountIndex` INTEGER NOT NULL,
+                `scriptArgs` TEXT NOT NULL,
+                `state` TEXT NOT NULL,
+                `createdAt` INTEGER NOT NULL,
+                PRIMARY KEY(`parentWalletId`, `accountIndex`)
+            )
+            """.trimIndent()
+        )
+    }
+}

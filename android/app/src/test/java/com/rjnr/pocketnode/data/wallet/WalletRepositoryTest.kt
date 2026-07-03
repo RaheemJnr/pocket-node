@@ -70,7 +70,8 @@ class WalletRepositoryTest {
         walletPreferences = WalletPreferences(context)
         repo = WalletRepository(
             walletDao, keyManager, walletPreferences, mnemonicManager, db,
-            db.transactionDao(), db.balanceCacheDao(), db.daoCellDao(), db.keyMaterialDao()
+            db.transactionDao(), db.balanceCacheDao(), db.daoCellDao(), db.keyMaterialDao(),
+            db.subAccountCandidateDao(), SubAccountDiscovery(mnemonicManager, keyManager)
         )
     }
 

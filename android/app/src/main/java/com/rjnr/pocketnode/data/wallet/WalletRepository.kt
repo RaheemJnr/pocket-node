@@ -32,6 +32,8 @@ class WalletRepository @Inject constructor(
     private val balanceCacheDao: BalanceCacheDao,
     private val daoCellDao: DaoCellDao,
     private val keyMaterialDao: KeyMaterialDao,
+    private val subAccountCandidateDao: com.rjnr.pocketnode.data.database.dao.SubAccountCandidateDao,
+    private val subAccountDiscovery: SubAccountDiscovery,
 ) {
     val walletsFlow: Flow<List<WalletEntity>> = walletDao.getAllFlow()
 
@@ -209,6 +211,23 @@ class WalletRepository @Inject constructor(
                 .onFailure { Log.e(TAG, "Rollback delete failed for $walletId", it) }
             throw e
         }
+
+        // #82 phase 1: record derivable sub-account slots while the mnemonic
+        // is in memory. Args only, no keys. Never allowed to fail the import —
+        // discovery is an enhancement, the wallet row above is the product.
+        runCatching {
+            val now2 = System.currentTimeMillis()
+            subAccountCandidateDao.insertAll(
+                subAccountDiscovery.deriveCandidates(words, passphrase).map {
+                    com.rjnr.pocketnode.data.database.entity.SubAccountCandidateEntity(
+                        parentWalletId = walletId,
+                        accountIndex = it.accountIndex,
+                        scriptArgs = it.scriptArgs,
+                        createdAt = now2,
+                    )
+                }
+            )
+        }.onFailure { Log.w(TAG, "Sub-account candidate derivation failed (non-fatal)", it) }
 
         Log.d(TAG, "Imported wallet: ${entity.walletId} (${entity.name})")
         entity
