@@ -15,6 +15,7 @@ import com.rjnr.pocketnode.data.database.dao.WalletDao
 import com.rjnr.pocketnode.data.database.entity.BalanceCacheEntity
 import com.rjnr.pocketnode.data.database.entity.ContactEntity
 import com.rjnr.pocketnode.data.database.entity.PendingDaoWithdrawEntity
+import com.rjnr.pocketnode.data.database.entity.SubAccountCandidateEntity
 import com.rjnr.pocketnode.data.database.entity.DaoCellEntity
 import com.rjnr.pocketnode.data.database.entity.HeaderCacheEntity
 import com.rjnr.pocketnode.data.database.entity.KeyMaterialEntity
@@ -35,6 +36,7 @@ import com.rjnr.pocketnode.data.database.entity.WalletEntity
         PendingBroadcastEntity::class,
         ContactEntity::class,
         PendingDaoWithdrawEntity::class,
+        SubAccountCandidateEntity::class,
     ],
     // Bumped from 8 to 9 in v1.5.2 because TransactionEntity / BalanceCacheEntity
     // / DaoCellEntity gained @Index(idx_tx_pending) + @ColumnInfo(defaultValue)
@@ -57,7 +59,11 @@ import com.rjnr.pocketnode.data.database.entity.WalletEntity
     // Bumped from 11 to 12 for #347: adds the `pending_dao_withdraws` table —
     // durable marker for an in-flight DAO phase-1 withdraw. MIGRATION_11_12 is
     // a single CREATE TABLE + 1 CREATE INDEX.
-    version = 12,
+    //
+    // Bumped from 12 to 13 for #82 phase 1: adds `sub_account_candidates`
+    // (HD discovery slots recorded at parent import). MIGRATION_12_13 is a
+    // single CREATE TABLE.
+    version = 13,
     // Schema export deliberately OFF until the Room 2.8.4 / kotlinx-serialization
     // 1.8.0 binary incompatibility is resolved (tracked in #149). Enabling it
     // crashes KSP with AbstractMethodError in Room's bundled
@@ -79,4 +85,5 @@ abstract class AppDatabase : RoomDatabase() {
     abstract fun pendingBroadcastDao(): PendingBroadcastDao
     abstract fun contactDao(): ContactDao
     abstract fun pendingDaoWithdrawDao(): PendingDaoWithdrawDao
+    abstract fun subAccountCandidateDao(): com.rjnr.pocketnode.data.database.dao.SubAccountCandidateDao
 }
