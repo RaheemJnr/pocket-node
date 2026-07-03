@@ -170,7 +170,18 @@ fun CkbNavGraph(
                         launchSingleTop = true
                     }
                 },
-                onNavigateBack = { navController.popBackStack() },
+                onNavigateBack = {
+                    // Fall back to a safe destination when there's nothing to
+                    // pop. The sub-account backup notice can be the START
+                    // destination, where popBackStack() no-ops and the "Got it"
+                    // button appeared dead (#372).
+                    if (!navController.popBackStack()) {
+                        navController.navigate(destinationAfterWalletReady()) {
+                            popUpTo(Screen.MnemonicBackup.BASE) { inclusive = true }
+                            launchSingleTop = true
+                        }
+                    }
+                },
                 onNavigateToPinVerify = {
                     navController.navigate(Screen.PinEntry.createRoute("verify"))
                 },

@@ -613,6 +613,16 @@ class GatewayRepository @Inject constructor(
      * Used by MainActivity to gate access to the dashboard until backup is done.
      */
     suspend fun needsMnemonicBackup(): Boolean {
+        // Sub-accounts are derived from the parent's seed and have no
+        // independent mnemonic to back up; they inherit the parent's backup
+        // status. Never prompt them to back up. Besides being wrong, this used
+        // to make the sub-account backup notice the nav START destination,
+        // where its "Got it" button (popBackStack) no-oped on an empty back
+        // stack and the user was stuck (#372).
+        val activeWallet = walletDao.getActive()
+            ?: activeWalletId.takeIf { it.isNotBlank() }?.let { walletDao.getById(it) }
+        if (activeWallet?.parentWalletId != null) return false
+
         return resolveActiveWalletType() == KeyManager.WALLET_TYPE_MNEMONIC
             && !hasMnemonicBackupForActiveWallet()
     }
