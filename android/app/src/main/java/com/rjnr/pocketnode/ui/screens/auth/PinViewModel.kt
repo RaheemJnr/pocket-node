@@ -26,6 +26,14 @@ data class PinUiState(
     val isLockedOut: Boolean = false,
     val lockoutRemainingSeconds: Int = 0,
     val remainingAttempts: Int = PinManager.MAX_ATTEMPTS,
+    /** True at the permanent-lockout threshold (10+ failures): no countdown, recovery only. */
+    val isPermanentlyLocked: Boolean = false,
+    /**
+     * Drives the recovery popup that points the user at "reset and restore
+     * from seed" once they run out of attempts. Set when attempts hit zero or
+     * on permanent lock, so the escape hatch is impossible to miss (#373).
+     */
+    val showRecoveryDialog: Boolean = false,
     val pinComplete: Boolean = false,
     /**
      * True while the Argon2id KDF is computing the PIN hash. The PIN entry
@@ -137,16 +145,23 @@ class PinViewModel @Inject constructor(
                     }
 
                     _uiState.update { it.copy(isVerifying = false) }
+                    val remaining = pinManager.getRemainingAttempts()
+                    // Surface the recovery popup the moment attempts run out, so
+                    // the user is never staring at a keypad with no way forward.
+                    val outOfAttempts = remaining == 0 || pinManager.isPermanentlyLocked()
                     if (pinManager.isLockedOut()) {
+                        if (outOfAttempts) {
+                            _uiState.update { it.copy(showRecoveryDialog = true) }
+                        }
                         startLockoutTimer()
                     } else {
-                        val remaining = pinManager.getRemainingAttempts()
                         _uiState.update {
                             it.copy(
                                 isError = true,
                                 errorMessage = "Wrong PIN. $remaining attempts remaining.",
                                 enteredDigits = "",
-                                remainingAttempts = remaining
+                                remainingAttempts = remaining,
+                                showRecoveryDialog = it.showRecoveryDialog || outOfAttempts
                             )
                         }
                         delay(500)
@@ -169,11 +184,17 @@ class PinViewModel @Inject constructor(
         if (pinManager.isLockedOut()) {
             startLockoutTimer()
         } else {
+            val remaining = pinManager.getRemainingAttempts()
             _uiState.update {
                 it.copy(
                     isLockedOut = false,
+                    isPermanentlyLocked = pinManager.isPermanentlyLocked(),
                     lockoutRemainingSeconds = 0,
-                    remainingAttempts = pinManager.getRemainingAttempts()
+                    remainingAttempts = remaining,
+                    // Re-open the recovery prompt for a user who returns to the
+                    // screen already out of attempts.
+                    showRecoveryDialog = it.showRecoveryDialog ||
+                        remaining == 0 || pinManager.isPermanentlyLocked()
                 )
             }
         }
@@ -181,7 +202,21 @@ class PinViewModel @Inject constructor(
 
     private fun startLockoutTimer() {
         lockoutTimerJob?.cancel()
-        _uiState.update { it.copy(isLockedOut = true, enteredDigits = "", errorMessage = null) }
+        val permanent = pinManager.isPermanentlyLocked()
+        _uiState.update {
+            it.copy(
+                isLockedOut = true,
+                isPermanentlyLocked = permanent,
+                enteredDigits = "",
+                errorMessage = null,
+                showRecoveryDialog = it.showRecoveryDialog || permanent
+            )
+        }
+        if (permanent) {
+            // No countdown: the lockout never expires. Recovery (reset +
+            // restore from seed) is the only path forward.
+            return
+        }
         lockoutTimerJob = viewModelScope.launch {
             while (pinManager.isLockedOut()) {
                 val remainingMs = pinManager.getLockoutRemainingMs()
@@ -198,5 +233,9 @@ class PinViewModel @Inject constructor(
                 )
             }
         }
+    }
+
+    fun dismissRecoveryDialog() {
+        _uiState.update { it.copy(showRecoveryDialog = false) }
     }
 }
