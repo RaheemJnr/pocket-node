@@ -17,6 +17,8 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.shape.CircleShape
 import com.composables.icons.lucide.*
+import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.Button
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.FilledTonalButton
 import androidx.compose.material3.Icon
@@ -85,6 +87,45 @@ fun PinEntryScreen(
     }
 
     val showBackArrow = mode == PinMode.SETUP || mode == PinMode.CONFIRM
+
+    // Recovery escape hatch when the user runs out of PIN attempts. Points
+    // straight at "reset and restore from seed" so a locked-out user is never
+    // stuck on the keypad with no way forward (#373).
+    if (uiState.showRecoveryDialog) {
+        AlertDialog(
+            onDismissRequest = { viewModel.dismissRecoveryDialog() },
+            title = {
+                Text(
+                    if (uiState.isPermanentlyLocked) "Wallet locked"
+                    else "Out of PIN attempts"
+                )
+            },
+            text = {
+                Text(
+                    if (uiState.isPermanentlyLocked) {
+                        "Too many incorrect PIN attempts. To regain access, reset this wallet and restore it from your recovery phrase. Your funds are safe as long as you have your recovery phrase."
+                    } else {
+                        "You've used all your PIN attempts for now. You can wait for the timer and try again, or reset this wallet and restore it from your recovery phrase. Your funds are safe as long as you have your recovery phrase."
+                    }
+                )
+            },
+            confirmButton = {
+                Button(onClick = {
+                    viewModel.dismissRecoveryDialog()
+                    onForgotPin()
+                }) {
+                    Text("Reset & restore")
+                }
+            },
+            dismissButton = {
+                if (!uiState.isPermanentlyLocked) {
+                    TextButton(onClick = { viewModel.dismissRecoveryDialog() }) {
+                        Text("Wait and try again")
+                    }
+                }
+            }
+        )
+    }
 
     Scaffold(
         containerColor = MaterialTheme.colorScheme.surface,
@@ -169,6 +210,13 @@ fun PinEntryScreen(
                         )
                     }
                 }
+                uiState.isPermanentlyLocked -> {
+                    Text(
+                        text = "Too many attempts. Reset and restore from your recovery phrase to regain access.",
+                        color = MaterialTheme.colorScheme.error,
+                        style = MaterialTheme.typography.bodySmall
+                    )
+                }
                 uiState.isLockedOut -> {
                     Text(
                         text = "Too many attempts. Try again in ${uiState.lockoutRemainingSeconds}s",
@@ -179,6 +227,13 @@ fun PinEntryScreen(
                 uiState.errorMessage != null -> {
                     Text(
                         text = uiState.errorMessage.orEmpty(),
+                        color = MaterialTheme.colorScheme.error,
+                        style = MaterialTheme.typography.bodySmall
+                    )
+                }
+                mode == PinMode.VERIFY && uiState.remainingAttempts == 0 -> {
+                    Text(
+                        text = "No attempts left right now. Wait for the timer, or reset and restore from your recovery phrase.",
                         color = MaterialTheme.colorScheme.error,
                         style = MaterialTheme.typography.bodySmall
                     )
@@ -247,10 +302,23 @@ fun PinEntryScreen(
                 Spacer(modifier = Modifier.height(12.dp))
             }
 
-            // Forgot PIN
+            // Forgot PIN / recovery. Becomes a prominent button once attempts
+            // run low so the escape hatch is obvious under stress (#373);
+            // stays a subtle text link otherwise.
             if (mode == PinMode.VERIFY) {
-                TextButton(onClick = onForgotPin) {
-                    Text("Forgot PIN?")
+                val recoveryProminent = uiState.isPermanentlyLocked ||
+                    uiState.remainingAttempts <= 2
+                if (recoveryProminent) {
+                    Button(
+                        onClick = onForgotPin,
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        Text("Forgot PIN? Reset & restore from seed")
+                    }
+                } else {
+                    TextButton(onClick = onForgotPin) {
+                        Text("Forgot PIN?")
+                    }
                 }
             }
 

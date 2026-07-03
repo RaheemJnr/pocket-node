@@ -27,6 +27,14 @@ import org.bouncycastle.crypto.params.Argon2Parameters
  * 24 hours of no failures (the "decay window"), or when the user explicitly
  * re-sets their PIN via `setPin`. Lockout duration escalates with attempt
  * count up to a permanent lockout at 10+ failures.
+ *
+ * The counter (and lockout state) live in EncryptedSharedPreferences, which
+ * survive an app upgrade / overwrite install by design (#370). Resetting it
+ * on reinstall would let an attacker sideload a build to clear the count and
+ * keep brute-forcing, so it deliberately persists across upgrades. When
+ * attempts run out, the recovery path is "reset and restore from seed"
+ * (surfaced by [com.rjnr.pocketnode.ui.screens.auth.PinEntryScreen], #373),
+ * not a counter reset.
  */
 @Singleton
 class PinManager @Inject constructor(
