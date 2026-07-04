@@ -303,6 +303,7 @@ class WalletRepository @Inject constructor(
         parentWalletId: String,
         name: String,
         parentMnemonic: List<String>,
+        explicitIndex: Int? = null,
         persistKeys: suspend (walletId: String, bundle: WalletKeyBundle) -> WalletKeyWriter.Result,
     ): Result<WalletEntity> = runCatching {
         val parent = walletDao.getById(parentWalletId)
@@ -312,7 +313,18 @@ class WalletRepository @Inject constructor(
         }
 
         val existingSubs = walletDao.getSubAccountsList(parentWalletId)
-        val nextIndex = if (existingSubs.isEmpty()) 1 else existingSubs.maxOf { it.accountIndex } + 1
+        // explicitIndex = discovery restore (#82): recreate the account at the
+        // exact index whose script showed on-chain history. Default path keeps
+        // the contiguous max+1 scheme.
+        val nextIndex = if (explicitIndex != null) {
+            require(explicitIndex >= 1) { "Sub-account index must be >= 1" }
+            require(existingSubs.none { it.accountIndex == explicitIndex }) {
+                "Sub-account index $explicitIndex already exists"
+            }
+            explicitIndex
+        } else {
+            if (existingSubs.isEmpty()) 1 else existingSubs.maxOf { it.accountIndex } + 1
+        }
         val seed = mnemonicManager.mnemonicToSeed(parentMnemonic)
         val privateKey = mnemonicManager.derivePrivateKey(seed, accountIndex = nextIndex)
         val publicKey = keyManager.derivePublicKey(privateKey)
@@ -350,12 +362,36 @@ class WalletRepository @Inject constructor(
             walletDao.deactivateAll()
             walletDao.insert(entity)
             walletPreferences.setActiveWalletId(walletId)
-            markFreshWalletSyncMode(walletId)
+            if (explicitIndex != null) {
+                // Discovery restore: the account has on-chain HISTORY — fresh
+                // from-tip sync would hide exactly what made it discoverable.
+                // Inherit the parent's sync window per network instead.
+                for (net in listOf(NetworkType.MAINNET, NetworkType.TESTNET)) {
+                    walletPreferences.setSyncMode(
+                        walletPreferences.getSyncMode(net, parentWalletId), net, walletId
+                    )
+                    walletPreferences.setCustomBlockHeight(
+                        walletPreferences.getCustomBlockHeight(net, parentWalletId), net, walletId
+                    )
+                }
+            } else {
+                markFreshWalletSyncMode(walletId)
+            }
         } catch (e: Throwable) {
             Log.e(TAG, "Post-persist sub-account insert failed for $walletId; attempting rollback", e)
             runCatching { keyMaterialDao.delete(walletId) }
                 .onFailure { Log.e(TAG, "Rollback delete failed for $walletId", it) }
             throw e
+        }
+
+        // Retire the discovery candidate at this index if one exists (any
+        // creation at index N supersedes the candidate row; IGNORE-on-insert
+        // means a plain no-candidate create is a harmless 0-row update).
+        runCatching {
+            subAccountCandidateDao.updateState(
+                parentWalletId, nextIndex,
+                com.rjnr.pocketnode.data.database.entity.SubAccountCandidateEntity.STATE_RESTORED,
+            )
         }
 
         Log.d(TAG, "Created sub-account: $walletId (parent: $parentWalletId, index: $nextIndex)")

@@ -19,6 +19,10 @@ interface SubAccountCandidateDao {
     @Query("SELECT * FROM sub_account_candidates WHERE state = :state")
     suspend fun getByState(state: String): List<SubAccountCandidateEntity>
 
+    /** Flow — drives the "Found N sub-accounts" restore banner. */
+    @Query("SELECT * FROM sub_account_candidates WHERE state = :state ORDER BY parentWalletId, accountIndex")
+    fun observeByState(state: String): kotlinx.coroutines.flow.Flow<List<SubAccountCandidateEntity>>
+
     @Query(
         "UPDATE sub_account_candidates SET state = :state " +
             "WHERE parentWalletId = :parentId AND accountIndex = :accountIndex"
