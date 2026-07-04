@@ -474,6 +474,10 @@ val MIGRATION_10_11 = object : Migration(10, 11) {
  * v13 (#82 phase 1): `sub_account_candidates` — derivable-but-unrestored HD
  * sub-account slots recorded at parent mnemonic import. Public script args
  * only; no key material. Single CREATE TABLE, no existing shape touched.
+ *
+ * `registeredFromBlock` added while v13 was still unreleased (no shipped
+ * versionCode carries v13), so the migration is amended in place rather
+ * than minting v14.
  */
 val MIGRATION_12_13 = object : Migration(12, 13) {
     override fun migrate(db: SupportSQLiteDatabase) {
@@ -485,6 +489,7 @@ val MIGRATION_12_13 = object : Migration(12, 13) {
                 `scriptArgs` TEXT NOT NULL,
                 `state` TEXT NOT NULL,
                 `createdAt` INTEGER NOT NULL,
+                `registeredFromBlock` INTEGER NOT NULL DEFAULT 0,
                 PRIMARY KEY(`parentWalletId`, `accountIndex`)
             )
             """.trimIndent()

@@ -317,6 +317,18 @@ class WalletSettingsViewModel @Inject constructor(
             // future reveals follow the standard V2 read path with its
             // own BiometricPrompt.
             if (kdf == 1) {
+                // No secure lock -> the V2 key cannot be minted, so the lazy
+                // V1->V2 upgrade below would throw ("Secure lock screen must
+                // be enabled", wrapped in InvalidAlgorithmParameterException —
+                // seed reveal errored on every no-lock device, device-test
+                // 2026-07). Fall through to the silent V1 read, the strongest
+                // path available without a lock; AuthScreen's migration
+                // upgrades the row once the user enables one.
+                if (!authManager.isBiometricEnrolled() && !authManager.hasDeviceCredential()) {
+                    Log.i(TAG, "No secure lock — V1 reveal without lazy V2 upgrade for $walletId")
+                    loadSensitiveData()
+                    return@launch
+                }
                 val cipher = try {
                     encryptionManager.newEncryptCipherV2()
                 } catch (e: Throwable) {
