@@ -263,6 +263,39 @@ class SyncCoordinator @Inject constructor(
     }
 
     /**
+     * PENDING sub-account discovery candidates for [walletId] as registrable
+     * script statuses (#82 phase 2). Registered with walletId="" by callers —
+     * [setScriptsAndRecord] skips empty ids for the args→wallet mapping and
+     * sync_progress rows, so candidates never pollute per-wallet progress.
+     * Same fromBlock as the parent so candidates scan the parent's window.
+     * Capped to bound per-script filter cost; remaining PENDING slots
+     * register on later cycles as earlier ones resolve FOUND/EMPTY.
+     *
+     * MUST be included by EVERY path that issues CMD_SET_SCRIPTS_ALL for a
+     * wallet: ALL replaces the whole registered set, so a single-wallet
+     * re-registration that omits candidates silently unregisters them —
+     * the import flow's immediate resync did exactly that and killed
+     * discovery before the filter ever scanned (device-test, 2026-07).
+     * Non-parents have no candidate rows, so this is a cheap no-op for them.
+     */
+    suspend fun pendingCandidateStatuses(
+        walletId: String,
+        lockScript: com.rjnr.pocketnode.data.gateway.models.Script,
+        blockNumberHex: String,
+    ): List<JniScriptStatus> = runCatching {
+        subAccountCandidateDao.getForParent(walletId)
+            .filter { it.state == com.rjnr.pocketnode.data.database.entity.SubAccountCandidateEntity.STATE_PENDING }
+            .take(MAX_CANDIDATE_SCRIPTS_PER_PARENT)
+            .map { candidate ->
+                JniScriptStatus(
+                    script = lockScript.copy(args = candidate.scriptArgs),
+                    scriptType = "lock",
+                    blockNumber = blockNumberHex,
+                )
+            }
+    }.getOrDefault(emptyList())
+
+    /**
      * BALANCED strategy filter: drop wallets whose `localSavedBlockNumber`
      * lags the max-progress wallet by more than [BALANCED_LAG_THRESHOLD]
      * blocks. Active wallet always passes regardless of its own lag.
@@ -460,35 +493,10 @@ class SyncCoordinator @Inject constructor(
 
                     // #82 phase 2: register PENDING sub-account discovery
                     // candidates alongside their parent so the filter sync
-                    // covers them. walletId = "" — setScriptsAndRecord skips
-                    // empty ids for the args→wallet mapping and sync_progress
-                    // rows, so candidates never pollute per-wallet progress.
-                    // Same fromBlock as the parent: candidates scan the same
-                    // window the parent's history does. Capped to bound the
-                    // per-script filter cost; remaining PENDING slots register
-                    // on later cycles as earlier ones resolve FOUND/EMPTY.
-                    // (Degradation note: paths that register only the active
-                    // wallet's script replace the whole set without candidates
-                    // — discovery just pauses until the next ALL registration;
-                    // states are in Room, nothing is lost.)
-                    val candidates = if (wallet.parentWalletId == null &&
-                        wallet.type == KeyManager.WALLET_TYPE_MNEMONIC
-                    ) {
-                        runCatching {
-                            subAccountCandidateDao.getForParent(wallet.walletId)
-                                .filter { it.state == com.rjnr.pocketnode.data.database.entity.SubAccountCandidateEntity.STATE_PENDING }
-                                .take(MAX_CANDIDATE_SCRIPTS_PER_PARENT)
-                                .map { candidate ->
-                                    "" to JniScriptStatus(
-                                        script = lockScript.copy(args = candidate.scriptArgs),
-                                        scriptType = "lock",
-                                        blockNumber = blockNumberHex,
-                                    )
-                                }
-                        }.getOrDefault(emptyList())
-                    } else {
-                        emptyList()
-                    }
+                    // covers them. See [pendingCandidateStatuses].
+                    val candidates =
+                        pendingCandidateStatuses(wallet.walletId, lockScript, blockNumberHex)
+                            .map { "" to it }
                     listOf(own) + candidates
                 }
             }.awaitAll().filterNotNull().flatten()

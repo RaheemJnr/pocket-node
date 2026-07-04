@@ -772,7 +772,20 @@ class GatewayRepository @Inject constructor(
             )
         )
 
-        val result = setScriptsAndRecord(scriptStatuses, listOf(activeWalletId), LightClientNative.CMD_SET_SCRIPTS_ALL)
+        // CMD_ALL replaces the entire registered set — carry the active
+        // wallet's PENDING discovery candidates or they get silently
+        // unregistered. The import flow's immediate resync hit exactly this:
+        // candidates registered at import were wiped 40s later and discovery
+        // never ran (#82, device-test 2026-07). Empty walletIds keep them out
+        // of per-wallet progress, same contract as registerAllWalletScripts.
+        val candidateStatuses = syncCoordinator.pendingCandidateStatuses(
+            activeWalletId, info.script, blockNumberHex
+        )
+        val result = setScriptsAndRecord(
+            scriptStatuses + candidateStatuses,
+            listOf(activeWalletId) + candidateStatuses.map { "" },
+            LightClientNative.CMD_SET_SCRIPTS_ALL
+        )
         if (!result) throw Exception("Failed to set scripts")
 
         _isRegistered.value = true

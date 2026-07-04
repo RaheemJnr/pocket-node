@@ -23,10 +23,9 @@ import org.bouncycastle.crypto.params.Argon2Parameters
  * is preserved for verification and silently re-hashed to Argon2id on the
  * first successful entry.
  *
- * The failure counter is cumulative across sessions. It resets only after
- * 24 hours of no failures (the "decay window"), or when the user explicitly
- * re-sets their PIN via `setPin`. Lockout duration escalates with attempt
- * count up to a permanent lockout at 10+ failures.
+ * The failure counter is cumulative across sessions and resets on a
+ * successful verification or an explicit `setPin`. Lockout duration
+ * escalates with attempt count up to a permanent lockout at 10+ failures.
  *
  * The counter (and lockout state) live in EncryptedSharedPreferences, which
  * survive an app upgrade / overwrite install by design (#370). Resetting it
@@ -248,21 +247,19 @@ class PinManager @Inject constructor(
     }
 
     private fun onSuccessfulPin() {
-        val now = timeProvider()
-        val lastFailedAt = prefs.getLong(KEY_LAST_FAILED_AT, 0L)
-        val editor = prefs.edit().remove(KEY_LOCKOUT_UNTIL)
-
-        val sinceLastFailureMs = if (lastFailedAt == 0L) Long.MAX_VALUE else now - lastFailedAt
-        if (sinceLastFailureMs >= LOCKOUT_DECAY_MS) {
-            // Long enough since the last failure that this is genuine usage,
-            // not a quiet attacker grinding between owner-initiated unlocks.
-            // Reset the counter.
-            editor.putInt(KEY_FAILED_ATTEMPTS, 0)
-            editor.remove(KEY_LAST_FAILED_AT)
-        }
-        // Otherwise: leave the counter alone so a near-success-after-failures
-        // does not erase the audit trail.
-        editor.apply()
+        // A correct PIN resets the counter to max, matching platform
+        // convention (Android lockscreen does the same). The previous 24h
+        // decay window kept the counter after success to slow an attacker
+        // grinding between owner unlocks, but in practice it left the OWNER
+        // staring at "out of attempts" + the recovery dialog on every unlock
+        // for a day after fumbling their PIN (device-test report, 2026-07).
+        // Escalating lockouts (30s at 5 failures -> permanent at 10) still
+        // bound brute force between successes.
+        prefs.edit()
+            .remove(KEY_LOCKOUT_UNTIL)
+            .putInt(KEY_FAILED_ATTEMPTS, 0)
+            .remove(KEY_LAST_FAILED_AT)
+            .apply()
     }
 
     private fun hashPinArgon2id(pinBytes: ByteArray): String {

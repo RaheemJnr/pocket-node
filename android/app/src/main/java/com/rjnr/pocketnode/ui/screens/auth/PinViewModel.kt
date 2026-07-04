@@ -140,7 +140,18 @@ class PinViewModel @Inject constructor(
                     val ok = withContext(Dispatchers.Default) { pinManager.verifyPin(pin) }
                     if (ok) {
                         authManager.setSessionPin(pin.toCharArray())
-                        _uiState.update { it.copy(isVerifying = false, pinComplete = true) }
+                        // Correct PIN restores full attempts (PinManager reset)
+                        // — mirror that here and drop any recovery dialog so it
+                        // can't reappear after a successful unlock.
+                        _uiState.update {
+                            it.copy(
+                                isVerifying = false,
+                                pinComplete = true,
+                                remainingAttempts = PinManager.MAX_ATTEMPTS,
+                                showRecoveryDialog = false,
+                                isPermanentlyLocked = false,
+                            )
+                        }
                         return@launch
                     }
 

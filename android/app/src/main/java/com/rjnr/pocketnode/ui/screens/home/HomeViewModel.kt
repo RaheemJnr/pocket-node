@@ -579,7 +579,11 @@ class HomeViewModel @Inject constructor(
             val type = repository.getWalletType()
             // Sub-accounts (parentWalletId != null) don't hold their own mnemonic —
             // the parent wallet's backup covers them. Don't show backup reminder.
-            val activeWallet = _uiState.value.wallets.find { it.isActive }
+            // Query Room directly: reading `_uiState.value.wallets` raced the
+            // async wallet-list load, so a sub-account opened before the list
+            // arrived was misclassified and got the "Back Up Your Wallet"
+            // banner (device-test report, 2026-07).
+            val activeWallet = walletRepository.getActive()
             val isSubAccount = activeWallet?.parentWalletId != null
             val needsBackup = type == KeyManager.WALLET_TYPE_MNEMONIC
                 && !isSubAccount
@@ -592,8 +596,10 @@ class HomeViewModel @Inject constructor(
         viewModelScope.launch {
             val hasPin = pinManager.hasPin()
             val hasBiometrics = authManager.isBiometricEnabled()
-            // Sub-accounts inherit parent's backup status — treat as backed up
-            val activeWallet = _uiState.value.wallets.find { it.isActive }
+            // Sub-accounts inherit parent's backup status — treat as backed up.
+            // Room query, not _uiState.value.wallets — same load race as
+            // checkBackupStatus.
+            val activeWallet = walletRepository.getActive()
             val isSubAccount = activeWallet?.parentWalletId != null
             val hasMnemonicBackup = isSubAccount || repository.hasMnemonicBackupForActiveWallet()
             _uiState.update {
