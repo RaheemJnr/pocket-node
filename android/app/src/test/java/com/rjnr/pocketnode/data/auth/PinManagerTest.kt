@@ -174,21 +174,20 @@ class PinManagerTest {
     }
 
     @Test
-    fun `successful verification within 24h does NOT reset failed attempts`() {
+    fun `successful verification resets failed attempts to max`() {
         pinManager.setPin("123456")
         pinManager.verifyPin("000000")
         pinManager.verifyPin("000000")
         assertEquals(PinManager.MAX_ATTEMPTS - 2, pinManager.getRemainingAttempts())
 
-        // Simulate a quiet attacker scenario: legitimate owner unlocks within
-        // the 24h decay window. The counter must NOT reset, so the attacker
-        // cannot grind between owner-initiated unlocks.
+        // Policy change (device-test report, 2026-07): a correct PIN restores
+        // the full attempt count immediately, matching platform convention.
+        // The old 24h decay window kept the owner in an "out of attempts"
+        // state for a day after fumbling; escalating lockouts still bound
+        // brute force between successes.
         fakeTimeMs += 60_000L // 1 minute later
         pinManager.verifyPin("123456")
-        assertEquals(
-            PinManager.MAX_ATTEMPTS - 2,
-            pinManager.getRemainingAttempts()
-        )
+        assertEquals(PinManager.MAX_ATTEMPTS, pinManager.getRemainingAttempts())
     }
 
     @Test
