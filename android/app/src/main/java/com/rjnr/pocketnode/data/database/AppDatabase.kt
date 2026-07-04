@@ -63,7 +63,10 @@ import com.rjnr.pocketnode.data.database.entity.WalletEntity
     // Bumped from 12 to 13 for #82 phase 1: adds `sub_account_candidates`
     // (HD discovery slots recorded at parent import). MIGRATION_12_13 is a
     // single CREATE TABLE.
-    version = 13,
+    //
+    // Bumped from 13 to 14: sub_account_candidates gains registeredFromBlock
+    // (#82 coverage gate). MIGRATION_13_14 is a single ALTER TABLE.
+    version = 14,
     // Schema export deliberately OFF until the Room 2.8.4 / kotlinx-serialization
     // 1.8.0 binary incompatibility is resolved (tracked in #149). Enabling it
     // crashes KSP with AbstractMethodError in Room's bundled

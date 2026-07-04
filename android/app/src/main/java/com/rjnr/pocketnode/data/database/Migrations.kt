@@ -474,10 +474,6 @@ val MIGRATION_10_11 = object : Migration(10, 11) {
  * v13 (#82 phase 1): `sub_account_candidates` — derivable-but-unrestored HD
  * sub-account slots recorded at parent mnemonic import. Public script args
  * only; no key material. Single CREATE TABLE, no existing shape touched.
- *
- * `registeredFromBlock` added while v13 was still unreleased (no shipped
- * versionCode carries v13), so the migration is amended in place rather
- * than minting v14.
  */
 val MIGRATION_12_13 = object : Migration(12, 13) {
     override fun migrate(db: SupportSQLiteDatabase) {
@@ -489,10 +485,24 @@ val MIGRATION_12_13 = object : Migration(12, 13) {
                 `scriptArgs` TEXT NOT NULL,
                 `state` TEXT NOT NULL,
                 `createdAt` INTEGER NOT NULL,
-                `registeredFromBlock` INTEGER NOT NULL DEFAULT 0,
                 PRIMARY KEY(`parentWalletId`, `accountIndex`)
             )
             """.trimIndent()
+        )
+    }
+}
+
+/**
+ * v14: `registeredFromBlock` on sub_account_candidates — lowest block a
+ * candidate's script was registered to scan from; gates the reconciler's
+ * EMPTY verdict on real coverage (#82). A proper version bump: amending
+ * v13 in place broke build-over-build upgrades (Room identity-hash crash
+ * caught by upgrade-smoke) even though no RELEASE shipped v13.
+ */
+val MIGRATION_13_14 = object : Migration(13, 14) {
+    override fun migrate(db: SupportSQLiteDatabase) {
+        db.execSQL(
+            "ALTER TABLE `sub_account_candidates` ADD COLUMN `registeredFromBlock` INTEGER NOT NULL DEFAULT 0"
         )
     }
 }
