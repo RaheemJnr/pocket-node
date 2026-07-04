@@ -74,6 +74,9 @@ class WalletKeyWriterTest {
             keyMaterialDao, encryptionManager, prefs
         )
         authManager = mockk(relaxed = true)
+        // Default: device HAS a secure lock so tests exercise the V2 path.
+        // The no-lock V1 fallback test overrides this.
+        io.mockk.every { authManager.isBiometricEnrolled() } returns true
         keyBackupManager = mockk(relaxed = true)
         writer = WalletKeyWriter(
             keyMaterialDao = keyMaterialDao,
@@ -105,6 +108,30 @@ class WalletKeyWriterTest {
         assertNotNull(entity)
         assertEquals(2, entity!!.kdfVersion)
         coVerify(exactly = 0) { keyBackupManager.writeBackup(any(), any(), any()) }
+    }
+
+    /**
+     * No secure lock on the device: persistNewWallet must fall back to the
+     * V1 software key with NO auth prompt instead of crashing with
+     * "Secure lock screen must be enabled" (emulator repro, #354 follow-up:
+     * WalletSettings addSubAccount and discovery restore hit this — only
+     * AddWalletViewModel had the pre-gate).
+     */
+    @Test
+    fun `persistNewWallet falls back to V1 when device has no secure lock`() = runTest {
+        io.mockk.every { authManager.isBiometricEnrolled() } returns false
+        io.mockk.every { authManager.hasDeviceCredential() } returns false
+
+        val result = writer.persistNewWallet(activity, "w-nolock", bundle, "mnemonic", false)
+
+        assertEquals(WalletKeyWriter.Result.Success, result)
+        val entity = keyMaterialDao.getByWalletId("w-nolock")
+        assertNotNull(entity)
+        assertEquals(1, entity!!.kdfVersion)
+        // The V2 prompt must never fire on the fallback path.
+        coVerify(exactly = 0) {
+            authManager.authenticateForCipher(any(), any<Cipher>(), any(), any())
+        }
     }
 
     @Test

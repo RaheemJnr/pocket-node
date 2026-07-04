@@ -106,23 +106,54 @@ class WalletKeyWriter @Inject constructor(
         promptTitle: String = "Secure wallet",
         promptSubtitle: String = "Use your phone's screen lock — fingerprint, face, or device PIN — to encrypt this wallet's keys.",
     ): Result {
+        // #354 follow-up: a V2 auth-bound key cannot exist without an enrolled
+        // biometric or device credential. AddWalletViewModel pre-gated this,
+        // but other callers (WalletSettings addSubAccount, discovery restore)
+        // called straight in and crashed with "Secure lock screen must be
+        // enabled" on no-lock devices. Gate HERE so every caller falls back to
+        // the V1 software key; the AuthScreen migration loop upgrades the row
+        // to V2 once the user enables a device lock.
+        if (!authManager.isBiometricEnrolled() && !authManager.hasDeviceCredential()) {
+            Log.i(TAG, "No secure lock on device — persisting $walletId at V1 fallback")
+            return persistNewWalletV1Fallback(
+                walletId = walletId,
+                bundle = bundle,
+                walletType = walletType,
+                mnemonicBackedUp = mnemonicBackedUp,
+            )
+        }
+
         val cipher = try {
             encryptionManager.newEncryptCipherV2()
         } catch (e: KeyPermanentlyInvalidatedException) {
             Log.w(TAG, "V2 key invalidated when generating cipher for $walletId", e)
             return Result.KeyInvalidated
+        } catch (e: java.security.InvalidAlgorithmParameterException) {
+            // KeyGenerator.init wraps the Keystore "Secure lock screen must be
+            // enabled" IllegalStateException in InvalidAlgorithmParameterException
+            // (seen on API 35 emulator) — the ISE catch below never fired for
+            // it. Race path only now that the pre-gate above exists (e.g. lock
+            // removed mid-flow): fall back to V1 like the gate would have.
+            if (e.cause?.message?.contains("Secure lock screen", ignoreCase = true) == true) {
+                Log.w(TAG, "V2 key creation refused mid-flow (no secure lock); V1 fallback", e)
+                return persistNewWalletV1Fallback(
+                    walletId = walletId,
+                    bundle = bundle,
+                    walletType = walletType,
+                    mnemonicBackedUp = mnemonicBackedUp,
+                )
+            }
+            throw e
         } catch (e: IllegalStateException) {
-            // Android Keystore throws IllegalStateException("Secure lock
-            // screen must be enabled to create keys requiring user
-            // authentication") when the V2 key (setUserAuthenticationRequired
-            // = true) is asked to generate on a device with no biometric
-            // enrolled AND no device PIN/pattern/password. The onboarding
-            // screen gates on this state, but a race (or a third-party
-            // entry point) could still reach here. Surface a typed result
-            // instead of letting the raw exception bubble up as a toast.
+            // Same condition, unwrapped form (older API levels).
             if (e.message?.contains("Secure lock screen", ignoreCase = true) == true) {
-                Log.w(TAG, "V2 key creation refused: no secure lock on device", e)
-                return Result.NoSecureLock
+                Log.w(TAG, "V2 key creation refused mid-flow (no secure lock); V1 fallback", e)
+                return persistNewWalletV1Fallback(
+                    walletId = walletId,
+                    bundle = bundle,
+                    walletType = walletType,
+                    mnemonicBackedUp = mnemonicBackedUp,
+                )
             }
             throw e
         }
