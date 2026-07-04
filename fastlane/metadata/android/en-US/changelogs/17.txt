@@ -1,0 +1,16 @@
+v1.7.6:
+This release restores sub-accounts automatically when you import a seed phrase, and fixes PIN, backup, and biometric issues found in testing.
+
+Importing a seed now finds its sub-accounts. After the sync completes, Wallet Manager shows any sub-accounts with on-chain history and restores them in one tap, with their balances and history intact. Restored accounts do not re-scan what was already synced.
+
+The PIN screen treats you fairly. Entering the correct PIN restores your full attempt count right away. If you do run out of attempts, a clear popup guides you to reset and restore from your seed phrase instead of leaving you stuck.
+
+Choosing a sync mode right after import now applies immediately. Previously choosing Recent could be silently ignored, leaving the wallet scanning from the wrong point.
+
+Sub-accounts are no longer asked to back up. They are covered by the parent wallet's seed phrase; the backup notice and its stuck Got it button are gone, and the reminder no longer appears on their home screen.
+
+Viewing your seed phrase works on devices without a screen lock, and unlocking with your PIN no longer leaves a fingerprint prompt hovering over the home screen.
+
+Settings now shows when an update is available, with a manual Check for updates action.
+
+Source: github.com/RaheemJnr/pocket-node/releases
