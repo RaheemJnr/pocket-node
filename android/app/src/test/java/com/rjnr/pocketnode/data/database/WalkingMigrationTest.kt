@@ -129,12 +129,19 @@ class WalkingMigrationTest {
      * validation passing.
      */
     @Test
-    fun `walk to v13 creates sub_account_candidates table`() {
+    fun `walk to v14 creates sub_account_candidates with registeredFromBlock`() {
         bootstrapV10()
         openViaRoomAndValidate()
         val db = openedRoomDb!!.openHelper.readableDatabase
         db.query("SELECT name FROM sqlite_master WHERE type='table' AND name='sub_account_candidates'").use { c ->
             assertTrue("sub_account_candidates table missing after MIGRATION_12_13", c.moveToNext())
+        }
+        db.query("PRAGMA table_info(`sub_account_candidates`)").use { c ->
+            var found = false
+            while (c.moveToNext()) {
+                if (c.getString(c.getColumnIndexOrThrow("name")) == "registeredFromBlock") found = true
+            }
+            assertTrue("registeredFromBlock column missing after MIGRATION_13_14", found)
         }
     }
 
@@ -183,7 +190,7 @@ class WalkingMigrationTest {
                 .addMigrations(
                     MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4, MIGRATION_4_5,
                     MIGRATION_5_6, MIGRATION_6_7, MIGRATION_7_8, noOpMigration8To9,
-                    MIGRATION_9_10, MIGRATION_10_11, MIGRATION_11_12, MIGRATION_12_13,
+                    MIGRATION_9_10, MIGRATION_10_11, MIGRATION_11_12, MIGRATION_12_13, MIGRATION_13_14,
                 )
                 .build()
             openedRoomDb = db
@@ -213,7 +220,7 @@ class WalkingMigrationTest {
             .addMigrations(
                 MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4, MIGRATION_4_5,
                 MIGRATION_5_6, MIGRATION_6_7, MIGRATION_7_8, MIGRATION_8_9,
-                MIGRATION_9_10, MIGRATION_10_11, MIGRATION_11_12, MIGRATION_12_13,
+                MIGRATION_9_10, MIGRATION_10_11, MIGRATION_11_12, MIGRATION_12_13, MIGRATION_13_14,
             )
             .build()
         openedRoomDb = db
