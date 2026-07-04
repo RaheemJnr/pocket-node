@@ -24,6 +24,15 @@ data class SubAccountCandidateEntity(
     val scriptArgs: String,
     val state: String = STATE_PENDING,
     val createdAt: Long,
+    /**
+     * Lowest block this candidate's script was ever registered to scan from
+     * (0 = never registered). The reconciler may only declare EMPTY when
+     * scanned-to-tip AND the scan actually covered chain from here — a
+     * candidate registered at tip has covered nothing, and judging it
+     * "no history" retired every candidate seconds after import
+     * (device-test 2026-07).
+     */
+    val registeredFromBlock: Long = 0,
 ) {
     companion object {
         const val STATE_PENDING = "PENDING"

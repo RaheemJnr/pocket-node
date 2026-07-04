@@ -29,6 +29,17 @@ interface SubAccountCandidateDao {
     )
     suspend fun updateState(parentId: String, accountIndex: Int, state: String)
 
+    /**
+     * Record the scan start for a registration, keeping the LOWEST block ever
+     * used (deepest coverage). 0 means never registered.
+     */
+    @Query(
+        "UPDATE sub_account_candidates SET registeredFromBlock = :fromBlock " +
+            "WHERE parentWalletId = :parentId AND accountIndex = :accountIndex " +
+            "AND (registeredFromBlock = 0 OR registeredFromBlock > :fromBlock)"
+    )
+    suspend fun updateRegisteredFrom(parentId: String, accountIndex: Int, fromBlock: Long)
+
     @Query("DELETE FROM sub_account_candidates WHERE parentWalletId = :parentId")
     suspend fun deleteForParent(parentId: String)
 }

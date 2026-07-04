@@ -72,14 +72,17 @@ class SubAccountReconciler @Inject constructor(
                         SubAccountCandidateEntity.STATE_FOUND,
                     )
                 }
-                tipHeight > 0 && scanned >= tipHeight - NEAR_TIP_MARGIN -> {
+                tipHeight > 0 && scanned >= tipHeight - NEAR_TIP_MARGIN &&
+                    candidate.registeredFromBlock > 0 &&
+                    scanned - candidate.registeredFromBlock >= MIN_COVERED_BLOCKS -> {
                     candidateDao.updateState(
                         candidate.parentWalletId,
                         candidate.accountIndex,
                         SubAccountCandidateEntity.STATE_EMPTY,
                     )
                 }
-                // else: still scanning — leave PENDING.
+                // else: still scanning (or the scan never covered real
+                // history) — leave PENDING.
             }
         }
     }
@@ -89,6 +92,18 @@ class SubAccountReconciler @Inject constructor(
 
         /** Scanned-to-within-this-many-blocks of tip counts as "scan complete". */
         const val NEAR_TIP_MARGIN = 1_000L
+
+        /**
+         * EMPTY additionally requires the scan to have actually COVERED this
+         * much chain. Candidates first registered at the tip (the parent had
+         * no sync window yet at import / network switch) report scanned≈tip
+         * immediately while having examined zero history — the first
+         * reconcile pass retired all of them as EMPTY seconds after import
+         * (device-test 2026-07). Imports default to the RECENT window
+         * (~200k blocks), so 50k means at least a quarter of that window was
+         * really examined before "no history" is believed.
+         */
+        const val MIN_COVERED_BLOCKS = 50_000L
 
         /** One pass per interval — the sync poll fires every few seconds. */
         const val RUN_INTERVAL_MS = 30_000L

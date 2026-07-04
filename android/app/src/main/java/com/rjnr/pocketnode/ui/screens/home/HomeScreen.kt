@@ -226,9 +226,15 @@ fun HomeScreen(
             onDismiss = { viewModel.hidePostImportSyncDialog() },
             onSelectMode = { mode, customBlock ->
                 viewModel.hidePostImportSyncDialog()
-                if (mode != SyncMode.RECENT) {
-                    viewModel.changeSyncMode(mode, customBlock)
-                }
+                // Apply UNCONDITIONALLY. The old `if (mode != RECENT)` assumed
+                // RECENT was already active, but an import can register from
+                // the tip first — picking RECENT was then silently dropped:
+                // Settings kept the stale mode and the wallet never scanned
+                // its history window (device-test 2026-07, also starved
+                // sub-account discovery of coverage). changeSyncMode's
+                // isSyncSettingApplied guard (#362) already makes a genuine
+                // re-selection a safe no-op, so there is nothing to save here.
+                viewModel.changeSyncMode(mode, customBlock)
             },
             onTopicHelp = { topic ->
                 // Close-and-reopen via the post-import flag so dismissing the
