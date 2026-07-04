@@ -136,7 +136,7 @@ fun BackgroundSyncOptInScreen(
             Text(
                 text = "Pocket Node can keep syncing while the app is closed, so your " +
                     "balance and history are fresher when you come back. This shows a " +
-                    "small ongoing notification and uses some extra battery.\n\n" +
+                    "small ongoing notification.\n\n" +
                     "Android limits background work, so syncing may still pause until " +
                     "you next open the app. You can change this anytime in Settings → Sync.",
                 style = MaterialTheme.typography.bodyMedium,

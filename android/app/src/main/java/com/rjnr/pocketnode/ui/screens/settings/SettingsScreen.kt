@@ -487,8 +487,8 @@ private fun SettingsScreenUI(
             item {
                 Text(
                     text = "Keeps your balance fresh while the app is closed, with a small " +
-                        "ongoing notification and some extra battery use. Android may still " +
-                        "pause it after extended background time.",
+                        "ongoing notification. Android may still pause it after extended " +
+                        "background time.",
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                     modifier = Modifier
