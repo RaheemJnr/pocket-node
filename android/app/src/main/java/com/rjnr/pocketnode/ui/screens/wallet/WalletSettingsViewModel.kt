@@ -327,6 +327,12 @@ class WalletSettingsViewModel @Inject constructor(
                 if (!authManager.isBiometricEnrolled() && !authManager.hasDeviceCredential()) {
                     Log.i(TAG, "No secure lock — V1 reveal without lazy V2 upgrade for $walletId")
                     loadSensitiveData()
+                    // The screen gate is `seedPhraseUnlocked || !requiresPin`;
+                    // without this flip the words loaded but stayed hidden and
+                    // the tap looked like a no-op (device-test 2026-07). No
+                    // stronger credential exists on a no-lock device — the
+                    // app-level PIN at entry is the gate.
+                    _uiState.update { it.copy(seedPhraseUnlocked = true) }
                     return@launch
                 }
                 val cipher = try {

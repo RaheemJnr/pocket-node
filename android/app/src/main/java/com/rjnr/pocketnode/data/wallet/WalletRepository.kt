@@ -374,6 +374,25 @@ class WalletRepository @Inject constructor(
                         walletPreferences.getCustomBlockHeight(net, parentWalletId), net, walletId
                     )
                 }
+                // Also inherit the parent's sync PROGRESS. The candidate
+                // script already scanned the window alongside the parent
+                // during discovery (its matched txs sit in light-client
+                // storage); without a progress row the fresh wallet
+                // registered from the window start and re-scanned ~200k
+                // blocks the device had just covered (device-test 2026-07).
+                runCatching {
+                    val spDao = appDatabase.syncProgressDao()
+                    for (net in listOf(NetworkType.MAINNET, NetworkType.TESTNET)) {
+                        spDao.get(parentWalletId, net.name)?.let { parentRow ->
+                            spDao.upsert(
+                                parentRow.copy(
+                                    walletId = walletId,
+                                    updatedAt = System.currentTimeMillis(),
+                                )
+                            )
+                        }
+                    }
+                }.onFailure { Log.w(TAG, "Progress inherit failed (non-fatal)", it) }
             } else {
                 markFreshWalletSyncMode(walletId)
             }
