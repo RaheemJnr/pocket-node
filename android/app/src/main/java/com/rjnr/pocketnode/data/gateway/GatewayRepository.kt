@@ -947,6 +947,15 @@ class GatewayRepository @Inject constructor(
                     )
                 }
             )
+            // An explicit scan means "look AGAIN": re-arm chain slots a past
+            // pass retired as EMPTY. Without this the action was a silent
+            // no-op after any completed scan — funds arriving later (or on a
+            // different network than the pass that retired them) were
+            // undiscoverable forever (device-verification, 2026-07). The
+            // reconciler's probe re-judges them: activity -> FOUND, still
+            // nothing -> EMPTY again shortly.
+            val reArmed = dao.reArmEmptyChainSlots(wId)
+            if (reArmed > 0) Log.i(TAG, "gap-limit scan: re-armed $reArmed retired slot(s)")
             // Fresh registration pass so new candidate scripts join the filter.
             registerAccountWithStrategy(
                 getSavedSyncMode(), getSavedCustomBlockHeight(), savePreference = false

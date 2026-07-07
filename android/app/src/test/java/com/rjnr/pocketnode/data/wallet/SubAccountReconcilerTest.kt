@@ -116,6 +116,47 @@ class SubAccountReconcilerTest {
         assertEquals(SubAccountCandidateEntity.STATE_PENDING, stateOf(2))
     }
 
+    /**
+     * #382 explicit re-scan: EMPTY chain slots (accountIndex 0) re-arm to
+     * PENDING; account-axis EMPTY stays retired (still gates the restore
+     * banner). Without re-arm, "Scan Other Addresses" was a silent no-op
+     * after any completed pass (device-verification, 2026-07).
+     */
+    @Test
+    fun `explicit re-scan re-arms EMPTY chain slots only`() = runTest {
+        dao.insertAll(
+            listOf(
+                SubAccountCandidateEntity(
+                    parentWalletId = parent,
+                    derivationPath = "m/44'/309'/0'/1/3",
+                    accountIndex = 0,
+                    scriptArgs = "0xchain",
+                    state = SubAccountCandidateEntity.STATE_EMPTY,
+                    createdAt = 1L,
+                ),
+                SubAccountCandidateEntity(
+                    parentWalletId = parent,
+                    derivationPath = SubAccountDiscovery.accountPath(2),
+                    accountIndex = 2,
+                    scriptArgs = "0xacct",
+                    state = SubAccountCandidateEntity.STATE_EMPTY,
+                    createdAt = 1L,
+                ),
+            )
+        )
+        val reArmed = dao.reArmEmptyChainSlots(parent)
+        assertEquals(1, reArmed)
+        val rows = dao.getForParent(parent)
+        assertEquals(
+            SubAccountCandidateEntity.STATE_PENDING,
+            rows.first { it.accountIndex == 0 }.state,
+        )
+        assertEquals(
+            SubAccountCandidateEntity.STATE_EMPTY,
+            rows.first { it.accountIndex == 2 }.state,
+        )
+    }
+
     @Test
     fun `FOUND survives later empty-looking passes`() = runTest {
         seed(1, "0xaa", registeredFrom = 100_000L)
