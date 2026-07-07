@@ -146,6 +146,31 @@ class WalkingMigrationTest {
     }
 
     /**
+     * #382 Tier 2: a v14 file with existing account-axis candidates walked
+     * to v15 must re-key `sub_account_candidates` on
+     * (parentWalletId, derivationPath), backfilling each old row's path as
+     * m/44'/309'/{accountIndex}'/0/0 and preserving every other column.
+     */
+    @Test
+    fun `v14 candidates walk to v15 with derivationPath backfilled`() {
+        bootstrapV14WithCandidate()
+        openViaRoomAndValidate()
+        val db = openedRoomDb!!.openHelper.readableDatabase
+        db.query(
+            "SELECT derivationPath, accountIndex, scriptArgs, state, registeredFromBlock " +
+                "FROM sub_account_candidates WHERE parentWalletId = 'parent-1'"
+        ).use { c ->
+            assertTrue("candidate row lost by MIGRATION_14_15", c.moveToNext())
+            org.junit.Assert.assertEquals("m/44'/309'/3'/0/0", c.getString(0))
+            org.junit.Assert.assertEquals(3, c.getInt(1))
+            org.junit.Assert.assertEquals("0xabcdef", c.getString(2))
+            org.junit.Assert.assertEquals("FOUND", c.getString(3))
+            org.junit.Assert.assertEquals(123456L, c.getLong(4))
+            org.junit.Assert.assertFalse("unexpected extra candidate row", c.moveToNext())
+        }
+    }
+
+    /**
      * v1.6.x → v1.7.0 path: bootstrap a v9 SQLite file (no `kdfVersion`
      * column on `key_material`) and confirm MIGRATION_9_10 adds the
      * column with default 1, then Room schema validation passes.
@@ -190,7 +215,7 @@ class WalkingMigrationTest {
                 .addMigrations(
                     MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4, MIGRATION_4_5,
                     MIGRATION_5_6, MIGRATION_6_7, MIGRATION_7_8, noOpMigration8To9,
-                    MIGRATION_9_10, MIGRATION_10_11, MIGRATION_11_12, MIGRATION_12_13, MIGRATION_13_14,
+                    MIGRATION_9_10, MIGRATION_10_11, MIGRATION_11_12, MIGRATION_12_13, MIGRATION_13_14, MIGRATION_14_15,
                 )
                 .build()
             openedRoomDb = db
@@ -220,7 +245,7 @@ class WalkingMigrationTest {
             .addMigrations(
                 MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4, MIGRATION_4_5,
                 MIGRATION_5_6, MIGRATION_6_7, MIGRATION_7_8, MIGRATION_8_9,
-                MIGRATION_9_10, MIGRATION_10_11, MIGRATION_11_12, MIGRATION_12_13, MIGRATION_13_14,
+                MIGRATION_9_10, MIGRATION_10_11, MIGRATION_11_12, MIGRATION_12_13, MIGRATION_13_14, MIGRATION_14_15,
             )
             .build()
         openedRoomDb = db
@@ -278,6 +303,41 @@ class WalkingMigrationTest {
                 MIGRATION_8_9.migrate(db)
                 db.execSQL("CREATE TABLE IF NOT EXISTS room_master_table (id INTEGER PRIMARY KEY,identity_hash TEXT)")
                 db.execSQL("INSERT OR REPLACE INTO room_master_table VALUES(42, 'bootstrap-v9')")
+            }
+            override fun onUpgrade(db: SupportSQLiteDatabase, oldV: Int, newV: Int) = Unit
+        }
+        val config = SupportSQLiteOpenHelper.Configuration.builder(ctx)
+            .name(dbName)
+            .callback(callback)
+            .build()
+        val helper = factory.create(config)
+        helper.writableDatabase.close()
+        helper.close()
+    }
+
+    /**
+     * Bootstrap a v14 SQLite file (full migration chain applied over the v8
+     * shape) holding one account-axis candidate row, so MIGRATION_14_15's
+     * backfill has something real to transform.
+     */
+    private fun bootstrapV14WithCandidate() {
+        val factory = FrameworkSQLiteOpenHelperFactory()
+        val callback = object : SupportSQLiteOpenHelper.Callback(14) {
+            override fun onCreate(db: SupportSQLiteDatabase) {
+                createV8Tables(db, pathA = true)
+                MIGRATION_8_9.migrate(db)
+                MIGRATION_9_10.migrate(db)
+                MIGRATION_10_11.migrate(db)
+                MIGRATION_11_12.migrate(db)
+                MIGRATION_12_13.migrate(db)
+                MIGRATION_13_14.migrate(db)
+                db.execSQL(
+                    "INSERT INTO sub_account_candidates " +
+                        "(parentWalletId, accountIndex, scriptArgs, state, createdAt, registeredFromBlock) " +
+                        "VALUES ('parent-1', 3, '0xabcdef', 'FOUND', 1000, 123456)"
+                )
+                db.execSQL("CREATE TABLE IF NOT EXISTS room_master_table (id INTEGER PRIMARY KEY,identity_hash TEXT)")
+                db.execSQL("INSERT OR REPLACE INTO room_master_table VALUES(42, 'bootstrap-v14')")
             }
             override fun onUpgrade(db: SupportSQLiteDatabase, oldV: Int, newV: Int) = Unit
         }

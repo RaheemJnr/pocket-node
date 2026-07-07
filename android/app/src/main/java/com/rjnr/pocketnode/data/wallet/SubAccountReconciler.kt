@@ -64,11 +64,11 @@ class SubAccountReconciler @Inject constructor(
                     Log.i(
                         TAG,
                         "Candidate found: parent=${candidate.parentWalletId} " +
-                            "index=${candidate.accountIndex} has on-chain history"
+                            "path=${candidate.derivationPath} has on-chain history"
                     )
                     candidateDao.updateState(
                         candidate.parentWalletId,
-                        candidate.accountIndex,
+                        candidate.derivationPath,
                         SubAccountCandidateEntity.STATE_FOUND,
                     )
                 }
@@ -77,7 +77,7 @@ class SubAccountReconciler @Inject constructor(
                     scanned - candidate.registeredFromBlock >= MIN_COVERED_BLOCKS -> {
                     candidateDao.updateState(
                         candidate.parentWalletId,
-                        candidate.accountIndex,
+                        candidate.derivationPath,
                         SubAccountCandidateEntity.STATE_EMPTY,
                     )
                 }

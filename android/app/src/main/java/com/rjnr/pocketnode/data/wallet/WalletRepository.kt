@@ -221,6 +221,7 @@ class WalletRepository @Inject constructor(
                 subAccountDiscovery.deriveCandidates(words, passphrase).map {
                     com.rjnr.pocketnode.data.database.entity.SubAccountCandidateEntity(
                         parentWalletId = walletId,
+                        derivationPath = it.derivationPath,
                         accountIndex = it.accountIndex,
                         scriptArgs = it.scriptArgs,
                         createdAt = now2,
@@ -408,7 +409,7 @@ class WalletRepository @Inject constructor(
         // means a plain no-candidate create is a harmless 0-row update).
         runCatching {
             subAccountCandidateDao.updateState(
-                parentWalletId, nextIndex,
+                parentWalletId, SubAccountDiscovery.accountPath(nextIndex),
                 com.rjnr.pocketnode.data.database.entity.SubAccountCandidateEntity.STATE_RESTORED,
             )
         }

@@ -66,7 +66,12 @@ import com.rjnr.pocketnode.data.database.entity.WalletEntity
     //
     // Bumped from 13 to 14: sub_account_candidates gains registeredFromBlock
     // (#82 coverage gate). MIGRATION_13_14 is a single ALTER TABLE.
-    version = 14,
+    //
+    // Bumped from 14 to 15 for #382 Tier 2: sub_account_candidates re-keyed
+    // on (parentWalletId, derivationPath) so chain-axis gap-limit slots can
+    // coexist with account-axis slots. MIGRATION_14_15 recreates the table
+    // and backfills derivationPath from accountIndex.
+    version = 15,
     // Schema export deliberately OFF until the Room 2.8.4 / kotlinx-serialization
     // 1.8.0 binary incompatibility is resolved (tracked in #149). Enabling it
     // crashes KSP with AbstractMethodError in Room's bundled

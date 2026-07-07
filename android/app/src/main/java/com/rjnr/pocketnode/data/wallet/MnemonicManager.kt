@@ -64,11 +64,16 @@ class MnemonicManager @Inject constructor() {
 
     /**
      * Derive a 32-byte secp256k1 private key from a BIP39 seed using BIP32/BIP44.
-     * Derivation path: m/44'/309'/{accountIndex}'/0/{addressIndex}
+     * Derivation path: m/44'/309'/{accountIndex}'/{chainIndex}/{addressIndex}
+     *
+     * [chainIndex] is BIP44's change level: 0 = receiving chain, 1 = change
+     * chain. Everything shipped before #382 Tier 2 used chain 0 only; the
+     * default keeps those call sites byte-identical.
      */
     fun derivePrivateKey(
         seed: ByteArray,
         accountIndex: Int = 0,
+        chainIndex: Int = 0,
         addressIndex: Int = 0
     ): ByteArray {
         require(seed.size == 64) { "Seed must be 64 bytes" }
@@ -78,8 +83,8 @@ class MnemonicManager @Inject constructor() {
         key = deriveHardenedChild(key, 44)
         key = deriveHardenedChild(key, 309)
         key = deriveHardenedChild(key, accountIndex)
-        // m/44'/309'/accountIndex'/0 -> m/44'/309'/accountIndex'/0/addressIndex
-        key = deriveNormalChild(key, 0)
+        // m/44'/309'/accountIndex'/chainIndex -> .../chainIndex/addressIndex
+        key = deriveNormalChild(key, chainIndex)
         key = deriveNormalChild(key, addressIndex)
 
         return key.key

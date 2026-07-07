@@ -29,9 +29,9 @@ interface SubAccountCandidateDao {
 
     @Query(
         "UPDATE sub_account_candidates SET state = :state " +
-            "WHERE parentWalletId = :parentId AND accountIndex = :accountIndex"
+            "WHERE parentWalletId = :parentId AND derivationPath = :derivationPath"
     )
-    suspend fun updateState(parentId: String, accountIndex: Int, state: String)
+    suspend fun updateState(parentId: String, derivationPath: String, state: String)
 
     /**
      * Record the scan start for a registration, keeping the LOWEST block ever
@@ -39,10 +39,10 @@ interface SubAccountCandidateDao {
      */
     @Query(
         "UPDATE sub_account_candidates SET registeredFromBlock = :fromBlock " +
-            "WHERE parentWalletId = :parentId AND accountIndex = :accountIndex " +
+            "WHERE parentWalletId = :parentId AND derivationPath = :derivationPath " +
             "AND (registeredFromBlock = 0 OR registeredFromBlock > :fromBlock)"
     )
-    suspend fun updateRegisteredFrom(parentId: String, accountIndex: Int, fromBlock: Long)
+    suspend fun updateRegisteredFrom(parentId: String, derivationPath: String, fromBlock: Long)
 
     @Query("DELETE FROM sub_account_candidates WHERE parentWalletId = :parentId")
     suspend fun deleteForParent(parentId: String)
