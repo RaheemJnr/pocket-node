@@ -16,6 +16,22 @@ import javax.inject.Inject
 import javax.inject.Singleton
 import com.rjnr.pocketnode.util.redactAddress
 
+/** #382 Tier 3: one sweep input — a live untyped cell plus the lock args that identify its signing group. */
+data class SweepInput(
+    val outPoint: OutPoint,
+    val capacityShannons: Long,
+    val lockArgs: String,
+)
+
+/** #382 Tier 3: an unsigned sweep plus the numbers the confirm dialog shows. */
+data class SweepPlan(
+    val transaction: Transaction,
+    val totalShannons: Long,
+    val feeShannons: Long,
+    /** Parallel to the transaction's inputs — feeds [TransactionBuilder.signSweep]. */
+    val inputLockArgs: List<String>,
+)
+
 @Singleton
 class TransactionBuilder @Inject constructor(
     private val networkValidator: NetworkValidator
@@ -44,7 +60,20 @@ class TransactionBuilder @Inject constructor(
      * Estimate the fee for a simple secp256k1 transfer based on input/output count.
      * Uses the standard CKB fee rate (1000 shannons/KB).
      */
-    fun estimateTransferFee(inputCount: Int, outputCount: Int): Long {
+    fun estimateTransferFee(inputCount: Int, outputCount: Int): Long =
+        estimateFeeWithGroups(inputCount, outputCount, groupCount = 1)
+
+    /**
+     * #382 Tier 3: fee for a sweep spending inputs locked by [groupCount]
+     * DIFFERENT secp256k1 scripts. Each lock group's first witness carries a
+     * full WitnessArgs (85 bytes); the transfer formula assumes exactly one
+     * group and undercounts a sweep by 85 bytes per extra group — enough for
+     * a "low fee rate" rejection at the node.
+     */
+    fun estimateSweepFee(inputCount: Int, groupCount: Int): Long =
+        estimateFeeWithGroups(inputCount, outputCount = 1, groupCount = groupCount)
+
+    private fun estimateFeeWithGroups(inputCount: Int, outputCount: Int, groupCount: Int): Long {
         // Molecule accounting, sized to never undershoot the node's measured
         // tx_size. The previous formula undercounted the witnesses dynvec
         // (missing the 4-byte offset per item) and per-output script tables;
@@ -65,10 +94,10 @@ class TransactionBuilder @Inject constructor(
         val outputsSize = 4 + outputCount * (4 + 97)
         // outputs_data dynvec: 4 + n * (offset 4 + empty Bytes 4)
         val outputsDataSize = 4 + outputCount * 8
-        // witnesses dynvec: 4 + n*offset(4) + first item (len 4 + WitnessArgs 85)
-        // + each remaining "0x" item (len 4)
-        val witnessSize = 4 + inputCount * 4 + (4 + 85) +
-            (inputCount - 1).coerceAtLeast(0) * 4
+        // witnesses dynvec: 4 + n*offset(4) + one full item (len 4 +
+        // WitnessArgs 85) PER LOCK GROUP + each remaining "0x" item (len 4)
+        val witnessSize = 4 + inputCount * 4 + groupCount * (4 + 85) +
+            (inputCount - groupCount).coerceAtLeast(0) * 4
         // Transaction wrapper table hdr (12) + in-block serialization offset (4)
         val wrapperSize = 16
         // Margin: molecule drift and future script arg growth. Proportional to
@@ -97,6 +126,113 @@ class TransactionBuilder @Inject constructor(
         val total = capacities.sum()
         val fee = estimateTransferFee(inputCount = capacities.size, outputCount = 1)
         return (total - fee).coerceAtLeast(0L)
+    }
+
+    // ========================================
+    // #382 Tier 3: gap-limit sweep
+    // ========================================
+
+    /**
+     * #382 Tier 3: build the unsigned all-in sweep — every input cell into
+     * ONE output at [toScript], fee deducted, NO change output (there is no
+     * change: the whole point is consolidation). Refused when the remainder
+     * would fall below the 61 CKB minimum cell capacity.
+     */
+    fun buildSweep(
+        inputs: List<SweepInput>,
+        toScript: Script,
+        network: NetworkType,
+    ): Result<SweepPlan> = runCatching {
+        require(inputs.isNotEmpty()) { "Nothing to sweep" }
+
+        val total = inputs.sumOf { it.capacityShannons }
+        val groupCount = inputs.map { it.lockArgs }.distinct().size
+        val fee = estimateSweepFee(inputs.size, groupCount)
+        val outputCapacity = total - fee
+        if (outputCapacity < MIN_CELL_CAPACITY) {
+            throw IllegalStateException(
+                "Sweep refused: the funds found (${total / 100_000_000.0} CKB) minus the " +
+                    "fee would be below the ${MIN_CELL_CAPACITY / 100_000_000} CKB minimum cell capacity."
+            )
+        }
+
+        val secpTxHash = if (network == NetworkType.MAINNET) MAINNET_SECP256K1_TX_HASH else TESTNET_SECP256K1_TX_HASH
+        val tx = Transaction(
+            version = "0x0",
+            cellDeps = listOf(
+                CellDep(outPoint = OutPoint(txHash = secpTxHash, index = "0x0"), depType = "dep_group")
+            ),
+            headerDeps = emptyList(),
+            cellInputs = inputs.map { CellInput(previousOutput = it.outPoint, since = "0x0") },
+            cellOutputs = listOf(
+                CellOutput(capacity = "0x${outputCapacity.toString(16)}", lock = toScript, type = null)
+            ),
+            outputsData = listOf("0x"),
+            witnesses = inputs.map { "0x" },
+        )
+
+        val estimatedSize = estimateTransactionSize(tx)
+        if (estimatedSize > MAX_TX_SIZE) {
+            throw IllegalStateException("Sweep too large: $estimatedSize bytes (max $MAX_TX_SIZE)")
+        }
+
+        SweepPlan(
+            transaction = tx,
+            totalShannons = total,
+            feeShannons = fee,
+            inputLockArgs = inputs.map { it.lockArgs },
+        )
+    }
+
+    /**
+     * #382 Tier 3: sign a sweep whose inputs span MULTIPLE secp256k1 lock
+     * groups. Per CKB consensus, inputs are grouped by lock script; each
+     * group's FIRST witness carries that group's signature over
+     * blake2b(tx_hash || len+WitnessArgs-placeholder || len(+bytes) of each
+     * OTHER witness in the SAME group). Other members stay "0x". Collapsing
+     * to one group reproduces [signTransaction] byte-for-byte (see
+     * TransactionBuilderSweepTest's equivalence anchor).
+     *
+     * Keys are the caller's responsibility to wipe; this function does not
+     * retain them.
+     */
+    fun signSweep(
+        tx: Transaction,
+        inputLockArgs: List<String>,
+        keysByLockArgs: Map<String, ByteArray>,
+    ): Result<Transaction> = runCatching {
+        require(inputLockArgs.size == tx.cellInputs.size) {
+            "inputLockArgs (${inputLockArgs.size}) must parallel inputs (${tx.cellInputs.size})"
+        }
+        val groups: Map<String, List<Int>> = inputLockArgs.withIndex()
+            .groupBy({ it.value }, { it.index })
+        groups.keys.forEach { args ->
+            require(keysByLockArgs.containsKey(args)) { "No key provided for lock group $args" }
+        }
+
+        val txHash = blake2bHash(serializeRawTransaction(tx))
+        val emptyWitnessArgs = serializeWitnessArgs(ByteArray(65), null, null)
+        val witnesses = MutableList(tx.cellInputs.size) { "0x" }
+
+        groups.forEach { (args, memberIndices) ->
+            val blake2b = Blake2b()
+            blake2b.update(txHash)
+            blake2b.update(littleEndianLong(emptyWitnessArgs.size.toLong()))
+            blake2b.update(emptyWitnessArgs)
+            // Other members of THIS group contribute their (empty) witnesses.
+            repeat(memberIndices.size - 1) {
+                blake2b.update(littleEndianLong(0L))
+            }
+            val message = blake2b.doFinal()
+
+            val keyPair = ECKeyPair.create(BigInteger(1, keysByLockArgs.getValue(args)))
+            val signature = Sign.signMessage(message, keyPair).signature
+            val signedWitness = serializeWitnessArgs(signature, null, null)
+            witnesses[memberIndices.first()] =
+                "0x" + signedWitness.joinToString("") { "%02x".format(it) }
+        }
+
+        tx.copy(witnesses = witnesses)
     }
 
     /**
@@ -538,7 +674,9 @@ class TransactionBuilder @Inject constructor(
         return "0x" + blake2bHash(rawTxBytes).toHex()
     }
 
-    private fun signTransaction(
+    // internal (was private): TransactionBuilderSweepTest anchors signSweep's
+    // single-group output byte-for-byte against this shipped signer.
+    internal fun signTransaction(
         tx: Transaction,
         privateKey: ByteArray,
         inputCount: Int,

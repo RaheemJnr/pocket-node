@@ -19,8 +19,10 @@ import com.rjnr.pocketnode.data.migration.WalletMigrationHelper
 import com.rjnr.pocketnode.data.transaction.TransactionBuilder
 import com.rjnr.pocketnode.data.database.entity.SubAccountCandidateEntity
 import com.rjnr.pocketnode.data.wallet.AddressUtils
+import com.rjnr.pocketnode.data.transaction.SweepInput
 import com.rjnr.pocketnode.data.wallet.GapLimitResolution
 import com.rjnr.pocketnode.data.wallet.GapLimitStatus
+import com.rjnr.pocketnode.data.wallet.GapLimitSweepPreview
 import com.rjnr.pocketnode.data.wallet.KeyManager
 import com.rjnr.pocketnode.data.wallet.gapLimitResolution
 import com.rjnr.pocketnode.data.wallet.nextScanWindow
@@ -973,10 +975,16 @@ class GatewayRepository @Inject constructor(
      * inflated "found funds" number would re-create the exact panic #382 is
      * meant to end).
      */
-    private suspend fun liveUntypedCapacityFor(searchKey: JniSearchKey): Long {
+    private suspend fun liveUntypedCapacityFor(searchKey: JniSearchKey): Long =
+        liveUntypedCellsFor(searchKey).sumOf {
+            it.output.capacity.removePrefix("0x").toLongOrNull(16) ?: 0L
+        }
+
+    /** The live untyped cells behind [liveUntypedCapacityFor] — the Tier 3 sweep spends them. */
+    private suspend fun liveUntypedCellsFor(searchKey: JniSearchKey): List<JniCell> {
         val searchKeyJson = json.encodeToString(searchKey)
         val spent = fetchAllSpentOutpoints(searchKeyJson)
-        var live = 0L
+        val live = mutableListOf<JniCell>()
         var cursor: String? = null
         var pages = 0
         while (pages < MAX_CELL_PAGES) {
@@ -984,8 +992,10 @@ class GatewayRepository @Inject constructor(
             val page = json.decodeFromString<JniPagination<JniCell>>(pageJson)
             page.objects.forEach { cell ->
                 val key = "${cell.outPoint.txHash}:${cell.outPoint.index}"
-                if (key !in spent && cell.output.type == null) {
-                    live += cell.output.capacity.removePrefix("0x").toLongOrNull(16) ?: 0L
+                if (key !in spent && cell.output.type == null &&
+                    cell.output.capacity.removePrefix("0x").toLongOrNull(16) != null
+                ) {
+                    live += cell
                 }
             }
             pages++
@@ -993,6 +1003,102 @@ class GatewayRepository @Inject constructor(
             cursor = page.lastCursor
         }
         return live
+    }
+
+    /**
+     * #382 Tier 3: gather every live untyped cell sitting on FOUND chain-axis
+     * slots as sweep inputs, tagged with the lock args that identify their
+     * signing group. Second value = how many distinct addresses hold funds.
+     */
+    private suspend fun gatherSweepInputs(walletId: String): Pair<List<SweepInput>, Int> {
+        val myScript = _walletInfo.value?.script ?: throw Exception("Wallet not initialized")
+        val found = appDatabase.subAccountCandidateDao().getForParent(walletId)
+            .filter { it.accountIndex == 0 && it.state == SubAccountCandidateEntity.STATE_FOUND }
+        val inputs = mutableListOf<SweepInput>()
+        var addresses = 0
+        found.forEach { cand ->
+            val cells = liveUntypedCellsFor(JniSearchKey(script = myScript.copy(args = cand.scriptArgs)))
+            if (cells.isNotEmpty()) addresses++
+            cells.forEach { cell ->
+                inputs += SweepInput(
+                    outPoint = OutPoint(cell.outPoint.txHash, cell.outPoint.index),
+                    capacityShannons = cell.output.capacity.removePrefix("0x").toLongOrNull(16) ?: 0L,
+                    lockArgs = cand.scriptArgs,
+                )
+            }
+        }
+        return inputs to addresses
+    }
+
+    /**
+     * #382 Tier 3: the numbers for the sweep confirm dialog — total found,
+     * exact fee, distinct addresses. Key-free: gathering and planning need
+     * no mnemonic, only the confirm step does.
+     */
+    suspend fun prepareGapLimitSweep(): Result<GapLimitSweepPreview> = runCatching {
+        val wId = activeWalletId
+        if (wId.isEmpty()) throw Exception("No active wallet")
+        val myScript = _walletInfo.value?.script ?: throw Exception("Wallet not initialized")
+        val (inputs, addresses) = gatherSweepInputs(wId)
+        val plan = transactionBuilder.buildSweep(inputs, myScript, currentNetwork).getOrThrow()
+        GapLimitSweepPreview(
+            totalShannons = plan.totalShannons,
+            feeShannons = plan.feeShannons,
+            addressCount = addresses,
+        )
+    }
+
+    /**
+     * #382 Tier 3: the sweep itself. Re-gathers cells (a preview can go
+     * stale), derives each lock group's key from its candidate's derivation
+     * path, VERIFIES each derived key reproduces the candidate's lock args
+     * (a derivation mismatch must abort, never sign), signs one multi-group
+     * transaction and hands it to the idempotent sendTransaction path
+     * (pending row + watchdog). Keys and seed are zeroed after signing.
+     */
+    suspend fun sweepGapLimitFunds(): Result<String> = runCatching {
+        if (!gapLimitScanMutex.tryLock()) throw Exception("A scan or sweep is already running")
+        try {
+            val wId = activeWalletId
+            if (wId.isEmpty()) throw Exception("No active wallet")
+            val myScript = _walletInfo.value?.script ?: throw Exception("Wallet not initialized")
+            val words = getMnemonic() ?: throw Exception("Recovery phrase unavailable for this wallet")
+
+            val (inputs, _) = gatherSweepInputs(wId)
+            val plan = transactionBuilder.buildSweep(inputs, myScript, currentNetwork).getOrThrow()
+
+            val pathByArgs = appDatabase.subAccountCandidateDao().getForParent(wId)
+                .filter { it.accountIndex == 0 && it.state == SubAccountCandidateEntity.STATE_FOUND }
+                .associate { it.scriptArgs to it.derivationPath }
+
+            val seed = keyManager.mnemonicToSeed(words)
+            val keys = mutableMapOf<String, ByteArray>()
+            try {
+                plan.inputLockArgs.distinct().forEach { args ->
+                    val path = pathByArgs[args]
+                        ?: throw Exception("No derivation path recorded for a sweep input")
+                    val (chain, index) = com.rjnr.pocketnode.data.wallet.chainAndIndexFromPath(path)
+                        ?: throw Exception("Unparseable derivation path for a sweep input")
+                    val key = keyManager.deriveChainKey(seed, chainIndex = chain, addressIndex = index)
+                    val derivedArgs = keyManager.deriveLockScript(keyManager.derivePublicKey(key)).args
+                    if (!derivedArgs.equals(args, ignoreCase = true)) {
+                        key.fill(0)
+                        throw Exception("Derived key does not match the recorded address; sweep aborted")
+                    }
+                    keys[args] = key
+                }
+                if (activeWalletId != wId) throw Exception("Wallet changed during the sweep; try again")
+                val signed = transactionBuilder.signSweep(plan.transaction, plan.inputLockArgs, keys).getOrThrow()
+                val txHash = sendTransaction(signed).getOrThrow()
+                Log.i(TAG, "gap-limit sweep broadcast: ${plan.inputLockArgs.size} inputs, ${keys.size} groups")
+                txHash
+            } finally {
+                keys.values.forEach { it.fill(0) }
+                seed.fill(0)
+            }
+        } finally {
+            gapLimitScanMutex.unlock()
+        }
     }
     
     suspend fun forceResetSync(): Result<Unit> = runCatching {

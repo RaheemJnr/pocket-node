@@ -498,6 +498,13 @@
     <string name="gap_limit_scan_started">Scanning extra addresses from your recovery phrase. Results appear on the home screen.</string>
     <string name="settings_scan_other_addresses">Scan Other Addresses</string>
     <string name="found_funds_title">Found %1$s CKB on other addresses</string>
+    <string name="found_funds_action_sweep">Move to main wallet</string>
+    <string name="found_funds_action_sweeping">Moving…</string>
+    <string name="sweep_dialog_title">Move funds to your main address?</string>
+    <string name="sweep_dialog_body">This sends %1$s CKB from %2$d extra addresses to your main address in one transaction. The network fee is %3$s CKB and is already deducted from that amount. Nothing leaves your recovery phrase.</string>
+    <string name="sweep_dialog_confirm">Move funds</string>
+    <string name="sweep_broadcast">Your funds are on the way to your main address. The transaction will appear in Activity.</string>
+    <string name="sweep_failed">Could not move the funds: %1$s</string>
     <plurals name="found_funds_body">
         <item quantity="one">These funds sit on %d extra address created from your recovery phrase by another wallet app. They belong to you and are safe. An upcoming update adds a one-tap way to move them to your main address.</item>
         <item quantity="other">These funds sit on %d extra addresses created from your recovery phrase by another wallet app. They belong to you and are safe. An upcoming update adds a one-tap way to move them to your main address.</item>

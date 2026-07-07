@@ -492,6 +492,7 @@ fun HomeScreen(
                     onGapLimitLearnMore = { onNavigateToFaq("imported_funds") },
                     onGapLimitDismiss = { viewModel.dismissGapLimitBanner() },
                     onGapLimitScanNow = { viewModel.runGapLimitScan() },
+                    onGapLimitSweep = { viewModel.requestGapLimitSweep() },
                 )
                 if (uiState.isSwitchingWallet) {
                     LinearProgressIndicator(
@@ -504,6 +505,41 @@ fun HomeScreen(
             }
         }
     }
+
+        // #382 Tier 3: sweep confirm — one transaction moving everything the
+        // gap-limit scan found to this wallet's main address. Amount and the
+        // exact fee come from the key-free preview.
+        uiState.sweepPreview?.let { preview ->
+            val netCkb = java.lang.String.format(
+                java.util.Locale.US, "%,.2f",
+                (preview.totalShannons - preview.feeShannons) / 100_000_000.0,
+            )
+            val feeCkb = java.math.BigDecimal(preview.feeShannons)
+                .divide(java.math.BigDecimal(100_000_000))
+                .stripTrailingZeros().toPlainString()
+            AlertDialog(
+                onDismissRequest = { viewModel.dismissGapLimitSweep() },
+                title = { Text(stringResource(R.string.sweep_dialog_title)) },
+                text = {
+                    Text(
+                        stringResource(
+                            R.string.sweep_dialog_body,
+                            netCkb, preview.addressCount, feeCkb,
+                        )
+                    )
+                },
+                confirmButton = {
+                    TextButton(onClick = { viewModel.confirmGapLimitSweep() }) {
+                        Text(stringResource(R.string.sweep_dialog_confirm))
+                    }
+                },
+                dismissButton = {
+                    TextButton(onClick = { viewModel.dismissGapLimitSweep() }) {
+                        Text(stringResource(R.string.common_cancel))
+                    }
+                },
+            )
+        }
 
         // Coachmark overlay (above all content)
         SyncCoachmark(
@@ -567,6 +603,7 @@ fun HomeScreenUI(
     onGapLimitLearnMore: () -> Unit = {},
     onGapLimitDismiss: () -> Unit = {},
     onGapLimitScanNow: () -> Unit = {},
+    onGapLimitSweep: () -> Unit = {},
 ) {
     val homeContentHaptic = LocalHapticFeedback.current
     PullToRefreshBox(
@@ -656,6 +693,8 @@ fun HomeScreenUI(
                         foundCkb = uiState.foundFundsShannons / 100_000_000.0,
                         addressCount = uiState.foundFundsAddressCount,
                         onLearnMore = onGapLimitLearnMore,
+                        onSweep = onGapLimitSweep,
+                        sweepInProgress = uiState.sweepInProgress,
                     )
                 }
             } else if (uiState.showGapLimitBanner) {

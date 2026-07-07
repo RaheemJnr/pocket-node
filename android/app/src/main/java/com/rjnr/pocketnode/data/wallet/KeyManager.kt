@@ -271,6 +271,18 @@ class KeyManager @Inject constructor(
         return keyPair.getEncodedPublicKey(true)
     }
 
+    // --- #382 Tier 3: thin pass-throughs so the sweep can re-derive
+    // chain-axis keys without a second MnemonicManager injection point.
+    // Callers own wiping the returned material.
+
+    fun mnemonicToSeed(words: List<String>): ByteArray =
+        mnemonicManager.mnemonicToSeed(words)
+
+    fun deriveChainKey(seed: ByteArray, chainIndex: Int, addressIndex: Int): ByteArray =
+        mnemonicManager.derivePrivateKey(
+            seed, accountIndex = 0, chainIndex = chainIndex, addressIndex = addressIndex
+        )
+
     fun deriveLockScript(publicKey: ByteArray): Script {
         val pubKeyHash = Blake2b.digest(publicKey)
         val args = pubKeyHash.copyOfRange(0, 20)

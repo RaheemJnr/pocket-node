@@ -34,6 +34,10 @@ fun FoundFundsCard(
     addressCount: Int,
     onLearnMore: () -> Unit,
     modifier: Modifier = Modifier,
+    /** #382 Tier 3: opens the sweep confirm dialog. */
+    onSweep: () -> Unit = {},
+    /** True while a sweep is broadcasting — disables the button. */
+    sweepInProgress: Boolean = false,
 ) {
     Card(
         modifier = modifier.fillMaxWidth(),
@@ -76,8 +80,16 @@ fun FoundFundsCard(
                 modifier = Modifier.fillMaxWidth(),
                 horizontalArrangement = Arrangement.End,
             ) {
-                FilledTonalButton(onClick = onLearnMore) {
+                androidx.compose.material3.TextButton(onClick = onLearnMore) {
                     Text(stringResource(R.string.gap_limit_banner_action_learn_more))
+                }
+                FilledTonalButton(onClick = onSweep, enabled = !sweepInProgress) {
+                    Text(
+                        stringResource(
+                            if (sweepInProgress) R.string.found_funds_action_sweeping
+                            else R.string.found_funds_action_sweep
+                        )
+                    )
                 }
             }
         }
