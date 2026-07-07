@@ -69,6 +69,9 @@ class MainActivity : FragmentActivity() {
         val startDestination = runBlocking {
             cachedHasWallet = repository.hasWallet()
             when {
+                // Suppressed, not removed: the corruption flag guards the ESP
+                // legacy-key path, which un-migrated installs still read.
+                @Suppress("DEPRECATION")
                 keyManager.wasResetDueToCorruption() -> Screen.Recovery.route
                 !cachedHasWallet -> Screen.Onboarding.route
                 !pinManager.hasPin() -> Screen.InitialPinSetup.route

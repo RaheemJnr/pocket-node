@@ -19,6 +19,10 @@ interface SubAccountCandidateDao {
     @Query("SELECT * FROM sub_account_candidates WHERE state = :state")
     suspend fun getByState(state: String): List<SubAccountCandidateEntity>
 
+    /** All candidate script args across parents — feeds the #382 known-scripts set. */
+    @Query("SELECT scriptArgs FROM sub_account_candidates")
+    suspend fun getAllScriptArgs(): List<String>
+
     /** Flow — drives the "Found N sub-accounts" restore banner. */
     @Query("SELECT * FROM sub_account_candidates WHERE state = :state ORDER BY parentWalletId, accountIndex")
     fun observeByState(state: String): kotlinx.coroutines.flow.Flow<List<SubAccountCandidateEntity>>
