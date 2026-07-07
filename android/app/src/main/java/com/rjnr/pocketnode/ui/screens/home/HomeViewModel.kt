@@ -460,8 +460,11 @@ class HomeViewModel @Inject constructor(
                     response.items.forEachIndexed { index, tx ->
                         Log.d(TAG, "  [$index] ${tx.txHash.take(16)}... dir=${tx.direction} amount=${tx.balanceChange} conf=${tx.confirmations}")
                     }
+                    // #382: detection runs inside getTransactions (the only
+                    // place output scripts exist); here we only read the flag.
+                    val showGapLimit = repository.isGapLimitBannerVisible()
                     _uiState.update {
-                        it.copy(transactions = response.items)
+                        it.copy(transactions = response.items, showGapLimitBanner = showGapLimit)
                     }
                 }
                 .onFailure { error ->
@@ -640,7 +643,7 @@ class HomeViewModel @Inject constructor(
             try {
                 syncStallDetector.reset()
                 stallBannerDismissed = false
-                _uiState.update { it.copy(isSwitchingWallet = true, showSyncStallBanner = false, syncStallMinutes = 0L) }
+                _uiState.update { it.copy(isSwitchingWallet = true, showSyncStallBanner = false, syncStallMinutes = 0L, showGapLimitBanner = false) }
                 walletRepository.switchActiveWallet(walletId)
                 val wallet = walletRepository.getById(walletId) ?: return@launch
                 repository.onActiveWalletChanged(wallet)
@@ -838,6 +841,12 @@ class HomeViewModel @Inject constructor(
         _uiState.update { it.copy(showSyncStallBanner = false) }
     }
 
+    /** #382 banner: per-wallet permanent dismissal; the Tier 2 deep scan will re-surface via its own flow. */
+    fun dismissGapLimitBanner() {
+        repository.dismissGapLimitBanner()
+        _uiState.update { it.copy(showGapLimitBanner = false) }
+    }
+
     /** #286 pill: permanent dismissal — informational, not a nag surface. */
     fun dismissBgSyncStalePill() {
         walletPreferences.setBgSyncPillDismissed()
@@ -945,5 +954,7 @@ data class HomeUiState(
     // #286 staleness pill: latched at app open (foreground sync freshens
     // lastSyncedAt within a minute, so a live check would self-hide).
     val showBgSyncStalePill: Boolean = false,
+    // #382: history shows change that left to addresses this app never derived
+    val showGapLimitBanner: Boolean = false,
     val bgSyncEnabledAtOpen: Boolean = false,
 )

@@ -254,6 +254,39 @@ class WalletPreferences @Inject constructor(
         prefs.edit().putBoolean(KEY_BG_SYNC_PILL_DISMISSED, true).apply()
     }
 
+    // --- #382 gap-limit signature banner ---
+    // Set when transaction history shows an outgoing tx whose change went to
+    // no script we track (seed also used in Neuron/standard BIP44 wallets).
+    // Sticky per wallet+network; the Tier 2 deep scan clears it.
+
+    fun isGapLimitSignalDetected(network: NetworkType? = null, walletId: String? = null): Boolean {
+        val net = network ?: getSelectedNetwork()
+        val key = if (walletId != null) walletNetworkKey(walletId, net.name, KEY_GAP_LIMIT_SIGNAL)
+                  else networkKey(KEY_GAP_LIMIT_SIGNAL, net)
+        return prefs.getBoolean(key, false)
+    }
+
+    fun setGapLimitSignalDetected(detected: Boolean, network: NetworkType? = null, walletId: String? = null) {
+        val net = network ?: getSelectedNetwork()
+        val key = if (walletId != null) walletNetworkKey(walletId, net.name, KEY_GAP_LIMIT_SIGNAL)
+                  else networkKey(KEY_GAP_LIMIT_SIGNAL, net)
+        prefs.edit().putBoolean(key, detected).apply()
+    }
+
+    fun isGapLimitBannerDismissed(network: NetworkType? = null, walletId: String? = null): Boolean {
+        val net = network ?: getSelectedNetwork()
+        val key = if (walletId != null) walletNetworkKey(walletId, net.name, KEY_GAP_LIMIT_BANNER_DISMISSED)
+                  else networkKey(KEY_GAP_LIMIT_BANNER_DISMISSED, net)
+        return prefs.getBoolean(key, false)
+    }
+
+    fun setGapLimitBannerDismissed(network: NetworkType? = null, walletId: String? = null) {
+        val net = network ?: getSelectedNetwork()
+        val key = if (walletId != null) walletNetworkKey(walletId, net.name, KEY_GAP_LIMIT_BANNER_DISMISSED)
+                  else networkKey(KEY_GAP_LIMIT_BANNER_DISMISSED, net)
+        prefs.edit().putBoolean(key, true).apply()
+    }
+
     // --- Database maintenance ---
 
     fun getLastVacuumAt(): Long = prefs.getLong(KEY_LAST_VACUUM_AT, 0L)
@@ -369,6 +402,8 @@ class WalletPreferences @Inject constructor(
         private const val KEY_BACKGROUND_SYNC = "background_sync_enabled"
         private const val KEY_LAST_SYNCED_AT = "last_synced_at_ms"
         private const val KEY_BG_SYNC_PILL_DISMISSED = "bg_sync_pill_dismissed"
+        private const val KEY_GAP_LIMIT_SIGNAL = "gap_limit_signal"
+        private const val KEY_GAP_LIMIT_BANNER_DISMISSED = "gap_limit_banner_dismissed"
         private const val KEY_LAST_VACUUM_AT = "last_vacuum_at"
         private const val KEY_SYNC_PROGRESS_MIGRATED = "sync_progress_migrated_to_room_v7"
         private const val KEY_SYNC_COACHMARK_SEEN = "sync_coachmark_seen"

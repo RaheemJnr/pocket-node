@@ -94,6 +94,7 @@ import androidx.compose.ui.res.stringResource
 import com.rjnr.pocketnode.ui.components.SecurityBanner
 import com.rjnr.pocketnode.ui.components.SecurityBannerState
 import com.rjnr.pocketnode.ui.components.BgSyncStaleBanner
+import com.rjnr.pocketnode.ui.components.GapLimitBanner
 import com.rjnr.pocketnode.ui.components.SyncStallBanner
 import com.rjnr.pocketnode.ui.components.SyncOptionsSheet
 import com.rjnr.pocketnode.ui.components.UpdateDialog
@@ -487,6 +488,8 @@ fun HomeScreen(
                     onSyncStallDismiss = { viewModel.dismissSyncStallBanner() },
                     onBgSyncStaleEnable = { viewModel.enableBackgroundSyncFromPill() },
                     onBgSyncStaleDismiss = { viewModel.dismissBgSyncStalePill() },
+                    onGapLimitLearnMore = { onNavigateToFaq("imported_funds") },
+                    onGapLimitDismiss = { viewModel.dismissGapLimitBanner() },
                 )
                 if (uiState.isSwitchingWallet) {
                     LinearProgressIndicator(
@@ -559,6 +562,8 @@ fun HomeScreenUI(
     onSyncStallDismiss: () -> Unit = {},
     onBgSyncStaleEnable: () -> Unit = {},
     onBgSyncStaleDismiss: () -> Unit = {},
+    onGapLimitLearnMore: () -> Unit = {},
+    onGapLimitDismiss: () -> Unit = {},
 ) {
     val homeContentHaptic = LocalHapticFeedback.current
     PullToRefreshBox(
@@ -634,6 +639,18 @@ fun HomeScreenUI(
                         minutesStalled = uiState.syncStallMinutes,
                         onSwitchToRecent = onSyncStallSwitchToRecent,
                         onDismiss = onSyncStallDismiss,
+                    )
+                }
+            }
+
+            // #382: change from this seed left to addresses we never derived
+            // (seed also used in Neuron/standard BIP44 wallets). Calm notice,
+            // links to the FAQ; the Tier 2 deep scan will add a scan action.
+            if (uiState.showGapLimitBanner) {
+                item {
+                    GapLimitBanner(
+                        onLearnMore = onGapLimitLearnMore,
+                        onDismiss = onGapLimitDismiss,
                     )
                 }
             }

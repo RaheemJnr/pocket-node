@@ -21,6 +21,7 @@ object FaqEntries {
         FaqEntry("safe_during_sync",  R.string.faq_safe_during_sync_title,  R.string.faq_safe_during_sync_body),
         FaqEntry("close_during_sync", R.string.faq_close_during_sync_title, R.string.faq_close_during_sync_body),
         FaqEntry("internet_required", R.string.faq_internet_required_title, R.string.faq_internet_required_body),
+        FaqEntry("imported_funds",    R.string.faq_imported_funds_title,    R.string.faq_imported_funds_body),
     )
 
     fun byAnchor(anchor: String): FaqEntry? = v1.firstOrNull { it.anchor == anchor }

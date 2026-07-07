@@ -832,6 +832,18 @@ class GatewayRepository @Inject constructor(
     }
 
     fun hasCompletedInitialSync(): Boolean = walletPreferences.hasCompletedInitialSync(walletId = activeWalletId.ifEmpty { null })
+
+    /** #382: gap-limit banner is visible when the signature was detected for the active wallet and not dismissed. */
+    fun isGapLimitBannerVisible(): Boolean {
+        if (activeWalletId.isEmpty()) return false
+        return walletPreferences.isGapLimitSignalDetected(currentNetwork, activeWalletId) &&
+            !walletPreferences.isGapLimitBannerDismissed(currentNetwork, activeWalletId)
+    }
+
+    fun dismissGapLimitBanner() {
+        if (activeWalletId.isEmpty()) return
+        walletPreferences.setGapLimitBannerDismissed(currentNetwork, activeWalletId)
+    }
     
     suspend fun forceResetSync(): Result<Unit> = runCatching {
         Log.w(TAG, "Forcing sync reset...")
@@ -1685,6 +1697,31 @@ class GatewayRepository @Inject constructor(
         // Group by transaction hash to show a clean "one entry per transaction" UI
         val groupedTransactions = allInteractions.groupBy { it.transaction.hash }
 
+        // #382 gap-limit signature: every lock-script args we track — all
+        // wallets (both networks share args; the address differs, the script
+        // args don't) plus every sub-account candidate. Failure here must
+        // never break the transaction list; an incomplete set only means the
+        // banner may not arm this pass.
+        val knownLockArgs: Set<String> = runCatching {
+            buildSet {
+                add(myScript.args)
+                val addressPicker: (com.rjnr.pocketnode.data.database.entity.WalletEntity) -> String =
+                    if (currentNetwork == NetworkType.MAINNET) { w -> w.mainnetAddress } else { w -> w.testnetAddress }
+                walletDao.getAll().forEach { w ->
+                    val addr = addressPicker(w)
+                    if (addr.isNotBlank()) {
+                        runCatching { keyManager.deriveLockScriptFromAddress(addr) }
+                            .getOrNull()?.let { add(it.args) }
+                    }
+                }
+                addAll(appDatabase.subAccountCandidateDao().getAllScriptArgs())
+            }
+        }.getOrElse {
+            Log.w(TAG, "getTransactions: known-scripts set incomplete: ${it.message}")
+            setOf(myScript.args)
+        }
+        var gapLimitSignal = false
+
         // Fetch tip height once for confirmation calculations (avoid per-tx JNI calls)
         val tipHeight = runCatching {
             LightClientNative.nativeGetTipHeader()
@@ -1711,6 +1748,16 @@ class GatewayRepository @Inject constructor(
                 netChangeShannons > 0 -> "in"
                 netChangeShannons < 0 -> "out"
                 else -> "self"
+            }
+
+            // #382: outgoing tx whose change went to no script we know —
+            // the seed was likely also used in a standard BIP44 wallet
+            // (Neuron) whose change chain we don't derive yet.
+            if (!gapLimitSignal &&
+                isUnknownChangeSignature(netChangeShannons, tx.outputs, knownLockArgs)
+            ) {
+                gapLimitSignal = true
+                Log.i(TAG, "getTransactions: gap-limit signature in $txHash (#382)")
             }
 
             // For display, we show the absolute value as the amount
@@ -1812,6 +1859,15 @@ class GatewayRepository @Inject constructor(
         // Activity tab pages from Room, so completeness here is what makes
         // its "All" list actually mean all. ---
         cacheManager.cacheTransactions(items, currentNetwork.name, walletId = activeWalletId)
+
+        // Sticky: once armed, only the Tier 2 deep scan clears it. Detection
+        // is not re-evaluated downward — a later partial walk (runaway cap)
+        // must not un-detect.
+        if (gapLimitSignal && activeWalletId.isNotEmpty() &&
+            !walletPreferences.isGapLimitSignalDetected(currentNetwork, activeWalletId)
+        ) {
+            walletPreferences.setGapLimitSignalDetected(true, currentNetwork, activeWalletId)
+        }
 
         // Merge: include pending local txs not yet returned by JNI
         val jniTxHashes = items.map { it.txHash }.toSet()

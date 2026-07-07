@@ -95,6 +95,9 @@
 
     <string name="faq_internet_required_title">Why does the app need internet?</string>
     <string name="faq_internet_required_body">To check the blockchain itself, your phone has to talk to other CKB nodes around the world. The app does not send your private keys anywhere — those stay on your phone. Without internet, the app can show you your last known balance but cannot send or receive new transactions.</string>
+
+    <string name="faq_imported_funds_title">I imported a phrase from another wallet and my balance looks wrong</string>
+    <string name="faq_imported_funds_body">Wallet apps like Neuron create many addresses from one recovery phrase and quietly rotate between them, including hidden change addresses. Pocket Node currently watches one address per account, so funds sitting on those other addresses do not show up here. That is why your balance can look lower than expected, and why a send can appear as a large negative amount with nothing received back: the change went to a sister address this app does not watch yet.\n\nYour funds are not lost. They are still controlled by your recovery phrase and nothing has left it. Until the deep scan feature arrives, you can open the same phrase in the other wallet app to see and move those funds. An upcoming update will add a deeper scan that finds these addresses, plus an option to gather the funds onto your main address.</string>
     <!-- endregion -->
 
     <!-- region: SyncOptions -->
@@ -485,6 +488,10 @@
     <string name="sync_stall_banner_body">If this wallet has years of history, scanning from that far back is slow. Switch to Recent activity to catch up faster.</string>
     <string name="sync_stall_banner_action_switch_recent">Use Recent</string>
     <string name="sync_stall_banner_action_dismiss">Dismiss</string>
+    <string name="gap_limit_banner_title">Funds may be on other addresses</string>
+    <string name="gap_limit_banner_body">A past transaction sent change to an address from your recovery phrase that this app does not scan yet. This happens when the same phrase was used in another wallet app, such as Neuron. Your funds are safe. A deeper address scan is coming in an upcoming update.</string>
+    <string name="gap_limit_banner_action_learn_more">Learn more</string>
+    <string name="gap_limit_banner_action_dismiss">Dismiss</string>
     <!-- endregion -->
 
 </resources>
