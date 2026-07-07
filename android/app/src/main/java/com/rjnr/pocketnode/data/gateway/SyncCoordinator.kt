@@ -108,6 +108,25 @@ internal fun clampPartialRewinds(
 }
 
 /**
+ * #382 Tier 2 registration policy, pure for unit-test directness.
+ * Account-axis candidates (restorable sub-account slots) trickle at most
+ * [accountAxisCap] per cycle, lowest indices first — each batch is a fresh
+ * filter rewind and they resolve one wallet at a time. Chain-axis gap-limit
+ * candidates (accountIndex 0) register as ONE batch: 41 scripts through a
+ * capped pipe would rewind-and-rescan the window once per batch.
+ */
+fun selectCandidatesForRegistration(
+    candidates: List<com.rjnr.pocketnode.data.database.entity.SubAccountCandidateEntity>,
+    accountAxisCap: Int,
+): List<com.rjnr.pocketnode.data.database.entity.SubAccountCandidateEntity> {
+    val pending = candidates.filter {
+        it.state == com.rjnr.pocketnode.data.database.entity.SubAccountCandidateEntity.STATE_PENDING
+    }
+    val (chainAxis, accountAxis) = pending.partition { it.accountIndex == 0 }
+    return accountAxis.sortedBy { it.accountIndex }.take(accountAxisCap) + chainAxis
+}
+
+/**
  * Thin indirection over the two static JNI methods [SyncCoordinator]
  * touches. Exists so unit tests can fake the JNI surface without
  * forcing `System.loadLibrary` on the JVM — `external` methods can't
@@ -282,18 +301,52 @@ class SyncCoordinator @Inject constructor(
         walletId: String,
         lockScript: com.rjnr.pocketnode.data.gateway.models.Script,
         blockNumberHex: String,
-    ): List<JniScriptStatus> = runCatching {
-        subAccountCandidateDao.getForParent(walletId)
-            .filter { it.state == com.rjnr.pocketnode.data.database.entity.SubAccountCandidateEntity.STATE_PENDING }
-            .take(MAX_CANDIDATE_SCRIPTS_PER_PARENT)
-            .map { candidate ->
-                JniScriptStatus(
+    ): List<CandidateRegistration> = runCatching {
+        selectCandidatesForRegistration(
+            subAccountCandidateDao.getForParent(walletId),
+            accountAxisCap = MAX_CANDIDATE_SCRIPTS_PER_PARENT,
+        ).map { candidate ->
+            CandidateRegistration(
+                candidate = candidate,
+                status = JniScriptStatus(
                     script = lockScript.copy(args = candidate.scriptArgs),
                     scriptType = "lock",
                     blockNumber = blockNumberHex,
-                )
-            }
+                ),
+            )
+        }
     }.getOrDefault(emptyList())
+
+    /**
+     * A candidate paired with the script status it registers as — identity
+     * kept so a successful registration can be recorded back into
+     * `registeredFromBlock` (the reconciler's EMPTY coverage gate is inert
+     * while that column stays 0).
+     */
+    data class CandidateRegistration(
+        val candidate: com.rjnr.pocketnode.data.database.entity.SubAccountCandidateEntity,
+        val status: JniScriptStatus,
+    )
+
+    /**
+     * Persist the fromBlock each candidate was just registered to scan from
+     * (keep-min semantics live in the DAO query). Call ONLY after the
+     * CMD_SET_SCRIPTS_ALL that included these candidates succeeded.
+     */
+    suspend fun recordCandidateRegistrations(registrations: List<CandidateRegistration>) {
+        registrations.forEach { reg ->
+            val fromBlock = reg.status.blockNumber.removePrefix("0x").toLongOrNull(16) ?: return@forEach
+            runCatching {
+                subAccountCandidateDao.updateRegisteredFrom(
+                    reg.candidate.parentWalletId,
+                    reg.candidate.derivationPath,
+                    fromBlock,
+                )
+            }.onFailure {
+                Log.w(TAG, "recordCandidateRegistrations failed for ${reg.candidate.derivationPath}: ${it.message}")
+            }
+        }
+    }
 
     /**
      * BALANCED strategy filter: drop wallets whose `localSavedBlockNumber`
@@ -449,7 +502,7 @@ class SyncCoordinator @Inject constructor(
         // boot without a BiometricPrompt (#213 sub-PR 5). The cached
         // WalletEntity already has the address; AddressUtils.decode
         // round-trips to the exact same Script.
-        val pairs = coroutineScope {
+        val perWallet = coroutineScope {
             wallets.map { wallet ->
                 async(Dispatchers.IO) {
                     val lockScript = try {
@@ -496,10 +549,14 @@ class SyncCoordinator @Inject constructor(
                     // covers them. See [pendingCandidateStatuses].
                     val candidates =
                         pendingCandidateStatuses(wallet.walletId, lockScript, blockNumberHex)
-                            .map { "" to it }
-                    listOf(own) + candidates
+                    Triple(wallet.walletId, own, candidates)
                 }
-            }.awaitAll().filterNotNull().flatten()
+            }.awaitAll().filterNotNull()
+        }
+
+        val registrations = perWallet.flatMap { it.third }
+        val pairs = perWallet.flatMap { (_, own, candidates) ->
+            listOf(own) + candidates.map { "" to it.status }
         }
 
         if (pairs.isEmpty()) {
@@ -512,6 +569,10 @@ class SyncCoordinator @Inject constructor(
         Log.d(TAG, "Registering ${scriptStatuses.size} wallet scripts with light client")
         val result = setScriptsAndRecord(scriptStatuses, walletIds, LightClientNative.CMD_SET_SCRIPTS_ALL, ctx.network)
         if (!result) throw Exception("Failed to set scripts for all wallets")
+
+        // #382: persist each candidate's scan-from block so the reconciler's
+        // EMPTY coverage gate can actually pass (it is inert at 0).
+        recordCandidateRegistrations(registrations)
 
         ctx.onScriptsRegistered()
     }
