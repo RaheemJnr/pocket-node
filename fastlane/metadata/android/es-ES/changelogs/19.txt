@@ -1,0 +1,10 @@
+v1.7.8:
+Esta versión corrige el envío desde carteras con muchas monedas pequeñas y encuentra fondos en direcciones usadas por otras carteras.
+
+Los envíos desde carteras activas funcionan. Un envío que reunía muchas monedas pequeñas (pagos de minería, depósitos frecuentes) pagaba una comisión de red ligeramente insuficiente y era rechazado siempre. Las comisiones ahora cubren el tamaño real de la transacción.
+
+La app puede encontrar fondos de otras carteras. Si tu frase semilla se usó en Neuron u otra cartera, puede haber fondos en direcciones que Pocket Node no escaneaba. Al importar ahora se escanean automáticamente, y Ajustes tiene la acción Escanear otras direcciones para carteras existentes. Los fondos encontrados se muestran con sus importes.
+
+Actividad muestra tu historial completo. La pestaña Todo dejaba de llenarse tras las cincuenta entradas más recientes en carteras activas, y una entrada podía mostrar un importe erróneo. Ahora se guarda el historial completo con importes exactos.
+
+Fuente: github.com/RaheemJnr/pocket-node/releases
