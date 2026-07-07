@@ -119,6 +119,10 @@ class GatewayRepository @Inject constructor(
 ) : TipSource {
     private val sendMutex = Mutex()
 
+    // #382: single-flight for the explicit gap-limit scan (Home banner and
+    // Settings both trigger it).
+    private val gapLimitScanMutex = Mutex()
+
     private val _tipFlow = MutableStateFlow(0L)
     override val tipFlow: StateFlow<Long> = _tipFlow.asStateFlow()
 
@@ -878,6 +882,8 @@ class GatewayRepository @Inject constructor(
         if (wId.isEmpty()) return GapLimitStatus(GapLimitResolution.NOT_SCANNED, 0, 0L)
         val chain = runCatching {
             appDatabase.subAccountCandidateDao().getForParent(wId).filter { it.accountIndex == 0 }
+        }.onFailure {
+            Log.w(TAG, "getGapLimitStatus: candidate read failed, treating as not scanned: ${it.message}")
         }.getOrDefault(emptyList())
         val resolution = gapLimitResolution(chain)
         if (resolution == GapLimitResolution.CLEAR &&
@@ -913,29 +919,42 @@ class GatewayRepository @Inject constructor(
      * light-client filter. Returns the window that is now covered.
      */
     suspend fun runGapLimitScan(): Result<Int> = runCatching {
-        val wId = activeWalletId
-        if (wId.isEmpty()) throw Exception("No active wallet")
-        val words = getMnemonic() ?: throw Exception("Recovery phrase unavailable for this wallet")
-        val dao = appDatabase.subAccountCandidateDao()
-        val existing = dao.getForParent(wId).filter { it.accountIndex == 0 }
-        val window = nextScanWindow(existing)
-        val now = System.currentTimeMillis()
-        dao.insertAll(
-            subAccountDiscovery.deriveChainCandidates(words, window = window).map {
-                SubAccountCandidateEntity(
-                    parentWalletId = wId,
-                    derivationPath = it.derivationPath,
-                    accountIndex = it.accountIndex,
-                    scriptArgs = it.scriptArgs,
-                    createdAt = now,
-                )
-            }
-        )
-        // Fresh registration pass so new candidate scripts join the filter.
-        registerAccountWithStrategy(
-            getSavedSyncMode(), getSavedCustomBlockHeight(), savePreference = false
-        ).getOrThrow()
-        window
+        // Single-flight: the Home banner and Settings both trigger this, and
+        // a second concurrent pass would double the derivation work and
+        // interleave two CMD_SET_SCRIPTS_ALL registrations.
+        if (!gapLimitScanMutex.tryLock()) throw Exception("A scan is already running")
+        try {
+            val wId = activeWalletId
+            if (wId.isEmpty()) throw Exception("No active wallet")
+            val words = getMnemonic() ?: throw Exception("Recovery phrase unavailable for this wallet")
+            val dao = appDatabase.subAccountCandidateDao()
+            val existing = dao.getForParent(wId).filter { it.accountIndex == 0 }
+            val window = nextScanWindow(existing)
+            val now = System.currentTimeMillis()
+            val candidates = subAccountDiscovery.deriveChainCandidates(words, window = window)
+            // The mnemonic read and derivation are slow; if the user switched
+            // wallets meanwhile, inserting rows for the OLD wallet and then
+            // registering the NEW one would corrupt the scan. Abort instead.
+            if (activeWalletId != wId) throw Exception("Wallet changed during the scan; try again")
+            dao.insertAll(
+                candidates.map {
+                    SubAccountCandidateEntity(
+                        parentWalletId = wId,
+                        derivationPath = it.derivationPath,
+                        accountIndex = it.accountIndex,
+                        scriptArgs = it.scriptArgs,
+                        createdAt = now,
+                    )
+                }
+            )
+            // Fresh registration pass so new candidate scripts join the filter.
+            registerAccountWithStrategy(
+                getSavedSyncMode(), getSavedCustomBlockHeight(), savePreference = false
+            ).getOrThrow()
+            window
+        } finally {
+            gapLimitScanMutex.unlock()
+        }
     }
 
     /**
