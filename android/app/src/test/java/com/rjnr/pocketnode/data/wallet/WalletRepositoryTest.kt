@@ -251,6 +251,55 @@ class WalletRepositoryTest {
         assertEquals(4, sub4.accountIndex)
     }
 
+    /**
+     * #382 Tier 2: importing a seed must also record gap-limit candidates
+     * along account 0's receiving/change chains — the paths Neuron spreads
+     * funds across — so the auto-scan can register them for sync.
+     */
+    @Test
+    fun `importFromMnemonic records chain-axis gap-limit candidates`() = runTest {
+        val words = mnemonicManager.generateMnemonic(MnemonicManager.WordCount.TWELVE)
+        val parent = repo.importFromMnemonic(
+            words = words,
+            name = "Neuron Import",
+            persistKeys = { walletId, bundle -> fakePersistV2(walletId, bundle) },
+        ).getOrThrow()
+
+        val candidates = db.subAccountCandidateDao().getForParent(parent.walletId)
+        val chain = candidates.filter { it.accountIndex == 0 }
+        val account = candidates.filter { it.accountIndex >= 1 }
+
+        // chains {0,1} x {0..20} minus the parent's own 0/0 slot
+        assertEquals(41, chain.size)
+        assertTrue(chain.all { it.state == com.rjnr.pocketnode.data.database.entity.SubAccountCandidateEntity.STATE_PENDING })
+        assertTrue(chain.any { it.derivationPath == "m/44'/309'/0'/1/0" })
+        assertTrue(chain.any { it.derivationPath == "m/44'/309'/0'/0/20" })
+        assertTrue(chain.none { it.derivationPath == "m/44'/309'/0'/0/0" })
+
+        // the parent's own args never appear as a candidate
+        val parentArgs = keyManager.deriveLockScriptFromAddress(parent.testnetAddress).args
+        assertTrue(chain.none { it.scriptArgs == parentArgs })
+
+        // account-axis discovery (#82) is untouched
+        assertEquals(SubAccountDiscovery.CANDIDATE_WINDOW, account.size)
+    }
+
+    /**
+     * Chain-axis slots are scan targets, not wallets. createWallet (a fresh
+     * seed that never existed elsewhere) must NOT record them — auto-scan is
+     * an import-time behavior.
+     */
+    @Test
+    fun `createWallet does not record chain-axis candidates`() = runTest {
+        val wallet = repo.createWallet(
+            name = "Fresh",
+            persistKeys = { walletId, bundle -> fakePersistV2(walletId, bundle) },
+        ).getOrThrow()
+        val chain = db.subAccountCandidateDao().getForParent(wallet.walletId)
+            .filter { it.accountIndex == 0 }
+        assertEquals(0, chain.size)
+    }
+
     @Test
     fun `deleteWallet refuses to delete active wallet`() = runTest {
         val wallet1 = repo.createWallet(
