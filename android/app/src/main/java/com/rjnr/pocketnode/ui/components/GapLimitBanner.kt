@@ -33,6 +33,10 @@ fun GapLimitBanner(
     onLearnMore: () -> Unit,
     onDismiss: () -> Unit,
     modifier: Modifier = Modifier,
+    /** Non-null when the explicit deep scan is available (#382 Tier 2 — wallet imported before auto-scan shipped). */
+    onScanNow: (() -> Unit)? = null,
+    /** True while chain-axis candidates are still resolving — scan in progress. */
+    scanning: Boolean = false,
 ) {
     Card(
         modifier = modifier.fillMaxWidth(),
@@ -62,7 +66,10 @@ fun GapLimitBanner(
                 )
             }
             Text(
-                text = stringResource(R.string.gap_limit_banner_body),
+                text = stringResource(
+                    if (scanning) R.string.gap_limit_banner_body_scanning
+                    else R.string.gap_limit_banner_body
+                ),
                 style = MaterialTheme.typography.bodyMedium,
                 color = MaterialTheme.colorScheme.onSecondaryContainer,
             )
@@ -73,8 +80,17 @@ fun GapLimitBanner(
                 TextButton(onClick = onDismiss) {
                     Text(stringResource(R.string.gap_limit_banner_action_dismiss))
                 }
-                FilledTonalButton(onClick = onLearnMore) {
-                    Text(stringResource(R.string.gap_limit_banner_action_learn_more))
+                if (onScanNow != null && !scanning) {
+                    TextButton(onClick = onLearnMore) {
+                        Text(stringResource(R.string.gap_limit_banner_action_learn_more))
+                    }
+                    FilledTonalButton(onClick = onScanNow) {
+                        Text(stringResource(R.string.gap_limit_banner_action_scan_now))
+                    }
+                } else {
+                    FilledTonalButton(onClick = onLearnMore) {
+                        Text(stringResource(R.string.gap_limit_banner_action_learn_more))
+                    }
                 }
             }
         }

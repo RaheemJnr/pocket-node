@@ -265,7 +265,8 @@ object AppModule {
         daoDepositReader: com.rjnr.pocketnode.data.gateway.DaoDepositReader,
         lightClient: com.rjnr.pocketnode.data.gateway.LightClientReadOnly,
         subAccountReconciler: com.rjnr.pocketnode.data.wallet.SubAccountReconciler,
-    ): GatewayRepository = GatewayRepository(context, keyManager, walletPreferences, json, transactionBuilder, cacheManager, daoSyncManager, walletMigrationHelper, walletDao, appDatabase, headerCacheDao, syncProgressDao, pendingBroadcastDao, broadcastClient, syncCoordinator, daoHeaderResolver, daoDepositReader, lightClient, subAccountReconciler)
+        subAccountDiscovery: com.rjnr.pocketnode.data.wallet.SubAccountDiscovery,
+    ): GatewayRepository = GatewayRepository(context, keyManager, walletPreferences, json, transactionBuilder, cacheManager, daoSyncManager, walletMigrationHelper, walletDao, appDatabase, headerCacheDao, syncProgressDao, pendingBroadcastDao, broadcastClient, syncCoordinator, daoHeaderResolver, daoDepositReader, lightClient, subAccountReconciler, subAccountDiscovery)
 
     /**
      * Production activity probe for sub-account discovery (#82 phase 2):

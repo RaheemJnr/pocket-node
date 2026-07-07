@@ -17,8 +17,13 @@ import com.rjnr.pocketnode.data.sync.SyncForegroundService
 import com.rjnr.pocketnode.data.sync.SyncProgressTracker
 import com.rjnr.pocketnode.data.migration.WalletMigrationHelper
 import com.rjnr.pocketnode.data.transaction.TransactionBuilder
+import com.rjnr.pocketnode.data.database.entity.SubAccountCandidateEntity
 import com.rjnr.pocketnode.data.wallet.AddressUtils
+import com.rjnr.pocketnode.data.wallet.GapLimitResolution
+import com.rjnr.pocketnode.data.wallet.GapLimitStatus
 import com.rjnr.pocketnode.data.wallet.KeyManager
+import com.rjnr.pocketnode.data.wallet.gapLimitResolution
+import com.rjnr.pocketnode.data.wallet.nextScanWindow
 import com.rjnr.pocketnode.data.wallet.WalletInfo
 import com.rjnr.pocketnode.data.wallet.WalletPreferences
 import com.rjnr.pocketnode.data.wallet.SyncStrategy
@@ -110,6 +115,7 @@ class GatewayRepository @Inject constructor(
     private val daoDepositReader: DaoDepositReader,
     private val lightClient: LightClientReadOnly,
     private val subAccountReconciler: com.rjnr.pocketnode.data.wallet.SubAccountReconciler,
+    private val subAccountDiscovery: com.rjnr.pocketnode.data.wallet.SubAccountDiscovery,
 ) : TipSource {
     private val sendMutex = Mutex()
 
@@ -851,6 +857,106 @@ class GatewayRepository @Inject constructor(
     fun dismissGapLimitBanner() {
         if (activeWalletId.isEmpty()) return
         walletPreferences.setGapLimitBannerDismissed(currentNetwork, activeWalletId)
+    }
+
+    /**
+     * #382 Tier 2: what the chain-axis candidate set means for the active
+     * wallet, plus the live capacity sitting on FOUND slots. Side effect:
+     * a CLEAR resolution (scan finished, nothing anywhere) retires the
+     * Tier 1 signal so the banner stops firing on stale evidence.
+     */
+    suspend fun getGapLimitStatus(): GapLimitStatus {
+        val wId = activeWalletId
+        if (wId.isEmpty()) return GapLimitStatus(GapLimitResolution.NOT_SCANNED, 0, 0L)
+        val chain = runCatching {
+            appDatabase.subAccountCandidateDao().getForParent(wId).filter { it.accountIndex == 0 }
+        }.getOrDefault(emptyList())
+        val resolution = gapLimitResolution(chain)
+        if (resolution == GapLimitResolution.CLEAR &&
+            walletPreferences.isGapLimitSignalDetected(currentNetwork, wId)
+        ) {
+            Log.i(TAG, "gap-limit scan completed clean — retiring Tier 1 signal for $wId")
+            walletPreferences.setGapLimitSignalDetected(false, currentNetwork, wId)
+        }
+        if (resolution != GapLimitResolution.FOUND) return GapLimitStatus(resolution, 0, 0L)
+
+        val myScript = _walletInfo.value?.script
+            ?: return GapLimitStatus(resolution, chain.count { it.state == SubAccountCandidateEntity.STATE_FOUND }, 0L)
+        var total = 0L
+        var count = 0
+        chain.filter { it.state == SubAccountCandidateEntity.STATE_FOUND }.forEach { cand ->
+            runCatching {
+                val cap = liveUntypedCapacityFor(JniSearchKey(script = myScript.copy(args = cand.scriptArgs)))
+                if (cap > 0L) {
+                    total += cap
+                    count++
+                }
+            }.onFailure { Log.w(TAG, "gap-limit capacity read failed for ${cand.derivationPath}: ${it.message}") }
+        }
+        return GapLimitStatus(resolution, count, total)
+    }
+
+    /**
+     * #382 Tier 2: explicit deep scan. Covers wallets imported before the
+     * auto-scan shipped, and extends the window (20 -> 40 -> 60) when the
+     * current boundary slot shows activity. Needs the mnemonic (session-auth
+     * gated by [getMnemonic]); inserts are IGNORE so already-resolved slots
+     * keep their state, then scripts re-register so the new ones enter the
+     * light-client filter. Returns the window that is now covered.
+     */
+    suspend fun runGapLimitScan(): Result<Int> = runCatching {
+        val wId = activeWalletId
+        if (wId.isEmpty()) throw Exception("No active wallet")
+        val words = getMnemonic() ?: throw Exception("Recovery phrase unavailable for this wallet")
+        val dao = appDatabase.subAccountCandidateDao()
+        val existing = dao.getForParent(wId).filter { it.accountIndex == 0 }
+        val window = nextScanWindow(existing)
+        val now = System.currentTimeMillis()
+        dao.insertAll(
+            subAccountDiscovery.deriveChainCandidates(words, window = window).map {
+                SubAccountCandidateEntity(
+                    parentWalletId = wId,
+                    derivationPath = it.derivationPath,
+                    accountIndex = it.accountIndex,
+                    scriptArgs = it.scriptArgs,
+                    createdAt = now,
+                )
+            }
+        )
+        // Fresh registration pass so new candidate scripts join the filter.
+        registerAccountWithStrategy(
+            getSavedSyncMode(), getSavedCustomBlockHeight(), savePreference = false
+        ).getOrThrow()
+        window
+    }
+
+    /**
+     * Live spendable capacity for one script: cells walked to the end, spent
+     * outpoints subtracted, typed cells excluded — the same read-path rules
+     * as refreshBalance (nativeGetCellsCapacity alone can overstate; an
+     * inflated "found funds" number would re-create the exact panic #382 is
+     * meant to end).
+     */
+    private suspend fun liveUntypedCapacityFor(searchKey: JniSearchKey): Long {
+        val searchKeyJson = json.encodeToString(searchKey)
+        val spent = fetchAllSpentOutpoints(searchKeyJson)
+        var live = 0L
+        var cursor: String? = null
+        var pages = 0
+        while (pages < MAX_CELL_PAGES) {
+            val pageJson = LightClientNative.nativeGetCells(searchKeyJson, "desc", 100, cursor) ?: break
+            val page = json.decodeFromString<JniPagination<JniCell>>(pageJson)
+            page.objects.forEach { cell ->
+                val key = "${cell.outPoint.txHash}:${cell.outPoint.index}"
+                if (key !in spent && cell.output.type == null) {
+                    live += cell.output.capacity.removePrefix("0x").toLongOrNull(16) ?: 0L
+                }
+            }
+            pages++
+            if (page.objects.isEmpty() || page.objects.size < 100 || page.lastCursor.isNullOrEmpty()) break
+            cursor = page.lastCursor
+        }
+        return live
     }
     
     suspend fun forceResetSync(): Result<Unit> = runCatching {

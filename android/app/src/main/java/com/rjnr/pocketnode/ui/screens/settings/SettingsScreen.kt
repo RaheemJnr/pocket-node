@@ -364,6 +364,7 @@ fun SettingsScreen(
         },
         showThemeDialog = { viewModel.showThemeDialog() },
         onCheckForUpdate = { viewModel.checkForUpdate() },
+        onScanOtherAddresses = { viewModel.runGapLimitScan() },
         onToggleBackgroundSync = { enabled ->
             if (enabled && Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
                 val hasPermission = ContextCompat.checkSelfPermission(
@@ -397,6 +398,7 @@ private fun SettingsScreenUI(
     requestNetworkSwitch: (NetworkType) -> Unit,
     showThemeDialog: () -> Unit,
     onCheckForUpdate: () -> Unit = {},
+    onScanOtherAddresses: () -> Unit = {},
     onToggleBackgroundSync: (Boolean) -> Unit = {}
 ) {
     Scaffold(
@@ -471,6 +473,17 @@ private fun SettingsScreenUI(
                     title = "Sync Options",
                     badgeText = syncModeLabel(uiState.syncMode),
                     onClick = { showSyncDialog() }
+                )
+            }
+
+            // #382 Tier 2: explicit gap-limit scan. Recovery path for wallets
+            // whose Home banner was dismissed, and the window-extension entry
+            // (20 -> 40 -> 60) when the boundary slot showed activity.
+            item {
+                SettingsLinkRow(
+                    icon = Lucide.Wallet,
+                    title = stringResource(R.string.settings_scan_other_addresses),
+                    onClick = onScanOtherAddresses
                 )
             }
 
