@@ -215,10 +215,15 @@ class WalletRepository @Inject constructor(
         // #82 phase 1: record derivable sub-account slots while the mnemonic
         // is in memory. Args only, no keys. Never allowed to fail the import —
         // discovery is an enhancement, the wallet row above is the product.
+        // #382 Tier 2 adds the gap-limit slots along account 0's receiving
+        // and change chains: an imported seed may have been used in Neuron or
+        // any standard BIP44 wallet, which spread funds across those paths.
         runCatching {
             val now2 = System.currentTimeMillis()
+            val candidates = subAccountDiscovery.deriveCandidates(words, passphrase) +
+                subAccountDiscovery.deriveChainCandidates(words, passphrase)
             subAccountCandidateDao.insertAll(
-                subAccountDiscovery.deriveCandidates(words, passphrase).map {
+                candidates.map {
                     com.rjnr.pocketnode.data.database.entity.SubAccountCandidateEntity(
                         parentWalletId = walletId,
                         derivationPath = it.derivationPath,

@@ -782,15 +782,19 @@ class GatewayRepository @Inject constructor(
         // candidates registered at import were wiped 40s later and discovery
         // never ran (#82, device-test 2026-07). Empty walletIds keep them out
         // of per-wallet progress, same contract as registerAllWalletScripts.
-        val candidateStatuses = syncCoordinator.pendingCandidateStatuses(
+        val candidateRegistrations = syncCoordinator.pendingCandidateStatuses(
             activeWalletId, info.script, blockNumberHex
         )
         val result = setScriptsAndRecord(
-            scriptStatuses + candidateStatuses,
-            listOf(activeWalletId) + candidateStatuses.map { "" },
+            scriptStatuses + candidateRegistrations.map { it.status },
+            listOf(activeWalletId) + candidateRegistrations.map { "" },
             LightClientNative.CMD_SET_SCRIPTS_ALL
         )
         if (!result) throw Exception("Failed to set scripts")
+
+        // #382: record each candidate's scan-from block — the reconciler's
+        // EMPTY coverage gate stays inert while registeredFromBlock is 0.
+        syncCoordinator.recordCandidateRegistrations(candidateRegistrations)
 
         _isRegistered.value = true
         if (savePreference) {
