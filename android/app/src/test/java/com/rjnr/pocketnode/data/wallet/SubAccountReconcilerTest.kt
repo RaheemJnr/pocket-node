@@ -45,6 +45,7 @@ class SubAccountReconcilerTest {
             listOf(
                 SubAccountCandidateEntity(
                     parentWalletId = parent,
+                    derivationPath = SubAccountDiscovery.accountPath(index),
                     accountIndex = index,
                     scriptArgs = args,
                     createdAt = 1L,

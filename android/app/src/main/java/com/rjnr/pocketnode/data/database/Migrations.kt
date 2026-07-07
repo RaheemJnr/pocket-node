@@ -506,3 +506,44 @@ val MIGRATION_13_14 = object : Migration(13, 14) {
         )
     }
 }
+
+/**
+ * v15 (#382 Tier 2): re-key `sub_account_candidates` on
+ * (parentWalletId, derivationPath) so gap-limit candidates along account 0's
+ * receiving/change chains (m/44'/309'/0'/{0|1}/{i}) can coexist with the
+ * account-axis slots (m/44'/309'/N'/0/0). Recreate-and-copy: the PK change
+ * cannot be expressed with ALTER, and recreating to the exact entity shape
+ * converges upgraders and fresh installs onto one schema (the v9 lesson).
+ * Existing rows are all account-axis; their path is backfilled from
+ * accountIndex.
+ */
+val MIGRATION_14_15 = object : Migration(14, 15) {
+    override fun migrate(db: SupportSQLiteDatabase) {
+        db.execSQL(
+            """
+            CREATE TABLE IF NOT EXISTS `sub_account_candidates_new` (
+                `parentWalletId` TEXT NOT NULL,
+                `derivationPath` TEXT NOT NULL,
+                `accountIndex` INTEGER NOT NULL,
+                `scriptArgs` TEXT NOT NULL,
+                `state` TEXT NOT NULL,
+                `createdAt` INTEGER NOT NULL,
+                `registeredFromBlock` INTEGER NOT NULL,
+                PRIMARY KEY(`parentWalletId`, `derivationPath`)
+            )
+            """.trimIndent()
+        )
+        db.execSQL(
+            """
+            INSERT INTO `sub_account_candidates_new`
+                (parentWalletId, derivationPath, accountIndex, scriptArgs, state, createdAt, registeredFromBlock)
+            SELECT parentWalletId,
+                   'm/44''/309''/' || accountIndex || '''/0/0',
+                   accountIndex, scriptArgs, state, createdAt, registeredFromBlock
+            FROM `sub_account_candidates`
+            """.trimIndent()
+        )
+        db.execSQL("DROP TABLE `sub_account_candidates`")
+        db.execSQL("ALTER TABLE `sub_account_candidates_new` RENAME TO `sub_account_candidates`")
+    }
+}

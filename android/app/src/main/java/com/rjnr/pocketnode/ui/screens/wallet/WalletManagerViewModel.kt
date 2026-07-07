@@ -43,13 +43,16 @@ class WalletManagerViewModel @Inject constructor(
         }
         // Discovery restore banner (#82 phase 2): sub-account slots whose
         // scripts showed on-chain history after a parent seed import.
+        // Account-axis only — chain-axis gap-limit slots (#382, accountIndex
+        // 0) are never restorable as wallets; they surface via the Tier 2
+        // found-funds flow instead.
         viewModelScope.launch {
             subAccountCandidateDao
                 .observeByState(
                     com.rjnr.pocketnode.data.database.entity.SubAccountCandidateEntity.STATE_FOUND
                 )
                 .collect { found ->
-                    _uiState.update { it.copy(foundCandidates = found) }
+                    _uiState.update { st -> st.copy(foundCandidates = found.filter { it.accountIndex >= 1 }) }
                 }
         }
     }
