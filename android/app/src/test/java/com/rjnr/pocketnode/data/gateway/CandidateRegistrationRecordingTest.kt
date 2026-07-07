@@ -57,6 +57,7 @@ class CandidateRegistrationRecordingTest {
             Json { ignoreUnknownKeys = true },
             fakeBridge,
             db.subAccountCandidateDao(),
+            db.transactionDao(),
         )
     }
 

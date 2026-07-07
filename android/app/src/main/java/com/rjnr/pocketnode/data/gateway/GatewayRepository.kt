@@ -788,8 +788,16 @@ class GatewayRepository @Inject constructor(
         // candidates registered at import were wiped 40s later and discovery
         // never ran (#82, device-test 2026-07). Empty walletIds keep them out
         // of per-wallet progress, same contract as registerAllWalletScripts.
+        // #382 P1: candidates register from their own HISTORICAL start, not
+        // this wallet's resume height — a tip-synced wallet resuming from
+        // ~tip would register candidates where a scan can find nothing.
+        val candidateHex = "0x" + candidateScanStart(
+            historicalStartBlock(syncMode, customBlockHeight, tipHeight, currentNetwork),
+            syncCoordinator.earliestCachedTxBlock(activeWalletId, currentNetwork.name),
+            tipHeight,
+        ).toString(16)
         val candidateRegistrations = syncCoordinator.pendingCandidateStatuses(
-            activeWalletId, info.script, blockNumberHex
+            activeWalletId, info.script, candidateHex
         )
         val result = setScriptsAndRecord(
             scriptStatuses + candidateRegistrations.map { it.status },

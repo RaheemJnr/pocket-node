@@ -13,6 +13,10 @@ interface TransactionDao {
     @Query("SELECT * FROM transactions WHERE network = :network AND status = 'PENDING'")
     suspend fun getPending(network: String): List<TransactionEntity>
 
+    /** #382: hex block numbers of every cached tx for a wallet — anchors the gap-limit candidate scan depth. */
+    @Query("SELECT blockNumber FROM transactions WHERE walletId = :walletId AND network = :network")
+    suspend fun getBlockNumbers(walletId: String, network: String): List<String>
+
     @Query("SELECT * FROM transactions WHERE txHash = :txHash")
     suspend fun getByTxHash(txHash: String): TransactionEntity?
 

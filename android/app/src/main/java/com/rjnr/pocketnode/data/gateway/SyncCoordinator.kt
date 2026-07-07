@@ -108,6 +108,51 @@ internal fun clampPartialRewinds(
 }
 
 /**
+ * #382: the mode-derived historical sync start for a wallet — what a fresh
+ * registration would use — ignoring any saved resume progress. Mirrors the
+ * guards both registration paths apply: a future block resets to the RECENT
+ * window, and a zero resolution outside FULL_HISTORY falls back to the
+ * network checkpoint.
+ */
+fun historicalStartBlock(
+    syncMode: SyncMode,
+    customHeight: Long?,
+    tipHeight: Long,
+    network: NetworkType,
+): Long {
+    val calculated = syncMode.toFromBlock(
+        if (syncMode == SyncMode.CUSTOM) customHeight else null, tipHeight, network
+    ).toLongOrNull() ?: 0L
+    val checkpoint = getCheckpoint(network)
+    return when {
+        calculated > tipHeight && tipHeight > 0 -> (tipHeight - 200_000L).coerceAtLeast(0L)
+        calculated == 0L && syncMode != SyncMode.FULL_HISTORY && checkpoint > 0 -> checkpoint
+        else -> calculated
+    }
+}
+
+/**
+ * #382 (sub-PR 3 review P1): the block gap-limit candidates register from.
+ * Candidates must scan HISTORY — inheriting the parent's resume height meant
+ * a tip-synced wallet registered them at ~tip, where the Neuron change can
+ * never be found. Deepest reasonable start wins:
+ *  - the mode-derived historical start ([historicalStartBlock]),
+ *  - the earliest cached transaction's block minus a small margin (sibling
+ *    change left DURING those transactions),
+ *  - and never shallower than the RECENT window when the tip is known.
+ */
+fun candidateScanStart(
+    modeDerivedStart: Long,
+    earliestKnownTxBlock: Long?,
+    tipHeight: Long,
+): Long {
+    val recentFloor = if (tipHeight > 0) (tipHeight - 200_000L).coerceAtLeast(0L) else modeDerivedStart
+    var start = minOf(modeDerivedStart, recentFloor)
+    earliestKnownTxBlock?.let { start = minOf(start, (it - 1_000L).coerceAtLeast(0L)) }
+    return start.coerceAtLeast(0L)
+}
+
+/**
  * #382 Tier 2 registration policy, pure for unit-test directness.
  * Account-axis candidates (restorable sub-account slots) trickle at most
  * [accountAxisCap] per cycle, lowest indices first — each batch is a fresh
@@ -158,6 +203,7 @@ class SyncCoordinator @Inject constructor(
     private val json: Json,
     private val lightClient: LightClientBridge,
     private val subAccountCandidateDao: com.rjnr.pocketnode.data.database.dao.SubAccountCandidateDao,
+    private val transactionDao: com.rjnr.pocketnode.data.database.dao.TransactionDao,
 ) {
 
     /**
@@ -316,6 +362,18 @@ class SyncCoordinator @Inject constructor(
             )
         }
     }.getOrDefault(emptyList())
+
+    /**
+     * Earliest cached transaction block for a wallet, or null when the cache
+     * is empty or unreadable. Anchors [candidateScanStart].
+     */
+    suspend fun earliestCachedTxBlock(walletId: String, network: String): Long? =
+        runCatching {
+            transactionDao.getBlockNumbers(walletId, network)
+                .mapNotNull { it.removePrefix("0x").toLongOrNull(16) }
+                .filter { it > 0L }
+                .minOrNull()
+        }.getOrNull()
 
     /**
      * A candidate paired with the script status it registers as — identity
@@ -547,8 +605,18 @@ class SyncCoordinator @Inject constructor(
                     // #82 phase 2: register PENDING sub-account discovery
                     // candidates alongside their parent so the filter sync
                     // covers them. See [pendingCandidateStatuses].
+                    // #382 P1: candidates get their own HISTORICAL start —
+                    // inheriting the parent's resume height registered them
+                    // at ~tip on synced wallets, where a scan finds nothing.
+                    val syncModeForWallet = walletPreferences.getSyncMode(walletId = wallet.walletId)
+                    val customForWallet = walletPreferences.getCustomBlockHeight(walletId = wallet.walletId)
+                    val candidateHex = "0x" + candidateScanStart(
+                        historicalStartBlock(syncModeForWallet, customForWallet, tipHeight, ctx.network),
+                        earliestCachedTxBlock(wallet.walletId, ctx.network.name),
+                        tipHeight,
+                    ).toString(16)
                     val candidates =
-                        pendingCandidateStatuses(wallet.walletId, lockScript, blockNumberHex)
+                        pendingCandidateStatuses(wallet.walletId, lockScript, candidateHex)
                     Triple(wallet.walletId, own, candidates)
                 }
             }.awaitAll().filterNotNull()
