@@ -628,6 +628,10 @@ class GatewayRepository @Inject constructor(
             && !hasMnemonicBackupForActiveWallet()
     }
 
+    // Retires together with KeyManager's ESP fallback — that path is still the
+    // legacy-key read for un-migrated installs, so its removal needs its own
+    // issue, not a warning sweep.
+    @Suppress("DEPRECATION")
     fun wasResetDueToCorruption(): Boolean = keyManager.wasResetDueToCorruption()
 
     fun getWalletType(): String = activeWalletType

@@ -59,7 +59,7 @@ import androidx.compose.ui.tooling.preview.Preview
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.core.content.ContextCompat
-import androidx.hilt.navigation.compose.hiltViewModel
+import androidx.hilt.lifecycle.viewmodel.compose.hiltViewModel
 import com.composables.icons.lucide.ChevronRight
 import com.composables.icons.lucide.CircleHelp
 import com.composables.icons.lucide.Download

@@ -35,8 +35,8 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Surface
+import androidx.compose.material3.PrimaryTabRow
 import androidx.compose.material3.Tab
-import androidx.compose.material3.TabRow
 import androidx.compose.material3.Text
 import androidx.compose.material3.TopAppBar
 import androidx.compose.material3.TopAppBarDefaults
@@ -59,8 +59,9 @@ import androidx.compose.ui.tooling.preview.Preview
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.rjnr.pocketnode.R
-import androidx.hilt.navigation.compose.hiltViewModel
+import androidx.hilt.lifecycle.viewmodel.compose.hiltViewModel
 import androidx.navigation.NavController
+import kotlinx.coroutines.launch
 import com.composables.icons.lucide.ChevronLeft
 import com.composables.icons.lucide.Lucide
 import com.rjnr.pocketnode.data.gateway.models.JniHeaderView
@@ -94,7 +95,7 @@ fun NodeStatusScreen(
         }
     ) { padding ->
         Column(modifier = Modifier.padding(padding)) {
-            TabRow(selectedTabIndex = selectedTab) {
+            PrimaryTabRow(selectedTabIndex = selectedTab) {
                 tabs.forEachIndexed { index, title ->
                     Tab(
                         selected = selectedTab == index,
@@ -126,7 +127,8 @@ fun StatusTab(
     onClearErrors: () -> Unit = {},
 ) {
     var rpcMethod by remember { mutableStateOf("get_peers") }
-    val clipboard = androidx.compose.ui.platform.LocalClipboardManager.current
+    val clipboard = androidx.compose.ui.platform.LocalClipboard.current
+    val copyScope = androidx.compose.runtime.rememberCoroutineScope()
     val tipHeader = uiState.tipHeader
     val peers = uiState.peers
 
@@ -163,11 +165,16 @@ fun StatusTab(
                         Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                             androidx.compose.material3.TextButton(onClick = {
                                 val fmt = java.text.SimpleDateFormat("yyyy-MM-dd HH:mm:ss", java.util.Locale.US)
-                                clipboard.setText(androidx.compose.ui.text.AnnotatedString(
-                                    uiState.appErrors.joinToString("\n") { e ->
-                                        "[${fmt.format(java.util.Date(e.atMs))}] ${e.tag}: ${e.message}"
-                                    }
-                                ))
+                                val text = uiState.appErrors.joinToString("\n") { e ->
+                                    "[${fmt.format(java.util.Date(e.atMs))}] ${e.tag}: ${e.message}"
+                                }
+                                copyScope.launch {
+                                    clipboard.setClipEntry(
+                                        androidx.compose.ui.platform.ClipEntry(
+                                            android.content.ClipData.newPlainText("App errors", text)
+                                        )
+                                    )
+                                }
                             }) { Text("Copy all") }
                             androidx.compose.material3.TextButton(onClick = onClearErrors) { Text("Clear") }
                         }
