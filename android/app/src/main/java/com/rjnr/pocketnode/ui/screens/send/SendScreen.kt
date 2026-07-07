@@ -207,6 +207,7 @@ fun SendScreen(
     if (uiState.error != null && uiState.transactionState != TransactionState.SENDING) {
         ErrorDialog(
             errorMessage = uiState.error?.resolveString(context) ?: "An unknown error occurred",
+            errorDetail = uiState.errorDetail,
             onDismiss = { viewModel.clearError() },
             onRetry = if (uiState.transactionState == TransactionState.FAILED) {
                 { viewModel.clearError() }
@@ -687,6 +688,7 @@ fun AddressValidationIndicator(
 @Composable
 fun ErrorDialog(
     errorMessage: String,
+    errorDetail: String? = null,
     onDismiss: () -> Unit,
     onRetry: (() -> Unit)? = null
 ) {
@@ -724,6 +726,26 @@ fun ErrorDialog(
                     textAlign = TextAlign.Center,
                     color = MaterialTheme.colorScheme.onSurfaceVariant
                 )
+
+                // Raw failure reason, compact. The full copyable version lives
+                // in Node Status > App errors; this line lets a user relay the
+                // gist without leaving the dialog (Alex, Telegram 2026-07).
+                if (!errorDetail.isNullOrBlank() && errorDetail != errorMessage) {
+                    Spacer(modifier = Modifier.height(8.dp))
+                    Text(
+                        text = errorDetail.take(200),
+                        style = MaterialTheme.typography.bodySmall,
+                        fontFamily = androidx.compose.ui.text.font.FontFamily.Monospace,
+                        textAlign = TextAlign.Center,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.7f)
+                    )
+                    Text(
+                        text = "Full details: Settings › Node Status › App errors",
+                        style = MaterialTheme.typography.labelSmall,
+                        textAlign = TextAlign.Center,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.6f)
+                    )
+                }
 
                 // Show helpful tips for common errors
                 if (errorMessage.contains("Insufficient", ignoreCase = true)) {

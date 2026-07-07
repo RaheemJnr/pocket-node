@@ -30,15 +30,26 @@ data class NodeStatusUiState(
     val scriptsJson: String = "",
     val rpcResult: String = "",
     val logs: List<String> = emptyList(),
-    val dbSizeBytes: Long = 0L
+    val dbSizeBytes: Long = 0L,
+    /** Persistent app-error journal (survives restarts; works in release builds). */
+    val appErrors: List<com.rjnr.pocketnode.data.diagnostics.ErrorJournal.Entry> = emptyList(),
 )
 
 @HiltViewModel
 class NodeStatusViewModel @Inject constructor(
     private val repository: GatewayRepository,
     private val json: Json,
-    private val appDatabase: AppDatabase
+    private val appDatabase: AppDatabase,
+    private val errorJournal: com.rjnr.pocketnode.data.diagnostics.ErrorJournal,
 ) : ViewModel() {
+
+    /** Copy-all payload for the App errors card. */
+    fun errorDump(): String = errorJournal.dump()
+
+    fun clearErrorJournal() {
+        errorJournal.clear()
+        _uiState.update { it.copy(appErrors = emptyList()) }
+    }
 
     private val _uiState = MutableStateFlow(NodeStatusUiState())
     val uiState: StateFlow<NodeStatusUiState> = _uiState.asStateFlow()
@@ -89,7 +100,8 @@ class NodeStatusViewModel @Inject constructor(
                 tipHeader = parsedTip,
                 peers = parsedPeers,
                 scriptsJson = scripts,
-                dbSizeBytes = dbSize
+                dbSizeBytes = dbSize,
+                appErrors = errorJournal.entries().asReversed(), // newest first
             )
         }
     }

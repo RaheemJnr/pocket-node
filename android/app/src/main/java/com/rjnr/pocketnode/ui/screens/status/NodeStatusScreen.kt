@@ -105,7 +105,11 @@ fun NodeStatusScreen(
             }
 
             when (selectedTab) {
-                0 -> StatusTab(uiState, onCallRpc = { viewModel.callRpc(it) })
+                0 -> StatusTab(
+                    uiState,
+                    onCallRpc = { viewModel.callRpc(it) },
+                    onClearErrors = { viewModel.clearErrorJournal() },
+                )
                 1 -> LogsTab(
                     logs = uiState.logs,
                     onClearLogs = { viewModel.clearLogs() }
@@ -116,8 +120,13 @@ fun NodeStatusScreen(
 }
 
 @Composable
-fun StatusTab(uiState: NodeStatusUiState, onCallRpc: (String) -> Unit) {
+fun StatusTab(
+    uiState: NodeStatusUiState,
+    onCallRpc: (String) -> Unit,
+    onClearErrors: () -> Unit = {},
+) {
     var rpcMethod by remember { mutableStateOf("get_peers") }
+    val clipboard = androidx.compose.ui.platform.LocalClipboardManager.current
     val tipHeader = uiState.tipHeader
     val peers = uiState.peers
 
@@ -127,6 +136,46 @@ fun StatusTab(uiState: NodeStatusUiState, onCallRpc: (String) -> Unit) {
             .padding(horizontal = com.rjnr.pocketnode.ui.util.screenHorizontalPadding(), vertical = 16.dp),
         verticalArrangement = Arrangement.spacedBy(16.dp)
     ) {
+        // App-error journal (Alex, Telegram 2026-07): release builds strip
+        // logcat, so this is the ONE place field failures (rejected sends,
+        // most importantly) are visible and copyable for a bug report.
+        if (uiState.appErrors.isNotEmpty()) {
+            item {
+                StatusCard(
+                    title = "App errors",
+                    icon = Icons.Rounded.AccountTree,
+                    trailing = "${uiState.appErrors.size}"
+                ) {
+                    Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                        val rowFmt = remember {
+                            java.text.SimpleDateFormat("MM-dd HH:mm", java.util.Locale.US)
+                        }
+                        uiState.appErrors.take(5).forEach { e ->
+                            Text(
+                                text = "${rowFmt.format(java.util.Date(e.atMs))} [${e.tag}] ${e.message}",
+                                fontSize = 12.sp,
+                                fontFamily = androidx.compose.ui.text.font.FontFamily.Monospace,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                maxLines = 4,
+                            )
+                            HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
+                        }
+                        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                            androidx.compose.material3.TextButton(onClick = {
+                                val fmt = java.text.SimpleDateFormat("yyyy-MM-dd HH:mm:ss", java.util.Locale.US)
+                                clipboard.setText(androidx.compose.ui.text.AnnotatedString(
+                                    uiState.appErrors.joinToString("\n") { e ->
+                                        "[${fmt.format(java.util.Date(e.atMs))}] ${e.tag}: ${e.message}"
+                                    }
+                                ))
+                            }) { Text("Copy all") }
+                            androidx.compose.material3.TextButton(onClick = onClearErrors) { Text("Clear") }
+                        }
+                    }
+                }
+            }
+        }
+
         // Tip Header card
         item {
             StatusCard(title = "Tip Header", icon = Icons.Rounded.AccountTree) {
