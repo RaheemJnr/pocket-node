@@ -44,6 +44,14 @@ data class SendUiState(
     val amountCkb: String = "",
     val isLoading: Boolean = false,
     val error: com.rjnr.pocketnode.ui.util.UiMessage? = null,
+    /**
+     * Raw failure reason (e.message) behind the friendly [error] copy.
+     * Shown in the failure dialog with a Copy action so a user can paste
+     * the EXACT reason into a bug report — release builds strip logcat,
+     * so this is the only diagnostic that reaches us from the field
+     * (Alex, Telegram 2026-07).
+     */
+    val errorDetail: String? = null,
     val txHash: String? = null,
     val availableBalance: Long = 0L,
     val estimatedFee: Long = 0L,
@@ -84,6 +92,7 @@ class SendViewModel @Inject constructor(
     private val walletKeyReader: WalletKeyReader,
     private val keyMaterialDao: KeyMaterialDao,
     private val contactRepository: ContactRepository,
+    private val errorJournal: com.rjnr.pocketnode.data.diagnostics.ErrorJournal,
 ) : ViewModel() {
 
     private val _uiState = MutableStateFlow(SendUiState())
@@ -496,10 +505,12 @@ class SendViewModel @Inject constructor(
             startPollingTransactionStatus(txHash, capturedAddress)
         } catch (e: Exception) {
             Log.e(TAG, "V2 send failed", e)
+            errorJournal.record("send", e.message ?: e.javaClass.simpleName)
             _uiState.update {
                 it.copy(
                     isLoading = false,
                     error = com.rjnr.pocketnode.ui.util.UiMessage.Raw(parseErrorMessage(e)),
+                    errorDetail = e.message,
                     transactionState = TransactionState.FAILED,
                     statusMessage = "Transaction failed"
                 )
@@ -587,10 +598,12 @@ class SendViewModel @Inject constructor(
                 e.printStackTrace()
 
                 val userFriendlyError = parseErrorMessage(e)
+                errorJournal.record("send", e.message ?: e.javaClass.simpleName)
                 _uiState.update {
                     it.copy(
                         isLoading = false,
                         error = com.rjnr.pocketnode.ui.util.UiMessage.Raw(userFriendlyError),
+                        errorDetail = e.message,
                         transactionState = TransactionState.FAILED,
                         statusMessage = "Transaction failed"
                     )
@@ -795,6 +808,7 @@ class SendViewModel @Inject constructor(
         _uiState.update {
             it.copy(
                 error = null,
+                errorDetail = null,
                 transactionState = if (it.txHash != null) it.transactionState else TransactionState.IDLE
             )
         }

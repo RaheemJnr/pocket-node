@@ -871,43 +871,38 @@ class GatewayRepository @Inject constructor(
         Log.d(TAG, "🔍 Calculating true balance by filtering out spent cells...")
 
         try {
-            // Get all transactions to find spent outpoints (inputs)
-            val txJson = LightClientNative.nativeGetTransactions(
-                json.encodeToString(searchKey),
-                "desc",
-                100,
-                null
-            )
+            // ALL spent outpoints, cursor-walked (see fetchAllSpentOutpoints
+            // KDoc — the old single limit=100 page under/over-counted balances
+            // for wallets with >100 transactions).
+            val spentOutpoints = fetchAllSpentOutpoints(json.encodeToString(searchKey))
+            Log.d(TAG, "📋 Found ${spentOutpoints.size} spent outpoints")
 
-            // Build a set of spent outpoints (cells used as inputs)
-            val spentOutpoints = mutableSetOf<String>()
-            if (txJson != null) {
-                val txPag = json.decodeFromString<JniPagination<JniTxWithCell>>(txJson)
-                txPag.objects.forEach { txWithCell ->
-                    // For each transaction, collect all inputs as spent outpoints
-                    txWithCell.transaction.inputs.forEach { input ->
-                        val outpointKey = "${input.previousOutput.txHash}:${input.previousOutput.index}"
-                        spentOutpoints.add(outpointKey)
-                    }
+            // Walk ALL cells the same way — one page hid everything past the
+            // first 100 cells from the balance.
+            val allBalanceCells = mutableListOf<JniCell>()
+            run {
+                var c: String? = null
+                var pages = 0
+                while (pages < MAX_CELL_PAGES) {
+                    val pageJson = LightClientNative.nativeGetCells(
+                        json.encodeToString(searchKey), "desc", 100, c
+                    ) ?: break
+                    val page = json.decodeFromString<JniPagination<JniCell>>(pageJson)
+                    allBalanceCells.addAll(page.objects)
+                    pages++
+                    if (page.objects.isEmpty() || page.objects.size < 100 ||
+                        page.lastCursor.isNullOrEmpty()
+                    ) break
+                    c = page.lastCursor
                 }
-                Log.d(TAG, "📋 Found ${spentOutpoints.size} spent outpoints from ${txPag.objects.size} transactions")
             }
 
-            // Get all cells and filter out spent ones
-            val cellsJson = LightClientNative.nativeGetCells(
-                json.encodeToString(searchKey),
-                "desc",
-                100,
-                null
-            )
-
-            if (cellsJson != null) {
-                val cellsPag = json.decodeFromString<JniPagination<JniCell>>(cellsJson)
+            if (allBalanceCells.isNotEmpty()) {
                 var liveCapacity = 0L
                 var liveCellCount = 0
                 var typedCellCount = 0
 
-                cellsPag.objects.forEach { cell ->
+                allBalanceCells.forEach { cell ->
                     val outpointKey = "${cell.outPoint.txHash}:${cell.outPoint.index}"
                     if (outpointKey !in spentOutpoints) {
                         // Exclude cells with type scripts (DAO cells, etc.) from available balance
@@ -941,8 +936,15 @@ class GatewayRepository @Inject constructor(
                 // counted DAO deposits as nothing and re-fired after every
                 // refresh — rewinding the light client to the wallet's
                 // earliest transaction in an infinite loop.
-                if (txJson != null) {
-                    val txPag = json.decodeFromString<JniPagination<JniTxWithCell>>(txJson)
+                // Ascending order: the first page holds the OLDEST txs, which
+                // is exactly what the earliest-block rewind wants (the old
+                // desc-order page could miss the true earliest on >100-tx
+                // wallets).
+                val ascTxJson = LightClientNative.nativeGetTransactions(
+                    json.encodeToString(searchKey), "asc", 100, null
+                )
+                if (ascTxJson != null) {
+                    val txPag = json.decodeFromString<JniPagination<JniTxWithCell>>(ascTxJson)
                     if (shouldAttemptZeroCellRescan(
                             spendableCapacity = liveCapacity,
                             typedCellCount = typedCellCount,
@@ -1122,38 +1124,37 @@ class GatewayRepository @Inject constructor(
 
         Log.d(TAG, "🔍 getCells: Fetching cells for script args ${searchKey.script.args.redactAddress()}")
 
-        // First, get all transactions to find spent outpoints
-        val txJson = LightClientNative.nativeGetTransactions(
-            json.encodeToString(searchKey),
-            "desc",
-            100,
-            null
-        )
+        // ALL spent outpoints, cursor-walked to the end (see helper KDoc —
+        // the old single limit=100 page broke wallets with >100 txs).
+        val spentOutpoints = fetchAllSpentOutpoints(json.encodeToString(searchKey))
+        Log.d(TAG, "📋 getCells: Found ${spentOutpoints.size} spent outpoints")
 
-        val spentOutpoints = mutableSetOf<String>()
-        if (txJson != null) {
-            val txPag = json.decodeFromString<JniPagination<JniTxWithCell>>(txJson)
-            txPag.objects.forEach { txWithCell ->
-                txWithCell.transaction.inputs.forEach { input ->
-                    val outpointKey = "${input.previousOutput.txHash}:${input.previousOutput.index}"
-                    spentOutpoints.add(outpointKey)
-                }
-            }
-            Log.d(TAG, "📋 getCells: Found ${spentOutpoints.size} spent outpoints")
+        // Walk the cell cursor too: a wallet holding >`limit` cells only ever
+        // exposed its first page to coin selection and the balance math.
+        val allCells = mutableListOf<JniCell>()
+        var cellCursor: String? = cursor
+        var lastCursorOut: String? = null
+        var cellPages = 0
+        while (cellPages < MAX_CELL_PAGES) {
+            val pageJson = LightClientNative.nativeGetCells(
+                json.encodeToString(searchKey), "desc", limit, cellCursor
+            ) ?: if (cellPages == 0) {
+                throw Exception(readPathNullMessage("get cells", lightClientReadyForRead()))
+            } else break
+            val page = json.decodeFromString<JniPagination<JniCell>>(pageJson)
+            allCells.addAll(page.objects)
+            lastCursorOut = page.lastCursor
+            cellPages++
+            if (page.objects.isEmpty() || page.objects.size < limit ||
+                page.lastCursor.isNullOrEmpty()
+            ) break
+            cellCursor = page.lastCursor
+        }
+        if (cellPages >= MAX_CELL_PAGES) {
+            Log.w(TAG, "getCells: hit $MAX_CELL_PAGES-page cap (${allCells.size} cells) — set may be incomplete")
         }
 
-        val resultJson = LightClientNative.nativeGetCells(
-            json.encodeToString(searchKey),
-            "desc",
-            limit,
-            cursor
-        ) ?: throw Exception(readPathNullMessage("get cells", lightClientReadyForRead()))
-
-        Log.d(TAG, "📦 getCells: Raw response length: ${resultJson.length}")
-
-        // Parse as JniCell and filter out spent cells
-        val pag = json.decodeFromString<JniPagination<JniCell>>(resultJson)
-        val liveCells = pag.objects.filter { cell ->
+        val liveCells = allCells.filter { cell ->
             val outpointKey = "${cell.outPoint.txHash}:${cell.outPoint.index}"
             val isLive = outpointKey !in spentOutpoints
             if (!isLive) {
@@ -1167,15 +1168,46 @@ class GatewayRepository @Inject constructor(
             isLive && !hasTypeScript
         }.map { it.toCell() }
 
-        Log.d(TAG, "✅ getCells: ${liveCells.size} live cells (filtered from ${pag.objects.size} total)")
-        liveCells.forEachIndexed { index, cell ->
-            Log.d(TAG, "  Cell[$index]: capacity=${cell.capacity}, outPoint=${cell.outPoint.txHash.take(20)}...")
-        }
+        Log.d(TAG, "✅ getCells: ${liveCells.size} live cells (filtered from ${allCells.size} total)")
 
-        CellsResponse(liveCells, pag.lastCursor)
+        CellsResponse(liveCells, lastCursorOut)
     }
 
     private suspend fun currentTipNumberOrZero(): Long = lightClient.currentTipNumberOrZero()
+
+    /**
+     * ALL spent outpoints for a script, walking the transaction cursor to the
+     * end. The previous single limit=100 page silently truncated the spent
+     * set for wallets with >100 transactions: cell selection then picked
+     * already-spent cells, every send failed local verification with a
+     * "network rejected" error that survived reinstall (it re-derives from
+     * the same chain data), and the balance math subtracted the wrong cells
+     * (Alex, Telegram 2026-07, ~646k CKB of history). Page cap is a runaway
+     * guard, far above real usage; truncation past it is logged, never silent.
+     */
+    private fun fetchAllSpentOutpoints(searchKeyJson: String): MutableSet<String> {
+        val spent = mutableSetOf<String>()
+        var cursor: String? = null
+        var pages = 0
+        while (pages < MAX_TX_PAGES) {
+            val txJson = LightClientNative.nativeGetTransactions(searchKeyJson, "desc", 100, cursor)
+                ?: break
+            val page = json.decodeFromString<JniPagination<JniTxWithCell>>(txJson)
+            if (page.objects.isEmpty()) break
+            page.objects.forEach { txWithCell ->
+                txWithCell.transaction.inputs.forEach { input ->
+                    spent.add("${input.previousOutput.txHash}:${input.previousOutput.index}")
+                }
+            }
+            pages++
+            cursor = page.lastCursor
+            if (cursor.isNullOrEmpty()) break
+        }
+        if (pages >= MAX_TX_PAGES) {
+            Log.w(TAG, "fetchAllSpentOutpoints: hit $MAX_TX_PAGES-page cap — spent set may be incomplete")
+        }
+        return spent
+    }
 
     /**
      * Readiness probe for the read-path null classifier ([readPathNullMessage]).
@@ -2484,6 +2516,13 @@ class GatewayRepository @Inject constructor(
 
     companion object {
         private const val TAG = "GatewayRepository"
+
+        /**
+         * Cursor-walk caps — runaway guards far above real usage
+         * (100 items/page → 20k txs, 5k cells). Hitting one is logged.
+         */
+        private const val MAX_TX_PAGES = 200
+        private const val MAX_CELL_PAGES = 50
 
         // Matches SEND_ERROR_PREFIX in the Rust JNI (query.rs): nativeSendTransaction
         // returns "__SEND_ERROR__:<reason>" on a rejected broadcast instead of null.
