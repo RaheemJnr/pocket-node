@@ -1648,19 +1648,42 @@ class GatewayRepository @Inject constructor(
         val searchKey = JniSearchKey(script = info.script)
         val myScript = info.script
 
-        val resultJson = LightClientNative.nativeGetTransactions(
-            json.encodeToString(searchKey),
-            "desc",
-            limit,
-            cursor
-        ) ?: throw Exception("Failed to get transactions")
-
-        Log.d(TAG, "📡 getTransactions raw JSON length: ${resultJson.length}")
-
-        val pag = json.decodeFromString<JniPagination<JniTxWithCell>>(resultJson)
+        // Walk ALL interaction pages before grouping (same class of fix as
+        // the #386 spent-set walk). Two bugs lived in the old single
+        // limit-sized page:
+        //  1. The Room cache below — which feeds the Activity tab's Paging
+        //     source — only ever saw the newest page, so wallets with more
+        //     history silently lost their older transactions from the list.
+        //  2. `limit` counts CELL INTERACTIONS, not transactions, and the
+        //     per-tx net amount is computed by grouping interactions. A tx
+        //     straddling the page boundary was computed from PART of its
+        //     interactions — wrong amount/direction written to the cache.
+        // Walking to the end fixes both; grouping happens once over the
+        // complete set. The page cap is a runaway guard, logged when hit.
+        val allInteractions = mutableListOf<JniTxWithCell>()
+        run {
+            var c: String? = cursor
+            var pages = 0
+            while (pages < MAX_TX_PAGES) {
+                val pageJson = LightClientNative.nativeGetTransactions(
+                    json.encodeToString(searchKey), "desc", 100, c
+                ) ?: if (pages == 0) throw Exception("Failed to get transactions") else break
+                val page = json.decodeFromString<JniPagination<JniTxWithCell>>(pageJson)
+                allInteractions.addAll(page.objects)
+                pages++
+                if (page.objects.isEmpty() || page.objects.size < 100 ||
+                    page.lastCursor.isNullOrEmpty()
+                ) break
+                c = page.lastCursor
+            }
+            if (pages >= MAX_TX_PAGES) {
+                Log.w(TAG, "getTransactions: hit $MAX_TX_PAGES-page cap (${allInteractions.size} interactions) — history may be incomplete")
+            }
+        }
+        Log.d(TAG, "📡 getTransactions: ${allInteractions.size} interactions walked")
 
         // Group by transaction hash to show a clean "one entry per transaction" UI
-        val groupedTransactions = pag.objects.groupBy { it.transaction.hash }
+        val groupedTransactions = allInteractions.groupBy { it.transaction.hash }
 
         // Fetch tip height once for confirmation calculations (avoid per-tx JNI calls)
         val tipHeight = runCatching {
@@ -1785,15 +1808,21 @@ class GatewayRepository @Inject constructor(
             )
         }
 
-        // --- Cache write: upsert JNI results into Room ---
+        // --- Cache write: upsert the COMPLETE walked history into Room. The
+        // Activity tab pages from Room, so completeness here is what makes
+        // its "All" list actually mean all. ---
         cacheManager.cacheTransactions(items, currentNetwork.name, walletId = activeWalletId)
 
         // Merge: include pending local txs not yet returned by JNI
         val jniTxHashes = items.map { it.txHash }.toSet()
         val pendingLocal = cacheManager.getPendingNotIn(currentNetwork.name, jniTxHashes, walletId = activeWalletId)
-        val mergedItems = pendingLocal + items
+        // Return only the newest `limit` transactions — Home renders this list
+        // directly and the full set lives in Room. Cursor is always null now:
+        // no UI caller ever passed one (Room Paging does the scrolling), and
+        // the full walk leaves nothing to continue from.
+        val mergedItems = (pendingLocal + items).take(limit)
 
-        TransactionsResponse(mergedItems, pag.lastCursor)
+        TransactionsResponse(mergedItems, null)
     }
 
     suspend fun getTransactionStatus(txHash: String): Result<TransactionStatusResponse> = runCatching {
