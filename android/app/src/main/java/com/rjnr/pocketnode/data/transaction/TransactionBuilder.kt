@@ -45,21 +45,38 @@ class TransactionBuilder @Inject constructor(
      * Uses the standard CKB fee rate (1000 shannons/KB).
      */
     fun estimateTransferFee(inputCount: Int, outputCount: Int): Long {
-        // Fixed overhead: version(4) + RawTransaction table header(28) +
-        // cell_deps fixvec with 1 dep_group(45) + header_deps empty fixvec(4)
-        val fixedOverhead = 81
-        // Each input: since(8) + outpoint(36) = 44 bytes + fixvec count header
+        // Molecule accounting, sized to never undershoot the node's measured
+        // tx_size. The previous formula undercounted the witnesses dynvec
+        // (missing the 4-byte offset per item) and per-output script tables;
+        // its flat +100 buffer only absorbed ~25 inputs. A ~100-input send
+        // from a fragmented mining wallet serialized to 5300 bytes while the
+        // fee paid for 4964 — rejected "low fee rate" on every attempt
+        // (Alex, Telegram 2026-07). Overpaying is thousandths of a cent;
+        // undershooting bricks the send.
+        //
+        // raw = table hdr(28) + version(4) + cell_deps fixvec(4+37) +
+        //       header_deps(4) = 77
+        val rawOverhead = 77
+        // inputs fixvec: 4 + n * (since 8 + outpoint 36)
         val inputsSize = 4 + inputCount * 44
-        // Each output: molecule table(16 header) + capacity(8) + lock script table(~53) + empty type opt = ~77 bytes
-        val outputsSize = 4 + outputCount * 4 + outputCount * 77 // dynvec
-        // outputs_data: each "0x" = 4 bytes (length-prefixed empty) + dynvec overhead
-        val outputsDataSize = 4 + outputCount * 4 + outputCount * 4 // dynvec
-        // Witnesses: first has WitnessArgs with 65-byte sig (~85 bytes), rest are empty
-        val witnessSize = 85 + (inputCount - 1).coerceAtLeast(0) * 4
-        // Safety buffer for molecule encoding overhead
-        val buffer = 100
+        // outputs dynvec: 4 + n * (offset 4 + CellOutput 97)
+        //   CellOutput = table hdr 16 + capacity 8 + secp lock script 73
+        //   (script = table hdr 16 + codeHash 32 + hashType 1 + args 4+20)
+        val outputsSize = 4 + outputCount * (4 + 97)
+        // outputs_data dynvec: 4 + n * (offset 4 + empty Bytes 4)
+        val outputsDataSize = 4 + outputCount * 8
+        // witnesses dynvec: 4 + n*offset(4) + first item (len 4 + WitnessArgs 85)
+        // + each remaining "0x" item (len 4)
+        val witnessSize = 4 + inputCount * 4 + (4 + 85) +
+            (inputCount - 1).coerceAtLeast(0) * 4
+        // Transaction wrapper table hdr (12) + in-block serialization offset (4)
+        val wrapperSize = 16
+        // Margin: molecule drift and future script arg growth. Proportional to
+        // input count so big txs keep headroom (2 bytes/input + 200 flat).
+        val margin = 200 + inputCount * 2
 
-        val estimatedBytes = fixedOverhead + inputsSize + outputsSize + outputsDataSize + witnessSize + buffer
+        val estimatedBytes = rawOverhead + inputsSize + outputsSize +
+            outputsDataSize + witnessSize + wrapperSize + margin
         return calculateFeeForSize(estimatedBytes)
     }
 
@@ -465,12 +482,14 @@ class TransactionBuilder @Inject constructor(
     private fun estimateTransactionSize(tx: Transaction): Int {
         return try {
             val rawSize = serializeRawTransaction(tx).size
-            // 69 bytes per input: 65-byte secp256k1 signature + 4-byte molecule length prefix.
-            // Only the first witness has a full WitnessArgs table (~16 byte header); subsequent
-            // witnesses are empty ("0x"). The +100 buffer covers the first witness table header,
-            // the molecule dynvec wrapper, and any rounding in the molecule encoding.
-            val witnessOverhead = tx.cellInputs.size * 69
-            rawSize + witnessOverhead + 100
+            // witnesses dynvec: 4 + n*offset(4) + first (len 4 + WitnessArgs 85)
+            // + each remaining "0x" (len 4); + Transaction wrapper hdr 12 +
+            // in-block offset 4. Same accounting as estimateTransferFee — the
+            // old n*69+100 form dropped the per-witness dynvec offset and
+            // undershot past ~25 inputs (Alex, Telegram 2026-07).
+            val n = tx.cellInputs.size
+            val witnessOverhead = 4 + n * 4 + (4 + 85) + (n - 1).coerceAtLeast(0) * 4
+            rawSize + witnessOverhead + 16 + 100
         } catch (e: Exception) {
             Log.w(TAG, "Transaction size estimation failed: ${e.message}")
             Int.MAX_VALUE // fail-safe: reject if we can't estimate size
