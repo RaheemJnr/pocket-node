@@ -94,6 +94,7 @@ import androidx.compose.ui.res.stringResource
 import com.rjnr.pocketnode.ui.components.SecurityBanner
 import com.rjnr.pocketnode.ui.components.SecurityBannerState
 import com.rjnr.pocketnode.ui.components.BgSyncStaleBanner
+import com.rjnr.pocketnode.ui.components.FoundFundsCard
 import com.rjnr.pocketnode.ui.components.GapLimitBanner
 import com.rjnr.pocketnode.ui.components.SyncStallBanner
 import com.rjnr.pocketnode.ui.components.SyncOptionsSheet
@@ -490,6 +491,7 @@ fun HomeScreen(
                     onBgSyncStaleDismiss = { viewModel.dismissBgSyncStalePill() },
                     onGapLimitLearnMore = { onNavigateToFaq("imported_funds") },
                     onGapLimitDismiss = { viewModel.dismissGapLimitBanner() },
+                    onGapLimitScanNow = { viewModel.runGapLimitScan() },
                 )
                 if (uiState.isSwitchingWallet) {
                     LinearProgressIndicator(
@@ -564,6 +566,7 @@ fun HomeScreenUI(
     onBgSyncStaleDismiss: () -> Unit = {},
     onGapLimitLearnMore: () -> Unit = {},
     onGapLimitDismiss: () -> Unit = {},
+    onGapLimitScanNow: () -> Unit = {},
 ) {
     val homeContentHaptic = LocalHapticFeedback.current
     PullToRefreshBox(
@@ -644,13 +647,24 @@ fun HomeScreenUI(
             }
 
             // #382: change from this seed left to addresses we never derived
-            // (seed also used in Neuron/standard BIP44 wallets). Calm notice,
-            // links to the FAQ; the Tier 2 deep scan will add a scan action.
-            if (uiState.showGapLimitBanner) {
+            // (seed also used in Neuron/standard BIP44 wallets). Calm notice
+            // with the Tier 2 deep-scan action; switches to the found-funds
+            // card once the scan resolves FOUND.
+            if (uiState.foundFundsAddressCount > 0) {
+                item {
+                    FoundFundsCard(
+                        foundCkb = uiState.foundFundsShannons / 100_000_000.0,
+                        addressCount = uiState.foundFundsAddressCount,
+                        onLearnMore = onGapLimitLearnMore,
+                    )
+                }
+            } else if (uiState.showGapLimitBanner) {
                 item {
                     GapLimitBanner(
                         onLearnMore = onGapLimitLearnMore,
                         onDismiss = onGapLimitDismiss,
+                        onScanNow = if (uiState.gapLimitScanAvailable) onGapLimitScanNow else null,
+                        scanning = uiState.gapLimitScanning,
                     )
                 }
             }

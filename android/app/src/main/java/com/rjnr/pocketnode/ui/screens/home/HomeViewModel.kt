@@ -8,6 +8,7 @@ import com.rjnr.pocketnode.data.gateway.CacheManager
 import com.rjnr.pocketnode.data.gateway.GatewayRepository
 import com.rjnr.pocketnode.data.gateway.SyncProgress
 import com.rjnr.pocketnode.data.sync.SyncStallDetector
+import com.rjnr.pocketnode.data.wallet.GapLimitResolution
 import com.rjnr.pocketnode.data.gateway.models.NetworkType
 import com.rjnr.pocketnode.data.gateway.models.SyncMode
 import com.rjnr.pocketnode.data.gateway.models.TransactionRecord
@@ -461,10 +462,24 @@ class HomeViewModel @Inject constructor(
                         Log.d(TAG, "  [$index] ${tx.txHash.take(16)}... dir=${tx.direction} amount=${tx.balanceChange} conf=${tx.confirmations}")
                     }
                     // #382: detection runs inside getTransactions (the only
-                    // place output scripts exist); here we only read the flag.
-                    val showGapLimit = repository.isGapLimitBannerVisible()
+                    // place output scripts exist); here we read the flag and
+                    // resolve what the chain-axis scan concluded. The status
+                    // call also retires the Tier 1 signal after a clean scan.
+                    val gapStatus = repository.getGapLimitStatus()
+                    val showGapLimit = repository.isGapLimitBannerVisible() &&
+                        (gapStatus.resolution == GapLimitResolution.NOT_SCANNED ||
+                            gapStatus.resolution == GapLimitResolution.SCANNING)
                     _uiState.update {
-                        it.copy(transactions = response.items, showGapLimitBanner = showGapLimit)
+                        it.copy(
+                            transactions = response.items,
+                            showGapLimitBanner = showGapLimit,
+                            gapLimitScanAvailable = gapStatus.resolution == GapLimitResolution.NOT_SCANNED,
+                            gapLimitScanning = gapStatus.resolution == GapLimitResolution.SCANNING,
+                            foundFundsAddressCount = if (gapStatus.resolution == GapLimitResolution.FOUND)
+                                gapStatus.foundAddressCount else 0,
+                            foundFundsShannons = if (gapStatus.resolution == GapLimitResolution.FOUND)
+                                gapStatus.foundShannons else 0L,
+                        )
                     }
                 }
                 .onFailure { error ->
@@ -847,6 +862,35 @@ class HomeViewModel @Inject constructor(
         _uiState.update { it.copy(showGapLimitBanner = false) }
     }
 
+    /**
+     * #382 Tier 2: explicit deep scan from the banner (wallets imported
+     * before auto-scan shipped, or window extension). Session-auth gated
+     * inside the repository via getMnemonic().
+     */
+    fun runGapLimitScan() {
+        viewModelScope.launch {
+            _uiState.update { it.copy(gapLimitScanning = true, gapLimitScanAvailable = false) }
+            repository.runGapLimitScan()
+                .onSuccess {
+                    Log.i(TAG, "gap-limit scan started (window $it)")
+                    refreshTransactionsOnly(silent = true)
+                }
+                .onFailure { e ->
+                    Log.e(TAG, "gap-limit scan failed", e)
+                    _uiState.update {
+                        it.copy(
+                            gapLimitScanning = false,
+                            gapLimitScanAvailable = true,
+                            error = com.rjnr.pocketnode.ui.util.UiMessage.Resource(
+                                com.rjnr.pocketnode.R.string.gap_limit_scan_failed,
+                                listOf(e.message ?: "")
+                            ),
+                        )
+                    }
+                }
+        }
+    }
+
     /** #286 pill: permanent dismissal — informational, not a nag surface. */
     fun dismissBgSyncStalePill() {
         walletPreferences.setBgSyncPillDismissed()
@@ -956,5 +1000,10 @@ data class HomeUiState(
     val showBgSyncStalePill: Boolean = false,
     // #382: history shows change that left to addresses this app never derived
     val showGapLimitBanner: Boolean = false,
+    // #382 Tier 2: chain-axis scan state for the active wallet
+    val gapLimitScanAvailable: Boolean = false,
+    val gapLimitScanning: Boolean = false,
+    val foundFundsAddressCount: Int = 0,
+    val foundFundsShannons: Long = 0L,
     val bgSyncEnabledAtOpen: Boolean = false,
 )

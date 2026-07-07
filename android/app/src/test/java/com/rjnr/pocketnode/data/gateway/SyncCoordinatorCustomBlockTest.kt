@@ -108,6 +108,7 @@ class SyncCoordinatorCustomBlockTest {
             json = json,
             lightClient = fakeBridge,
             subAccountCandidateDao = db.subAccountCandidateDao(),
+            transactionDao = db.transactionDao(),
         )
     }
 

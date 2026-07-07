@@ -171,6 +171,36 @@ class SettingsViewModel @Inject constructor(
         }
     }
 
+    /**
+     * #382 Tier 2: explicit gap-limit scan from Settings — the recovery path
+     * when the Home banner was dismissed, and the window-extension entry.
+     * Feedback rides the same snackbar channel as other Settings actions.
+     */
+    fun runGapLimitScan() {
+        viewModelScope.launch {
+            repository.runGapLimitScan()
+                .onSuccess {
+                    _uiState.update {
+                        it.copy(
+                            error = com.rjnr.pocketnode.ui.util.UiMessage.Resource(
+                                com.rjnr.pocketnode.R.string.gap_limit_scan_started,
+                            ),
+                        )
+                    }
+                }
+                .onFailure { e ->
+                    _uiState.update {
+                        it.copy(
+                            error = com.rjnr.pocketnode.ui.util.UiMessage.Resource(
+                                com.rjnr.pocketnode.R.string.gap_limit_scan_failed,
+                                listOf(e.message ?: ""),
+                            ),
+                        )
+                    }
+                }
+        }
+    }
+
     fun requestNetworkSwitch(target: NetworkType) {
         if (target == _uiState.value.currentNetwork) return
         _uiState.update {
