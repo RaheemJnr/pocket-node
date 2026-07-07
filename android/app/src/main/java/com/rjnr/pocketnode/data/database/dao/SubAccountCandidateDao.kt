@@ -44,6 +44,20 @@ interface SubAccountCandidateDao {
     )
     suspend fun updateRegisteredFrom(parentId: String, derivationPath: String, fromBlock: Long)
 
+    /**
+     * Re-arm retired chain-axis slots for an explicit re-scan (#382). EMPTY
+     * is a verdict about a PAST scan; a user-triggered "Scan Other Addresses"
+     * must look again (funds may have arrived since, or the verdict came from
+     * a different network's scan). Account-axis slots (accountIndex > 0) are
+     * left alone — their EMPTY still gates the restore banner.
+     * Returns rows re-armed.
+     */
+    @Query(
+        "UPDATE sub_account_candidates SET state = 'PENDING' " +
+            "WHERE parentWalletId = :parentId AND accountIndex = 0 AND state = 'EMPTY'"
+    )
+    suspend fun reArmEmptyChainSlots(parentId: String): Int
+
     @Query("DELETE FROM sub_account_candidates WHERE parentWalletId = :parentId")
     suspend fun deleteForParent(parentId: String)
 }
