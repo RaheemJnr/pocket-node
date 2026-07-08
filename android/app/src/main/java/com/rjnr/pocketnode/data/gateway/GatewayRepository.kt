@@ -980,10 +980,22 @@ class GatewayRepository @Inject constructor(
             it.output.capacity.removePrefix("0x").toLongOrNull(16) ?: 0L
         }
 
-    /** The live untyped cells behind [liveUntypedCapacityFor] — the Tier 3 sweep spends them. */
+    /**
+     * The live untyped cells behind [liveUntypedCapacityFor] — the Tier 3
+     * sweep spends them. Outpoints reserved by ACTIVE pending broadcasts are
+     * excluded: a just-broadcast sweep's inputs are spent-in-flight, and
+     * counting them keeps the found-funds card at the old amount until the
+     * chain index catches up (and would let a double-tapped sweep try to
+     * respend them).
+     */
     private suspend fun liveUntypedCellsFor(searchKey: JniSearchKey): List<JniCell> {
         val searchKeyJson = json.encodeToString(searchKey)
-        val spent = fetchAllSpentOutpoints(searchKeyJson)
+        val spent = fetchAllSpentOutpoints(searchKeyJson).toMutableSet()
+        runCatching {
+            pendingBroadcastDao.getActive(activeWalletId, currentNetwork.name)
+                .flatMap { json.decodeFromString<List<OutPoint>>(it.reservedInputs) }
+                .forEach { spent += "${it.txHash}:${it.index}" }
+        }.onFailure { Log.w(TAG, "liveUntypedCellsFor: reservation read failed: ${it.message}") }
         val live = mutableListOf<JniCell>()
         var cursor: String? = null
         var pages = 0

@@ -56,19 +56,27 @@ class CandidateSelectionTest {
     }
 
     @Test
-    fun `non-pending candidates are never selected`() {
+    fun `chain-axis FOUND slots stay registered so their spends keep indexing`() {
+        // Dropping a FOUND side script from the filter freezes its view:
+        // the sweep that spends its cells is never indexed against it, the
+        // spent-set never grows, and the found-funds card shows the swept
+        // amount forever (emulator, 2026-07-08). Account-axis FOUND slots
+        // are still excluded — the restore flow turns them into wallets
+        // that register properly on their own.
         val selected = selectCandidatesForRegistration(
             listOf(
                 account(1, SubAccountCandidateEntity.STATE_FOUND),
                 account(2, SubAccountCandidateEntity.STATE_EMPTY),
                 account(3, SubAccountCandidateEntity.STATE_RESTORED),
                 chain(1, 0, SubAccountCandidateEntity.STATE_FOUND),
+                chain(1, 2, SubAccountCandidateEntity.STATE_EMPTY),
                 chain(1, 1),
             ),
             accountAxisCap = 5,
         )
-        assertEquals(1, selected.size)
-        assertEquals(SubAccountDiscovery.chainPath(1, 1), selected.single().derivationPath)
+        assertEquals(2, selected.size)
+        assertTrue(selected.any { it.derivationPath == SubAccountDiscovery.chainPath(1, 1) })
+        assertTrue(selected.any { it.derivationPath == SubAccountDiscovery.chainPath(1, 0) })
     }
 
     @Test
