@@ -1376,8 +1376,21 @@ class GatewayRepository @Inject constructor(
             0.0
         }
         
-        val isSynced = tipNumber > 0 && 
-                scriptBlockNumber >= tipNumber - 10 && 
+        // isSynced tracks the ACTIVE WALLET'S PRIMARY script only — deliberately
+        // NOT a MIN across its #382 gap-limit candidate scripts. This looks like
+        // Neuron's #2992 ("light client sync miss some tx"), but that was a real
+        // miss: Neuron advanced a SHARED fetch cursor past lagging scripts, so
+        // their range never got refetched. Our embedded light client scans each
+        // registered script INDEPENDENTLY to tip, and candidates re-register from
+        // their own historical start (candidateScanStart), so a lagging candidate
+        // is never abandoned — it keeps catching up and its cells get indexed.
+        // Gating isSynced on candidates would instead show "syncing" for the
+        // entire background discovery deep-scan while the user's own funds are
+        // already synced and spendable — strictly worse UX. The candidate
+        // lifecycle (FOUND/EMPTY/found-funds) is gated separately and correctly
+        // by SubAccountReconciler's coverage rule. Do not "fix" this into a MIN.
+        val isSynced = tipNumber > 0 &&
+                scriptBlockNumber >= tipNumber - 10 &&
                 scriptBlockNumber <= tipNumber + 10 // Handle slight mismatches safely
         
         Log.d(TAG, "📊 SYNC PROGRESS: ${(progress * 100).toInt()}% synced, isSynced=$isSynced")
