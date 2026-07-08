@@ -1482,28 +1482,17 @@ class GatewayRepository @Inject constructor(
      * (Alex, Telegram 2026-07, ~646k CKB of history). Page cap is a runaway
      * guard, far above real usage; truncation past it is logged, never silent.
      */
-    private fun fetchAllSpentOutpoints(searchKeyJson: String): MutableSet<String> {
-        val spent = mutableSetOf<String>()
-        var cursor: String? = null
-        var pages = 0
-        while (pages < MAX_TX_PAGES) {
-            val txJson = LightClientNative.nativeGetTransactions(searchKeyJson, "desc", 100, cursor)
-                ?: break
-            val page = json.decodeFromString<JniPagination<JniTxWithCell>>(txJson)
-            if (page.objects.isEmpty()) break
-            page.objects.forEach { txWithCell ->
-                txWithCell.transaction.inputs.forEach { input ->
-                    spent.add("${input.previousOutput.txHash}:${input.previousOutput.index}")
-                }
-            }
-            pages++
-            cursor = page.lastCursor
-            if (cursor.isNullOrEmpty()) break
+    private suspend fun fetchAllSpentOutpoints(searchKeyJson: String): MutableSet<String> {
+        // Walk every page THEN collect — see TransactionWalk.kt. Single-page
+        // reads here are the #386/#388 bug (yanli's 100-item boundary).
+        val walk = walkAllPages(pageLimit = 100, maxPages = MAX_TX_PAGES) { cursor ->
+            LightClientNative.nativeGetTransactions(searchKeyJson, "desc", 100, cursor)
+                ?.let { json.decodeFromString<JniPagination<JniTxWithCell>>(it) }
         }
-        if (pages >= MAX_TX_PAGES) {
+        if (walk.hitCap) {
             Log.w(TAG, "fetchAllSpentOutpoints: hit $MAX_TX_PAGES-page cap — spent set may be incomplete")
         }
-        return spent
+        return spentOutpointsOf(walk.items).toMutableSet()
     }
 
     /**
@@ -1968,27 +1957,25 @@ class GatewayRepository @Inject constructor(
         //     interactions — wrong amount/direction written to the cache.
         // Walking to the end fixes both; grouping happens once over the
         // complete set. The page cap is a runaway guard, logged when hit.
-        val allInteractions = mutableListOf<JniTxWithCell>()
-        run {
-            var c: String? = cursor
-            var pages = 0
-            while (pages < MAX_TX_PAGES) {
-                val pageJson = LightClientNative.nativeGetTransactions(
-                    json.encodeToString(searchKey), "desc", 100, c
-                ) ?: if (pages == 0) throw Exception("Failed to get transactions") else break
-                val page = json.decodeFromString<JniPagination<JniTxWithCell>>(pageJson)
-                allInteractions.addAll(page.objects)
-                pages++
-                if (page.objects.isEmpty() || page.objects.size < 100 ||
-                    page.lastCursor.isNullOrEmpty()
-                ) break
-                c = page.lastCursor
-            }
-            if (pages >= MAX_TX_PAGES) {
-                Log.w(TAG, "getTransactions: hit $MAX_TX_PAGES-page cap (${allInteractions.size} interactions) — history may be incomplete")
-            }
+        // Walk every page THEN group/net — see TransactionWalk.kt. pagesWalked==0
+        // means the very first JNI read failed (an empty history still returns
+        // one empty page, so pagesWalked==1); preserve the original throw so a
+        // cold-start failure isn't mistaken for a wallet with no transactions.
+        val searchKeyJson = json.encodeToString(searchKey)
+        val walk = walkAllPages(pageLimit = 100, maxPages = MAX_TX_PAGES) { c ->
+            LightClientNative.nativeGetTransactions(searchKeyJson, "desc", 100, c)
+                ?.let { json.decodeFromString<JniPagination<JniTxWithCell>>(it) }
         }
+        if (walk.pagesWalked == 0) throw Exception("Failed to get transactions")
+        if (walk.hitCap) {
+            Log.w(TAG, "getTransactions: hit $MAX_TX_PAGES-page cap (${walk.items.size} interactions) — history may be incomplete")
+        }
+        val allInteractions = walk.items
         Log.d(TAG, "📡 getTransactions: ${allInteractions.size} interactions walked")
+
+        // Net per transaction, computed once over the COMPLETE walk (the #388
+        // fix: a boundary-straddling tx must not be scored from a partial page).
+        val netByTx = netShannonsByTx(allInteractions)
 
         // Group by transaction hash to show a clean "one entry per transaction" UI
         val groupedTransactions = allInteractions.groupBy { it.transaction.hash }
@@ -2029,16 +2016,9 @@ class GatewayRepository @Inject constructor(
             val firstInteraction = cellInteractions.first()
             val tx = firstInteraction.transaction
 
-            // Net balance change = Sum(Outputs to us) - Sum(Inputs from us)
-            var netChangeShannons = 0L
-            cellInteractions.forEach { interaction ->
-                val cap = interaction.ioCapacity.removePrefix("0x").toLongOrNull(16) ?: 0L
-                if (interaction.ioType == "output") {
-                    netChangeShannons += cap
-                } else {
-                    netChangeShannons -= cap
-                }
-            }
+            // Net balance change = Sum(Outputs to us) - Sum(Inputs from us),
+            // taken from the precomputed complete-walk map (netShannonsByTx).
+            val netChangeShannons = netByTx[txHash] ?: 0L
 
             val direction = when {
                 netChangeShannons > 0 -> "in"
