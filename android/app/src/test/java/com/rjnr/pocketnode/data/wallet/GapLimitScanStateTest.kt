@@ -89,4 +89,21 @@ class GapLimitScanStateTest {
         val candidates = listOf(chain(0, 60, found), chain(1, 60, found))
         assertEquals(60, nextScanWindow(candidates))
     }
+
+    // --- path parsing (Tier 3 sweep re-derives keys from candidate paths) ---
+
+    @Test
+    fun `chain and index parse from a chain-axis path`() {
+        assertEquals(1 to 7, chainAndIndexFromPath("m/44'/309'/0'/1/7"))
+        assertEquals(0 to 20, chainAndIndexFromPath("m/44'/309'/0'/0/20"))
+    }
+
+    @Test
+    fun `account-axis and malformed paths refuse to parse`() {
+        // account-axis slots are never sweep inputs; a silent wrong parse
+        // would derive the wrong key and produce an unverifiable signature.
+        org.junit.Assert.assertNull(chainAndIndexFromPath("m/44'/309'/3'/0/0"))
+        org.junit.Assert.assertNull(chainAndIndexFromPath("garbage"))
+        org.junit.Assert.assertNull(chainAndIndexFromPath("m/44'/309'/0'/x/2"))
+    }
 }

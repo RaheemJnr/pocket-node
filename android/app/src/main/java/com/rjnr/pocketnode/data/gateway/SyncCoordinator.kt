@@ -164,11 +164,24 @@ fun selectCandidatesForRegistration(
     candidates: List<com.rjnr.pocketnode.data.database.entity.SubAccountCandidateEntity>,
     accountAxisCap: Int,
 ): List<com.rjnr.pocketnode.data.database.entity.SubAccountCandidateEntity> {
-    val pending = candidates.filter {
-        it.state == com.rjnr.pocketnode.data.database.entity.SubAccountCandidateEntity.STATE_PENDING
+    val pendingStates = setOf(
+        com.rjnr.pocketnode.data.database.entity.SubAccountCandidateEntity.STATE_PENDING,
+    )
+    val (chainAxisAll, accountAxis) = candidates.partition { it.accountIndex == 0 }
+    // Chain-axis FOUND slots stay registered PERSISTENTLY: dropping a found
+    // side script from the filter freezes its view — the sweep spending its
+    // cells never indexes against it, so its spent-set never grows and the
+    // found-funds amount survives the sweep forever (emulator, 2026-07-08).
+    // Account-axis FOUND slots are excluded as before: restore turns them
+    // into wallets that register on their own.
+    val chainAxis = chainAxisAll.filter {
+        it.state in pendingStates ||
+            it.state == com.rjnr.pocketnode.data.database.entity.SubAccountCandidateEntity.STATE_FOUND
     }
-    val (chainAxis, accountAxis) = pending.partition { it.accountIndex == 0 }
-    return accountAxis.sortedBy { it.accountIndex }.take(accountAxisCap) + chainAxis
+    return accountAxis
+        .filter { it.state in pendingStates }
+        .sortedBy { it.accountIndex }
+        .take(accountAxisCap) + chainAxis
 }
 
 /**

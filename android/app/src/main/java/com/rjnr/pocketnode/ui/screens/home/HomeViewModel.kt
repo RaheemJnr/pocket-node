@@ -891,6 +891,61 @@ class HomeViewModel @Inject constructor(
         }
     }
 
+    /**
+     * #382 Tier 3: open the sweep confirm dialog. Preview is key-free —
+     * cells gathered and the exact fee computed without touching the
+     * mnemonic; only [confirmGapLimitSweep] needs it.
+     */
+    fun requestGapLimitSweep() {
+        viewModelScope.launch {
+            repository.prepareGapLimitSweep()
+                .onSuccess { preview -> _uiState.update { it.copy(sweepPreview = preview) } }
+                .onFailure { e ->
+                    _uiState.update {
+                        it.copy(
+                            error = com.rjnr.pocketnode.ui.util.UiMessage.Resource(
+                                com.rjnr.pocketnode.R.string.sweep_failed, listOf(e.message ?: "")
+                            ),
+                        )
+                    }
+                }
+        }
+    }
+
+    fun dismissGapLimitSweep() {
+        _uiState.update { it.copy(sweepPreview = null) }
+    }
+
+    fun confirmGapLimitSweep() {
+        viewModelScope.launch {
+            _uiState.update { it.copy(sweepPreview = null, sweepInProgress = true) }
+            repository.sweepGapLimitFunds()
+                .onSuccess { txHash ->
+                    Log.i(TAG, "sweep broadcast: ${txHash.take(16)}...")
+                    _uiState.update {
+                        it.copy(
+                            sweepInProgress = false,
+                            error = com.rjnr.pocketnode.ui.util.UiMessage.Resource(
+                                com.rjnr.pocketnode.R.string.sweep_broadcast
+                            ),
+                        )
+                    }
+                    refresh()
+                }
+                .onFailure { e ->
+                    Log.e(TAG, "sweep failed", e)
+                    _uiState.update {
+                        it.copy(
+                            sweepInProgress = false,
+                            error = com.rjnr.pocketnode.ui.util.UiMessage.Resource(
+                                com.rjnr.pocketnode.R.string.sweep_failed, listOf(e.message ?: "")
+                            ),
+                        )
+                    }
+                }
+        }
+    }
+
     /** #286 pill: permanent dismissal — informational, not a nag surface. */
     fun dismissBgSyncStalePill() {
         walletPreferences.setBgSyncPillDismissed()
@@ -1005,5 +1060,8 @@ data class HomeUiState(
     val gapLimitScanning: Boolean = false,
     val foundFundsAddressCount: Int = 0,
     val foundFundsShannons: Long = 0L,
+    // #382 Tier 3: non-null while the sweep confirm dialog is open
+    val sweepPreview: com.rjnr.pocketnode.data.wallet.GapLimitSweepPreview? = null,
+    val sweepInProgress: Boolean = false,
     val bgSyncEnabledAtOpen: Boolean = false,
 )
