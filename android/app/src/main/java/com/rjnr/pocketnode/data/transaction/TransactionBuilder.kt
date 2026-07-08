@@ -632,20 +632,41 @@ class TransactionBuilder @Inject constructor(
         }
     }
 
-    private fun selectCells(cells: List<Cell>, requiredCapacity: Long): Pair<List<Cell>, Long> {
+    // internal for CellSelectionOrderTest — selection order is behavioural and
+    // deserves direct coverage rather than only through buildTransfer.
+    internal fun selectCells(
+        cells: List<Cell>,
+        requiredCapacity: Long,
+        minChange: Long = MIN_CELL_CAPACITY,
+    ): Pair<List<Cell>, Long> {
         val sortedCells = cells
             .filter { it.type == null }
             // Malformed capacity hex from the node: skip the cell rather than
             // abort the whole selection — same treatment as
             // calculateMaxSendable (#321).
             .mapNotNull { cell -> parseCapacity(cell.capacity)?.let { cell to it } }
-            .sortedByDescending { (_, capacity) -> capacity }
+            // Smallest-first (Neuron's cells.ts does the same). Largest-first
+            // kept txs small but never spent dust, so a frequently-funded
+            // wallet fragmented until a send needed 100+ inputs and hit the
+            // fee/size edge (Alex, #395). Smallest-first sweeps dust into
+            // every send, bounding fragmentation. Cost: slightly larger txs,
+            // now priced correctly by the #395 fee fix.
+            .sortedBy { (_, capacity) -> capacity }
 
         val selected = mutableListOf<Cell>()
         var total = 0L
 
         for ((cell, capacity) in sortedCells) {
-            if (total >= requiredCapacity) break
+            // Stop once the amount+fee is covered AND the leftover change is
+            // viable — either exact (no change output) or at least a whole
+            // min-capacity cell. Stopping the instant `total >= required`
+            // (the old behaviour) could strand the remainder in the dust zone
+            // (0, 61 CKB), which buildTransfer then refuses as dust change —
+            // a send that would have succeeded. Smallest-first makes that
+            // overshoot common, so selection has to keep going one more cell
+            // to escape the zone. Mirrors Neuron's gatherInputs stop rule.
+            val change = total - requiredCapacity
+            if (total >= requiredCapacity && (change == 0L || change >= minChange)) break
             selected.add(cell)
             total += capacity
         }
