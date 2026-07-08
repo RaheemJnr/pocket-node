@@ -1083,6 +1083,10 @@ class GatewayRepository @Inject constructor(
                 .filter { it.accountIndex == 0 && it.state == SubAccountCandidateEntity.STATE_FOUND }
                 .associate { it.scriptArgs to it.derivationPath }
 
+            // BIP39 passphrase: the import UI has no passphrase field, so
+            // every wallet's candidates were derived with "". If that ever
+            // changes, the derived-args verification below aborts the sweep
+            // rather than signing with a mismatched key.
             val seed = keyManager.mnemonicToSeed(words)
             val keys = mutableMapOf<String, ByteArray>()
             try {
@@ -1101,7 +1105,7 @@ class GatewayRepository @Inject constructor(
                 }
                 if (activeWalletId != wId) throw Exception("Wallet changed during the sweep; try again")
                 val signed = transactionBuilder.signSweep(plan.transaction, plan.inputLockArgs, keys).getOrThrow()
-                val txHash = sendTransaction(signed).getOrThrow()
+                val txHash = sendTransaction(signed, expectedWalletId = wId).getOrThrow()
                 Log.i(TAG, "gap-limit sweep broadcast: ${plan.inputLockArgs.size} inputs, ${keys.size} groups")
                 txHash
             } finally {
@@ -1719,7 +1723,15 @@ class GatewayRepository @Inject constructor(
         sendTransaction(tx).getOrThrow()
     }
 
-    suspend fun sendTransaction(transaction: Transaction): Result<String> = runCatching {
+    suspend fun sendTransaction(
+        transaction: Transaction,
+        /**
+         * When non-null, abort if the active wallet is no longer this one —
+         * a transaction signed for wallet A must never persist its pending
+         * row under wallet B's id/network (#382 Tier 3 review).
+         */
+        expectedWalletId: String? = null,
+    ): Result<String> = runCatching {
         Log.d(TAG, "📤 sendTransaction: building JSON")
         Log.d(TAG, "  Inputs: ${transaction.cellInputs.size}, Outputs: ${transaction.cellOutputs.size}")
 
@@ -1737,6 +1749,9 @@ class GatewayRepository @Inject constructor(
 
         // Snapshot at entry — pin to whichever wallet/network the user was on.
         val walletId = activeWalletId
+        if (expectedWalletId != null && walletId != expectedWalletId) {
+            throw Exception("Wallet changed before broadcast; transaction not sent")
+        }
         val network = currentNetwork.name
         val tipNumber = currentTipNumberOrZero()
         publishTip(tipNumber)
