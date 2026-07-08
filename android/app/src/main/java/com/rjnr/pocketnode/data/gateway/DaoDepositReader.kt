@@ -76,16 +76,24 @@ class DaoDepositReader @Inject constructor(
         )
         val searchKeyJson = json.encodeToString(searchKey)
 
-        // Paginate all cells by lock script
+        // Paginate all cells by lock script. Cap is a runaway guard only
+        // (logged when hit), matching the read-path convention in
+        // GatewayRepository — never a functional limit that could truncate
+        // real history and undercount deposits.
         val allCellObjects = mutableListOf<JniCell>()
         var cellsCursor: String? = null
+        var cellPages = 0
         do {
             val pageJson = LightClientNative.nativeGetCells(searchKeyJson, "desc", 100, cellsCursor)
                 ?: break
             val page = json.decodeFromString<JniPagination<JniCell>>(pageJson)
             allCellObjects += page.objects
             cellsCursor = page.lastCursor?.takeUnless { it == cellsCursor }
-        } while (cellsCursor != null)
+            cellPages++
+        } while (cellsCursor != null && cellPages < MAX_PAGES)
+        if (cellPages >= MAX_PAGES) {
+            Log.w(TAG, "list: hit $MAX_PAGES-page cap walking DAO cells — list may be incomplete")
+        }
 
         // Filter locally: only cells whose type script matches DAO code hash
         val daoCells = allCellObjects.filter { cell ->
@@ -93,9 +101,10 @@ class DaoDepositReader @Inject constructor(
         }
         Log.d(TAG, "📋 getDaoDeposits: ${daoCells.size} DAO cells out of ${allCellObjects.size} total")
 
-        // Paginate transactions to find spent outpoints
+        // Paginate transactions to find spent outpoints (same runaway guard).
         val spentOutpoints = mutableSetOf<String>()
         var txCursor: String? = null
+        var txPages = 0
         do {
             val txJson = LightClientNative.nativeGetTransactions(searchKeyJson, "desc", 100, txCursor)
                 ?: break
@@ -106,7 +115,11 @@ class DaoDepositReader @Inject constructor(
                 }
             }
             txCursor = txPag.lastCursor?.takeUnless { it == txCursor }
-        } while (txCursor != null)
+            txPages++
+        } while (txCursor != null && txPages < MAX_PAGES)
+        if (txPages >= MAX_PAGES) {
+            Log.w(TAG, "list: hit $MAX_PAGES-page cap walking DAO spent-set — result may be incomplete")
+        }
 
         val liveDaoCells = daoCells.filter { cell ->
             val key = "${cell.outPoint.txHash}:${cell.outPoint.index}"
@@ -328,5 +341,11 @@ class DaoDepositReader @Inject constructor(
 
     companion object {
         private const val TAG = "DaoDepositReader"
+
+        // Runaway guard for the cell / spent-set walks (100 items per page).
+        // Generous — a real wallet's DAO history is far smaller; this only
+        // bounds a pathological/looping cursor, and it logs when hit so a
+        // genuine truncation is visible rather than silent.
+        private const val MAX_PAGES = 200
     }
 }
