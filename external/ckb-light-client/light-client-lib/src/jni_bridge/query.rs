@@ -810,28 +810,79 @@ pub extern "C" fn Java_com_nervosnetwork_ckblightclient_LightClientNative_native
             };
 
             let io_capacity = if io_type == CellType::Input {
-                // For input, the io_index is the index into the inputs array
+                // For input, io_index indexes into the inputs array; the spent
+                // cell's capacity lives in the output that created it, so we
+                // resolve it from the previous transaction.
                 let input = tx.raw().inputs().get(io_index as usize)?;
                 let out_point = input.previous_output();
-                // We need to look up the capacity of the spent cell from storage
-                swc.storage()
+                let prev_index: u32 = out_point.index().unpack();
+                let prev_hash: H256 = out_point.tx_hash().unpack();
+                let cur_hash: H256 = tx_hash.unpack();
+
+                // On a light client synced from a checkpoint, the tx that
+                // created the spent cell can predate the sync window and simply
+                // not be in storage. Its capacity is then unrecoverable here
+                // (the cell index stores only the tx hash, not the capacity), so
+                // the activity net for this tx is understated and, because the
+                // Kotlin side classifies direction by net sign, an affected send
+                // can even render as a receive. This used to fail silently.
+                // Behavior is unchanged (missing prev tx drops the row, malformed
+                // data reports 0), but each case now logs so windowed-out amounts
+                // are diagnosable in logcat. A correct fix needs the spent
+                // capacity stored in the cell index or resolved on the Kotlin
+                // side, which is a coordinated follow-up.
+                let prev_tx_bytes = match swc
+                    .storage()
                     .get(Key::TxHash(&out_point.tx_hash()).into_vec())
-                    .ok()??
+                {
+                    Ok(Some(bytes)) => bytes,
+                    Ok(None) => {
+                        warn!(
+                            "nativeGetTransactions: spent-cell tx {:#x} outside sync window; \
+                             input {}:{} of tx {:#x} dropped, activity amount understated",
+                            prev_hash, prev_index, io_index, cur_hash
+                        );
+                        return None;
+                    }
+                    Err(e) => {
+                        error!(
+                            "nativeGetTransactions: storage error resolving input capacity \
+                             for tx {:#x}: {}",
+                            cur_hash, e
+                        );
+                        return None;
+                    }
+                };
+                prev_tx_bytes
                     .get(12..) // Skip block number (8) and tx index (4) in Value::Transaction
                     .and_then(|data| {
-                        let tx = packed::Transaction::from_slice(data).ok()?;
-                        let index: u32 = out_point.index().unpack();
-                        tx.raw().outputs().get(index as usize)
+                        let prev_tx = packed::Transaction::from_slice(data).ok()?;
+                        prev_tx.raw().outputs().get(prev_index as usize)
                     })
                     .map(|output: packed::CellOutput| Unpack::<core::Capacity>::unpack(&output.capacity()).as_u64())
-                    .unwrap_or(0)
+                    .unwrap_or_else(|| {
+                        warn!(
+                            "nativeGetTransactions: malformed prev tx {:#x} for input {}:{} \
+                             of tx {:#x}; capacity reported as 0",
+                            prev_hash, prev_index, io_index, cur_hash
+                        );
+                        0
+                    })
             } else {
-                // For output, we can get it directly from the current transaction
+                // For output, read capacity directly from the current transaction.
+                let cur_hash: H256 = tx_hash.unpack();
                 tx.raw()
                     .outputs()
                     .get(io_index as usize)
                     .map(|output: packed::CellOutput| Unpack::<core::Capacity>::unpack(&output.capacity()).as_u64())
-                    .unwrap_or(0)
+                    .unwrap_or_else(|| {
+                        warn!(
+                            "nativeGetTransactions: output io_index {} out of range for tx {:#x}; \
+                             capacity reported as 0",
+                            io_index, cur_hash
+                        );
+                        0
+                    })
             };
 
             last_key = key.to_vec();
