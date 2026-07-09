@@ -819,18 +819,34 @@ pub extern "C" fn Java_com_nervosnetwork_ckblightclient_LightClientNative_native
                 let prev_hash: H256 = out_point.tx_hash().unpack();
                 let cur_hash: H256 = tx_hash.unpack();
 
-                // On a light client synced from a checkpoint, the tx that
-                // created the spent cell can predate the sync window and simply
-                // not be in storage. Its capacity is then unrecoverable here
-                // (the cell index stores only the tx hash, not the capacity), so
-                // the activity net for this tx is understated and, because the
-                // Kotlin side classifies direction by net sign, an affected send
-                // can even render as a receive. This used to fail silently.
-                // Behavior is unchanged (missing prev tx drops the row, malformed
-                // data reports 0), but each case now logs so windowed-out amounts
-                // are diagnosable in logcat. A correct fix needs the spent
-                // capacity stored in the cell index or resolved on the Kotlin
-                // side, which is a coordinated follow-up.
+                // The Ok(None) arm below is a near-unreachable defensive guard,
+                // NOT the source of wrong activity amounts. `filter_block`
+                // (storage/db/native.rs) only writes an input's index entry
+                // inside `if let Some(prev_tx) = self.get_transaction(prev_hash)`
+                // — it resolves the spent cell's lock from the locally-stored
+                // previous tx to decide the input is ours — and nothing prunes
+                // stored txs (the only delete is reorg rollback_to_block). So
+                // whenever an input IS indexed, its previous tx is in storage
+                // permanently, and this lookup resolves. Ok(None) can therefore
+                // only happen on DB corruption or a mid-read reorg; we log and
+                // drop that row rather than trust a bogus capacity.
+                //
+                // The genuine amount error lives at the WRITE layer, upstream of
+                // this code and unfixable here: a cell funded BEFORE the sync
+                // start block is never in storage, so filter_block never matches
+                // or indexes the input that spends it. A tx mixing such a
+                // pre-window input with an in-window output to us then shows only
+                // the output, so its net looks positive and — because the Kotlin
+                // side classifies direction by net sign — a send can render as a
+                // receive. The spent cell's lock is genuinely unknowable from
+                // local data, so no computation here recovers it. The remedy is
+                // sync COVERAGE: sync from at/before the wallet's first funding
+                // block (the Custom height option) so no cell is ever pre-window
+                // and every amount is correct by construction. See
+                // docs/SYNC_COVERAGE_AND_AMOUNTS.md.
+                //
+                // The malformed-data arm reports 0 (behavior preserved); both
+                // arms log so anything unexpected is diagnosable in logcat.
                 let prev_tx_bytes = match swc
                     .storage()
                     .get(Key::TxHash(&out_point.tx_hash()).into_vec())
@@ -838,8 +854,10 @@ pub extern "C" fn Java_com_nervosnetwork_ckblightclient_LightClientNative_native
                     Ok(Some(bytes)) => bytes,
                     Ok(None) => {
                         warn!(
-                            "nativeGetTransactions: spent-cell tx {:#x} outside sync window; \
-                             input {}:{} of tx {:#x} dropped, activity amount understated",
+                            "nativeGetTransactions: indexed input references prev tx {:#x} \
+                             not in storage (unexpected: DB corruption or mid-read reorg, since \
+                             filter_block only indexes inputs whose prev tx it stored); \
+                             input {}:{} of tx {:#x} dropped",
                             prev_hash, prev_index, io_index, cur_hash
                         );
                         return None;
