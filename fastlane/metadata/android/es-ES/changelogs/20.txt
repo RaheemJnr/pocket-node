@@ -1,0 +1,12 @@
+v1.7.9:
+Esta versión corrige las carteras con más de 100 monedas, para que se muestre tu saldo completo y se pueda gastar cada moneda.
+
+Las carteras con muchas monedas ahora muestran el saldo correcto. Por debajo, el cliente ligero devolvía solo las primeras 100 monedas por consulta y se detenía ahí, así que una cartera con más de 100 monedas pequeñas (pagos de minería, depósitos frecuentes) mostraba un saldo demasiado bajo y solo podía gastar una parte. La app ahora lee todas las páginas de monedas, así aparece el saldo completo y un envío puede reunir tantas monedas como necesite. Un envío de prueba en una cartera de 183 monedas gastó 151 en una sola transacción.
+
+Los envíos desde carteras activas funcionan. Un envío que reunía muchas monedas pequeñas pagaba una comisión de red ligeramente insuficiente y era rechazado siempre. Las comisiones ahora cubren el tamaño real de la transacción.
+
+La app puede encontrar fondos de otras carteras. Si tu frase semilla se usó en Neuron u otra cartera, puede haber fondos en direcciones que Pocket Node no escaneaba. Al importar ahora se escanean automáticamente, y Ajustes tiene la acción Escanear otras direcciones para carteras existentes. Los fondos encontrados se muestran con sus importes, y el botón Mover a la cartera principal los lleva a tu dirección principal en una sola transacción.
+
+Actividad muestra tu historial completo. La pestaña Todo dejaba de llenarse en carteras activas, y una entrada podía mostrar un importe erróneo. Ahora se guarda el historial completo con importes exactos.
+
+Fuente: github.com/RaheemJnr/pocket-node/releases
