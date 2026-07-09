@@ -617,7 +617,12 @@ pub extern "C" fn Java_com_nervosnetwork_ckblightclient_LightClientNative_native
             (key, 0)
         }
     } else {
-        match serde_json::from_str::<JsonBytes>(&cursor_str) {
+        // Cursor round-trip fix: `last_cursor` is emitted as a JsonBytes, which
+        // reaches us as a bare `0x..` hex string. serde_json::from_str on the
+        // raw hex fails (it wants a QUOTED JSON string) and silently fell back
+        // to `prefix`, so every page-2 fetch returned empty and reads capped at
+        // 100 items. Wrap it as the JSON string JsonBytes deserializes from.
+        match serde_json::from_str::<JsonBytes>(&format!("\"{}\"", cursor_str)) {
             Ok(cursor) => (cursor.as_bytes().to_vec(), 1),
             Err(_) => (prefix.clone(), 0),
         }
@@ -757,7 +762,12 @@ pub extern "C" fn Java_com_nervosnetwork_ckblightclient_LightClientNative_native
             (key, 0)
         }
     } else {
-        match serde_json::from_str::<JsonBytes>(&cursor_str) {
+        // Cursor round-trip fix: `last_cursor` is emitted as a JsonBytes, which
+        // reaches us as a bare `0x..` hex string. serde_json::from_str on the
+        // raw hex fails (it wants a QUOTED JSON string) and silently fell back
+        // to `prefix`, so every page-2 fetch returned empty and reads capped at
+        // 100 items. Wrap it as the JSON string JsonBytes deserializes from.
+        match serde_json::from_str::<JsonBytes>(&format!("\"{}\"", cursor_str)) {
             Ok(cursor) => (cursor.as_bytes().to_vec(), 1),
             Err(_) => (prefix.clone(), 0),
         }

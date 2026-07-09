@@ -78,6 +78,7 @@ console_error_panic_hook = { version = "0.1.7" }
 wasm-bindgen-test = "0.3.45"
 
 [dev-dependencies]
+ckb-jsonrpc-types = "1"
 ckb-shared = "1"
 ckb-chain = "1"
 ckb-tx-pool = "1"
