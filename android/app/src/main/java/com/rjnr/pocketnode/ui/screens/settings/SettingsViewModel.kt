@@ -1,13 +1,16 @@
 package com.rjnr.pocketnode.ui.screens.settings
 
+import androidx.fragment.app.FragmentActivity
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.rjnr.pocketnode.BuildConfig
 import com.rjnr.pocketnode.data.auth.PinManager
+import com.rjnr.pocketnode.data.database.dao.KeyMaterialDao
 import com.rjnr.pocketnode.data.gateway.GatewayRepository
 import com.rjnr.pocketnode.data.update.UpdateRepository
 import com.rjnr.pocketnode.data.gateway.models.NetworkType
 import com.rjnr.pocketnode.data.gateway.models.SyncMode
+import com.rjnr.pocketnode.data.wallet.SeedPhraseAuthorizer
 import com.rjnr.pocketnode.data.wallet.SyncStrategy
 import com.rjnr.pocketnode.data.wallet.ThemeMode
 import com.rjnr.pocketnode.data.wallet.WalletPreferences
@@ -27,6 +30,8 @@ class SettingsViewModel @Inject constructor(
     private val pinManager: PinManager,
     private val walletRepository: WalletRepository,
     private val updateRepository: UpdateRepository,
+    private val seedPhraseAuthorizer: SeedPhraseAuthorizer,
+    private val keyMaterialDao: KeyMaterialDao,
 ) : ViewModel() {
 
     /** Update-availability state for the About > Version row (#369). */
@@ -176,9 +181,34 @@ class SettingsViewModel @Inject constructor(
      * when the Home banner was dismissed, and the window-extension entry.
      * Feedback rides the same snackbar channel as other Settings actions.
      */
-    fun runGapLimitScan() {
+    fun runGapLimitScan(activity: FragmentActivity) {
         viewModelScope.launch {
-            repository.runGapLimitScan()
+            // V1 wallets read the seed in the repository; V2 (kdfVersion=2)
+            // wallets need a BiometricPrompt to unlock it (#408).
+            val walletId = walletRepository.activeWalletIdSnapshot()?.takeIf { it.isNotEmpty() }
+            val kdfVersion = walletId?.let { runCatching { keyMaterialDao.getKdfVersion(it) }.getOrNull() }
+            val result: Result<Int> = if (kdfVersion == 2 && walletId != null) {
+                when (val seed = seedPhraseAuthorizer.authorize(
+                    activity,
+                    walletId,
+                    "Authenticate to scan",
+                    "Verify your identity to scan for funds on other addresses",
+                )) {
+                    is SeedPhraseAuthorizer.SeedResult.Words -> repository.runGapLimitScan(seed.words)
+                    SeedPhraseAuthorizer.SeedResult.Cancelled -> return@launch
+                    SeedPhraseAuthorizer.SeedResult.KeyInvalidated -> {
+                        emitScanFailed("Biometric changed. Re-import this wallet from its recovery phrase.")
+                        return@launch
+                    }
+                    is SeedPhraseAuthorizer.SeedResult.Failed -> {
+                        emitScanFailed(seed.reason)
+                        return@launch
+                    }
+                }
+            } else {
+                repository.runGapLimitScan()
+            }
+            result
                 .onSuccess {
                     _uiState.update {
                         it.copy(
@@ -188,16 +218,18 @@ class SettingsViewModel @Inject constructor(
                         )
                     }
                 }
-                .onFailure { e ->
-                    _uiState.update {
-                        it.copy(
-                            error = com.rjnr.pocketnode.ui.util.UiMessage.Resource(
-                                com.rjnr.pocketnode.R.string.gap_limit_scan_failed,
-                                listOf(e.message ?: ""),
-                            ),
-                        )
-                    }
-                }
+                .onFailure { e -> emitScanFailed(e.message ?: "") }
+        }
+    }
+
+    private fun emitScanFailed(reason: String) {
+        _uiState.update {
+            it.copy(
+                error = com.rjnr.pocketnode.ui.util.UiMessage.Resource(
+                    com.rjnr.pocketnode.R.string.gap_limit_scan_failed,
+                    listOf(reason),
+                ),
+            )
         }
     }
 
