@@ -63,6 +63,7 @@ import androidx.compose.ui.hapticfeedback.HapticFeedbackType
 import androidx.compose.ui.platform.LocalClipboardManager
 import androidx.compose.ui.platform.LocalHapticFeedback
 import androidx.compose.ui.platform.LocalContext
+import androidx.fragment.app.FragmentActivity
 import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.SpanStyle
 import androidx.compose.ui.text.buildAnnotatedString
@@ -491,7 +492,7 @@ fun HomeScreen(
                     onBgSyncStaleDismiss = { viewModel.dismissBgSyncStalePill() },
                     onGapLimitLearnMore = { onNavigateToFaq("imported_funds") },
                     onGapLimitDismiss = { viewModel.dismissGapLimitBanner() },
-                    onGapLimitScanNow = { viewModel.runGapLimitScan() },
+                    onGapLimitScanNow = { (context as? FragmentActivity)?.let { viewModel.runGapLimitScan(it) } },
                     onGapLimitSweep = { viewModel.requestGapLimitSweep() },
                 )
                 if (uiState.isSwitchingWallet) {
@@ -529,7 +530,7 @@ fun HomeScreen(
                     )
                 },
                 confirmButton = {
-                    TextButton(onClick = { viewModel.confirmGapLimitSweep() }) {
+                    TextButton(onClick = { (context as? FragmentActivity)?.let { viewModel.confirmGapLimitSweep(it) } }) {
                         Text(stringResource(R.string.sweep_dialog_confirm))
                     }
                 },

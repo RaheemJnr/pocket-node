@@ -920,15 +920,30 @@ class GatewayRepository @Inject constructor(
      * keep their state, then scripts re-register so the new ones enter the
      * light-client filter. Returns the window that is now covered.
      */
+    /**
+     * V1 / session-auth entry: reads the seed via [getMnemonic] (which has an
+     * EncryptedSharedPreferences fallback). V2 (kdfVersion=2) wallets cannot
+     * decrypt without an authenticated Cipher, so their ViewModels unlock the
+     * seed via a BiometricPrompt and call [runGapLimitScan] with words (#408).
+     */
     suspend fun runGapLimitScan(): Result<Int> = runCatching {
+        val words = getMnemonic() ?: throw Exception("Recovery phrase unavailable for this wallet")
+        runGapLimitScanInner(words)
+    }
+
+    /** V2 entry: [words] were already unlocked by the caller's BiometricPrompt (#408). */
+    suspend fun runGapLimitScan(words: List<String>): Result<Int> = runCatching {
+        runGapLimitScanInner(words)
+    }
+
+    private suspend fun runGapLimitScanInner(words: List<String>): Int {
         // Single-flight: the Home banner and Settings both trigger this, and
         // a second concurrent pass would double the derivation work and
         // interleave two CMD_SET_SCRIPTS_ALL registrations.
         if (!gapLimitScanMutex.tryLock()) throw Exception("A scan is already running")
-        try {
+        return try {
             val wId = activeWalletId
             if (wId.isEmpty()) throw Exception("No active wallet")
-            val words = getMnemonic() ?: throw Exception("Recovery phrase unavailable for this wallet")
             val dao = appDatabase.subAccountCandidateDao()
             val existing = dao.getForParent(wId).filter { it.accountIndex == 0 }
             val window = nextScanWindow(existing)
@@ -1068,13 +1083,26 @@ class GatewayRepository @Inject constructor(
      * transaction and hands it to the idempotent sendTransaction path
      * (pending row + watchdog). Keys and seed are zeroed after signing.
      */
+    /**
+     * V1 / session-auth entry: reads the seed via [getMnemonic]. V2 wallets
+     * unlock the seed via a BiometricPrompt and call the words overload (#408).
+     */
     suspend fun sweepGapLimitFunds(): Result<String> = runCatching {
+        val words = getMnemonic() ?: throw Exception("Recovery phrase unavailable for this wallet")
+        sweepGapLimitFundsInner(words)
+    }
+
+    /** V2 entry: [words] were already unlocked by the caller's BiometricPrompt (#408). */
+    suspend fun sweepGapLimitFunds(words: List<String>): Result<String> = runCatching {
+        sweepGapLimitFundsInner(words)
+    }
+
+    private suspend fun sweepGapLimitFundsInner(words: List<String>): String {
         if (!gapLimitScanMutex.tryLock()) throw Exception("A scan or sweep is already running")
-        try {
+        return try {
             val wId = activeWalletId
             if (wId.isEmpty()) throw Exception("No active wallet")
             val myScript = _walletInfo.value?.script ?: throw Exception("Wallet not initialized")
-            val words = getMnemonic() ?: throw Exception("Recovery phrase unavailable for this wallet")
 
             val (inputs, _) = gatherSweepInputs(wId)
             val plan = transactionBuilder.buildSweep(inputs, myScript, currentNetwork).getOrThrow()

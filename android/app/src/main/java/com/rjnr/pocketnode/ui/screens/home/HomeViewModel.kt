@@ -1,6 +1,7 @@
 package com.rjnr.pocketnode.ui.screens.home
 
 import android.util.Log
+import androidx.fragment.app.FragmentActivity
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.rjnr.pocketnode.data.database.entity.WalletEntity
@@ -55,6 +56,8 @@ class HomeViewModel @Inject constructor(
     private val authManager: AuthManager,
     private val cacheManager: CacheManager,
     private val walletPreferences: com.rjnr.pocketnode.data.wallet.WalletPreferences,
+    private val seedPhraseAuthorizer: com.rjnr.pocketnode.data.wallet.SeedPhraseAuthorizer,
+    private val keyMaterialDao: com.rjnr.pocketnode.data.database.dao.KeyMaterialDao,
     private val savedStateHandle: androidx.lifecycle.SavedStateHandle,
 ) : ViewModel() {
 
@@ -863,14 +866,82 @@ class HomeViewModel @Inject constructor(
     }
 
     /**
-     * #382 Tier 2: explicit deep scan from the banner (wallets imported
-     * before auto-scan shipped, or window extension). Session-auth gated
-     * inside the repository via getMnemonic().
+     * Seed acquisition for a key-deriving op (scan/sweep). V1 wallets read the
+     * seed inside the repository via getMnemonic(); V2 (kdfVersion=2) wallets
+     * cannot decrypt without an authenticated Cipher, so we drive a
+     * BiometricPrompt here and hand the words to the repo's words overload
+     * (#408). Only the two banner/settings actions reach this.
      */
-    fun runGapLimitScan() {
+    private sealed interface SeedAcquire {
+        /** V1 wallet: caller runs the no-words repository overload. */
+        object UseV1 : SeedAcquire
+        data class Words(val words: List<String>) : SeedAcquire
+        object Cancelled : SeedAcquire
+        object KeyInvalidated : SeedAcquire
+        data class Failed(val reason: String) : SeedAcquire
+    }
+
+    private suspend fun acquireSeed(
+        activity: FragmentActivity,
+        promptTitle: String,
+        promptSubtitle: String,
+    ): SeedAcquire {
+        val walletId = walletRepository.activeWalletIdSnapshot()?.takeIf { it.isNotEmpty() }
+            ?: return SeedAcquire.Failed("No active wallet")
+        val kdfVersion = runCatching { keyMaterialDao.getKdfVersion(walletId) }.getOrNull()
+        if (kdfVersion != 2) return SeedAcquire.UseV1
+        return when (val r = seedPhraseAuthorizer.authorize(activity, walletId, promptTitle, promptSubtitle)) {
+            is com.rjnr.pocketnode.data.wallet.SeedPhraseAuthorizer.SeedResult.Words -> SeedAcquire.Words(r.words)
+            com.rjnr.pocketnode.data.wallet.SeedPhraseAuthorizer.SeedResult.Cancelled -> SeedAcquire.Cancelled
+            com.rjnr.pocketnode.data.wallet.SeedPhraseAuthorizer.SeedResult.KeyInvalidated -> SeedAcquire.KeyInvalidated
+            is com.rjnr.pocketnode.data.wallet.SeedPhraseAuthorizer.SeedResult.Failed -> SeedAcquire.Failed(r.reason)
+        }
+    }
+
+    /**
+     * #382 Tier 2: explicit deep scan from the banner (wallets imported
+     * before auto-scan shipped, or window extension). V2 wallets are prompted
+     * for biometric auth to unlock the seed (#408).
+     */
+    fun runGapLimitScan(activity: FragmentActivity) {
         viewModelScope.launch {
             _uiState.update { it.copy(gapLimitScanning = true, gapLimitScanAvailable = false) }
-            repository.runGapLimitScan()
+            val result: Result<Int> = when (val seed = acquireSeed(
+                activity,
+                "Authenticate to scan",
+                "Verify your identity to scan for funds on other addresses",
+            )) {
+                SeedAcquire.UseV1 -> repository.runGapLimitScan()
+                is SeedAcquire.Words -> repository.runGapLimitScan(seed.words)
+                SeedAcquire.Cancelled -> {
+                    _uiState.update { it.copy(gapLimitScanning = false, gapLimitScanAvailable = true) }
+                    return@launch
+                }
+                SeedAcquire.KeyInvalidated -> {
+                    _uiState.update {
+                        it.copy(
+                            gapLimitScanning = false, gapLimitScanAvailable = true,
+                            error = com.rjnr.pocketnode.ui.util.UiMessage.Resource(
+                                com.rjnr.pocketnode.R.string.gap_limit_scan_failed,
+                                listOf("Biometric changed. Re-import this wallet from its recovery phrase."),
+                            ),
+                        )
+                    }
+                    return@launch
+                }
+                is SeedAcquire.Failed -> {
+                    _uiState.update {
+                        it.copy(
+                            gapLimitScanning = false, gapLimitScanAvailable = true,
+                            error = com.rjnr.pocketnode.ui.util.UiMessage.Resource(
+                                com.rjnr.pocketnode.R.string.gap_limit_scan_failed, listOf(seed.reason),
+                            ),
+                        )
+                    }
+                    return@launch
+                }
+            }
+            result
                 .onSuccess {
                     Log.i(TAG, "gap-limit scan started (window $it)")
                     refreshTransactionsOnly(silent = true)
@@ -916,10 +987,45 @@ class HomeViewModel @Inject constructor(
         _uiState.update { it.copy(sweepPreview = null) }
     }
 
-    fun confirmGapLimitSweep() {
+    fun confirmGapLimitSweep(activity: FragmentActivity) {
         viewModelScope.launch {
             _uiState.update { it.copy(sweepPreview = null, sweepInProgress = true) }
-            repository.sweepGapLimitFunds()
+            val result: Result<String> = when (val seed = acquireSeed(
+                activity,
+                "Authenticate to move funds",
+                "Verify your identity to move funds to your main wallet",
+            )) {
+                SeedAcquire.UseV1 -> repository.sweepGapLimitFunds()
+                is SeedAcquire.Words -> repository.sweepGapLimitFunds(seed.words)
+                SeedAcquire.Cancelled -> {
+                    _uiState.update { it.copy(sweepInProgress = false) }
+                    return@launch
+                }
+                SeedAcquire.KeyInvalidated -> {
+                    _uiState.update {
+                        it.copy(
+                            sweepInProgress = false,
+                            error = com.rjnr.pocketnode.ui.util.UiMessage.Resource(
+                                com.rjnr.pocketnode.R.string.sweep_failed,
+                                listOf("Biometric changed. Re-import this wallet from its recovery phrase."),
+                            ),
+                        )
+                    }
+                    return@launch
+                }
+                is SeedAcquire.Failed -> {
+                    _uiState.update {
+                        it.copy(
+                            sweepInProgress = false,
+                            error = com.rjnr.pocketnode.ui.util.UiMessage.Resource(
+                                com.rjnr.pocketnode.R.string.sweep_failed, listOf(seed.reason),
+                            ),
+                        )
+                    }
+                    return@launch
+                }
+            }
+            result
                 .onSuccess { txHash ->
                     Log.i(TAG, "sweep broadcast: ${txHash.take(16)}...")
                     _uiState.update {

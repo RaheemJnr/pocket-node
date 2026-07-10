@@ -54,6 +54,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.platform.LocalContext
+import androidx.fragment.app.FragmentActivity
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.tooling.preview.Preview
 import androidx.compose.ui.unit.dp
@@ -364,7 +365,7 @@ fun SettingsScreen(
         },
         showThemeDialog = { viewModel.showThemeDialog() },
         onCheckForUpdate = { viewModel.checkForUpdate() },
-        onScanOtherAddresses = { viewModel.runGapLimitScan() },
+        onScanOtherAddresses = { (context as? FragmentActivity)?.let { viewModel.runGapLimitScan(it) } },
         onToggleBackgroundSync = { enabled ->
             if (enabled && Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
                 val hasPermission = ContextCompat.checkSelfPermission(
