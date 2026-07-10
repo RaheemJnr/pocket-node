@@ -478,6 +478,7 @@ fun HomeScreen(
                     onNavigateToSecurityChecklist = onNavigateToSecurityChecklist,
                     onNavigateToNodeStatus = onNavigateToNodeStatus,
                     onNavigateToSettings = onNavigateToSettings,
+                    onRequestNetworkSwitch = { viewModel.requestNetworkSwitch(it) },
                     dismissBackupReminder = { viewModel.dismissBackupReminder() },
                     onToggleBalanceVisibility = { viewModel.toggleBalanceVisibility() },
                     clipboardManager = clipboardManager,
@@ -589,6 +590,7 @@ fun HomeScreenUI(
     onNavigateToSecurityChecklist: () -> Unit = {},
     onNavigateToNodeStatus: () -> Unit = {},
     onNavigateToSettings: () -> Unit = {},
+    onRequestNetworkSwitch: (NetworkType) -> Unit = {},
     dismissBackupReminder: () -> Unit,
     onToggleBalanceVisibility: () -> Unit,
     clipboardManager: androidx.compose.ui.platform.ClipboardManager,
@@ -644,7 +646,15 @@ fun HomeScreenUI(
             item {
                 NetworkBadge(
                     network = uiState.currentNetwork,
-                    onClick = onNavigateToSettings,
+                    // #405: switch inline from the chip. Tapping it targets the
+                    // other network and opens the existing restart-confirm dialog
+                    // in place, instead of deep-linking to Settings.
+                    onClick = {
+                        onRequestNetworkSwitch(
+                            if (uiState.currentNetwork == NetworkType.MAINNET) NetworkType.TESTNET
+                            else NetworkType.MAINNET
+                        )
+                    },
                 )
                 Spacer(Modifier.width(4.dp))
             }
@@ -1324,9 +1334,9 @@ private fun NetworkBadge(network: NetworkType, onClick: (() -> Unit)? = null) {
     Surface(
         shape = RoundedCornerShape(12.dp),
         color = backgroundColor,
-        // #353: the chip looked tappable but wasn't. Tapping it now opens
-        // Settings, where the network switcher (with its restart-confirm
-        // dialog) lives.
+        // #353/#405: the chip looked tappable but wasn't, then deep-linked to
+        // Settings. It now switches the network inline — tapping it targets the
+        // other network and raises the restart-confirm dialog in place.
         modifier = Modifier
             .padding(8.dp)
             .then(if (onClick != null) Modifier.clickable { onClick() } else Modifier)
