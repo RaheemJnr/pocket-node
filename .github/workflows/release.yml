@@ -12,11 +12,23 @@ permissions:
   contents: write
 
 jobs:
-  release:
+  # Job 1: build the native library + UNSIGNED release APK. Runs the untrusted
+  # Cargo/Gradle build. The keystore private key is NEVER present in this job's
+  # process environment (F4 follow-up) — only the PUBLIC RELEASE_CERT_SHA256
+  # fingerprint, which is baked into the APK at build time.
+  build:
     runs-on: ubuntu-latest
     # Cold cargo build of rocksdb + light-client takes ~10-15 min uncached.
     timeout-minutes: 60
+    # Used ONLY to read RELEASE_CERT_SHA256 (a public value). The keystore
+    # secrets are not mapped into any step here, so a compromised crate/build
+    # script cannot exfiltrate the signing key. If RELEASE_CERT_SHA256 is a
+    # repository secret/variable rather than an environment secret, this
+    # `environment:` line can be dropped.
     environment: release-signing
+    outputs:
+      release_tag: ${{ steps.validate_tag.outputs.release_tag }}
+      tag_commit: ${{ steps.validate_tag.outputs.tag_commit }}
 
     steps:
       - name: Checkout release workflow branch
@@ -71,8 +83,7 @@ jobs:
         # v1.7.0 alongside tag v1.7.0, dispatch the workflow with input
         # v1.7.0, pass the tag-provenance validation (which inspects
         # refs/tags/v1.7.0), and then have checkout resolve to the malicious
-        # branch with release-signing secrets available. SHAs are
-        # unambiguous and cannot be shadowed. (#291)
+        # branch. SHAs are unambiguous and cannot be shadowed. (#291)
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
         with:
           ref: ${{ steps.validate_tag.outputs.tag_commit }}
@@ -145,25 +156,14 @@ jobs:
             echo "::warning::GOOGLE_SERVICES_JSON secret not set — using dummy config. Firebase features will be non-functional."
           fi
 
-      - name: Decode keystore
-        env:
-          KEYSTORE_BASE64: ${{ secrets.KEYSTORE_BASE64 }}
-        run: echo "$KEYSTORE_BASE64" | base64 -d > android/app/release.jks
-
-      - name: Build signed release APK
+      - name: Build UNSIGNED release APK
         working-directory: android
+        # No keystore here — the untrusted Cargo/Gradle build must not run in a
+        # process holding the signing key. RELEASE_CERT_SHA256 is public and is
+        # baked into the APK so the in-app updater can pin future updates.
         env:
-          KEYSTORE_PATH: ${{ github.workspace }}/android/app/release.jks
-          KEYSTORE_PASSWORD: ${{ secrets.KEYSTORE_PASSWORD }}
-          KEY_ALIAS: ${{ secrets.KEY_ALIAS }}
-          KEY_PASSWORD: ${{ secrets.KEY_PASSWORD }}
-          # Embedded at build time and read by UpdateDownloader.verifyApkSignature
-          # before launching the system installer (#293). The release APK refuses
-          # to install any update whose signing-cert SHA-256 does not match this
-          # value, blocking URL-substitution + same-key release-channel-compromise
-          # attacks at the in-app updater boundary.
           RELEASE_CERT_SHA256: ${{ secrets.RELEASE_CERT_SHA256 }}
-        run: ./gradlew assembleRelease
+        run: ./gradlew assembleRelease -PunsignedRelease=true
 
       - name: Verify native library is packaged
         run: |
@@ -176,9 +176,83 @@ jobs:
           done
           echo "Native library found in APK for both ABIs."
 
+      - name: Upload unsigned APK
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: unsigned-release-apk
+          path: android/app/build/outputs/apk/release/*.apk
+          retention-days: 1
+          if-no-files-found: error
+
+  # Job 2: minimal, isolated signing. Holds the keystore, runs ONLY apksigner /
+  # zipalign (trusted Android SDK tools) — no Cargo, no Gradle, no app build.
+  sign:
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    environment: release-signing
+
+    steps:
+      - name: Download unsigned APK
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: unsigned-release-apk
+          path: unsigned
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@c1e323688fd81a25caa38c78aa6df2d33d3e20d9 # v4
+        with:
+          java-version: '17'
+          distribution: 'temurin'
+
+      - name: Setup Android SDK
+        # Provides apksigner + zipalign from build-tools.
+        uses: android-actions/setup-android@9fc6c4e9069bf8d3d10b2204b1fb8f6ef7065407 # v3
+
+      - name: Decode keystore
+        env:
+          KEYSTORE_BASE64: ${{ secrets.KEYSTORE_BASE64 }}
+        run: echo "$KEYSTORE_BASE64" | base64 -d > release.jks
+
+      - name: Zipalign, sign, and verify
+        env:
+          KEYSTORE_PASSWORD: ${{ secrets.KEYSTORE_PASSWORD }}
+          KEY_ALIAS: ${{ secrets.KEY_ALIAS }}
+          KEY_PASSWORD: ${{ secrets.KEY_PASSWORD }}
+          RELEASE_CERT_SHA256: ${{ secrets.RELEASE_CERT_SHA256 }}
+          RELEASE_TAG: ${{ needs.build.outputs.release_tag }}
+        run: |
+          set -euo pipefail
+          BT="$(ls -d "$ANDROID_HOME"/build-tools/* | sort -V | tail -1)"
+          UNSIGNED="$(find unsigned -name '*.apk' | head -1)"
+          OUT="PocketNode-${RELEASE_TAG}.apk"
+
+          "$BT/zipalign" -f -p 4 "$UNSIGNED" aligned.apk
+          "$BT/apksigner" sign \
+            --ks release.jks \
+            --ks-pass "pass:${KEYSTORE_PASSWORD}" \
+            --key-pass "pass:${KEY_PASSWORD}" \
+            --ks-key-alias "${KEY_ALIAS}" \
+            --out "$OUT" aligned.apk
+          "$BT/apksigner" verify --print-certs "$OUT"
+
+          # Fail the release if the signing cert does not match the fingerprint
+          # baked into the APK — otherwise the in-app updater would reject this
+          # build for every existing user (URL/channel-substitution guard, #293).
+          ACTUAL="$("$BT/apksigner" verify --print-certs "$OUT" \
+            | awk -F': ' '/SHA-256 digest/{print $2; exit}' | tr 'A-F' 'a-f' | tr -d ': ')"
+          EXPECTED="$(printf '%s' "${RELEASE_CERT_SHA256:-}" | tr 'A-F' 'a-f' | tr -d ': ')"
+          echo "signed cert SHA-256: $ACTUAL"
+          if [ -n "$EXPECTED" ] && [ "$ACTUAL" != "$EXPECTED" ]; then
+            echo "::error::Signing cert SHA-256 ($ACTUAL) != embedded RELEASE_CERT_SHA256 ($EXPECTED). In-app updater would reject this build."
+            exit 1
+          fi
+
+          rm -f release.jks aligned.apk
+
       - name: Create GitHub Release
         uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2
         with:
-          tag_name: ${{ steps.validate_tag.outputs.release_tag }}
-          files: android/app/build/outputs/apk/release/*.apk
+          tag_name: ${{ needs.build.outputs.release_tag }}
+          files: PocketNode-*.apk
           generate_release_notes: true
