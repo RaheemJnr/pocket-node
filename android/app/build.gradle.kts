@@ -90,6 +90,14 @@ android {
         }
     }
 
+    // -PunsignedRelease=true builds an UNSIGNED release APK. Used by the split
+    // release workflow (F4 follow-up): the native + APK build runs in a
+    // no-secrets job, and a separate minimal job signs the artifact with
+    // apksigner. Keeps the untrusted Cargo/Gradle build out of the process that
+    // holds the keystore. Default false preserves the fail-closed behavior for
+    // every normal `assembleRelease`.
+    val unsignedRelease = (project.findProperty("unsignedRelease") as String?)?.toBoolean() ?: false
+
     signingConfigs {
         // Override AGP's auto-generated debug keystore with a checked-in one.
         // The upgrade-smoke harness builds the prev APK on one runner and the
@@ -148,7 +156,7 @@ android {
             "packageReleaseUniversalApk",
         )
         val needsReleaseSigning = allTasks.any { task -> task.name in signingTaskNames }
-        if (needsReleaseSigning) {
+        if (needsReleaseSigning && !unsignedRelease) {
             val missingVars = listOf("KEYSTORE_PATH", "KEYSTORE_PASSWORD", "KEY_ALIAS", "KEY_PASSWORD")
                 .filter { System.getenv(it) == null }
             if (missingVars.isNotEmpty()) {
@@ -167,7 +175,9 @@ android {
                 getDefaultProguardFile("proguard-android-optimize.txt"),
                 "proguard-rules.pro"
             )
-            signingConfig = signingConfigs.getByName("release")
+            // Unsigned when -PunsignedRelease=true (split release workflow signs
+            // the artifact in a separate minimal job); signed otherwise.
+            signingConfig = if (unsignedRelease) null else signingConfigs.getByName("release")
         }
     }
 
