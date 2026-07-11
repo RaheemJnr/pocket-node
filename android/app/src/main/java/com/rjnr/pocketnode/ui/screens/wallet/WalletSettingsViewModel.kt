@@ -443,7 +443,36 @@ class WalletSettingsViewModel @Inject constructor(
      *
      * Replaces the old V1-fallback path which crashed on V2 parents.
      */
-    fun addSubAccount(activity: FragmentActivity, name: String) {
+    private fun canCreateV2BoundKey(): Boolean =
+        authManager.isBiometricEnrolled() || authManager.hasDeviceCredential()
+
+    // F1/F3: on a no-lock device the new sub-account persists at the V1
+    // software fallback. Warn first (shared consent dialog), matching
+    // onboarding, instead of silently downgrading.
+    private var pendingNoLockAction: (() -> Unit)? = null
+
+    private fun requestNoLockConsent(action: () -> Unit) {
+        pendingNoLockAction = action
+        _uiState.update { it.copy(showNoLockConsent = true) }
+    }
+
+    fun confirmNoLockConsent() {
+        val action = pendingNoLockAction
+        pendingNoLockAction = null
+        _uiState.update { it.copy(showNoLockConsent = false) }
+        action?.invoke()
+    }
+
+    fun dismissNoLockConsent() {
+        pendingNoLockAction = null
+        _uiState.update { it.copy(showNoLockConsent = false) }
+    }
+
+    fun addSubAccount(activity: FragmentActivity, name: String, consented: Boolean = false) {
+        if (!consented && !canCreateV2BoundKey()) {
+            requestNoLockConsent { addSubAccount(activity, name, consented = true) }
+            return
+        }
         viewModelScope.launch {
             when (val readResult = walletKeyReader.readKeyMaterial(
                 activity = activity,
@@ -470,15 +499,25 @@ class WalletSettingsViewModel @Inject constructor(
                     // so the user knows this is securing the NEW sub-account,
                     // not re-confirming the parent unlock from prompt #1.
                     val result = walletRepository.createSubAccount(walletId, name, parentMnemonic = words) { newWalletId, bundle ->
-                        walletKeyWriter.persistNewWallet(
-                            activity = activity,
-                            walletId = newWalletId,
-                            bundle = bundle,
-                            walletType = KeyManager.WALLET_TYPE_MNEMONIC,
-                            mnemonicBackedUp = false,
-                            promptTitle = "Secure new sub-account",
-                            promptSubtitle = "Encrypt the new account's keys.",
-                        )
+                        if (canCreateV2BoundKey()) {
+                            walletKeyWriter.persistNewWallet(
+                                activity = activity,
+                                walletId = newWalletId,
+                                bundle = bundle,
+                                walletType = KeyManager.WALLET_TYPE_MNEMONIC,
+                                mnemonicBackedUp = false,
+                                promptTitle = "Secure new sub-account",
+                                promptSubtitle = "Encrypt the new account's keys.",
+                            )
+                        } else {
+                            // No secure lock; the user consented to V1 above.
+                            walletKeyWriter.persistNewWalletV1Fallback(
+                                walletId = newWalletId,
+                                bundle = bundle,
+                                walletType = KeyManager.WALLET_TYPE_MNEMONIC,
+                                mnemonicBackedUp = false,
+                            )
+                        }
                     }
                     result.onFailure { e ->
                         // Cancelled at the persist prompt: silent. Other errors: surface.
@@ -519,6 +558,8 @@ class WalletSettingsViewModel @Inject constructor(
 data class WalletSettingsUiState(
     val wallet: WalletEntity? = null,
     val subAccounts: List<WalletEntity> = emptyList(),
+    /** F1/F3: show the no-device-lock consent dialog before a V1 sub-account write. */
+    val showNoLockConsent: Boolean = false,
     val isEditing: Boolean = false,
     val editName: String = "",
     val isBackedUp: Boolean = false,

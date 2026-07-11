@@ -115,6 +115,15 @@ fun AddWalletScreen(
         }
     }
 
+    // F1/F3: no device lock -> warn before persisting at the V1 software
+    // fallback, matching onboarding, instead of silently downgrading.
+    if (uiState.showNoLockConsent) {
+        com.rjnr.pocketnode.ui.components.NoDeviceLockConsentDialog(
+            onConfirm = { viewModel.confirmNoLockConsent() },
+            onDismiss = { viewModel.dismissNoLockConsent() },
+        )
+    }
+
     Scaffold(
         topBar = {
             TopAppBar(

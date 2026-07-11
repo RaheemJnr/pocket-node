@@ -27,6 +27,8 @@ private const val TAG = "AddWalletVM"
 
 data class AddWalletUiState(
     val isLoading: Boolean = false,
+    /** F1/F3: show the no-device-lock informed-consent dialog before a V1 fallback write. */
+    val showNoLockConsent: Boolean = false,
     val name: String = "",
     val importWords: List<String> = List(12) { "" },
     val importSuggestions: Map<Int, List<String>> = emptyMap(),
@@ -60,6 +62,30 @@ class AddWalletViewModel @Inject constructor(
      */
     private fun canCreateV2BoundKey(): Boolean =
         authManager.isBiometricEnrolled() || authManager.hasDeviceCredential()
+
+    // F1/F3: on a no-lock device, persisting drops to the V1 software fallback.
+    // Onboarding warns before this; the Add Wallet flows must too. Each action
+    // takes a `consented` flag: the first call, if no secure lock, stashes a
+    // re-invocation and shows the shared consent dialog instead of silently
+    // downgrading. Confirm re-runs the action with consented=true.
+    private var pendingNoLockAction: (() -> Unit)? = null
+
+    private fun requestNoLockConsent(action: () -> Unit) {
+        pendingNoLockAction = action
+        _uiState.update { it.copy(showNoLockConsent = true) }
+    }
+
+    fun confirmNoLockConsent() {
+        val action = pendingNoLockAction
+        pendingNoLockAction = null
+        _uiState.update { it.copy(showNoLockConsent = false) }
+        action?.invoke()
+    }
+
+    fun dismissNoLockConsent() {
+        pendingNoLockAction = null
+        _uiState.update { it.copy(showNoLockConsent = false, isLoading = false) }
+    }
 
     /**
      * Persist a new wallet's keys, choosing the V1 software-only fallback when
@@ -139,7 +165,7 @@ class AddWalletViewModel @Inject constructor(
      *   2. Encrypt + persist the new sub-account's key material via
      *      [WalletKeyWriter.persistNewWallet] (inside [persistKeys]).
      */
-    fun createSubAccount(activity: FragmentActivity) {
+    fun createSubAccount(activity: FragmentActivity, consented: Boolean = false) {
         if (_uiState.value.isLoading) return // prevent double-tap
         val name = _uiState.value.name.trim()
         val parentId = _uiState.value.selectedParentId
@@ -150,6 +176,10 @@ class AddWalletViewModel @Inject constructor(
         }
         if (parentId == null) {
             _uiState.update { it.copy(error = UiMessage.Resource(R.string.vm_error_select_parent_wallet)) }
+            return
+        }
+        if (!consented && !canCreateV2BoundKey()) {
+            requestNoLockConsent { createSubAccount(activity, consented = true) }
             return
         }
 
@@ -289,11 +319,15 @@ class AddWalletViewModel @Inject constructor(
         _uiState.update { it.copy(importPrivateKey = key) }
     }
 
-    fun createNewWallet(activity: FragmentActivity) {
+    fun createNewWallet(activity: FragmentActivity, consented: Boolean = false) {
         if (_uiState.value.isLoading) return // prevent double-tap
         val name = _uiState.value.name.trim()
         if (name.isBlank()) {
             _uiState.update { it.copy(error = UiMessage.Resource(R.string.vm_error_enter_wallet_name)) }
+            return
+        }
+        if (!consented && !canCreateV2BoundKey()) {
+            requestNoLockConsent { createNewWallet(activity, consented = true) }
             return
         }
 
@@ -328,7 +362,7 @@ class AddWalletViewModel @Inject constructor(
         }
     }
 
-    fun importMnemonic(activity: FragmentActivity) {
+    fun importMnemonic(activity: FragmentActivity, consented: Boolean = false) {
         if (_uiState.value.isLoading) return // prevent double-tap
         val name = _uiState.value.name.trim()
         val words = _uiState.value.importWords.map { it.trim().lowercase() }
@@ -347,6 +381,10 @@ class AddWalletViewModel @Inject constructor(
         }
         if (!mnemonicManager.validateMnemonic(words)) {
             _uiState.update { it.copy(error = UiMessage.Resource(R.string.vm_error_invalid_mnemonic)) }
+            return
+        }
+        if (!consented && !canCreateV2BoundKey()) {
+            requestNoLockConsent { importMnemonic(activity, consented = true) }
             return
         }
 
@@ -375,7 +413,7 @@ class AddWalletViewModel @Inject constructor(
         }
     }
 
-    fun importRawKey(activity: FragmentActivity) {
+    fun importRawKey(activity: FragmentActivity, consented: Boolean = false) {
         if (_uiState.value.isLoading) return // prevent double-tap
         val name = _uiState.value.name.trim()
         val key = _uiState.value.importPrivateKey.trim()
@@ -386,6 +424,10 @@ class AddWalletViewModel @Inject constructor(
         }
         if (key.removePrefix("0x").length != 64) {
             _uiState.update { it.copy(error = UiMessage.Resource(R.string.vm_error_invalid_private_key)) }
+            return
+        }
+        if (!consented && !canCreateV2BoundKey()) {
+            requestNoLockConsent { importRawKey(activity, consented = true) }
             return
         }
 
