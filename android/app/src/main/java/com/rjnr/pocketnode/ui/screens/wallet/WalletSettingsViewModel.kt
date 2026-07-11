@@ -250,8 +250,13 @@ class WalletSettingsViewModel @Inject constructor(
     fun requiresPinForSeedPhrase(): Boolean = pinManager.hasPin()
 
     fun onPinVerified() {
-        _uiState.update { it.copy(seedPhraseUnlocked = true) }
+        _uiState.update { it.copy(seedPhraseUnlocked = true, pinVerifyRequested = false) }
         loadSensitiveData()
+    }
+
+    /** Screen consumed the [WalletSettingsUiState.pinVerifyRequested] navigation signal (F2). */
+    fun onPinVerifyRequestHandled() {
+        _uiState.update { it.copy(pinVerifyRequested = false) }
     }
 
     fun lockSeedPhrase() {
@@ -325,13 +330,22 @@ class WalletSettingsViewModel @Inject constructor(
                 // path available without a lock; AuthScreen's migration
                 // upgrades the row once the user enables one.
                 if (!authManager.isBiometricEnrolled() && !authManager.hasDeviceCredential()) {
-                    Log.i(TAG, "No secure lock — V1 reveal without lazy V2 upgrade for $walletId")
+                    // F2: no device lock, so no BiometricPrompt/CryptoObject gate
+                    // is available. The app PIN is then the only per-operation
+                    // gate for revealing the seed / private key. Require it
+                    // (route to PinEntry) instead of silently unlocking — a
+                    // momentarily-unlocked session must not reveal secrets
+                    // without the PIN. If there is no PIN either, there is
+                    // nothing to gate with, so proceed.
+                    if (noLockRevealNeedsPin(pinManager.hasPin(), _uiState.value.seedPhraseUnlocked)) {
+                        Log.i(TAG, "No secure lock — gating V1 reveal behind app PIN for $walletId")
+                        _uiState.update { it.copy(pinVerifyRequested = true) }
+                        return@launch
+                    }
+                    Log.i(TAG, "No secure lock, no PIN — V1 reveal for $walletId")
                     loadSensitiveData()
                     // The screen gate is `seedPhraseUnlocked || !requiresPin`;
-                    // without this flip the words loaded but stayed hidden and
-                    // the tap looked like a no-op (device-test 2026-07). No
-                    // stronger credential exists on a no-lock device — the
-                    // app-level PIN at entry is the gate.
+                    // flip so the loaded words show.
                     _uiState.update { it.copy(seedPhraseUnlocked = true) }
                     return@launch
                 }
@@ -527,6 +541,18 @@ class WalletSettingsViewModel @Inject constructor(
     fun clearError() {
         _uiState.update { it.copy(error = null) }
     }
+
+    companion object {
+        /**
+         * F2: on a no-lock device (no biometric, no device credential) the app
+         * PIN is the only per-operation gate for revealing secrets. A reveal
+         * needs the PIN when one is set and the seed is not already unlocked in
+         * this session. With no PIN there is nothing to gate with, so reveal
+         * proceeds.
+         */
+        fun noLockRevealNeedsPin(hasPin: Boolean, alreadyUnlocked: Boolean): Boolean =
+            hasPin && !alreadyUnlocked
+    }
 }
 
 data class WalletSettingsUiState(
@@ -545,5 +571,11 @@ data class WalletSettingsUiState(
     val error: com.rjnr.pocketnode.ui.util.UiMessage? = null,
     val seedPhraseUnlocked: Boolean = false,
     val privateKeyHex: String? = null,
-    val mnemonicWords: List<String>? = null
+    val mnemonicWords: List<String>? = null,
+    /**
+     * F2: a no-lock V1 reveal needs the app PIN. The screen observes this,
+     * navigates to PinEntry("verify"), and clears it; on success the returning
+     * flow calls [WalletSettingsViewModel.onPinVerified].
+     */
+    val pinVerifyRequested: Boolean = false,
 )
