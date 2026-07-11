@@ -1,6 +1,7 @@
 package com.rjnr.pocketnode
 
 import android.os.Bundle
+import android.util.Log
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.compose.foundation.layout.fillMaxSize
@@ -62,6 +63,23 @@ class MainActivity : FragmentActivity() {
 
         // Clean up any orphaned .tmp files from interrupted PIN re-encryption
         keyBackupManager.cleanupOrphanedTmpFiles()
+
+        // #370: reset the PIN failed-attempt counter once after an overwrite
+        // install / version upgrade, BEFORE the startup gate below reads the
+        // lockout state. A fresh install (last-seen 0) just records the version;
+        // an ordinary same-version relaunch is a no-op. Note: this is a
+        // deliberate product choice (see #370) that trades a little brute-force
+        // hardening — a sideloaded higher-versionCode build would also clear the
+        // count — for not stranding a user who fumbled their PIN before updating.
+        run {
+            val lastSeen = walletPreferences.getLastSeenVersionCode()
+            val current = BuildConfig.VERSION_CODE
+            if (PinManager.shouldResetAttemptsForUpgrade(lastSeen, current)) {
+                pinManager.resetFailedAttempts()
+                Log.i("MainActivity", "PIN attempt counter reset after upgrade $lastSeen -> $current (#370)")
+            }
+            if (lastSeen != current) walletPreferences.setLastSeenVersionCode(current)
+        }
 
         // Startup gate: must resolve synchronously to determine start destination.
         // This is the ONE acceptable runBlocking site — it runs once during cold start

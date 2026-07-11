@@ -107,6 +107,19 @@ class WalletPreferences @Inject constructor(
         prefs.edit().putString(KEY_SELECTED_NETWORK, network.name).commit()
     }
 
+    /**
+     * Last app versionCode seen at cold start (#370). Default 0 = never
+     * recorded (fresh install). Used to detect an overwrite install / upgrade
+     * and reset the PIN failed-attempt counter once.
+     */
+    fun getLastSeenVersionCode(): Int = prefs.getInt(KEY_LAST_SEEN_VERSION_CODE, 0)
+
+    fun setLastSeenVersionCode(code: Int) {
+        // commit(): the upgrade check runs during cold start before the PIN
+        // gate; the write must land before a possible Process.killProcess().
+        prefs.edit().putInt(KEY_LAST_SEEN_VERSION_CODE, code).commit()
+    }
+
     // --- Per-network key helper ---
 
     private fun networkKey(key: String, network: NetworkType? = null): String {
@@ -392,6 +405,7 @@ class WalletPreferences @Inject constructor(
         private const val TAG = "WalletPreferences"
         private const val PREFS_NAME = "ckb_wallet_prefs"
         private const val KEY_SELECTED_NETWORK = "selected_network"
+        private const val KEY_LAST_SEEN_VERSION_CODE = "last_seen_version_code"
         private const val KEY_SYNC_MODE = "sync_mode"
         private const val KEY_CUSTOM_BLOCK_HEIGHT = "custom_block_height"
         private const val KEY_INITIAL_SYNC_COMPLETED = "initial_sync_completed"
