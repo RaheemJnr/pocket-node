@@ -191,6 +191,22 @@ class PinManager @Inject constructor(
             .apply()
     }
 
+    /**
+     * #370: clear the failed-attempt counter and any lockout, keeping the PIN
+     * itself. Called once after an overwrite install / version upgrade so a
+     * user who fumbled their PIN before upgrading is not still staring at "out
+     * of attempts" on the freshly upgraded build. Committed synchronously
+     * because the caller runs it during cold start, before the PIN gate reads
+     * the lockout state.
+     */
+    fun resetFailedAttempts() {
+        prefs.edit()
+            .putInt(KEY_FAILED_ATTEMPTS, 0)
+            .remove(KEY_LAST_FAILED_AT)
+            .remove(KEY_LOCKOUT_UNTIL)
+            .commit()
+    }
+
     fun getRemainingAttempts(): Int {
         val failed = prefs.getInt(KEY_FAILED_ATTEMPTS, 0)
         return (MAX_ATTEMPTS - failed).coerceAtLeast(0)
@@ -327,5 +343,15 @@ class PinManager @Inject constructor(
         private const val KEY_FAILED_ATTEMPTS = "failed_attempts"
         private const val KEY_LAST_FAILED_AT = "last_failed_at"
         private const val KEY_LOCKOUT_UNTIL = "lockout_until"
+
+        /**
+         * #370: whether an overwrite install / version bump should reset the
+         * failed-attempt counter. True only on a genuine upgrade — a recorded
+         * previous version strictly below the current one. A fresh install
+         * (lastSeen 0) has no counter to reset; a same-version relaunch or a
+         * downgrade must not clear a legitimate lockout.
+         */
+        fun shouldResetAttemptsForUpgrade(lastSeen: Int, current: Int): Boolean =
+            lastSeen in 1 until current
     }
 }
