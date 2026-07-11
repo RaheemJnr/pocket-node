@@ -104,6 +104,16 @@ fun WalletSettingsScreen(
         if (uiState.deleted) onNavigateBack()
     }
 
+    // F2: a no-lock V1 reveal asked for the app PIN. Route to PinEntry("verify");
+    // on success the returning flow calls viewModel.onPinVerified() (NavGraph),
+    // which loads the secret and unlocks the reveal.
+    LaunchedEffect(uiState.pinVerifyRequested) {
+        if (uiState.pinVerifyRequested) {
+            viewModel.onPinVerifyRequestHandled()
+            onNavigateToPinVerify()
+        }
+    }
+
     LaunchedEffect(uiState.error) {
         uiState.error?.let { msg ->
             snackbarHostState.showSnackbar(msg.resolveString(context))
