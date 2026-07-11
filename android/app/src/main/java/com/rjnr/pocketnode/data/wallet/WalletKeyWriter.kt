@@ -106,21 +106,17 @@ class WalletKeyWriter @Inject constructor(
         promptTitle: String = "Secure wallet",
         promptSubtitle: String = "Use your phone's screen lock — fingerprint, face, or device PIN — to encrypt this wallet's keys.",
     ): Result {
-        // #354 follow-up: a V2 auth-bound key cannot exist without an enrolled
-        // biometric or device credential. AddWalletViewModel pre-gated this,
-        // but other callers (WalletSettings addSubAccount, discovery restore)
-        // called straight in and crashed with "Secure lock screen must be
-        // enabled" on no-lock devices. Gate HERE so every caller falls back to
-        // the V1 software key; the AuthScreen migration loop upgrades the row
-        // to V2 once the user enables a device lock.
+        // #354 follow-up + security F1: a V2 auth-bound key cannot exist
+        // without an enrolled biometric or device credential. Do NOT silently
+        // downgrade to the V1 software key here — that hid a storage-security
+        // downgrade from callers (Add Wallet, WalletSettings addSubAccount,
+        // discovery restore) whose prompt copy implied secure persistence.
+        // Return NoSecureLock; each UI flow decides whether to opt into
+        // persistNewWalletV1Fallback AFTER showing the informed-consent
+        // "Continue without a device lock?" dialog, matching onboarding.
         if (!authManager.isBiometricEnrolled() && !authManager.hasDeviceCredential()) {
-            Log.i(TAG, "No secure lock on device — persisting $walletId at V1 fallback")
-            return persistNewWalletV1Fallback(
-                walletId = walletId,
-                bundle = bundle,
-                walletType = walletType,
-                mnemonicBackedUp = mnemonicBackedUp,
-            )
+            Log.i(TAG, "No secure lock on device — returning NoSecureLock for $walletId")
+            return Result.NoSecureLock
         }
 
         val cipher = try {
@@ -135,25 +131,17 @@ class WalletKeyWriter @Inject constructor(
             // it. Race path only now that the pre-gate above exists (e.g. lock
             // removed mid-flow): fall back to V1 like the gate would have.
             if (e.cause?.message?.contains("Secure lock screen", ignoreCase = true) == true) {
-                Log.w(TAG, "V2 key creation refused mid-flow (no secure lock); V1 fallback", e)
-                return persistNewWalletV1Fallback(
-                    walletId = walletId,
-                    bundle = bundle,
-                    walletType = walletType,
-                    mnemonicBackedUp = mnemonicBackedUp,
-                )
+                // Race: the lock was removed mid-flow. Same as the pre-gate —
+                // return NoSecureLock (F1) rather than silently downgrading.
+                Log.w(TAG, "V2 key creation refused mid-flow (no secure lock); NoSecureLock", e)
+                return Result.NoSecureLock
             }
             throw e
         } catch (e: IllegalStateException) {
             // Same condition, unwrapped form (older API levels).
             if (e.message?.contains("Secure lock screen", ignoreCase = true) == true) {
-                Log.w(TAG, "V2 key creation refused mid-flow (no secure lock); V1 fallback", e)
-                return persistNewWalletV1Fallback(
-                    walletId = walletId,
-                    bundle = bundle,
-                    walletType = walletType,
-                    mnemonicBackedUp = mnemonicBackedUp,
-                )
+                Log.w(TAG, "V2 key creation refused mid-flow (no secure lock); NoSecureLock", e)
+                return Result.NoSecureLock
             }
             throw e
         }

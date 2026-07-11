@@ -66,6 +66,15 @@ fun WalletManagerScreen(
     val snackbarHostState = remember { SnackbarHostState() }
     val context = androidx.compose.ui.platform.LocalContext.current
 
+    // F1/F3: no device lock -> warn before restoring sub-accounts at the V1
+    // software fallback, matching onboarding.
+    if (uiState.showNoLockConsent) {
+        com.rjnr.pocketnode.ui.components.NoDeviceLockConsentDialog(
+            onConfirm = { viewModel.confirmNoLockConsent() },
+            onDismiss = { viewModel.dismissNoLockConsent() },
+        )
+    }
+
     LaunchedEffect(uiState.error) {
         uiState.error?.let { msg ->
             snackbarHostState.showSnackbar(msg.resolveString(context))

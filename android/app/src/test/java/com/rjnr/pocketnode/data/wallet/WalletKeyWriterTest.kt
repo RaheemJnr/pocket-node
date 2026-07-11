@@ -111,24 +111,40 @@ class WalletKeyWriterTest {
     }
 
     /**
-     * No secure lock on the device: persistNewWallet must fall back to the
-     * V1 software key with NO auth prompt instead of crashing with
-     * "Secure lock screen must be enabled" (emulator repro, #354 follow-up:
-     * WalletSettings addSubAccount and discovery restore hit this — only
-     * AddWalletViewModel had the pre-gate).
+     * Security F1: no secure lock on the device. persistNewWallet must NOT
+     * silently downgrade to V1 — that hid a storage-security downgrade from
+     * callers whose prompt copy implied secure persistence. It returns
+     * NoSecureLock and writes nothing; each UI flow shows the no-lock consent
+     * dialog and only then opts into persistNewWalletV1Fallback.
      */
     @Test
-    fun `persistNewWallet falls back to V1 when device has no secure lock`() = runTest {
+    fun `persistNewWallet returns NoSecureLock and writes nothing when no secure lock`() = runTest {
         io.mockk.every { authManager.isBiometricEnrolled() } returns false
         io.mockk.every { authManager.hasDeviceCredential() } returns false
 
         val result = writer.persistNewWallet(activity, "w-nolock", bundle, "mnemonic", false)
 
+        assertEquals(WalletKeyWriter.Result.NoSecureLock, result)
+        assertNull(keyMaterialDao.getByWalletId("w-nolock"))
+        // No prompt, no silent downgrade.
+        coVerify(exactly = 0) {
+            authManager.authenticateForCipher(any(), any<Cipher>(), any(), any())
+        }
+    }
+
+    /**
+     * The explicit, post-consent fallback still writes a V1 row (kdfVersion=1)
+     * with no auth prompt — this is what the UI flows call after the user
+     * confirms the no-lock consent dialog.
+     */
+    @Test
+    fun `persistNewWalletV1Fallback writes a V1 row without a prompt`() = runTest {
+        val result = writer.persistNewWalletV1Fallback("w-v1", bundle, "mnemonic", false)
+
         assertEquals(WalletKeyWriter.Result.Success, result)
-        val entity = keyMaterialDao.getByWalletId("w-nolock")
+        val entity = keyMaterialDao.getByWalletId("w-v1")
         assertNotNull(entity)
         assertEquals(1, entity!!.kdfVersion)
-        // The V2 prompt must never fire on the fallback path.
         coVerify(exactly = 0) {
             authManager.authenticateForCipher(any(), any<Cipher>(), any(), any())
         }

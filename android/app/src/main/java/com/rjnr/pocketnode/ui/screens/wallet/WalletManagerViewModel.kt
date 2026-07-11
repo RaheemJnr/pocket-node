@@ -23,7 +23,32 @@ class WalletManagerViewModel @Inject constructor(
     private val subAccountCandidateDao: com.rjnr.pocketnode.data.database.dao.SubAccountCandidateDao,
     private val walletKeyReader: com.rjnr.pocketnode.data.wallet.WalletKeyReader,
     private val walletKeyWriter: com.rjnr.pocketnode.data.wallet.WalletKeyWriter,
+    private val authManager: com.rjnr.pocketnode.data.auth.AuthManager,
 ) : ViewModel() {
+
+    private fun canCreateV2BoundKey(): Boolean =
+        authManager.isBiometricEnrolled() || authManager.hasDeviceCredential()
+
+    // F1/F3: no device lock -> restored sub-accounts persist at the V1 software
+    // fallback. Warn once before the batch, matching onboarding.
+    private var pendingNoLockAction: (() -> Unit)? = null
+
+    private fun requestNoLockConsent(action: () -> Unit) {
+        pendingNoLockAction = action
+        _uiState.update { it.copy(showNoLockConsent = true) }
+    }
+
+    fun confirmNoLockConsent() {
+        val action = pendingNoLockAction
+        pendingNoLockAction = null
+        _uiState.update { it.copy(showNoLockConsent = false) }
+        action?.invoke()
+    }
+
+    fun dismissNoLockConsent() {
+        pendingNoLockAction = null
+        _uiState.update { it.copy(showNoLockConsent = false) }
+    }
 
     private val _uiState = MutableStateFlow(WalletManagerUiState())
     val uiState: StateFlow<WalletManagerUiState> = _uiState.asStateFlow()
@@ -63,9 +88,16 @@ class WalletManagerViewModel @Inject constructor(
      * per restored account — the same two-prompt contract as manual
      * sub-account creation, just batched and user-initiated from the banner.
      */
-    fun restoreFoundSubAccounts(activity: androidx.fragment.app.FragmentActivity) {
+    fun restoreFoundSubAccounts(
+        activity: androidx.fragment.app.FragmentActivity,
+        consented: Boolean = false,
+    ) {
         val found = _uiState.value.foundCandidates
         if (found.isEmpty() || _uiState.value.isRestoring) return
+        if (!consented && !canCreateV2BoundKey()) {
+            requestNoLockConsent { restoreFoundSubAccounts(activity, consented = true) }
+            return
+        }
         _uiState.update { it.copy(isRestoring = true) }
         viewModelScope.launch {
             try {
@@ -90,15 +122,25 @@ class WalletManagerViewModel @Inject constructor(
                             parentMnemonic = words,
                             explicitIndex = candidate.accountIndex,
                             persistKeys = { newWalletId, bundle ->
-                                walletKeyWriter.persistNewWallet(
-                                    activity = activity,
-                                    walletId = newWalletId,
-                                    bundle = bundle,
-                                    walletType = com.rjnr.pocketnode.data.wallet.KeyManager.WALLET_TYPE_MNEMONIC,
-                                    mnemonicBackedUp = false,
-                                    promptTitle = "Secure restored sub-account",
-                                    promptSubtitle = "Encrypt sub-account ${candidate.accountIndex}'s keys.",
-                                )
+                                if (canCreateV2BoundKey()) {
+                                    walletKeyWriter.persistNewWallet(
+                                        activity = activity,
+                                        walletId = newWalletId,
+                                        bundle = bundle,
+                                        walletType = com.rjnr.pocketnode.data.wallet.KeyManager.WALLET_TYPE_MNEMONIC,
+                                        mnemonicBackedUp = false,
+                                        promptTitle = "Secure restored sub-account",
+                                        promptSubtitle = "Encrypt sub-account ${candidate.accountIndex}'s keys.",
+                                    )
+                                } else {
+                                    // No secure lock; user consented to V1 above.
+                                    walletKeyWriter.persistNewWalletV1Fallback(
+                                        walletId = newWalletId,
+                                        bundle = bundle,
+                                        walletType = com.rjnr.pocketnode.data.wallet.KeyManager.WALLET_TYPE_MNEMONIC,
+                                        mnemonicBackedUp = false,
+                                    )
+                                }
                             },
                         ).onSuccess { wallet ->
                             restored++
@@ -153,5 +195,7 @@ data class WalletManagerUiState(
     /** Discovered-but-unrestored sub-account slots with on-chain history (#82). */
     val foundCandidates: List<com.rjnr.pocketnode.data.database.entity.SubAccountCandidateEntity> = emptyList(),
     val isRestoring: Boolean = false,
+    /** F1/F3: show the no-device-lock consent dialog before V1 restore writes. */
+    val showNoLockConsent: Boolean = false,
     val error: com.rjnr.pocketnode.ui.util.UiMessage? = null,
 )

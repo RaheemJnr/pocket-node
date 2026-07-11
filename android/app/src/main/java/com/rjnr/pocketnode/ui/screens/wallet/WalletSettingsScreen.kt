@@ -111,6 +111,15 @@ fun WalletSettingsScreen(
         }
     }
 
+    // F1/F3: no device lock -> warn before persisting a sub-account at the V1
+    // software fallback, matching onboarding.
+    if (uiState.showNoLockConsent) {
+        com.rjnr.pocketnode.ui.components.NoDeviceLockConsentDialog(
+            onConfirm = { viewModel.confirmNoLockConsent() },
+            onDismiss = { viewModel.dismissNoLockConsent() },
+        )
+    }
+
     // Delete confirmation dialog
     if (uiState.showDeleteConfirm) {
         val warningText = buildString {
