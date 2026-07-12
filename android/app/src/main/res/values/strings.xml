@@ -468,6 +468,14 @@
     <string name="send_contact_picker_empty_no_match">No matches for \"%1$s\"</string>
     <string name="send_saved_as">Saved as %1$s</string>
     <string name="send_contact_picker_cd">Pick from contacts</string>
+    <string name="send_mode_single">Single</string>
+    <string name="send_mode_bulk">Bulk</string>
+    <string name="send_bulk_cta">Send Bulk Airdrop</string>
+    <string name="send_bulk_recipients_label">Recipient Addresses</string>
+    <string name="send_bulk_recipients_placeholder">Paste one CKB address per line</string>
+    <string name="send_bulk_summary">%1$d valid · %2$d duplicates removed · %3$d invalid · %4$d batches</string>
+    <string name="send_bulk_total_amount">Total send amount: %1$s CKB</string>
+    <string name="send_bulk_progress">Batch %1$d of %2$d · %3$d recipients submitted</string>
 
     <string name="save_contact_dialog_title">Save to contacts?</string>
     <string name="save_contact_dialog_body">Add this recipient to your address book to send to them faster next time.</string>

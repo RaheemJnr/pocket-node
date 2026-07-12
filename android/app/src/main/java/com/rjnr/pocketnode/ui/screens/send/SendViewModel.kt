@@ -13,7 +13,9 @@ import com.rjnr.pocketnode.data.database.entity.WalletEntity
 import com.rjnr.pocketnode.data.gateway.GatewayRepository
 import com.rjnr.pocketnode.data.gateway.models.NetworkType
 import com.rjnr.pocketnode.data.gateway.models.TransactionStatusResponse
+import com.rjnr.pocketnode.data.transaction.RecipientOutput
 import com.rjnr.pocketnode.data.transaction.TransactionBuilder
+import com.rjnr.pocketnode.data.wallet.AddressUtils
 import com.rjnr.pocketnode.data.wallet.KeyManager
 import com.rjnr.pocketnode.data.wallet.WalletKeyReader
 import com.rjnr.pocketnode.data.wallet.WalletRepository
@@ -39,8 +41,30 @@ enum class TransactionState {
     FAILED          // Transaction failed
 }
 
+enum class SendMode {
+    SINGLE,
+    BULK
+}
+
+private data class BulkParseResult(
+    val validAddresses: List<String>,
+    val invalidEntries: List<String>,
+    val duplicateCount: Int,
+)
+
 data class SendUiState(
+    val sendMode: SendMode = SendMode.SINGLE,
     val recipientAddress: String = "",
+    val bulkRecipientsText: String = "",
+    val bulkValidRecipients: List<String> = emptyList(),
+    val bulkInvalidEntries: List<String> = emptyList(),
+    val bulkDuplicateCount: Int = 0,
+    val bulkBatchCount: Int = 0,
+    val bulkTotalAmountShannons: Long = 0L,
+    val bulkCurrentBatch: Int = 0,
+    val bulkCompletedRecipients: Int = 0,
+    val bulkSubmittedTxHashes: List<String> = emptyList(),
+    val bulkFailureMessage: String? = null,
     val amountCkb: String = "",
     val isLoading: Boolean = false,
     val error: com.rjnr.pocketnode.ui.util.UiMessage? = null,
@@ -149,6 +173,7 @@ class SendViewModel @Inject constructor(
 
     companion object {
         private const val TAG = "SendViewModel"
+        private const val BULK_BATCH_SIZE = 25
         private const val POLLING_INTERVAL_MS = 3000L // Poll every 3 seconds
         private const val MAX_POLLING_ATTEMPTS = 120  // Stop after ~6 minutes
         private const val REQUIRED_CONFIRMATIONS = 3  // Consider fully confirmed after 3 confirmations
@@ -187,7 +212,9 @@ class SendViewModel @Inject constructor(
                         )
                     }
                 } else {
-                    _uiState.update { it.copy(networkType = network) }
+                    _uiState.update { current ->
+                        current.copy(networkType = network).refreshBulkPreview()
+                    }
                 }
             }
         }
@@ -215,6 +242,31 @@ class SendViewModel @Inject constructor(
                     matchedContact = exactMatch,
                 )
             }
+        }
+    }
+
+    fun updateSendMode(mode: SendMode) {
+        _uiState.update {
+            it.copy(
+                sendMode = mode,
+                error = null,
+                burnWarning = if (mode == SendMode.BULK) null else it.burnWarning,
+                estimatedFee = if (mode == SendMode.BULK) it.estimatedFee else it.estimatedFee,
+            ).refreshBulkPreview()
+        }
+        if (mode == SendMode.BULK) {
+            suggestionsJob?.cancel()
+            _uiState.update { it.copy(recipientSuggestions = emptyList(), matchedContact = null) }
+        }
+    }
+
+    fun updateBulkRecipients(text: String) {
+        _uiState.update {
+            it.copy(
+                bulkRecipientsText = text,
+                error = null,
+                bulkFailureMessage = null,
+            ).refreshBulkPreview()
         }
     }
 
@@ -265,6 +317,17 @@ class SendViewModel @Inject constructor(
                 .multiply(BigDecimal(100_000_000)).longValueExact()
         } catch (e: Exception) {
             0L
+        }
+
+        if (_uiState.value.sendMode == SendMode.BULK) {
+            _uiState.update {
+                it.copy(
+                    amountCkb = sanitized,
+                    error = null,
+                    burnWarning = null,
+                ).refreshBulkPreview(amountShannonsOverride = amountShannons)
+            }
+            return
         }
 
         val balance = _uiState.value.availableBalance
@@ -369,6 +432,14 @@ class SendViewModel @Inject constructor(
     }
 
     private fun validateInputs(): Boolean {
+        return if (_uiState.value.sendMode == SendMode.BULK) {
+            validateBulkInputs()
+        } else {
+            validateSingleInputs()
+        }
+    }
+
+    private fun validateSingleInputs(): Boolean {
         val state = _uiState.value
         if (state.recipientAddress.isBlank()) {
             _uiState.update { it.copy(error = com.rjnr.pocketnode.ui.util.UiMessage.Resource(com.rjnr.pocketnode.R.string.vm_error_enter_recipient)) }
@@ -397,6 +468,37 @@ class SendViewModel @Inject constructor(
         return true
     }
 
+    private fun validateBulkInputs(): Boolean {
+        val state = _uiState.value.refreshBulkPreview()
+        if (state.bulkRecipientsText.isBlank()) {
+            _uiState.update { it.copy(error = com.rjnr.pocketnode.ui.util.UiMessage.Raw("Paste at least one recipient address.")) }
+            return false
+        }
+        if (state.amountCkb.isBlank()) {
+            _uiState.update { it.copy(error = com.rjnr.pocketnode.ui.util.UiMessage.Resource(com.rjnr.pocketnode.R.string.vm_error_enter_amount)) }
+            return false
+        }
+        val amountShannons = parseAmountShannons(state.amountCkb)
+        if (amountShannons == null) {
+            _uiState.update { it.copy(error = com.rjnr.pocketnode.ui.util.UiMessage.Resource(com.rjnr.pocketnode.R.string.vm_error_invalid_amount)) }
+            return false
+        }
+        if (amountShannons < TransactionBuilder.MIN_CELL_CAPACITY) {
+            _uiState.update { it.copy(error = com.rjnr.pocketnode.ui.util.UiMessage.Resource(com.rjnr.pocketnode.R.string.vm_error_min_transfer)) }
+            return false
+        }
+        if (state.bulkValidRecipients.isEmpty()) {
+            _uiState.update { it.copy(error = com.rjnr.pocketnode.ui.util.UiMessage.Raw("No valid ${state.networkType.name.lowercase()} recipient addresses found.")) }
+            return false
+        }
+        val estimatedTotal = state.bulkTotalAmountShannons + state.estimatedFee
+        if (estimatedTotal > state.availableBalance) {
+            _uiState.update { it.copy(error = com.rjnr.pocketnode.ui.util.UiMessage.Resource(com.rjnr.pocketnode.R.string.vm_error_insufficient_balance)) }
+            return false
+        }
+        return true
+    }
+
     private fun sendTransactionV1OrFallback() {
         if (!validateInputs()) return
 
@@ -416,8 +518,8 @@ class SendViewModel @Inject constructor(
 
     private suspend fun executeSendV2(activity: FragmentActivity) {
         val state = _uiState.value
-        val amountShannons = BigDecimal(state.amountCkb).setScale(8, RoundingMode.DOWN)
-            .multiply(BigDecimal(100_000_000)).longValueExact()
+        val amountShannons = parseAmountShannons(state.amountCkb)
+            ?: error("Invalid amount state before authenticated send")
 
         val capturedAddress = repository.getCurrentAddress()
         if (capturedAddress == null) {
@@ -462,7 +564,11 @@ class SendViewModel @Inject constructor(
                 return
             }
             is WalletKeyReader.Result.Success -> {
-                proceedWithSend(amountShannons, capturedAddress, readResult.privateKey)
+                if (state.sendMode == SendMode.BULK) {
+                    proceedWithBulkSend(amountShannons, capturedAddress, readResult.privateKey)
+                } else {
+                    proceedWithSend(amountShannons, capturedAddress, readResult.privateKey)
+                }
             }
         }
     }
@@ -524,10 +630,8 @@ class SendViewModel @Inject constructor(
         val state = _uiState.value
         _uiState.update { it.copy(requiresAuth = false, authMethod = null) }
 
-        val amountShannons = try {
-            BigDecimal(state.amountCkb).setScale(8, RoundingMode.DOWN)
-                .multiply(BigDecimal(100_000_000)).longValueExact()
-        } catch (e: Exception) {
+        val amountShannons = parseAmountShannons(state.amountCkb)
+        if (amountShannons == null) {
             _uiState.update { it.copy(error = com.rjnr.pocketnode.ui.util.UiMessage.Resource(com.rjnr.pocketnode.R.string.vm_error_invalid_amount)) }
             return
         }
@@ -565,31 +669,35 @@ class SendViewModel @Inject constructor(
                 _uiState.update { it.copy(statusMessage = "Broadcasting transaction...") }
                 Log.d(TAG, "📡 prepareAndSend: fetching cells, filtering reserved, building, broadcasting...")
 
-                val recipient = state.recipientAddress
-                val txHash = repository.prepareAndSend(
-                    fromAddress = capturedAddress,
-                    toAddress = recipient,
-                    amountShannons = amountShannons,
-                    privateKey = capturedKey
-                ).getOrThrow()
-                Log.d(TAG, "✅ Transaction sent! Hash: $txHash")
+                if (state.sendMode == SendMode.BULK) {
+                    proceedWithBulkSend(amountShannons, capturedAddress, capturedKey)
+                } else {
+                    val recipient = state.recipientAddress
+                    val txHash = repository.prepareAndSend(
+                        fromAddress = capturedAddress,
+                        toAddress = recipient,
+                        amountShannons = amountShannons,
+                        privateKey = capturedKey
+                    ).getOrThrow()
+                    Log.d(TAG, "✅ Transaction sent! Hash: $txHash")
 
-                _uiState.update {
-                    it.copy(
-                        isLoading = false,
-                        txHash = txHash,
-                        recipientAddress = "",
-                        amountCkb = "",
-                        transactionState = TransactionState.PENDING,
-                        statusMessage = "Transaction submitted. Waiting for confirmation..."
-                    )
+                    _uiState.update {
+                        it.copy(
+                            isLoading = false,
+                            txHash = txHash,
+                            recipientAddress = "",
+                            amountCkb = "",
+                            transactionState = TransactionState.PENDING,
+                            statusMessage = "Transaction submitted. Waiting for confirmation..."
+                        )
+                    }
+
+                    // #197: usage bump for saved contacts, save-prompt for new ones.
+                    afterSendBookkeeping(recipient)
+
+                    // Start polling for transaction status using the captured address
+                    startPollingTransactionStatus(txHash, capturedAddress)
                 }
-
-                // #197: usage bump for saved contacts, save-prompt for new ones.
-                afterSendBookkeeping(recipient)
-
-                // Start polling for transaction status using the captured address
-                startPollingTransactionStatus(txHash, capturedAddress)
 
             } catch (e: Exception) {
                 Log.e(TAG, "❌ Transaction failed", e)
@@ -610,6 +718,82 @@ class SendViewModel @Inject constructor(
                 }
             } finally {
                 capturedKey.fill(0) // transient signing key — zero after use (#321)
+            }
+        }
+    }
+
+    private suspend fun proceedWithBulkSend(
+        amountShannons: Long,
+        capturedAddress: String,
+        privateKey: ByteArray,
+    ) {
+        val initialState = _uiState.value.refreshBulkPreview(amountShannonsOverride = amountShannons)
+        val recipients = initialState.bulkValidRecipients.map { RecipientOutput(it, amountShannons) }
+        val batches = recipients.chunked(BULK_BATCH_SIZE)
+        _uiState.update {
+            it.copy(
+                isLoading = true,
+                error = null,
+                txHash = null,
+                transactionState = TransactionState.SENDING,
+                statusMessage = "Broadcasting batch 1 of ${batches.size}...",
+                bulkCurrentBatch = 0,
+                bulkCompletedRecipients = 0,
+                bulkSubmittedTxHashes = emptyList(),
+                bulkFailureMessage = null,
+            )
+        }
+
+        try {
+            batches.forEachIndexed { index, batch ->
+                _uiState.update {
+                    it.copy(
+                        statusMessage = "Broadcasting batch ${index + 1} of ${batches.size}...",
+                        bulkCurrentBatch = index + 1,
+                    )
+                }
+                val txHash = repository.prepareAndSendBulk(
+                    fromAddress = capturedAddress,
+                    recipients = batch,
+                    privateKey = privateKey,
+                ).getOrThrow()
+                _uiState.update {
+                    it.copy(
+                        bulkCurrentBatch = index + 1,
+                        bulkCompletedRecipients = it.bulkCompletedRecipients + batch.size,
+                        bulkSubmittedTxHashes = it.bulkSubmittedTxHashes + txHash,
+                        statusMessage = "Submitted batch ${index + 1} of ${batches.size}.",
+                    )
+                }
+            }
+
+            _uiState.update {
+                it.copy(
+                    isLoading = false,
+                    bulkRecipientsText = "",
+                    bulkValidRecipients = emptyList(),
+                    bulkInvalidEntries = emptyList(),
+                    bulkDuplicateCount = 0,
+                    bulkBatchCount = 0,
+                    bulkTotalAmountShannons = 0L,
+                    amountCkb = "",
+                    estimatedFee = 0L,
+                    transactionState = TransactionState.PENDING,
+                    statusMessage = "Bulk send submitted for ${recipients.size} recipients across ${batches.size} transactions.",
+                )
+            }
+        } catch (e: Exception) {
+            Log.e(TAG, "Bulk send failed", e)
+            errorJournal.record("bulk-send", e.message ?: e.javaClass.simpleName)
+            _uiState.update {
+                it.copy(
+                    isLoading = false,
+                    error = com.rjnr.pocketnode.ui.util.UiMessage.Raw(parseErrorMessage(e)),
+                    errorDetail = e.message,
+                    transactionState = TransactionState.FAILED,
+                    statusMessage = "Bulk send stopped on batch ${it.bulkCurrentBatch}.",
+                    bulkFailureMessage = parseErrorMessage(e),
+                )
             }
         }
     }
@@ -818,6 +1002,56 @@ class SendViewModel @Inject constructor(
         super.onCleared()
         sendJob?.cancel()
         pollingJob?.cancel()
+    }
+
+    private fun SendUiState.refreshBulkPreview(amountShannonsOverride: Long? = null): SendUiState {
+        if (sendMode != SendMode.BULK) return this
+        val amountShannons = amountShannonsOverride ?: parseAmountShannons(amountCkb) ?: 0L
+        val parsed = parseBulkRecipients(bulkRecipientsText, networkType)
+        val batchCount = if (parsed.validAddresses.isEmpty()) 0 else (parsed.validAddresses.size + BULK_BATCH_SIZE - 1) / BULK_BATCH_SIZE
+        val estimatedFee = if (parsed.validAddresses.isEmpty() || amountShannons <= 0L) {
+            0L
+        } else {
+            parsed.validAddresses.chunked(BULK_BATCH_SIZE).sumOf { batch ->
+                transactionBuilder.estimateTransferFee(inputCount = 1, outputCount = batch.size + 1)
+            }
+        }
+        return copy(
+            bulkValidRecipients = parsed.validAddresses,
+            bulkInvalidEntries = parsed.invalidEntries,
+            bulkDuplicateCount = parsed.duplicateCount,
+            bulkBatchCount = batchCount,
+            bulkTotalAmountShannons = parsed.validAddresses.size * amountShannons,
+            estimatedFee = estimatedFee,
+            burnWarning = null,
+        )
+    }
+
+    private fun parseBulkRecipients(text: String, network: NetworkType): BulkParseResult {
+        val unique = LinkedHashSet<String>()
+        val invalid = mutableListOf<String>()
+        var duplicates = 0
+        text.lineSequence().forEachIndexed { index, rawLine ->
+            val line = rawLine.trim()
+            if (line.isBlank()) return@forEachIndexed
+            when {
+                !AddressUtils.isValid(line) -> invalid += "Line ${index + 1}: invalid address"
+                AddressUtils.getNetwork(line) != network -> invalid += "Line ${index + 1}: wrong network"
+                !unique.add(line) -> duplicates++
+            }
+        }
+        return BulkParseResult(
+            validAddresses = unique.toList(),
+            invalidEntries = invalid,
+            duplicateCount = duplicates,
+        )
+    }
+
+    private fun parseAmountShannons(amount: String): Long? = try {
+        BigDecimal(amount).setScale(8, RoundingMode.DOWN)
+            .multiply(BigDecimal(100_000_000)).longValueExact()
+    } catch (e: Exception) {
+        null
     }
 }
 

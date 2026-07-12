@@ -32,6 +32,11 @@ data class SweepPlan(
     val inputLockArgs: List<String>,
 )
 
+data class RecipientOutput(
+    val address: String,
+    val amountShannons: Long,
+)
+
 @Singleton
 class TransactionBuilder @Inject constructor(
     private val networkValidator: NetworkValidator
@@ -252,27 +257,50 @@ class TransactionBuilder @Inject constructor(
         privateKey: ByteArray,
         network: NetworkType
     ): Transaction {
+        return buildMultiTransfer(
+            fromAddress = fromAddress,
+            recipients = listOf(RecipientOutput(toAddress, amountShannons)),
+            availableCells = availableCells,
+            privateKey = privateKey,
+            network = network,
+        )
+    }
+
+    fun buildMultiTransfer(
+        fromAddress: String,
+        recipients: List<RecipientOutput>,
+        availableCells: List<Cell>,
+        privateKey: ByteArray,
+        network: NetworkType
+    ): Transaction {
         Log.d(TAG, "🔨 Building transfer transaction")
         // Sender + recipient + amount form a payment record — redact the
         // addresses and drop the amount from debug logcat (#321).
         Log.d(TAG, "  From: ${fromAddress.redactAddress()}")
-        Log.d(TAG, "  To: ${toAddress.redactAddress()}")
+        Log.d(TAG, "  Recipient count: ${recipients.size}")
 
-        // Validate recipient amount meets minimum cell capacity
-        if (amountShannons < MIN_CELL_CAPACITY) {
-            throw IllegalArgumentException(
-                "Transfer amount must be at least ${MIN_CELL_CAPACITY / 100_000_000} CKB (minimum cell capacity)"
-            )
+        require(recipients.isNotEmpty()) { "At least one recipient is required" }
+
+        recipients.forEach { recipient ->
+            if (recipient.amountShannons < MIN_CELL_CAPACITY) {
+                throw IllegalArgumentException(
+                    "Transfer amount must be at least ${MIN_CELL_CAPACITY / 100_000_000} CKB (minimum cell capacity)"
+                )
+            }
         }
 
         val senderScript = AddressUtils.parseAddress(fromAddress)
             ?: throw IllegalArgumentException("Invalid sender address")
-        val recipientScript = AddressUtils.parseAddress(toAddress)
-            ?: throw IllegalArgumentException("Invalid recipient address")
 
-        // Validate addresses match the app-level network config
-        networkValidator.validateTransferAddresses(fromAddress, toAddress, network)
-            .getOrThrow()
+        val recipientScripts = recipients.map { recipient ->
+            val script = AddressUtils.parseAddress(recipient.address)
+                ?: throw IllegalArgumentException("Invalid recipient address")
+            networkValidator.validateTransferAddresses(fromAddress, recipient.address, network)
+                .getOrThrow()
+            script
+        }
+
+        val totalRecipientAmount = recipients.sumOf { it.amountShannons }
 
         val isMainnet = network == NetworkType.MAINNET
         val secp256k1TxHash = if (isMainnet) MAINNET_SECP256K1_TX_HASH else TESTNET_SECP256K1_TX_HASH
@@ -280,7 +308,7 @@ class TransactionBuilder @Inject constructor(
         Log.d(TAG, "  Using SECP256K1 cell dep: $secp256k1TxHash")
 
         // Select cells with generous fee to ensure we gather enough inputs
-        val (selectedCells, totalInput) = selectCells(availableCells, amountShannons + DEFAULT_FEE)
+        val (selectedCells, totalInput) = selectCells(availableCells, totalRecipientAmount + DEFAULT_FEE)
 
         Log.d(TAG, "  Selected ${selectedCells.size} cells with total: $totalInput shannons")
 
@@ -288,23 +316,23 @@ class TransactionBuilder @Inject constructor(
             throw IllegalStateException("No cells available")
         }
 
-        if (totalInput < amountShannons + MIN_FEE) {
-            throw IllegalStateException("Insufficient balance: have $totalInput, need at least ${amountShannons + MIN_FEE}")
+        if (totalInput < totalRecipientAmount + MIN_FEE) {
+            throw IllegalStateException("Insufficient balance: have $totalInput, need at least ${totalRecipientAmount + MIN_FEE}")
         }
 
         // Compute dynamic fee based on actual tx structure
-        val changeWithDefaultFee = totalInput - amountShannons - DEFAULT_FEE
-        val initialOutputCount = if (changeWithDefaultFee >= MIN_CELL_CAPACITY) 2 else 1
+        val changeWithDefaultFee = totalInput - totalRecipientAmount - DEFAULT_FEE
+        val initialOutputCount = recipients.size + if (changeWithDefaultFee >= MIN_CELL_CAPACITY) 1 else 0
         var dynamicFee = estimateTransferFee(selectedCells.size, initialOutputCount)
 
         // Recompute change with the (smaller) dynamic fee
-        var change = totalInput - amountShannons - dynamicFee
-        val finalOutputCount = if (change >= MIN_CELL_CAPACITY) 2 else 1
+        var change = totalInput - totalRecipientAmount - dynamicFee
+        val finalOutputCount = recipients.size + if (change >= MIN_CELL_CAPACITY) 1 else 0
 
         // Re-estimate if output count changed (edge case: lower fee creates a viable change output)
         if (finalOutputCount != initialOutputCount) {
             dynamicFee = estimateTransferFee(selectedCells.size, finalOutputCount)
-            change = totalInput - amountShannons - dynamicFee
+            change = totalInput - totalRecipientAmount - dynamicFee
         }
 
         Log.d(TAG, "  Dynamic fee: $dynamicFee shannons (${dynamicFee / 100_000_000.0} CKB)")
@@ -322,15 +350,16 @@ class TransactionBuilder @Inject constructor(
         val outputs = mutableListOf<CellOutput>()
         val outputsData = mutableListOf<String>()
 
-        // Output to recipient
-        outputs.add(
-            CellOutput(
-                capacity = "0x${amountShannons.toString(16)}",
-                lock = recipientScript,
-                type = null
+        recipients.zip(recipientScripts).forEach { (recipient, script) ->
+            outputs.add(
+                CellOutput(
+                    capacity = "0x${recipient.amountShannons.toString(16)}",
+                    lock = script,
+                    type = null
+                )
             )
-        )
-        outputsData.add("0x")
+            outputsData.add("0x")
+        }
 
         // Change output back to sender (using dynamic fee).
         //

@@ -3,6 +3,7 @@ package com.rjnr.pocketnode.ui.screens.send
 import android.content.Intent
 import android.net.Uri
 import com.rjnr.pocketnode.data.auth.AuthMethod
+import com.rjnr.pocketnode.ui.screens.send.SendMode
 import androidx.compose.animation.animateColorAsState
 import androidx.compose.animation.core.RepeatMode
 import androidx.compose.animation.core.animateFloat
@@ -245,7 +246,9 @@ fun SendScreen(
         onNavigateToScanner = onNavigateToScanner,
         onOpenContactPicker = { showContactPicker = true },
         onSuggestionPicked = { viewModel.selectContact(it) },
+        updateSendMode = viewModel::updateSendMode,
         updateRecipient = viewModel::updateRecipient,
+        updateBulkRecipients = viewModel::updateBulkRecipients,
         updateAmount = viewModel::updateAmount,
         setMaxAmount = viewModel::setMaxAmount,
         sendTransaction = {
@@ -273,7 +276,9 @@ private fun SendScreenUI(
     onNavigateToScanner: () -> Unit,
     onOpenContactPicker: () -> Unit = {},
     onSuggestionPicked: (com.rjnr.pocketnode.data.database.entity.ContactEntity) -> Unit = {},
+    updateSendMode: (SendMode) -> Unit,
     updateRecipient: (recipientAddress: String) -> Unit,
+    updateBulkRecipients: (String) -> Unit,
     updateAmount: (amount: String) -> Unit,
     setMaxAmount: () -> Unit,
     sendTransaction: () -> Unit,
@@ -337,60 +342,121 @@ private fun SendScreenUI(
             }
 
             Spacer(modifier = Modifier.height(16.dp))
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(12.dp)
+            ) {
+                OutlinedButton(
+                    onClick = { updateSendMode(SendMode.SINGLE) },
+                    modifier = Modifier.weight(1f)
+                ) {
+                    Text(stringResource(R.string.send_mode_single))
+                }
+                Button(
+                    onClick = { updateSendMode(SendMode.BULK) },
+                    modifier = Modifier.weight(1f),
+                    colors = if (uiState.sendMode == SendMode.BULK) {
+                        ButtonDefaults.buttonColors()
+                    } else {
+                        ButtonDefaults.outlinedButtonColors()
+                    }
+                ) {
+                    Text(stringResource(R.string.send_mode_bulk))
+                }
+            }
+
+            Spacer(modifier = Modifier.height(24.dp))
             // Recipient Address
             Text(
-                "Recipient Address",
+                if (uiState.sendMode == SendMode.BULK) {
+                    stringResource(R.string.send_bulk_recipients_label)
+                } else {
+                    "Recipient Address"
+                },
                 color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.9f),
                 fontSize = 14.sp,
                 fontWeight = FontWeight.Medium
             )
             Spacer(modifier = Modifier.height(8.dp))
-            Row(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .height(62.dp)
-                    .background(MaterialTheme.colorScheme.surfaceVariant, RoundedCornerShape(8.dp))
-                    .padding(horizontal = 16.dp),
-                verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.spacedBy(8.dp)
-            ) {
-                BasicTextField(
-                    value = uiState.recipientAddress,
-                    onValueChange = { updateRecipient(it) },
-                    modifier = Modifier.weight(1f),
-                    maxLines = 3,
-                    singleLine = false,
-                    cursorBrush = SolidColor(MaterialTheme.colorScheme.onSurfaceVariant),
-                    enabled = !uiState.isLoading,
-                    textStyle = androidx.compose.ui.text.TextStyle(
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    ),
-                    decorationBox = { innerTextField ->
-                        if (uiState.recipientAddress.isEmpty()) {
-                            Text(
-                                "Enter CKB Address",
-                                color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.3f),
-                                fontSize = 16.sp
-                            )
+            if (uiState.sendMode == SendMode.BULK) {
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .height(148.dp)
+                        .background(MaterialTheme.colorScheme.surfaceVariant, RoundedCornerShape(8.dp))
+                        .padding(horizontal = 16.dp, vertical = 14.dp),
+                ) {
+                    BasicTextField(
+                        value = uiState.bulkRecipientsText,
+                        onValueChange = { updateBulkRecipients(it) },
+                        modifier = Modifier.fillMaxSize(),
+                        maxLines = Int.MAX_VALUE,
+                        singleLine = false,
+                        cursorBrush = SolidColor(MaterialTheme.colorScheme.onSurfaceVariant),
+                        enabled = !uiState.isLoading,
+                        textStyle = androidx.compose.ui.text.TextStyle(
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        ),
+                        decorationBox = { innerTextField ->
+                            if (uiState.bulkRecipientsText.isEmpty()) {
+                                Text(
+                                    stringResource(R.string.send_bulk_recipients_placeholder),
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.3f),
+                                    fontSize = 16.sp
+                                )
+                            }
+                            innerTextField()
                         }
-                        innerTextField()
-                    }
-                )
-                Icon(
-                    imageVector = Lucide.BookUser,
-                    contentDescription = stringResource(R.string.send_contact_picker_cd),
-                    modifier = Modifier.clickable { onOpenContactPicker() }
-                )
-                Icon(
-                    imageVector = Lucide.ScanLine,
-                    contentDescription = stringResource(R.string.send_scan_cd),
-                    modifier = Modifier.clickable{onNavigateToScanner()}
-                )
+                    )
+                }
+            } else {
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .height(62.dp)
+                        .background(MaterialTheme.colorScheme.surfaceVariant, RoundedCornerShape(8.dp))
+                        .padding(horizontal = 16.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    BasicTextField(
+                        value = uiState.recipientAddress,
+                        onValueChange = { updateRecipient(it) },
+                        modifier = Modifier.weight(1f),
+                        maxLines = 3,
+                        singleLine = false,
+                        cursorBrush = SolidColor(MaterialTheme.colorScheme.onSurfaceVariant),
+                        enabled = !uiState.isLoading,
+                        textStyle = androidx.compose.ui.text.TextStyle(
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        ),
+                        decorationBox = { innerTextField ->
+                            if (uiState.recipientAddress.isEmpty()) {
+                                Text(
+                                    "Enter CKB Address",
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.3f),
+                                    fontSize = 16.sp
+                                )
+                            }
+                            innerTextField()
+                        }
+                    )
+                    Icon(
+                        imageVector = Lucide.BookUser,
+                        contentDescription = stringResource(R.string.send_contact_picker_cd),
+                        modifier = Modifier.clickable { onOpenContactPicker() }
+                    )
+                    Icon(
+                        imageVector = Lucide.ScanLine,
+                        contentDescription = stringResource(R.string.send_scan_cd),
+                        modifier = Modifier.clickable{onNavigateToScanner()}
+                    )
+                }
             }
 
             // Autocomplete suggestions (#196). Hidden when the field has an
             // exact-match contact or when the user hasn't typed anything yet.
-            if (uiState.recipientSuggestions.isNotEmpty()) {
+            if (uiState.sendMode == SendMode.SINGLE && uiState.recipientSuggestions.isNotEmpty()) {
                 Spacer(modifier = Modifier.height(4.dp))
                 Column(
                     modifier = Modifier
@@ -428,7 +494,7 @@ private fun SendScreenUI(
             // Saved-contact inline hint. Shown when the recipient address
             // exactly matches a contact — useful confirmation that the user
             // is sending to someone they know.
-            uiState.matchedContact?.let { contact ->
+            if (uiState.sendMode == SendMode.SINGLE) uiState.matchedContact?.let { contact ->
                 Spacer(modifier = Modifier.height(4.dp))
                 Text(
                     text = stringResource(R.string.send_saved_as, contact.name),
@@ -438,7 +504,7 @@ private fun SendScreenUI(
             }
 
             // "My Wallets" shortcut
-            if (uiState.otherWallets.isNotEmpty()) {
+            if (uiState.sendMode == SendMode.SINGLE && uiState.otherWallets.isNotEmpty()) {
                 var showMyWallets by remember { mutableStateOf(false) }
                 Box {
                     TextButton(
@@ -470,10 +536,76 @@ private fun SendScreenUI(
             }
 
             // Inline address validation indicator
-            AddressValidationIndicator(
-                address = uiState.recipientAddress,
-                currentNetwork = uiState.networkType
-            )
+            if (uiState.sendMode == SendMode.SINGLE) {
+                AddressValidationIndicator(
+                    address = uiState.recipientAddress,
+                    currentNetwork = uiState.networkType
+                )
+            }
+
+            if (uiState.sendMode == SendMode.BULK) {
+                Spacer(modifier = Modifier.height(8.dp))
+                Text(
+                    text = stringResource(
+                        R.string.send_bulk_summary,
+                        uiState.bulkValidRecipients.size,
+                        uiState.bulkDuplicateCount,
+                        uiState.bulkInvalidEntries.size,
+                        uiState.bulkBatchCount
+                    ),
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+                if (uiState.bulkValidRecipients.isNotEmpty() && uiState.amountCkb.isNotBlank()) {
+                    Spacer(modifier = Modifier.height(6.dp))
+                    Text(
+                        text = stringResource(
+                            R.string.send_bulk_total_amount,
+                            String.format(Locale.US, "%,.2f", uiState.bulkTotalAmountShannons / 100_000_000.0)
+                        ),
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+                if (uiState.bulkSubmittedTxHashes.isNotEmpty() || uiState.bulkFailureMessage != null || uiState.isLoading) {
+                    Spacer(modifier = Modifier.height(12.dp))
+                    Card(
+                        modifier = Modifier.fillMaxWidth(),
+                        shape = RoundedCornerShape(8.dp)
+                    ) {
+                        Column(modifier = Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                            Text(
+                                text = if (uiState.isLoading) {
+                                    stringResource(
+                                        R.string.send_bulk_progress,
+                                        uiState.bulkCurrentBatch.coerceAtLeast(1),
+                                        uiState.bulkBatchCount.coerceAtLeast(1),
+                                        uiState.bulkCompletedRecipients
+                                    )
+                                } else {
+                                    uiState.statusMessage
+                                },
+                                style = MaterialTheme.typography.bodyMedium,
+                                fontWeight = FontWeight.Medium
+                            )
+                            uiState.bulkFailureMessage?.let {
+                                Text(
+                                    text = it,
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = MaterialTheme.colorScheme.error
+                                )
+                            }
+                            uiState.bulkSubmittedTxHashes.takeLast(3).forEach { hash ->
+                                Text(
+                                    text = hash,
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                                )
+                            }
+                        }
+                    }
+                }
+            }
 
             Spacer(modifier = Modifier.height(32.dp))
             // Amount
@@ -520,7 +652,7 @@ private fun SendScreenUI(
                     color = MaterialTheme.colorScheme.primary.copy(alpha = 0.1f),
                     shape = CircleShape,
                     onClick = { setMaxAmount() },
-                    enabled = !uiState.isLoading && uiState.availableBalance > 0L,
+                    enabled = !uiState.isLoading && uiState.availableBalance > 0L && uiState.sendMode == SendMode.SINGLE,
                 ) {
                     Text(
                         "MAX",
@@ -613,7 +745,8 @@ private fun SendScreenUI(
                     .fillMaxWidth()
                     .height(56.dp),
                 enabled = !uiState.isLoading &&
-                        uiState.recipientAddress.isNotBlank() &&
+                        ((uiState.sendMode == SendMode.SINGLE && uiState.recipientAddress.isNotBlank()) ||
+                            (uiState.sendMode == SendMode.BULK && uiState.bulkRecipientsText.isNotBlank())) &&
                         uiState.amountCkb.isNotBlank()
             ) {
                 if (uiState.isLoading) {
@@ -624,7 +757,13 @@ private fun SendScreenUI(
                     Spacer(modifier = Modifier.width(8.dp))
                     Text(uiState.statusMessage.ifEmpty { "Sending..." })
                 } else {
-                    Text(stringResource(R.string.send_send_ckb))
+                    Text(
+                        if (uiState.sendMode == SendMode.BULK) {
+                            stringResource(R.string.send_bulk_cta)
+                        } else {
+                            stringResource(R.string.send_send_ckb)
+                        }
+                    )
                 }
             }
         }
@@ -1133,7 +1272,9 @@ private fun SendScreenUIPreview() {
                 networkType = NetworkType.MAINNET
             ),
             onNavigateToScanner = {},
+            updateSendMode = {},
             updateRecipient = {},
+            updateBulkRecipients = {},
             updateAmount = {},
             setMaxAmount = {},
             sendTransaction = {}

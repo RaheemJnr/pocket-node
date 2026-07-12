@@ -17,6 +17,7 @@ import com.rjnr.pocketnode.data.sync.SyncForegroundService
 import com.rjnr.pocketnode.data.sync.SyncProgressTracker
 import com.rjnr.pocketnode.data.migration.WalletMigrationHelper
 import com.rjnr.pocketnode.data.transaction.TransactionBuilder
+import com.rjnr.pocketnode.data.transaction.RecipientOutput
 import com.rjnr.pocketnode.data.database.entity.SubAccountCandidateEntity
 import com.rjnr.pocketnode.data.wallet.AddressUtils
 import com.rjnr.pocketnode.data.transaction.SweepInput
@@ -1714,6 +1715,22 @@ class GatewayRepository @Inject constructor(
                 fromAddress = fromAddress,
                 toAddress = toAddress,
                 amountShannons = amountShannons,
+                availableCells = availableCells,
+                privateKey = privateKey,
+                network = net
+            )
+        }
+    }
+
+    suspend fun prepareAndSendBulk(
+        fromAddress: String,
+        recipients: List<RecipientOutput>,
+        privateKey: ByteArray
+    ): Result<String> = runCatching {
+        buildReserveAndSend(fromAddress) { availableCells, net ->
+            transactionBuilder.buildMultiTransfer(
+                fromAddress = fromAddress,
+                recipients = recipients,
                 availableCells = availableCells,
                 privateKey = privateKey,
                 network = net
