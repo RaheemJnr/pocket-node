@@ -78,6 +78,8 @@ data class SendUiState(
     val errorDetail: String? = null,
     val txHash: String? = null,
     val availableBalance: Long = 0L,
+    /** Spendable cell count, fetched on entering bulk mode, for a realistic bulk fee estimate (review item 3). */
+    val spendableCellCount: Int = 0,
     val estimatedFee: Long = 0L,
     val networkType: NetworkType = NetworkType.MAINNET,
     val transactionState: TransactionState = TransactionState.IDLE,
@@ -257,6 +259,16 @@ class SendViewModel @Inject constructor(
         if (mode == SendMode.BULK) {
             suggestionsJob?.cancel()
             _uiState.update { it.copy(recipientSuggestions = emptyList(), matchedContact = null) }
+            // Item 3: fetch the real spendable cell count so the bulk fee
+            // preview and the insufficient-balance gate reflect how many inputs
+            // each batch will gather (a fragmented wallet needs many inputs ->
+            // higher fee). The actual per-tx fee is still computed dynamically
+            // at build time; this only stops the PREVIEW from assuming 1 input
+            // per batch and under-gating.
+            viewModelScope.launch {
+                val count = repository.getCells().map { it.items.size }.getOrNull() ?: 0
+                _uiState.update { it.copy(spendableCellCount = count).refreshBulkPreview() }
+            }
         }
     }
 
@@ -785,15 +797,28 @@ class SendViewModel @Inject constructor(
         } catch (e: Exception) {
             Log.e(TAG, "Bulk send failed", e)
             errorJournal.record("bulk-send", e.message ?: e.javaClass.simpleName)
-            _uiState.update {
-                it.copy(
+            _uiState.update { state ->
+                // Item 4: a batch failed mid-airdrop. The batches before it are
+                // already on-chain and cannot be undone. Repopulate the paste
+                // field with ONLY the unsent recipients so the user can press
+                // Send to retry the remainder — re-sending the whole list would
+                // double-pay everyone already funded. `bulkCompletedRecipients`
+                // is the count that actually broadcast; the failed batch did not.
+                val sent = state.bulkCompletedRecipients
+                val remaining = recipients.drop(sent).map { it.address }
+                state.copy(
                     isLoading = false,
                     error = com.rjnr.pocketnode.ui.util.UiMessage.Raw(parseErrorMessage(e)),
                     errorDetail = e.message,
                     transactionState = TransactionState.FAILED,
-                    statusMessage = "Bulk send stopped on batch ${it.bulkCurrentBatch}.",
+                    statusMessage = if (remaining.isEmpty()) {
+                        "Bulk send stopped on batch ${state.bulkCurrentBatch}."
+                    } else {
+                        "Sent to $sent of ${recipients.size}. ${remaining.size} remaining — press Send to retry the rest."
+                    },
                     bulkFailureMessage = parseErrorMessage(e),
-                )
+                    bulkRecipientsText = if (remaining.isEmpty()) state.bulkRecipientsText else remaining.joinToString("\n"),
+                ).refreshBulkPreview()
             }
         }
     }
@@ -1009,11 +1034,24 @@ class SendViewModel @Inject constructor(
         val amountShannons = amountShannonsOverride ?: parseAmountShannons(amountCkb) ?: 0L
         val parsed = parseBulkRecipients(bulkRecipientsText, networkType)
         val batchCount = if (parsed.validAddresses.isEmpty()) 0 else (parsed.validAddresses.size + BULK_BATCH_SIZE - 1) / BULK_BATCH_SIZE
+        // Item 3: estimate each batch's input count from the wallet's average
+        // cell size (balance / cell count) instead of assuming 1. A fragmented
+        // wallet gathers many inputs per batch, so the flat 1-input estimate
+        // under-counted the fee and could let the insufficient-balance gate
+        // pass a send that a late batch can't afford. Falls back to ~1 input
+        // per recipient until the cell count loads (never under-gates).
+        val avgCell = if (spendableCellCount > 0 && availableBalance > 0) availableBalance / spendableCellCount else 0L
         val estimatedFee = if (parsed.validAddresses.isEmpty() || amountShannons <= 0L) {
             0L
         } else {
             parsed.validAddresses.chunked(BULK_BATCH_SIZE).sumOf { batch ->
-                transactionBuilder.estimateTransferFee(inputCount = 1, outputCount = batch.size + 1)
+                val batchTotal = batch.size.toLong() * amountShannons
+                val inputs = if (avgCell > 0) {
+                    ((batchTotal + avgCell - 1) / avgCell).toInt().coerceIn(1, spendableCellCount)
+                } else {
+                    batch.size
+                }
+                transactionBuilder.estimateTransferFee(inputCount = inputs, outputCount = batch.size + 1)
             }
         }
         return copy(
