@@ -51,6 +51,9 @@ export function Footer() {
             <FooterLink href="https://t.me/pocket_node" external>
               Telegram
             </FooterLink>
+            <FooterLink href="https://x.com/PocketNodeCKB" external>
+              X (Twitter)
+            </FooterLink>
             <FooterLink href="https://github.com/RaheemJnr/pocket-node" external>
               GitHub
             </FooterLink>
