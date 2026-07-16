@@ -34,6 +34,25 @@ class SettingsViewModel @Inject constructor(
     private val keyMaterialDao: KeyMaterialDao,
 ) : ViewModel() {
 
+    // Founder-only easter egg: tap the Version row 7 times (dev-options style)
+    // to unlock the hidden bulk-airdrop send mode. Persisted, so it stays on.
+    private var versionTapCount = 0
+    private var lastVersionTapAt = 0L
+
+    fun onVersionRowTap() {
+        if (walletPrefs.isBulkSendUnlocked()) return
+        val now = android.os.SystemClock.elapsedRealtime()
+        versionTapCount = if (now - lastVersionTapAt <= SECRET_TAP_WINDOW_MS) versionTapCount + 1 else 1
+        lastVersionTapAt = now
+        if (versionTapCount >= SECRET_UNLOCK_TAPS) {
+            versionTapCount = 0
+            walletPrefs.setBulkSendUnlocked(true)
+            _uiState.update {
+                it.copy(error = com.rjnr.pocketnode.ui.util.UiMessage.Raw("Bulk airdrop unlocked 🎁"))
+            }
+        }
+    }
+
     /** Update-availability state for the About > Version row (#369). */
     sealed interface UpdateStatus {
         data object Idle : UpdateStatus
@@ -317,5 +336,10 @@ class SettingsViewModel @Inject constructor(
 
     fun clearError() {
         _uiState.update { it.copy(error = null) }
+    }
+
+    companion object {
+        private const val SECRET_UNLOCK_TAPS = 7
+        private const val SECRET_TAP_WINDOW_MS = 2000L
     }
 }

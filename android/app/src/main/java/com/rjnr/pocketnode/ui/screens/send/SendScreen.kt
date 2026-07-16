@@ -12,7 +12,6 @@ import androidx.compose.animation.core.rememberInfiniteTransition
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
-import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -248,7 +247,6 @@ fun SendScreen(
         onOpenContactPicker = { showContactPicker = true },
         onSuggestionPicked = { viewModel.selectContact(it) },
         updateSendMode = viewModel::updateSendMode,
-        onSecretTap = viewModel::onSecretUnlockTap,
         updateRecipient = viewModel::updateRecipient,
         updateBulkRecipients = viewModel::updateBulkRecipients,
         updateAmount = viewModel::updateAmount,
@@ -279,7 +277,6 @@ private fun SendScreenUI(
     onOpenContactPicker: () -> Unit = {},
     onSuggestionPicked: (com.rjnr.pocketnode.data.database.entity.ContactEntity) -> Unit = {},
     updateSendMode: (SendMode) -> Unit,
-    onSecretTap: () -> Unit = {},
     updateRecipient: (recipientAddress: String) -> Unit,
     updateBulkRecipients: (String) -> Unit,
     updateAmount: (amount: String) -> Unit,
@@ -330,13 +327,7 @@ private fun SendScreenUI(
                 Text(
                     "Available",
                     color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f),
-                    style = MaterialTheme.typography.titleMedium,
-                    // Hidden easter-egg target: tap 7x to unlock bulk airdrop.
-                    // No ripple/indication so it doesn't look tappable.
-                    modifier = Modifier.clickable(
-                        interactionSource = remember { MutableInteractionSource() },
-                        indication = null,
-                    ) { onSecretTap() }
+                    style = MaterialTheme.typography.titleMedium
                 )
                 Text(
                     String.format(
