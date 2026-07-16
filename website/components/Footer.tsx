@@ -48,6 +48,9 @@ export function Footer() {
           </FooterColumn>
 
           <FooterColumn title="Project">
+            <FooterLink href="https://t.me/pocket_node" external>
+              Telegram
+            </FooterLink>
             <FooterLink href="https://github.com/RaheemJnr/pocket-node" external>
               GitHub
             </FooterLink>
