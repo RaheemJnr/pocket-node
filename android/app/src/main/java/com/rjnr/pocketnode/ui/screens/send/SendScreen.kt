@@ -12,6 +12,7 @@ import androidx.compose.animation.core.rememberInfiniteTransition
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -247,6 +248,7 @@ fun SendScreen(
         onOpenContactPicker = { showContactPicker = true },
         onSuggestionPicked = { viewModel.selectContact(it) },
         updateSendMode = viewModel::updateSendMode,
+        onSecretTap = viewModel::onSecretUnlockTap,
         updateRecipient = viewModel::updateRecipient,
         updateBulkRecipients = viewModel::updateBulkRecipients,
         updateAmount = viewModel::updateAmount,
@@ -277,6 +279,7 @@ private fun SendScreenUI(
     onOpenContactPicker: () -> Unit = {},
     onSuggestionPicked: (com.rjnr.pocketnode.data.database.entity.ContactEntity) -> Unit = {},
     updateSendMode: (SendMode) -> Unit,
+    onSecretTap: () -> Unit = {},
     updateRecipient: (recipientAddress: String) -> Unit,
     updateBulkRecipients: (String) -> Unit,
     updateAmount: (amount: String) -> Unit,
@@ -327,7 +330,13 @@ private fun SendScreenUI(
                 Text(
                     "Available",
                     color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f),
-                    style = MaterialTheme.typography.titleMedium
+                    style = MaterialTheme.typography.titleMedium,
+                    // Hidden easter-egg target: tap 7x to unlock bulk airdrop.
+                    // No ripple/indication so it doesn't look tappable.
+                    modifier = Modifier.clickable(
+                        interactionSource = remember { MutableInteractionSource() },
+                        indication = null,
+                    ) { onSecretTap() }
                 )
                 Text(
                     String.format(
@@ -341,27 +350,32 @@ private fun SendScreenUI(
                 )
             }
 
-            Spacer(modifier = Modifier.height(16.dp))
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.spacedBy(12.dp)
-            ) {
-                OutlinedButton(
-                    onClick = { updateSendMode(SendMode.SINGLE) },
-                    modifier = Modifier.weight(1f)
+            // Bulk airdrop toggle — hidden for everyone until unlocked via the
+            // secret tap gesture on the "Available" label (founder-only easter
+            // egg). Locked users only ever see the normal single-send UI.
+            if (uiState.bulkUnlocked) {
+                Spacer(modifier = Modifier.height(16.dp))
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(12.dp)
                 ) {
-                    Text(stringResource(R.string.send_mode_single))
-                }
-                Button(
-                    onClick = { updateSendMode(SendMode.BULK) },
-                    modifier = Modifier.weight(1f),
-                    colors = if (uiState.sendMode == SendMode.BULK) {
-                        ButtonDefaults.buttonColors()
-                    } else {
-                        ButtonDefaults.outlinedButtonColors()
+                    OutlinedButton(
+                        onClick = { updateSendMode(SendMode.SINGLE) },
+                        modifier = Modifier.weight(1f)
+                    ) {
+                        Text(stringResource(R.string.send_mode_single))
                     }
-                ) {
-                    Text(stringResource(R.string.send_mode_bulk))
+                    Button(
+                        onClick = { updateSendMode(SendMode.BULK) },
+                        modifier = Modifier.weight(1f),
+                        colors = if (uiState.sendMode == SendMode.BULK) {
+                            ButtonDefaults.buttonColors()
+                        } else {
+                            ButtonDefaults.outlinedButtonColors()
+                        }
+                    ) {
+                        Text(stringResource(R.string.send_mode_bulk))
+                    }
                 }
             }
 

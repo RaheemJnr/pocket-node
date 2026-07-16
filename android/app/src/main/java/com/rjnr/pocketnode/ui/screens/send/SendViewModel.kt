@@ -53,6 +53,8 @@ private data class BulkParseResult(
 )
 
 data class SendUiState(
+    /** Founder-only easter egg: the Single/Bulk toggle is hidden until unlocked. */
+    val bulkUnlocked: Boolean = false,
     val sendMode: SendMode = SendMode.SINGLE,
     val recipientAddress: String = "",
     val bulkRecipientsText: String = "",
@@ -119,6 +121,7 @@ class SendViewModel @Inject constructor(
     private val keyMaterialDao: KeyMaterialDao,
     private val contactRepository: ContactRepository,
     private val errorJournal: com.rjnr.pocketnode.data.diagnostics.ErrorJournal,
+    private val walletPreferences: com.rjnr.pocketnode.data.wallet.WalletPreferences,
 ) : ViewModel() {
 
     private val _uiState = MutableStateFlow(SendUiState())
@@ -175,13 +178,39 @@ class SendViewModel @Inject constructor(
 
     companion object {
         private const val TAG = "SendViewModel"
+        private const val SECRET_UNLOCK_TAPS = 7
+        private const val SECRET_TAP_WINDOW_MS = 2000L
         private const val BULK_BATCH_SIZE = 25
         private const val POLLING_INTERVAL_MS = 3000L // Poll every 3 seconds
         private const val MAX_POLLING_ATTEMPTS = 120  // Stop after ~6 minutes
         private const val REQUIRED_CONFIRMATIONS = 3  // Consider fully confirmed after 3 confirmations
     }
 
+    // Secret-tap unlock state for the bulk-airdrop easter egg.
+    private var secretTapCount = 0
+    private var lastSecretTapAt = 0L
+
+    /**
+     * Hidden gesture on the "Available" balance label. Tap it
+     * [SECRET_UNLOCK_TAPS] times in quick succession to reveal the Single/Bulk
+     * toggle (founder-only). Persisted, so it stays unlocked on this device.
+     * A slow tap sequence resets, so accidental taps don't accumulate.
+     */
+    fun onSecretUnlockTap() {
+        if (_uiState.value.bulkUnlocked) return
+        val now = android.os.SystemClock.elapsedRealtime()
+        secretTapCount = if (now - lastSecretTapAt <= SECRET_TAP_WINDOW_MS) secretTapCount + 1 else 1
+        lastSecretTapAt = now
+        if (secretTapCount >= SECRET_UNLOCK_TAPS) {
+            secretTapCount = 0
+            walletPreferences.setBulkSendUnlocked(true)
+            _uiState.update { it.copy(bulkUnlocked = true) }
+        }
+    }
+
     init {
+        _uiState.update { it.copy(bulkUnlocked = walletPreferences.isBulkSendUnlocked()) }
+
         viewModelScope.launch {
             repository.balance.collect { balance ->
                 _uiState.update { it.copy(availableBalance = balance?.capacityAsLong() ?: 0L) }

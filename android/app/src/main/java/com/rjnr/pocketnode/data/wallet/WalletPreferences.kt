@@ -86,6 +86,17 @@ class WalletPreferences @Inject constructor(
         _themeMode.value = mode
     }
 
+    /**
+     * Hidden "bulk airdrop" send mode. Off for everyone by default; unlocked
+     * per-device by a secret tap gesture on the Send screen (founder-only
+     * easter egg). Persisted so it stays unlocked once activated.
+     */
+    fun isBulkSendUnlocked(): Boolean = prefs.getBoolean(KEY_BULK_SEND_UNLOCKED, false)
+
+    fun setBulkSendUnlocked(unlocked: Boolean) {
+        prefs.edit().putBoolean(KEY_BULK_SEND_UNLOCKED, unlocked).apply()
+    }
+
     init {
         migrateIfNeeded()
     }
@@ -413,6 +424,7 @@ class WalletPreferences @Inject constructor(
         private const val KEY_ACTIVE_WALLET_ID = "active_wallet_id"
         private const val KEY_SYNC_STRATEGY = "sync_strategy"
         private const val KEY_THEME_MODE = "theme_mode"
+        private const val KEY_BULK_SEND_UNLOCKED = "bulk_send_unlocked"
         private const val KEY_BACKGROUND_SYNC = "background_sync_enabled"
         private const val KEY_LAST_SYNCED_AT = "last_synced_at_ms"
         private const val KEY_BG_SYNC_PILL_DISMISSED = "bg_sync_pill_dismissed"
