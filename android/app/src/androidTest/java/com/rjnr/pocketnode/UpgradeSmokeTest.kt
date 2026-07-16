@@ -223,6 +223,46 @@ class UpgradeSmokeTest {
     }
 
     /**
+     * Narrow smoke for the Nairobi bulk-send UI. This does not depend on the
+     * home balance row; it only needs the post-upgrade unlock to succeed, the
+     * SEND action to be reachable, and the Send screen to render the new
+     * Single/Bulk mode switch plus the bulk paste placeholder.
+     */
+    @Test
+    fun assertBulkSendScreenAfterUnlock() {
+        launchApp()
+
+        clickByRes("auth-use-pin", 10_000L)
+
+        if (device.wait(Until.hasObject(By.res("pin-keypad-1")), 10_000L)) {
+            repeat(6) {
+                assertTrue(
+                    "PIN digit '1' not clickable on bulk-send smoke unlock",
+                    clickByRes("pin-keypad-1")
+                )
+            }
+        }
+
+        assertTrue(
+            "SEND action not visible after unlock",
+            clickButton("missing-send-tag", "SEND", POST_UPGRADE_HOME_TIMEOUT_MS)
+        )
+
+        assertTrue(
+            "Bulk mode toggle not visible on Send screen",
+            clickButton("missing-bulk-tag", "Bulk", 10_000L)
+        )
+
+        assertTrue(
+            "Bulk recipient placeholder not visible after switching modes",
+            device.wait(
+                Until.hasObject(By.text("Paste one CKB address per line").pkg(PKG)),
+                10_000L
+            )
+        )
+    }
+
+    /**
      * Deadline-poll wrapper around clickButton for screens that can take a long
      * time to APPEAR (vs. nodes that exist but go briefly stale). Each cycle
      * re-runs the full clickButton strategy (resource-id fast path, scroll, text

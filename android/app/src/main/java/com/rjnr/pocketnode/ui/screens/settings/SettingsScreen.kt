@@ -365,6 +365,7 @@ fun SettingsScreen(
         },
         showThemeDialog = { viewModel.showThemeDialog() },
         onCheckForUpdate = { viewModel.checkForUpdate() },
+        onVersionTap = { viewModel.onVersionRowTap() },
         onScanOtherAddresses = { (context as? FragmentActivity)?.let { viewModel.runGapLimitScan(it) } },
         onToggleBackgroundSync = { enabled ->
             if (enabled && Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
@@ -399,6 +400,7 @@ private fun SettingsScreenUI(
     requestNetworkSwitch: (NetworkType) -> Unit,
     showThemeDialog: () -> Unit,
     onCheckForUpdate: () -> Unit = {},
+    onVersionTap: () -> Unit = {},
     onScanOtherAddresses: () -> Unit = {},
     onToggleBackgroundSync: (Boolean) -> Unit = {}
 ) {
@@ -580,9 +582,13 @@ private fun SettingsScreenUI(
                     icon = Lucide.Info,
                     title = "Version",
                     value = BuildConfig.VERSION_NAME,
-                    // Tapping the row when an update exists opens the release so
-                    // the user can grab it; otherwise it's a static row.
-                    onClick = available?.let { { com.rjnr.pocketnode.ui.util.openInBrowser(context, it.url) } },
+                    // Tapping counts toward the hidden bulk-airdrop unlock
+                    // (7 taps, dev-options style). When an update also exists,
+                    // the tap additionally opens the release to grab it.
+                    onClick = {
+                        onVersionTap()
+                        available?.let { com.rjnr.pocketnode.ui.util.openInBrowser(context, it.url) }
+                    },
                     trailing = when {
                         available != null -> {
                             {

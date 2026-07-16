@@ -2,6 +2,7 @@ package com.rjnr.pocketnode.data.transaction
 
 import com.rjnr.pocketnode.data.gateway.models.*
 import com.rjnr.pocketnode.data.validation.NetworkValidator
+import com.rjnr.pocketnode.data.wallet.AddressUtils
 import io.mockk.every
 import io.mockk.mockk
 import org.junit.Assert.*
@@ -92,6 +93,56 @@ class TransactionBuilderTest {
         )
     }
 
+    @Test(expected = IllegalArgumentException::class)
+    fun `buildMultiTransfer rejects empty recipients`() {
+        val cells = listOf(makeCell("0x${(200_00000000L).toString(16)}", "0x" + "cc".repeat(32), "0x0"))
+        builder.buildMultiTransfer(
+            fromAddress = TESTNET_ADDRESS,
+            recipients = emptyList(),
+            availableCells = cells,
+            privateKey = ByteArray(32) { 1 },
+            network = NetworkType.TESTNET
+        )
+    }
+
+    @Test(expected = IllegalArgumentException::class)
+    fun `buildMultiTransfer rejects recipient amount below minimum`() {
+        val cells = listOf(makeCell("0x${(200_00000000L).toString(16)}", "0x" + "dd".repeat(32), "0x0"))
+        builder.buildMultiTransfer(
+            fromAddress = TESTNET_ADDRESS,
+            recipients = listOf(
+                RecipientOutput(TESTNET_ADDRESS_2, 60_00000000L)
+            ),
+            availableCells = cells,
+            privateKey = ByteArray(32) { 1 },
+            network = NetworkType.TESTNET
+        )
+    }
+
+    @Test
+    fun `buildMultiTransfer creates recipient outputs plus change`() {
+        val cells = listOf(makeCell("0x${(200_00000000L).toString(16)}", "0x" + "ee".repeat(32), "0x0"))
+
+        val tx = builder.buildMultiTransfer(
+            fromAddress = TESTNET_ADDRESS,
+            recipients = listOf(
+                RecipientOutput(TESTNET_ADDRESS_2, 61_00000000L),
+                RecipientOutput(TESTNET_ADDRESS, 61_00000000L)
+            ),
+            availableCells = cells,
+            privateKey = ByteArray(32) { 1 },
+            network = NetworkType.TESTNET
+        )
+
+        assertEquals(1, tx.cellInputs.size)
+        assertEquals(3, tx.cellOutputs.size)
+        assertEquals("0x${61_00000000L.toString(16)}", tx.cellOutputs[0].capacity)
+        assertEquals("0x${61_00000000L.toString(16)}", tx.cellOutputs[1].capacity)
+        assertEquals("0x", tx.outputsData[0])
+        assertEquals("0x", tx.outputsData[1])
+        assertEquals("0x", tx.outputsData[2])
+    }
+
     // #287 dust-change refusal: end-to-end coverage deferred because the
     // existing test fixtures use placeholder testnet addresses that fail
     // `AddressUtils.parseAddress` (rejected as "Invalid sender address" at
@@ -126,8 +177,18 @@ class TransactionBuilderTest {
     // --- Helpers ---
 
     companion object {
-        const val TESTNET_ADDRESS = "ckt1qzda0cr08m85hc8jlnfp3zer7xulejywt49kt2rr0vthywaa50xwsqflz5wfc5zrk5njcglpvf2y90xml03hvqqqw4ld6a"
-        const val TESTNET_ADDRESS_2 = "ckt1qzda0cr08m85hc8jlnfp3zer7xulejywt49kt2rr0vthywaa50xwsqdamwzrffgc54ef48493nfd2sd5gjeqnfh8gpch424"
+        private val TESTNET_SCRIPT = Script(
+            codeHash = Script.SECP256K1_CODE_HASH,
+            hashType = "type",
+            args = "0x" + "aa".repeat(20)
+        )
+        private val TESTNET_SCRIPT_2 = Script(
+            codeHash = Script.SECP256K1_CODE_HASH,
+            hashType = "type",
+            args = "0x" + "bb".repeat(20)
+        )
+        val TESTNET_ADDRESS: String = AddressUtils.encode(TESTNET_SCRIPT, NetworkType.TESTNET)
+        val TESTNET_ADDRESS_2: String = AddressUtils.encode(TESTNET_SCRIPT_2, NetworkType.TESTNET)
 
         fun makeCell(capacity: String, txHash: String, index: String): Cell {
             return Cell(
