@@ -445,6 +445,20 @@ fun TransactionItems(
                         )
                     }
                 }
+                if (transaction.isBulk) {
+                    Surface(
+                        color = daoColor.copy(alpha = 0.1f),
+                        shape = CircleShape
+                    ) {
+                        Text(
+                            "Bulk",
+                            color = daoColor,
+                            fontSize = 9.sp,
+                            fontWeight = FontWeight.Bold,
+                            modifier = Modifier.padding(horizontal = 8.dp, vertical = 2.dp)
+                        )
+                    }
+                }
                 // Status chip — distinct visuals for Failed vs Pending vs
                 // Confirmed. Failed is tappable; the parent renders the
                 // confirm dialog and routes the retry through HomeViewModel.

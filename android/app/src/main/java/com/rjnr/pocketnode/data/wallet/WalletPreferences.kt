@@ -97,6 +97,22 @@ class WalletPreferences @Inject constructor(
         prefs.edit().putBoolean(KEY_BULK_SEND_UNLOCKED, unlocked).apply()
     }
 
+    /**
+     * Tx hashes broadcast as batches of a bulk airdrop. Used to badge those rows
+     * as "Bulk" in the activity list. Tx hashes are globally unique, so a single
+     * set across wallets/networks is fine; the set only grows on the rare bulk
+     * send (founder easter egg).
+     */
+    fun isBulkTxHash(hash: String): Boolean =
+        prefs.getStringSet(KEY_BULK_TX_HASHES, emptySet())?.contains(hash) == true
+
+    fun addBulkTxHash(hash: String) {
+        // Copy the returned set before mutating — SharedPreferences hands back a
+        // shared instance that must not be modified in place.
+        val current = prefs.getStringSet(KEY_BULK_TX_HASHES, emptySet()) ?: emptySet()
+        prefs.edit().putStringSet(KEY_BULK_TX_HASHES, current + hash).apply()
+    }
+
     init {
         migrateIfNeeded()
     }
@@ -425,6 +441,7 @@ class WalletPreferences @Inject constructor(
         private const val KEY_SYNC_STRATEGY = "sync_strategy"
         private const val KEY_THEME_MODE = "theme_mode"
         private const val KEY_BULK_SEND_UNLOCKED = "bulk_send_unlocked"
+        private const val KEY_BULK_TX_HASHES = "bulk_tx_hashes"
         private const val KEY_BACKGROUND_SYNC = "background_sync_enabled"
         private const val KEY_LAST_SYNCED_AT = "last_synced_at_ms"
         private const val KEY_BG_SYNC_PILL_DISMISSED = "bg_sync_pill_dismissed"
