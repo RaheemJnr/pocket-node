@@ -99,6 +99,9 @@ data class TransactionRecord(
     @SerialName("block_timestamp_hex") val blockTimestampHex: String? = null,
     // True if the transaction interacts with a DAO type script cell
     @SerialName("is_dao_related") val isDaoRelated: Boolean = false,
+    // True if this tx was sent as one batch of a bulk airdrop. Set at display
+    // time from a persisted set of bulk tx hashes (not serialized or synced).
+    @SerialName("is_bulk") val isBulk: Boolean = false,
     // "PENDING", "CONFIRMED", "FAILED" — defaults to CONFIRMED so historical
     // rows that never had an explicit status (pre-#115) render as confirmed.
     @SerialName("status") val status: String = "CONFIRMED"

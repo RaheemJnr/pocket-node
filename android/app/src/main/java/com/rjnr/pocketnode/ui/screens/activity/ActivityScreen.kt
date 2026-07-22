@@ -454,6 +454,20 @@ private fun ActivityTransactionItem(
                         )
                     }
                 }
+                if (transaction.isBulk) {
+                    Spacer(modifier = Modifier.width(6.dp))
+                    Surface(
+                        color = MaterialTheme.colorScheme.primary.copy(alpha = 0.15f),
+                        shape = RoundedCornerShape(4.dp)
+                    ) {
+                        Text(
+                            text = "Bulk",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.primary,
+                            modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp)
+                        )
+                    }
+                }
             }
             Spacer(modifier = Modifier.height(2.dp))
             Text(

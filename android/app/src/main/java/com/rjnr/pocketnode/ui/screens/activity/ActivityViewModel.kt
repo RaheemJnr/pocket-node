@@ -70,7 +70,9 @@ class ActivityViewModel @Inject constructor(
                 Filter.SENT -> transactionDao.getSentTransactionsPaged(walletId, network.name)
             }
         }.flow.map { pagingData ->
-            pagingData.map { it.toTransactionRecord() }
+            pagingData.map {
+                it.toTransactionRecord().copy(isBulk = walletPreferences.isBulkTxHash(it.txHash))
+            }
         }
     }.cachedIn(viewModelScope)
 

@@ -1727,7 +1727,7 @@ class GatewayRepository @Inject constructor(
         recipients: List<RecipientOutput>,
         privateKey: ByteArray
     ): Result<String> = runCatching {
-        buildReserveAndSend(fromAddress) { availableCells, net ->
+        val txHash = buildReserveAndSend(fromAddress) { availableCells, net ->
             transactionBuilder.buildMultiTransfer(
                 fromAddress = fromAddress,
                 recipients = recipients,
@@ -1736,6 +1736,9 @@ class GatewayRepository @Inject constructor(
                 network = net
             )
         }
+        // Remember this batch's hash so the activity list can badge it "Bulk".
+        walletPreferences.addBulkTxHash(txHash)
+        txHash
     }
 
     /**
@@ -2197,7 +2200,12 @@ class GatewayRepository @Inject constructor(
         // directly and the full set lives in Room. Cursor is always null now:
         // no UI caller ever passed one (Room Paging does the scrolling), and
         // the full walk leaves nothing to continue from.
-        val mergedItems = (pendingLocal + items).take(limit)
+        val mergedItems = (pendingLocal + items)
+            .take(limit)
+            // Badge batches of a bulk airdrop (marked at send time). Computed
+            // from the persisted set so it survives the pending->confirmed and
+            // cache-resync transitions.
+            .map { it.copy(isBulk = walletPreferences.isBulkTxHash(it.txHash)) }
 
         TransactionsResponse(mergedItems, null)
     }
