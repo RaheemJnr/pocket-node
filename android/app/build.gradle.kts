@@ -15,8 +15,8 @@ android {
         applicationId = "com.rjnr.pocketnode"
         minSdk = 26
         targetSdk = 35
-        versionCode = 21
-        versionName = "1.8.0"
+        versionCode = 22
+        versionName = "1.8.1"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
 
@@ -52,6 +52,13 @@ android {
         // gate is enforced strictly only when the constant is non-empty.
         val releaseCertSha256 = System.getenv("RELEASE_CERT_SHA256") ?: ""
         buildConfigField("String", "RELEASE_CERT_SHA256", "\"$releaseCertSha256\"")
+
+        // Gates the in-app updater (GitHub Releases -> download -> PackageInstaller).
+        // Default true for GitHub-distributed debug/release builds. The `playRelease`
+        // build type overrides this to false: Google Play forbids apps self-installing
+        // APKs, so the Play AAB compiles out the updater UI and strips
+        // REQUEST_INSTALL_PACKAGES (src/playRelease/AndroidManifest.xml).
+        buildConfigField("boolean", "UPDATER_ENABLED", "true")
 
         // Only include ARM ABIs — x86_64 is emulator-only and adds ~29 MB.
         // CI's upgrade-smoke harness opts in via BUILD_X86_64=1 (matched in
@@ -154,6 +161,12 @@ android {
             "packageRelease",
             "packageReleaseBundle",
             "packageReleaseUniversalApk",
+            // playRelease build type (Play Store AAB) signs with the same key.
+            "assemblePlayRelease",
+            "bundlePlayRelease",
+            "packagePlayRelease",
+            "packagePlayReleaseBundle",
+            "packagePlayReleaseUniversalApk",
         )
         val needsReleaseSigning = allTasks.any { task -> task.name in signingTaskNames }
         if (needsReleaseSigning && !unsignedRelease) {
@@ -179,16 +192,35 @@ android {
             // the artifact in a separate minimal job); signed otherwise.
             signingConfig = if (unsignedRelease) null else signingConfigs.getByName("release")
         }
+
+        // Google Play build. Identical to `release` (minify, shrink, proguard,
+        // signing) but strips the in-app updater: UPDATER_ENABLED=false compiles
+        // out the self-update UI and src/playRelease/AndroidManifest.xml removes
+        // REQUEST_INSTALL_PACKAGES. Play distributes and updates the app, and its
+        // policy forbids an app self-installing APKs, so the Play AAB must not
+        // ship the updater. Build with `./gradlew bundlePlayRelease`; GitHub
+        // distribution keeps `assembleRelease` (updater intact).
+        create("playRelease") {
+            initWith(getByName("release"))
+            // Resolve dependency variants that only publish `release`.
+            matchingFallbacks += "release"
+            buildConfigField("boolean", "UPDATER_ENABLED", "false")
+            signingConfig = if (unsignedRelease) null else signingConfigs.getByName("release")
+        }
     }
 
     // Name release APKs like "PocketNode-v1.5.0.apk" so the file a user downloads
     // from a GitHub Release matches the asset URL, and so the built artifact in
     // app/release/ reflects the version without a manual rename step.
     applicationVariants.all {
-        if (buildType.name == "release") {
+        val bt = buildType.name
+        if (bt == "release" || bt == "playRelease") {
             outputs.all {
                 val impl = this as com.android.build.gradle.internal.api.BaseVariantOutputImpl
-                impl.outputFileName = "PocketNode-v${defaultConfig.versionName}.apk"
+                // Play ships the AAB; only suffix the (rarely built) playRelease APK
+                // so it never collides with the GitHub-distributed release APK name.
+                val suffix = if (bt == "playRelease") "-play" else ""
+                impl.outputFileName = "PocketNode-v${defaultConfig.versionName}$suffix.apk"
             }
         }
     }
