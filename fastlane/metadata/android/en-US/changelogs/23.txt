@@ -1,0 +1,8 @@
+v1.8.1:
+Pocket Node arrives on Google Play.
+
+Run a CKB light client right on your phone. Your keys and your node stay on your device, with no remote servers in between.
+
+This build also includes minor stability and display improvements.
+
+Source: github.com/RaheemJnr/pocket-node/releases
