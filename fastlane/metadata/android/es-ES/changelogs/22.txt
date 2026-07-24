@@ -1,0 +1,8 @@
+v1.8.1:
+Pocket Node llega a Google Play.
+
+Ejecuta un cliente ligero de CKB directamente en tu telefono. Tus claves y tu nodo permanecen en tu dispositivo, sin servidores remotos de por medio.
+
+Esta version tambien incluye mejoras menores de estabilidad y de visualizacion.
+
+Fuente: github.com/RaheemJnr/pocket-node/releases

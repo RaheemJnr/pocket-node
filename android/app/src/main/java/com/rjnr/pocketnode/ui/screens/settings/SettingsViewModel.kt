@@ -88,7 +88,8 @@ class SettingsViewModel @Inject constructor(
 
     init {
         loadState()
-        checkForUpdate()
+        // Play builds ship no updater; skip the GitHub release check entirely.
+        if (BuildConfig.UPDATER_ENABLED) checkForUpdate()
 
         // Keep network in sync with repository's live StateFlow
         viewModelScope.launch {
@@ -311,6 +312,9 @@ class SettingsViewModel @Inject constructor(
      * where users look for it. Non-fatal: failures show a retry-able state.
      */
     fun checkForUpdate() {
+        // Defensive: the "Check for updates" row is hidden on Play builds, but
+        // guard the entry point too so the updater can never run there.
+        if (!BuildConfig.UPDATER_ENABLED) return
         _uiState.update { it.copy(updateStatus = UpdateStatus.Checking) }
         viewModelScope.launch {
             updateRepository.checkForUpdate(BuildConfig.VERSION_NAME)

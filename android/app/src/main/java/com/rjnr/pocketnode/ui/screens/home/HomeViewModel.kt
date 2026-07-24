@@ -127,7 +127,8 @@ class HomeViewModel @Inject constructor(
     init {
         checkBackupStatus()
         refreshSecurityState()
-        checkForUpdate()
+        // No self-update on Play builds (updater compiled out, permission stripped).
+        if (BuildConfig.UPDATER_ENABLED) checkForUpdate()
 
         viewModelScope.launch {
             initializeWallet()

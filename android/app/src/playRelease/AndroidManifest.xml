@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Play Store build overlay. The in-app updater is compiled out of this build
+  type (BuildConfig.UPDATER_ENABLED=false), and Google Play forbids apps that
+  self-install APKs, so REQUEST_INSTALL_PACKAGES must not appear in the merged
+  manifest of the uploaded AAB. tools:node="remove" strips it from the merge.
+-->
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:tools="http://schemas.android.com/tools">
+
+    <uses-permission
+        android:name="android.permission.REQUEST_INSTALL_PACKAGES"
+        tools:node="remove" />
+
+</manifest>

@@ -608,30 +608,34 @@ private fun SettingsScreenUI(
                 )
             }
 
-            item {
-                val updateStatus = uiState.updateStatus
-                val statusText = when (updateStatus) {
-                    is SettingsViewModel.UpdateStatus.Checking -> "Checking..."
-                    is SettingsViewModel.UpdateStatus.UpToDate -> "Up to date"
-                    is SettingsViewModel.UpdateStatus.Available ->
-                        "Version ${updateStatus.version} available"
-                    is SettingsViewModel.UpdateStatus.Failed -> "Couldn't check. Tap to retry"
-                    is SettingsViewModel.UpdateStatus.Idle -> null
-                }
-                SettingsValueRow(
-                    icon = Lucide.RefreshCw,
-                    title = "Check for updates",
-                    value = statusText.orEmpty(),
-                    valueColor = MaterialTheme.colorScheme.onSurfaceVariant,
-                    onClick = {
-                        val available = updateStatus as? SettingsViewModel.UpdateStatus.Available
-                        if (available != null) {
-                            com.rjnr.pocketnode.ui.util.openInBrowser(context, available.url)
-                        } else {
-                            onCheckForUpdate()
-                        }
+            // Self-update lives only in GitHub-distributed builds. Play updates
+            // through the store, so the Play build has no updater and hides this row.
+            if (BuildConfig.UPDATER_ENABLED) {
+                item {
+                    val updateStatus = uiState.updateStatus
+                    val statusText = when (updateStatus) {
+                        is SettingsViewModel.UpdateStatus.Checking -> "Checking..."
+                        is SettingsViewModel.UpdateStatus.UpToDate -> "Up to date"
+                        is SettingsViewModel.UpdateStatus.Available ->
+                            "Version ${updateStatus.version} available"
+                        is SettingsViewModel.UpdateStatus.Failed -> "Couldn't check. Tap to retry"
+                        is SettingsViewModel.UpdateStatus.Idle -> null
                     }
-                )
+                    SettingsValueRow(
+                        icon = Lucide.RefreshCw,
+                        title = "Check for updates",
+                        value = statusText.orEmpty(),
+                        valueColor = MaterialTheme.colorScheme.onSurfaceVariant,
+                        onClick = {
+                            val available = updateStatus as? SettingsViewModel.UpdateStatus.Available
+                            if (available != null) {
+                                com.rjnr.pocketnode.ui.util.openInBrowser(context, available.url)
+                            } else {
+                                onCheckForUpdate()
+                            }
+                        }
+                    )
+                }
             }
 
             item {
