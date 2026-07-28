@@ -159,6 +159,23 @@ class KeyManager @Inject constructor(
         return prefs.contains(KEY_PRIVATE_KEY)
     }
 
+    /**
+     * Diagnostic-only (#424): "total/V1/V2 key_material rows, espKey" for the
+     * startup-gate log. Returns (-1, -1, -1, false) if the Room helper is not
+     * wired. Never logs key bytes — counts and an existence flag only.
+     */
+    suspend fun diagnosticKeyState(): String {
+        val helper = keyStoreMigrationHelper
+        val (total, v1, v2) = helper?.keyMaterialCounts() ?: Triple(-1, -1, -1)
+        val espKey = try {
+            @Suppress("DEPRECATION")
+            prefs.contains(KEY_PRIVATE_KEY)
+        } catch (e: Exception) {
+            "err(${e.javaClass.simpleName})"
+        }
+        return "keyMaterial=$total(v1=$v1,v2=$v2) espKey=$espKey"
+    }
+
     suspend fun getMnemonic(): List<String>? {
         val helper = keyStoreMigrationHelper
         if (helper != null) {

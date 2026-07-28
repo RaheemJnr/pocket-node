@@ -25,6 +25,7 @@ import com.rjnr.pocketnode.data.wallet.KeyManager
 import com.rjnr.pocketnode.ui.navigation.CkbNavGraph
 import com.rjnr.pocketnode.ui.navigation.Screen
 import com.rjnr.pocketnode.data.wallet.WalletPreferences
+import com.rjnr.pocketnode.data.wallet.WalletRepository
 import com.rjnr.pocketnode.ui.theme.CkbWalletTheme
 import com.rjnr.pocketnode.ui.util.LocalWindowSizeClass
 import dagger.hilt.android.AndroidEntryPoint
@@ -44,6 +45,9 @@ class MainActivity : FragmentActivity() {
 
     @Inject
     lateinit var keyManager: KeyManager
+
+    @Inject
+    lateinit var walletRepository: WalletRepository
 
     @Inject
     lateinit var keyBackupManager: KeyBackupManager
@@ -86,15 +90,34 @@ class MainActivity : FragmentActivity() {
         // on the main thread before any UI is shown.
         val startDestination = runBlocking {
             cachedHasWallet = repository.hasWallet()
-            when {
+            @Suppress("DEPRECATION")
+            val wasReset = keyManager.wasResetDueToCorruption()
+            val hasPin = pinManager.hasPin()
+            val route = when {
                 // Suppressed, not removed: the corruption flag guards the ESP
                 // legacy-key path, which un-migrated installs still read.
-                @Suppress("DEPRECATION")
-                keyManager.wasResetDueToCorruption() -> Screen.Recovery.route
+                wasReset -> Screen.Recovery.route
                 !cachedHasWallet -> Screen.Onboarding.route
-                !pinManager.hasPin() -> Screen.InitialPinSetup.route
+                !hasPin -> Screen.InitialPinSetup.route
                 else -> Screen.Auth.route
             }
+            // #424 diagnostic: users report onboarding after an overwrite
+            // install despite preserved data. Log the exact startup-gate inputs
+            // so a repro on the reporter's device shows which signal is wrong —
+            // detection (keyMaterial>0 but hasWallet=false) vs. actual data loss
+            // (keyMaterial=0) vs. the corruption/ESP path. Counts + a UUID only;
+            // no key bytes are ever logged.
+            runCatching {
+                Log.i(
+                    "StartupGate",
+                    "#424 route=$route hasWallet=$cachedHasWallet wasReset=$wasReset " +
+                        "hasPin=$hasPin ${keyManager.diagnosticKeyState()} " +
+                        "wallets=${walletRepository.walletCount()} " +
+                        "activeWalletId=${walletRepository.activeWalletIdSnapshot()} " +
+                        "lastSeenVc=${walletPreferences.getLastSeenVersionCode()} vc=${BuildConfig.VERSION_CODE}"
+                )
+            }
+            route
         }
 
         setContent {

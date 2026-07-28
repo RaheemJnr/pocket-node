@@ -208,6 +208,14 @@ class KeyStoreMigrationHelper(
         return keyMaterialDao.count() > 0
     }
 
+    /**
+     * Diagnostic-only (#424): total / V1 / V2 row counts in key_material.
+     * Used by the startup-gate log to distinguish "wallet detection failed"
+     * from "key material actually gone" on overwrite-install reports.
+     */
+    suspend fun keyMaterialCounts(): Triple<Int, Int, Int> =
+        Triple(keyMaterialDao.count(), keyMaterialDao.countV1Wallets(), keyMaterialDao.countV2Wallets())
+
     companion object {
         private const val TAG = "KeyStoreMigrationHelper"
         private const val KEY_MIGRATION_COMPLETE = "esp_to_room_migration_complete"
