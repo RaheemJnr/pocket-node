@@ -107,8 +107,15 @@ class MainActivity : FragmentActivity() {
             // detection (keyMaterial>0 but hasWallet=false) vs. actual data loss
             // (keyMaterial=0) vs. the corruption/ESP path. Counts + a UUID only;
             // no key bytes are ever logged.
+            //
+            // Log.println, NOT Log.i: proguard-rules.pro strips v/d/i/w/e/wtf via
+            // -assumenosideeffects in release/playRelease, which would erase this
+            // line from exactly the signed builds the reporter runs (a debug
+            // build can't overwrite their release-signed install). println is not
+            // in that strip list, so it survives R8 and still reaches logcat.
             runCatching {
-                Log.i(
+                Log.println(
+                    Log.INFO,
                     "StartupGate",
                     "#424 route=$route hasWallet=$cachedHasWallet wasReset=$wasReset " +
                         "hasPin=$hasPin ${keyManager.diagnosticKeyState()} " +
