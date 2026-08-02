@@ -159,6 +159,38 @@ class KeyManager @Inject constructor(
         return prefs.contains(KEY_PRIVATE_KEY)
     }
 
+    /**
+     * Diagnostic-only (#424): "total/V1/V2 key_material rows, espKey" for the
+     * startup-gate log. Read-only: never logs key bytes, only counts and an
+     * existence flag.
+     *
+     * Side-effect note: the ESP presence check is skipped when Room already
+     * holds keys (`total > 0`), exactly mirroring [hasWallet]'s short-circuit.
+     * Touching `prefs` lazily initializes `encryptedPrefs`, which can flip
+     * `walletResetDueToCorruption` on an unreadable legacy file; gating on
+     * `total > 0` keeps a migrated wallet's routing untouched (Codex/CodeRabbit
+     * review on #425). Each probe is independently guarded so one failure still
+     * yields a usable line rather than dropping the whole log event.
+     */
+    suspend fun diagnosticKeyState(): String {
+        val helper = keyStoreMigrationHelper
+        val (total, v1, v2) = try {
+            helper?.keyMaterialCounts() ?: Triple(-1, -1, -1)
+        } catch (e: Exception) {
+            Triple(-2, -2, -2) // -2 marks a count-probe failure
+        }
+        val espKey = when {
+            total > 0 -> "skip" // Room has keys; don't touch ESP (no side effect)
+            else -> try {
+                @Suppress("DEPRECATION")
+                prefs.contains(KEY_PRIVATE_KEY).toString()
+            } catch (e: Exception) {
+                "err(${e.javaClass.simpleName})"
+            }
+        }
+        return "keyMaterial=$total(v1=$v1,v2=$v2) espKey=$espKey"
+    }
+
     suspend fun getMnemonic(): List<String>? {
         val helper = keyStoreMigrationHelper
         if (helper != null) {
