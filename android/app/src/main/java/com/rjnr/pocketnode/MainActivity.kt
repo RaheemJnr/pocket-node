@@ -191,11 +191,11 @@ class MainActivity : FragmentActivity() {
         super.onStop()
         // Play build only (self-gated): enqueue a one-time catch-up so the light
         // client keeps syncing for a few minutes after the app is backgrounded,
-        // while the process is still warm. No-op on builds that keep the
-        // foreground service (#337).
-        if (cachedHasWallet) {
-            syncWorkScheduler.enqueueBackgroundCatchUp()
-        }
+        // while the process is still warm. Always enqueue: the worker itself
+        // checks hasWallet(), so a fresh install that just created its wallet
+        // during onboarding is covered even though cachedHasWallet (set once in
+        // onCreate) is still stale here (Codex #428 P1). No-op on FGS builds.
+        syncWorkScheduler.enqueueBackgroundCatchUp()
         // Use cached value — avoids blocking main thread on every onStop
         if (cachedHasWallet && pinManager.hasPin()) {
             _requireReauth.value = true

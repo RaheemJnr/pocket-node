@@ -9,7 +9,7 @@ import com.rjnr.pocketnode.BuildConfig
 import com.rjnr.pocketnode.data.gateway.GatewayRepository
 import dagger.assisted.Assisted
 import dagger.assisted.AssistedInject
-import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.withTimeoutOrNull
 
 /**
@@ -55,23 +55,37 @@ class SyncCatchUpWorker @AssistedInject constructor(
 
         return try {
             repository.initializeWallet()
-            repository.startSyncPolling()
 
             val outcome = withTimeoutOrNull(MAX_RUN_MS) {
-                // Probe: if the native client emits no tip within PROBE_MS it is
-                // not running in this (likely cold) process. Bail rather than
-                // spin the full window.
-                val nodeLive = withTimeoutOrNull(PROBE_MS) {
-                    repository.syncProgress.first { it.tipBlockNumber > 0 }
-                    true
-                } ?: false
-
-                if (!nodeLive) {
-                    "no-live-node"
-                } else {
-                    repository.syncProgress.first { !it.isSyncing && it.percentage >= 100 }
-                    "caught-up"
+                // Poll getAccountStatus() directly rather than driving the shared
+                // startSyncPolling job. That job is process-wide state owned by
+                // the foreground UI; a worker that started/stopped it would cancel
+                // the Home screen's progress poller on a warm process and stale it
+                // (Codex #428 P1). getAccountStatus is a cheap local JNI read with
+                // no shared ownership. The native client keeps syncing on its own
+                // threads while WorkManager holds the process alive here; we only
+                // observe progress and return once caught up.
+                var sawNode = false
+                val probeDeadline = System.currentTimeMillis() + PROBE_MS
+                var result: String? = null
+                while (result == null) {
+                    val status = repository.getAccountStatus().getOrNull()
+                    val synced = status?.syncedToBlock?.toLongOrNull() ?: 0L
+                    val tip = status?.tipNumber?.toLongOrNull() ?: 0L
+                    when {
+                        tip > 0L && synced >= tip -> result = "caught-up"
+                        tip > 0L -> sawNode = true
+                    }
+                    // No tip within PROBE_MS => native client not running in this
+                    // (likely cold) process. Bail rather than spin the full window.
+                    if (result == null && !sawNode &&
+                        System.currentTimeMillis() > probeDeadline
+                    ) {
+                        result = "no-live-node"
+                    }
+                    if (result == null) delay(POLL_INTERVAL_MS)
                 }
+                result
             } ?: "timed-out-still-syncing"
 
             Log.i(TAG, "catch-up finished: $outcome")
@@ -79,8 +93,6 @@ class SyncCatchUpWorker @AssistedInject constructor(
         } catch (e: Exception) {
             Log.w(TAG, "catch-up failed; will retry with backoff", e)
             Result.retry()
-        } finally {
-            repository.stopSyncPolling()
         }
     }
 
@@ -93,5 +105,8 @@ class SyncCatchUpWorker @AssistedInject constructor(
         // How long to wait for the native client to show any chain data before
         // concluding it is not running in this process.
         private const val PROBE_MS = 45L * 1000L
+
+        // Cadence for the direct getAccountStatus() catch-up poll.
+        private const val POLL_INTERVAL_MS = 5L * 1000L
     }
 }
