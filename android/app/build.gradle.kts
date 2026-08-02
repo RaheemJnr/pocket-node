@@ -60,6 +60,15 @@ android {
         // REQUEST_INSTALL_PACKAGES (src/playRelease/AndroidManifest.xml).
         buildConfigField("boolean", "UPDATER_ENABLED", "true")
 
+        // Gates the background-sync foreground service (dataSync FGS). Default
+        // true for GitHub-distributed debug/release builds. The `playRelease`
+        // build type overrides this to false: Google Play's foreground-service
+        // policy rejected the dataSync justification, so the Play AAB never
+        // starts the FGS (sync stays foreground-first; a WorkManager catch-up
+        // worker is tracked in #337) and strips the FOREGROUND_SERVICE
+        // permissions (src/playRelease/AndroidManifest.xml).
+        buildConfigField("boolean", "BG_FGS_ENABLED", "true")
+
         // Only include ARM ABIs — x86_64 is emulator-only and adds ~29 MB.
         // CI's upgrade-smoke harness opts in via BUILD_X86_64=1 (matched in
         // external/ckb-light-client/build-android-jni.sh).
@@ -205,6 +214,7 @@ android {
             // Resolve dependency variants that only publish `release`.
             matchingFallbacks += "release"
             buildConfigField("boolean", "UPDATER_ENABLED", "false")
+            buildConfigField("boolean", "BG_FGS_ENABLED", "false")
             signingConfig = if (unsignedRelease) null else signingConfigs.getByName("release")
         }
     }

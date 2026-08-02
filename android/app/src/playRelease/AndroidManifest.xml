@@ -1,9 +1,21 @@
 <?xml version="1.0" encoding="utf-8"?>
 <!--
-  Play Store build overlay. The in-app updater is compiled out of this build
-  type (BuildConfig.UPDATER_ENABLED=false), and Google Play forbids apps that
-  self-install APKs, so REQUEST_INSTALL_PACKAGES must not appear in the merged
-  manifest of the uploaded AAB. tools:node="remove" strips it from the merge.
+  Play Store build overlay. Two things are stripped from the merged manifest of
+  the uploaded AAB:
+
+  1. REQUEST_INSTALL_PACKAGES — the in-app updater is compiled out
+     (BuildConfig.UPDATER_ENABLED=false) and Google Play forbids apps that
+     self-install APKs.
+
+  2. FOREGROUND_SERVICE and FOREGROUND_SERVICE_DATA_SYNC — Google Play's
+     foreground-service policy rejected the dataSync justification for the
+     background-sync service (#338). The Play build compiles the FGS out
+     (BuildConfig.BG_FGS_ENABLED=false, guarded in GatewayRepository), so these
+     permissions must not appear in the Play manifest. Sync stays
+     foreground-first; a WorkManager catch-up worker is tracked in #337. The
+     GitHub/website release build retains the FGS and these permissions.
+
+  tools:node="remove" strips each from the merge.
 -->
 <manifest xmlns:android="http://schemas.android.com/apk/res/android"
     xmlns:tools="http://schemas.android.com/tools">
@@ -11,5 +23,26 @@
     <uses-permission
         android:name="android.permission.REQUEST_INSTALL_PACKAGES"
         tools:node="remove" />
+
+    <uses-permission
+        android:name="android.permission.FOREGROUND_SERVICE"
+        tools:node="remove" />
+
+    <uses-permission
+        android:name="android.permission.FOREGROUND_SERVICE_DATA_SYNC"
+        tools:node="remove" />
+
+    <!--
+      Also drop the service element itself so no `dataSync` foreground-service
+      signal remains in the Play manifest for Google's policy scan. The service
+      is never started on this build (guarded by BG_FGS_ENABLED in
+      GatewayRepository), and stopService() on an unregistered service is a
+      no-op, so removal is safe.
+    -->
+    <application>
+        <service
+            android:name=".data.sync.SyncForegroundService"
+            tools:node="remove" />
+    </application>
 
 </manifest>

@@ -2,6 +2,7 @@ package com.rjnr.pocketnode.data.gateway
 
 import android.content.Context
 import android.util.Log
+import com.rjnr.pocketnode.BuildConfig
 import com.rjnr.pocketnode.data.database.AppDatabase
 import com.rjnr.pocketnode.data.database.DatabaseMaintenanceUtil
 import com.rjnr.pocketnode.data.database.dao.HeaderCacheDao
@@ -2912,6 +2913,15 @@ class GatewayRepository @Inject constructor(
      * Start the foreground sync service if background sync is enabled.
      */
     fun startBackgroundSync() {
+        // Play build ships no foreground service (Google FGS policy rejected the
+        // dataSync justification, #338). The flag is false only on `playRelease`;
+        // the GitHub/website release keeps the FGS. Guard here, the single call
+        // site, so the manifest overlay that strips FOREGROUND_SERVICE_* can never
+        // be paired with a startForegroundService() that would then crash.
+        if (!BuildConfig.BG_FGS_ENABLED) {
+            Log.d(TAG, "FGS compiled out for this build (Play); sync stays foreground-first")
+            return
+        }
         if (!walletPreferences.isBackgroundSyncEnabled()) {
             Log.d(TAG, "Background sync disabled, not starting service")
             return
