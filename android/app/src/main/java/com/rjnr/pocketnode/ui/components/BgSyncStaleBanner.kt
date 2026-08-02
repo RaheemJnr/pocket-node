@@ -3,6 +3,7 @@ package com.rjnr.pocketnode.ui.components
 import android.Manifest
 import android.content.pm.PackageManager
 import android.os.Build
+import com.rjnr.pocketnode.BuildConfig
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.layout.Arrangement
@@ -99,7 +100,10 @@ fun BgSyncStaleBanner(
                 TextButton(onClick = onDismiss) {
                     Text(stringResource(R.string.bg_sync_pill_action_dismiss))
                 }
-                if (!bgSyncEnabled) {
+                // #427 / Codex P1: no foreground service on the Play build, so
+                // never offer the "enable background sync" action there (it
+                // would request POST_NOTIFICATIONS for a feature that cannot run).
+                if (BuildConfig.BG_FGS_ENABLED && !bgSyncEnabled) {
                     FilledTonalButton(onClick = {
                         val needsPermission = Build.VERSION.SDK_INT >= 33 &&
                             ContextCompat.checkSelfPermission(

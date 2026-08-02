@@ -490,27 +490,33 @@ private fun SettingsScreenUI(
                 )
             }
 
-            item {
-                SettingsSwitchRow(
-                    icon = Lucide.RefreshCw,
-                    title = "Background Sync",
-                    checked = uiState.isBackgroundSyncEnabled,
-                    onCheckedChange = onToggleBackgroundSync
-                )
-            }
+            // Background sync is powered by the foreground service, which is
+            // compiled out of the Play build (BG_FGS_ENABLED=false, #338). Hide
+            // the toggle there so we don't offer a control that does nothing;
+            // the GitHub/website release still shows it.
+            if (BuildConfig.BG_FGS_ENABLED) {
+                item {
+                    SettingsSwitchRow(
+                        icon = Lucide.RefreshCw,
+                        title = "Background Sync",
+                        checked = uiState.isBackgroundSyncEnabled,
+                        onCheckedChange = onToggleBackgroundSync
+                    )
+                }
 
-            // #286: one-line tradeoff blurb at the point of choice.
-            item {
-                Text(
-                    text = "Keeps your balance fresh while the app is closed, with a small " +
-                        "ongoing notification. Android may still pause it after extended " +
-                        "background time.",
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    modifier = Modifier
-                        .padding(horizontal = 16.dp)
-                        .padding(top = 4.dp, bottom = 8.dp)
-                )
+                // #286: one-line tradeoff blurb at the point of choice.
+                item {
+                    Text(
+                        text = "Keeps your balance fresh while the app is closed, with a small " +
+                            "ongoing notification. Android may still pause it after extended " +
+                            "background time.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        modifier = Modifier
+                            .padding(horizontal = 16.dp)
+                            .padding(top = 4.dp, bottom = 8.dp)
+                    )
+                }
             }
 
             item {

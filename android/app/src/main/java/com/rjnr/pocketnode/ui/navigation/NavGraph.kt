@@ -11,6 +11,7 @@ import androidx.navigation.compose.NavHost
 import androidx.navigation.compose.composable
 import androidx.navigation.navArgument
 import androidx.hilt.lifecycle.viewmodel.compose.hiltViewModel
+import com.rjnr.pocketnode.BuildConfig
 import com.rjnr.pocketnode.data.auth.PinManager
 import com.rjnr.pocketnode.ui.MainScreen
 import com.rjnr.pocketnode.ui.screens.auth.AuthScreen
@@ -593,7 +594,16 @@ fun CkbNavGraph(
                     // #286: surface background sync at the point of choice,
                     // right after the mandatory PIN step. The opt-in screen
                     // self-skips when the preference is already set.
-                    navController.navigate(Screen.BackgroundSyncOptIn.route) {
+                    //
+                    // #427 / Codex P1: the Play build has no foreground service,
+                    // so there is nothing to opt into and no POST_NOTIFICATIONS
+                    // to request. Skip the opt-in and go straight to the wallet.
+                    val next = if (BuildConfig.BG_FGS_ENABLED) {
+                        Screen.BackgroundSyncOptIn.route
+                    } else {
+                        destinationAfterWalletReady()
+                    }
+                    navController.navigate(next) {
                         popUpTo(navController.graph.id) { inclusive = true }
                         launchSingleTop = true
                     }
