@@ -20,6 +20,7 @@ import androidx.navigation.compose.rememberNavController
 import com.rjnr.pocketnode.data.auth.AuthManager
 import com.rjnr.pocketnode.data.auth.PinManager
 import com.rjnr.pocketnode.data.gateway.GatewayRepository
+import com.rjnr.pocketnode.data.sync.SyncWorkScheduler
 import com.rjnr.pocketnode.data.wallet.KeyBackupManager
 import com.rjnr.pocketnode.data.wallet.KeyManager
 import com.rjnr.pocketnode.ui.navigation.CkbNavGraph
@@ -54,6 +55,9 @@ class MainActivity : FragmentActivity() {
 
     @Inject
     lateinit var authManager: AuthManager
+
+    @Inject
+    lateinit var syncWorkScheduler: SyncWorkScheduler
 
     private val _requireReauth = mutableStateOf(false)
 
@@ -185,6 +189,13 @@ class MainActivity : FragmentActivity() {
 
     override fun onStop() {
         super.onStop()
+        // Play build only (self-gated): enqueue a one-time catch-up so the light
+        // client keeps syncing for a few minutes after the app is backgrounded,
+        // while the process is still warm. No-op on builds that keep the
+        // foreground service (#337).
+        if (cachedHasWallet) {
+            syncWorkScheduler.enqueueBackgroundCatchUp()
+        }
         // Use cached value — avoids blocking main thread on every onStop
         if (cachedHasWallet && pinManager.hasPin()) {
             _requireReauth.value = true
