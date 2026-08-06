@@ -176,6 +176,22 @@ class DaoDepositReader @Inject constructor(
         var apc = 0.0
         var consumedDepositOutPoints: List<com.rjnr.pocketnode.data.gateway.models.OutPoint> = emptyList()
 
+        // #434: read the phase-1 tx up front for withdrawing cells and record
+        // what it consumed, INDEPENDENT of header availability. This drives
+        // dedupeWithdrawnDeposits, which drops the original deposit's stale
+        // DEPOSITED entry the light client still lists until its spent-filter
+        // catches up. Previously this was only populated inside the
+        // `cellBlockHeader != null` branch below, so the moment right after a
+        // withdraw confirms — before the new withdrawing cell's header is
+        // fetched — it stayed empty, dedup couldn't fire, and the pending
+        // overlay painted the stale deposit a duplicate "Confirming…" card.
+        val withdrawTx = if (isWithdrawing) {
+            LightClientNative.nativeGetTransaction(cell.outPoint.txHash)
+                ?.let { json.decodeFromString<JniTransactionWithStatus>(it) }
+        } else null
+        consumedDepositOutPoints = withdrawTx?.transaction?.inputs
+            ?.map { it.previousOutput } ?: emptyList()
+
         // Get block header for compensation & epoch data (cache-first).
         val blockHash = daoHeaderResolver.getBlockHashForCell(cell.outPoint.txHash)
         val cellBlockHeader = if (blockHash != null) {
@@ -206,14 +222,9 @@ class DaoDepositReader @Inject constructor(
                 withdrawEpoch = cellBlockEpoch
                 depositBlockNumber = depositBlockNum
 
-                // Get original deposit header for compensation (cache-first)
-                val withdrawTxJson = LightClientNative.nativeGetTransaction(cell.outPoint.txHash)
-                val withdrawTx = withdrawTxJson?.let { json.decodeFromString<JniTransactionWithStatus>(it) }
-                // #357: record what this phase-1 tx consumed so the caller can
-                // drop the original deposit's stale DEPOSITED entry that the
-                // light client may still list until its spent-filter catches up.
-                consumedDepositOutPoints = withdrawTx?.transaction?.inputs
-                    ?.map { it.previousOutput } ?: emptyList()
+                // Original deposit header for compensation (cache-first). The
+                // phase-1 tx (`withdrawTx`) and its consumed outpoints were read
+                // up front (#434); reuse it here for the header dep.
                 val origDepositBlockHash = withdrawTx?.transaction?.headerDeps?.firstOrNull()
                 if (origDepositBlockHash != null) {
                     depositBlockHash = origDepositBlockHash

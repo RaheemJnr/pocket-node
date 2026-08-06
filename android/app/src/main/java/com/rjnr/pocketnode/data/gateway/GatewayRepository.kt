@@ -1621,6 +1621,15 @@ class GatewayRepository @Inject constructor(
      */
     private suspend fun buildReserveAndSend(
         fromAddress: String,
+        // Pending activity-row overrides for DAO ops (#433). A plain transfer
+        // leaves these null and the row is a generic "out" whose balanceChange
+        // is the computed net debit. A DAO withdraw/deposit passes its true
+        // direction + amount so the pending row reads "Dao Withdraw 250 CKB"
+        // instead of surfacing the tiny fee as a "-0.001 Sent". Fee is stored
+        // separately so the detail view's fee line is populated.
+        pendingDirection: String = "out",
+        pendingAmountShannons: Long? = null,
+        pendingFeeShannons: Long? = null,
         build: (availableCells: List<Cell>, network: NetworkType) -> Transaction
     ): String {
         // Snapshot every piece of sender state at function entry. The user can
@@ -1752,9 +1761,9 @@ class GatewayRepository @Inject constructor(
                 txHash = txHash,
                 network = network,
                 walletId = walletId,
-                balanceChange = balanceChangeHex,
-                direction = "out",
-                fee = "0x0"
+                balanceChange = pendingAmountShannons?.let { "0x${it.toString(16)}" } ?: balanceChangeHex,
+                direction = pendingDirection,
+                fee = pendingFeeShannons?.let { "0x${it.toString(16)}" } ?: "0x0"
             )
             signed
         }
@@ -2609,7 +2618,14 @@ class GatewayRepository @Inject constructor(
 
         // Route through the shared mutex + reservation filter (#320) so a deposit
         // can't select inputs already reserved by an in-flight transfer.
-        val txHash = buildReserveAndSend(address) { availableCells, net ->
+        val txHash = buildReserveAndSend(
+            address,
+            // #433: pending deposit reads "Dao Deposit <amount> CKB" (matching the
+            // confirmed row) rather than a generic "Sent" carrying amount + fee.
+            pendingDirection = "dao_deposit",
+            pendingAmountShannons = amountShannons,
+            pendingFeeShannons = TransactionBuilder.DEFAULT_FEE,
+        ) { availableCells, net ->
             transactionBuilder.buildDaoDeposit(
                 amountShannons = amountShannons,
                 availableCells = availableCells,
@@ -2668,7 +2684,15 @@ class GatewayRepository @Inject constructor(
         // preserves the deposit capacity exactly, so a regular fee input cell is
         // mandatory (#119) — `availableCells` is the reservation-filtered regular
         // CKB set, ensuring the fee cell isn't one an in-flight transfer reserved.
-        val txHash = buildReserveAndSend(address) { availableCells, net ->
+        val txHash = buildReserveAndSend(
+            address,
+            // #433: show the pending withdraw as "Dao Withdraw <deposit> CKB"
+            // with the fee on its own line, not as a "-0.001 Sent". Phase-1
+            // preserves the deposit capacity exactly, so the fee is DEFAULT_FEE.
+            pendingDirection = "dao_withdraw",
+            pendingAmountShannons = deposit.capacity,
+            pendingFeeShannons = TransactionBuilder.DEFAULT_FEE,
+        ) { availableCells, net ->
             transactionBuilder.buildDaoWithdraw(
                 depositCell = depositCell,
                 depositBlockNumber = deposit.depositBlockNumber,
