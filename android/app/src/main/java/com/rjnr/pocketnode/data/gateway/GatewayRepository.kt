@@ -2507,6 +2507,22 @@ class GatewayRepository @Inject constructor(
 
         val windowStart = getExistingScriptBlock()
         val liveKeys = live.map { "${it.outPoint.txHash}:${it.outPoint.index}" }.toSet()
+
+        // #434: outpoints consumed by a live withdrawing cell's phase-1 tx.
+        // A cached deposit whose outpoint is here was spent by a withdraw and
+        // MUST be retired — never resurfaced as an outside-window entry.
+        // getExistingScriptBlock() returns the script's current sync head, not
+        // its registration start, so a just-spent recent deposit (block now
+        // behind the head) would otherwise fall into the `< windowStart` branch,
+        // reappear under "made before this wallet's sync window", and double the
+        // DAO total right after a withdraw confirms. Index formats are
+        // normalized (hex vs decimal) so the outpoint match is reliable.
+        fun normKey(txHash: String, index: String) =
+            "${txHash.lowercase()}:${index.removePrefix("0x").toLongOrNull(16) ?: index}"
+        val consumedByLive = live.flatMap { it.consumedDepositOutPoints }
+            .map { normKey(it.txHash, it.index) }
+            .toSet()
+
         val cached = runCatching { daoSyncManager.getActiveDeposits(network, walletId) }
             .getOrDefault(emptyList())
 
@@ -2517,7 +2533,13 @@ class GatewayRepository @Inject constructor(
             // DEPOSITING rows are optimistic pre-confirmation inserts with
             // blockNumber 0 — not windowing victims; leave them alone.
             if (entity.status == DaoCellStatus.DEPOSITING.name) continue
-            if (windowStart > 0 && entity.depositBlockNumber in 1 until windowStart) {
+            if (normKey(entity.txHash, entity.index) in consumedByLive) {
+                // Spent by a live withdraw — retire so it neither resurfaces as
+                // an outside-window entry nor double-counts the DAO total (#434).
+                runCatching {
+                    daoSyncManager.updateStatus(entity.txHash, entity.index, DaoCellStatus.COMPLETED.name)
+                }
+            } else if (windowStart > 0 && entity.depositBlockNumber in 1 until windowStart) {
                 outsideWindow += entity.toOutsideWindowDeposit()
             } else {
                 // Inside the window yet absent from the live scan: the cell
