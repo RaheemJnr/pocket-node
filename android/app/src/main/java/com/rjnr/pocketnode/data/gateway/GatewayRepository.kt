@@ -1327,6 +1327,71 @@ class GatewayRepository @Inject constructor(
         resp
     }
 
+    /**
+     * #435: recompute and cache the spendable balance for a wallet OTHER than
+     * the active one, keyed under [walletId], from its [address].
+     *
+     * The account switcher renders each account's balance from the balance
+     * cache. That cache was only written for a wallet while it was active (via
+     * [refreshBalance]), so a confirmed transfer INTO a sub-account left the
+     * sub-account's switcher balance stale until the user switched to it. All
+     * wallets' lock scripts are registered with the light client
+     * (SyncCoordinator), so the cell scan here sees the sub-account's cells
+     * even while it is inactive.
+     *
+     * Unlike [refreshBalance] this deliberately does NOT mutate [_balance]
+     * (that stream belongs to the active wallet) and does NOT run the zero-cell
+     * rescue rescan (an active-wallet-only recovery that rewinds the script).
+     */
+    suspend fun refreshBalanceForWallet(walletId: String, address: String): Result<BalanceResponse> = runCatching {
+        val script = AddressUtils.decode(address)
+        val searchKey = JniSearchKey(script = script)
+        val searchKeyJson = json.encodeToString(searchKey)
+
+        val responseJson = LightClientNative.nativeGetCellsCapacity(searchKeyJson)
+            ?: throw Exception(readPathNullMessage("get balance", lightClientReadyForRead()))
+        val cap = json.decodeFromString<JniCellsCapacity>(responseJson)
+        var capacityVal = cap.capacity.removePrefix("0x").toLongOrNull(16) ?: 0L
+
+        // Same live-cell filtering as refreshBalance: drop spent + typed cells.
+        try {
+            val spentOutpoints = fetchAllSpentOutpoints(searchKeyJson)
+            val allBalanceCells = mutableListOf<JniCell>()
+            var c: String? = null
+            var pages = 0
+            while (pages < MAX_CELL_PAGES) {
+                val pageJson = LightClientNative.nativeGetCells(searchKeyJson, "desc", 100, c) ?: break
+                val page = json.decodeFromString<JniPagination<JniCell>>(pageJson)
+                allBalanceCells.addAll(page.objects)
+                pages++
+                if (page.objects.isEmpty() || page.objects.size < 100 || page.lastCursor.isNullOrEmpty()) break
+                c = page.lastCursor
+            }
+            if (allBalanceCells.isNotEmpty()) {
+                var liveCapacity = 0L
+                allBalanceCells.forEach { cell ->
+                    val outpointKey = "${cell.outPoint.txHash}:${cell.outPoint.index}"
+                    if (outpointKey !in spentOutpoints) {
+                        val cellCapacity = cell.output.capacity.removePrefix("0x").toLongOrNull(16)
+                        if (cellCapacity != null && cell.output.type == null) liveCapacity += cellCapacity
+                    }
+                }
+                capacityVal = liveCapacity
+            }
+        } catch (e: Exception) {
+            Log.w(TAG, "refreshBalanceForWallet($walletId): live filter failed, using raw capacity: ${e.message}")
+        }
+
+        val resp = BalanceResponse(
+            address = address,
+            capacity = "0x${capacityVal.toString(16)}",
+            capacityCkb = (capacityVal / 100_000_000.0).toString(),
+            asOfBlock = cap.blockNumber
+        )
+        cacheManager.cacheBalance(resp, currentNetwork.name, walletId = walletId)
+        resp
+    }
+
     // Simplified Account Status - JNI doesn't give sync progress easily
     suspend fun getAccountStatus(): Result<AccountStatusResponse> = runCatching {
         val addr = getCurrentAddress() ?: throw Exception("No wallet")

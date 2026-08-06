@@ -431,16 +431,35 @@ class HomeViewModel @Inject constructor(
 
             refreshTransactionsOnly()
 
+            // #435: keep the account switcher's per-account balances current,
+            // not just the active wallet's headline balance.
+            refreshWalletBalances(_uiState.value.wallets)
+
             _uiState.update { it.copy(isRefreshing = false) }
         }
     }
 
     private suspend fun refreshWalletBalances(wallets: List<WalletEntity>) {
-        val network = _uiState.value.currentNetwork.name
+        val network = _uiState.value.currentNetwork
+        val networkName = network.name
+        val activeWalletId = walletPreferences.getActiveWalletId()?.takeIf { it.isNotBlank() }
+
+        // #435: recompute non-active wallets' balances from the light client so
+        // the account switcher isn't stale after a confirmed transfer into
+        // another account. The active wallet's cache is kept fresh by
+        // refreshBalance(), so skip it here to avoid duplicate cell walks.
+        for (wallet in wallets) {
+            if (wallet.walletId == activeWalletId) continue
+            val address = if (network == NetworkType.MAINNET) wallet.mainnetAddress else wallet.testnetAddress
+            if (address.isBlank()) continue
+            runCatching { repository.refreshBalanceForWallet(wallet.walletId, address) }
+                .onFailure { Log.w(TAG, "Failed to refresh balance for ${wallet.walletId}", it) }
+        }
+
         val balanceMap = mutableMapOf<String, String>()
         for (wallet in wallets) {
             try {
-                val cached = cacheManager.getCachedBalance(network, walletId = wallet.walletId)
+                val cached = cacheManager.getCachedBalance(networkName, walletId = wallet.walletId)
                 if (cached != null) {
                     val ckb = cached.capacityAsCkb()
                     balanceMap[wallet.walletId] = String.format(Locale.US, "%,.2f CKB", ckb)
