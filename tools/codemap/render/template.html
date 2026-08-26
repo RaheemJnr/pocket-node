@@ -1,0 +1,70 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Pocket Node Codemap</title>
+<style>/*STYLES*/</style>
+</head>
+<body>
+<div id="app">
+  <header id="topbar">
+    <div class="brand">
+      <strong>Codemap</strong>
+      <span class="meta" id="meta"></span>
+    </div>
+    <div class="controls">
+      <div class="group">
+        <button id="layout-layered" class="active">Layered</button>
+        <button id="layout-force">Force</button>
+      </div>
+      <div class="group">
+        <label for="depth">Depth</label>
+        <select id="depth">
+          <option value="module">Module</option>
+          <option value="type" selected>Type</option>
+          <option value="function">Function</option>
+        </select>
+      </div>
+      <div class="group">
+        <label><input type="checkbox" id="kmp-overlay"> KMP overlay</label>
+        <label><input type="checkbox" id="violations-only"> Violations only</label>
+      </div>
+      <div class="group">
+        <input type="search" id="search" placeholder="Search name…" autocomplete="off">
+        <span id="search-count" class="meta"></span>
+      </div>
+      <div class="group">
+        <button id="reset">Reset</button>
+      </div>
+    </div>
+  </header>
+
+  <main>
+    <div id="cy"></div>
+    <aside id="panel">
+      <div id="panel-empty" class="panel-empty">
+        <p>Click a node to inspect it.</p>
+        <p class="hint">Selecting highlights everything upstream (callers) and downstream (callees). Double-click a node to expand its children.</p>
+      </div>
+      <div id="panel-body" hidden></div>
+    </aside>
+  </main>
+
+  <footer id="statusbar">
+    <span id="counts"></span>
+    <button id="chip-unresolved" class="chip" title="Calls whose receiver type we knew but whose method we could not locate"></button>
+    <button id="chip-violations" class="chip" title="Edges where a lower layer depends on a higher one"></button>
+    <span id="legend" class="legend" hidden>
+      <span class="sw green"></span>commonMain-ready
+      <span class="sw amber"></span>needs expect/actual
+      <span class="sw red"></span>androidMain only
+    </span>
+  </footer>
+</div>
+
+<script type="application/json" id="codemap-data">/*DATA*/</script>
+<script>/*VENDOR*/</script>
+<script>/*APP*/</script>
+</body>
+</html>

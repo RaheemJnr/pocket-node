@@ -99,9 +99,37 @@ def _resolve(raw, rf, decl, own_type, types_by_name, methods, toplevel):
                          only number worth tracking as a quality metric
       not_ours        -- bare call matching nothing we declare
     """
+    sep = "::" if rf.lang == "rust" else "."
+
+    # Rust paths use both separators: `self.store.get()`, `Store::open()`,
+    # `crate::storage::read_cell_count()`. Normalise before splitting.
+    if sep == "::" and "::" in raw:
+        receiver, _, method = raw.rpartition("::")
+        receiver = receiver.split("::")[-1]
+        if receiver in types_by_name:
+            for tid in types_by_name[receiver]:
+                hit = methods.get((tid, method))
+                if hit:
+                    return hit, "hit"
+        # a free function reached through a module path
+        hit = toplevel.get((receiver, method))
+        if hit:
+            return hit, "hit"
+        for (mod, name), fid in toplevel.items():
+            if name == method and mod.endswith(receiver):
+                return fid, "hit"
+        return None, "no_receiver"
+
     if "." in raw:
         receiver, _, method = raw.rpartition(".")
         receiver = receiver.split(".")[-1]
+
+        # `self.method()` dispatches on the enclosing type
+        if receiver == "self" and own_type:
+            hit = methods.get((own_type, method))
+            if hit:
+                return hit, "hit"
+            return None, "method_missing"
 
         type_name = decl.local_types.get(receiver)
         if type_name is None:
@@ -124,10 +152,20 @@ def _resolve(raw, rf, decl, own_type, types_by_name, methods, toplevel):
     if hit:
         return hit, "hit"
 
-    # a top-level function pulled in by import
+    # a top-level function pulled in by import (separator is language-aware)
     for imp in rf.imports:
-        if imp.rsplit(".", 1)[-1] == raw:
-            hit = toplevel.get((imp.rsplit(".", 1)[0], raw))
+        if imp.rsplit(sep, 1)[-1] == raw:
+            module = imp.rsplit(sep, 1)[0]
+            hit = toplevel.get((module, raw))
             if hit:
                 return hit, "hit"
+            for (mod, name), fid in toplevel.items():
+                if name == raw and (mod.endswith(module) or module.endswith(mod)):
+                    return fid, "hit"
+
+    # same-crate free function reachable by bare name
+    if rf.lang == "rust":
+        candidates = [fid for (mod, name), fid in toplevel.items() if name == raw]
+        if len(candidates) == 1:
+            return candidates[0], "hit"
     return None, "not_ours"

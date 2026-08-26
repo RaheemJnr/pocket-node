@@ -70,16 +70,28 @@ def build_graph(files: list[RawFile]) -> Graph:
 
 
 def discover(root: Path) -> list[Path]:
+    """Source files under the configured roots.
+
+    Falls back to scanning the whole tree when the configured globs match
+    nothing, so the tool works when pointed at an arbitrary directory --
+    which is also what makes the fixture-based CLI tests meaningful
+    rather than silently passing on an empty graph.
+    """
     out: list[Path] = []
     for globs in (KOTLIN_GLOBS, RUST_GLOBS, SWIFT_GLOBS):
         for pattern in globs:
             for p in root.glob(pattern):
-                s = str(p)
-                if any(m in s for m in EXCLUDE_MARKERS):
+                if any(m in str(p) for m in EXCLUDE_MARKERS):
                     continue
                 if p.suffix in EXT_TO_LANG:
                     out.append(p)
-    return sorted(out)
+    if not out:
+        for p in root.rglob("*"):
+            if any(m in str(p) for m in EXCLUDE_MARKERS):
+                continue
+            if p.suffix in EXT_TO_LANG:
+                out.append(p)
+    return sorted(set(out))
 
 
 def extract_all(root: Path, paths: list[Path] | None = None) -> list[RawFile]:
