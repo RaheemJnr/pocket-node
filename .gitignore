@@ -212,6 +212,7 @@ android/app/src/main/play/
 # Claude Code (local only)
 # ===================
 CLAUDE.md
+.claude/
 
 # ===================
 # Misc
