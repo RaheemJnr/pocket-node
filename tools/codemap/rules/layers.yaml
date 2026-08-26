@@ -12,15 +12,15 @@ layers:
     label: UniFFI bridge
     match: ["**/uniffi*/**", "**/*_uniffi.rs", "**/uniffi_api.rs", "**/*.udl"]
 
-  - id: ios-core
-    order: 6
-    label: iOS core
-    match: ["ios/**/Core/**", "ios/**/Services/**", "**/*.swift"]
-
   - id: ios-ui
     order: 7
     label: iOS UI
     match: ["ios/**/Views/**", "ios/**/*View.swift", "ios/**/*Screen.swift"]
+
+  - id: ios-core
+    order: 6
+    label: iOS core
+    match: ["ios/**/Core/**", "ios/**/Services/**", "**/*.swift"]
 
   - id: rust-core
     order: 0

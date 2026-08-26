@@ -10,3 +10,8 @@ allow_parse_errors:
 # 9.8% when this was set; the ceiling leaves headroom without hiding a
 # real regression.
 unresolved_ceiling: 0.20
+
+# A Rust `#[uniffi::export]` with no Swift caller is a dead cross-platform
+# edge. Set false during early iOS work if exports legitimately land before
+# their callers.
+flag_unused_uniffi_exports: true

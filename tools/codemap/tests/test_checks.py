@@ -65,3 +65,15 @@ def test_run_all_returns_a_bucket_per_check():
     g.stats["unresolved_calls"] = {"rate": 0.0}
     r = run_all(g, {})
     assert set(r) == {"bridges_paired", "no_layer_violations", "parse_errors", "unresolved_rate"}
+
+
+def test_unused_uniffi_export_is_reported_by_default():
+    g = _g()
+    g.stats["uniffi"] = {"rust_orphans": ["get_tip"], "swift_orphans": []}
+    assert any("no Swift caller" in m for m in check_bridges_paired(g))
+
+
+def test_unused_uniffi_export_can_be_tolerated():
+    g = _g()
+    g.stats["uniffi"] = {"rust_orphans": ["get_tip"], "swift_orphans": []}
+    assert check_bridges_paired(g, flag_unused_exports=False) == []

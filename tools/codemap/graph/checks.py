@@ -11,7 +11,7 @@ from .graph import Graph
 from .layers import is_backward_edge
 
 
-def check_bridges_paired(g: Graph) -> list[str]:
+def check_bridges_paired(g: Graph, flag_unused_exports: bool = True) -> list[str]:
     out = []
     b = g.stats.get("bridge", {})
     for sym in b.get("kotlin_orphans", []):
@@ -21,6 +21,12 @@ def check_bridges_paired(g: Graph) -> list[str]:
     u = g.stats.get("uniffi", {})
     for sym in u.get("swift_orphans", []):
         out.append(f"UniFFI: Swift calls a binding with no Rust export: {sym}")
+    if flag_unused_exports:
+        # Without this, deleting the last Swift caller silently passes even
+        # though the cross-platform edge is gone. Configurable because during
+        # greenfield iOS work an export legitimately lands before its caller.
+        for sym in u.get("rust_orphans", []):
+            out.append(f"UniFFI: Rust export has no Swift caller: {sym}")
     return out
 
 
@@ -52,7 +58,8 @@ def check_unresolved_rate(g: Graph, ceiling: float) -> list[str]:
 
 def run_all(g: Graph, config: dict) -> dict[str, list[str]]:
     return {
-        "bridges_paired": check_bridges_paired(g),
+        "bridges_paired": check_bridges_paired(
+            g, flag_unused_exports=config.get("flag_unused_uniffi_exports", True)),
         "no_layer_violations": check_no_layer_violations(g),
         "parse_errors": check_parse_errors(g, set(config.get("allow_parse_errors", []))),
         "unresolved_rate": check_unresolved_rate(g, config.get("unresolved_ceiling", 0.25)),

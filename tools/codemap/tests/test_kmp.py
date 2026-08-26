@@ -30,3 +30,34 @@ def test_rust_nodes_are_not_classified(mini_full):
     for n in mini_full.nodes.values():
         if n.lang == "rust":
             assert n.kmp == "unknown"
+
+
+def test_aliased_import_is_classified_by_its_alias(tmp_path):
+    """`import a.b.C as D` then using `D` must classify by a.b.C.
+
+    Matching only the original final segment misses the identifier that
+    actually appears: data/crypto/Blake2b.kt aliases the amber CKB SDK to
+    CkbBlake2b, and hash() was classified green -- an unsafe commonMain
+    recommendation.
+    """
+    from pathlib import Path
+
+    from extract.kotlin import extract_kotlin
+    from graph import kmp as kmp_pass
+    from graph.build import build_graph
+
+    p = tmp_path / "Hasher.kt"
+    p.write_text(
+        "package com.example.mini\n\n"
+        "import org.nervos.ckb.crypto.Blake2b as CkbBlake2b\n\n"
+        "class Hasher {\n"
+        "    fun hash(input: ByteArray): ByteArray {\n"
+        "        return CkbBlake2b.digest(input)\n"
+        "    }\n"
+        "}\n"
+    )
+    rf = extract_kotlin(p, "mini/kotlin/Hasher.kt")
+    g = build_graph([rf])
+    rules = Path(__file__).resolve().parent.parent / "rules" / "kmp.yaml"
+    kmp_pass.apply(g, [rf], rules)
+    assert g.find_one(kind="function", name="hash").kmp == "amber"

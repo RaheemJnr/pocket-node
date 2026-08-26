@@ -51,7 +51,11 @@ def apply(g: Graph, files: list[RawFile], rules_path: Path) -> None:
             continue
 
         file_classes = [c for c in (_classify_ref(i, rules) for i in rf.imports) if c]
+        # Keyed by the identifier that actually appears in source. For
+        # `import a.b.C as D` that is D, not C -- matching only the
+        # original final segment misses every aliased usage.
         import_by_simple = {i.rsplit(".", 1)[-1]: i for i in rf.imports}
+        import_by_simple.update(rf.aliases)
 
         for d in rf.decls:
             nid = (

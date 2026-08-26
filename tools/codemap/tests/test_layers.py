@@ -47,3 +47,12 @@ def test_auth_is_data_layer_so_migration_can_call_it():
     assert assign_layer("android/app/src/main/java/com/rjnr/pocketnode/data/auth/AuthManager.kt") == "data"
     assert assign_layer("android/app/src/main/java/com/rjnr/pocketnode/data/migration/KeystoreV2MigrationRunner.kt") == "data"
     assert is_backward_edge("data", "data") is False
+
+
+def test_ios_ui_is_matched_before_the_catch_all_swift_rule():
+    # `**/*.swift` in ios-core is broad and first-match-wins, so ios-ui must
+    # be declared first or every view lands in the core lane at order 6.
+    load_rules(RULES)
+    assert assign_layer("ios/Sources/Views/HomeView.swift") == "ios-ui"
+    assert assign_layer("ios/Sources/Foo/BarScreen.swift") == "ios-ui"
+    assert assign_layer("ios/Sources/Core/Client.swift") == "ios-core"

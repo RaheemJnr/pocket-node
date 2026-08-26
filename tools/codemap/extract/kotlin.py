@@ -85,11 +85,25 @@ def _type_names(node: Node, src: bytes) -> list[str]:
 
 
 def _enclosing_type_name(node: Node, src: bytes) -> str:
+    """Owner name for a declaration.
+
+    An anonymous `object : X { }` produces no declaration node at all --
+    it is inline in the property declaration -- so members would get an
+    empty qualifier and every same-name, same-arity method in a package
+    would collapse to one graph node. Migrations.kt alone has 14
+    `migrate(db)` declarations that way. Fall back to the enclosing
+    property name, which is both unique and the name a reader would use.
+    """
     p = node.parent
     while p is not None:
         if p.type in KT.TYPE_DECLS:
             n = field(p, "name")
             return text(n, src) if n else ""
+        if p.type == KT.PROPERTY:
+            var = child_of_type(p, KT.VARIABLE)
+            ident = child_of_type(var, KT.IDENT) if var is not None else None
+            if ident is not None:
+                return text(ident, src)
         p = p.parent
     return ""
 

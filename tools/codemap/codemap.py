@@ -121,10 +121,18 @@ def main(argv: list[str] | None = None) -> int:
         print(f"wrote {n} summary requests to {out / 'summary-requests.jsonl'}")
         return 0
 
-    if args.serve:
-        _serve(out, args.serve)
+    server = _serve(out, args.serve) if args.serve else None
     if args.watch:
         _watch(root, out, args)
+    elif server is not None:
+        # --serve on its own must block; the serving thread is a daemon, so
+        # returning here would tear down the process and the server with it.
+        print("serving until interrupted (ctrl-c to stop)")
+        try:
+            while True:
+                time.sleep(3600)
+        except KeyboardInterrupt:
+            print("\nstopped")
     return 0
 
 
@@ -224,6 +232,7 @@ def _serve(out: Path, port: int) -> None:
     server = http.server.ThreadingHTTPServer(("127.0.0.1", port), handler)
     threading.Thread(target=server.serve_forever, daemon=True).start()
     print(f"serving http://127.0.0.1:{port}/codemap.html")
+    return server
 
 
 if __name__ == "__main__":
