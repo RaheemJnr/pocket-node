@@ -498,6 +498,37 @@
     if (hits.length) cy.animate({ fit: { eles: hits, padding: 90 } }, { duration: 300 });
   });
 
+  // ---- zoom -------------------------------------------------------------
+
+  const ZOOM_STEP = 1.35;
+
+  function zoomBy(factor) {
+    const z = Math.min(cy.maxZoom(), Math.max(cy.minZoom(), cy.zoom() * factor));
+    const ext = cy.extent();
+    cy.zoom({
+      level: z,
+      position: { x: (ext.x1 + ext.x2) / 2, y: (ext.y1 + ext.y2) / 2 },
+    });
+    showZoom();
+  }
+
+  function showZoom() {
+    document.getElementById("zoom-level").textContent = Math.round(cy.zoom() * 100) + "%";
+  }
+
+  on("zoom-in", "click", () => zoomBy(ZOOM_STEP));
+  on("zoom-out", "click", () => zoomBy(1 / ZOOM_STEP));
+  on("zoom-fit", "click", () => { cy.fit(undefined, 60); showZoom(); });
+  cy.on("zoom", showZoom);
+
+  // keyboard, ignored while typing in the search box
+  document.addEventListener("keydown", (e) => {
+    if (e.target.tagName === "INPUT" || e.target.tagName === "SELECT") return;
+    if (e.key === "+" || e.key === "=") { zoomBy(ZOOM_STEP); e.preventDefault(); }
+    else if (e.key === "-" || e.key === "_") { zoomBy(1 / ZOOM_STEP); e.preventDefault(); }
+    else if (e.key === "0") { cy.fit(undefined, 60); showZoom(); e.preventDefault(); }
+  });
+
   on("reset", "click", () => {
     state.expanded.clear();
     clearHighlight();
@@ -531,4 +562,5 @@
 
   document.getElementById("meta").textContent = DATA.meta.git_sha + " · " + DATA.meta.generated;
   render();
+  showZoom();
 })();

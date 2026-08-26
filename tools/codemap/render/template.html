@@ -48,7 +48,15 @@
   </header>
 
   <main>
-    <div id="cy"></div>
+    <div id="canvas">
+      <div id="cy"></div>
+      <div id="zoom-controls">
+        <button id="zoom-in" title="Zoom in (+)" aria-label="Zoom in">+</button>
+        <button id="zoom-out" title="Zoom out (−)" aria-label="Zoom out">&minus;</button>
+        <button id="zoom-fit" title="Fit to view (0)" aria-label="Fit to view">⤢</button>
+        <span id="zoom-level" title="Current zoom">100%</span>
+      </div>
+    </div>
     <aside id="panel">
       <div id="panel-empty" class="panel-empty">
         <p>Click a node to inspect it.</p>
