@@ -69,6 +69,7 @@ button, select, input[type="search"] {
   padding: 5px 10px; cursor: pointer;
 }
 input[type="search"] { cursor: text; min-width: 180px; }
+input[type="range"] { width: 92px; cursor: pointer; accent-color: var(--accent); }
 button:hover, select:hover { border-color: var(--accent); }
 button.active { background: var(--accent); border-color: var(--accent); color: #fff; }
 

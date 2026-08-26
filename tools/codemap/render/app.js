@@ -21,6 +21,7 @@
     violationsOnly: false,
     expanded: new Set(),
     selected: null,
+    nodeScale: 1.4,
   };
 
   // ---- element construction ------------------------------------------
@@ -85,6 +86,35 @@
     return null;
   }
 
+  // ---- sizing ---------------------------------------------------------
+
+  /* Fan-in drives node size, so coupling magnets read as magnets instead
+   * of every node being the same dot. Degree counts non-structural edges
+   * only -- containment would make every module look enormous. */
+  const degree = new Map();
+  for (const e of DATA.edges) {
+    if (STRUCTURAL.has(e.kind)) continue;
+    degree.set(e.dst, (degree.get(e.dst) || 0) + 1);
+    degree.set(e.src, (degree.get(e.src) || 0) + 0.25);
+  }
+
+  const BASE = { module: 46, file: 30, type: 30, function: 22 };
+
+  function nodeSize(el) {
+    const kind = el.data("kind");
+    const d = degree.get(el.id()) || 0;
+    const grow = Math.min(38, Math.sqrt(d) * 7);
+    return (BASE[kind] || 22) + grow * (kind === "function" ? 0.8 : 1);
+  }
+
+  function scaledSize(el) { return nodeSize(el) * state.nodeScale; }
+
+  function labelSize(el) {
+    const kind = el.data("kind");
+    const base = kind === "module" ? 17 : kind === "file" ? 13 : kind === "type" ? 14 : 12;
+    return base * Math.max(0.85, Math.min(1.5, state.nodeScale));
+  }
+
   // ---- cytoscape ------------------------------------------------------
 
   const cy = cytoscape({
@@ -97,19 +127,24 @@
         style: {
           "background-color": "#8b93a1",
           label: "data(label)",
-          "font-size": 9,
+          "font-size": labelSize,
+          "font-weight": 500,
           "font-family": "ui-monospace, Menlo, monospace",
           color: cssVar("--fg"),
           "text-valign": "center",
           "text-halign": "right",
-          "text-margin-x": 4,
-          "min-zoomed-font-size": 7,
-          width: 14,
-          height: 14,
+          "text-margin-x": 7,
+          "text-outline-width": 2.5,
+          "text-outline-color": cssVar("--bg"),
+          "min-zoomed-font-size": 9,
+          "border-width": 1,
+          "border-color": "rgba(0,0,0,0.25)",
+          width: scaledSize,
+          height: scaledSize,
         },
       },
-      { selector: 'node[kind="module"]', style: { width: 26, height: 26, "font-size": 11 } },
-      { selector: 'node[kind="file"]', style: { width: 18, height: 18, shape: "round-rectangle" } },
+      { selector: 'node[kind="module"]', style: { "font-weight": 700 } },
+      { selector: 'node[kind="file"]', style: { shape: "round-rectangle" } },
       { selector: 'node[kind="type"]', style: { shape: "round-rectangle" } },
       { selector: 'node[lang="rust"]', style: { "background-color": "#b45309" } },
       { selector: 'node[lang="kotlin"]', style: { "background-color": "#6366f1" } },
@@ -204,14 +239,14 @@
   function layout() {
     const opts = state.layout === "layered"
       ? {
-          name: "dagre", rankDir: "LR", nodeSep: 14, rankSep: 130, edgeSep: 6,
+          name: "dagre", rankDir: "LR", nodeSep: 26, rankSep: 190, edgeSep: 10,
           ranker: "longest-path", fit: true, padding: 30,
           // rank by architectural layer so lanes read left to right
           rank: (n) => layerOrder(NODES.get(n.id()).layer),
         }
       : {
           name: "fcose", quality: "default", randomize: false, animate: false,
-          nodeRepulsion: 9000, idealEdgeLength: 60, gravity: 0.2, fit: true, padding: 30,
+          nodeRepulsion: 22000, idealEdgeLength: 105, gravity: 0.15, fit: true, padding: 30,
         };
     cy.layout(opts).run();
   }
@@ -414,6 +449,13 @@
     const hits = cy.nodes().filter((n) => n.data("label").toLowerCase().includes(q));
     hits.addClass("match");
     document.getElementById("search-count").textContent = `${hits.length} shown`;
+  });
+
+  const sizeInput = document.getElementById("node-size");
+  sizeInput.value = String(state.nodeScale);
+  sizeInput.addEventListener("input", (e) => {
+    state.nodeScale = parseFloat(e.target.value);
+    cy.style().update();
   });
 
   document.getElementById("reset").addEventListener("click", () => {
