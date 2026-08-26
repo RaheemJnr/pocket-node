@@ -38,6 +38,17 @@ export function Hero() {
 
         <div className="flex flex-col items-start gap-3 sm:flex-row sm:items-center">
           <Link
+            href="https://play.google.com/store/apps/details?id=com.rjnr.pocketnode"
+            target="_blank"
+            rel="noopener noreferrer"
+            className="group inline-flex items-center gap-3 rounded-md border border-green bg-green/5 px-6 py-4 font-doto text-sm font-black uppercase leading-none tracking-wider text-green transition-colors hover:bg-green-deep hover:text-green-glow"
+          >
+            <svg viewBox="0 0 24 24" className="h-4 w-4" fill="currentColor" aria-hidden>
+              <path d="M3.609 1.814 13.792 12 3.61 22.186a.996.996 0 0 1-.61-.92V2.734a1 1 0 0 1 .609-.92zM14.5 12.707l2.302 2.302-10.937 6.333 8.635-8.635zm3.31-3.31 2.79 1.615c.73.42.73 1.545 0 1.966l-2.79 1.615L15.207 12l2.603-2.603zM5.865 2.658l10.937 6.333-2.302 2.302-8.635-8.635z"/>
+            </svg>
+            Google Play
+          </Link>
+          <Link
             href="/download"
             // The /download route resolves the latest GitHub release's
             // .apk asset at request time and 302-redirects to it. The
