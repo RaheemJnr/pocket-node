@@ -19,6 +19,21 @@
     "text": "Owns biometric and device-credential authentication, including prompt construction and result handling.",
     "written": "2026-08-26"
   },
+  "kt:com.rjnr.pocketnode.data.auth.AuthMethod": {
+    "hash": "5fbd402f9d1d",
+    "text": "Enumeration of BIOMETRIC.",
+    "written": "2026-08-26"
+  },
+  "kt:com.rjnr.pocketnode.data.auth.BiometricStatus": {
+    "hash": "c4b6ad89476f",
+    "text": "Enumeration of AVAILABLE, NO_HARDWARE, NOT_ENROLLED.",
+    "written": "2026-08-26"
+  },
+  "kt:com.rjnr.pocketnode.data.auth.Cancelled": {
+    "hash": "3cbf5ea5a1b6",
+    "text": "CipherAuthResult outcome: Cancelled.",
+    "written": "2026-08-26"
+  },
   "kt:com.rjnr.pocketnode.data.auth.PinManager": {
     "hash": "bbec5cf756f2",
     "text": "Stores and verifies the app PIN, including KDF hashing, attempt throttling and lockout state.",
@@ -27,6 +42,31 @@
   "kt:com.rjnr.pocketnode.data.contacts.ContactRepository": {
     "hash": "2ad41d0417a0",
     "text": "CRUD over the address book, backed by ContactDao.",
+    "written": "2026-08-26"
+  },
+  "kt:com.rjnr.pocketnode.data.contacts.InvalidAddress": {
+    "hash": "8f8e4ae71346",
+    "text": "ContactError case: Address cannot be decoded",
+    "written": "2026-08-26"
+  },
+  "kt:com.rjnr.pocketnode.data.contacts.InvalidName": {
+    "hash": "602ffe4fff72",
+    "text": "ContactError case: Name must be 1-64 characters",
+    "written": "2026-08-26"
+  },
+  "kt:com.rjnr.pocketnode.data.contacts.NoActiveWallet": {
+    "hash": "5187168d6fdd",
+    "text": "ContactError case: No active wallet to scope contact to",
+    "written": "2026-08-26"
+  },
+  "kt:com.rjnr.pocketnode.data.contacts.NotFound": {
+    "hash": "190ff31257c7",
+    "text": "ContactError case: Contact $id not found",
+    "written": "2026-08-26"
+  },
+  "kt:com.rjnr.pocketnode.data.contacts.NotesTooLong": {
+    "hash": "6f0c002d16dc",
+    "text": "ContactError case: Notes must be 256 characters or fewer",
     "written": "2026-08-26"
   },
   "kt:com.rjnr.pocketnode.data.crypto.Blake2b": {
@@ -119,6 +159,36 @@
     "text": "Room entity for one transaction history row.",
     "written": "2026-08-26"
   },
+  "kt:com.rjnr.pocketnode.data.gateway#balancedFilterAlgorithm/4": {
+    "hash": "034d43e55368",
+    "text": "Chooses which wallet scripts to register under the BALANCED filter.",
+    "written": "2026-08-26"
+  },
+  "kt:com.rjnr.pocketnode.data.gateway#candidateScanStart/2": {
+    "hash": "734c78dd3a7e",
+    "text": "Start height for scanning a sub-account candidate.",
+    "written": "2026-08-26"
+  },
+  "kt:com.rjnr.pocketnode.data.gateway#clampPartialRewinds/2": {
+    "hash": "5fe61164ebc1",
+    "text": "Prevents a re-register from rewinding sync further back than intended.",
+    "written": "2026-08-26"
+  },
+  "kt:com.rjnr.pocketnode.data.gateway#computeFirstCatchingUpAtMs/2": {
+    "hash": "2546ed01f55b",
+    "text": "Timestamps when catch-up first began, so elapsed catch-up time can be shown.",
+    "written": "2026-08-26"
+  },
+  "kt:com.rjnr.pocketnode.data.gateway#historicalStartBlock/3": {
+    "hash": "b646f9a6ac38",
+    "text": "Resolves a sync mode into a concrete start block for the network.",
+    "written": "2026-08-26"
+  },
+  "kt:com.rjnr.pocketnode.data.gateway#selectCandidatesForRegistration/2": {
+    "hash": "68709d784f97",
+    "text": "Picks which sub-account candidates to register, bounded by a cap.",
+    "written": "2026-08-26"
+  },
   "kt:com.rjnr.pocketnode.data.gateway.BroadcastClient": {
     "hash": "c73d1d1848cb",
     "text": "Interface for submitting a signed transaction; returns the tx hash JSON or null on failure.",
@@ -127,6 +197,51 @@
   "kt:com.rjnr.pocketnode.data.gateway.CacheManager": {
     "hash": "a46f486eb028",
     "text": "Mediates Room caches for transactions and balances, keeping reads fast while sync runs.",
+    "written": "2026-08-26"
+  },
+  "kt:com.rjnr.pocketnode.data.gateway.CacheManager#cacheBalance/3": {
+    "hash": "d041f79a9a94",
+    "text": "Writes a freshly computed balance into the cache.",
+    "written": "2026-08-26"
+  },
+  "kt:com.rjnr.pocketnode.data.gateway.CacheManager#cacheTransactions/3": {
+    "hash": "d4c8c25fa775",
+    "text": "Writes fetched transactions into the cache.",
+    "written": "2026-08-26"
+  },
+  "kt:com.rjnr.pocketnode.data.gateway.CacheManager#clearAll/0": {
+    "hash": "d0e759030b17",
+    "text": "Empties every cache table.",
+    "written": "2026-08-26"
+  },
+  "kt:com.rjnr.pocketnode.data.gateway.CacheManager#deleteTransaction/1": {
+    "hash": "8828cc265152",
+    "text": "Removes one cached transaction.",
+    "written": "2026-08-26"
+  },
+  "kt:com.rjnr.pocketnode.data.gateway.CacheManager#getCachedBalance/2": {
+    "hash": "71aa11b4b216",
+    "text": "Reads the cached balance for a wallet and network.",
+    "written": "2026-08-26"
+  },
+  "kt:com.rjnr.pocketnode.data.gateway.CacheManager#getOrphanPendingHashes/2": {
+    "hash": "8f211e3ac79c",
+    "text": "Pending hashes with no matching chain transaction, candidates for cleanup.",
+    "written": "2026-08-26"
+  },
+  "kt:com.rjnr.pocketnode.data.gateway.CacheManager#getPendingNotIn/3": {
+    "hash": "85058837a67e",
+    "text": "Pending transactions absent from a given hash set.",
+    "written": "2026-08-26"
+  },
+  "kt:com.rjnr.pocketnode.data.gateway.CacheManager#insertPendingTransaction/6": {
+    "hash": "725e47dc1b55",
+    "text": "Records a just-broadcast transaction as pending so it appears immediately.",
+    "written": "2026-08-26"
+  },
+  "kt:com.rjnr.pocketnode.data.gateway.CacheManager#updateTransactionStatus/2": {
+    "hash": "2697455ee616",
+    "text": "Updates a cached transaction's status by hash.",
     "written": "2026-08-26"
   },
   "kt:com.rjnr.pocketnode.data.gateway.DaoConstants": {
@@ -144,6 +259,21 @@
     "text": "Resolves the chain state a DAO cell needs: block hash for a cell, header fetch with retry, cache-first lookup.",
     "written": "2026-08-26"
   },
+  "kt:com.rjnr.pocketnode.data.gateway.DaoHeaderResolver#fetchHeaderWithRetry/1": {
+    "hash": "d48bf8659323",
+    "text": "Fetches a header, retrying up to three times.",
+    "written": "2026-08-26"
+  },
+  "kt:com.rjnr.pocketnode.data.gateway.DaoHeaderResolver#getBlockHashForCell/1": {
+    "hash": "1955d3180c42",
+    "text": "Finds the block hash containing a cell by fetching its transaction.",
+    "written": "2026-08-26"
+  },
+  "kt:com.rjnr.pocketnode.data.gateway.DaoHeaderResolver#getOrFetchHeader/2": {
+    "hash": "28907c2f9c0f",
+    "text": "Returns a cached header if present, otherwise fetches and caches it.",
+    "written": "2026-08-26"
+  },
   "kt:com.rjnr.pocketnode.data.gateway.DaoSyncManager": {
     "hash": "b3f76b039557",
     "text": "Keeps tracked DAO cells and their headers in step with chain tip.",
@@ -154,9 +284,474 @@
     "text": "Central repository for all blockchain operations: node lifecycle, balance, cells, transactions, send, sync polling and network switching.",
     "written": "2026-08-26"
   },
+  "kt:com.rjnr.pocketnode.data.gateway.GatewayRepository#activeWalletAndNetworkOrNull/0": {
+    "hash": "ecb076fe8a5b",
+    "text": "Returns the active wallet id paired with the current network, or null if none is active.",
+    "written": "2026-08-26"
+  },
+  "kt:com.rjnr.pocketnode.data.gateway.GatewayRepository#applyPendingWithdrawOverlay/1": {
+    "hash": "3d5fc52b8b08",
+    "text": "Overlays locally pending withdrawals onto the deposit list so the UI reflects them immediately.",
+    "written": "2026-08-26"
+  },
+  "kt:com.rjnr.pocketnode.data.gateway.GatewayRepository#awaitNodeReady/0": {
+    "hash": "82cf39554852",
+    "text": "Suspends until the light client reports ready.",
+    "written": "2026-08-26"
+  },
+  "kt:com.rjnr.pocketnode.data.gateway.GatewayRepository#buildReserveAndSend/2": {
+    "hash": "9048391b91b2",
+    "text": "Builds a transaction, reserves its inputs and broadcasts it as one step.",
+    "written": "2026-08-26"
+  },
+  "kt:com.rjnr.pocketnode.data.gateway.GatewayRepository#callRpc/1": {
+    "hash": "732c8ba9ee7b",
+    "text": "Calls a light-client RPC method by name and returns the raw JSON.",
+    "written": "2026-08-26"
+  },
+  "kt:com.rjnr.pocketnode.data.gateway.GatewayRepository#currentTipNumberOrZero/0": {
+    "hash": "0bcc01b43f56",
+    "text": "Current chain tip height, or zero if unavailable.",
+    "written": "2026-08-26"
+  },
+  "kt:com.rjnr.pocketnode.data.gateway.GatewayRepository#depositToDao/1": {
+    "hash": "89622bc23e06",
+    "text": "Builds, signs and broadcasts a Nervos DAO deposit.",
+    "written": "2026-08-26"
+  },
+  "kt:com.rjnr.pocketnode.data.gateway.GatewayRepository#depositToDao/2": {
+    "hash": "b84b40f751d1",
+    "text": "Builds and signs with a caller-supplied private key, then broadcasts a Nervos DAO deposit.",
+    "written": "2026-08-26"
+  },
+  "kt:com.rjnr.pocketnode.data.gateway.GatewayRepository#dismissGapLimitBanner/0": {
+    "hash": "c3b1448e1f42",
+    "text": "Records that the user dismissed the gap-limit banner.",
+    "written": "2026-08-26"
+  },
+  "kt:com.rjnr.pocketnode.data.gateway.GatewayRepository#fetchAllSpentOutpoints/1": {
+    "hash": "bff8fe8ba044",
+    "text": "Walks transaction history to collect every outpoint already spent.",
+    "written": "2026-08-26"
+  },
+  "kt:com.rjnr.pocketnode.data.gateway.GatewayRepository#fetchAndPublishTip/0": {
+    "hash": "8116b952fba2",
+    "text": "Reads the current light-client tip and publishes it to the tip flow.",
+    "written": "2026-08-26"
+  },
+  "kt:com.rjnr.pocketnode.data.gateway.GatewayRepository#forceResetSync/0": {
+    "hash": "c08356dcc0a3",
+    "text": "Resets the wallet's sync checkpoint to zero and restarts syncing from scratch.",
+    "written": "2026-08-26"
+  },
+  "kt:com.rjnr.pocketnode.data.gateway.GatewayRepository#gatherSweepInputs/1": {
+    "hash": "f6afed81d532",
+    "text": "Collects the input cells a gap-limit sweep will consume.",
+    "written": "2026-08-26"
+  },
+  "kt:com.rjnr.pocketnode.data.gateway.GatewayRepository#getAccountStatus/0": {
+    "hash": "93a72cf0ece6",
+    "text": "Reports the wallet's sync position against chain tip.",
+    "written": "2026-08-26"
+  },
+  "kt:com.rjnr.pocketnode.data.gateway.GatewayRepository#getBlockHashForCell/1": {
+    "hash": "287a14b53153",
+    "text": "Resolves the block hash containing a cell; delegates to DaoHeaderResolver.",
+    "written": "2026-08-26"
+  },
+  "kt:com.rjnr.pocketnode.data.gateway.GatewayRepository#getCells/1": {
+    "hash": "98109c5a8525",
+    "text": "Fetches live cells for an address, paging through the light client.",
+    "written": "2026-08-26"
+  },
+  "kt:com.rjnr.pocketnode.data.gateway.GatewayRepository#getCurrentAddress/0": {
+    "hash": "182924ff9183",
+    "text": "Returns the active wallet's address for the current network.",
+    "written": "2026-08-26"
+  },
+  "kt:com.rjnr.pocketnode.data.gateway.GatewayRepository#getCurrentEpoch/0": {
+    "hash": "e84b3f4a9053",
+    "text": "Returns the current epoch number, index and length.",
+    "written": "2026-08-26"
+  },
+  "kt:com.rjnr.pocketnode.data.gateway.GatewayRepository#getDaoDeposits/0": {
+    "hash": "a9563a76a506",
+    "text": "Lists the wallet's Nervos DAO deposits with their accrued compensation.",
+    "written": "2026-08-26"
+  },
+  "kt:com.rjnr.pocketnode.data.gateway.GatewayRepository#getDaoOverview/0": {
+    "hash": "106e8c8de659",
+    "text": "Aggregates DAO deposits into totals for the overview screen.",
+    "written": "2026-08-26"
+  },
+  "kt:com.rjnr.pocketnode.data.gateway.GatewayRepository#getExistingScriptBlock/0": {
+    "hash": "82818b66f424",
+    "text": "Reads the block height at which the wallet script is already registered.",
+    "written": "2026-08-26"
+  },
+  "kt:com.rjnr.pocketnode.data.gateway.GatewayRepository#getGapLimitStatus/0": {
+    "hash": "b6ee739fc1b3",
+    "text": "Reports whether funds may exist beyond the scanned address gap limit.",
+    "written": "2026-08-26"
+  },
+  "kt:com.rjnr.pocketnode.data.gateway.GatewayRepository#getGatewayStatus/0": {
+    "hash": "775089b1ea47",
+    "text": "Returns a status summary for the current network.",
+    "written": "2026-08-26"
+  },
+  "kt:com.rjnr.pocketnode.data.gateway.GatewayRepository#getInFlightWithdrawOutPoints/0": {
+    "hash": "e13bd08bd764",
+    "text": "Lists outpoints for withdrawals broadcast but not yet confirmed.",
+    "written": "2026-08-26"
+  },
+  "kt:com.rjnr.pocketnode.data.gateway.GatewayRepository#getMnemonic/0": {
+    "hash": "9db54a45595c",
+    "text": "Returns the active wallet's seed phrase, reading V1 or V2 storage as appropriate.",
+    "written": "2026-08-26"
+  },
+  "kt:com.rjnr.pocketnode.data.gateway.GatewayRepository#getOrFetchHeader/1": {
+    "hash": "cdf7789b5483",
+    "text": "Returns a header from cache or fetches it; delegates to DaoHeaderResolver.",
+    "written": "2026-08-26"
+  },
+  "kt:com.rjnr.pocketnode.data.gateway.GatewayRepository#getPeers/0": {
+    "hash": "211a33c57657",
+    "text": "Lists the light client's connected peers.",
+    "written": "2026-08-26"
+  },
+  "kt:com.rjnr.pocketnode.data.gateway.GatewayRepository#getPrivateKey/0": {
+    "hash": "ba9ca6d958c5",
+    "text": "Returns the active wallet's private key for signing.",
+    "written": "2026-08-26"
+  },
+  "kt:com.rjnr.pocketnode.data.gateway.GatewayRepository#getSavedCustomBlockHeight/0": {
+    "hash": "0f005c651ebb",
+    "text": "Returns the persisted custom sync start height.",
+    "written": "2026-08-26"
+  },
+  "kt:com.rjnr.pocketnode.data.gateway.GatewayRepository#getSavedSyncMode/0": {
+    "hash": "e0b23d4cfaff",
+    "text": "Returns the persisted sync mode.",
+    "written": "2026-08-26"
+  },
+  "kt:com.rjnr.pocketnode.data.gateway.GatewayRepository#getScripts/0": {
+    "hash": "a3944ba108cb",
+    "text": "Returns the scripts currently registered with the light client.",
+    "written": "2026-08-26"
+  },
+  "kt:com.rjnr.pocketnode.data.gateway.GatewayRepository#getTipHeader/0": {
+    "hash": "f53e790eb1ec",
+    "text": "Returns the current chain tip header.",
+    "written": "2026-08-26"
+  },
+  "kt:com.rjnr.pocketnode.data.gateway.GatewayRepository#getTransactionStatus/1": {
+    "hash": "d1230c985736",
+    "text": "Queries a transaction's confirmation status by hash.",
+    "written": "2026-08-26"
+  },
+  "kt:com.rjnr.pocketnode.data.gateway.GatewayRepository#getTransactions/1": {
+    "hash": "19d7c02ae4fb",
+    "text": "Fetches transaction history for the active wallet, paged.",
+    "written": "2026-08-26"
+  },
+  "kt:com.rjnr.pocketnode.data.gateway.GatewayRepository#getWalletSyncBlock/2": {
+    "hash": "9b9d55c236be",
+    "text": "Reads a wallet's persisted sync checkpoint for a network from sync_progress.",
+    "written": "2026-08-26"
+  },
+  "kt:com.rjnr.pocketnode.data.gateway.GatewayRepository#getWalletType/0": {
+    "hash": "1487b1a7f939",
+    "text": "Returns the active wallet's type.",
+    "written": "2026-08-26"
+  },
+  "kt:com.rjnr.pocketnode.data.gateway.GatewayRepository#hasCompletedInitialSync/0": {
+    "hash": "c33ae8e87149",
+    "text": "Whether the first full sync pass has finished.",
+    "written": "2026-08-26"
+  },
+  "kt:com.rjnr.pocketnode.data.gateway.GatewayRepository#hasMnemonicBackup/0": {
+    "hash": "4083fd02ef64",
+    "text": "Whether a seed-phrase backup has been confirmed.",
+    "written": "2026-08-26"
+  },
+  "kt:com.rjnr.pocketnode.data.gateway.GatewayRepository#hasMnemonicBackupForActiveWallet/0": {
+    "hash": "ba7e192fc9bd",
+    "text": "Whether the active wallet specifically has a confirmed backup.",
+    "written": "2026-08-26"
+  },
+  "kt:com.rjnr.pocketnode.data.gateway.GatewayRepository#hasWallet/0": {
+    "hash": "a0a105e3c285",
+    "text": "Whether any wallet exists on this device.",
+    "written": "2026-08-26"
+  },
+  "kt:com.rjnr.pocketnode.data.gateway.GatewayRepository#initializeNode/1": {
+    "hash": "e3cc33b34dcf",
+    "text": "Copies the network TOML config, starts the Rust light client and marks the node ready.",
+    "written": "2026-08-26"
+  },
+  "kt:com.rjnr.pocketnode.data.gateway.GatewayRepository#initializeWallet/0": {
+    "hash": "466fa817bc52",
+    "text": "Loads the active wallet's key material and derives its script and addresses.",
+    "written": "2026-08-26"
+  },
+  "kt:com.rjnr.pocketnode.data.gateway.GatewayRepository#isGapLimitBannerVisible/0": {
+    "hash": "8f1ecea20862",
+    "text": "Whether to show the gap-limit banner for the active wallet.",
+    "written": "2026-08-26"
+  },
+  "kt:com.rjnr.pocketnode.data.gateway.GatewayRepository#isSyncSettingApplied/1": {
+    "hash": "e7184417f80c",
+    "text": "Whether the requested sync mode is already in effect, avoiding a needless re-register.",
+    "written": "2026-08-26"
+  },
+  "kt:com.rjnr.pocketnode.data.gateway.GatewayRepository#key/2": {
+    "hash": "c0cfe9990705",
+    "text": "Builds a composite cache key from a transaction hash and output index.",
+    "written": "2026-08-26"
+  },
+  "kt:com.rjnr.pocketnode.data.gateway.GatewayRepository#lightClientReadyForRead/0": {
+    "hash": "549696afab4d",
+    "text": "Whether the light client can currently answer read queries.",
+    "written": "2026-08-26"
+  },
+  "kt:com.rjnr.pocketnode.data.gateway.GatewayRepository#liveUntypedCapacityFor/1": {
+    "hash": "86943318af50",
+    "text": "Sums capacity of live cells with no type script for a search key.",
+    "written": "2026-08-26"
+  },
+  "kt:com.rjnr.pocketnode.data.gateway.GatewayRepository#liveUntypedCellsFor/1": {
+    "hash": "e3e4c9881365",
+    "text": "Lists live cells with no type script for a search key, excluding spent outpoints.",
+    "written": "2026-08-26"
+  },
+  "kt:com.rjnr.pocketnode.data.gateway.GatewayRepository#makeSyncContext/0": {
+    "hash": "aa1b55cc8b19",
+    "text": "Bundles network, active wallet and related state for the sync coordinator.",
+    "written": "2026-08-26"
+  },
+  "kt:com.rjnr.pocketnode.data.gateway.GatewayRepository#maybeReregisterBalanced/0": {
+    "hash": "83ae99e18ec4",
+    "text": "Re-registers scripts under the BALANCED filter when conditions require it.",
+    "written": "2026-08-26"
+  },
+  "kt:com.rjnr.pocketnode.data.gateway.GatewayRepository#mergeWithCachedDaoDeposits/1": {
+    "hash": "83340701de10",
+    "text": "Merges live DAO deposits with the cached set, retiring spent ones so totals are not doubled.",
+    "written": "2026-08-26"
+  },
+  "kt:com.rjnr.pocketnode.data.gateway.GatewayRepository#migrateDataDirectoryIfNeeded/0": {
+    "hash": "aceb125d92cb",
+    "text": "Moves legacy light-client data into the per-network data directory layout.",
+    "written": "2026-08-26"
+  },
+  "kt:com.rjnr.pocketnode.data.gateway.GatewayRepository#needsMnemonicBackup/0": {
+    "hash": "e980bafb30eb",
+    "text": "Whether the active wallet still has an unconfirmed seed-phrase backup.",
+    "written": "2026-08-26"
+  },
+  "kt:com.rjnr.pocketnode.data.gateway.GatewayRepository#normKey/2": {
+    "hash": "6f620a49e211",
+    "text": "Normalises a tx-hash and index pair into a canonical lookup key.",
+    "written": "2026-08-26"
+  },
+  "kt:com.rjnr.pocketnode.data.gateway.GatewayRepository#onActiveWalletChanged/1": {
+    "hash": "b1e585eb6525",
+    "text": "Reacts to an active-wallet switch by refreshing cached wallet id, type and script.",
+    "written": "2026-08-26"
+  },
+  "kt:com.rjnr.pocketnode.data.gateway.GatewayRepository#onStatusChange/2": {
+    "hash": "f29de58ad368",
+    "text": "JNI status callback; forwards native status strings into the node-status flow.",
+    "written": "2026-08-26"
+  },
+  "kt:com.rjnr.pocketnode.data.gateway.GatewayRepository#pollSyncOnce/1": {
+    "hash": "89859a77d1cb",
+    "text": "One sync poll pass: refreshes tip, progress and balance.",
+    "written": "2026-08-26"
+  },
+  "kt:com.rjnr.pocketnode.data.gateway.GatewayRepository#prepareAndSend/4": {
+    "hash": "9e573ac5f177",
+    "text": "Validates, builds, signs and broadcasts a single-recipient transfer.",
+    "written": "2026-08-26"
+  },
+  "kt:com.rjnr.pocketnode.data.gateway.GatewayRepository#prepareAndSendBulk/3": {
+    "hash": "418b387da0e4",
+    "text": "Validates, builds, signs and broadcasts a multi-recipient transfer.",
+    "written": "2026-08-26"
+  },
+  "kt:com.rjnr.pocketnode.data.gateway.GatewayRepository#prepareGapLimitSweep/0": {
+    "hash": "e0ef9dd1c6d3",
+    "text": "Prepares a sweep moving funds from beyond-gap-limit addresses back to the main account.",
+    "written": "2026-08-26"
+  },
+  "kt:com.rjnr.pocketnode.data.gateway.GatewayRepository#publishTip/1": {
+    "hash": "464ac7235b2c",
+    "text": "Publishes a new tip height, ignoring values that would move the monotonic tip backwards.",
+    "written": "2026-08-26"
+  },
+  "kt:com.rjnr.pocketnode.data.gateway.GatewayRepository#refreshBalance/0": {
+    "hash": "c02680c9f94b",
+    "text": "Recomputes the active wallet's balance from live cells and updates the cache.",
+    "written": "2026-08-26"
+  },
+  "kt:com.rjnr.pocketnode.data.gateway.GatewayRepository#refreshBalanceForWallet/2": {
+    "hash": "73622eb674b2",
+    "text": "Recomputes one specific wallet's balance from its address.",
+    "written": "2026-08-26"
+  },
+  "kt:com.rjnr.pocketnode.data.gateway.GatewayRepository#registerAccount/3": {
+    "hash": "dcb8f0b4a3f3",
+    "text": "Registers the active wallet's script with the light client so it begins syncing.",
+    "written": "2026-08-26"
+  },
+  "kt:com.rjnr.pocketnode.data.gateway.GatewayRepository#registerAccountWithStrategy/2": {
+    "hash": "03de4c86a0ab",
+    "text": "Registers the wallet script with a chosen sync mode and start height.",
+    "written": "2026-08-26"
+  },
+  "kt:com.rjnr.pocketnode.data.gateway.GatewayRepository#registerAllWalletScripts/0": {
+    "hash": "d1388a233f25",
+    "text": "Registers every wallet's script so multi-wallet balances stay current.",
+    "written": "2026-08-26"
+  },
+  "kt:com.rjnr.pocketnode.data.gateway.GatewayRepository#rescanForOlderDaoDeposits/0": {
+    "hash": "9a119bf1b7e8",
+    "text": "Re-scans earlier blocks for DAO deposits the current sync window missed.",
+    "written": "2026-08-26"
+  },
+  "kt:com.rjnr.pocketnode.data.gateway.GatewayRepository#resolveActiveWalletType/0": {
+    "hash": "6421b86f7b53",
+    "text": "Determines whether the active wallet is V1 or V2 key material.",
+    "written": "2026-08-26"
+  },
+  "kt:com.rjnr.pocketnode.data.gateway.GatewayRepository#resyncAccount/1": {
+    "hash": "45f617e53e3f",
+    "text": "Re-registers the wallet at a new start height, restarting sync from there.",
+    "written": "2026-08-26"
+  },
+  "kt:com.rjnr.pocketnode.data.gateway.GatewayRepository#retryBroadcast/1": {
+    "hash": "d2cc181b6f61",
+    "text": "Re-broadcasts a previously failed transaction from the pending_broadcasts row.",
+    "written": "2026-08-26"
+  },
+  "kt:com.rjnr.pocketnode.data.gateway.GatewayRepository#runGapLimitScan/0": {
+    "hash": "7c68bf239700",
+    "text": "Derives further addresses and scans them for on-chain activity beyond the gap limit.",
+    "written": "2026-08-26"
+  },
+  "kt:com.rjnr.pocketnode.data.gateway.GatewayRepository#runGapLimitScan/1": {
+    "hash": "1ee0b398e68d",
+    "text": "Derives further addresses and scans them for on-chain activity beyond the gap limit.",
+    "written": "2026-08-26"
+  },
+  "kt:com.rjnr.pocketnode.data.gateway.GatewayRepository#runGapLimitScanInner/1": {
+    "hash": "6201f3ff45af",
+    "text": "Gap-limit scan body, guarded by a mutex so only one scan runs at a time.",
+    "written": "2026-08-26"
+  },
+  "kt:com.rjnr.pocketnode.data.gateway.GatewayRepository#sendTransaction/1": {
+    "hash": "befb63e4f75a",
+    "text": "Submits a signed transaction to the network and records it as pending.",
+    "written": "2026-08-26"
+  },
+  "kt:com.rjnr.pocketnode.data.gateway.GatewayRepository#setMnemonicBackedUp/1": {
+    "hash": "dd5ec1f6ae32",
+    "text": "Records that the user confirmed their seed-phrase backup.",
+    "written": "2026-08-26"
+  },
+  "kt:com.rjnr.pocketnode.data.gateway.GatewayRepository#setScriptsAndRecord/4": {
+    "hash": "28d9c84a0306",
+    "text": "Registers scripts with the light client and records the resulting statuses.",
+    "written": "2026-08-26"
+  },
+  "kt:com.rjnr.pocketnode.data.gateway.GatewayRepository#setWalletSyncBlock/3": {
+    "hash": "281dbe520bc6",
+    "text": "Persists a wallet's sync checkpoint for a network, stamped with the current time.",
+    "written": "2026-08-26"
+  },
+  "kt:com.rjnr.pocketnode.data.gateway.GatewayRepository#startBackgroundSync/0": {
+    "hash": "377bdf2ad4a2",
+    "text": "Starts the foreground sync service, unless compiled out for the Play build.",
+    "written": "2026-08-26"
+  },
+  "kt:com.rjnr.pocketnode.data.gateway.GatewayRepository#startSyncPolling/0": {
+    "hash": "9ccce214b023",
+    "text": "Starts the periodic sync poll loop, cancelling any previous generation.",
+    "written": "2026-08-26"
+  },
+  "kt:com.rjnr.pocketnode.data.gateway.GatewayRepository#stopBackgroundSync/0": {
+    "hash": "1c50ccd2a29c",
+    "text": "Stops the foreground sync service.",
+    "written": "2026-08-26"
+  },
+  "kt:com.rjnr.pocketnode.data.gateway.GatewayRepository#stopSyncPolling/0": {
+    "hash": "b869deeced2e",
+    "text": "Stops the sync poll loop and invalidates its generation.",
+    "written": "2026-08-26"
+  },
+  "kt:com.rjnr.pocketnode.data.gateway.GatewayRepository#sweepGapLimitFunds/0": {
+    "hash": "b9c0694b8cc1",
+    "text": "Builds, signs and broadcasts the gap-limit sweep transaction.",
+    "written": "2026-08-26"
+  },
+  "kt:com.rjnr.pocketnode.data.gateway.GatewayRepository#sweepGapLimitFunds/1": {
+    "hash": "7c1c93517360",
+    "text": "Builds, signs and broadcasts the gap-limit sweep transaction.",
+    "written": "2026-08-26"
+  },
+  "kt:com.rjnr.pocketnode.data.gateway.GatewayRepository#sweepGapLimitFundsInner/1": {
+    "hash": "592229310dc8",
+    "text": "Sweep body, sharing the scan mutex so a scan and a sweep cannot overlap.",
+    "written": "2026-08-26"
+  },
+  "kt:com.rjnr.pocketnode.data.gateway.GatewayRepository#switchNetwork/1": {
+    "hash": "e8b4009dcf8d",
+    "text": "Persists the chosen network and kills the process so it relaunches cleanly; in-process restart is impossible while the Rust globals are OnceLock.",
+    "written": "2026-08-26"
+  },
+  "kt:com.rjnr.pocketnode.data.gateway.GatewayRepository#unlockDao/1": {
+    "hash": "70a9addf204a",
+    "text": "Builds, signs and broadcasts a DAO unlock, releasing principal plus compensation.",
+    "written": "2026-08-26"
+  },
+  "kt:com.rjnr.pocketnode.data.gateway.GatewayRepository#unlockDao/2": {
+    "hash": "eeeecc66401c",
+    "text": "Builds and signs with a caller-supplied private key, then broadcasts a DAO unlock, releasing principal plus compensation.",
+    "written": "2026-08-26"
+  },
+  "kt:com.rjnr.pocketnode.data.gateway.GatewayRepository#wasResetDueToCorruption/0": {
+    "hash": "47459aae8397",
+    "text": "Whether key storage was reset because it could not be decrypted.",
+    "written": "2026-08-26"
+  },
+  "kt:com.rjnr.pocketnode.data.gateway.GatewayRepository#withdrawFromDao/1": {
+    "hash": "a9b7dfef1306",
+    "text": "Builds, signs and broadcasts a DAO phase-one withdrawal.",
+    "written": "2026-08-26"
+  },
+  "kt:com.rjnr.pocketnode.data.gateway.GatewayRepository#withdrawFromDao/2": {
+    "hash": "19d71cf10938",
+    "text": "Builds and signs with a caller-supplied private key, then broadcasts a DAO phase-one withdrawal.",
+    "written": "2026-08-26"
+  },
   "kt:com.rjnr.pocketnode.data.gateway.LightClientBridge": {
     "hash": "8caa97081403",
     "text": "Interface over the native light client, letting tests substitute the JNI layer.",
+    "written": "2026-08-26"
+  },
+  "kt:com.rjnr.pocketnode.data.gateway.LightClientBridge#getScriptsRaw/0": {
+    "hash": "24f3b5e85552",
+    "text": "Raw registered-scripts JSON from the light client.",
+    "written": "2026-08-26"
+  },
+  "kt:com.rjnr.pocketnode.data.gateway.LightClientBridge#getTipHeaderRaw/0": {
+    "hash": "7fdc354c938a",
+    "text": "Raw tip-header JSON from the light client.",
+    "written": "2026-08-26"
+  },
+  "kt:com.rjnr.pocketnode.data.gateway.LightClientBridge#setScripts/2": {
+    "hash": "c3e1d75e05b6",
+    "text": "Registers scripts with the light client via the bridge.",
     "written": "2026-08-26"
   },
   "kt:com.rjnr.pocketnode.data.gateway.LightClientBroadcastClient": {
@@ -169,9 +764,29 @@
     "text": "LightClientBridge implementation delegating straight to the JNI external functions.",
     "written": "2026-08-26"
   },
+  "kt:com.rjnr.pocketnode.data.gateway.LightClientNativeBridge#getScriptsRaw/0": {
+    "hash": "945f062a475f",
+    "text": "Raw registered-scripts JSON from the light client.",
+    "written": "2026-08-26"
+  },
+  "kt:com.rjnr.pocketnode.data.gateway.LightClientNativeBridge#getTipHeaderRaw/0": {
+    "hash": "0c2f79c39e41",
+    "text": "Raw tip-header JSON from the light client.",
+    "written": "2026-08-26"
+  },
+  "kt:com.rjnr.pocketnode.data.gateway.LightClientNativeBridge#setScripts/2": {
+    "hash": "01e6c3d2b783",
+    "text": "Registers scripts with the light client via the bridge.",
+    "written": "2026-08-26"
+  },
   "kt:com.rjnr.pocketnode.data.gateway.LightClientReadOnly": {
     "hash": "9453a2bef4e0",
     "text": "Read-only queries against the light client, isolated from write and lifecycle paths.",
+    "written": "2026-08-26"
+  },
+  "kt:com.rjnr.pocketnode.data.gateway.PendingWithdrawResolution": {
+    "hash": "bfd03ce45610",
+    "text": "Enumeration of OVERLAY, CLEAR_CONFIRMED, CLEAR_FAILED.",
     "written": "2026-08-26"
   },
   "kt:com.rjnr.pocketnode.data.gateway.SyncCoordinator": {
@@ -179,14 +794,84 @@
     "text": "Owns multi-wallet script registration, the BALANCED filter and the script-args to wallet-id mapping.",
     "written": "2026-08-26"
   },
+  "kt:com.rjnr.pocketnode.data.gateway.SyncCoordinator#applyBalancedFilter/3": {
+    "hash": "650e988dd9ac",
+    "text": "Applies the BALANCED filter to the wallet set before registering.",
+    "written": "2026-08-26"
+  },
+  "kt:com.rjnr.pocketnode.data.gateway.SyncCoordinator#earliestCachedTxBlock/2": {
+    "hash": "0c933f426165",
+    "text": "Earliest cached transaction block for a wallet, used to bound rescans.",
+    "written": "2026-08-26"
+  },
+  "kt:com.rjnr.pocketnode.data.gateway.SyncCoordinator#getWalletIdForScript/1": {
+    "hash": "1b35d8b23987",
+    "text": "Maps script args back to the owning wallet id.",
+    "written": "2026-08-26"
+  },
+  "kt:com.rjnr.pocketnode.data.gateway.SyncCoordinator#maybeReregisterBalanced/1": {
+    "hash": "71e0ffc17ad3",
+    "text": "Re-registers under BALANCED when the wallet set or tip has moved enough.",
+    "written": "2026-08-26"
+  },
+  "kt:com.rjnr.pocketnode.data.gateway.SyncCoordinator#pendingCandidateStatuses/3": {
+    "hash": "aa822776ebab",
+    "text": "Script statuses for candidates awaiting registration.",
+    "written": "2026-08-26"
+  },
+  "kt:com.rjnr.pocketnode.data.gateway.SyncCoordinator#recordCandidateRegistrations/1": {
+    "hash": "f0950539e4ea",
+    "text": "Persists which candidates were registered and when.",
+    "written": "2026-08-26"
+  },
+  "kt:com.rjnr.pocketnode.data.gateway.SyncCoordinator#registerAllWalletScripts/1": {
+    "hash": "1e0b5302af90",
+    "text": "Registers every wallet and candidate script for the current context.",
+    "written": "2026-08-26"
+  },
+  "kt:com.rjnr.pocketnode.data.gateway.SyncCoordinator#setScriptsAndRecord/5": {
+    "hash": "20893a59cba5",
+    "text": "Registers scripts and records the resulting statuses in the registered-set cache.",
+    "written": "2026-08-26"
+  },
   "kt:com.rjnr.pocketnode.data.gateway.TipSource": {
     "hash": "965887eb4126",
     "text": "Monotonic light-client tip stream, starting at 0 until the first publish.",
     "written": "2026-08-26"
   },
+  "kt:com.rjnr.pocketnode.data.gateway.TipSource#activeWalletAndNetworkOrNull/0": {
+    "hash": "77231c952c0e",
+    "text": "Returns the active wallet id paired with the current network, or null if none is active.",
+    "written": "2026-08-26"
+  },
+  "kt:com.rjnr.pocketnode.data.gateway.TipSource#fetchAndPublishTip/0": {
+    "hash": "fb77b48b1d9f",
+    "text": "Reads the current light-client tip and publishes it to the tip flow.",
+    "written": "2026-08-26"
+  },
   "kt:com.rjnr.pocketnode.data.gateway.TransactionStatusUpdater": {
     "hash": "3304e17c0a5b",
     "text": "Narrow interface for writing back a transaction's confirmation status.",
+    "written": "2026-08-26"
+  },
+  "kt:com.rjnr.pocketnode.data.gateway.TransactionStatusUpdater#updateTransactionStatus/2": {
+    "hash": "94d7a366c3bc",
+    "text": "Updates a cached transaction's status by hash.",
+    "written": "2026-08-26"
+  },
+  "kt:com.rjnr.pocketnode.data.gateway.models.CyclePhase": {
+    "hash": "93e71ca2b6bd",
+    "text": "Enumeration of NORMAL, SUGGESTED.",
+    "written": "2026-08-26"
+  },
+  "kt:com.rjnr.pocketnode.data.gateway.models.DaoCellStatus": {
+    "hash": "1e549c264c4b",
+    "text": "Enumeration of DEPOSITING, DEPOSITED, WITHDRAWING, LOCKED, UNLOCKABLE, UNLOCKING.",
+    "written": "2026-08-26"
+  },
+  "kt:com.rjnr.pocketnode.data.gateway.models.DaoTab": {
+    "hash": "68737798d7dd",
+    "text": "Enumeration of ACTIVE.",
     "written": "2026-08-26"
   },
   "kt:com.rjnr.pocketnode.data.gateway.models.EpochInfo": {
@@ -199,9 +884,24 @@
     "text": "Serializable live cell as returned across the JNI boundary.",
     "written": "2026-08-26"
   },
+  "kt:com.rjnr.pocketnode.data.gateway.models.NetworkType": {
+    "hash": "6eed19021a47",
+    "text": "Enumeration of TESTNET, MAINNET.",
+    "written": "2026-08-26"
+  },
+  "kt:com.rjnr.pocketnode.data.gateway.models.SyncMode": {
+    "hash": "62a8910eccc8",
+    "text": "Enumeration of NEW_WALLET, RECENT, FULL_HISTORY.",
+    "written": "2026-08-26"
+  },
   "kt:com.rjnr.pocketnode.data.gateway.models.TransactionStatusResponse": {
     "hash": "cf59a6547a69",
     "text": "Serializable response carrying a transaction hash and its chain status.",
+    "written": "2026-08-26"
+  },
+  "kt:com.rjnr.pocketnode.data.migration.Completed": {
+    "hash": "55320241ddd9",
+    "text": "Outcome outcome: Completed.",
     "written": "2026-08-26"
   },
   "kt:com.rjnr.pocketnode.data.migration.KeyStoreMigrationHelper": {
@@ -217,6 +917,11 @@
   "kt:com.rjnr.pocketnode.data.migration.KeystoreV2MigrationRunner": {
     "hash": "f85420685456",
     "text": "Drives the V2 keystore migration once per install, idempotently.",
+    "written": "2026-08-26"
+  },
+  "kt:com.rjnr.pocketnode.data.migration.NothingToDo": {
+    "hash": "aaec760c3048",
+    "text": "Outcome outcome: NothingToDo.",
     "written": "2026-08-26"
   },
   "kt:com.rjnr.pocketnode.data.migration.WalletMigrationHelper": {
@@ -274,6 +979,246 @@
     "text": "Builds, molecule-encodes and signs CKB transactions, including cell selection and change output.",
     "written": "2026-08-26"
   },
+  "kt:com.rjnr.pocketnode.data.transaction.TransactionBuilder#blake2bHash/1": {
+    "hash": "0cffd61f2cff",
+    "text": "Blake2b-256 digest with CKB personalisation.",
+    "written": "2026-08-26"
+  },
+  "kt:com.rjnr.pocketnode.data.transaction.TransactionBuilder#buildDaoDeposit/5": {
+    "hash": "aea27eea32ad",
+    "text": "Builds a Nervos DAO deposit transaction.",
+    "written": "2026-08-26"
+  },
+  "kt:com.rjnr.pocketnode.data.transaction.TransactionBuilder#buildDaoUnlock/8": {
+    "hash": "f56346efc6fa",
+    "text": "Builds a DAO unlock releasing principal plus compensation after the lock period.",
+    "written": "2026-08-26"
+  },
+  "kt:com.rjnr.pocketnode.data.transaction.TransactionBuilder#buildDaoWithdraw/7": {
+    "hash": "106a4c120b71",
+    "text": "Builds a DAO phase-one withdrawal from a deposit cell.",
+    "written": "2026-08-26"
+  },
+  "kt:com.rjnr.pocketnode.data.transaction.TransactionBuilder#buildMultiTransfer/5": {
+    "hash": "1771538dc5aa",
+    "text": "Builds a multi-recipient transfer in one transaction.",
+    "written": "2026-08-26"
+  },
+  "kt:com.rjnr.pocketnode.data.transaction.TransactionBuilder#buildSweep/3": {
+    "hash": "92fc3da0a20e",
+    "text": "Builds a transaction consuming many inputs into a single output.",
+    "written": "2026-08-26"
+  },
+  "kt:com.rjnr.pocketnode.data.transaction.TransactionBuilder#buildTransfer/6": {
+    "hash": "5fa359c157c1",
+    "text": "Builds a single-recipient transfer, selecting cells and adding change.",
+    "written": "2026-08-26"
+  },
+  "kt:com.rjnr.pocketnode.data.transaction.TransactionBuilder#calculateFeeForSize/1": {
+    "hash": "3786851418d3",
+    "text": "Converts a serialized size in bytes to a fee at the configured rate.",
+    "written": "2026-08-26"
+  },
+  "kt:com.rjnr.pocketnode.data.transaction.TransactionBuilder#calculateMaxSendable/1": {
+    "hash": "187bfb186997",
+    "text": "Largest amount sendable from the given cells once fee and change minimum are covered.",
+    "written": "2026-08-26"
+  },
+  "kt:com.rjnr.pocketnode.data.transaction.TransactionBuilder#computeTxHash/1": {
+    "hash": "10055493be8a",
+    "text": "Blake2b hash of the molecule-serialized raw transaction.",
+    "written": "2026-08-26"
+  },
+  "kt:com.rjnr.pocketnode.data.transaction.TransactionBuilder#estimateFeeWithGroups/3": {
+    "hash": "5f6a5c6288e6",
+    "text": "Fee estimate accounting for per-signing-group witness overhead.",
+    "written": "2026-08-26"
+  },
+  "kt:com.rjnr.pocketnode.data.transaction.TransactionBuilder#estimateSweepFee/2": {
+    "hash": "d5b2efdffcde",
+    "text": "Estimates the fee for a sweep, which has one output but many signing groups.",
+    "written": "2026-08-26"
+  },
+  "kt:com.rjnr.pocketnode.data.transaction.TransactionBuilder#estimateTransactionSize/1": {
+    "hash": "4383dce93148",
+    "text": "Serializes the transaction to measure its on-chain byte size.",
+    "written": "2026-08-26"
+  },
+  "kt:com.rjnr.pocketnode.data.transaction.TransactionBuilder#estimateTransferFee/2": {
+    "hash": "64019da20874",
+    "text": "Estimates the fee for a transfer from input and output counts.",
+    "written": "2026-08-26"
+  },
+  "kt:com.rjnr.pocketnode.data.transaction.TransactionBuilder#littleEndianInt/1": {
+    "hash": "005b44f86aa6",
+    "text": "Encodes an Int as four little-endian bytes.",
+    "written": "2026-08-26"
+  },
+  "kt:com.rjnr.pocketnode.data.transaction.TransactionBuilder#littleEndianLong/1": {
+    "hash": "521bdef7fa1a",
+    "text": "Encodes a Long as eight little-endian bytes.",
+    "written": "2026-08-26"
+  },
+  "kt:com.rjnr.pocketnode.data.transaction.TransactionBuilder#parseCapacity/1": {
+    "hash": "8f83b6f21e64",
+    "text": "Parses a hex capacity string into shannons.",
+    "written": "2026-08-26"
+  },
+  "kt:com.rjnr.pocketnode.data.transaction.TransactionBuilder#selectCells/3": {
+    "hash": "ce7c4e27d6aa",
+    "text": "Largest-first cell selection covering the target amount plus fee.",
+    "written": "2026-08-26"
+  },
+  "kt:com.rjnr.pocketnode.data.transaction.TransactionBuilder#serializeByte32/1": {
+    "hash": "d946e2dc590f",
+    "text": "Molecule Byte32 from a hex string.",
+    "written": "2026-08-26"
+  },
+  "kt:com.rjnr.pocketnode.data.transaction.TransactionBuilder#serializeByte32Vec/1": {
+    "hash": "bfe5644db052",
+    "text": "Molecule vector of Byte32.",
+    "written": "2026-08-26"
+  },
+  "kt:com.rjnr.pocketnode.data.transaction.TransactionBuilder#serializeBytes/1": {
+    "hash": "2823291b5996",
+    "text": "Molecule Bytes from a hex string.",
+    "written": "2026-08-26"
+  },
+  "kt:com.rjnr.pocketnode.data.transaction.TransactionBuilder#serializeBytesOpt/0": {
+    "hash": "137baa7dcc9f",
+    "text": "Molecule optional Bytes, empty when absent.",
+    "written": "2026-08-26"
+  },
+  "kt:com.rjnr.pocketnode.data.transaction.TransactionBuilder#serializeBytesRaw/1": {
+    "hash": "ee727f54a067",
+    "text": "Molecule Bytes from a raw byte array.",
+    "written": "2026-08-26"
+  },
+  "kt:com.rjnr.pocketnode.data.transaction.TransactionBuilder#serializeBytesVec/1": {
+    "hash": "5c2bd5f4b5ef",
+    "text": "Molecule vector of Bytes.",
+    "written": "2026-08-26"
+  },
+  "kt:com.rjnr.pocketnode.data.transaction.TransactionBuilder#serializeCellDep/1": {
+    "hash": "3fddff0e8075",
+    "text": "Molecule CellDep (outpoint plus dep type).",
+    "written": "2026-08-26"
+  },
+  "kt:com.rjnr.pocketnode.data.transaction.TransactionBuilder#serializeCellDepVec/1": {
+    "hash": "053f34bce37b",
+    "text": "Molecule vector of CellDep.",
+    "written": "2026-08-26"
+  },
+  "kt:com.rjnr.pocketnode.data.transaction.TransactionBuilder#serializeCellInput/1": {
+    "hash": "139eca0e76f9",
+    "text": "Molecule CellInput (since plus previous outpoint).",
+    "written": "2026-08-26"
+  },
+  "kt:com.rjnr.pocketnode.data.transaction.TransactionBuilder#serializeCellInputVec/1": {
+    "hash": "25e49d180107",
+    "text": "Molecule vector of CellInput.",
+    "written": "2026-08-26"
+  },
+  "kt:com.rjnr.pocketnode.data.transaction.TransactionBuilder#serializeCellOutput/1": {
+    "hash": "4d414b4e589b",
+    "text": "Molecule CellOutput (capacity, lock, optional type).",
+    "written": "2026-08-26"
+  },
+  "kt:com.rjnr.pocketnode.data.transaction.TransactionBuilder#serializeCellOutputVec/1": {
+    "hash": "7fe8851bfba1",
+    "text": "Molecule vector of CellOutput.",
+    "written": "2026-08-26"
+  },
+  "kt:com.rjnr.pocketnode.data.transaction.TransactionBuilder#serializeDynVec/1": {
+    "hash": "d8095c3746dc",
+    "text": "Molecule dynamic-size vector encoding.",
+    "written": "2026-08-26"
+  },
+  "kt:com.rjnr.pocketnode.data.transaction.TransactionBuilder#serializeFixVec/1": {
+    "hash": "c99872ddf356",
+    "text": "Molecule fixed-size vector encoding.",
+    "written": "2026-08-26"
+  },
+  "kt:com.rjnr.pocketnode.data.transaction.TransactionBuilder#serializeOutPoint/1": {
+    "hash": "b734532639cc",
+    "text": "Molecule OutPoint (tx hash plus index).",
+    "written": "2026-08-26"
+  },
+  "kt:com.rjnr.pocketnode.data.transaction.TransactionBuilder#serializeRawTransaction/1": {
+    "hash": "f27fff0604df",
+    "text": "Molecule-encodes the raw transaction (version, deps, inputs, outputs, data).",
+    "written": "2026-08-26"
+  },
+  "kt:com.rjnr.pocketnode.data.transaction.TransactionBuilder#serializeScript/1": {
+    "hash": "c26eec42d5d4",
+    "text": "Molecule Script (code hash, hash type, args).",
+    "written": "2026-08-26"
+  },
+  "kt:com.rjnr.pocketnode.data.transaction.TransactionBuilder#serializeScriptOpt/0": {
+    "hash": "e58a28e84314",
+    "text": "Molecule optional Script, empty when absent.",
+    "written": "2026-08-26"
+  },
+  "kt:com.rjnr.pocketnode.data.transaction.TransactionBuilder#serializeTable/1": {
+    "hash": "82a4812e3b5a",
+    "text": "Molecule table encoding: full size, field offsets, then fields.",
+    "written": "2026-08-26"
+  },
+  "kt:com.rjnr.pocketnode.data.transaction.TransactionBuilder#serializeUint32/1": {
+    "hash": "8ee45898d135",
+    "text": "Molecule uint32, little-endian.",
+    "written": "2026-08-26"
+  },
+  "kt:com.rjnr.pocketnode.data.transaction.TransactionBuilder#serializeUint64/1": {
+    "hash": "54c006e852c3",
+    "text": "Molecule uint64, little-endian.",
+    "written": "2026-08-26"
+  },
+  "kt:com.rjnr.pocketnode.data.transaction.TransactionBuilder#serializeWitnessArgs/0": {
+    "hash": "4086442034a3",
+    "text": "Molecule WitnessArgs, carrying the 65-byte signature in the lock field.",
+    "written": "2026-08-26"
+  },
+  "kt:com.rjnr.pocketnode.data.transaction.TransactionBuilder#signSweep/3": {
+    "hash": "ece9d9e70cd0",
+    "text": "Signs a sweep, producing one signature per signing group.",
+    "written": "2026-08-26"
+  },
+  "kt:com.rjnr.pocketnode.data.transaction.TransactionBuilder#signTransaction/3": {
+    "hash": "d9530238c239",
+    "text": "Signs the transaction hash and writes signatures into the witnesses.",
+    "written": "2026-08-26"
+  },
+  "kt:com.rjnr.pocketnode.data.update.ApkMissing": {
+    "hash": "30b45995640f",
+    "text": "SignatureCheck case: apk-missing",
+    "written": "2026-08-26"
+  },
+  "kt:com.rjnr.pocketnode.data.update.DisabledNoConstant": {
+    "hash": "28580dea2e0f",
+    "text": "SignatureCheck case: ok-skipped",
+    "written": "2026-08-26"
+  },
+  "kt:com.rjnr.pocketnode.data.update.Mismatch": {
+    "hash": "f540d941f9b6",
+    "text": "SignatureCheck case: sha-mismatch",
+    "written": "2026-08-26"
+  },
+  "kt:com.rjnr.pocketnode.data.update.NoSigners": {
+    "hash": "6fce04070507",
+    "text": "SignatureCheck case: no-signers",
+    "written": "2026-08-26"
+  },
+  "kt:com.rjnr.pocketnode.data.update.Ok": {
+    "hash": "95dba7a154c2",
+    "text": "SignatureCheck case: ok",
+    "written": "2026-08-26"
+  },
+  "kt:com.rjnr.pocketnode.data.update.ReadError": {
+    "hash": "9be5152236de",
+    "text": "SignatureCheck case: read-error",
+    "written": "2026-08-26"
+  },
   "kt:com.rjnr.pocketnode.data.update.UpdateDownloader": {
     "hash": "34e85d92dbb0",
     "text": "Downloads an APK update and tracks its progress.",
@@ -289,9 +1234,49 @@
     "text": "Validates that addresses and scripts belong to the active network before a transfer.",
     "written": "2026-08-26"
   },
+  "kt:com.rjnr.pocketnode.data.validation.NetworkValidator#validateTransferAddresses/3": {
+    "hash": "706d2fe4abc5",
+    "text": "Rejects a transfer whose addresses do not match the active network.",
+    "written": "2026-08-26"
+  },
   "kt:com.rjnr.pocketnode.data.wallet.AddressUtils": {
     "hash": "d7347d03bcda",
     "text": "Encodes and decodes CKB addresses to and from Script objects.",
+    "written": "2026-08-26"
+  },
+  "kt:com.rjnr.pocketnode.data.wallet.AddressUtils#decode/1": {
+    "hash": "3c7821b0932c",
+    "text": "Decodes a CKB address into its Script.",
+    "written": "2026-08-26"
+  },
+  "kt:com.rjnr.pocketnode.data.wallet.AddressUtils#encode/2": {
+    "hash": "d2e80eef6bfa",
+    "text": "Encodes a Script into a network-prefixed CKB address.",
+    "written": "2026-08-26"
+  },
+  "kt:com.rjnr.pocketnode.data.wallet.AddressUtils#getNetwork/1": {
+    "hash": "cff3e14e8568",
+    "text": "Returns the network an address belongs to, from its prefix.",
+    "written": "2026-08-26"
+  },
+  "kt:com.rjnr.pocketnode.data.wallet.AddressUtils#hexToBytes/0": {
+    "hash": "899abbb2d5b6",
+    "text": "Hex string to byte array, tolerating a 0x prefix.",
+    "written": "2026-08-26"
+  },
+  "kt:com.rjnr.pocketnode.data.wallet.AddressUtils#isValid/1": {
+    "hash": "d26d1f9d98b0",
+    "text": "Whether a string is a decodable CKB address.",
+    "written": "2026-08-26"
+  },
+  "kt:com.rjnr.pocketnode.data.wallet.AddressUtils#parseAddress/1": {
+    "hash": "41ad81c39772",
+    "text": "Parses a CKB address into a Script, returning null when malformed.",
+    "written": "2026-08-26"
+  },
+  "kt:com.rjnr.pocketnode.data.wallet.GapLimitResolution": {
+    "hash": "268158c7b8a5",
+    "text": "Enumeration of NOT_SCANNED.",
     "written": "2026-08-26"
   },
   "kt:com.rjnr.pocketnode.data.wallet.KeyBackupManager": {
@@ -304,9 +1289,254 @@
     "text": "Generates, imports, stores and signs with private keys, across Android Keystore and Room.",
     "written": "2026-08-26"
   },
+  "kt:com.rjnr.pocketnode.data.wallet.KeyManager#clearSessionPin/0": {
+    "hash": "7b0a240d3564",
+    "text": "Zeroes and drops the cached session PIN.",
+    "written": "2026-08-26"
+  },
+  "kt:com.rjnr.pocketnode.data.wallet.KeyManager#createEncryptedPrefs/1": {
+    "hash": "36815dd5b70f",
+    "text": "Opens EncryptedSharedPreferences, optionally requiring StrongBox.",
+    "written": "2026-08-26"
+  },
+  "kt:com.rjnr.pocketnode.data.wallet.KeyManager#createEncryptedPrefsForWallet/2": {
+    "hash": "b7fdfb027857",
+    "text": "Creates a per-wallet encrypted preferences file.",
+    "written": "2026-08-26"
+  },
+  "kt:com.rjnr.pocketnode.data.wallet.KeyManager#deleteEspFilesIfSafe/0": {
+    "hash": "9371b4bc65f1",
+    "text": "Removes legacy preference files once migration is confirmed.",
+    "written": "2026-08-26"
+  },
+  "kt:com.rjnr.pocketnode.data.wallet.KeyManager#deleteWallet/0": {
+    "hash": "41f5d4e66bfe",
+    "text": "Deletes the default wallet's key material and its backup.",
+    "written": "2026-08-26"
+  },
+  "kt:com.rjnr.pocketnode.data.wallet.KeyManager#deleteWalletKeys/1": {
+    "hash": "e6ae071f63ba",
+    "text": "Deletes one wallet's key material and backup.",
+    "written": "2026-08-26"
+  },
+  "kt:com.rjnr.pocketnode.data.wallet.KeyManager#deriveChainKey/3": {
+    "hash": "c992d3e113cb",
+    "text": "Derives a BIP32 child private key at the given account and index.",
+    "written": "2026-08-26"
+  },
+  "kt:com.rjnr.pocketnode.data.wallet.KeyManager#deriveLockScript/1": {
+    "hash": "a1a5ad2f107d",
+    "text": "Builds the secp256k1-blake160 lock script from a public key.",
+    "written": "2026-08-26"
+  },
+  "kt:com.rjnr.pocketnode.data.wallet.KeyManager#deriveLockScriptFromAddress/1": {
+    "hash": "067f1a323feb",
+    "text": "Decodes an address back into its lock script.",
+    "written": "2026-08-26"
+  },
+  "kt:com.rjnr.pocketnode.data.wallet.KeyManager#derivePublicKey/1": {
+    "hash": "54fbf7c3da0d",
+    "text": "Derives the compressed public key from a private key.",
+    "written": "2026-08-26"
+  },
+  "kt:com.rjnr.pocketnode.data.wallet.KeyManager#deriveWalletInfo/1": {
+    "hash": "fa606ed1ec32",
+    "text": "Derives address, script and public key from a private key.",
+    "written": "2026-08-26"
+  },
+  "kt:com.rjnr.pocketnode.data.wallet.KeyManager#deriveWalletInfoFromEntity/1": {
+    "hash": "4b54c16890d6",
+    "text": "Builds wallet info from a stored wallet row.",
+    "written": "2026-08-26"
+  },
+  "kt:com.rjnr.pocketnode.data.wallet.KeyManager#diagnosticKeyState/0": {
+    "hash": "bb8ba7c2aeca",
+    "text": "Reports which storage tiers hold key material, for troubleshooting.",
+    "written": "2026-08-26"
+  },
+  "kt:com.rjnr.pocketnode.data.wallet.KeyManager#encodePlaintextBundle/1": {
+    "hash": "4f50be88eb0a",
+    "text": "Packs private key, mnemonic and flags into the stored bundle format.",
+    "written": "2026-08-26"
+  },
+  "kt:com.rjnr.pocketnode.data.wallet.KeyManager#getKeyPair/0": {
+    "hash": "96f13448c85d",
+    "text": "Returns the stored key pair, decrypting as needed.",
+    "written": "2026-08-26"
+  },
+  "kt:com.rjnr.pocketnode.data.wallet.KeyManager#getMnemonic/0": {
+    "hash": "1ed8c9f98e76",
+    "text": "Returns the stored seed phrase for the default wallet.",
+    "written": "2026-08-26"
+  },
+  "kt:com.rjnr.pocketnode.data.wallet.KeyManager#getMnemonicForWallet/1": {
+    "hash": "5236afb74157",
+    "text": "Returns a specific wallet's seed phrase.",
+    "written": "2026-08-26"
+  },
+  "kt:com.rjnr.pocketnode.data.wallet.KeyManager#getPrivateKey/0": {
+    "hash": "2c3ede995d21",
+    "text": "Returns the stored private key.",
+    "written": "2026-08-26"
+  },
+  "kt:com.rjnr.pocketnode.data.wallet.KeyManager#getPrivateKeyForWallet/1": {
+    "hash": "537e50afc774",
+    "text": "Returns a specific wallet's private key.",
+    "written": "2026-08-26"
+  },
+  "kt:com.rjnr.pocketnode.data.wallet.KeyManager#getWalletInfo/0": {
+    "hash": "cd35c8cf1b48",
+    "text": "Derives address, script and public key from the stored key pair.",
+    "written": "2026-08-26"
+  },
+  "kt:com.rjnr.pocketnode.data.wallet.KeyManager#getWalletPrefs/1": {
+    "hash": "f385bb05b70a",
+    "text": "Opens the encrypted preferences file for one wallet.",
+    "written": "2026-08-26"
+  },
+  "kt:com.rjnr.pocketnode.data.wallet.KeyManager#getWalletType/0": {
+    "hash": "b603b0580a95",
+    "text": "Returns whether stored key material is V1 or V2.",
+    "written": "2026-08-26"
+  },
+  "kt:com.rjnr.pocketnode.data.wallet.KeyManager#hasMnemonicBackup/0": {
+    "hash": "38524e9345a0",
+    "text": "Whether the seed phrase backup was confirmed.",
+    "written": "2026-08-26"
+  },
+  "kt:com.rjnr.pocketnode.data.wallet.KeyManager#hasMnemonicBackupForWallet/1": {
+    "hash": "e294622966d2",
+    "text": "Whether one wallet's backup was confirmed.",
+    "written": "2026-08-26"
+  },
+  "kt:com.rjnr.pocketnode.data.wallet.KeyManager#hasWallet/0": {
+    "hash": "43aac830de91",
+    "text": "Whether any key material is stored.",
+    "written": "2026-08-26"
+  },
+  "kt:com.rjnr.pocketnode.data.wallet.KeyManager#migrateEspToRoomIfNeeded/1": {
+    "hash": "8ace05b92974",
+    "text": "Moves key material out of EncryptedSharedPreferences into Room.",
+    "written": "2026-08-26"
+  },
+  "kt:com.rjnr.pocketnode.data.wallet.KeyManager#mnemonicToSeed/1": {
+    "hash": "19289d7f5ea8",
+    "text": "Converts a seed phrase to a BIP39 seed.",
+    "written": "2026-08-26"
+  },
+  "kt:com.rjnr.pocketnode.data.wallet.KeyManager#resetCorruptionFlag/0": {
+    "hash": "07fbe84a39b3",
+    "text": "Clears the corruption flag once the user has been informed.",
+    "written": "2026-08-26"
+  },
+  "kt:com.rjnr.pocketnode.data.wallet.KeyManager#setBackupManager/1": {
+    "hash": "d266395229eb",
+    "text": "Injects the backup manager after construction, breaking a dependency cycle.",
+    "written": "2026-08-26"
+  },
+  "kt:com.rjnr.pocketnode.data.wallet.KeyManager#setMigrationHelper/1": {
+    "hash": "46477987ba3a",
+    "text": "Injects the key-store migration helper after construction.",
+    "written": "2026-08-26"
+  },
+  "kt:com.rjnr.pocketnode.data.wallet.KeyManager#setMnemonicBackedUp/1": {
+    "hash": "3a46d12b9fe4",
+    "text": "Records seed-phrase backup confirmation.",
+    "written": "2026-08-26"
+  },
+  "kt:com.rjnr.pocketnode.data.wallet.KeyManager#setMnemonicBackedUpForWallet/2": {
+    "hash": "1880c8964fca",
+    "text": "Records backup confirmation for one wallet.",
+    "written": "2026-08-26"
+  },
+  "kt:com.rjnr.pocketnode.data.wallet.KeyManager#setSessionPin/1": {
+    "hash": "20dbef5e49c2",
+    "text": "Caches the PIN for this session, zeroing any previous copy.",
+    "written": "2026-08-26"
+  },
+  "kt:com.rjnr.pocketnode.data.wallet.KeyManager#sign/1": {
+    "hash": "68cb4a50b0ab",
+    "text": "Signs a message hash with the stored key, returning r+s+v.",
+    "written": "2026-08-26"
+  },
+  "kt:com.rjnr.pocketnode.data.wallet.KeyManager#wasResetDueToCorruption/0": {
+    "hash": "2d316028bb5f",
+    "text": "Whether key storage was wiped because it could not be decrypted.",
+    "written": "2026-08-26"
+  },
+  "kt:com.rjnr.pocketnode.data.wallet.KeyManager#writeBackupIfPinAvailable/1": {
+    "hash": "bc009c797f67",
+    "text": "Writes the encrypted key backup when a session PIN is available.",
+    "written": "2026-08-26"
+  },
   "kt:com.rjnr.pocketnode.data.wallet.MnemonicManager": {
     "hash": "7a354d64c374",
     "text": "BIP39 mnemonic generation, validation and seed derivation.",
+    "written": "2026-08-26"
+  },
+  "kt:com.rjnr.pocketnode.data.wallet.MnemonicManager#computeChildKey/2": {
+    "hash": "5a656bfcbaf9",
+    "text": "Shared BIP32 child-key computation from parent chain code and data.",
+    "written": "2026-08-26"
+  },
+  "kt:com.rjnr.pocketnode.data.wallet.MnemonicManager#deriveHardenedChild/2": {
+    "hash": "526999e0dc33",
+    "text": "BIP32 hardened child derivation.",
+    "written": "2026-08-26"
+  },
+  "kt:com.rjnr.pocketnode.data.wallet.MnemonicManager#deriveMasterKey/1": {
+    "hash": "c752ad2e9af8",
+    "text": "Derives the BIP32 master key from a seed.",
+    "written": "2026-08-26"
+  },
+  "kt:com.rjnr.pocketnode.data.wallet.MnemonicManager#deriveNormalChild/2": {
+    "hash": "479e333ba6cb",
+    "text": "BIP32 non-hardened child derivation.",
+    "written": "2026-08-26"
+  },
+  "kt:com.rjnr.pocketnode.data.wallet.MnemonicManager#derivePrivateKey/4": {
+    "hash": "fd401b3caa89",
+    "text": "Derives a private key at the BIP44 path for account, change and index.",
+    "written": "2026-08-26"
+  },
+  "kt:com.rjnr.pocketnode.data.wallet.MnemonicManager#generateMnemonic/1": {
+    "hash": "c087ccb6e2ca",
+    "text": "Generates a BIP39 seed phrase of the requested word count.",
+    "written": "2026-08-26"
+  },
+  "kt:com.rjnr.pocketnode.data.wallet.MnemonicManager#hmacSha512/2": {
+    "hash": "e5f4383abadf",
+    "text": "HMAC-SHA512, the primitive behind BIP32 derivation.",
+    "written": "2026-08-26"
+  },
+  "kt:com.rjnr.pocketnode.data.wallet.MnemonicManager#mnemonicToPrivateKey/2": {
+    "hash": "84517fc76aff",
+    "text": "Derives the default account's private key straight from a phrase.",
+    "written": "2026-08-26"
+  },
+  "kt:com.rjnr.pocketnode.data.wallet.MnemonicManager#mnemonicToSeed/2": {
+    "hash": "0838b4a75774",
+    "text": "Derives the BIP39 seed from a phrase and optional passphrase.",
+    "written": "2026-08-26"
+  },
+  "kt:com.rjnr.pocketnode.data.wallet.MnemonicManager#putBE32/3": {
+    "hash": "75a4cde201d0",
+    "text": "Writes a 32-bit big-endian value into a buffer.",
+    "written": "2026-08-26"
+  },
+  "kt:com.rjnr.pocketnode.data.wallet.MnemonicManager#toByteArray32/0": {
+    "hash": "9faae48f6420",
+    "text": "Left-pads a BigInteger to exactly 32 bytes.",
+    "written": "2026-08-26"
+  },
+  "kt:com.rjnr.pocketnode.data.wallet.MnemonicManager#validateMnemonic/1": {
+    "hash": "4d0ac16062e8",
+    "text": "Checks a seed phrase against the BIP39 wordlist and checksum.",
+    "written": "2026-08-26"
+  },
+  "kt:com.rjnr.pocketnode.data.wallet.NoSecureLock": {
+    "hash": "96a21f2196f5",
+    "text": "Result outcome: NoSecureLock.",
     "written": "2026-08-26"
   },
   "kt:com.rjnr.pocketnode.data.wallet.SeedPhraseAuthorizer": {
@@ -324,9 +1554,44 @@
     "text": "Derives sub-account keys and scans for on-chain activity within the gap limit.",
     "written": "2026-08-26"
   },
+  "kt:com.rjnr.pocketnode.data.wallet.SubAccountDiscovery#accountPath/1": {
+    "hash": "42be35f0b844",
+    "text": "BIP44 path for an account index.",
+    "written": "2026-08-26"
+  },
+  "kt:com.rjnr.pocketnode.data.wallet.SubAccountDiscovery#argsFor/4": {
+    "hash": "7deb4394c12e",
+    "text": "Lock-script args for a derivation path.",
+    "written": "2026-08-26"
+  },
+  "kt:com.rjnr.pocketnode.data.wallet.SubAccountDiscovery#chainPath/2": {
+    "hash": "1688d8323896",
+    "text": "BIP44 path for a chain and address index.",
+    "written": "2026-08-26"
+  },
+  "kt:com.rjnr.pocketnode.data.wallet.SubAccountDiscovery#deriveCandidates/3": {
+    "hash": "484610f9a85b",
+    "text": "Derives sub-account candidate scripts up to the gap limit.",
+    "written": "2026-08-26"
+  },
+  "kt:com.rjnr.pocketnode.data.wallet.SubAccountDiscovery#deriveChainCandidates/3": {
+    "hash": "17139d7f7d73",
+    "text": "Derives candidates along one BIP44 chain (external or change).",
+    "written": "2026-08-26"
+  },
   "kt:com.rjnr.pocketnode.data.wallet.SubAccountReconciler": {
     "hash": "19086c84b3ea",
     "text": "Reconciles discovered sub-account candidates against confirmed wallet records.",
+    "written": "2026-08-26"
+  },
+  "kt:com.rjnr.pocketnode.data.wallet.SyncStrategy": {
+    "hash": "076bc73032ea",
+    "text": "Enumeration of ACTIVE_ONLY.",
+    "written": "2026-08-26"
+  },
+  "kt:com.rjnr.pocketnode.data.wallet.ThemeMode": {
+    "hash": "d085147617b8",
+    "text": "Enumeration of SYSTEM.",
     "written": "2026-08-26"
   },
   "kt:com.rjnr.pocketnode.data.wallet.WalletKeyWriter": {
@@ -344,9 +1609,239 @@
     "text": "Multi-wallet CRUD: create, import, switch, delete and sub-accounts.",
     "written": "2026-08-26"
   },
+  "kt:com.rjnr.pocketnode.data.wallet.WalletRepository#activeWalletIdSnapshot/0": {
+    "hash": "4639f9b24639",
+    "text": "Current active wallet id, read synchronously.",
+    "written": "2026-08-26"
+  },
+  "kt:com.rjnr.pocketnode.data.wallet.WalletRepository#createSubAccount/3": {
+    "hash": "5a983add83fc",
+    "text": "Derives and stores a sub-account under a parent wallet.",
+    "written": "2026-08-26"
+  },
+  "kt:com.rjnr.pocketnode.data.wallet.WalletRepository#createWallet/2": {
+    "hash": "b72d63c2567f",
+    "text": "Creates a wallet from a freshly generated seed phrase.",
+    "written": "2026-08-26"
+  },
+  "kt:com.rjnr.pocketnode.data.wallet.WalletRepository#deleteWallet/1": {
+    "hash": "21251874179e",
+    "text": "Deletes a wallet and its key material.",
+    "written": "2026-08-26"
+  },
+  "kt:com.rjnr.pocketnode.data.wallet.WalletRepository#factoryReset/0": {
+    "hash": "89197bc0a0f4",
+    "text": "Clears every wallet, key and preference on the device.",
+    "written": "2026-08-26"
+  },
+  "kt:com.rjnr.pocketnode.data.wallet.WalletRepository#getActive/0": {
+    "hash": "81fe6d2ff241",
+    "text": "Returns the active wallet row, or null.",
+    "written": "2026-08-26"
+  },
+  "kt:com.rjnr.pocketnode.data.wallet.WalletRepository#getActiveWallet/0": {
+    "hash": "f2ccb4acdbcc",
+    "text": "Returns the active wallet row.",
+    "written": "2026-08-26"
+  },
+  "kt:com.rjnr.pocketnode.data.wallet.WalletRepository#getAll/0": {
+    "hash": "185c159c99ee",
+    "text": "Returns all wallet rows.",
+    "written": "2026-08-26"
+  },
+  "kt:com.rjnr.pocketnode.data.wallet.WalletRepository#getAllWallets/0": {
+    "hash": "b74e3c5e4b1d",
+    "text": "Returns every wallet as a flow.",
+    "written": "2026-08-26"
+  },
+  "kt:com.rjnr.pocketnode.data.wallet.WalletRepository#getById/1": {
+    "hash": "59d7976e2bab",
+    "text": "Returns one wallet by id.",
+    "written": "2026-08-26"
+  },
+  "kt:com.rjnr.pocketnode.data.wallet.WalletRepository#getSubAccounts/1": {
+    "hash": "496789940e3e",
+    "text": "Returns sub-accounts belonging to a parent wallet.",
+    "written": "2026-08-26"
+  },
+  "kt:com.rjnr.pocketnode.data.wallet.WalletRepository#importFromMnemonic/3": {
+    "hash": "a721fd2553fa",
+    "text": "Imports a wallet from a seed phrase.",
+    "written": "2026-08-26"
+  },
+  "kt:com.rjnr.pocketnode.data.wallet.WalletRepository#importRawKey/2": {
+    "hash": "cfd34897d3f4",
+    "text": "Imports a wallet from a raw private key.",
+    "written": "2026-08-26"
+  },
+  "kt:com.rjnr.pocketnode.data.wallet.WalletRepository#markFreshWalletSyncMode/1": {
+    "hash": "16aa71549ff8",
+    "text": "Sets NEW_WALLET sync mode for a newly created wallet, so it starts at tip.",
+    "written": "2026-08-26"
+  },
+  "kt:com.rjnr.pocketnode.data.wallet.WalletRepository#renameWallet/2": {
+    "hash": "87be70f23235",
+    "text": "Renames a wallet after checking the name is unique.",
+    "written": "2026-08-26"
+  },
+  "kt:com.rjnr.pocketnode.data.wallet.WalletRepository#switchActiveWallet/1": {
+    "hash": "aa35fc8516e8",
+    "text": "Makes another wallet active and refreshes derived state.",
+    "written": "2026-08-26"
+  },
+  "kt:com.rjnr.pocketnode.data.wallet.WalletRepository#validateUniqueAddress/2": {
+    "hash": "74eab107220d",
+    "text": "Rejects importing a wallet whose address already exists.",
+    "written": "2026-08-26"
+  },
+  "kt:com.rjnr.pocketnode.data.wallet.WalletRepository#validateUniqueName/1": {
+    "hash": "201feaf9aa7f",
+    "text": "Rejects a wallet name already in use.",
+    "written": "2026-08-26"
+  },
+  "kt:com.rjnr.pocketnode.data.wallet.WalletRepository#walletCount/0": {
+    "hash": "3ed981d51f2e",
+    "text": "Number of wallets stored.",
+    "written": "2026-08-26"
+  },
+  "kt:com.rjnr.pocketnode.data.wallet.WordCount": {
+    "hash": "e8be22dda2ab",
+    "text": "Enumeration of TWELVE, TWENTY_FOUR.",
+    "written": "2026-08-26"
+  },
   "kt:com.rjnr.pocketnode.di.AppModule": {
     "hash": "d80700f3ccef",
     "text": "Hilt module providing every application singleton, the Room database and its DAOs.",
+    "written": "2026-08-26"
+  },
+  "kt:com.rjnr.pocketnode.ui.navigation.AddContact": {
+    "hash": "76cfd5b1c50e",
+    "text": "Screen case: contacts/add",
+    "written": "2026-08-26"
+  },
+  "kt:com.rjnr.pocketnode.ui.navigation.AddWallet": {
+    "hash": "818bbc57d32c",
+    "text": "Screen case: add_wallet?parentId={parentId}",
+    "written": "2026-08-26"
+  },
+  "kt:com.rjnr.pocketnode.ui.navigation.Auth": {
+    "hash": "02b7eaa3a048",
+    "text": "Screen case: auth",
+    "written": "2026-08-26"
+  },
+  "kt:com.rjnr.pocketnode.ui.navigation.BackgroundSyncOptIn": {
+    "hash": "9539e3ff03a8",
+    "text": "Screen case: bg_sync_opt_in",
+    "written": "2026-08-26"
+  },
+  "kt:com.rjnr.pocketnode.ui.navigation.ContactDetail": {
+    "hash": "aaf8aee3840b",
+    "text": "Screen case: contacts/detail/{id}",
+    "written": "2026-08-26"
+  },
+  "kt:com.rjnr.pocketnode.ui.navigation.Contacts": {
+    "hash": "fed7c84f6ca7",
+    "text": "Screen case: contacts",
+    "written": "2026-08-26"
+  },
+  "kt:com.rjnr.pocketnode.ui.navigation.EditContact": {
+    "hash": "c814b687373e",
+    "text": "Screen case: contacts/edit/{id}",
+    "written": "2026-08-26"
+  },
+  "kt:com.rjnr.pocketnode.ui.navigation.Faq": {
+    "hash": "74d7dcff87c8",
+    "text": "Screen case: faq?anchor={anchor}",
+    "written": "2026-08-26"
+  },
+  "kt:com.rjnr.pocketnode.ui.navigation.ForgotPin": {
+    "hash": "b3912bc6ea3d",
+    "text": "Screen case: forgot_pin",
+    "written": "2026-08-26"
+  },
+  "kt:com.rjnr.pocketnode.ui.navigation.Home": {
+    "hash": "c6851db6c310",
+    "text": "Screen case: home",
+    "written": "2026-08-26"
+  },
+  "kt:com.rjnr.pocketnode.ui.navigation.InitialPinSetup": {
+    "hash": "5c655f43112e",
+    "text": "Screen case: initial_pin_setup",
+    "written": "2026-08-26"
+  },
+  "kt:com.rjnr.pocketnode.ui.navigation.Main": {
+    "hash": "012880cd8e03",
+    "text": "Screen case: main",
+    "written": "2026-08-26"
+  },
+  "kt:com.rjnr.pocketnode.ui.navigation.MnemonicBackup": {
+    "hash": "e4f136311579",
+    "text": "Screen case: mnemonic_backup?simplified={simplified}",
+    "written": "2026-08-26"
+  },
+  "kt:com.rjnr.pocketnode.ui.navigation.MnemonicImport": {
+    "hash": "b13c4992fdfb",
+    "text": "Screen case: mnemonic_import",
+    "written": "2026-08-26"
+  },
+  "kt:com.rjnr.pocketnode.ui.navigation.MnemonicVerify": {
+    "hash": "f26f23b1b919",
+    "text": "Screen case: mnemonic_verify",
+    "written": "2026-08-26"
+  },
+  "kt:com.rjnr.pocketnode.ui.navigation.NodeStatus": {
+    "hash": "cd47b1788eee",
+    "text": "Screen case: node_status",
+    "written": "2026-08-26"
+  },
+  "kt:com.rjnr.pocketnode.ui.navigation.Onboarding": {
+    "hash": "a20c84a7f1ce",
+    "text": "Screen case: onboarding",
+    "written": "2026-08-26"
+  },
+  "kt:com.rjnr.pocketnode.ui.navigation.PinEntry": {
+    "hash": "17cba24f658a",
+    "text": "Screen case: pin_entry/{mode}",
+    "written": "2026-08-26"
+  },
+  "kt:com.rjnr.pocketnode.ui.navigation.Receive": {
+    "hash": "bd352857d79e",
+    "text": "Screen case: receive",
+    "written": "2026-08-26"
+  },
+  "kt:com.rjnr.pocketnode.ui.navigation.Recovery": {
+    "hash": "508082b1677f",
+    "text": "Screen case: recovery",
+    "written": "2026-08-26"
+  },
+  "kt:com.rjnr.pocketnode.ui.navigation.Scanner": {
+    "hash": "4a497cd3f69b",
+    "text": "Screen case: scanner",
+    "written": "2026-08-26"
+  },
+  "kt:com.rjnr.pocketnode.ui.navigation.SecurityChecklist": {
+    "hash": "cd3d25c0a779",
+    "text": "Screen case: security_checklist",
+    "written": "2026-08-26"
+  },
+  "kt:com.rjnr.pocketnode.ui.navigation.SecuritySettings": {
+    "hash": "c1c7c2dafbc5",
+    "text": "Screen case: security_settings",
+    "written": "2026-08-26"
+  },
+  "kt:com.rjnr.pocketnode.ui.navigation.Send": {
+    "hash": "7f250741654a",
+    "text": "Screen case: send",
+    "written": "2026-08-26"
+  },
+  "kt:com.rjnr.pocketnode.ui.navigation.WalletDetail": {
+    "hash": "2707311ed6b4",
+    "text": "Screen case: wallet_detail/{walletId}",
+    "written": "2026-08-26"
+  },
+  "kt:com.rjnr.pocketnode.ui.navigation.WalletManager": {
+    "hash": "520ad72ba053",
+    "text": "Screen case: wallet_manager",
     "written": "2026-08-26"
   },
   "kt:com.rjnr.pocketnode.ui.screens.activity.ActivityViewModel": {
@@ -354,9 +1849,64 @@
     "text": "State for the activity/history screen.",
     "written": "2026-08-26"
   },
+  "kt:com.rjnr.pocketnode.ui.screens.activity.ActivityViewModel#exportTransactions/0": {
+    "hash": "1367e8a95bce",
+    "text": "Exports transaction history to a file.",
+    "written": "2026-08-26"
+  },
+  "kt:com.rjnr.pocketnode.ui.screens.activity.ActivityViewModel#refreshCache/0": {
+    "hash": "c6e604d8044b",
+    "text": "Refreshes cached activity data.",
+    "written": "2026-08-26"
+  },
+  "kt:com.rjnr.pocketnode.ui.screens.activity.ActivityViewModel#retryFailedTransaction/1": {
+    "hash": "e42004b11a53",
+    "text": "Re-broadcasts a transaction that previously failed to send.",
+    "written": "2026-08-26"
+  },
+  "kt:com.rjnr.pocketnode.ui.screens.activity.ActivityViewModel#setFilter/1": {
+    "hash": "03674a2a013d",
+    "text": "Applies a filter to the activity list.",
+    "written": "2026-08-26"
+  },
+  "kt:com.rjnr.pocketnode.ui.screens.activity.Filter": {
+    "hash": "cc78dd101b78",
+    "text": "Enumeration of ALL.",
+    "written": "2026-08-26"
+  },
   "kt:com.rjnr.pocketnode.ui.screens.auth.AuthViewModel": {
     "hash": "8a54b18be037",
     "text": "State for the biometric and device-credential unlock screen.",
+    "written": "2026-08-26"
+  },
+  "kt:com.rjnr.pocketnode.ui.screens.auth.AuthViewModel#clearError/0": {
+    "hash": "191ac155048d",
+    "text": "Clears the current error from UI state.",
+    "written": "2026-08-26"
+  },
+  "kt:com.rjnr.pocketnode.ui.screens.auth.AuthViewModel#onBiometricFailed/1": {
+    "hash": "e083d2862d61",
+    "text": "Handles a failed biometric attempt.",
+    "written": "2026-08-26"
+  },
+  "kt:com.rjnr.pocketnode.ui.screens.auth.AuthViewModel#onBiometricSuccess/0": {
+    "hash": "8926c6b38cec",
+    "text": "Handles a successful biometric unlock.",
+    "written": "2026-08-26"
+  },
+  "kt:com.rjnr.pocketnode.ui.screens.auth.AuthViewModel#onPinUnlockSuccess/0": {
+    "hash": "2634697928d2",
+    "text": "Handles a successful PIN unlock.",
+    "written": "2026-08-26"
+  },
+  "kt:com.rjnr.pocketnode.ui.screens.auth.AuthViewModel#runMigrationIfNeeded/1": {
+    "hash": "ea11fb954f6b",
+    "text": "Runs pending key migrations after unlock.",
+    "written": "2026-08-26"
+  },
+  "kt:com.rjnr.pocketnode.ui.screens.auth.AuthViewModel#shouldAutoTriggerBiometric/0": {
+    "hash": "cee4c20421b2",
+    "text": "Whether to raise the biometric prompt automatically on entry.",
     "written": "2026-08-26"
   },
   "kt:com.rjnr.pocketnode.ui.screens.auth.ForgotPinViewModel": {
@@ -364,9 +1914,74 @@
     "text": "Drives PIN recovery via seed phrase verification.",
     "written": "2026-08-26"
   },
+  "kt:com.rjnr.pocketnode.ui.screens.auth.ForgotPinViewModel#executeReset/0": {
+    "hash": "e74aa4953f03",
+    "text": "Resets the PIN after seed-phrase verification.",
+    "written": "2026-08-26"
+  },
+  "kt:com.rjnr.pocketnode.ui.screens.auth.PinMode": {
+    "hash": "71fabe458f12",
+    "text": "Enumeration of SETUP.",
+    "written": "2026-08-26"
+  },
   "kt:com.rjnr.pocketnode.ui.screens.auth.PinViewModel": {
     "hash": "2ec74ec9b5a9",
     "text": "State for PIN entry, creation and confirmation.",
+    "written": "2026-08-26"
+  },
+  "kt:com.rjnr.pocketnode.ui.screens.auth.PinViewModel#consumePinComplete/0": {
+    "hash": "06b1e5b01805",
+    "text": "Consumes the completion event so it fires once.",
+    "written": "2026-08-26"
+  },
+  "kt:com.rjnr.pocketnode.ui.screens.auth.PinViewModel#dismissRecoveryDialog/0": {
+    "hash": "cbf0d586f7ae",
+    "text": "Dismisses the recovery dialog.",
+    "written": "2026-08-26"
+  },
+  "kt:com.rjnr.pocketnode.ui.screens.auth.PinViewModel#getEnteredPin/0": {
+    "hash": "bf1a9524a1ae",
+    "text": "Returns the digits entered so far.",
+    "written": "2026-08-26"
+  },
+  "kt:com.rjnr.pocketnode.ui.screens.auth.PinViewModel#handlePinSubmit/1": {
+    "hash": "d6c10b8d7956",
+    "text": "Verifies the entered PIN and applies lockout on failure.",
+    "written": "2026-08-26"
+  },
+  "kt:com.rjnr.pocketnode.ui.screens.auth.PinViewModel#onDeleteDigit/0": {
+    "hash": "bccc8ab40b95",
+    "text": "Removes the last entered digit.",
+    "written": "2026-08-26"
+  },
+  "kt:com.rjnr.pocketnode.ui.screens.auth.PinViewModel#onDigitEntered/1": {
+    "hash": "636ea10f8064",
+    "text": "Appends a digit to the PIN being entered.",
+    "written": "2026-08-26"
+  },
+  "kt:com.rjnr.pocketnode.ui.screens.auth.PinViewModel#refreshLockoutState/0": {
+    "hash": "a9beb3d2eda9",
+    "text": "Refreshes remaining lockout time after failed attempts.",
+    "written": "2026-08-26"
+  },
+  "kt:com.rjnr.pocketnode.ui.screens.auth.PinViewModel#setMode/1": {
+    "hash": "f700a404ac7d",
+    "text": "Sets PIN entry mode: create, confirm or verify.",
+    "written": "2026-08-26"
+  },
+  "kt:com.rjnr.pocketnode.ui.screens.auth.PinViewModel#setSetupPin/1": {
+    "hash": "56965d8942b1",
+    "text": "Stores the PIN being created, pending confirmation.",
+    "written": "2026-08-26"
+  },
+  "kt:com.rjnr.pocketnode.ui.screens.auth.PinViewModel#showError/1": {
+    "hash": "013f4284b234",
+    "text": "Shows an error message in UI state.",
+    "written": "2026-08-26"
+  },
+  "kt:com.rjnr.pocketnode.ui.screens.auth.PinViewModel#startLockoutTimer/0": {
+    "hash": "d10093629a10",
+    "text": "Counts down the PIN lockout period.",
     "written": "2026-08-26"
   },
   "kt:com.rjnr.pocketnode.ui.screens.contacts.AddContactViewModel": {
@@ -374,9 +1989,64 @@
     "text": "State for creating an address-book entry.",
     "written": "2026-08-26"
   },
+  "kt:com.rjnr.pocketnode.ui.screens.contacts.AddContactViewModel#clearError/0": {
+    "hash": "709bfec3303f",
+    "text": "Clears the current error from UI state.",
+    "written": "2026-08-26"
+  },
+  "kt:com.rjnr.pocketnode.ui.screens.contacts.AddContactViewModel#errorMessage/1": {
+    "hash": "fab0c7f37419",
+    "text": "Human-readable message for the current error.",
+    "written": "2026-08-26"
+  },
+  "kt:com.rjnr.pocketnode.ui.screens.contacts.AddContactViewModel#onAddressChange/1": {
+    "hash": "531e2c39d0b5",
+    "text": "Updates address in UI state as the user edits it.",
+    "written": "2026-08-26"
+  },
+  "kt:com.rjnr.pocketnode.ui.screens.contacts.AddContactViewModel#onNameChange/1": {
+    "hash": "d4d62a74b18b",
+    "text": "Updates name in UI state as the user edits it.",
+    "written": "2026-08-26"
+  },
+  "kt:com.rjnr.pocketnode.ui.screens.contacts.AddContactViewModel#onNotesChange/1": {
+    "hash": "d31d68139452",
+    "text": "Updates notes in UI state as the user edits it.",
+    "written": "2026-08-26"
+  },
+  "kt:com.rjnr.pocketnode.ui.screens.contacts.AddContactViewModel#save/0": {
+    "hash": "2e2bd9e9584e",
+    "text": "Validates and saves the entry.",
+    "written": "2026-08-26"
+  },
   "kt:com.rjnr.pocketnode.ui.screens.contacts.ContactDetailViewModel": {
     "hash": "787dff283397",
     "text": "State for viewing one contact, keyed by a nav argument.",
+    "written": "2026-08-26"
+  },
+  "kt:com.rjnr.pocketnode.ui.screens.contacts.ContactDetailViewModel#cancelDelete/0": {
+    "hash": "b40d2a593d61",
+    "text": "Cancels the pending deletion.",
+    "written": "2026-08-26"
+  },
+  "kt:com.rjnr.pocketnode.ui.screens.contacts.ContactDetailViewModel#clearError/0": {
+    "hash": "709bfec3303f",
+    "text": "Clears the current error from UI state.",
+    "written": "2026-08-26"
+  },
+  "kt:com.rjnr.pocketnode.ui.screens.contacts.ContactDetailViewModel#confirmDelete/0": {
+    "hash": "cd0349ab67b6",
+    "text": "Deletes the wallet and its key material after confirmation.",
+    "written": "2026-08-26"
+  },
+  "kt:com.rjnr.pocketnode.ui.screens.contacts.ContactDetailViewModel#reload/0": {
+    "hash": "ec6e3186d3e3",
+    "text": "Reloads the entry from storage.",
+    "written": "2026-08-26"
+  },
+  "kt:com.rjnr.pocketnode.ui.screens.contacts.ContactDetailViewModel#requestDelete/0": {
+    "hash": "41d5008272c1",
+    "text": "Raises the delete confirmation.",
     "written": "2026-08-26"
   },
   "kt:com.rjnr.pocketnode.ui.screens.contacts.ContactsViewModel": {
@@ -384,9 +2054,44 @@
     "text": "State for the contacts list.",
     "written": "2026-08-26"
   },
+  "kt:com.rjnr.pocketnode.ui.screens.contacts.ContactsViewModel#delete/1": {
+    "hash": "6b63da466667",
+    "text": "Deletes the entry.",
+    "written": "2026-08-26"
+  },
+  "kt:com.rjnr.pocketnode.ui.screens.contacts.ContactsViewModel#onQueryChange/1": {
+    "hash": "2efcebb52e53",
+    "text": "Updates query in UI state as the user edits it.",
+    "written": "2026-08-26"
+  },
   "kt:com.rjnr.pocketnode.ui.screens.contacts.EditContactViewModel": {
     "hash": "39f65ae2cc94",
     "text": "State for editing an existing contact.",
+    "written": "2026-08-26"
+  },
+  "kt:com.rjnr.pocketnode.ui.screens.contacts.EditContactViewModel#clearError/0": {
+    "hash": "709bfec3303f",
+    "text": "Clears the current error from UI state.",
+    "written": "2026-08-26"
+  },
+  "kt:com.rjnr.pocketnode.ui.screens.contacts.EditContactViewModel#onNameChange/1": {
+    "hash": "d4d62a74b18b",
+    "text": "Updates name in UI state as the user edits it.",
+    "written": "2026-08-26"
+  },
+  "kt:com.rjnr.pocketnode.ui.screens.contacts.EditContactViewModel#onNotesChange/1": {
+    "hash": "d31d68139452",
+    "text": "Updates notes in UI state as the user edits it.",
+    "written": "2026-08-26"
+  },
+  "kt:com.rjnr.pocketnode.ui.screens.contacts.EditContactViewModel#save/0": {
+    "hash": "d5067dac1003",
+    "text": "Validates and saves the entry.",
+    "written": "2026-08-26"
+  },
+  "kt:com.rjnr.pocketnode.ui.screens.dao#shouldClearPendingAction/2": {
+    "hash": "ce76fc7513f9",
+    "text": "Whether the queued DAO action should be discarded.",
     "written": "2026-08-26"
   },
   "kt:com.rjnr.pocketnode.ui.screens.dao.DaoViewModel": {
@@ -394,9 +2099,329 @@
     "text": "State for Nervos DAO: deposits, withdrawals and accrued compensation.",
     "written": "2026-08-26"
   },
+  "kt:com.rjnr.pocketnode.ui.screens.dao.DaoViewModel#cancelAuth/0": {
+    "hash": "6cda563dda00",
+    "text": "Cancels the pending authentication prompt.",
+    "written": "2026-08-26"
+  },
+  "kt:com.rjnr.pocketnode.ui.screens.dao.DaoViewModel#clearError/0": {
+    "hash": "191ac155048d",
+    "text": "Clears the current error from UI state.",
+    "written": "2026-08-26"
+  },
+  "kt:com.rjnr.pocketnode.ui.screens.dao.DaoViewModel#deepRescanForOlderDeposits/0": {
+    "hash": "96922521eb3e",
+    "text": "Rescans earlier blocks for deposits outside the current sync window.",
+    "written": "2026-08-26"
+  },
+  "kt:com.rjnr.pocketnode.ui.screens.dao.DaoViewModel#deposit/1": {
+    "hash": "d7a1c39a4cfe",
+    "text": "Starts a DAO deposit, prompting for authentication.",
+    "written": "2026-08-26"
+  },
+  "kt:com.rjnr.pocketnode.ui.screens.dao.DaoViewModel#depositWithActivity/2": {
+    "hash": "0c8e9222fc24",
+    "text": "Deposits using an activity context for the biometric prompt.",
+    "written": "2026-08-26"
+  },
+  "kt:com.rjnr.pocketnode.ui.screens.dao.DaoViewModel#dismissAuthPrompt/0": {
+    "hash": "7521d037cf4e",
+    "text": "Dismisses the auth prompt.",
+    "written": "2026-08-26"
+  },
+  "kt:com.rjnr.pocketnode.ui.screens.dao.DaoViewModel#executeDaoOperationWithActivity/4": {
+    "hash": "71b7c756137c",
+    "text": "Shared path running a DAO operation behind an auth prompt.",
+    "written": "2026-08-26"
+  },
+  "kt:com.rjnr.pocketnode.ui.screens.dao.DaoViewModel#executeDeposit/0": {
+    "hash": "05753f9cbc84",
+    "text": "Performs the DAO deposit once authorised.",
+    "written": "2026-08-26"
+  },
+  "kt:com.rjnr.pocketnode.ui.screens.dao.DaoViewModel#refresh/0": {
+    "hash": "6351c6c10f22",
+    "text": "Reloads this screen's data.",
+    "written": "2026-08-26"
+  },
+  "kt:com.rjnr.pocketnode.ui.screens.dao.DaoViewModel#refreshDaoData/0": {
+    "hash": "8ea1bb0af77b",
+    "text": "Reloads deposits, withdrawals and totals.",
+    "written": "2026-08-26"
+  },
+  "kt:com.rjnr.pocketnode.ui.screens.dao.DaoViewModel#resolvePendingAction/1": {
+    "hash": "def0f8ffc7d0",
+    "text": "Resumes the DAO action that was waiting on authentication.",
+    "written": "2026-08-26"
+  },
+  "kt:com.rjnr.pocketnode.ui.screens.dao.DaoViewModel#selectTab/1": {
+    "hash": "eedddec60244",
+    "text": "Selects the visible tab.",
+    "written": "2026-08-26"
+  },
+  "kt:com.rjnr.pocketnode.ui.screens.dao.DaoViewModel#startPolling/0": {
+    "hash": "a76da0d9ed70",
+    "text": "Starts polling DAO state so compensation figures stay current.",
+    "written": "2026-08-26"
+  },
+  "kt:com.rjnr.pocketnode.ui.screens.dao.DaoViewModel#unlock/1": {
+    "hash": "1a0a019ed48e",
+    "text": "Starts a DAO unlock, releasing principal plus compensation.",
+    "written": "2026-08-26"
+  },
+  "kt:com.rjnr.pocketnode.ui.screens.dao.DaoViewModel#unlockWithActivity/2": {
+    "hash": "967e6c385f96",
+    "text": "Unlocks using an activity context for the biometric prompt.",
+    "written": "2026-08-26"
+  },
+  "kt:com.rjnr.pocketnode.ui.screens.dao.DaoViewModel#withdraw/1": {
+    "hash": "808933d36ff1",
+    "text": "Starts a DAO phase-one withdrawal.",
+    "written": "2026-08-26"
+  },
+  "kt:com.rjnr.pocketnode.ui.screens.dao.DaoViewModel#withdrawWithActivity/2": {
+    "hash": "749232b57391",
+    "text": "Withdraws using an activity context for the biometric prompt.",
+    "written": "2026-08-26"
+  },
+  "kt:com.rjnr.pocketnode.ui.screens.help.FaqViewModel#initialScrollIndex/0": {
+    "hash": "7dd4edfcb980",
+    "text": "Initial scroll position, so a linked FAQ entry opens in view.",
+    "written": "2026-08-26"
+  },
+  "kt:com.rjnr.pocketnode.ui.screens.help.FaqViewModel#toggle/1": {
+    "hash": "8dbd4ee9694c",
+    "text": "Expands or collapses the item.",
+    "written": "2026-08-26"
+  },
   "kt:com.rjnr.pocketnode.ui.screens.home.HomeViewModel": {
     "hash": "396448def5be",
     "text": "Balance refresh, sync polling and transaction fetching for the home screen.",
+    "written": "2026-08-26"
+  },
+  "kt:com.rjnr.pocketnode.ui.screens.home.HomeViewModel#acquireSeed/3": {
+    "hash": "694a8253378a",
+    "text": "Obtains the seed phrase, prompting for authentication if required.",
+    "written": "2026-08-26"
+  },
+  "kt:com.rjnr.pocketnode.ui.screens.home.HomeViewModel#cancelNetworkSwitch/0": {
+    "hash": "92f27d0d0dc5",
+    "text": "Cancels the pending network switch.",
+    "written": "2026-08-26"
+  },
+  "kt:com.rjnr.pocketnode.ui.screens.home.HomeViewModel#changeSyncMode/1": {
+    "hash": "be018a4fd948",
+    "text": "Applies a new sync mode and re-registers the wallet at its start height.",
+    "written": "2026-08-26"
+  },
+  "kt:com.rjnr.pocketnode.ui.screens.home.HomeViewModel#checkBackupStatus/0": {
+    "hash": "57d633ed9894",
+    "text": "Checks whether the seed phrase still needs backing up.",
+    "written": "2026-08-26"
+  },
+  "kt:com.rjnr.pocketnode.ui.screens.home.HomeViewModel#checkForUpdate/0": {
+    "hash": "9f6805a959f8",
+    "text": "Checks the release feed for a newer version.",
+    "written": "2026-08-26"
+  },
+  "kt:com.rjnr.pocketnode.ui.screens.home.HomeViewModel#checkSyncStatusAndRefresh/0": {
+    "hash": "9cae4e42a1e9",
+    "text": "Checks sync progress and refreshes data when it has advanced.",
+    "written": "2026-08-26"
+  },
+  "kt:com.rjnr.pocketnode.ui.screens.home.HomeViewModel#clearError/0": {
+    "hash": "191ac155048d",
+    "text": "Clears the current error from UI state.",
+    "written": "2026-08-26"
+  },
+  "kt:com.rjnr.pocketnode.ui.screens.home.HomeViewModel#confirmGapLimitSweep/1": {
+    "hash": "c680e7ebde21",
+    "text": "Executes the gap-limit sweep after confirmation.",
+    "written": "2026-08-26"
+  },
+  "kt:com.rjnr.pocketnode.ui.screens.home.HomeViewModel#confirmNetworkSwitch/0": {
+    "hash": "e079d6004191",
+    "text": "Confirms the network switch, which restarts the process.",
+    "written": "2026-08-26"
+  },
+  "kt:com.rjnr.pocketnode.ui.screens.home.HomeViewModel#dismissBackupReminder/0": {
+    "hash": "cf7e3c879ef7",
+    "text": "Dismisses the backup reminder.",
+    "written": "2026-08-26"
+  },
+  "kt:com.rjnr.pocketnode.ui.screens.home.HomeViewModel#dismissBgSyncStalePill/0": {
+    "hash": "f1124fcdd9ea",
+    "text": "Dismisses the bg sync stale pill.",
+    "written": "2026-08-26"
+  },
+  "kt:com.rjnr.pocketnode.ui.screens.home.HomeViewModel#dismissGapLimitBanner/0": {
+    "hash": "2507dd4a80bc",
+    "text": "Dismisses the gap limit banner.",
+    "written": "2026-08-26"
+  },
+  "kt:com.rjnr.pocketnode.ui.screens.home.HomeViewModel#dismissGapLimitSweep/0": {
+    "hash": "4315341bc06d",
+    "text": "Dismisses the gap limit sweep.",
+    "written": "2026-08-26"
+  },
+  "kt:com.rjnr.pocketnode.ui.screens.home.HomeViewModel#dismissInstallPermission/0": {
+    "hash": "834ee1c27dbc",
+    "text": "Dismisses the install permission.",
+    "written": "2026-08-26"
+  },
+  "kt:com.rjnr.pocketnode.ui.screens.home.HomeViewModel#dismissSyncStallBanner/0": {
+    "hash": "5232aedf7ac3",
+    "text": "Dismisses the sync stall banner.",
+    "written": "2026-08-26"
+  },
+  "kt:com.rjnr.pocketnode.ui.screens.home.HomeViewModel#dismissUpdate/0": {
+    "hash": "3a4961b0fdda",
+    "text": "Dismisses the update.",
+    "written": "2026-08-26"
+  },
+  "kt:com.rjnr.pocketnode.ui.screens.home.HomeViewModel#enableBackgroundSyncFromPill/0": {
+    "hash": "fc81043e8497",
+    "text": "Turns on background sync from the stale-sync pill.",
+    "written": "2026-08-26"
+  },
+  "kt:com.rjnr.pocketnode.ui.screens.home.HomeViewModel#fetchPrice/0": {
+    "hash": "d9a1ecd81e52",
+    "text": "Fetches the current CKB fiat price.",
+    "written": "2026-08-26"
+  },
+  "kt:com.rjnr.pocketnode.ui.screens.home.HomeViewModel#formatFiat/2": {
+    "hash": "c9aeb2c10bd7",
+    "text": "Formats a shannon amount as a fiat string at the current price.",
+    "written": "2026-08-26"
+  },
+  "kt:com.rjnr.pocketnode.ui.screens.home.HomeViewModel#hidePostImportSyncDialog/0": {
+    "hash": "5a803e94062a",
+    "text": "Hides the post import sync dialog.",
+    "written": "2026-08-26"
+  },
+  "kt:com.rjnr.pocketnode.ui.screens.home.HomeViewModel#hideSyncOptions/0": {
+    "hash": "430bc0b74fd0",
+    "text": "Hides the sync options.",
+    "written": "2026-08-26"
+  },
+  "kt:com.rjnr.pocketnode.ui.screens.home.HomeViewModel#initializeWallet/0": {
+    "hash": "f694f5e2cb62",
+    "text": "Loads wallet state on first composition and kicks off sync.",
+    "written": "2026-08-26"
+  },
+  "kt:com.rjnr.pocketnode.ui.screens.home.HomeViewModel#isMnemonicWallet/0": {
+    "hash": "a11e2bfdc03f",
+    "text": "Whether the active wallet has a seed phrase, as opposed to a raw key.",
+    "written": "2026-08-26"
+  },
+  "kt:com.rjnr.pocketnode.ui.screens.home.HomeViewModel#observeSyncProgress/0": {
+    "hash": "1ea72c5da925",
+    "text": "Subscribes to sync progress and mirrors it into UI state.",
+    "written": "2026-08-26"
+  },
+  "kt:com.rjnr.pocketnode.ui.screens.home.HomeViewModel#onCleared/0": {
+    "hash": "8d2c43d7538f",
+    "text": "ViewModel teardown: cancels polling and in-flight work.",
+    "written": "2026-08-26"
+  },
+  "kt:com.rjnr.pocketnode.ui.screens.home.HomeViewModel#onCoachmarkDismissed/0": {
+    "hash": "c59d81a9a9ff",
+    "text": "Records that the user dismissed the sync coachmark.",
+    "written": "2026-08-26"
+  },
+  "kt:com.rjnr.pocketnode.ui.screens.home.HomeViewModel#openInstallPermissionSettings/0": {
+    "hash": "f80c3c349266",
+    "text": "Opens system settings to grant install-unknown-apps permission.",
+    "written": "2026-08-26"
+  },
+  "kt:com.rjnr.pocketnode.ui.screens.home.HomeViewModel#refresh/0": {
+    "hash": "f3c38fd94230",
+    "text": "Reloads this screen's data.",
+    "written": "2026-08-26"
+  },
+  "kt:com.rjnr.pocketnode.ui.screens.home.HomeViewModel#refreshPriceIfStale/0": {
+    "hash": "e0ac6dd614c8",
+    "text": "Refetches the price only if the cached one has aged out.",
+    "written": "2026-08-26"
+  },
+  "kt:com.rjnr.pocketnode.ui.screens.home.HomeViewModel#refreshSecurityState/0": {
+    "hash": "842a33cd536f",
+    "text": "Refreshes PIN and biometric status for the security banner.",
+    "written": "2026-08-26"
+  },
+  "kt:com.rjnr.pocketnode.ui.screens.home.HomeViewModel#refreshTransactionsOnly/1": {
+    "hash": "0358847a3dc5",
+    "text": "Refreshes transaction history without recomputing balance.",
+    "written": "2026-08-26"
+  },
+  "kt:com.rjnr.pocketnode.ui.screens.home.HomeViewModel#refreshWalletBalances/1": {
+    "hash": "d0b870caf107",
+    "text": "Refreshes balances across every wallet, not just the active one.",
+    "written": "2026-08-26"
+  },
+  "kt:com.rjnr.pocketnode.ui.screens.home.HomeViewModel#registerAndRefresh/0": {
+    "hash": "a65d7b771e06",
+    "text": "Registers the wallet script then refreshes balance and history.",
+    "written": "2026-08-26"
+  },
+  "kt:com.rjnr.pocketnode.ui.screens.home.HomeViewModel#requestGapLimitSweep/0": {
+    "hash": "f38b1cea1385",
+    "text": "Prepares a sweep of funds found beyond the gap limit.",
+    "written": "2026-08-26"
+  },
+  "kt:com.rjnr.pocketnode.ui.screens.home.HomeViewModel#requestNetworkSwitch/1": {
+    "hash": "ab25a6102619",
+    "text": "Asks to switch network, raising the confirm dialog first.",
+    "written": "2026-08-26"
+  },
+  "kt:com.rjnr.pocketnode.ui.screens.home.HomeViewModel#retryFailedTransaction/1": {
+    "hash": "7224be684121",
+    "text": "Re-broadcasts a transaction that previously failed to send.",
+    "written": "2026-08-26"
+  },
+  "kt:com.rjnr.pocketnode.ui.screens.home.HomeViewModel#retryPendingUpdateIfPermissionGranted/0": {
+    "hash": "af2e38c17d33",
+    "text": "Resumes a deferred update once install permission is granted.",
+    "written": "2026-08-26"
+  },
+  "kt:com.rjnr.pocketnode.ui.screens.home.HomeViewModel#runGapLimitScan/1": {
+    "hash": "47f2a7987303",
+    "text": "Scans derived addresses beyond the gap limit for funds.",
+    "written": "2026-08-26"
+  },
+  "kt:com.rjnr.pocketnode.ui.screens.home.HomeViewModel#shouldShowSyncCoachmark/3": {
+    "hash": "fd494447b1c4",
+    "text": "Whether the first-run sync coachmark should appear.",
+    "written": "2026-08-26"
+  },
+  "kt:com.rjnr.pocketnode.ui.screens.home.HomeViewModel#showPostImportSyncDialog/0": {
+    "hash": "fc1b5a8f4ef8",
+    "text": "Shows the post import sync dialog.",
+    "written": "2026-08-26"
+  },
+  "kt:com.rjnr.pocketnode.ui.screens.home.HomeViewModel#showSyncOptions/0": {
+    "hash": "35986aeb3fe3",
+    "text": "Shows the sync options.",
+    "written": "2026-08-26"
+  },
+  "kt:com.rjnr.pocketnode.ui.screens.home.HomeViewModel#startUpdate/0": {
+    "hash": "30b3cd5688cd",
+    "text": "Begins downloading the available update.",
+    "written": "2026-08-26"
+  },
+  "kt:com.rjnr.pocketnode.ui.screens.home.HomeViewModel#switchToRecentSyncFromStall/0": {
+    "hash": "87660c299e40",
+    "text": "Switches to RECENT sync mode when sync appears stalled.",
+    "written": "2026-08-26"
+  },
+  "kt:com.rjnr.pocketnode.ui.screens.home.HomeViewModel#switchWallet/1": {
+    "hash": "c3a38675a89b",
+    "text": "Switches the active wallet and reloads its data.",
+    "written": "2026-08-26"
+  },
+  "kt:com.rjnr.pocketnode.ui.screens.home.HomeViewModel#toggleBalanceVisibility/0": {
+    "hash": "0a6c4cc22b1e",
+    "text": "Shows or hides the balance figure.",
     "written": "2026-08-26"
   },
   "kt:com.rjnr.pocketnode.ui.screens.onboarding.BackgroundSyncOptInViewModel": {
@@ -419,9 +2444,44 @@
     "text": "State for first-run wallet creation and sync-mode choice.",
     "written": "2026-08-26"
   },
+  "kt:com.rjnr.pocketnode.ui.screens.onboarding.OnboardingViewModel#canCreateV2BoundKey/0": {
+    "hash": "0f617f773b83",
+    "text": "Whether the device supports auth-bound V2 key material.",
+    "written": "2026-08-26"
+  },
+  "kt:com.rjnr.pocketnode.ui.screens.onboarding.OnboardingViewModel#clearError/0": {
+    "hash": "191ac155048d",
+    "text": "Clears the current error from UI state.",
+    "written": "2026-08-26"
+  },
+  "kt:com.rjnr.pocketnode.ui.screens.onboarding.OnboardingViewModel#createNewWallet/2": {
+    "hash": "46e6b894dfe3",
+    "text": "Creates a wallet from a newly generated seed phrase.",
+    "written": "2026-08-26"
+  },
+  "kt:com.rjnr.pocketnode.ui.screens.onboarding.OnboardingViewModel#persistErrorMessage/1": {
+    "hash": "df64505af5eb",
+    "text": "Keeps an error visible across recomposition.",
+    "written": "2026-08-26"
+  },
+  "kt:com.rjnr.pocketnode.ui.screens.recovery.RecoveryStage": {
+    "hash": "f730490610cd",
+    "text": "Enumeration of PIN_ENTRY, MNEMONIC_ENTRY, SUCCESS.",
+    "written": "2026-08-26"
+  },
   "kt:com.rjnr.pocketnode.ui.screens.recovery.RecoveryViewModel": {
     "hash": "9ae91e7db905",
     "text": "Drives wallet recovery from the on-device key backup.",
+    "written": "2026-08-26"
+  },
+  "kt:com.rjnr.pocketnode.ui.screens.recovery.RecoveryViewModel#attemptPinRecovery/1": {
+    "hash": "e3f3062dd904",
+    "text": "Attempts PIN recovery using the on-device key backup.",
+    "written": "2026-08-26"
+  },
+  "kt:com.rjnr.pocketnode.ui.screens.recovery.RecoveryViewModel#clearError/0": {
+    "hash": "191ac155048d",
+    "text": "Clears the current error from UI state.",
     "written": "2026-08-26"
   },
   "kt:com.rjnr.pocketnode.ui.screens.security.SecurityChecklistViewModel": {
@@ -429,9 +2489,204 @@
     "text": "State for the security checklist: PIN, biometrics and backup status.",
     "written": "2026-08-26"
   },
+  "kt:com.rjnr.pocketnode.ui.screens.security.SecurityChecklistViewModel#refreshState/0": {
+    "hash": "572aaae941f8",
+    "text": "Reloads the screen's state from its sources.",
+    "written": "2026-08-26"
+  },
+  "kt:com.rjnr.pocketnode.ui.screens.send#mapSendErrorMessage/0": {
+    "hash": "3e1163c5f843",
+    "text": "Maps a send failure to a specific, actionable message.",
+    "written": "2026-08-26"
+  },
+  "kt:com.rjnr.pocketnode.ui.screens.send.SendMode": {
+    "hash": "96d57801a5e8",
+    "text": "Enumeration of SINGLE.",
+    "written": "2026-08-26"
+  },
   "kt:com.rjnr.pocketnode.ui.screens.send.SendViewModel": {
     "hash": "9fc58943cd8f",
     "text": "Transaction lifecycle: validate, build, send and poll status.",
+    "written": "2026-08-26"
+  },
+  "kt:com.rjnr.pocketnode.ui.screens.send.SendViewModel#afterSendBookkeeping/1": {
+    "hash": "3e1d8f8b586f",
+    "text": "Post-send housekeeping: cache the pending row and start status polling.",
+    "written": "2026-08-26"
+  },
+  "kt:com.rjnr.pocketnode.ui.screens.send.SendViewModel#cancelAuth/0": {
+    "hash": "add0a0d81e1c",
+    "text": "Cancels the pending authentication prompt.",
+    "written": "2026-08-26"
+  },
+  "kt:com.rjnr.pocketnode.ui.screens.send.SendViewModel#clearError/0": {
+    "hash": "3b0da3730cd1",
+    "text": "Clears the current error from UI state.",
+    "written": "2026-08-26"
+  },
+  "kt:com.rjnr.pocketnode.ui.screens.send.SendViewModel#clearTxHash/0": {
+    "hash": "d706a0408156",
+    "text": "Clears the displayed transaction hash.",
+    "written": "2026-08-26"
+  },
+  "kt:com.rjnr.pocketnode.ui.screens.send.SendViewModel#executeSend/0": {
+    "hash": "ab92926dd2c8",
+    "text": "Performs the build-sign-broadcast sequence.",
+    "written": "2026-08-26"
+  },
+  "kt:com.rjnr.pocketnode.ui.screens.send.SendViewModel#executeSendV2/1": {
+    "hash": "7217e5e73d5e",
+    "text": "Sends using V2 auth-bound key material.",
+    "written": "2026-08-26"
+  },
+  "kt:com.rjnr.pocketnode.ui.screens.send.SendViewModel#onCleared/0": {
+    "hash": "93997ceda1cf",
+    "text": "ViewModel teardown: cancels polling and in-flight work.",
+    "written": "2026-08-26"
+  },
+  "kt:com.rjnr.pocketnode.ui.screens.send.SendViewModel#parseAmountShannons/1": {
+    "hash": "7774235464b5",
+    "text": "Parses a CKB amount string into shannons.",
+    "written": "2026-08-26"
+  },
+  "kt:com.rjnr.pocketnode.ui.screens.send.SendViewModel#parseBulkRecipients/2": {
+    "hash": "01b782009b4a",
+    "text": "Parses pasted bulk recipient text into address and amount pairs.",
+    "written": "2026-08-26"
+  },
+  "kt:com.rjnr.pocketnode.ui.screens.send.SendViewModel#parseErrorMessage/1": {
+    "hash": "bc2d7de7798f",
+    "text": "Turns a thrown error into a message for the user.",
+    "written": "2026-08-26"
+  },
+  "kt:com.rjnr.pocketnode.ui.screens.send.SendViewModel#peekActiveKdfVersion/0": {
+    "hash": "e726aecac270",
+    "text": "Reads which KDF version guards the active wallet's key.",
+    "written": "2026-08-26"
+  },
+  "kt:com.rjnr.pocketnode.ui.screens.send.SendViewModel#pollForBalanceUpdate/2": {
+    "hash": "82f9776f057a",
+    "text": "Polls until the spendable balance reflects the send.",
+    "written": "2026-08-26"
+  },
+  "kt:com.rjnr.pocketnode.ui.screens.send.SendViewModel#proceedWithBulkSend/3": {
+    "hash": "4696282a6057",
+    "text": "Continues a bulk send once authentication has succeeded.",
+    "written": "2026-08-26"
+  },
+  "kt:com.rjnr.pocketnode.ui.screens.send.SendViewModel#proceedWithSend/3": {
+    "hash": "1f1e3c71c976",
+    "text": "Continues the send once authentication has succeeded.",
+    "written": "2026-08-26"
+  },
+  "kt:com.rjnr.pocketnode.ui.screens.send.SendViewModel#recentContacts/0": {
+    "hash": "8aa1ce7bba6c",
+    "text": "Recently used contacts, for quick selection.",
+    "written": "2026-08-26"
+  },
+  "kt:com.rjnr.pocketnode.ui.screens.send.SendViewModel#refreshBulkPreview/0": {
+    "hash": "dbf97d729a63",
+    "text": "Recomputes totals and fees for the bulk recipient list.",
+    "written": "2026-08-26"
+  },
+  "kt:com.rjnr.pocketnode.ui.screens.send.SendViewModel#saveContactPromptDismissed/0": {
+    "hash": "978ce3d14a69",
+    "text": "Records that the save-contact prompt was dismissed.",
+    "written": "2026-08-26"
+  },
+  "kt:com.rjnr.pocketnode.ui.screens.send.SendViewModel#saveContactPromptSubmit/1": {
+    "hash": "ddcae5b6ba1e",
+    "text": "Saves the recipient to the address book after a successful send.",
+    "written": "2026-08-26"
+  },
+  "kt:com.rjnr.pocketnode.ui.screens.send.SendViewModel#searchContacts/1": {
+    "hash": "9b284df35ef3",
+    "text": "Filters contacts by the current query.",
+    "written": "2026-08-26"
+  },
+  "kt:com.rjnr.pocketnode.ui.screens.send.SendViewModel#selectContact/1": {
+    "hash": "c0975772383e",
+    "text": "Fills the recipient from an address-book entry.",
+    "written": "2026-08-26"
+  },
+  "kt:com.rjnr.pocketnode.ui.screens.send.SendViewModel#sendTransaction/0": {
+    "hash": "fb644f4fd92b",
+    "text": "Validates, builds, signs and broadcasts the transaction.",
+    "written": "2026-08-26"
+  },
+  "kt:com.rjnr.pocketnode.ui.screens.send.SendViewModel#sendTransaction/1": {
+    "hash": "0927722a7397",
+    "text": "Validates, builds, signs and broadcasts the transaction.",
+    "written": "2026-08-26"
+  },
+  "kt:com.rjnr.pocketnode.ui.screens.send.SendViewModel#sendTransactionV1OrFallback/0": {
+    "hash": "bb1f0dfa3ab8",
+    "text": "Sends using V1 key material, falling back when V2 is unavailable.",
+    "written": "2026-08-26"
+  },
+  "kt:com.rjnr.pocketnode.ui.screens.send.SendViewModel#setMaxAmount/0": {
+    "hash": "a0897b157fa4",
+    "text": "Fills the amount with the maximum sendable after fees.",
+    "written": "2026-08-26"
+  },
+  "kt:com.rjnr.pocketnode.ui.screens.send.SendViewModel#startPollingTransactionStatus/2": {
+    "hash": "578fe041182e",
+    "text": "Polls the transaction's status until it confirms or times out.",
+    "written": "2026-08-26"
+  },
+  "kt:com.rjnr.pocketnode.ui.screens.send.SendViewModel#updateAmount/1": {
+    "hash": "5df3ae65bd40",
+    "text": "Updates the amount field in UI state.",
+    "written": "2026-08-26"
+  },
+  "kt:com.rjnr.pocketnode.ui.screens.send.SendViewModel#updateBulkRecipients/1": {
+    "hash": "57e659f62d9e",
+    "text": "Updates the parsed bulk recipient list.",
+    "written": "2026-08-26"
+  },
+  "kt:com.rjnr.pocketnode.ui.screens.send.SendViewModel#updateRecipient/1": {
+    "hash": "5806b941f8d5",
+    "text": "Updates the recipient address in UI state.",
+    "written": "2026-08-26"
+  },
+  "kt:com.rjnr.pocketnode.ui.screens.send.SendViewModel#updateSendMode/1": {
+    "hash": "35c07c6d2115",
+    "text": "Switches between single and bulk send.",
+    "written": "2026-08-26"
+  },
+  "kt:com.rjnr.pocketnode.ui.screens.send.SendViewModel#updateTransactionStatus/1": {
+    "hash": "cc6936072c61",
+    "text": "Writes a new status for the sent transaction into UI state.",
+    "written": "2026-08-26"
+  },
+  "kt:com.rjnr.pocketnode.ui.screens.send.SendViewModel#validateBulkInputs/0": {
+    "hash": "2c32ecba9009",
+    "text": "Validates the bulk-recipient form.",
+    "written": "2026-08-26"
+  },
+  "kt:com.rjnr.pocketnode.ui.screens.send.SendViewModel#validateInputs/0": {
+    "hash": "dfd75b850d6d",
+    "text": "Validates the form before building a transaction.",
+    "written": "2026-08-26"
+  },
+  "kt:com.rjnr.pocketnode.ui.screens.send.SendViewModel#validateSingleInputs/0": {
+    "hash": "0b22989868cb",
+    "text": "Validates the single-recipient form.",
+    "written": "2026-08-26"
+  },
+  "kt:com.rjnr.pocketnode.ui.screens.send.SendViewModel#walletPreferencesActiveId/0": {
+    "hash": "1eb97821a950",
+    "text": "Active wallet id read straight from preferences.",
+    "written": "2026-08-26"
+  },
+  "kt:com.rjnr.pocketnode.ui.screens.send.TransactionState": {
+    "hash": "27fdd7fe2e95",
+    "text": "Enumeration of IDLE, SENDING, PENDING, PROPOSED, CONFIRMED.",
+    "written": "2026-08-26"
+  },
+  "kt:com.rjnr.pocketnode.ui.screens.settings.PendingSecurityAction": {
+    "hash": "72c74cf43858",
+    "text": "Enumeration of REMOVE_PIN, ENABLE_BIOMETRIC, DISABLE_BIOMETRIC, ENABLE_AUTH_BEFORE_SEND, DISABLE_AUTH_BEFORE_SEND.",
     "written": "2026-08-26"
   },
   "kt:com.rjnr.pocketnode.ui.screens.settings.SecuritySettingsViewModel": {
@@ -439,9 +2694,159 @@
     "text": "State for security settings changes.",
     "written": "2026-08-26"
   },
+  "kt:com.rjnr.pocketnode.ui.screens.settings.SecuritySettingsViewModel#applyAuthBeforeSend/1": {
+    "hash": "2c47d12a2569",
+    "text": "Applies the require-auth-before-send setting.",
+    "written": "2026-08-26"
+  },
+  "kt:com.rjnr.pocketnode.ui.screens.settings.SecuritySettingsViewModel#applyBiometricToggle/1": {
+    "hash": "b4c480cfb6a9",
+    "text": "Persists the biometric setting change.",
+    "written": "2026-08-26"
+  },
+  "kt:com.rjnr.pocketnode.ui.screens.settings.SecuritySettingsViewModel#clearError/0": {
+    "hash": "191ac155048d",
+    "text": "Clears the current error from UI state.",
+    "written": "2026-08-26"
+  },
+  "kt:com.rjnr.pocketnode.ui.screens.settings.SecuritySettingsViewModel#confirmBiometricEnrollmentWarning/0": {
+    "hash": "2f7ddd59f9aa",
+    "text": "Acknowledges that new biometric enrolment invalidates keys.",
+    "written": "2026-08-26"
+  },
+  "kt:com.rjnr.pocketnode.ui.screens.settings.SecuritySettingsViewModel#dismissBiometricEnrollmentWarning/0": {
+    "hash": "2987f6f136bd",
+    "text": "Dismisses the biometric enrollment warning.",
+    "written": "2026-08-26"
+  },
+  "kt:com.rjnr.pocketnode.ui.screens.settings.SecuritySettingsViewModel#executePendingAction/0": {
+    "hash": "d0eb96b59603",
+    "text": "Runs the queued action once authorised.",
+    "written": "2026-08-26"
+  },
+  "kt:com.rjnr.pocketnode.ui.screens.settings.SecuritySettingsViewModel#onPinCreated/1": {
+    "hash": "6649489f069f",
+    "text": "Handles a newly created PIN.",
+    "written": "2026-08-26"
+  },
+  "kt:com.rjnr.pocketnode.ui.screens.settings.SecuritySettingsViewModel#refreshState/0": {
+    "hash": "169069240d67",
+    "text": "Reloads the screen's state from its sources.",
+    "written": "2026-08-26"
+  },
+  "kt:com.rjnr.pocketnode.ui.screens.settings.SecuritySettingsViewModel#removePin/0": {
+    "hash": "31dd0306a7d7",
+    "text": "Removes the app PIN after verification.",
+    "written": "2026-08-26"
+  },
+  "kt:com.rjnr.pocketnode.ui.screens.settings.SecuritySettingsViewModel#setPendingAction/1": {
+    "hash": "0696fd6d0e9e",
+    "text": "Queues an action to run after authentication.",
+    "written": "2026-08-26"
+  },
+  "kt:com.rjnr.pocketnode.ui.screens.settings.SecuritySettingsViewModel#toggleBiometric/1": {
+    "hash": "b7e9c9a47cae",
+    "text": "Turns biometric unlock on or off.",
+    "written": "2026-08-26"
+  },
   "kt:com.rjnr.pocketnode.ui.screens.settings.SettingsViewModel": {
     "hash": "55c01a2e0ef5",
     "text": "State for app settings, including network switching.",
+    "written": "2026-08-26"
+  },
+  "kt:com.rjnr.pocketnode.ui.screens.settings.SettingsViewModel#cancelNetworkSwitch/0": {
+    "hash": "92f27d0d0dc5",
+    "text": "Cancels the pending network switch.",
+    "written": "2026-08-26"
+  },
+  "kt:com.rjnr.pocketnode.ui.screens.settings.SettingsViewModel#checkForUpdate/0": {
+    "hash": "104f091b9b5b",
+    "text": "Checks the release feed for a newer version.",
+    "written": "2026-08-26"
+  },
+  "kt:com.rjnr.pocketnode.ui.screens.settings.SettingsViewModel#clearError/0": {
+    "hash": "191ac155048d",
+    "text": "Clears the current error from UI state.",
+    "written": "2026-08-26"
+  },
+  "kt:com.rjnr.pocketnode.ui.screens.settings.SettingsViewModel#confirmNetworkSwitch/0": {
+    "hash": "3b1292b16d1f",
+    "text": "Confirms the network switch, which restarts the process.",
+    "written": "2026-08-26"
+  },
+  "kt:com.rjnr.pocketnode.ui.screens.settings.SettingsViewModel#emitScanFailed/1": {
+    "hash": "736d02adf726",
+    "text": "Emits a scan-failure event to the UI.",
+    "written": "2026-08-26"
+  },
+  "kt:com.rjnr.pocketnode.ui.screens.settings.SettingsViewModel#hideSyncDialog/0": {
+    "hash": "f98f70a4c486",
+    "text": "Hides the sync dialog.",
+    "written": "2026-08-26"
+  },
+  "kt:com.rjnr.pocketnode.ui.screens.settings.SettingsViewModel#hideSyncStrategyDialog/0": {
+    "hash": "1095e60728c5",
+    "text": "Hides the sync strategy dialog.",
+    "written": "2026-08-26"
+  },
+  "kt:com.rjnr.pocketnode.ui.screens.settings.SettingsViewModel#hideThemeDialog/0": {
+    "hash": "ae1cf2fd83eb",
+    "text": "Hides the theme dialog.",
+    "written": "2026-08-26"
+  },
+  "kt:com.rjnr.pocketnode.ui.screens.settings.SettingsViewModel#loadState/0": {
+    "hash": "ad6c63060cf3",
+    "text": "Loads settings state from preferences and repositories.",
+    "written": "2026-08-26"
+  },
+  "kt:com.rjnr.pocketnode.ui.screens.settings.SettingsViewModel#onVersionRowTap/0": {
+    "hash": "165292bae43e",
+    "text": "Counts taps on the version row to reveal developer options.",
+    "written": "2026-08-26"
+  },
+  "kt:com.rjnr.pocketnode.ui.screens.settings.SettingsViewModel#requestNetworkSwitch/1": {
+    "hash": "3a2584887dbd",
+    "text": "Asks to switch network, raising the confirm dialog first.",
+    "written": "2026-08-26"
+  },
+  "kt:com.rjnr.pocketnode.ui.screens.settings.SettingsViewModel#runGapLimitScan/1": {
+    "hash": "cf6a388ce41b",
+    "text": "Scans derived addresses beyond the gap limit for funds.",
+    "written": "2026-08-26"
+  },
+  "kt:com.rjnr.pocketnode.ui.screens.settings.SettingsViewModel#setSyncMode/1": {
+    "hash": "350cf8e81526",
+    "text": "Applies a new sync mode.",
+    "written": "2026-08-26"
+  },
+  "kt:com.rjnr.pocketnode.ui.screens.settings.SettingsViewModel#setSyncStrategy/1": {
+    "hash": "07b7e7008b92",
+    "text": "Sets the sync strategy.",
+    "written": "2026-08-26"
+  },
+  "kt:com.rjnr.pocketnode.ui.screens.settings.SettingsViewModel#setThemeMode/1": {
+    "hash": "64b064ad39d6",
+    "text": "Sets light, dark or system theme.",
+    "written": "2026-08-26"
+  },
+  "kt:com.rjnr.pocketnode.ui.screens.settings.SettingsViewModel#showSyncDialog/0": {
+    "hash": "47d94a792f20",
+    "text": "Shows the sync dialog.",
+    "written": "2026-08-26"
+  },
+  "kt:com.rjnr.pocketnode.ui.screens.settings.SettingsViewModel#showSyncStrategyDialog/0": {
+    "hash": "c053c7f72195",
+    "text": "Shows the sync strategy dialog.",
+    "written": "2026-08-26"
+  },
+  "kt:com.rjnr.pocketnode.ui.screens.settings.SettingsViewModel#showThemeDialog/0": {
+    "hash": "00191abdb049",
+    "text": "Shows the theme dialog.",
+    "written": "2026-08-26"
+  },
+  "kt:com.rjnr.pocketnode.ui.screens.settings.SettingsViewModel#toggleBackgroundSync/1": {
+    "hash": "5d8aac964ff9",
+    "text": "Turns background sync on or off.",
     "written": "2026-08-26"
   },
   "kt:com.rjnr.pocketnode.ui.screens.status.NodeStatusViewModel": {
@@ -449,9 +2854,134 @@
     "text": "Exposes light-client node status: peers, tip height and sync progress.",
     "written": "2026-08-26"
   },
+  "kt:com.rjnr.pocketnode.ui.screens.status.NodeStatusViewModel#callRpc/1": {
+    "hash": "cde721baedb7",
+    "text": "Runs an ad-hoc light-client RPC call from the debug screen.",
+    "written": "2026-08-26"
+  },
+  "kt:com.rjnr.pocketnode.ui.screens.status.NodeStatusViewModel#clearErrorJournal/0": {
+    "hash": "9f5023ec5df9",
+    "text": "Clears the recorded error journal.",
+    "written": "2026-08-26"
+  },
+  "kt:com.rjnr.pocketnode.ui.screens.status.NodeStatusViewModel#clearLogs/0": {
+    "hash": "3f28e2b47fac",
+    "text": "Clears the captured log buffer.",
+    "written": "2026-08-26"
+  },
+  "kt:com.rjnr.pocketnode.ui.screens.status.NodeStatusViewModel#errorDump/0": {
+    "hash": "ea1e00bfc918",
+    "text": "Dumps the recorded error journal for diagnostics.",
+    "written": "2026-08-26"
+  },
+  "kt:com.rjnr.pocketnode.ui.screens.status.NodeStatusViewModel#onCleared/0": {
+    "hash": "66a075cd136a",
+    "text": "ViewModel teardown: cancels polling and in-flight work.",
+    "written": "2026-08-26"
+  },
+  "kt:com.rjnr.pocketnode.ui.screens.status.NodeStatusViewModel#startLogcat/0": {
+    "hash": "5356d05fcbfa",
+    "text": "Starts streaming logcat into the debug view.",
+    "written": "2026-08-26"
+  },
+  "kt:com.rjnr.pocketnode.ui.screens.status.NodeStatusViewModel#startRefreshing/0": {
+    "hash": "eb12918ba47f",
+    "text": "Starts periodic node-status refresh.",
+    "written": "2026-08-26"
+  },
+  "kt:com.rjnr.pocketnode.ui.screens.status.NodeStatusViewModel#updateStatus/0": {
+    "hash": "dac52dcc98d7",
+    "text": "Reads current node status into UI state.",
+    "written": "2026-08-26"
+  },
   "kt:com.rjnr.pocketnode.ui.screens.wallet.AddWalletViewModel": {
     "hash": "54c48eff8475",
     "text": "State for adding a wallet or sub-account.",
+    "written": "2026-08-26"
+  },
+  "kt:com.rjnr.pocketnode.ui.screens.wallet.AddWalletViewModel#canCreateV2BoundKey/0": {
+    "hash": "0f617f773b83",
+    "text": "Whether the device supports auth-bound V2 key material.",
+    "written": "2026-08-26"
+  },
+  "kt:com.rjnr.pocketnode.ui.screens.wallet.AddWalletViewModel#clearError/0": {
+    "hash": "191ac155048d",
+    "text": "Clears the current error from UI state.",
+    "written": "2026-08-26"
+  },
+  "kt:com.rjnr.pocketnode.ui.screens.wallet.AddWalletViewModel#confirmNoLockConsent/0": {
+    "hash": "ec1946d653da",
+    "text": "Records consent to no-device-lock key storage.",
+    "written": "2026-08-26"
+  },
+  "kt:com.rjnr.pocketnode.ui.screens.wallet.AddWalletViewModel#createNewWallet/2": {
+    "hash": "8bce92278d02",
+    "text": "Creates a wallet from a newly generated seed phrase.",
+    "written": "2026-08-26"
+  },
+  "kt:com.rjnr.pocketnode.ui.screens.wallet.AddWalletViewModel#createSubAccount/2": {
+    "hash": "29338e6d394e",
+    "text": "Creates a sub-account under the selected parent.",
+    "written": "2026-08-26"
+  },
+  "kt:com.rjnr.pocketnode.ui.screens.wallet.AddWalletViewModel#dismissNoLockConsent/0": {
+    "hash": "15262e625c08",
+    "text": "Dismisses the no lock consent.",
+    "written": "2026-08-26"
+  },
+  "kt:com.rjnr.pocketnode.ui.screens.wallet.AddWalletViewModel#importMnemonic/2": {
+    "hash": "092c857c3dd4",
+    "text": "Imports a wallet from the entered seed phrase.",
+    "written": "2026-08-26"
+  },
+  "kt:com.rjnr.pocketnode.ui.screens.wallet.AddWalletViewModel#importRawKey/2": {
+    "hash": "b798257a334b",
+    "text": "Imports a wallet from the entered private key.",
+    "written": "2026-08-26"
+  },
+  "kt:com.rjnr.pocketnode.ui.screens.wallet.AddWalletViewModel#pasteImportMnemonic/1": {
+    "hash": "a90c99a23219",
+    "text": "Fills the seed phrase fields from pasted text.",
+    "written": "2026-08-26"
+  },
+  "kt:com.rjnr.pocketnode.ui.screens.wallet.AddWalletViewModel#persistErrorMessage/1": {
+    "hash": "3b4d1df85fab",
+    "text": "Keeps an error visible across recomposition.",
+    "written": "2026-08-26"
+  },
+  "kt:com.rjnr.pocketnode.ui.screens.wallet.AddWalletViewModel#persistWalletKeys/7": {
+    "hash": "9cea0cb72084",
+    "text": "Writes the new wallet's key material to storage.",
+    "written": "2026-08-26"
+  },
+  "kt:com.rjnr.pocketnode.ui.screens.wallet.AddWalletViewModel#requestNoLockConsent/0": {
+    "hash": "a3923b79e494",
+    "text": "Asks the user to consent to storing keys without a device lock.",
+    "written": "2026-08-26"
+  },
+  "kt:com.rjnr.pocketnode.ui.screens.wallet.AddWalletViewModel#selectImportSuggestion/2": {
+    "hash": "859570c29f27",
+    "text": "Accepts a BIP39 autocomplete suggestion.",
+    "written": "2026-08-26"
+  },
+  "kt:com.rjnr.pocketnode.ui.screens.wallet.AddWalletViewModel#selectParent/1": {
+    "hash": "f8fe3527acc8",
+    "text": "Chooses the parent wallet for a new sub-account.",
+    "written": "2026-08-26"
+  },
+  "kt:com.rjnr.pocketnode.ui.screens.wallet.AddWalletViewModel#updateImportPrivateKey/1": {
+    "hash": "707ce91ee8ba",
+    "text": "Updates the raw private key import field.",
+    "written": "2026-08-26"
+  },
+  "kt:com.rjnr.pocketnode.ui.screens.wallet.AddWalletViewModel#updateImportWord/2": {
+    "hash": "4c27816d616a",
+    "text": "Updates one word of the seed phrase being entered.",
+    "written": "2026-08-26"
+  },
+  "kt:com.rjnr.pocketnode.ui.screens.wallet.AddWalletViewModel#updateName/1": {
+    "hash": "13f06446fa99",
+    "text": "Updates name in UI state.",
     "written": "2026-08-26"
   },
   "kt:com.rjnr.pocketnode.ui.screens.wallet.WalletManagerViewModel": {
@@ -459,14 +2989,209 @@
     "text": "State for the wallet list, switching and deletion.",
     "written": "2026-08-26"
   },
+  "kt:com.rjnr.pocketnode.ui.screens.wallet.WalletManagerViewModel#canCreateV2BoundKey/0": {
+    "hash": "0f617f773b83",
+    "text": "Whether the device supports auth-bound V2 key material.",
+    "written": "2026-08-26"
+  },
+  "kt:com.rjnr.pocketnode.ui.screens.wallet.WalletManagerViewModel#clearError/0": {
+    "hash": "191ac155048d",
+    "text": "Clears the current error from UI state.",
+    "written": "2026-08-26"
+  },
+  "kt:com.rjnr.pocketnode.ui.screens.wallet.WalletManagerViewModel#confirmNoLockConsent/0": {
+    "hash": "ec1946d653da",
+    "text": "Records consent to no-device-lock key storage.",
+    "written": "2026-08-26"
+  },
+  "kt:com.rjnr.pocketnode.ui.screens.wallet.WalletManagerViewModel#dismissNoLockConsent/0": {
+    "hash": "e1e3b8c1da9d",
+    "text": "Dismisses the no lock consent.",
+    "written": "2026-08-26"
+  },
+  "kt:com.rjnr.pocketnode.ui.screens.wallet.WalletManagerViewModel#requestNoLockConsent/0": {
+    "hash": "a3923b79e494",
+    "text": "Asks the user to consent to storing keys without a device lock.",
+    "written": "2026-08-26"
+  },
+  "kt:com.rjnr.pocketnode.ui.screens.wallet.WalletManagerViewModel#restoreFoundSubAccounts/2": {
+    "hash": "a1d142473a00",
+    "text": "Restores sub-accounts discovered by the gap-limit scan.",
+    "written": "2026-08-26"
+  },
+  "kt:com.rjnr.pocketnode.ui.screens.wallet.WalletManagerViewModel#switchWallet/1": {
+    "hash": "9c50090cb699",
+    "text": "Switches the active wallet and reloads its data.",
+    "written": "2026-08-26"
+  },
   "kt:com.rjnr.pocketnode.ui.screens.wallet.WalletSettingsViewModel": {
     "hash": "87099e008690",
     "text": "State for one wallet's settings, keyed by a nav argument.",
     "written": "2026-08-26"
   },
+  "kt:com.rjnr.pocketnode.ui.screens.wallet.WalletSettingsViewModel#addSubAccount/3": {
+    "hash": "367a9b80647c",
+    "text": "Derives and adds a sub-account under this wallet.",
+    "written": "2026-08-26"
+  },
+  "kt:com.rjnr.pocketnode.ui.screens.wallet.WalletSettingsViewModel#canCreateV2BoundKey/0": {
+    "hash": "0f617f773b83",
+    "text": "Whether the device supports auth-bound V2 key material.",
+    "written": "2026-08-26"
+  },
+  "kt:com.rjnr.pocketnode.ui.screens.wallet.WalletSettingsViewModel#cancelDelete/0": {
+    "hash": "6b8cab0ddff3",
+    "text": "Cancels the pending deletion.",
+    "written": "2026-08-26"
+  },
+  "kt:com.rjnr.pocketnode.ui.screens.wallet.WalletSettingsViewModel#cancelEditing/0": {
+    "hash": "635e87afe7ba",
+    "text": "Leaves name-edit mode without saving.",
+    "written": "2026-08-26"
+  },
+  "kt:com.rjnr.pocketnode.ui.screens.wallet.WalletSettingsViewModel#clearError/0": {
+    "hash": "191ac155048d",
+    "text": "Clears the current error from UI state.",
+    "written": "2026-08-26"
+  },
+  "kt:com.rjnr.pocketnode.ui.screens.wallet.WalletSettingsViewModel#confirmDelete/0": {
+    "hash": "b23e52dda30d",
+    "text": "Deletes the wallet and its key material after confirmation.",
+    "written": "2026-08-26"
+  },
+  "kt:com.rjnr.pocketnode.ui.screens.wallet.WalletSettingsViewModel#confirmNoLockConsent/0": {
+    "hash": "ec1946d653da",
+    "text": "Records consent to no-device-lock key storage.",
+    "written": "2026-08-26"
+  },
+  "kt:com.rjnr.pocketnode.ui.screens.wallet.WalletSettingsViewModel#dismissNoLockConsent/0": {
+    "hash": "e1e3b8c1da9d",
+    "text": "Dismisses the no lock consent.",
+    "written": "2026-08-26"
+  },
+  "kt:com.rjnr.pocketnode.ui.screens.wallet.WalletSettingsViewModel#getMnemonic/0": {
+    "hash": "6aa8aa6871fb",
+    "text": "Returns the wallet's seed phrase, behind authentication.",
+    "written": "2026-08-26"
+  },
+  "kt:com.rjnr.pocketnode.ui.screens.wallet.WalletSettingsViewModel#getPrivateKeyHex/0": {
+    "hash": "0538de25c129",
+    "text": "Returns the private key as hex for display, behind authentication.",
+    "written": "2026-08-26"
+  },
+  "kt:com.rjnr.pocketnode.ui.screens.wallet.WalletSettingsViewModel#hasMnemonic/0": {
+    "hash": "adcaf7148b44",
+    "text": "Whether this wallet has a seed phrase.",
+    "written": "2026-08-26"
+  },
+  "kt:com.rjnr.pocketnode.ui.screens.wallet.WalletSettingsViewModel#isRawKey/0": {
+    "hash": "ee4bcb89be51",
+    "text": "Whether this wallet was imported from a raw private key.",
+    "written": "2026-08-26"
+  },
+  "kt:com.rjnr.pocketnode.ui.screens.wallet.WalletSettingsViewModel#isSubAccount/0": {
+    "hash": "418a158c2d41",
+    "text": "Whether this wallet is a sub-account of another.",
+    "written": "2026-08-26"
+  },
+  "kt:com.rjnr.pocketnode.ui.screens.wallet.WalletSettingsViewModel#loadSensitiveData/0": {
+    "hash": "9a2991deb990",
+    "text": "Loads seed phrase or private key once authorised.",
+    "written": "2026-08-26"
+  },
+  "kt:com.rjnr.pocketnode.ui.screens.wallet.WalletSettingsViewModel#loadSensitiveData/1": {
+    "hash": "b9a8229d1c78",
+    "text": "Loads seed phrase or private key once authorised.",
+    "written": "2026-08-26"
+  },
+  "kt:com.rjnr.pocketnode.ui.screens.wallet.WalletSettingsViewModel#loadWallet/0": {
+    "hash": "3bd1eeea76ee",
+    "text": "Loads the wallet named by the nav argument.",
+    "written": "2026-08-26"
+  },
+  "kt:com.rjnr.pocketnode.ui.screens.wallet.WalletSettingsViewModel#lockSeedPhrase/0": {
+    "hash": "7099b4791347",
+    "text": "Re-hides the seed phrase and clears it from memory.",
+    "written": "2026-08-26"
+  },
+  "kt:com.rjnr.pocketnode.ui.screens.wallet.WalletSettingsViewModel#noLockRevealNeedsPin/2": {
+    "hash": "f5a99a6b4fb2",
+    "text": "Whether revealing a no-lock wallet's secret still needs a PIN.",
+    "written": "2026-08-26"
+  },
+  "kt:com.rjnr.pocketnode.ui.screens.wallet.WalletSettingsViewModel#observeSubAccounts/0": {
+    "hash": "46b53cd83172",
+    "text": "Subscribes to this wallet's sub-accounts.",
+    "written": "2026-08-26"
+  },
+  "kt:com.rjnr.pocketnode.ui.screens.wallet.WalletSettingsViewModel#onPinVerified/0": {
+    "hash": "9a5cfa5f37b2",
+    "text": "Unlocks sensitive data after a correct PIN.",
+    "written": "2026-08-26"
+  },
+  "kt:com.rjnr.pocketnode.ui.screens.wallet.WalletSettingsViewModel#onPinVerifyRequestHandled/0": {
+    "hash": "366ad2a70a2c",
+    "text": "Marks the PIN-verify request as consumed.",
+    "written": "2026-08-26"
+  },
+  "kt:com.rjnr.pocketnode.ui.screens.wallet.WalletSettingsViewModel#requestDelete/0": {
+    "hash": "10e6c29010e8",
+    "text": "Raises the delete confirmation.",
+    "written": "2026-08-26"
+  },
+  "kt:com.rjnr.pocketnode.ui.screens.wallet.WalletSettingsViewModel#requestNoLockConsent/0": {
+    "hash": "a3923b79e494",
+    "text": "Asks the user to consent to storing keys without a device lock.",
+    "written": "2026-08-26"
+  },
+  "kt:com.rjnr.pocketnode.ui.screens.wallet.WalletSettingsViewModel#requiresPinForSeedPhrase/0": {
+    "hash": "14bc8bfdf9f2",
+    "text": "Whether revealing the seed phrase needs a PIN.",
+    "written": "2026-08-26"
+  },
+  "kt:com.rjnr.pocketnode.ui.screens.wallet.WalletSettingsViewModel#saveName/0": {
+    "hash": "d28efc144ddc",
+    "text": "Persists the edited wallet name after uniqueness checks.",
+    "written": "2026-08-26"
+  },
+  "kt:com.rjnr.pocketnode.ui.screens.wallet.WalletSettingsViewModel#startEditing/0": {
+    "hash": "be09d41c10b1",
+    "text": "Enters name-edit mode.",
+    "written": "2026-08-26"
+  },
+  "kt:com.rjnr.pocketnode.ui.screens.wallet.WalletSettingsViewModel#updateEditName/1": {
+    "hash": "595765869a80",
+    "text": "Updates the name being edited.",
+    "written": "2026-08-26"
+  },
   "kt:com.rjnr.pocketnode.ui.update.UpdateBannerViewModel": {
     "hash": "a496991ae346",
     "text": "State for the in-app update banner and its download progress.",
+    "written": "2026-08-26"
+  },
+  "kt:com.rjnr.pocketnode.ui.update.UpdateBannerViewModel#cancel/0": {
+    "hash": "031e2112144f",
+    "text": "Cancels the in-progress operation.",
+    "written": "2026-08-26"
+  },
+  "kt:com.rjnr.pocketnode.ui.update.UpdateBannerViewModel#dismiss/0": {
+    "hash": "a2b5890c23e8",
+    "text": "Dismisses the banner.",
+    "written": "2026-08-26"
+  },
+  "kt:com.rjnr.pocketnode.ui.update.UpdateBannerViewModel#installNow/0": {
+    "hash": "4575fafb6f20",
+    "text": "Installs the downloaded update.",
+    "written": "2026-08-26"
+  },
+  "kt:com.rjnr.pocketnode.ui.update.UpdateBannerViewModel#onActivityResumed/0": {
+    "hash": "a5aee9f8b786",
+    "text": "Re-checks update state when the activity resumes.",
+    "written": "2026-08-26"
+  },
+  "kt:com.rjnr.pocketnode.ui.update.UpdateBannerViewModel#retry/0": {
+    "hash": "b4707814a208",
+    "text": "Retries the failed operation.",
     "written": "2026-08-26"
   },
   "kt:com.rjnr.pocketnode.ui.util.Bip39WordList": {
