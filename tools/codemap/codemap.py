@@ -46,7 +46,13 @@ def build(root: Path, out: Path, write_html: bool = True) -> dict:
     data = g.to_dict(root)
 
     store = SummaryStore.load(HERE / "summaries" / "descriptions.json")
-    data["summaries"] = store.for_graph(data["nodes"])
+    summaries = store.for_graph(data["nodes"])
+
+    # Files and modules are containers, not declarations, so nothing
+    # writes summaries for them. Roll them up from their contents.
+    from graph.rollup import apply as rollup
+    rollup(g, summaries)
+    data["summaries"] = summaries
 
     out.mkdir(parents=True, exist_ok=True)
     (out / "codemap.json").write_text(json.dumps(data, indent=None, separators=(",", ":")))

@@ -420,7 +420,9 @@
     }
     if (summary && summary.text) {
       const stale = summary.hash !== n.content_hash;
-      html += '<div class="tier"><div class="tier-label">Generated</div><div class="tier-body'
+      html += '<div class="tier"><div class="tier-label">'
+            + (summary.derived ? "From contents" : "Generated")
+            + '</div><div class="tier-body'
             + (stale ? " stale" : "") + '">' + esc(summary.text) + "</div>";
       if (stale) html += '<span class="badge-stale">stale &mdash; code changed since written</span>';
       html += "</div>";
@@ -554,8 +556,9 @@
       h += '<div class="tt-what tt-src"><span class="tt-tag">from source</span>' + esc(n.doc) + "</div>";
     } else if (summary && summary.text) {
       const stale = summary.hash !== n.content_hash;
+      const tag = stale ? "stale" : summary.derived ? "from contents" : "generated";
       h += '<div class="tt-what' + (stale ? " stale" : "") + '"><span class="tt-tag">'
-         + (stale ? "stale" : "generated") + "</span>" + esc(summary.text) + "</div>";
+         + tag + "</span>" + esc(summary.text) + "</div>";
     } else {
       h += '<div class="tt-none">No description recorded.</div>';
     }
