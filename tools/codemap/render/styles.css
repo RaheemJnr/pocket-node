@@ -207,3 +207,10 @@ dialog ol { margin: 0; padding-left: 20px; font-family: var(--mono); font-size: 
   font-family: var(--mono); font-size: 10.5px; color: var(--muted);
 }
 #tooltip .tt-hint { margin-top: 6px; font-size: 10px; color: var(--muted); }
+
+
+#help { width: 30px; padding: 5px 0; font-weight: 700; }
+.help-dialog { max-width: 620px; }
+.help-dialog dt { font-weight: 600; margin-top: 12px; font-size: 13px; }
+.help-dialog dd { margin: 3px 0 0; color: var(--muted); font-size: 12.5px; line-height: 1.55; }
+.help-close { margin: 18px 0 0; font-size: 11px; color: var(--muted); text-align: right; }

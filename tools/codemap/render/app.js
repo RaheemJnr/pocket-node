@@ -70,9 +70,14 @@
     return m ? m.order : -1;
   }
 
+  /* A lower-order layer depending on a higher-order one. Layers flagged
+   * `leaf` in the rules are exempt: a leaf utility is something every
+   * tier may call, so depending on it is never a violation. */
   function isBackward(e) {
+    const dst = NODES.get(e.dst).layer;
+    if ((LAYER_META[dst] || {}).leaf) return false;
     const a = layerOrder(NODES.get(e.src).layer);
-    const b = layerOrder(NODES.get(e.dst).layer);
+    const b = layerOrder(dst);
     return a >= 0 && b >= 0 && a < b;
   }
 
@@ -619,6 +624,38 @@
     DATA.edges.filter((e) => !STRUCTURAL.has(e.kind) && isBackward(e)).slice(0, 40)
       .map((e) => NODES.get(e.src).name + " → " + NODES.get(e.dst).name
                 + "  (" + NODES.get(e.src).layer + " → " + NODES.get(e.dst).layer + ")"));
+
+  // ---- help ---------------------------------------------------------------
+
+  const HELP = [
+    ["Lanes vs Force",
+     "Lanes places each layer in its own column, left to right, so you read architecture order and spot anything pointing backwards. Force lets physics position nodes, so tightly coupled things end up near each other and hubs become obvious."],
+    ["Show",
+     "Which unit to draw: modules, files, types or functions. Only that level is drawn; edges between deeper nodes are lifted to whatever is visible. Double-click one node to expand just its children."],
+    ["Group",
+     "Draws a labelled box around each architectural layer. Off means bare nodes with no boxes, which is usually what you want in Force view."],
+    ["Hide orphans",
+     "An orphan is a node with no connections AT THE LEVEL YOU ARE VIEWING -- not dead code. Sealed-class variants like Success or Cancelled are orphans because they are constructed and matched on, which is not a call edge. Two thirds of nodes are orphans at type depth, so they are hidden by default."],
+    ["Violations",
+     "An edge pointing backwards through the layer order: a lower layer depending on a higher one. UI depending on data is normal; data reaching into UI is not. Layers marked leaf in rules/layers.yaml (such as Util) are exempt, since everything may call a leaf utility."],
+    ["KMP",
+     "Colours Kotlin nodes by portability to commonMain. Green is ready. Amber needs an expect/actual seam. Red is androidMain only, from direct evidence such as touching android.*, being an external JNI declaration, or being @Composable."],
+    ["Colour and shape",
+     "Both encode tier: Rust (blue diamond), JNI (red hexagon), Kotlin logic (green circle), UI (green rounded square). Shape carries the same information because the four-colour palette sits in the colourblind floor band and colour alone is not sufficient."],
+    ["Node size",
+     "Scales with fan-in, so heavily depended-on nodes read as larger. The Size slider scales everything if the defaults do not suit your display."],
+  ];
+
+  document.getElementById("help").addEventListener("click", () => {
+    const dlg = document.createElement("dialog");
+    dlg.className = "help-dialog";
+    dlg.innerHTML = "<h3>What the controls mean</h3>"
+      + HELP.map((p) => "<dt>" + esc(p[0]) + "</dt><dd>" + esc(p[1]) + "</dd>").join("")
+      + '<p class="help-close">click anywhere to close</p>';
+    document.body.appendChild(dlg);
+    dlg.addEventListener("click", () => { dlg.close(); dlg.remove(); });
+    dlg.showModal();
+  });
 
   document.getElementById("meta").textContent = DATA.meta.git_sha + " · " + DATA.meta.generated;
   render();

@@ -34,3 +34,16 @@ def test_backward_edge_direction_convention():
     assert is_backward_edge("ui", "data") is False       # forward: UI depends on data
     assert is_backward_edge("data", "ui") is True        # violation
     assert is_backward_edge("data", "viewmodel") is True
+
+
+def test_leaf_layers_are_exempt_from_violation_check():
+    # Util is a leaf everything may call; depending on it is not a violation
+    # even though its lane sits to the right of viewmodel.
+    assert is_backward_edge("viewmodel", "util") is False
+    assert is_backward_edge("data", "util") is False
+
+
+def test_auth_is_data_layer_so_migration_can_call_it():
+    assert assign_layer("android/app/src/main/java/com/rjnr/pocketnode/data/auth/AuthManager.kt") == "data"
+    assert assign_layer("android/app/src/main/java/com/rjnr/pocketnode/data/migration/KeystoreV2MigrationRunner.kt") == "data"
+    assert is_backward_edge("data", "data") is False

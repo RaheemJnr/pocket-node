@@ -15,11 +15,11 @@
     </div>
     <div class="controls">
       <div class="group">
-        <button id="layout-lanes" class="active">Lanes</button>
-        <button id="layout-force">Force</button>
+        <button id="layout-lanes" class="active" title="One column per architectural layer, left to right.">Lanes</button>
+        <button id="layout-force" title="Physics layout: coupled things sit near each other, hubs stand out.">Force</button>
       </div>
       <div class="group">
-        <label for="depth">Show</label>
+        <label for="depth" title="Which unit to draw. Only this level is drawn; deeper edges lift to what is visible.">Show</label>
         <select id="depth">
           <option value="module">Modules</option>
           <option value="file">Files</option>
@@ -32,18 +32,21 @@
         <input type="range" id="node-size" min="0.6" max="3" step="0.1" value="1.2">
       </div>
       <div class="group">
-        <label title="Hide nodes with no connections at this level"><input type="checkbox" id="hide-orphans" checked> Hide orphans</label>
-        <label><input type="checkbox" id="group-layer" checked> Group</label>
+        <label title="An orphan has no connections at the level you are viewing — not dead code. Sealed variants and leaf helpers are typically orphans."><input type="checkbox" id="hide-orphans" checked> Hide orphans</label>
+        <label title="Draw a labelled box around each architectural layer."><input type="checkbox" id="group-layer" checked> Group</label>
       </div>
       <div class="group">
-        <label><input type="checkbox" id="kmp-overlay"> KMP</label>
-        <label><input type="checkbox" id="violations-only"> Violations</label>
+        <label title="Colour Kotlin nodes by portability to commonMain: green ready, amber needs expect/actual, red androidMain only."><input type="checkbox" id="kmp-overlay"> KMP</label>
+        <label title="Show only backward edges: a lower layer depending on a higher one. Leaf layers such as Util are exempt."><input type="checkbox" id="violations-only"> Violations</label>
       </div>
       <div class="group">
         <input type="search" id="search" placeholder="Search name…" autocomplete="off">
         <span id="search-count" class="meta"></span>
       </div>
-      <div class="group"><button id="reset">Reset</button></div>
+      <div class="group">
+        <button id="reset">Reset</button>
+        <button id="help" title="What do these controls mean?" aria-label="Help">?</button>
+      </div>
     </div>
   </header>
 

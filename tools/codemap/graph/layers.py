@@ -17,12 +17,14 @@ from .graph import Graph
 
 _RULES: list[dict] = []
 _ORDER: dict[str, int] = {}
+_LEAF: set[str] = set()
 
 
 def load_rules(path: Path) -> list[dict]:
-    global _RULES, _ORDER
+    global _RULES, _ORDER, _LEAF
     _RULES = yaml.safe_load(path.read_text())["layers"]
     _ORDER = {r["id"]: r["order"] for r in _RULES}
+    _LEAF = {r["id"] for r in _RULES if r.get("leaf")}
     return _RULES
 
 
@@ -40,6 +42,14 @@ def layer_order(layer: str) -> int:
 
 
 def is_backward_edge(src_layer: str, dst_layer: str) -> bool:
+    """A lower-order layer depending on a higher-order one.
+
+    Layers marked `leaf` in the rules are exempt: a leaf utility is
+    something every tier may call, so depending on it is never a
+    violation regardless of where its lane sits.
+    """
+    if dst_layer in _LEAF:
+        return False
     a, b = layer_order(src_layer), layer_order(dst_layer)
     if a < 0 or b < 0:
         return False
@@ -58,7 +68,10 @@ def apply(g: Graph, rules_path: Path) -> None:
             if kids:
                 n.layer = max(set(kids), key=kids.count)
 
-    g.stats["layer_meta"] = {r["id"]: {"order": r["order"], "label": r["label"]} for r in _RULES}
+    g.stats["layer_meta"] = {
+        r["id"]: {"order": r["order"], "label": r["label"], "leaf": bool(r.get("leaf"))}
+        for r in _RULES
+    }
     g.stats["violations"] = sum(
         1 for e in g.edges
         if e.kind in ("calls", "injects")

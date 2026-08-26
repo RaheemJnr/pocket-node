@@ -30,6 +30,7 @@ layers:
       - "**/data/crypto/**"
       - "**/data/wallet/**"
       - "**/data/migration/**"
+      - "**/data/auth/**"        # auth guards key material: same tier as the data it protects
 
   - id: domain
     order: 3
@@ -40,6 +41,9 @@ layers:
     order: 5
     label: Util
     match: ["**/util/**"]
+    # A leaf everything may call. Depending on it is never a layering
+    # violation, so it is exempt from the backward-edge check.
+    leaf: true
 
   - id: ui
     order: 5
