@@ -231,3 +231,10 @@ CLAUDE.md
 # diff comparison and crashes with AbstractMethodError. (#142)
 android/app/schemas/
 android/app/src/debug/assets/
+
+# ===================
+# Codemap (generated output only — the generator itself is tracked)
+# ===================
+tools/codemap/out/
+tools/codemap/.venv/
+tools/codemap/**/__pycache__/
