@@ -1,0 +1,3 @@
+# Adds the "Sponsor" button on the repo. Buy Me a Coffee is not a native
+# field, so it goes under custom.
+custom: ["https://www.buymeacoffee.com/rjnr"]
