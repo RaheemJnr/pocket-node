@@ -498,6 +498,66 @@
     if (hits.length) cy.animate({ fit: { eles: hits, padding: 90 } }, { duration: 300 });
   });
 
+  // ---- hover tooltip ------------------------------------------------------
+
+  /* The detail panel needs a click; hovering should still answer "what is
+   * this?" without one. Same three tiers as the panel, condensed. */
+  const tip = document.getElementById("tooltip");
+  const canvas = document.getElementById("canvas");
+
+  function tooltipHtml(n) {
+    const summary = SUMMARIES[n.id];
+    let h = '<div class="tt-name">' + esc(n.name) + "</div>";
+    h += '<div class="tt-sig">' + esc(n.signature || n.kind) + "</div>";
+
+    if (n.doc) {
+      h += '<div class="tt-what tt-src"><span class="tt-tag">from source</span>' + esc(n.doc) + "</div>";
+    } else if (summary && summary.text) {
+      const stale = summary.hash !== n.content_hash;
+      h += '<div class="tt-what' + (stale ? " stale" : "") + '"><span class="tt-tag">'
+         + (stale ? "stale" : "generated") + "</span>" + esc(summary.text) + "</div>";
+    } else {
+      h += '<div class="tt-none">No description recorded.</div>';
+    }
+
+    const inN = neighbours(n.id, "in").length;
+    const outN = neighbours(n.id, "out").length;
+    h += '<div class="tt-facts">'
+       + esc((LAYER_META[n.layer] || {}).label || n.layer)
+       + " · kmp " + esc(n.kmp)
+       + " · in " + inN + " / out " + outN
+       + (n.bridge_symbol ? " · bridge" : "")
+       + "<br>" + esc(n.file) + (n.start_line ? ":" + n.start_line : "")
+       + "</div>";
+    h += '<div class="tt-hint">click for full detail and impact</div>';
+    return h;
+  }
+
+  function placeTooltip(evt) {
+    const rect = canvas.getBoundingClientRect();
+    let x = evt.originalEvent.clientX - rect.left + 16;
+    let y = evt.originalEvent.clientY - rect.top + 16;
+    tip.style.left = "0px";
+    tip.style.top = "0px";
+    tip.hidden = false;
+    const tw = tip.offsetWidth, th = tip.offsetHeight;
+    if (x + tw > rect.width - 8) x = Math.max(8, x - tw - 32);
+    if (y + th > rect.height - 8) y = Math.max(8, y - th - 32);
+    tip.style.left = x + "px";
+    tip.style.top = y + "px";
+  }
+
+  cy.on("mouseover", "node", (evt) => {
+    if (evt.target.data("kind") === "layer") return;
+    const n = NODES.get(evt.target.id());
+    if (!n) return;
+    tip.innerHTML = tooltipHtml(n);
+    placeTooltip(evt);
+  });
+  cy.on("mousemove", "node", (evt) => { if (!tip.hidden) placeTooltip(evt); });
+  cy.on("mouseout", "node", () => { tip.hidden = true; });
+  cy.on("pan zoom", () => { tip.hidden = true; });
+
   // ---- zoom -------------------------------------------------------------
 
   const ZOOM_STEP = 1.35;

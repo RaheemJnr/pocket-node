@@ -1,1 +1,672 @@
-{}
+{
+  "kt:com.nervosnetwork.ckblightclient.LightClientNative": {
+    "hash": "b207445df9ee",
+    "text": "JNI bridge object: loads libckb_light_client_lib.so and exposes the 24 native entry points into the Rust light client.",
+    "written": "2026-08-26"
+  },
+  "kt:com.rjnr.pocketnode.CkbWalletApp": {
+    "hash": "6d8a948d7ed7",
+    "text": "Hilt application class; boots WorkManager configuration and process-wide singletons at startup.",
+    "written": "2026-08-26"
+  },
+  "kt:com.rjnr.pocketnode.MainActivity": {
+    "hash": "9b53028f80f7",
+    "text": "Single activity host for the Compose navigation graph; decides the start destination from wallet and auth state.",
+    "written": "2026-08-26"
+  },
+  "kt:com.rjnr.pocketnode.data.auth.AuthManager": {
+    "hash": "c84b4e6c0e6e",
+    "text": "Owns biometric and device-credential authentication, including prompt construction and result handling.",
+    "written": "2026-08-26"
+  },
+  "kt:com.rjnr.pocketnode.data.auth.PinManager": {
+    "hash": "bbec5cf756f2",
+    "text": "Stores and verifies the app PIN, including KDF hashing, attempt throttling and lockout state.",
+    "written": "2026-08-26"
+  },
+  "kt:com.rjnr.pocketnode.data.contacts.ContactRepository": {
+    "hash": "2ad41d0417a0",
+    "text": "CRUD over the address book, backed by ContactDao.",
+    "written": "2026-08-26"
+  },
+  "kt:com.rjnr.pocketnode.data.crypto.Blake2b": {
+    "hash": "395f851e1f00",
+    "text": "Blake2b-256 wrapper with CKB's 'ckb-default-hash' personalisation, used for script and transaction hashing.",
+    "written": "2026-08-26"
+  },
+  "kt:com.rjnr.pocketnode.data.crypto.KeystoreEncryptionManager": {
+    "hash": "5fdcb5b16cf0",
+    "text": "Wraps Android Keystore AES key generation and encrypt/decrypt for key material at rest.",
+    "written": "2026-08-26"
+  },
+  "kt:com.rjnr.pocketnode.data.database.AppDatabase": {
+    "hash": "115c6b803b85",
+    "text": "Room database definition: entity list, DAO accessors and the migration chain.",
+    "written": "2026-08-26"
+  },
+  "kt:com.rjnr.pocketnode.data.database.DatabaseMaintenanceUtil": {
+    "hash": "af7c7f617411",
+    "text": "Periodic SQLite maintenance, notably the ~30-day VACUUM cadence run from startup idle.",
+    "written": "2026-08-26"
+  },
+  "kt:com.rjnr.pocketnode.data.database.dao.BalanceCacheDao": {
+    "hash": "1255a1f4ecc3",
+    "text": "Room DAO for the per-wallet, per-network cached balance row.",
+    "written": "2026-08-26"
+  },
+  "kt:com.rjnr.pocketnode.data.database.dao.ContactDao": {
+    "hash": "f206b1d41d2a",
+    "text": "Room DAO for address-book entries.",
+    "written": "2026-08-26"
+  },
+  "kt:com.rjnr.pocketnode.data.database.dao.DaoCellDao": {
+    "hash": "e8ecf82349a4",
+    "text": "Room DAO for tracked Nervos DAO deposit and withdraw cells.",
+    "written": "2026-08-26"
+  },
+  "kt:com.rjnr.pocketnode.data.database.dao.HeaderCacheDao": {
+    "hash": "15c8e7f9325b",
+    "text": "Room DAO for cached block headers, keyed by block hash.",
+    "written": "2026-08-26"
+  },
+  "kt:com.rjnr.pocketnode.data.database.dao.KeyMaterialDao": {
+    "hash": "3e9f2fcf2699",
+    "text": "Room DAO for encrypted key material rows, keyed by wallet id.",
+    "written": "2026-08-26"
+  },
+  "kt:com.rjnr.pocketnode.data.database.dao.PendingBroadcastDao": {
+    "hash": "9f45943c328c",
+    "text": "Room DAO for transactions broadcast but not yet confirmed, used by the send-reliability watchdog.",
+    "written": "2026-08-26"
+  },
+  "kt:com.rjnr.pocketnode.data.database.dao.PendingDaoWithdrawDao": {
+    "hash": "de21e5c2e345",
+    "text": "Room DAO for DAO withdrawals awaiting confirmation.",
+    "written": "2026-08-26"
+  },
+  "kt:com.rjnr.pocketnode.data.database.dao.SubAccountCandidateDao": {
+    "hash": "29e7b53a5c1c",
+    "text": "Room DAO for gap-limit scan candidates; inserts IGNORE so re-import cannot clobber FOUND state.",
+    "written": "2026-08-26"
+  },
+  "kt:com.rjnr.pocketnode.data.database.dao.SyncProgressDao": {
+    "hash": "f149726067ec",
+    "text": "Room DAO for per-wallet, per-network sync progress checkpoints.",
+    "written": "2026-08-26"
+  },
+  "kt:com.rjnr.pocketnode.data.database.dao.TransactionDao": {
+    "hash": "c61354b50c10",
+    "text": "Room DAO for transaction history, with pending-first ordering.",
+    "written": "2026-08-26"
+  },
+  "kt:com.rjnr.pocketnode.data.database.dao.WalletDao": {
+    "hash": "d821b11396a5",
+    "text": "Room DAO for wallet records and the active-wallet selection.",
+    "written": "2026-08-26"
+  },
+  "kt:com.rjnr.pocketnode.data.database.entity.BalanceCacheEntity": {
+    "hash": "e433cc6b8408",
+    "text": "Room entity for cached balance, keyed by wallet id plus network.",
+    "written": "2026-08-26"
+  },
+  "kt:com.rjnr.pocketnode.data.database.entity.HeaderCacheEntity": {
+    "hash": "f0c77267c875",
+    "text": "Room entity for a cached block header.",
+    "written": "2026-08-26"
+  },
+  "kt:com.rjnr.pocketnode.data.database.entity.TransactionEntity": {
+    "hash": "a2bba06c2c63",
+    "text": "Room entity for one transaction history row.",
+    "written": "2026-08-26"
+  },
+  "kt:com.rjnr.pocketnode.data.gateway.BroadcastClient": {
+    "hash": "c73d1d1848cb",
+    "text": "Interface for submitting a signed transaction; returns the tx hash JSON or null on failure.",
+    "written": "2026-08-26"
+  },
+  "kt:com.rjnr.pocketnode.data.gateway.CacheManager": {
+    "hash": "a46f486eb028",
+    "text": "Mediates Room caches for transactions and balances, keeping reads fast while sync runs.",
+    "written": "2026-08-26"
+  },
+  "kt:com.rjnr.pocketnode.data.gateway.DaoConstants": {
+    "hash": "4d8f9d1516b2",
+    "text": "Nervos DAO script constants, including the DAO code hash shared by both networks.",
+    "written": "2026-08-26"
+  },
+  "kt:com.rjnr.pocketnode.data.gateway.DaoDepositReader": {
+    "hash": "a956aae30bef",
+    "text": "Reads DAO deposit cells from the light client and decodes their fields.",
+    "written": "2026-08-26"
+  },
+  "kt:com.rjnr.pocketnode.data.gateway.DaoHeaderResolver": {
+    "hash": "a10a70b1d572",
+    "text": "Resolves the chain state a DAO cell needs: block hash for a cell, header fetch with retry, cache-first lookup.",
+    "written": "2026-08-26"
+  },
+  "kt:com.rjnr.pocketnode.data.gateway.DaoSyncManager": {
+    "hash": "b3f76b039557",
+    "text": "Keeps tracked DAO cells and their headers in step with chain tip.",
+    "written": "2026-08-26"
+  },
+  "kt:com.rjnr.pocketnode.data.gateway.GatewayRepository": {
+    "hash": "e5000559991f",
+    "text": "Central repository for all blockchain operations: node lifecycle, balance, cells, transactions, send, sync polling and network switching.",
+    "written": "2026-08-26"
+  },
+  "kt:com.rjnr.pocketnode.data.gateway.LightClientBridge": {
+    "hash": "8caa97081403",
+    "text": "Interface over the native light client, letting tests substitute the JNI layer.",
+    "written": "2026-08-26"
+  },
+  "kt:com.rjnr.pocketnode.data.gateway.LightClientBroadcastClient": {
+    "hash": "ccb4e8379993",
+    "text": "BroadcastClient implementation that submits through the JNI light client.",
+    "written": "2026-08-26"
+  },
+  "kt:com.rjnr.pocketnode.data.gateway.LightClientNativeBridge": {
+    "hash": "31e3e5346d08",
+    "text": "LightClientBridge implementation delegating straight to the JNI external functions.",
+    "written": "2026-08-26"
+  },
+  "kt:com.rjnr.pocketnode.data.gateway.LightClientReadOnly": {
+    "hash": "9453a2bef4e0",
+    "text": "Read-only queries against the light client, isolated from write and lifecycle paths.",
+    "written": "2026-08-26"
+  },
+  "kt:com.rjnr.pocketnode.data.gateway.SyncCoordinator": {
+    "hash": "e5526cb36bea",
+    "text": "Owns multi-wallet script registration, the BALANCED filter and the script-args to wallet-id mapping.",
+    "written": "2026-08-26"
+  },
+  "kt:com.rjnr.pocketnode.data.gateway.TipSource": {
+    "hash": "965887eb4126",
+    "text": "Monotonic light-client tip stream, starting at 0 until the first publish.",
+    "written": "2026-08-26"
+  },
+  "kt:com.rjnr.pocketnode.data.gateway.TransactionStatusUpdater": {
+    "hash": "3304e17c0a5b",
+    "text": "Narrow interface for writing back a transaction's confirmation status.",
+    "written": "2026-08-26"
+  },
+  "kt:com.rjnr.pocketnode.data.gateway.models.EpochInfo": {
+    "hash": "45b5b876dfe6",
+    "text": "CKB epoch coordinates (number, index, length) used for DAO unlock maths.",
+    "written": "2026-08-26"
+  },
+  "kt:com.rjnr.pocketnode.data.gateway.models.JniCell": {
+    "hash": "e9046cf9914e",
+    "text": "Serializable live cell as returned across the JNI boundary.",
+    "written": "2026-08-26"
+  },
+  "kt:com.rjnr.pocketnode.data.gateway.models.TransactionStatusResponse": {
+    "hash": "cf59a6547a69",
+    "text": "Serializable response carrying a transaction hash and its chain status.",
+    "written": "2026-08-26"
+  },
+  "kt:com.rjnr.pocketnode.data.migration.KeyStoreMigrationHelper": {
+    "hash": "9903857c6a42",
+    "text": "Migrates legacy key storage into the Room key_material table.",
+    "written": "2026-08-26"
+  },
+  "kt:com.rjnr.pocketnode.data.migration.KeystoreV2MigrationHelper": {
+    "hash": "e302a89076eb",
+    "text": "Migrates V1 key material to the V2 auth-bound Keystore scheme.",
+    "written": "2026-08-26"
+  },
+  "kt:com.rjnr.pocketnode.data.migration.KeystoreV2MigrationRunner": {
+    "hash": "f85420685456",
+    "text": "Drives the V2 keystore migration once per install, idempotently.",
+    "written": "2026-08-26"
+  },
+  "kt:com.rjnr.pocketnode.data.migration.WalletMigrationHelper": {
+    "hash": "79461300c3bf",
+    "text": "Idempotent migrations: legacy single wallet to multi-wallet, and sync_progress prefs into Room.",
+    "written": "2026-08-26"
+  },
+  "kt:com.rjnr.pocketnode.data.price.PriceRepository": {
+    "hash": "f38c14dcdab4",
+    "text": "Fetches and caches the CKB fiat price.",
+    "written": "2026-08-26"
+  },
+  "kt:com.rjnr.pocketnode.data.sync.BroadcastWatchdog": {
+    "hash": "b2f70be8e194",
+    "text": "Re-checks broadcast-but-unconfirmed transactions and resolves their final status.",
+    "written": "2026-08-26"
+  },
+  "kt:com.rjnr.pocketnode.data.sync.LifecycleProvider": {
+    "hash": "1d2c428ff3fd",
+    "text": "Reports whether the process is at least STARTED, gating background work.",
+    "written": "2026-08-26"
+  },
+  "kt:com.rjnr.pocketnode.data.sync.RepositoryTransactionStatusGateway": {
+    "hash": "6941232bd05a",
+    "text": "TransactionStatusGateway backed by GatewayRepository.",
+    "written": "2026-08-26"
+  },
+  "kt:com.rjnr.pocketnode.data.sync.SyncCatchUpWorker": {
+    "hash": "f3ba814b662b",
+    "text": "WorkManager worker that advances sync while the app is backgrounded.",
+    "written": "2026-08-26"
+  },
+  "kt:com.rjnr.pocketnode.data.sync.SyncForegroundService": {
+    "hash": "3756dbdf56d3",
+    "text": "Foreground service keeping the light client syncing with a user-visible notification.",
+    "written": "2026-08-26"
+  },
+  "kt:com.rjnr.pocketnode.data.sync.SyncNotificationManager": {
+    "hash": "e628221edb94",
+    "text": "Builds and updates the sync progress notification and its channel.",
+    "written": "2026-08-26"
+  },
+  "kt:com.rjnr.pocketnode.data.sync.SyncWorkScheduler": {
+    "hash": "3b5eebc0f723",
+    "text": "Schedules and cancels the periodic background sync work.",
+    "written": "2026-08-26"
+  },
+  "kt:com.rjnr.pocketnode.data.sync.TransactionStatusGateway": {
+    "hash": "6a178fdb0acd",
+    "text": "Single-method interface for fetching a transaction's status by hash.",
+    "written": "2026-08-26"
+  },
+  "kt:com.rjnr.pocketnode.data.transaction.TransactionBuilder": {
+    "hash": "d0ddc0c5812c",
+    "text": "Builds, molecule-encodes and signs CKB transactions, including cell selection and change output.",
+    "written": "2026-08-26"
+  },
+  "kt:com.rjnr.pocketnode.data.update.UpdateDownloader": {
+    "hash": "34e85d92dbb0",
+    "text": "Downloads an APK update and tracks its progress.",
+    "written": "2026-08-26"
+  },
+  "kt:com.rjnr.pocketnode.data.update.UpdateRepository": {
+    "hash": "e6e6cdccf45e",
+    "text": "Checks the release feed for a newer version.",
+    "written": "2026-08-26"
+  },
+  "kt:com.rjnr.pocketnode.data.validation.NetworkValidator": {
+    "hash": "b286e0df8cf0",
+    "text": "Validates that addresses and scripts belong to the active network before a transfer.",
+    "written": "2026-08-26"
+  },
+  "kt:com.rjnr.pocketnode.data.wallet.AddressUtils": {
+    "hash": "d7347d03bcda",
+    "text": "Encodes and decodes CKB addresses to and from Script objects.",
+    "written": "2026-08-26"
+  },
+  "kt:com.rjnr.pocketnode.data.wallet.KeyBackupManager": {
+    "hash": "9bd61536a803",
+    "text": "Writes and reads the on-device encrypted key backup file.",
+    "written": "2026-08-26"
+  },
+  "kt:com.rjnr.pocketnode.data.wallet.KeyManager": {
+    "hash": "7d9ce79bcc18",
+    "text": "Generates, imports, stores and signs with private keys, across Android Keystore and Room.",
+    "written": "2026-08-26"
+  },
+  "kt:com.rjnr.pocketnode.data.wallet.MnemonicManager": {
+    "hash": "7a354d64c374",
+    "text": "BIP39 mnemonic generation, validation and seed derivation.",
+    "written": "2026-08-26"
+  },
+  "kt:com.rjnr.pocketnode.data.wallet.SeedPhraseAuthorizer": {
+    "hash": "38867073a626",
+    "text": "Authorises sensitive actions by verifying the user's seed phrase.",
+    "written": "2026-08-26"
+  },
+  "kt:com.rjnr.pocketnode.data.wallet.SubAccountActivityProbe": {
+    "hash": "86d27940e90c",
+    "text": "Single-method probe answering whether a script has any on-chain activity.",
+    "written": "2026-08-26"
+  },
+  "kt:com.rjnr.pocketnode.data.wallet.SubAccountDiscovery": {
+    "hash": "255a4887523a",
+    "text": "Derives sub-account keys and scans for on-chain activity within the gap limit.",
+    "written": "2026-08-26"
+  },
+  "kt:com.rjnr.pocketnode.data.wallet.SubAccountReconciler": {
+    "hash": "19086c84b3ea",
+    "text": "Reconciles discovered sub-account candidates against confirmed wallet records.",
+    "written": "2026-08-26"
+  },
+  "kt:com.rjnr.pocketnode.data.wallet.WalletKeyWriter": {
+    "hash": "1fbeedab0a24",
+    "text": "Writes encrypted key material for a wallet into Room.",
+    "written": "2026-08-26"
+  },
+  "kt:com.rjnr.pocketnode.data.wallet.WalletPreferences": {
+    "hash": "4907bf3ff617",
+    "text": "SharedPreferences-backed settings: sync mode, network choice and block height.",
+    "written": "2026-08-26"
+  },
+  "kt:com.rjnr.pocketnode.data.wallet.WalletRepository": {
+    "hash": "9f5cf197b76d",
+    "text": "Multi-wallet CRUD: create, import, switch, delete and sub-accounts.",
+    "written": "2026-08-26"
+  },
+  "kt:com.rjnr.pocketnode.di.AppModule": {
+    "hash": "d80700f3ccef",
+    "text": "Hilt module providing every application singleton, the Room database and its DAOs.",
+    "written": "2026-08-26"
+  },
+  "kt:com.rjnr.pocketnode.ui.screens.activity.ActivityViewModel": {
+    "hash": "c0bed403b6df",
+    "text": "State for the activity/history screen.",
+    "written": "2026-08-26"
+  },
+  "kt:com.rjnr.pocketnode.ui.screens.auth.AuthViewModel": {
+    "hash": "8a54b18be037",
+    "text": "State for the biometric and device-credential unlock screen.",
+    "written": "2026-08-26"
+  },
+  "kt:com.rjnr.pocketnode.ui.screens.auth.ForgotPinViewModel": {
+    "hash": "fdada351764f",
+    "text": "Drives PIN recovery via seed phrase verification.",
+    "written": "2026-08-26"
+  },
+  "kt:com.rjnr.pocketnode.ui.screens.auth.PinViewModel": {
+    "hash": "2ec74ec9b5a9",
+    "text": "State for PIN entry, creation and confirmation.",
+    "written": "2026-08-26"
+  },
+  "kt:com.rjnr.pocketnode.ui.screens.contacts.AddContactViewModel": {
+    "hash": "a53eedeaca5c",
+    "text": "State for creating an address-book entry.",
+    "written": "2026-08-26"
+  },
+  "kt:com.rjnr.pocketnode.ui.screens.contacts.ContactDetailViewModel": {
+    "hash": "787dff283397",
+    "text": "State for viewing one contact, keyed by a nav argument.",
+    "written": "2026-08-26"
+  },
+  "kt:com.rjnr.pocketnode.ui.screens.contacts.ContactsViewModel": {
+    "hash": "b6740f420386",
+    "text": "State for the contacts list.",
+    "written": "2026-08-26"
+  },
+  "kt:com.rjnr.pocketnode.ui.screens.contacts.EditContactViewModel": {
+    "hash": "39f65ae2cc94",
+    "text": "State for editing an existing contact.",
+    "written": "2026-08-26"
+  },
+  "kt:com.rjnr.pocketnode.ui.screens.dao.DaoViewModel": {
+    "hash": "05adaf237b1e",
+    "text": "State for Nervos DAO: deposits, withdrawals and accrued compensation.",
+    "written": "2026-08-26"
+  },
+  "kt:com.rjnr.pocketnode.ui.screens.home.HomeViewModel": {
+    "hash": "396448def5be",
+    "text": "Balance refresh, sync polling and transaction fetching for the home screen.",
+    "written": "2026-08-26"
+  },
+  "kt:com.rjnr.pocketnode.ui.screens.onboarding.BackgroundSyncOptInViewModel": {
+    "hash": "8b4746c7c3b6",
+    "text": "State for the background-sync opt-in prompt.",
+    "written": "2026-08-26"
+  },
+  "kt:com.rjnr.pocketnode.ui.screens.onboarding.MnemonicBackupViewModel": {
+    "hash": "947eafe45165",
+    "text": "Drives seed-phrase display and the backup confirmation quiz.",
+    "written": "2026-08-26"
+  },
+  "kt:com.rjnr.pocketnode.ui.screens.onboarding.MnemonicImportViewModel": {
+    "hash": "411473300f8c",
+    "text": "Drives wallet import from a seed phrase.",
+    "written": "2026-08-26"
+  },
+  "kt:com.rjnr.pocketnode.ui.screens.onboarding.OnboardingViewModel": {
+    "hash": "3ecf12f827b0",
+    "text": "State for first-run wallet creation and sync-mode choice.",
+    "written": "2026-08-26"
+  },
+  "kt:com.rjnr.pocketnode.ui.screens.recovery.RecoveryViewModel": {
+    "hash": "9ae91e7db905",
+    "text": "Drives wallet recovery from the on-device key backup.",
+    "written": "2026-08-26"
+  },
+  "kt:com.rjnr.pocketnode.ui.screens.security.SecurityChecklistViewModel": {
+    "hash": "ae313db117d0",
+    "text": "State for the security checklist: PIN, biometrics and backup status.",
+    "written": "2026-08-26"
+  },
+  "kt:com.rjnr.pocketnode.ui.screens.send.SendViewModel": {
+    "hash": "9fc58943cd8f",
+    "text": "Transaction lifecycle: validate, build, send and poll status.",
+    "written": "2026-08-26"
+  },
+  "kt:com.rjnr.pocketnode.ui.screens.settings.SecuritySettingsViewModel": {
+    "hash": "3cda0c1f3639",
+    "text": "State for security settings changes.",
+    "written": "2026-08-26"
+  },
+  "kt:com.rjnr.pocketnode.ui.screens.settings.SettingsViewModel": {
+    "hash": "55c01a2e0ef5",
+    "text": "State for app settings, including network switching.",
+    "written": "2026-08-26"
+  },
+  "kt:com.rjnr.pocketnode.ui.screens.status.NodeStatusViewModel": {
+    "hash": "665c9837923c",
+    "text": "Exposes light-client node status: peers, tip height and sync progress.",
+    "written": "2026-08-26"
+  },
+  "kt:com.rjnr.pocketnode.ui.screens.wallet.AddWalletViewModel": {
+    "hash": "54c48eff8475",
+    "text": "State for adding a wallet or sub-account.",
+    "written": "2026-08-26"
+  },
+  "kt:com.rjnr.pocketnode.ui.screens.wallet.WalletManagerViewModel": {
+    "hash": "871ff3afd509",
+    "text": "State for the wallet list, switching and deletion.",
+    "written": "2026-08-26"
+  },
+  "kt:com.rjnr.pocketnode.ui.screens.wallet.WalletSettingsViewModel": {
+    "hash": "87099e008690",
+    "text": "State for one wallet's settings, keyed by a nav argument.",
+    "written": "2026-08-26"
+  },
+  "kt:com.rjnr.pocketnode.ui.update.UpdateBannerViewModel": {
+    "hash": "a496991ae346",
+    "text": "State for the in-app update banner and its download progress.",
+    "written": "2026-08-26"
+  },
+  "kt:com.rjnr.pocketnode.ui.util.Bip39WordList": {
+    "hash": "e2e74bdc672c",
+    "text": "The BIP39 English wordlist plus a set for fast membership checks.",
+    "written": "2026-08-26"
+  },
+  "rs:protocols::filter::block_filter::FilterProtocol": {
+    "hash": "a9161244617b",
+    "text": "Light-client block-filter protocol: requests filters and check points from peers.",
+    "written": "2026-08-26"
+  },
+  "rs:protocols::filter::components::block_filter_check_points_process::BlockFilterCheckPointsProcess": {
+    "hash": "92f83ec7172d",
+    "text": "Handles an incoming BlockFilterCheckPoints message.",
+    "written": "2026-08-26"
+  },
+  "rs:protocols::filter::components::block_filter_hashes_process::BlockFilterHashesProcess": {
+    "hash": "657ffeb0a2c4",
+    "text": "Handles an incoming BlockFilterHashes message.",
+    "written": "2026-08-26"
+  },
+  "rs:protocols::filter::components::block_filters_process::BlockFiltersProcess": {
+    "hash": "5abcd34bad49",
+    "text": "Handles an incoming BlockFilters message and matches them against watched scripts.",
+    "written": "2026-08-26"
+  },
+  "rs:protocols::light_client::LightClientProtocol": {
+    "hash": "25deaee3ec12",
+    "text": "Core light-client protocol driver: tracks peer last states and requests proofs.",
+    "written": "2026-08-26"
+  },
+  "rs:protocols::light_client::components::send_blocks_proof::SendBlocksProofProcess": {
+    "hash": "bd4700aa59c7",
+    "text": "Verifies a peer's blocks-proof response.",
+    "written": "2026-08-26"
+  },
+  "rs:protocols::light_client::components::send_last_state::SendLastStateProcess": {
+    "hash": "a10434b39331",
+    "text": "Handles a peer's last-state announcement.",
+    "written": "2026-08-26"
+  },
+  "rs:protocols::light_client::components::send_last_state_proof::SendLastStateProofProcess": {
+    "hash": "19536bd628ec",
+    "text": "Verifies a peer's proof for its claimed last state.",
+    "written": "2026-08-26"
+  },
+  "rs:protocols::light_client::components::send_transactions_proof::SendTransactionsProofProcess": {
+    "hash": "7e4b7b825db1",
+    "text": "Verifies a peer's transactions-proof response.",
+    "written": "2026-08-26"
+  },
+  "rs:protocols::light_client::peers::BlocksProofRequest": {
+    "hash": "6565999405c3",
+    "text": "An outstanding get-blocks-proof request and when it was sent.",
+    "written": "2026-08-26"
+  },
+  "rs:protocols::light_client::peers::BlocksRequest": {
+    "hash": "d375b59834db",
+    "text": "An outstanding block request, tracking which hashes have arrived.",
+    "written": "2026-08-26"
+  },
+  "rs:protocols::light_client::peers::CheckPoints": {
+    "hash": "364df1ae1726",
+    "text": "Sliding window of block-filter check points held for a peer.",
+    "written": "2026-08-26"
+  },
+  "rs:protocols::light_client::peers::FetchInfo": {
+    "hash": "48cfd83867b4",
+    "text": "Bookkeeping for one in-flight fetch, including when it was added.",
+    "written": "2026-08-26"
+  },
+  "rs:protocols::light_client::peers::LastState": {
+    "hash": "9ab07193eb74",
+    "text": "A peer's claimed chain tip as a verifiable header, with an update timestamp.",
+    "written": "2026-08-26"
+  },
+  "rs:protocols::light_client::peers::LatestBlockFilterHashes": {
+    "hash": "7e3f96ce9e87",
+    "text": "The most recent block-filter hashes tracked for a peer.",
+    "written": "2026-08-26"
+  },
+  "rs:protocols::light_client::peers::Peer": {
+    "hash": "84fe4589168c",
+    "text": "One peer's state, including its proof progress.",
+    "written": "2026-08-26"
+  },
+  "rs:protocols::light_client::peers::Peers": {
+    "hash": "f01c7e6e1fdd",
+    "text": "Registry of connected peers and their in-flight fetch requests.",
+    "written": "2026-08-26"
+  },
+  "rs:protocols::light_client::peers::ProveRequest": {
+    "hash": "941452b2983f",
+    "text": "An outstanding request for a peer to prove its last state.",
+    "written": "2026-08-26"
+  },
+  "rs:protocols::light_client::peers::ProveState": {
+    "hash": "f5b7042437bc",
+    "text": "A peer's proven state, including reorg headers.",
+    "written": "2026-08-26"
+  },
+  "rs:protocols::light_client::peers::TransactionsProofRequest": {
+    "hash": "b532c2f20a5f",
+    "text": "An outstanding get-transactions-proof request and when it was sent.",
+    "written": "2026-08-26"
+  },
+  "rs:protocols::status::Status": {
+    "hash": "3a3443d69cc6",
+    "text": "A StatusCode plus optional context, returned by message processors.",
+    "written": "2026-08-26"
+  },
+  "rs:protocols::status::StatusCode": {
+    "hash": "10008c915f8b",
+    "text": "Protocol result codes for message handling.",
+    "written": "2026-08-26"
+  },
+  "rs:protocols::synchronizer::SyncProtocol": {
+    "hash": "cc8cc0c6de93",
+    "text": "Header-sync protocol driver for the light client.",
+    "written": "2026-08-26"
+  },
+  "rs:rpc::Service": {
+    "hash": "af5ec8eceed2",
+    "text": "JSON-RPC service bound to the local listen address.",
+    "written": "2026-08-26"
+  },
+  "rs:storage::StorageWithChainData": {
+    "hash": "6aa9b41e2cb6",
+    "text": "Storage paired with peer and chain state, the handle most queries take.",
+    "written": "2026-08-26"
+  },
+  "rs:storage::WrappedBlockView": {
+    "hash": "fc38363940ee",
+    "text": "Block view wrapper with a hash-to-index map for fast lookup.",
+    "written": "2026-08-26"
+  },
+  "rs:storage::db::browser::CommunicationChannel": {
+    "hash": "8f44c33a26a5",
+    "text": "Browser-target shared-memory channel between the worker and the DB.",
+    "written": "2026-08-26"
+  },
+  "rs:storage::db::browser::Storage": {
+    "hash": "556f00b4b39b",
+    "text": "Browser-target storage backend driving the DB through a shared-memory channel.",
+    "written": "2026-08-26"
+  },
+  "rs:storage::db::native::Storage": {
+    "hash": "a51b6f57c809",
+    "text": "Native storage backend over RocksDB.",
+    "written": "2026-08-26"
+  },
+  "rs:storage::db::sqlite::Storage": {
+    "hash": "f85c2bc91972",
+    "text": "SQLite storage backend.",
+    "written": "2026-08-26"
+  },
+  "rs:tests::prelude::ChainExt": {
+    "hash": "e19928a81f38",
+    "text": "Test trait exposing storage and consensus from a chain.",
+    "written": "2026-08-26"
+  },
+  "rs:tests::prelude::FilterData": {
+    "hash": "8af1c1b4ab39",
+    "text": "Test helper mapping block hashes to transactions for filter tests.",
+    "written": "2026-08-26"
+  },
+  "rs:tests::prelude::RunningChainExt": {
+    "hash": "b83aeb79893a",
+    "text": "Test trait adding controller and shared access to a running chain.",
+    "written": "2026-08-26"
+  },
+  "rs:tests::prelude::SnapshotExt": {
+    "hash": "524e3e21c41c",
+    "text": "Test trait adding header-by-number lookups to a snapshot.",
+    "written": "2026-08-26"
+  },
+  "rs:tests::utils::chain::MockChain": {
+    "hash": "b87ed499df05",
+    "text": "In-memory chain used by the Rust test suite.",
+    "written": "2026-08-26"
+  },
+  "rs:tests::utils::network_context::MockNetworkContext": {
+    "hash": "c8602dac33ef",
+    "text": "Test network context wrapping MockProtocolContext.",
+    "written": "2026-08-26"
+  },
+  "rs:tests::utils::network_context::MockProtocolContext": {
+    "hash": "de5bcc5d66d2",
+    "text": "Test double recording protocol messages sent by a handler.",
+    "written": "2026-08-26"
+  },
+  "rs:verify::ContextualTransactionVerifier": {
+    "hash": "ef97dc739709",
+    "text": "Verifies a transaction against chain context: cell data, headers and extensions.",
+    "written": "2026-08-26"
+  },
+  "rs:verify::MinFeeVerifier": {
+    "hash": "779d3b0c3c11",
+    "text": "Rejects transactions below the configured minimum fee rate.",
+    "written": "2026-08-26"
+  }
+}

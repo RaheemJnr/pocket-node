@@ -172,3 +172,38 @@ dialog {
 dialog::backdrop { background: rgba(0,0,0,0.45); }
 dialog h3 { margin: 0 0 10px; font-size: 14px; }
 dialog ol { margin: 0; padding-left: 20px; font-family: var(--mono); font-size: 12px; line-height: 1.7; }
+
+
+#tooltip {
+  position: absolute;
+  z-index: 20;
+  max-width: 340px;
+  pointer-events: none;
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 10px 12px;
+  box-shadow: 0 4px 18px rgba(0,0,0,0.28);
+  font-size: 12px;
+  line-height: 1.5;
+}
+#tooltip .tt-name { font-weight: 600; font-size: 13px; word-break: break-word; }
+#tooltip .tt-sig {
+  font-family: var(--mono); font-size: 11px; color: var(--muted);
+  word-break: break-all; margin-top: 1px;
+}
+#tooltip .tt-what { margin-top: 7px; }
+#tooltip .tt-what.stale { color: var(--muted); font-style: italic; }
+#tooltip .tt-src { color: var(--fg); }
+#tooltip .tt-none { color: var(--muted); font-style: italic; margin-top: 7px; }
+#tooltip .tt-tag {
+  display: inline-block; font-family: var(--mono); font-size: 9px;
+  text-transform: uppercase; letter-spacing: 0.05em;
+  color: var(--muted); border: 1px solid var(--border);
+  border-radius: 3px; padding: 0 4px; margin-right: 5px;
+}
+#tooltip .tt-facts {
+  margin-top: 8px; padding-top: 7px; border-top: 1px solid var(--border);
+  font-family: var(--mono); font-size: 10.5px; color: var(--muted);
+}
+#tooltip .tt-hint { margin-top: 6px; font-size: 10px; color: var(--muted); }
