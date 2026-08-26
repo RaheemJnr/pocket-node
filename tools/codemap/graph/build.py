@@ -12,6 +12,7 @@ from pathlib import Path
 from extract.kotlin import extract_kotlin
 from extract.model import RawFile
 from extract.rust import extract_rust
+from extract.swift import extract_swift
 from extract.ts_api import EXT_TO_LANG
 
 from .graph import Graph, Node
@@ -105,6 +106,8 @@ def extract_all(root: Path, paths: list[Path] | None = None) -> list[RawFile]:
                 files.append(extract_kotlin(p, rel))
             elif p.suffix == ".rs":
                 files.append(extract_rust(p, rel))
+            elif p.suffix == ".swift":
+                files.append(extract_swift(p, rel))
         except Exception as exc:  # one bad file must not abort the run
             files.append(RawFile(path=rel, lang="unknown", module="", parse_error=True))
             print(f"  warning: {rel}: {exc}")
@@ -126,6 +129,7 @@ def build_full_graph(root: Path, rules_dir: Path | None = None) -> Graph:
     g.stats["parse_errors"] = [f.path for f in files if f.parse_error]
 
     bridge_pass.apply(g, files)
+    bridge_pass.apply_uniffi(g, files)
     calls_pass.apply(g, files)
     semantic_pass.apply(g, files)
     layers_pass.apply(g, rules / "layers.yaml")

@@ -1,0 +1,51 @@
+name: Codemap structure
+
+# Structural invariants over the codebase graph: the JNI/UniFFI bridges stay
+# paired, no layering violations appear, no new files fail to parse, and call
+# resolution does not silently degrade.
+#
+# Deliberately narrow. A red build here must always mean something actually
+# broke, never a style disagreement.
+
+on:
+  pull_request:
+    paths:
+      - 'android/**'
+      - 'external/**'
+      - 'ios/**'
+      - 'tools/codemap/**'
+  workflow_dispatch:
+
+jobs:
+  structure:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: pip
+          cache-dependency-path: tools/codemap/requirements.txt
+
+      - name: Install codemap dependencies
+        run: pip install -r tools/codemap/requirements.txt
+
+      - name: Unit tests
+        run: cd tools/codemap && python -m pytest tests/ -q
+
+      - name: Structural checks
+        run: cd tools/codemap && python codemap.py --check
+
+      - name: Bridge diagram for the PR
+        if: always()
+        run: |
+          cd tools/codemap
+          python codemap.py --mermaid /tmp/bridge.mmd --focus nativeGetCells --depth-hops 1 >/dev/null
+          {
+            echo '### Codemap: JNI bridge neighbourhood'
+            echo '```mermaid'
+            cat /tmp/bridge.mmd
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"

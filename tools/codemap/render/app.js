@@ -26,11 +26,13 @@
     jni:    { layers: ["jni"] },
     kotlin: { layers: ["data", "domain", "di", "util"] },
     ui:     { layers: ["viewmodel", "ui", "app"] },
+    swift:  { layers: ["ios-core", "ios-ui"] },
   };
   const TIER_OF = {};
   for (const [t, def] of Object.entries(TIERS)) for (const l of def.layers) TIER_OF[l] = t;
 
-  const LANE_ORDER = ["rust-core", "jni", "data", "domain", "di", "util", "viewmodel", "ui", "app"];
+  const LANE_ORDER = ["rust-core", "jni", "uniffi", "data", "domain", "di", "util",
+                      "viewmodel", "ui", "app", "ios-core", "ios-ui"];
 
   const state = {
     depth: "type",
@@ -197,6 +199,7 @@
       { selector: 'node[tier="jni"]',    style: { "background-color": "#e34948", shape: "hexagon" } },
       { selector: 'node[tier="kotlin"]', style: { "background-color": "#1baf7a", shape: "ellipse" } },
       { selector: 'node[tier="ui"]',     style: { "background-color": "#008300", shape: "round-rectangle" } },
+      { selector: 'node[tier="swift"]',  style: { "background-color": "#eb6834", shape: "triangle" } },
       {
         selector: 'node[kind="layer"]',
         style: {

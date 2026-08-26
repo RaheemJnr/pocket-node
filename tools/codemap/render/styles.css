@@ -162,6 +162,7 @@ main { display: flex; flex: 1; min-height: 0; }
 .sw.tier-jni { background: #e34948; border-radius: 2px; }
 .sw.tier-kotlin { background: #1baf7a; border-radius: 50%; }
 .sw.tier-ui { background: #008300; border-radius: 3px; }
+.sw.tier-swift { background: #eb6834; border-radius: 0; clip-path: polygon(50% 0, 100% 100%, 0 100%); }
 #legend-tier, #legend-kmp { margin-left: auto; }
 
 dialog {

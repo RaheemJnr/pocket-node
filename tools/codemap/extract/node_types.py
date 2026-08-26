@@ -89,3 +89,40 @@ class RS:
 
     #: Node types that declare a named type.
     TYPE_DECLS = (STRUCT, ENUM, TRAIT)
+
+
+class SW:
+    """Swift, from tree-sitter-swift 0.7.3.
+
+    `class_declaration` covers struct, class, enum AND extension; for an
+    extension the name field carries the extended type. Call and
+    navigation expressions share the Kotlin grammar's names.
+    """
+    SOURCE = "source_file"
+
+    IMPORT = "import_declaration"
+
+    CLASS = "class_declaration"          # struct, class, enum, extension
+    PROTOCOL = "protocol_declaration"
+    FUNCTION = "function_declaration"
+    PROTOCOL_FUNCTION = "protocol_function_declaration"
+    PROPERTY = "property_declaration"
+
+    CLASS_BODY = "class_body"
+    FUNCTION_BODY = "function_body"
+
+    PARAMS = "parameter"
+    MODIFIERS = "modifiers"
+    ATTRIBUTE = "attribute"
+
+    CALL = "call_expression"
+    NAVIGATION = "navigation_expression"
+
+    IDENT = "simple_identifier"
+    TYPE_IDENT = "type_identifier"
+    USER_TYPE = "user_type"
+
+    LINE_COMMENT = "comment"
+    BLOCK_COMMENT = "multiline_comment"
+
+    TYPE_DECLS = (CLASS, PROTOCOL)

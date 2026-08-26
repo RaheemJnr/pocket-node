@@ -162,11 +162,62 @@ cd tools/codemap && .venv/bin/python -m pytest tests/ -v
 including one live invariant: every `external fun` pairs to a Rust symbol and vice versa
 (currently 24 ↔ 24, zero orphans).
 
-## Adding iOS
+## iOS and UniFFI
 
-The Swift grammar is already pinned. When `ios/` exists, add a `extract/swift.py` producing
-`RawFile`, plus entries in `rules/layers.yaml`. Nothing else changes -- the graph, overlay
-and renderer are language-agnostic by construction.
+Swift extraction and UniFFI bridge stitching are already in place, built before `ios/`
+exists so the map is correct from the first commit rather than retrofitted.
+
+One graph spans both platforms:
+
+```
+Rust core --JNI-->    Kotlin --> Compose
+          --UniFFI--> Swift  --> SwiftUI
+```
+
+`graph/bridge.py` carries two pairing schemes. JNI matches a Kotlin `external fun`
+to its mangled `Java_com_*` symbol. UniFFI matches a Rust `#[uniffi::export]`
+function to the Swift call site of its generated binding, applying UniFFI's
+snake_case-to-camelCase conversion (`get_cell_count` becomes `getCellCount`).
+
+The generated Swift bindings are build artifacts and are not in the repository, so
+the edge runs from the Swift function that *calls* the binding straight to the Rust
+function behind it. Orphans are reported on both sides: an `#[uniffi::export]` no
+Swift code calls, or a Swift call to a binding with no Rust export.
+
+Swift nodes render as orange triangles. `rules/layers.yaml` already carries
+`uniffi`, `ios-core` and `ios-ui` lanes.
+
+## CI
+
+```bash
+./tools/codemap/run.sh --check
+```
+
+Exits non-zero on any structural regression. Four invariants, configured in
+`rules/checks.yaml`:
+
+| Check | Fails when |
+|---|---|
+| `bridges_paired` | a JNI or UniFFI symbol loses its counterpart on either side |
+| `no_layer_violations` | a lower layer starts depending on a higher one (leaf layers exempt) |
+| `parse_errors` | a file outside the allow-list stops parsing |
+| `unresolved_rate` | call resolution degrades past the configured ceiling |
+
+Deliberately narrow: a red build must always mean something genuinely broke, never a
+style disagreement. `.github/workflows/codemap.yml` runs it on PRs touching
+`android/`, `external/`, `ios/` or the tool itself, and posts a bridge diagram to the
+run summary.
+
+## Exports
+
+```bash
+./tools/codemap/run.sh --mermaid out/bridge.mmd --focus nativeGetCells --depth-hops 1
+```
+
+Writes a Mermaid flowchart of one node's neighbourhood, grouped into layer subgraphs
+with bridge edges drawn thick. Mermaid rather than an image because it renders
+natively on GitHub, stays diffable in review, and needs no toolchain. Omit `--focus`
+for the most-connected nodes at a given level.
 
 ## Known limitations
 

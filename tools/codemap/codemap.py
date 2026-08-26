@@ -66,6 +66,11 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--stats-only", action="store_true", help="skip HTML generation")
     ap.add_argument("--watch", action="store_true", help="rebuild on source change")
     ap.add_argument("--serve", type=int, metavar="PORT", help="serve out/ on localhost")
+    ap.add_argument("--check", action="store_true",
+                    help="run structural invariants and exit non-zero on failure (CI)")
+    ap.add_argument("--mermaid", metavar="FILE", help="write a Mermaid subgraph")
+    ap.add_argument("--focus", metavar="NODE", help="node id or name to centre --mermaid on")
+    ap.add_argument("--depth-hops", type=int, default=1, help="hops around --focus")
     ap.add_argument("--emit-summary-requests", action="store_true")
     ap.add_argument("--import-summaries", metavar="FILE")
     args = ap.parse_args(argv)
@@ -79,7 +84,23 @@ def main(argv: list[str] | None = None) -> int:
         print(f"imported {n} summaries")
         return 0
 
-    data = build(root, out, write_html=not args.stats_only)
+    if args.check:
+        return _check(root)
+
+    data = build(root, out, write_html=not args.stats_only or args.mermaid is not None)
+
+    if args.mermaid:
+        from render.export import to_mermaid
+        focus = args.focus
+        if focus and focus not in {n["id"] for n in data["nodes"]}:
+            matches = [n["id"] for n in data["nodes"] if n["name"] == focus]
+            if not matches:
+                print(f"no node named {focus!r}")
+                return 2
+            focus = matches[0]
+        Path(args.mermaid).write_text(to_mermaid(data, focus=focus, depth=args.depth_hops))
+        print(f"wrote Mermaid to {args.mermaid}")
+        return 0
 
     if args.emit_summary_requests:
         from summaries.requests import emit_requests_file
@@ -91,6 +112,37 @@ def main(argv: list[str] | None = None) -> int:
         _serve(out, args.serve)
     if args.watch:
         _watch(root, out, args)
+    return 0
+
+
+def _check(root: Path) -> int:
+    """Structural invariants for CI. Prints every failure, then exits."""
+    import yaml
+    from graph.checks import run_all
+
+    cfg_path = HERE / "rules" / "checks.yaml"
+    cfg = yaml.safe_load(cfg_path.read_text()) if cfg_path.exists() else {}
+    g = build_full_graph(root)
+    results = run_all(g, cfg or {})
+
+    failures = 0
+    for name, msgs in results.items():
+        if msgs:
+            failures += len(msgs)
+            print(f"FAIL {name}")
+            for m in msgs:
+                print(f"       {m}")
+        else:
+            print(f"ok   {name}")
+
+    b = g.stats.get("bridge", {})
+    print(f"\n     JNI pairs {b.get('paired', 0)} · "
+          f"unresolved {g.stats.get('unresolved_calls', {}).get('rate', 0):.1%} · "
+          f"nodes {len(g.nodes)}")
+    if failures:
+        print(f"\n{failures} structural check failure(s)")
+        return 1
+    print("\nall structural checks passed")
     return 0
 
 

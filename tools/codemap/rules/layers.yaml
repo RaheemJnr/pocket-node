@@ -7,6 +7,21 @@ layers:
     label: JNI bridge
     match: ["**/jni_bridge/**", "**/ckblightclient/**"]
 
+  - id: uniffi
+    order: 1
+    label: UniFFI bridge
+    match: ["**/uniffi*/**", "**/*_uniffi.rs", "**/uniffi_api.rs", "**/*.udl"]
+
+  - id: ios-core
+    order: 6
+    label: iOS core
+    match: ["ios/**/Core/**", "ios/**/Services/**", "**/*.swift"]
+
+  - id: ios-ui
+    order: 7
+    label: iOS UI
+    match: ["ios/**/Views/**", "ios/**/*View.swift", "ios/**/*Screen.swift"]
+
   - id: rust-core
     order: 0
     label: Rust core
