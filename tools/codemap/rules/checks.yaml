@@ -1,0 +1,17 @@
+# CI invariants. Conservative by design: a red build must always mean
+# something genuinely broke, never a style disagreement.
+
+# Files known to trip a grammar edge case. Adding one here is a decision,
+# not a shrug -- see KNOWN_LIMITATIONS.md for why this one is listed.
+allow_parse_errors:
+  - android/app/src/main/java/com/rjnr/pocketnode/data/wallet/WalletKeyReader.kt
+
+# Guards against the resolver silently degrading. The measured rate was
+# 9.8% when this was set; the ceiling leaves headroom without hiding a
+# real regression.
+unresolved_ceiling: 0.20
+
+# A Rust `#[uniffi::export]` with no Swift caller is a dead cross-platform
+# edge. Set false during early iOS work if exports legitimately land before
+# their callers.
+flag_unused_uniffi_exports: true

@@ -1,0 +1,96 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Pocket Node Codemap</title>
+<style>/*STYLES*/</style>
+</head>
+<body>
+<div id="app">
+  <header id="topbar">
+    <div class="brand">
+      <strong>Codemap</strong>
+      <span class="meta" id="meta"></span>
+    </div>
+    <div class="controls">
+      <div class="group">
+        <button id="layout-lanes" class="active" title="One column per architectural layer, left to right.">Lanes</button>
+        <button id="layout-force" title="Physics layout: coupled things sit near each other, hubs stand out.">Force</button>
+      </div>
+      <div class="group">
+        <label for="depth" title="Which unit to draw. Only this level is drawn; deeper edges lift to what is visible.">Show</label>
+        <select id="depth">
+          <option value="module">Modules</option>
+          <option value="file">Files</option>
+          <option value="type" selected>Types</option>
+          <option value="function">Functions</option>
+        </select>
+      </div>
+      <div class="group">
+        <label for="node-size">Size</label>
+        <input type="range" id="node-size" min="0.6" max="3" step="0.1" value="1.2">
+      </div>
+      <div class="group">
+        <label title="An orphan has no connections at the level you are viewing — not dead code. Sealed variants and leaf helpers are typically orphans."><input type="checkbox" id="hide-orphans" checked> Hide orphans</label>
+        <label title="Draw a labelled box around each architectural layer."><input type="checkbox" id="group-layer" checked> Group</label>
+      </div>
+      <div class="group">
+        <label title="Colour Kotlin nodes by portability to commonMain: green ready, amber needs expect/actual, red androidMain only."><input type="checkbox" id="kmp-overlay"> KMP</label>
+        <label title="Show only backward edges: a lower layer depending on a higher one. Leaf layers such as Util are exempt."><input type="checkbox" id="violations-only"> Violations</label>
+      </div>
+      <div class="group">
+        <input type="search" id="search" placeholder="Search name…" autocomplete="off">
+        <span id="search-count" class="meta"></span>
+      </div>
+      <div class="group">
+        <button id="reset">Reset</button>
+        <button id="help" title="What do these controls mean?" aria-label="Help">?</button>
+      </div>
+    </div>
+  </header>
+
+  <main>
+    <div id="canvas">
+      <div id="cy"></div>
+      <div id="tooltip" hidden></div>
+      <div id="zoom-controls">
+        <button id="zoom-in" title="Zoom in (+)" aria-label="Zoom in">+</button>
+        <button id="zoom-out" title="Zoom out (−)" aria-label="Zoom out">&minus;</button>
+        <button id="zoom-fit" title="Fit to view (0)" aria-label="Fit to view">⤢</button>
+        <span id="zoom-level" title="Current zoom">100%</span>
+      </div>
+    </div>
+    <aside id="panel">
+      <div id="panel-empty" class="panel-empty">
+        <p>Click a node to inspect it.</p>
+        <p class="hint">Selecting highlights everything upstream (callers) and downstream (callees). Double-click to expand a node's children. <strong>Lanes</strong> shows architecture order; <strong>Force</strong> shows real coupling.</p>
+      </div>
+      <div id="panel-body" hidden></div>
+    </aside>
+  </main>
+
+  <footer id="statusbar">
+    <span id="counts"></span>
+    <button id="chip-unresolved" class="chip" title="Calls whose receiver type we knew but whose method we could not locate"></button>
+    <button id="chip-violations" class="chip" title="Edges where a lower layer depends on a higher one"></button>
+    <span id="legend-tier" class="legend">
+      <span class="sw tier-rust"></span>Rust
+      <span class="sw tier-jni"></span>JNI
+      <span class="sw tier-kotlin"></span>Kotlin
+      <span class="sw tier-ui"></span>UI
+      <span class="sw tier-swift"></span>Swift
+    </span>
+    <span id="legend-kmp" class="legend" hidden>
+      <span class="sw green"></span>commonMain
+      <span class="sw amber"></span>expect/actual
+      <span class="sw red"></span>androidMain
+    </span>
+  </footer>
+</div>
+
+<script type="application/json" id="codemap-data">/*DATA*/</script>
+<script>/*VENDOR*/</script>
+<script>/*APP*/</script>
+</body>
+</html>
