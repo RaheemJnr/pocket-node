@@ -1,0 +1,52 @@
+# First match wins. Order the list most-specific first.
+# `order` drives left-to-right lane placement in the layered layout, and
+# defines what counts as a backward (violating) edge.
+layers:
+  - id: jni
+    order: 1
+    label: JNI bridge
+    match: ["**/jni_bridge/**", "**/ckblightclient/**"]
+
+  - id: rust-core
+    order: 0
+    label: Rust core
+    match: ["external/**"]
+
+  - id: viewmodel
+    order: 4
+    label: ViewModel
+    match: ["**/*ViewModel.kt"]
+
+  - id: di
+    order: 3
+    label: DI
+    match: ["**/di/**"]
+
+  - id: data
+    order: 2
+    label: Data
+    match:
+      - "**/data/database/**"
+      - "**/data/crypto/**"
+      - "**/data/wallet/**"
+      - "**/data/migration/**"
+
+  - id: domain
+    order: 3
+    label: Repository
+    match: ["**/data/**"]
+
+  - id: util
+    order: 5
+    label: Util
+    match: ["**/util/**"]
+
+  - id: ui
+    order: 5
+    label: UI
+    match: ["**/ui/**"]
+
+  - id: app
+    order: 6
+    label: App
+    match: ["**/*.kt"]

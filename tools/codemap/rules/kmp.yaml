@@ -1,0 +1,49 @@
+# Import-prefix -> portability class. Longest matching prefix wins.
+#
+# Starting assumptions, not settled truth. Room 2.8.4 is multiplatform-capable
+# but this project's usage has not been audited for it, so it starts amber.
+# secp256k1-kmp is already multiplatform. Revise as the migration teaches you
+# things -- that is why these live in YAML rather than in code.
+
+red:
+  - android.
+  - androidx.compose.
+  - androidx.activity.
+  - androidx.camera.
+  - androidx.lifecycle.
+  - androidx.work.
+  - androidx.biometric.
+  - androidx.navigation.
+  - androidx.core.
+  - dagger.hilt.android.
+  - com.google.mlkit.
+  - com.google.android.
+
+amber:
+  - androidx.room.
+  - androidx.datastore.
+  - androidx.security.
+  - javax.crypto.
+  - java.security.
+  - org.nervos.ckb.
+
+green:
+  - kotlin.
+  - kotlinx.
+  - java.math.
+  - java.util.
+  - javax.inject.
+  - fr.acinq.secp256k1.
+  - org.bouncycastle.
+  - com.rjnr.pocketnode.
+  - com.nervosnetwork.
+  - com.example.
+
+# Package-independent markers. These beat prefix matching, because a JNI
+# declaration or a Composable is Android-bound regardless of what it imports.
+markers:
+  red_modifiers: [external]
+  red_annotations: [Composable, AndroidEntryPoint, HiltAndroidApp, Dao, Entity, Database]
+
+# A green declaration that calls an amber or red one cannot move alone.
+propagate: true
