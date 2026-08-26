@@ -215,3 +215,7 @@ dialog ol { margin: 0; padding-left: 20px; font-family: var(--mono); font-size: 
 .help-dialog dt { font-weight: 600; margin-top: 12px; font-size: 13px; }
 .help-dialog dd { margin: 3px 0 0; color: var(--muted); font-size: 12.5px; line-height: 1.55; }
 .help-close { margin: 18px 0 0; font-size: 11px; color: var(--muted); text-align: right; }
+
+#tooltip .tt-why { margin-top: 7px; font-size: 11.5px; }
+.issue-links a { color: var(--accent); text-decoration: none; font-family: var(--mono); margin-right: 8px; }
+.issue-links a:hover { text-decoration: underline; }

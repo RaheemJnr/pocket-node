@@ -120,6 +120,7 @@ def build_full_graph(root: Path, rules_dir: Path | None = None) -> Graph:
     from . import bridge as bridge_pass
     from . import calls as calls_pass
     from . import kmp as kmp_pass
+    from . import issues as issues_pass
     from . import layers as layers_pass
 
     rules = rules_dir or (Path(__file__).resolve().parent.parent / "rules")
@@ -134,4 +135,5 @@ def build_full_graph(root: Path, rules_dir: Path | None = None) -> Graph:
     semantic_pass.apply(g, files)
     layers_pass.apply(g, rules / "layers.yaml")
     kmp_pass.apply(g, files, rules / "kmp.yaml")
+    issues_pass.apply(g, files, root)
     return g

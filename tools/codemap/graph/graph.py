@@ -32,6 +32,9 @@ class Node:
     signature: str = ""
     doc: str = ""
     bridge_symbol: str = ""
+    kmp_reason: str = ""        # human-readable cause of this node's class
+    kmp_via: str = ""           # node id this was inherited from, if propagated
+    issues: list[str] = field(default_factory=list)
 
 
 @dataclass

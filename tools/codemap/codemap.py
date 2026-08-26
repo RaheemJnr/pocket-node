@@ -71,6 +71,10 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--mermaid", metavar="FILE", help="write a Mermaid subgraph")
     ap.add_argument("--focus", metavar="NODE", help="node id or name to centre --mermaid on")
     ap.add_argument("--depth-hops", type=int, default=1, help="hops around --focus")
+    ap.add_argument("--plan", metavar="NAME", help="extraction plan for moving NAME to commonMain")
+    ap.add_argument("--why", metavar="NAME", help="explain a node's KMP classification")
+    ap.add_argument("--cycles", action="store_true", help="report dependency cycles")
+    ap.add_argument("--cycle-kind", default="type", choices=["type", "module", "file"])
     ap.add_argument("--emit-summary-requests", action="store_true")
     ap.add_argument("--import-summaries", metavar="FILE")
     args = ap.parse_args(argv)
@@ -86,6 +90,9 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.check:
         return _check(root)
+
+    if args.plan or args.why or args.cycles:
+        return _analyse(root, args)
 
     data = build(root, out, write_html=not args.stats_only or args.mermaid is not None)
 
@@ -112,6 +119,45 @@ def main(argv: list[str] | None = None) -> int:
         _serve(out, args.serve)
     if args.watch:
         _watch(root, out, args)
+    return 0
+
+
+def _resolve(g, name: str):
+    hits = [n for n in g.nodes.values() if n.id == name or n.name == name]
+    if not hits:
+        print(f"no node named {name!r}")
+        return None
+    hits.sort(key=lambda n: (n.kind != "type", n.name))
+    if len(hits) > 1:
+        print(f"note: {len(hits)} nodes named {name!r}; using {hits[0].kind} in {hits[0].file}\n")
+    return hits[0]
+
+
+def _analyse(root: Path, args) -> int:
+    from graph.cycles import find_cycles, format_cycles
+    from graph.explain import explain_kmp
+    from graph.planner import format_plan, plan
+
+    g = build_full_graph(root)
+
+    if args.cycles:
+        print(format_cycles(g, find_cycles(g, args.cycle_kind)))
+    if args.why:
+        n = _resolve(g, args.why)
+        if n is None:
+            return 2
+        e = explain_kmp(g, n.id)
+        print(f"{n.name}  [{e['kmp']}]  {n.file}:{n.start_line}")
+        print(f"  {e['summary']}")
+        if len(e["chain"]) > 1:
+            print("\n  chain:")
+            for step in e["chain"]:
+                print(f"    {step['name']:<34} {step['kmp']:<6} {step['reason']}")
+    if args.plan:
+        n = _resolve(g, args.plan)
+        if n is None:
+            return 2
+        print(format_plan(plan(g, n.id)))
     return 0
 
 

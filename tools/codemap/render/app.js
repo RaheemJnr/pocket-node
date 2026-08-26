@@ -151,7 +151,7 @@
       const parent = state.groupByLayer ? "layer:" + n.layer : null;
       if (parent) lanes.add(n.layer);
       nodeEls.push({ data: { id: id, label: n.name, kind: n.kind, lang: n.lang,
-                             layer: n.layer, kmp: n.kmp,
+                             layer: n.layer, kmp: n.kmp, issues: (n.issues || []).length,
                              tier: TIER_OF[n.layer] || "kotlin", parent: parent } });
     }
 
@@ -387,6 +387,24 @@
       ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
   }
 
+  /* Follows kmp_via to the root cause, so the panel says WHICH call made
+   * a node amber rather than only that it is. */
+  function kmpChain(n) {
+    if (n.kmp === "green") return "Nothing platform-specific here; it can move to commonMain as-is.";
+    const steps = [];
+    const seen = new Set();
+    let cur = n;
+    while (cur && !seen.has(cur.id) && steps.length < 8) {
+      seen.add(cur.id);
+      steps.push(cur);
+      cur = cur.kmp_via ? NODES.get(cur.kmp_via) : null;
+    }
+    if (steps.length === 1) return n.name + " " + (n.kmp_reason || "is platform-bound") + ".";
+    const root = steps[steps.length - 1];
+    return steps.map((s) => s.name).join(" → ") + ". Root cause: "
+         + root.name + " " + (root.kmp_reason || "is platform-bound") + ".";
+  }
+
   function renderPanel(id, upCount, downCount) {
     const n = NODES.get(id);
     const inN = neighbours(id, "in");
@@ -406,6 +424,20 @@
             + (stale ? " stale" : "") + '">' + esc(summary.text) + "</div>";
       if (stale) html += '<span class="badge-stale">stale &mdash; code changed since written</span>';
       html += "</div>";
+    }
+
+    if (n.kmp && n.kmp !== "unknown") {
+      html += '<div class="tier"><div class="tier-label">Why ' + esc(n.kmp) + '</div>'
+            + '<div class="tier-body">' + esc(kmpChain(n)) + "</div></div>";
+    }
+
+    if (n.issues && n.issues.length) {
+      const base = (DATA.stats.issues || {}).repo_url || "";
+      const links = n.issues.map((i) => base
+        ? '<a href="' + esc(base) + "/issues/" + esc(i) + '" target="_blank" rel="noopener">#' + esc(i) + "</a>"
+        : "#" + esc(i)).join(" ");
+      html += '<div class="tier"><div class="tier-label">Issues</div><div class="tier-body issue-links">'
+            + links + "</div></div>";
     }
 
     html += '<div class="tier"><div class="tier-label">Evidence</div><dl class="facts">'
@@ -526,6 +558,11 @@
          + (stale ? "stale" : "generated") + "</span>" + esc(summary.text) + "</div>";
     } else {
       h += '<div class="tt-none">No description recorded.</div>';
+    }
+
+    if (n.kmp_reason && n.kmp !== "unknown") {
+      h += '<div class="tt-why"><span class="tt-tag">' + esc(n.kmp) + "</span>"
+         + esc(n.kmp_reason) + "</div>";
     }
 
     const inN = neighbours(n.id, "in").length;

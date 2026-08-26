@@ -63,8 +63,14 @@ def apply(g: Graph, files: list[RawFile], rules_path: Path) -> None:
             if node is None:
                 continue
 
-            if red_mods & set(d.modifiers) or red_anns & set(d.annotations):
+            hit_mod = red_mods & set(d.modifiers)
+            hit_ann = red_anns & set(d.annotations)
+            if hit_mod or hit_ann:
                 node.kmp = "red"
+                node.kmp_reason = (
+                    f"declared `{sorted(hit_mod)[0]}`" if hit_mod
+                    else f"annotated `@{sorted(hit_ann)[0]}`"
+                )
                 continue
 
             # Only what THIS declaration references. `local_types` is the
@@ -73,21 +79,23 @@ def apply(g: Graph, files: list[RawFile], rules_path: Path) -> None:
             # Context-holding class red -- which is exactly the conflation
             # function-level extraction exists to avoid.
             worst = 0
+            cause = ""
             declared = set(d.param_types) | set(d.supertypes) | set(d.annotations)
             for name in declared:
                 fqn = import_by_simple.get(name)
                 if fqn:
                     cls = _classify_ref(fqn, rules)
-                    if cls:
-                        worst = max(worst, RANK[cls])
+                    if cls and RANK[cls] > worst:
+                        worst, cause = RANK[cls], f"references `{fqn}` in its signature"
             for simple, fqn in import_by_simple.items():
                 if simple in declared:
                     continue
                 if _mentions(d.source, simple):
                     cls = _classify_ref(fqn, rules)
-                    if cls:
-                        worst = max(worst, RANK[cls])
+                    if cls and RANK[cls] > worst:
+                        worst, cause = RANK[cls], f"uses `{fqn}`"
             node.kmp = UNRANK[worst]
+            node.kmp_reason = cause or "references nothing platform-specific"
 
     # types with no direct evidence inherit the file's worst import class,
     # since a class holding a Context is Android-bound even if the property
@@ -106,6 +114,8 @@ def apply(g: Graph, files: list[RawFile], rules_path: Path) -> None:
             if node is not None and RANK.get(node.kmp, 0) < file_worst:
                 if file_worst == RANK["red"] and _touches(d, rf, rules):
                     node.kmp = "red"
+                    if not node.kmp_reason:
+                        node.kmp_reason = "holds a platform-specific type"
 
     # -- stage 2: propagation --------------------------------------------
     if not rules.get("propagate"):
@@ -129,9 +139,13 @@ def apply(g: Graph, files: list[RawFile], rules_path: Path) -> None:
                     continue
                 if target.kmp in ("amber", "red") and node.kmp == "green":
                     node.kmp = "amber"
+                    node.kmp_reason = f"calls `{target.name}`, which is {target.kmp}"
+                    node.kmp_via = target.id
                     changed = True
                 elif target.lang == "rust" and node.kmp == "green":
                     node.kmp = "amber"
+                    node.kmp_reason = f"crosses the bridge into Rust via `{target.name}`"
+                    node.kmp_via = target.id
                     changed = True
         if not changed:
             break
