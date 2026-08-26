@@ -45,6 +45,7 @@ class KT:
 
     MODIFIERS = "modifiers"
     ANNOTATION = "annotation"
+    DELEGATION_LIST = "delegation_specifiers"
     DELEGATION = "delegation_specifier"
 
     CALL = "call_expression"
