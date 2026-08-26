@@ -129,6 +129,12 @@ main { display: flex; flex: 1; min-height: 0; }
 .sw.green { background: var(--green); }
 .sw.amber { background: var(--amber); }
 .sw.red { background: var(--red); }
+/* tier swatches: shape is the secondary cue in the graph, colour here */
+.sw.tier-rust { background: #2a78d6; border-radius: 0; transform: rotate(45deg); }
+.sw.tier-jni { background: #e34948; border-radius: 2px; }
+.sw.tier-kotlin { background: #1baf7a; border-radius: 50%; }
+.sw.tier-ui { background: #008300; border-radius: 3px; }
+#legend-tier, #legend-kmp { margin-left: auto; }
 
 dialog {
   border: 1px solid var(--border); border-radius: 10px;

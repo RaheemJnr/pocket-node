@@ -15,32 +15,35 @@
     </div>
     <div class="controls">
       <div class="group">
-        <button id="layout-layered" class="active">Layered</button>
+        <button id="layout-lanes" class="active">Lanes</button>
         <button id="layout-force">Force</button>
       </div>
       <div class="group">
-        <label for="depth">Depth</label>
+        <label for="depth">Show</label>
         <select id="depth">
-          <option value="module">Module</option>
-          <option value="type" selected>Type</option>
-          <option value="function">Function</option>
+          <option value="module">Modules</option>
+          <option value="file">Files</option>
+          <option value="type" selected>Types</option>
+          <option value="function">Functions</option>
         </select>
       </div>
       <div class="group">
         <label for="node-size">Size</label>
-        <input type="range" id="node-size" min="0.6" max="3" step="0.1" value="1.4">
+        <input type="range" id="node-size" min="0.6" max="3" step="0.1" value="1.2">
       </div>
       <div class="group">
-        <label><input type="checkbox" id="kmp-overlay"> KMP overlay</label>
-        <label><input type="checkbox" id="violations-only"> Violations only</label>
+        <label title="Hide nodes with no connections at this level"><input type="checkbox" id="hide-orphans" checked> Hide orphans</label>
+        <label><input type="checkbox" id="group-layer" checked> Group</label>
+      </div>
+      <div class="group">
+        <label><input type="checkbox" id="kmp-overlay"> KMP</label>
+        <label><input type="checkbox" id="violations-only"> Violations</label>
       </div>
       <div class="group">
         <input type="search" id="search" placeholder="Search name…" autocomplete="off">
         <span id="search-count" class="meta"></span>
       </div>
-      <div class="group">
-        <button id="reset">Reset</button>
-      </div>
+      <div class="group"><button id="reset">Reset</button></div>
     </div>
   </header>
 
@@ -49,7 +52,7 @@
     <aside id="panel">
       <div id="panel-empty" class="panel-empty">
         <p>Click a node to inspect it.</p>
-        <p class="hint">Selecting highlights everything upstream (callers) and downstream (callees). Double-click a node to expand its children.</p>
+        <p class="hint">Selecting highlights everything upstream (callers) and downstream (callees). Double-click to expand a node's children. <strong>Lanes</strong> shows architecture order; <strong>Force</strong> shows real coupling.</p>
       </div>
       <div id="panel-body" hidden></div>
     </aside>
@@ -59,10 +62,16 @@
     <span id="counts"></span>
     <button id="chip-unresolved" class="chip" title="Calls whose receiver type we knew but whose method we could not locate"></button>
     <button id="chip-violations" class="chip" title="Edges where a lower layer depends on a higher one"></button>
-    <span id="legend" class="legend" hidden>
-      <span class="sw green"></span>commonMain-ready
-      <span class="sw amber"></span>needs expect/actual
-      <span class="sw red"></span>androidMain only
+    <span id="legend-tier" class="legend">
+      <span class="sw tier-rust"></span>Rust
+      <span class="sw tier-jni"></span>JNI
+      <span class="sw tier-kotlin"></span>Kotlin
+      <span class="sw tier-ui"></span>UI
+    </span>
+    <span id="legend-kmp" class="legend" hidden>
+      <span class="sw green"></span>commonMain
+      <span class="sw amber"></span>expect/actual
+      <span class="sw red"></span>androidMain
     </span>
   </footer>
 </div>
