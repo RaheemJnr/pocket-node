@@ -1,18 +1,21 @@
 # Pocket Node
 
-A sovereign Android wallet for [Nervos CKB](https://www.nervos.org/) that runs an embedded light client directly on your device via JNI. No remote indexers, no third-party servers for blockchain access. Your keys, your node, your wallet.
+A sovereign Android wallet for [Nervos CKB](https://www.nervos.org/) that runs an embedded light client directly on your device via JNI. No remote indexers, no third-party servers for blockchain access. Your keys, your node, your wallet. Now available on [Google Play](https://play.google.com/store/apps/details?id=com.rjnr.pocketnode).
 
+[![Google Play](https://img.shields.io/badge/Google%20Play-Available-brightgreen?logo=google-play&logoColor=white)](https://play.google.com/store/apps/details?id=com.rjnr.pocketnode)
+[![Downloads](https://img.shields.io/github/downloads/RaheemJnr/pocket-node/total?label=downloads&color=success)](https://github.com/RaheemJnr/pocket-node/releases)
+[![Latest Release](https://img.shields.io/github/v/release/RaheemJnr/pocket-node?label=latest)](https://github.com/RaheemJnr/pocket-node/releases/latest)
 ![CI](https://github.com/RaheemJnr/pocket-node/actions/workflows/android-ci.yml/badge.svg)
-![Platform](https://img.shields.io/badge/platform-Android-green)
+![Platform](https://img.shields.io/badge/platform-Android%208.0%2B-green)
 ![Kotlin](https://img.shields.io/badge/kotlin-2.1-blue)
-![Min SDK](https://img.shields.io/badge/minSdk-26-brightgreen)
-![License](https://img.shields.io/badge/license-MIT-lightgrey)
-![Latest Release](https://img.shields.io/github/v/release/RaheemJnr/pocket-node?label=latest)
+[![License](https://img.shields.io/github/license/RaheemJnr/pocket-node?color=lightgrey)](LICENSE)
+[![X](https://img.shields.io/badge/X-%40PocketNodeCKB-black?logo=x&logoColor=white)](https://x.com/PocketNodeCKB)
+[![Buy Me a Coffee](https://img.shields.io/badge/Buy%20Me%20a%20Coffee-support-yellow?logo=buymeacoffee&logoColor=black)](https://www.buymeacoffee.com/rjnr)
 
 ## Quick links
 
 - **End users:** read the [User Guide](docs/USER_GUIDE.md) for install, backup, sync, send/receive, DAO, troubleshooting, and FAQ
-- **Download the app:** [latest GitHub Release](https://github.com/RaheemJnr/pocket-node/releases/latest) (Play Store coming soon)
+- **Download the app:** [Google Play](https://play.google.com/store/apps/details?id=com.rjnr.pocketnode), or the [latest GitHub Release](https://github.com/RaheemJnr/pocket-node/releases/latest)
 - **Contributors:** read [CONTRIBUTING.md](CONTRIBUTING.md) for development setup, code style, and the manual sync-stall smoke procedure
 - **Security:** see [SECURITY.md](SECURITY.md) for the security model and the vulnerability disclosure process
 - **Grant deliverable:** the [M4 Completion Report](docs/GRANT_COMPLETION_REPORT.md) summarises what shipped under the CKB Community DAO grant
