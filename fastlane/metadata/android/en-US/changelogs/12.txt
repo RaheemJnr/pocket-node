@@ -1,4 +1,0 @@
-v1.7.1:
-- Fix launch crash on v1.6.x to v1.7.0 upgrades after the V2 keystore migration. The post-auth nav path was decrypting the key bundle just to read a plaintext flag, which threw on V2 wallets and killed the process.
-
-Source: github.com/RaheemJnr/pocket-node/releases

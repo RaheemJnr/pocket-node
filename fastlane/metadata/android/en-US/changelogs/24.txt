@@ -1,8 +1,0 @@
-v1.8.2:
-Pocket Node keeps a CKB light client on your phone, with your keys and node on-device and no servers in between.
-
-This update makes background syncing lighter: it no longer shows an ongoing notification and refreshes your balance in the background when the system allows.
-
-Also includes minor stability improvements.
-
-Source: github.com/RaheemJnr/pocket-node/releases

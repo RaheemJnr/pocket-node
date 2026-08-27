@@ -1,8 +1,0 @@
-v1.7.7:
-This release fixes wallets with a long transaction history and makes real errors visible.
-
-Busy wallets work again. A wallet with more than 100 transactions could show the wrong balance and fail every send with a network error, even after reinstalling. The app was only reading the first page of its history when working out which coins were spendable. It now reads everything, so balances are correct and sends go through.
-
-Errors are now copyable. If something ever fails, Settings, Node Status, App errors keeps the exact reason with a Copy all button, so you can paste it straight into a bug report. The failure message on screen also shows the real cause.
-
-Source: github.com/RaheemJnr/pocket-node/releases

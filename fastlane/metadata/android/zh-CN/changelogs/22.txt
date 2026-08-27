@@ -1,8 +1,0 @@
-v1.8.1:
-Pocket Node 现已登陆 Google Play。
-
-在手机上直接运行 CKB 轻客户端。你的密钥和节点都保存在设备上，中间没有任何远程服务器。
-
-此版本还包含一些稳定性和显示方面的小改进。
-
-来源: github.com/RaheemJnr/pocket-node/releases

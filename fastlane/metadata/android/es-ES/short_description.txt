@@ -1,1 +1,0 @@
-Cliente ligero CKB en tu teléfono. Sin servidores remotos. Tus claves, tu nodo.

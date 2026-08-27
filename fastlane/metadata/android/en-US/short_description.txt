@@ -1,1 +1,0 @@
-CKB light client on your phone. No remote servers. Your keys, your node.
