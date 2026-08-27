@@ -1,5 +1,0 @@
-v1.1.0:
-- Replaced ML Kit with ZXing for QR scanning (smaller APK, no Google dependencies)
-- Stripped native library debug symbols (APK reduced from 69MB to 37MB)
-- Added R8 ProGuard rules for release builds
-- Mainnet hardening: network validation, retry logic, backup controls

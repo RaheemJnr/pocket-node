@@ -1,5 +1,0 @@
-v1.6.1:
-- Auto-update now actually works. When a new version is found, a compact banner sits above the bottom navigation and shows real-time download progress. Tap when ready to install.
-- If the app needs install-from-unknown-sources permission, returning from Android settings resumes the download automatically. No more re-tapping Update.
-- Cancel an in-progress download by tapping the banner. Retry a failed one the same way.
-- The downloaded APK is cleaned up after install or cancellation, so the update never sits around eating disk.

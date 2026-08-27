@@ -1,9 +1,0 @@
-v1.7.0:
-- "Olvidé mi PIN" ahora recupera la cartera desde la frase.
-- Ver la frase de recuperación requiere biometría, no solo PIN.
-- El botón "Añadir" en Carteras funciona. Borrar la activa cambia a otra.
-- Crear cartera pide nombre y confirma la frase.
-- Carteras nuevas sincronizan desde la altura real, no un checkpoint obsoleto.
-- Corregidos cierres tras estar en segundo plano mucho tiempo en Samsung.
-
-Código: github.com/RaheemJnr/pocket-node/releases

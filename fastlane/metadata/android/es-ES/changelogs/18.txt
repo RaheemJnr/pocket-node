@@ -1,8 +1,0 @@
-v1.7.7:
-Esta versión corrige las carteras con un historial largo de transacciones y hace visibles los errores reales.
-
-Las carteras con mucha actividad vuelven a funcionar. Una cartera con más de 100 transacciones podía mostrar un saldo incorrecto y fallar en cada envío con un error de red, incluso tras reinstalar. La app solo leía la primera página de su historial al calcular qué monedas eran gastables. Ahora lo lee todo, así que los saldos son correctos y los envíos funcionan.
-
-Los errores ahora se pueden copiar. Si algo falla, Ajustes, Estado del nodo, Errores de la app guarda el motivo exacto con un botón Copiar todo, para pegarlo directamente en un informe de error. El mensaje de fallo en pantalla también muestra la causa real.
-
-Fuente: github.com/RaheemJnr/pocket-node/releases
