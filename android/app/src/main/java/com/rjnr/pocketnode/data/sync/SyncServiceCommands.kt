@@ -13,11 +13,11 @@ import javax.inject.Singleton
  * Exists to break the only type-level dependency cycle in the app (#460):
  * [SyncForegroundService] is an `@AndroidEntryPoint` that injects
  * `GatewayRepository`, and `GatewayRepository` used to call
- * `SyncForegroundService.start(context)` back. Both sides now depend on this
- * type instead, and this type depends on neither — the service is addressed
- * by [SERVICE_CLASS_NAME] through an explicit [ComponentName] rather than by
- * a class literal, so no edge back into `data.sync`'s service graph is
- * created.
+ * `SyncForegroundService.start(context)` back. The repository now depends on
+ * this type instead, and this type depends on neither side: the service is
+ * addressed by [SERVICE_CLASS_NAME] through an explicit [ComponentName]
+ * rather than by a class literal, so starting it creates no edge back into
+ * the service's own dependency graph.
  *
  * The class name is pinned to the real service by `SyncServiceCommandsTest`,
  * and the service itself is kept by R8 because it is declared in the manifest.

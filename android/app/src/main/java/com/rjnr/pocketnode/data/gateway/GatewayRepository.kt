@@ -1,6 +1,5 @@
 package com.rjnr.pocketnode.data.gateway
 
-import android.content.Context
 import com.rjnr.pocketnode.core.log.Logger
 import com.rjnr.pocketnode.BuildConfig
 import com.rjnr.pocketnode.data.database.AppDatabase
@@ -32,7 +31,6 @@ import com.rjnr.pocketnode.data.wallet.WalletInfo
 import com.rjnr.pocketnode.data.wallet.WalletPreferences
 import com.rjnr.pocketnode.data.wallet.SyncStrategy
 import com.nervosnetwork.ckblightclient.LightClientNative
-import dagger.hilt.android.qualifiers.ApplicationContext
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.Dispatchers
@@ -44,7 +42,6 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
-import kotlinx.coroutines.flow.filterNotNull
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
@@ -53,7 +50,6 @@ import kotlinx.coroutines.withContext
 import kotlinx.serialization.encodeToString
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.decodeFromJsonElement
-import java.io.File
 import javax.inject.Inject
 import javax.inject.Singleton
 import com.rjnr.pocketnode.util.redactAddress
@@ -100,7 +96,6 @@ interface TipSource {
 
 @Singleton
 class GatewayRepository @Inject constructor(
-    @ApplicationContext private val context: Context,
     private val keyManager: KeyManager,
     private val walletPreferences: WalletPreferences,
     private val json: Json,
@@ -121,6 +116,7 @@ class GatewayRepository @Inject constructor(
     private val subAccountReconciler: com.rjnr.pocketnode.data.wallet.SubAccountReconciler,
     private val subAccountDiscovery: com.rjnr.pocketnode.data.wallet.SubAccountDiscovery,
     private val syncServiceCommands: SyncServiceCommands,
+    private val nodeLifecycle: NodeLifecycle,
     private val logger: Logger,
 ) : TipSource {
     private val sendMutex = Mutex()
@@ -163,15 +159,13 @@ class GatewayRepository @Inject constructor(
     private val _isRegistered = MutableStateFlow(false)
     val isRegistered: StateFlow<Boolean> = _isRegistered.asStateFlow()
 
-    private val _nodeStatus = MutableStateFlow("Stopped")
-    val nodeStatus: StateFlow<String> = _nodeStatus.asStateFlow()
-
-    private val _network = MutableStateFlow(walletPreferences.getSelectedNetwork())
-    val network: StateFlow<NetworkType> = _network.asStateFlow()
-    val currentNetwork: NetworkType get() = _network.value
-
-    private val _isSwitchingNetwork = MutableStateFlow(false)
-    val isSwitchingNetwork: StateFlow<Boolean> = _isSwitchingNetwork.asStateFlow()
+    // Node lifecycle (config copy, JNI init/start, status callback, network
+    // selection and the restart-based switch) lives on [NodeLifecycle] (#460).
+    // These forward so the repository's public surface is unchanged.
+    val nodeStatus: StateFlow<String> get() = nodeLifecycle.nodeStatus
+    val network: StateFlow<NetworkType> get() = nodeLifecycle.network
+    val currentNetwork: NetworkType get() = nodeLifecycle.currentNetwork
+    val isSwitchingNetwork: StateFlow<Boolean> get() = nodeLifecycle.isSwitchingNetwork
 
     // SupervisorJob: one child failure must not cancel siblings or the scope
     // itself. Without this, a thrown exception inside any background coroutine
@@ -190,7 +184,6 @@ class GatewayRepository @Inject constructor(
         logger.e(TAG, "Uncaught exception in GatewayRepository scope; suppressed to avoid process crash", e)
     }
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO + coroutineExceptionHandler)
-    private val _nodeReady = MutableStateFlow<Boolean?>(null)
     private var activeWalletId: String = walletPreferences.getActiveWalletId() ?: ""
     private var activeWalletType: String = KeyManager.WALLET_TYPE_MNEMONIC
 
@@ -219,10 +212,10 @@ class GatewayRepository @Inject constructor(
 
     init {
         // Migrate old flat data/ directory to data/mainnet/ on first run
-        migrateDataDirectoryIfNeeded()
+        nodeLifecycle.migrateDataDirectoryIfNeeded()
 
         // Initialize the embedded node for the persisted network. Any unhandled
-        // failure in the startup sequence must flip _nodeReady to false so
+        // failure in the startup sequence must mark node init as failed so
         // awaitNodeReady() can't suspend forever and callers see an error.
         scope.launch {
             try {
@@ -246,10 +239,10 @@ class GatewayRepository @Inject constructor(
                     }
                 }.onFailure { logger.w(TAG, "Periodic VACUUM failed (non-fatal)", it) }
 
-                initializeNode(currentNetwork)
+                nodeLifecycle.initializeNode(currentNetwork, ::onNodeStarted)
             } catch (e: Exception) {
                 logger.e(TAG, "Startup sequence failed before node init", e)
-                _nodeReady.value = false
+                nodeLifecycle.markInitFailed()
             }
         }
     }
@@ -341,238 +334,71 @@ class GatewayRepository @Inject constructor(
     }
 
     /**
-     * Suspends until the node is ready. Returns true if init succeeded, false if it failed.
+     * Repository-side work that runs immediately after the embedded node
+     * starts, passed to [NodeLifecycle.initializeNode]. Kept here (not in
+     * [NodeLifecycle]) because it touches the tx cache, pending broadcasts and
+     * the sync poll.
      */
-    private suspend fun awaitNodeReady(): Boolean {
-        return _nodeReady.filterNotNull().first()
-    }
-
-    /**
-     * One-time migration: moves old flat data/ layout (store.db, network/) into data/mainnet/.
-     * Existing users upgrading from pre-testnet have data directly in data/ — this moves it
-     * so each network gets its own isolated subdirectory.
-     */
-    private fun migrateDataDirectoryIfNeeded() {
-        val dataDir = File(context.filesDir, "data")
-        val mainnetDir = File(dataDir, "mainnet")
-        val storeDb = File(dataDir, "store.db")
-        val networkDir = File(dataDir, "network")
-
-        // If mainnet subdir already exists or there's nothing to migrate, skip
-        if (mainnetDir.exists() || (!storeDb.exists() && !networkDir.exists())) return
-
-        logger.d(TAG, "Migrating data directory to per-network layout...")
-        if (!mainnetDir.mkdirs() && !mainnetDir.exists()) {
-            logger.e(TAG, "Failed to create mainnet directory, skipping migration")
-            return
-        }
-
-        var migrationOk = true
-        if (storeDb.exists()) {
-            if (storeDb.renameTo(File(mainnetDir, "store.db"))) {
-                logger.d(TAG, "Moved store.db -> mainnet/store.db")
-            } else {
-                logger.e(TAG, "Failed to move store.db to mainnet/store.db")
-                migrationOk = false
-            }
-        }
-        if (networkDir.exists()) {
-            if (networkDir.renameTo(File(mainnetDir, "network"))) {
-                logger.d(TAG, "Moved network/ -> mainnet/network/")
-            } else {
-                logger.e(TAG, "Failed to move network/ to mainnet/network/")
-                migrationOk = false
-            }
-        }
-        if (!migrationOk) {
-            logger.e(TAG, "Migration incomplete — manual intervention may be needed")
-        }
-    }
-
-    private suspend fun initializeNode(targetNetwork: NetworkType) {
-        try {
-            _nodeReady.value = null // Reset for re-initialization
-            logger.d(TAG, "Initializing embedded node for ${targetNetwork.name}...")
-
-            val configName = "${targetNetwork.name.lowercase()}.toml"
-            val configFile = File(context.filesDir, configName)
-
-            // Copy config from assets (deterministic, no retry needed)
-            logger.d(TAG, "Copying config from assets: $configName")
-            try {
-                context.assets.open(configName).use { input ->
-                    configFile.outputStream().use { output ->
-                        input.copyTo(output)
-                    }
-                }
-            } catch (e: Exception) {
-                logger.e(TAG, "Failed to copy $configName from assets", e)
-                _nodeReady.value = false
-                return
-            }
-
-            // Update paths in config — each network gets its own data subdirectory
-            val configContent = configFile.readText()
-            val dataDir = File(context.filesDir, "data/${targetNetwork.name.lowercase()}")
-            if (!dataDir.exists()) {
-                logger.d(TAG, "Creating data directory: ${dataDir.absolutePath}")
-                if (!dataDir.mkdirs()) {
-                    logger.e(TAG, "Failed to create data directory")
-                    _nodeReady.value = false
-                    return
-                }
-            }
-
-            val newConfig = configContent
-                .replace("path = \"data/store\"", "path = \"${File(dataDir, "store.db").absolutePath}\"")
-                .replace("path = \"data/network\"", "path = \"${File(dataDir, "network").absolutePath}\"")
-            configFile.writeText(newConfig)
-            logger.d(TAG, "Config updated with absolute paths for ${targetNetwork.name}")
-
-            // Init and start JNI with retry (transient failures can occur)
-            val maxRetries = 3
-            val backoffMs = longArrayOf(2_000, 4_000, 8_000)
-
-            for (attempt in 1..maxRetries) {
-                logger.d(TAG, "JNI init attempt $attempt/$maxRetries...")
-
-                val initResult = LightClientNative.nativeInit(
-                    configFile.absolutePath,
-                    object : LightClientNative.StatusCallback {
-                        override fun onStatusChange(status: String, data: String) {
-                            logger.d(TAG, "Native Status Change: $status")
-                            _nodeStatus.value = status
-                        }
-                    }
+    private suspend fun onNodeStarted() {
+        // Cold-start recovery: surface any BROADCASTING orphan rows for the
+        // active network so the watchdog can resolve them on the next tip.
+        // Network-scoped — LightClientNative is per-network; querying for a
+        // hash on a network whose light client isn't running would return null
+        // spuriously and drive valid orphans to a false FAILED. (#115 §5)
+        runCatching {
+            val orphans = pendingBroadcastDao.getActive(activeWalletId, currentNetwork.name)
+            val broadcasting = orphans.count { it.state == "BROADCASTING" }
+            if (broadcasting > 0) {
+                logger.w(
+                    TAG,
+                    "Cold-start: $broadcasting BROADCASTING orphan(s) on ${currentNetwork.name}; watchdog will resolve"
                 )
+            }
+        }
 
-                if (!initResult) {
-                    logger.e(TAG, "nativeInit returned false (attempt $attempt)")
-                    if (attempt < maxRetries) {
-                        delay(backoffMs[attempt - 1])
-                        continue
-                    }
-                    _nodeReady.value = false
-                    return
-                }
-
-                val startResult = LightClientNative.nativeStart()
-                if (startResult) {
-                    logger.d(TAG, "Node started successfully on ${targetNetwork.name} (attempt $attempt)")
-                    _nodeReady.value = true
-
-                    // Cold-start recovery: surface any BROADCASTING orphan rows for the
-                    // active network so the watchdog can resolve them on the next tip.
-                    // Network-scoped — LightClientNative is per-network; querying for a
-                    // hash on a network whose light client isn't running would return null
-                    // spuriously and drive valid orphans to a false FAILED. (#115 §5)
-                    runCatching {
-                        val orphans = pendingBroadcastDao.getActive(activeWalletId, currentNetwork.name)
-                        val broadcasting = orphans.count { it.state == "BROADCASTING" }
-                        if (broadcasting > 0) {
-                            logger.w(
-                                TAG,
-                                "Cold-start: $broadcasting BROADCASTING orphan(s) on ${currentNetwork.name}; watchdog will resolve"
-                            )
+        // Legacy reconciliation: PENDING `transactions` rows that predate
+        // pending_broadcasts have no broadcast row, so the watchdog can't
+        // see them. Query the light client directly: on chain → CONFIRMED,
+        // not found → FAILED, in pool → leave alone (the natural pending state).
+        // (#115 — addresses the user's "old ghosts still showing pending" case.)
+        runCatching {
+            val orphanHashes = cacheManager.getOrphanPendingHashes(activeWalletId, currentNetwork.name)
+            if (orphanHashes.isNotEmpty()) {
+                logger.w(TAG, "Legacy reconcile: ${orphanHashes.size} orphan PENDING tx(s) on ${currentNetwork.name}")
+                scope.launch {
+                    delay(15_000) // give light client time to be ready
+                    for (hash in orphanHashes) {
+                        val result = getTransactionStatus(hash)
+                        // Distinguish transient lookup failure (Result.failure) from
+                        // a successful "unknown" response. Only the latter means the
+                        // light client knows it doesn't have the tx; the former is a
+                        // JNI/RPC hiccup and must NOT permanently mark the row FAILED.
+                        val resp = result.getOrNull()
+                        val newStatus = when {
+                            result.isFailure -> null      // transient — retry next init
+                            resp == null -> null           // defensive
+                            resp.status == "unknown" -> "FAILED"
+                            resp.blockHash != null -> "CONFIRMED"
+                            else -> null  // still in pool — leave PENDING
+                        }
+                        if (newStatus != null) {
+                            cacheManager.updateTransactionStatus(hash, newStatus)
+                            logger.d(TAG, "Legacy reconcile: $hash → $newStatus")
                         }
                     }
-
-                    // Legacy reconciliation: PENDING `transactions` rows that predate
-                    // pending_broadcasts have no broadcast row, so the watchdog can't
-                    // see them. Query the light client directly: on chain → CONFIRMED,
-                    // not found → FAILED, in pool → leave alone (the natural pending state).
-                    // (#115 — addresses the user's "old ghosts still showing pending" case.)
-                    runCatching {
-                        val orphanHashes = cacheManager.getOrphanPendingHashes(activeWalletId, currentNetwork.name)
-                        if (orphanHashes.isNotEmpty()) {
-                            logger.w(TAG, "Legacy reconcile: ${orphanHashes.size} orphan PENDING tx(s) on ${currentNetwork.name}")
-                            scope.launch {
-                                delay(15_000) // give light client time to be ready
-                                for (hash in orphanHashes) {
-                                    val result = getTransactionStatus(hash)
-                                    // Distinguish transient lookup failure (Result.failure) from
-                                    // a successful "unknown" response. Only the latter means the
-                                    // light client knows it doesn't have the tx; the former is a
-                                    // JNI/RPC hiccup and must NOT permanently mark the row FAILED.
-                                    val resp = result.getOrNull()
-                                    val newStatus = when {
-                                        result.isFailure -> null      // transient — retry next init
-                                        resp == null -> null           // defensive
-                                        resp.status == "unknown" -> "FAILED"
-                                        resp.blockHash != null -> "CONFIRMED"
-                                        else -> null  // still in pool — leave PENDING
-                                    }
-                                    if (newStatus != null) {
-                                        cacheManager.updateTransactionStatus(hash, newStatus)
-                                        logger.d(TAG, "Legacy reconcile: $hash → $newStatus")
-                                    }
-                                }
-                            }
-                        }
-                    }
-
-                    startSyncPolling()
-                    startBackgroundSync()
-                    return
-                }
-
-                logger.e(TAG, "nativeStart returned false (attempt $attempt)")
-                if (attempt < maxRetries) {
-                    delay(backoffMs[attempt - 1])
-                } else {
-                    _nodeReady.value = false
                 }
             }
-
-        } catch (e: Exception) {
-            logger.e(TAG, "Setup error during node initialization", e)
-            _nodeReady.value = false
         }
+
+        startSyncPolling()
+        startBackgroundSync()
     }
 
-    /**
-     * Switches to a different network by persisting the selection and restarting the process.
-     *
-     * The JNI light client does not support in-process re-initialization: nativeStop() blocks
-     * indefinitely while peers are connected, and nativeInit() rejects calls when already
-     * initialized. Restarting the process gives a clean JNI state at zero engineering cost.
-     *
-     * Process death safety: setSelectedNetwork() uses commit() (synchronous) so the preference
-     * is guaranteed on disk before killProcess(). On restart, initializeNode() reads the new
-     * network from WalletPreferences. Data directories are isolated per network.
-     */
-    suspend fun switchNetwork(target: NetworkType): Result<Unit> = runCatching {
-        if (target == currentNetwork) return@runCatching
-        if (_isSwitchingNetwork.value) throw Exception("Network switch already in progress")
+    /** @see NodeLifecycle.awaitNodeReady */
+    private suspend fun awaitNodeReady(): Boolean = nodeLifecycle.awaitNodeReady()
 
-        _isSwitchingNetwork.value = true
-        try {
-            logger.d(TAG, "Switching network: ${currentNetwork.name} -> ${target.name}")
-
-            // The JNI light client does not support re-initialization in the same process lifetime:
-            // nativeStop() blocks indefinitely (peer disconnection loop) and nativeInit() rejects
-            // calls while already initialized ("Already initialized!"). The only reliable path is
-            // to persist the selection and restart the process — Android will relaunch the app and
-            // initializeNode() will pick up the new network from WalletPreferences.
-
-            // Clear Room caches before process restart
-            cacheManager.clearAll()
-            daoSyncManager.clearAll()
-
-            walletPreferences.setSelectedNetwork(target) // uses commit() — synchronous flush
-            logger.d(TAG, "Persisted ${target.name}, restarting process for clean JNI init")
-
-            // ProcessPhoenix-style restart: launch fresh activity before killing process.
-            // This ensures the app visibly restarts on all devices/launchers.
-            val intent = context.packageManager.getLaunchIntentForPackage(context.packageName)!!
-            intent.addFlags(android.content.Intent.FLAG_ACTIVITY_NEW_TASK or android.content.Intent.FLAG_ACTIVITY_CLEAR_TASK)
-            context.startActivity(intent)
-            android.os.Process.killProcess(android.os.Process.myPid())
-        } catch (e: Exception) {
-            _isSwitchingNetwork.value = false
-            throw e
-        }
-    }
+    /** @see NodeLifecycle.switchNetwork */
+    suspend fun switchNetwork(target: NetworkType): Result<Unit> = nodeLifecycle.switchNetwork(target)
 
     /**
      * Initialize wallet by loading existing one. 
@@ -2764,7 +2590,7 @@ class GatewayRepository @Inject constructor(
         privateKey: ByteArray,
     ): Result<String> = runCatching {
         val info = _walletInfo.value ?: throw Exception("No wallet")
-        val net = _network.value
+        val net = currentNetwork
 
         val deposits = getDaoDeposits().getOrThrow()
         val deposit = deposits.find { it.outPoint == withdrawingOutPoint }

@@ -56,7 +56,7 @@ Private keys and BIP39 mnemonics are encrypted using Android's `EncryptedSharedP
 - An internal Milestone 4 security audit completed 2026-05-19 (#186, #187, #188 in the issue tracker). External audit by an independent firm is tracked under #204 and may engage post-grant. No formal third-party audit has been completed at the time of writing.
 - PIN derivation currently uses a single Blake2b pass with a per-device salt. Strengthening to Argon2id with cumulative lockout is tracked under #214 for v1.7.0.
 - Keystore-backed wallet keys are not yet bound to per-operation user authentication. Adding `setUserAuthenticationRequired` plus `BiometricPrompt`-gated `CryptoObject` use is tracked under #213 for v1.7.0.
-- Network switch requires a full app restart. The embedded Rust JNI bridge holds global state in `OnceLock` and cannot be re-initialized in-process. The app handles this with a confirm dialog plus `Process.killProcess` (see `GatewayRepository.switchNetwork`).
+- Network switch requires a full app restart. The embedded Rust JNI bridge holds global state in `OnceLock` and cannot be re-initialized in-process. The app handles this with a confirm dialog plus `Process.killProcess` (see `NodeLifecycle.switchNetwork`).
 - No certificate pinning for any outgoing connections (CoinGecko price fetch only; no auth headers, no user-supplied URLs).
 - Light client P2P traffic is not encrypted beyond CKB protocol-level protections.
 

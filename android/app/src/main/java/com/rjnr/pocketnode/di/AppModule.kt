@@ -254,7 +254,6 @@ object AppModule {
     @Provides
     @Singleton
     fun provideGatewayRepository(
-        @ApplicationContext context: Context,
         keyManager: KeyManager,
         walletPreferences: WalletPreferences,
         json: Json,
@@ -275,8 +274,9 @@ object AppModule {
         subAccountReconciler: com.rjnr.pocketnode.data.wallet.SubAccountReconciler,
         subAccountDiscovery: com.rjnr.pocketnode.data.wallet.SubAccountDiscovery,
         syncServiceCommands: com.rjnr.pocketnode.data.sync.SyncServiceCommands,
+        nodeLifecycle: com.rjnr.pocketnode.data.gateway.NodeLifecycle,
         logger: Logger,
-    ): GatewayRepository = GatewayRepository(context, keyManager, walletPreferences, json, transactionBuilder, cacheManager, daoSyncManager, walletMigrationHelper, walletDao, appDatabase, headerCacheDao, syncProgressDao, pendingBroadcastDao, broadcastClient, syncCoordinator, daoHeaderResolver, daoDepositReader, lightClient, subAccountReconciler, subAccountDiscovery, syncServiceCommands, logger)
+    ): GatewayRepository = GatewayRepository(keyManager, walletPreferences, json, transactionBuilder, cacheManager, daoSyncManager, walletMigrationHelper, walletDao, appDatabase, headerCacheDao, syncProgressDao, pendingBroadcastDao, broadcastClient, syncCoordinator, daoHeaderResolver, daoDepositReader, lightClient, subAccountReconciler, subAccountDiscovery, syncServiceCommands, nodeLifecycle, logger)
 
     /**
      * Production activity probe for sub-account discovery (#82 phase 2):
