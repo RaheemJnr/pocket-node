@@ -20,4 +20,4 @@ dependencyResolutionManagement {
 }
 
 rootProject.name = "CKBWallet"
-include(":app")
+include(":app", ":shared")
