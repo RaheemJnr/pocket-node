@@ -13,7 +13,6 @@ import com.rjnr.pocketnode.data.database.entity.PendingBroadcastEntity
 import com.rjnr.pocketnode.data.database.entity.SyncProgressEntity
 import com.rjnr.pocketnode.data.database.entity.WalletEntity
 import com.rjnr.pocketnode.data.gateway.models.*
-import com.rjnr.pocketnode.data.sync.SyncProgressTracker
 import com.rjnr.pocketnode.data.sync.SyncServiceCommands
 import com.rjnr.pocketnode.data.migration.WalletMigrationHelper
 import com.rjnr.pocketnode.data.transaction.TransactionBuilder
@@ -34,7 +33,6 @@ import com.nervosnetwork.ckblightclient.LightClientNative
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.Job
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.coroutineScope
@@ -52,29 +50,6 @@ import kotlinx.serialization.json.decodeFromJsonElement
 import javax.inject.Inject
 import javax.inject.Singleton
 import com.rjnr.pocketnode.util.redactAddress
-
-data class SyncProgress(
-    val isSyncing: Boolean = false,
-    val syncedToBlock: Long = 0L,
-    val tipBlockNumber: Long = 0L,
-    val percentage: Double = 0.0,
-    val etaDisplay: String = "",
-    val justReachedTip: Boolean = false,
-    val firstCatchingUpAtMs: Long? = null
-)
-
-/**
- * Edge-trigger first-time tracking for the "catching up" state.
- *
- * - When `catching` flips false→true, returns `nowMs` (start of the run).
- * - While `catching` stays true, returns `prev` unchanged.
- * - When `catching` is false, returns null.
- */
-fun computeFirstCatchingUpAtMs(prev: Long?, catching: Boolean, nowMs: Long): Long? = when {
-    !catching -> null
-    prev == null -> nowMs
-    else -> prev
-}
 
 /**
  * Narrow seam over [GatewayRepository] so [com.rjnr.pocketnode.data.sync.BroadcastWatchdog]
@@ -116,32 +91,29 @@ class GatewayRepository @Inject constructor(
     private val subAccountDiscovery: com.rjnr.pocketnode.data.wallet.SubAccountDiscovery,
     private val syncServiceCommands: SyncServiceCommands,
     private val nodeLifecycle: NodeLifecycle,
+    private val syncPoller: SyncPoller,
     private val logger: Logger,
-) : TipSource {
+) : TipSource, SyncPollSource {
     private val sendMutex = Mutex()
 
     // #382: single-flight for the explicit gap-limit scan (Home banner and
     // Settings both trigger it).
     private val gapLimitScanMutex = Mutex()
 
-    private val _tipFlow = MutableStateFlow(0L)
-    override val tipFlow: StateFlow<Long> = _tipFlow.asStateFlow()
+    // The tip stream and the whole sync-progress poll live on [SyncPoller]
+    // (#460). These forward so the repository's public surface is unchanged.
+    override val tipFlow: StateFlow<Long> get() = syncPoller.tipFlow
 
-    /**
-     * Publish a fresh tip to [tipFlow]. Monotonic — older tips are ignored
-     * (light-client tip events can interleave). Public-by-package so the
-     * sync polling path and send path can both keep the flow warm without
-     * exposing a setter to outside callers.
-     */
-    internal fun publishTip(n: Long) {
-        if (n > _tipFlow.value) _tipFlow.value = n
-    }
+    /** @see SyncPoller.publishTip */
+    internal fun publishTip(n: Long) = syncPoller.publishTip(n)
 
     override suspend fun fetchAndPublishTip(): Long {
         val n = currentTipNumberOrZero()
         if (n > 0) publishTip(n)
         return n
     }
+
+    override fun hasWalletInfo(): Boolean = _walletInfo.value != null
 
     override fun activeWalletAndNetworkOrNull(): Pair<String, String>? {
         val id = activeWalletId
@@ -189,25 +161,8 @@ class GatewayRepository @Inject constructor(
     // BALANCED filter cache + `scriptArgsToWalletId` mapping live on
     // [SyncCoordinator] now (#106). Read through `syncCoordinator.getWalletIdForScript`.
 
-    // --- Sync progress tracking ---
-    private val syncProgressTracker = SyncProgressTracker()
-    private var syncPollingJob: Job? = null
-
-    // Generation token bumped on every start/stop of sync polling. In-flight
-    // getAccountStatus().onSuccess lambdas capture the generation at the start
-    // of each iteration and refuse to write `firstCatchingUpAtMs` /
-    // `_syncProgress` if it's stale — coroutine cancellation is cooperative,
-    // so without this gate a successful HTTP response that returned just
-    // before stopSyncPolling() could resurrect the cleared state. (#90)
-    @Volatile
-    private var syncPollingGeneration: Long = 0L
-    private var wasSyncing = false
-    // Process-lifetime edge-tracker for the first time the wallet entered
-    // "catching up" (actively downloading blocks). Used by the HomeViewModel
-    // coachmark grace timer (#90). Null whenever we are not catching up.
-    private var firstCatchingUpAtMs: Long? = null
-    private val _syncProgress = MutableStateFlow(SyncProgress())
-    val syncProgress: StateFlow<SyncProgress> = _syncProgress.asStateFlow()
+    /** @see SyncPoller.syncProgress */
+    val syncProgress: StateFlow<SyncProgress> get() = syncPoller.syncProgress
 
     init {
         // Migrate old flat data/ directory to data/mainnet/ on first run
@@ -297,18 +252,16 @@ class GatewayRepository @Inject constructor(
         // Drop the previous wallet's sync samples so the new wallet's progress
         // starts from its own baseline. Otherwise ACTIVE_ONLY switches can spuriously
         // report progress / ETA / justReachedTip from the old wallet's syncing window.
-        syncProgressTracker.reset()
+        syncPoller.resetTracker()
         // Seed the percentage baseline with the registered light-client start
         // block so the first sample doesn't anchor the math to a transient
         // syncedToBlock=0 reading during peer warm-up (#150).
         val lightStart = syncProgressDao.get(wallet.walletId, currentNetwork.name)
             ?.lightStartBlockNumber ?: 0L
         if (lightStart > 0) {
-            syncProgressTracker.seedStartHeight(lightStart)
+            syncPoller.seedStartHeight(lightStart)
         }
-        wasSyncing = false
-        firstCatchingUpAtMs = null
-        _syncProgress.value = SyncProgress()
+        syncPoller.resetProgressState()
 
         val walletSyncMode = walletPreferences.getSyncMode(walletId = wallet.walletId)
         val walletCustomHeight = if (walletSyncMode == SyncMode.CUSTOM) {
@@ -1095,7 +1048,7 @@ class GatewayRepository @Inject constructor(
                             // permanently-empty primary rewound on every launch.
                             alreadyAttempted = activeWalletId in balanceRescanAttempted ||
                                 walletPreferences.isZeroCellRescanDone(activeWalletId),
-                            isSyncing = _syncProgress.value.isSyncing,
+                            isSyncing = syncProgress.value.isSyncing,
                         )
                     ) {
                         balanceRescanAttempted.add(activeWalletId)
@@ -1220,7 +1173,7 @@ class GatewayRepository @Inject constructor(
     }
 
     // Simplified Account Status - JNI doesn't give sync progress easily
-    suspend fun getAccountStatus(): Result<AccountStatusResponse> = runCatching {
+    override suspend fun getAccountStatus(): Result<AccountStatusResponse> = runCatching {
         val addr = getCurrentAddress() ?: throw Exception("No wallet")
         
         // Fetch tip header
@@ -1291,7 +1244,7 @@ class GatewayRepository @Inject constructor(
 
         // Calculate progress relative to sync start (not absolute tip ratio).
         // This gives meaningful feedback for small block ranges (e.g. 50-100 blocks).
-        val trackerInfo = syncProgressTracker.calculate(tipNumber)
+        val trackerInfo = syncPoller.calculate(tipNumber)
         val progress = if (tipNumber > 0) {
             (trackerInfo.percentage / 100.0).coerceIn(0.0, 1.0)
         } else {
@@ -1860,7 +1813,7 @@ class GatewayRepository @Inject constructor(
                 // tip-10 JUMPS the script forward over unscanned history —
                 // silent balance/history loss. The ongoing scan will find the
                 // change output anyway; only fast-path when already synced.
-                if (_syncProgress.value.isSyncing) {
+                if (syncProgress.value.isSyncing) {
                     logger.d(TAG, "Skipping post-send partial re-register: wallet still catching up")
                     return@launch
                 }
@@ -2691,14 +2644,6 @@ class GatewayRepository @Inject constructor(
     // Sync Progress Polling
     // ========================================
 
-    /**
-     * Start centralized sync polling. Idempotent — does nothing if already running.
-     * Polls getAccountStatus(), records samples, calculates progress, and emits to syncProgress flow.
-     */
-    // Throttle for the lastSyncedAt pref write in the sync poll (#286).
-    @Volatile
-    private var lastSyncedAtWrittenMs = 0L
-
     // One rescue rescan per wallet per process (#332) — the rescan itself
     // takes hours on a long-history wallet; re-firing restarts it.
     private val balanceRescanAttempted =
@@ -2714,135 +2659,11 @@ class GatewayRepository @Inject constructor(
     private val broadcastedThisSession =
         java.util.Collections.synchronizedSet(mutableSetOf<String>())
 
-    fun startSyncPolling() {
-        if (syncPollingJob?.isActive == true) return
+    /** @see SyncPoller.start */
+    fun startSyncPolling() = syncPoller.start(scope, this)
 
-        val generation = ++syncPollingGeneration
-
-        syncPollingJob = scope.launch {
-            logger.d(TAG, "Starting centralized sync polling")
-            while (true) {
-                // Wrap each poll iteration so an exception (JNI panic-returned-
-                // null, state mutation race, notification update failure)
-                // doesn't kill the polling loop. Without this, one bad cycle
-                // produces a permanently-stuck "Syncing..." UI even though
-                // the scope's SupervisorJob keeps the process alive. The
-                // catch logs and waits for the next cycle.
-                try {
-                    pollSyncOnce(generation)
-                } catch (e: kotlinx.coroutines.CancellationException) {
-                    throw e // honour structured concurrency
-                } catch (e: Throwable) {
-                    logger.e(TAG, "syncPoll iteration failed; continuing", e)
-                }
-                // Synced cadence is 10s (was 30s): balance only refreshes off
-                // this poll, so a confirmed incoming tx could lag up to ~30s
-                // after "Synced" (#355/#356). The poll is cheap local JNI
-                // (tip header + account status); 10s bounds the lag without
-                // meaningful battery cost. Catch-up stays at 5s.
-                val delayMs = if (_syncProgress.value.isSyncing) 5_000L else 10_000L
-                delay(delayMs)
-            }
-        }
-    }
-
-    /**
-     * Single sync-poll iteration extracted from [startSyncPolling] so the
-     * while loop can wrap each call in a try-catch without losing the
-     * generation-guard semantics. Any throwable inside this function logs
-     * and returns; the loop continues on the next tick.
-     */
-    private suspend fun pollSyncOnce(generation: Long) {
-        // Skip the iteration when no wallet is loaded into repo state.
-        // Happens during normal lifecycle windows: lock screen (PIN not
-        // entered), brief startup race before wallet decryption, after
-        // session clear on background. Without this guard, getAccountStatus
-        // throws "No wallet" on every poll and floods logcat with stack
-        // traces that look like real errors.
-        if (_walletInfo.value == null) {
-            return
-        }
-
-        getAccountStatus()
-                    .onSuccess { status ->
-                        // Generation gate: refuse to publish state if stopSyncPolling()
-                        // (or a fresh start) has bumped the generation since this
-                        // iteration began. Prevents in-flight responses that returned
-                        // just before cancel() from resurrecting cleared state.
-                        if (generation != syncPollingGeneration) return@onSuccess
-
-                        val syncedBlock = status.syncedToBlock.toLongOrNull() ?: 0L
-                        val tipBlock = status.tipNumber.toLongOrNull() ?: 0L
-
-                        // Diagnostic for the production sync-stall reports (#150).
-                        // Logged once every poll cycle so support can see the
-                        // delta between syncedBlock and tipBlock in logcat
-                        // without enabling verbose JNI logging.
-                        logger.i(
-                            TAG,
-                            "syncPoll synced=$syncedBlock tip=$tipBlock " +
-                                "delta=${tipBlock - syncedBlock} progress=${status.syncProgress}"
-                        )
-
-                        syncProgressTracker.recordSample(syncedBlock, System.currentTimeMillis())
-                        val info = syncProgressTracker.calculate(tipBlock)
-
-                        // Staleness pill input (#286): persist "last time we
-                        // observed sync progress", throttled to ~1 write/min
-                        // (the poll runs every 5-30s; pref churn is pointless).
-                        val nowMs = System.currentTimeMillis()
-                        if (syncedBlock > 0 && nowMs - lastSyncedAtWrittenMs > 60_000L) {
-                            lastSyncedAtWrittenMs = nowMs
-                            walletPreferences.setLastSyncedAt(nowMs)
-                        }
-
-                        val justReachedTip = wasSyncing && info.isSynced
-                        wasSyncing = !info.isSynced
-
-                        // Edge-track first time we entered "catching up" (actively
-                        // downloading blocks) so HomeViewModel can apply a grace
-                        // period before showing the sync coachmark (#90).
-                        val catching = !info.isSynced && info.percentage < 100
-                        firstCatchingUpAtMs = computeFirstCatchingUpAtMs(
-                            firstCatchingUpAtMs,
-                            catching,
-                            System.currentTimeMillis()
-                        )
-
-                        _syncProgress.value = SyncProgress(
-                            isSyncing = !info.isSynced,
-                            syncedToBlock = syncedBlock,
-                            tipBlockNumber = tipBlock,
-                            percentage = info.percentage,
-                            etaDisplay = info.etaDisplay,
-                            justReachedTip = justReachedTip,
-                            firstCatchingUpAtMs = firstCatchingUpAtMs
-                        )
-                    }
-                    .onFailure { e ->
-                        logger.e(TAG, "Sync polling: failed to get account status", e)
-                    }
-    }
-
-    /**
-     * Stop centralized sync polling. Resets tracker state.
-     */
-    fun stopSyncPolling() {
-        // Bump the generation FIRST so any in-flight onSuccess lambda sees a
-        // mismatch and refuses to write before we clear state below.
-        syncPollingGeneration++
-        syncPollingJob?.cancel()
-        syncPollingJob = null
-        syncProgressTracker.reset()
-        wasSyncing = false
-        // Clear the coachmark grace tracker (#90) so a subsequent
-        // startSyncPolling() restarts the 2s grace from a clean clock.
-        // Also strip the timestamp from the last-emitted SyncProgress so
-        // HomeViewModel's combine doesn't see stale state during the gap.
-        firstCatchingUpAtMs = null
-        _syncProgress.value = _syncProgress.value.copy(firstCatchingUpAtMs = null)
-        logger.d(TAG, "Stopped centralized sync polling")
-    }
+    /** @see SyncPoller.stop */
+    fun stopSyncPolling() = syncPoller.stop()
 
     // ========================================
     // Background Sync Service
