@@ -31,7 +31,7 @@ struct NodeStatusView: View {
 
             Section {
                 Button("Start") { Task { await service.start() } }
-                    .disabled(service.status == .running)
+                    .disabled(service.status == .running || !service.isInitialized)
                 Button("Stop") { Task { await service.stop() } }
                     .disabled(service.status == .stopped)
             }
