@@ -1,6 +1,7 @@
 package com.rjnr.pocketnode.data.transaction
 
-import android.util.Log
+import com.rjnr.pocketnode.core.log.Logger
+import com.rjnr.pocketnode.core.log.NoopLogger
 import com.rjnr.pocketnode.data.gateway.DaoConstants
 import com.rjnr.pocketnode.data.gateway.models.*
 import com.rjnr.pocketnode.data.validation.NetworkValidator
@@ -39,7 +40,8 @@ data class RecipientOutput(
 
 @Singleton
 class TransactionBuilder @Inject constructor(
-    private val networkValidator: NetworkValidator
+    private val networkValidator: NetworkValidator,
+    private val logger: Logger = NoopLogger
 ) {
 
     companion object {
@@ -273,11 +275,11 @@ class TransactionBuilder @Inject constructor(
         privateKey: ByteArray,
         network: NetworkType
     ): Transaction {
-        Log.d(TAG, "🔨 Building transfer transaction")
+        logger.d(TAG, "🔨 Building transfer transaction")
         // Sender + recipient + amount form a payment record — redact the
         // addresses and drop the amount from debug logcat (#321).
-        Log.d(TAG, "  From: ${fromAddress.redactAddress()}")
-        Log.d(TAG, "  Recipient count: ${recipients.size}")
+        logger.d(TAG, "  From: ${fromAddress.redactAddress()}")
+        logger.d(TAG, "  Recipient count: ${recipients.size}")
 
         require(recipients.isNotEmpty()) { "At least one recipient is required" }
 
@@ -304,13 +306,13 @@ class TransactionBuilder @Inject constructor(
 
         val isMainnet = network == NetworkType.MAINNET
         val secp256k1TxHash = if (isMainnet) MAINNET_SECP256K1_TX_HASH else TESTNET_SECP256K1_TX_HASH
-        Log.d(TAG, "  Network: ${network.name}")
-        Log.d(TAG, "  Using SECP256K1 cell dep: $secp256k1TxHash")
+        logger.d(TAG, "  Network: ${network.name}")
+        logger.d(TAG, "  Using SECP256K1 cell dep: $secp256k1TxHash")
 
         // Select cells with generous fee to ensure we gather enough inputs
         val (selectedCells, totalInput) = selectCells(availableCells, totalRecipientAmount + DEFAULT_FEE)
 
-        Log.d(TAG, "  Selected ${selectedCells.size} cells with total: $totalInput shannons")
+        logger.d(TAG, "  Selected ${selectedCells.size} cells with total: $totalInput shannons")
 
         if (selectedCells.isEmpty()) {
             throw IllegalStateException("No cells available")
@@ -335,7 +337,7 @@ class TransactionBuilder @Inject constructor(
             change = totalInput - totalRecipientAmount - dynamicFee
         }
 
-        Log.d(TAG, "  Dynamic fee: $dynamicFee shannons (${dynamicFee / 100_000_000.0} CKB)")
+        logger.d(TAG, "  Dynamic fee: $dynamicFee shannons (${dynamicFee / 100_000_000.0} CKB)")
 
         val inputs = selectedCells.map { cell ->
             CellInput(
@@ -369,7 +371,7 @@ class TransactionBuilder @Inject constructor(
         when {
             change == 0L -> {
                 // Exact fit: input total = amount + fee. No change output needed.
-                Log.d(TAG, "  No change output (exact fit; total inputs = amount + fee)")
+                logger.d(TAG, "  No change output (exact fit; total inputs = amount + fee)")
             }
             change >= MIN_CELL_CAPACITY -> {
                 outputs.add(
@@ -380,7 +382,7 @@ class TransactionBuilder @Inject constructor(
                     )
                 )
                 outputsData.add("0x")
-                Log.d(TAG, "  Change output: $change shannons")
+                logger.d(TAG, "  Change output: $change shannons")
             }
             else -> {
                 // 0 < change < MIN_CELL_CAPACITY: emitting this as a change
@@ -396,7 +398,7 @@ class TransactionBuilder @Inject constructor(
                     .stripTrailingZeros()
                     .toPlainString()
                 val minCkb = MIN_CELL_CAPACITY / 100_000_000
-                Log.w(TAG, "  Dust change refused: $change shannons ($changeCkbStr CKB) below min $MIN_CELL_CAPACITY")
+                logger.w(TAG, "  Dust change refused: $change shannons ($changeCkbStr CKB) below min $MIN_CELL_CAPACITY")
                 throw IllegalStateException(
                     "Dust change refused: this send would leave $changeCkbStr CKB of change " +
                         "below the $minCkb CKB minimum cell capacity, which would be silently absorbed as " +
@@ -436,7 +438,7 @@ class TransactionBuilder @Inject constructor(
             )
         }
 
-        Log.d(TAG, "  Signing transaction with ${inputs.size} inputs, ${outputs.size} outputs (est. ${estimatedSize} bytes)")
+        logger.d(TAG, "  Signing transaction with ${inputs.size} inputs, ${outputs.size} outputs (est. ${estimatedSize} bytes)")
         return signTransaction(unsignedTx, privateKey, selectedCells.size)
     }
 
@@ -656,7 +658,7 @@ class TransactionBuilder @Inject constructor(
             val witnessOverhead = 4 + n * 4 + (4 + 85) + (n - 1).coerceAtLeast(0) * 4
             rawSize + witnessOverhead + 16 + 100
         } catch (e: Exception) {
-            Log.w(TAG, "Transaction size estimation failed: ${e.message}")
+            logger.w(TAG, "Transaction size estimation failed: ${e.message}")
             Int.MAX_VALUE // fail-safe: reject if we can't estimate size
         }
     }
