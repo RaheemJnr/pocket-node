@@ -70,6 +70,7 @@ jobs:
         run: rustup show
 
       - name: Add iOS Rust targets
+        working-directory: external/ckb-light-client
         run: rustup target add aarch64-apple-ios aarch64-apple-ios-sim
 
       # :shared:* tasks do not configure :app (verified locally: running them
@@ -123,8 +124,11 @@ jobs:
           pool = exact if exact else candidates
 
           def runtime_key(item):
-              version = item[0].split()[-1]
-              return tuple(int(p) for p in version.split(".") if p.isdigit())
+              # Runtime keys look like com.apple.CoreSimulator.SimRuntime.iOS-18-6
+              # (or "iOS 18.6" on older simctl); take the trailing digits either way.
+              key = item[0]
+              tail = key.rsplit(".", 1)[-1] if "SimRuntime" in key else key.split()[-1]
+              return tuple(int(p) for p in tail.replace("-", ".").split(".") if p.isdigit())
 
           pool.sort(key=runtime_key, reverse=True)
           runtime, device = pool[0]
@@ -168,12 +172,12 @@ jobs:
           if command -v xcbeautify >/dev/null 2>&1; then
             xcodebuild -project PocketNode.xcodeproj -scheme PocketNode \
               -destination "platform=iOS Simulator,id=$SIMULATOR_UDID" -configuration Debug \
-              test 2>&1 | tee "$log" | xcbeautify
+              CODE_SIGNING_ALLOWED=NO test 2>&1 | tee "$log" | xcbeautify
             status=${PIPESTATUS[0]}
           else
             xcodebuild -project PocketNode.xcodeproj -scheme PocketNode \
               -destination "platform=iOS Simulator,id=$SIMULATOR_UDID" -configuration Debug \
-              test > "$log" 2>&1
+              CODE_SIGNING_ALLOWED=NO test > "$log" 2>&1
             status=$?
           fi
           if [ "$status" -ne 0 ]; then
