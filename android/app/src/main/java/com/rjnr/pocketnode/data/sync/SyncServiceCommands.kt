@@ -19,8 +19,12 @@ import javax.inject.Singleton
  * rather than by a class literal, so starting it creates no edge back into
  * the service's own dependency graph.
  *
- * The class name is pinned to the real service by `SyncServiceCommandsTest`,
- * and the service itself is kept by R8 because it is declared in the manifest.
+ * The class name is pinned to the real service by `SyncServiceCommandsTest`.
+ * The service survives R8 on `release` because the manifest declares it; on
+ * `playRelease` the manifest overlay removes the `<service>` node and the
+ * class is deliberately shrunk away, which is safe because [start] is guarded
+ * by `BuildConfig.BG_FGS_ENABLED` on that build and [stop] resolves to
+ * nothing (`stopService` on an unregistered component is a no-op).
  */
 @Singleton
 class SyncServiceCommands @Inject constructor(

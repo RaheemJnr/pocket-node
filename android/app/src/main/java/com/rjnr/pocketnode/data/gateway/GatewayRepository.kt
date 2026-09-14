@@ -13,8 +13,8 @@ import com.rjnr.pocketnode.data.database.entity.PendingBroadcastEntity
 import com.rjnr.pocketnode.data.database.entity.SyncProgressEntity
 import com.rjnr.pocketnode.data.database.entity.WalletEntity
 import com.rjnr.pocketnode.data.gateway.models.*
-import com.rjnr.pocketnode.data.sync.SyncServiceCommands
 import com.rjnr.pocketnode.data.sync.SyncProgressTracker
+import com.rjnr.pocketnode.data.sync.SyncServiceCommands
 import com.rjnr.pocketnode.data.migration.WalletMigrationHelper
 import com.rjnr.pocketnode.data.transaction.TransactionBuilder
 import com.rjnr.pocketnode.data.transaction.RecipientOutput
@@ -42,7 +42,6 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
-import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock

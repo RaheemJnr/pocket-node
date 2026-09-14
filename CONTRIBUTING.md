@@ -111,7 +111,7 @@ The automated test suite covers the registration path and the detector logic in 
 Keep `adb logcat` open in a second terminal, filtered:
 
 ```bash
-adb logcat -s SyncCoordinator:I GatewayRepository:I NodeLifecycle:I HomeViewModel:D
+adb logcat -s SyncCoordinator:I GatewayRepository:I NodeLifecycle:D HomeViewModel:D
 ```
 
 Watch for:
