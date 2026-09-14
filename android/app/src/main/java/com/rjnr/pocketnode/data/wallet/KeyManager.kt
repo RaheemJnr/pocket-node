@@ -5,6 +5,10 @@ import android.content.SharedPreferences
 import android.util.Log
 import androidx.security.crypto.EncryptedSharedPreferences
 import androidx.security.crypto.MasterKey
+import com.rjnr.pocketnode.core.crypto.Blake2b
+import com.rjnr.pocketnode.core.crypto.Secp256k1Signer
+import com.rjnr.pocketnode.core.crypto.hexToByteArray
+import com.rjnr.pocketnode.core.crypto.toHexString
 import com.rjnr.pocketnode.data.auth.AuthManager
 import com.rjnr.pocketnode.data.gateway.models.NetworkType
 import com.rjnr.pocketnode.data.gateway.models.Script
@@ -12,11 +16,6 @@ import com.rjnr.pocketnode.data.migration.KeyStoreMigrationHelper
 import com.rjnr.pocketnode.data.migration.WalletKeyBundle
 import androidx.annotation.VisibleForTesting
 import dagger.hilt.android.qualifiers.ApplicationContext
-import org.nervos.ckb.crypto.Blake2b
-import org.nervos.ckb.crypto.secp256k1.ECKeyPair
-import org.nervos.ckb.crypto.secp256k1.Sign
-import org.nervos.ckb.utils.Numeric
-import java.math.BigInteger
 import javax.inject.Inject
 import javax.inject.Singleton
 
@@ -31,8 +30,14 @@ import javax.inject.Singleton
  *
  *  - Hex `String`s handed out by EncryptedSharedPreferences / Room TEXT
  *    columns — immutable, GC-managed.
- *  - `BigInteger` / `ECKeyPair` internals — the CKB SDK signing API takes
- *    immutable BigInteger copies of the key.
+ *  - libsecp256k1's internal copies of the key made during signing.
+ *  - The plaintext 32-byte key [getPrivateKey] materialises. [sign] and
+ *    [getWalletInfo] call it and do NOT zero the array they get back, so a
+ *    readable copy of the key survives on the heap until GC after every
+ *    in-process signature. Callers that hold the key themselves (SendViewModel,
+ *    the GatewayRepository DAO overloads) do zero theirs; these two do not, and
+ *    fixing it properly means the ByteArray storage rewrite in #335 rather than
+ *    a local `fill(0)` that still leaves the hex `String` behind.
  *
  * The full String→ByteArray storage rewrite (prefs re-encode, Room BLOB
  * migration, backup format v3) is tracked in #335 and intentionally NOT
@@ -253,14 +258,13 @@ class KeyManager @Inject constructor(
     // -- Shared methods --
 
     suspend fun getWalletInfo(): WalletInfo {
-        val keyPair = getKeyPair()
-        val publicKey = keyPair.getEncodedPublicKey(true) // compressed
+        val publicKey = Secp256k1Signer.publicKey(getPrivateKey()) // compressed
         val script = deriveLockScript(publicKey)
         val testnetAddress = AddressUtils.encode(script, NetworkType.TESTNET)
         val mainnetAddress = AddressUtils.encode(script, NetworkType.MAINNET)
 
         return WalletInfo(
-            publicKey = Numeric.toHexString(publicKey),
+            publicKey = publicKey.toHexString(),
             script = script,
             testnetAddress = testnetAddress,
             mainnetAddress = mainnetAddress
@@ -273,34 +277,17 @@ class KeyManager @Inject constructor(
         if (helper != null) {
             val data = helper.readDecryptedKey("default")
             if (data != null) {
-                return Numeric.hexStringToByteArray(data.privateKeyHex)
+                return data.privateKeyHex.hexToByteArray()
             }
         }
         // Fallback to ESP
         val hex = prefs.getString(KEY_PRIVATE_KEY, null)
             ?: throw IllegalStateException("No wallet found")
-        return Numeric.hexStringToByteArray(hex)
-    }
-
-    suspend fun getKeyPair(): ECKeyPair {
-        // Try Room first
-        val helper = keyStoreMigrationHelper
-        if (helper != null) {
-            val data = helper.readDecryptedKey("default")
-            if (data != null) {
-                return ECKeyPair.create(BigInteger(data.privateKeyHex, 16))
-            }
-        }
-        // Fallback to ESP
-        val hex = prefs.getString(KEY_PRIVATE_KEY, null)
-            ?: throw IllegalStateException("No wallet found")
-        val privateKey = BigInteger(hex, 16)
-        return ECKeyPair.create(privateKey)
+        return hex.hexToByteArray()
     }
 
     fun derivePublicKey(privateKey: ByteArray): ByteArray {
-        val keyPair = ECKeyPair.create(BigInteger(1, privateKey))
-        return keyPair.getEncodedPublicKey(true)
+        return Secp256k1Signer.publicKey(privateKey)
     }
 
     // --- #382 Tier 3: thin pass-throughs so the sweep can re-derive
@@ -322,7 +309,7 @@ class KeyManager @Inject constructor(
         return Script(
             codeHash = Script.SECP256K1_CODE_HASH,
             hashType = "type",
-            args = Numeric.toHexString(args)
+            args = args.toHexString()
         )
     }
 
@@ -363,9 +350,7 @@ class KeyManager @Inject constructor(
     }
 
     suspend fun sign(message: ByteArray): ByteArray {
-        val keyPair = getKeyPair()
-        val signatureData = Sign.signMessage(message, keyPair)
-        return signatureData.signature
+        return Secp256k1Signer.signRecoverable(message, getPrivateKey())
     }
 
     suspend fun deleteWallet() {
@@ -434,12 +419,12 @@ class KeyManager @Inject constructor(
         if (helper != null) {
             val data = helper.readDecryptedKey(walletId)
             if (data != null) {
-                return Numeric.hexStringToByteArray(data.privateKeyHex)
+                return data.privateKeyHex.hexToByteArray()
             }
         }
         // Fallback to ESP
         val hex = getWalletPrefs(walletId).getString(KEY_PRIVATE_KEY, null) ?: return null
-        return Numeric.hexStringToByteArray(hex)
+        return hex.hexToByteArray()
     }
 
     /**
@@ -449,14 +434,13 @@ class KeyManager @Inject constructor(
      * the legacy "default" prefs.
      */
     fun deriveWalletInfo(privateKey: ByteArray): WalletInfo {
-        val keyPair = ECKeyPair.create(BigInteger(1, privateKey))
-        val publicKey = keyPair.getEncodedPublicKey(true)
+        val publicKey = Secp256k1Signer.publicKey(privateKey)
         val script = deriveLockScript(publicKey)
         val testnetAddress = AddressUtils.encode(script, NetworkType.TESTNET)
         val mainnetAddress = AddressUtils.encode(script, NetworkType.MAINNET)
 
         return WalletInfo(
-            publicKey = Numeric.toHexString(publicKey),
+            publicKey = publicKey.toHexString(),
             script = script,
             testnetAddress = testnetAddress,
             mainnetAddress = mainnetAddress

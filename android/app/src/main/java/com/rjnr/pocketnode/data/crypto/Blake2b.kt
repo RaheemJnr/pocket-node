@@ -1,12 +1,12 @@
 package com.rjnr.pocketnode.data.crypto
 
-import org.nervos.ckb.crypto.Blake2b as CkbBlake2b
+import com.rjnr.pocketnode.core.crypto.Blake2b as SharedBlake2b
 import javax.inject.Inject
 import javax.inject.Singleton
 
 /**
- * Blake2b-256 wrapper using official CKB SDK implementation.
- * Uses BouncyCastle's Blake2bDigest with CKB personalization.
+ * Blake2b-256 wrapper over the shared multiplatform implementation.
+ * BLAKE2b-256 with CKB personalization (#454).
  */
 @Singleton
 class Blake2b @Inject constructor() {
@@ -15,7 +15,7 @@ class Blake2b @Inject constructor() {
      * Hash input bytes using Blake2b-256 with CKB personalization.
      */
     fun hash(input: ByteArray): ByteArray {
-        return CkbBlake2b.digest(input)
+        return SharedBlake2b.digest(input)
     }
 
     /**
@@ -25,10 +25,10 @@ class Blake2b @Inject constructor() {
 }
 
 /**
- * Incremental Blake2b hasher using official CKB SDK.
+ * Incremental Blake2b hasher over the shared multiplatform implementation.
  */
 class Blake2bHasher {
-    private val blake2b = CkbBlake2b()
+    private val blake2b = SharedBlake2b()
 
     fun update(input: ByteArray): Blake2bHasher {
         blake2b.update(input)

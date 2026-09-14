@@ -1,6 +1,7 @@
 package com.rjnr.pocketnode.data.wallet
 
 import android.util.Log
+import com.rjnr.pocketnode.core.crypto.hexToByteArray
 import com.rjnr.pocketnode.data.database.AppDatabase
 import com.rjnr.pocketnode.data.database.DatabaseMaintenanceUtil
 import com.rjnr.pocketnode.data.database.dao.BalanceCacheDao
@@ -14,7 +15,6 @@ import com.rjnr.pocketnode.data.gateway.models.NetworkType
 import com.rjnr.pocketnode.data.gateway.models.SyncMode
 import com.rjnr.pocketnode.data.migration.WalletKeyBundle
 import kotlinx.coroutines.flow.Flow
-import org.nervos.ckb.utils.Numeric
 import java.util.UUID
 import javax.inject.Inject
 import javax.inject.Singleton
@@ -249,7 +249,7 @@ class WalletRepository @Inject constructor(
         persistKeys: suspend (walletId: String, bundle: WalletKeyBundle) -> WalletKeyWriter.Result,
     ): Result<WalletEntity> = runCatching {
         validateUniqueName(name)
-        val privateKeyBytes = Numeric.hexStringToByteArray(privateKeyHex)
+        val privateKeyBytes = privateKeyHex.hexToByteArray()
         require(privateKeyBytes.size == 32) { "Private key must be 32 bytes" }
         val info = keyManager.deriveWalletInfo(privateKeyBytes)
         validateUniqueAddress(info.mainnetAddress, info.testnetAddress)

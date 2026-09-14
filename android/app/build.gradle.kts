@@ -314,9 +314,9 @@ dependencies {
     implementation(libs.secp256k1.kmp.jni.android)
     implementation(libs.kotlin.bip39)
 
-    // CKB SDK
-    implementation(libs.ckb.sdk.core)
-    implementation(libs.ckb.sdk.utils)
+    // BouncyCastle: PIN KDF and the BIP32 HMAC-SHA512 ladder. The CKB Java SDK
+    // it used to sit next to is gone — blake2b, secp256k1, hex and the address
+    // codec now come from :shared (#454).
     implementation(libs.bouncycastle)
 
     // Room (for caching)
@@ -350,12 +350,47 @@ dependencies {
     testImplementation("androidx.test:core:1.6.1")
     testImplementation(libs.mockk)
     testImplementation(libs.kotlinx.coroutines.test)
+    // Host-side unit tests call libsecp256k1 through :shared; the Android JNI
+    // artifact only carries Android .so files, so the JVM payload is needed here.
+    testImplementation(libs.secp256k1.kmp.jni.jvm)
 
     // Instrumented tests
     androidTestImplementation("androidx.test.ext:junit:1.2.1")
     androidTestImplementation("androidx.test:runner:1.6.2")
     androidTestImplementation("androidx.test:rules:1.6.1")
     androidTestImplementation("androidx.test.uiautomator:uiautomator:2.3.0")
+}
+
+// #454: the CKB Java SDK was removed from the app in favour of :shared's
+// multiplatform crypto. It survives only as a differential-test dependency of
+// :shared's androidHostTest source set, where it is the reference the signing
+// and address primitives are proved against. If it ever leaks back onto a
+// shipping classpath — a transitive pull, a copy-pasted dependency line — the
+// app would silently ship two implementations of the same primitives, and the
+// "SDK is gone" claim in the commit history would quietly stop being true.
+val ckbSdkForbiddenGroup = "org.nervos.ckb"
+val checkNoCkbSdkOnRuntimeClasspath = tasks.register("checkNoCkbSdkOnRuntimeClasspath") {
+    group = "verification"
+    description = "Fails if $ckbSdkForbiddenGroup is on the release runtime classpath."
+    doLast {
+        val offenders = configurations.getByName("releaseRuntimeClasspath")
+            .incoming.resolutionResult.allComponents
+            .mapNotNull { it.moduleVersion }
+            .filter { it.group == ckbSdkForbiddenGroup }
+            .map { "${it.group}:${it.name}:${it.version}" }
+            .sorted()
+        if (offenders.isNotEmpty()) {
+            throw GradleException(
+                "$ckbSdkForbiddenGroup is back on releaseRuntimeClasspath: " +
+                    offenders.joinToString(", ") +
+                    ". It is a differential-test dependency of :shared androidHostTest only (#454)."
+            )
+        }
+    }
+}
+
+tasks.named("check") {
+    dependsOn(checkNoCkbSdkOnRuntimeClasspath)
 }
 
 tasks.register<Exec>("cargoBuild") {

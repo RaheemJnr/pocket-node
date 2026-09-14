@@ -33,9 +33,6 @@
     public static int wtf(...);
 }
 
-# Keep CKB SDK (uses reflection for crypto operations)
--keep class org.nervos.ckb.** { *; }
-
 # Keep BouncyCastle (crypto provider)
 -keep class org.bouncycastle.** { *; }
 
