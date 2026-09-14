@@ -1,0 +1,193 @@
+name: iOS CI
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'android/shared/**'
+      - 'android/gradle/**'
+      - 'android/*.kts'
+      - 'android/gradle.properties'
+      - 'ios/**'
+      - 'external/ckb-light-client/**'
+      - '.github/workflows/ios-ci.yml'
+  pull_request:
+    paths:
+      - 'android/shared/**'
+      - 'android/gradle/**'
+      - 'android/*.kts'
+      - 'android/gradle.properties'
+      - 'ios/**'
+      - 'external/ckb-light-client/**'
+      - '.github/workflows/ios-ci.yml'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  ios:
+    runs-on: macos-15
+    timeout-minutes: 45
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          java-version: '17'
+          distribution: 'temurin'
+
+      - name: Cache Gradle
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.gradle/caches
+            ~/.gradle/wrapper
+          key: ios-gradle-${{ hashFiles('android/gradle/libs.versions.toml', 'android/**/*.gradle.kts') }}
+          restore-keys: ios-gradle-
+
+      - name: Cache Kotlin/Native
+        uses: actions/cache@v4
+        with:
+          path: ~/.konan
+          key: ios-konan-${{ hashFiles('android/gradle/libs.versions.toml', 'android/**/*.gradle.kts') }}
+          restore-keys: ios-konan-
+
+      - name: Cache Cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            external/ckb-light-client/target
+          key: ios-cargo-${{ runner.os }}-${{ hashFiles('external/ckb-light-client/Cargo.lock', 'external/ckb-light-client/rust-toolchain') }}
+          restore-keys: ios-cargo-${{ runner.os }}-
+
+      - name: Set up Rust toolchain (pinned)
+        working-directory: external/ckb-light-client
+        run: rustup show
+
+      - name: Add iOS Rust targets
+        run: rustup target add aarch64-apple-ios aarch64-apple-ios-sim
+
+      # :shared:* tasks do not configure :app (verified locally: running them
+      # without app/google-services.json succeeds — no dummy file needed here,
+      # unlike android-ci.yml's `./gradlew test` which does compile :app).
+      - name: Run shared KMP tests (iOS simulator + Android host)
+        working-directory: android
+        run: ./gradlew :shared:iosSimulatorArm64Test :shared:testAndroidHostTest --no-daemon
+
+      - name: Build CKB light client for iOS (xcframework)
+        working-directory: external/ckb-light-client
+        run: ./build-ios.sh
+
+      - name: Install xcodegen
+        run: HOMEBREW_NO_AUTO_UPDATE=1 brew install xcodegen
+
+      - name: Generate Xcode project
+        working-directory: ios
+        run: xcodegen generate
+
+      - name: Resolve iOS Simulator
+        id: simulator
+        run: |
+          set -euo pipefail
+          python3 - <<'PY' >> "$GITHUB_OUTPUT"
+          import json
+          import subprocess
+          import sys
+
+          out = subprocess.run(
+              ["xcrun", "simctl", "list", "devices", "available", "-j"],
+              capture_output=True, text=True, check=True,
+          ).stdout
+          data = json.loads(out)
+
+          preferred = "iPhone 16"
+          candidates = []
+          for runtime, devices in data["devices"].items():
+              if "iOS" not in runtime:
+                  continue
+              for d in devices:
+                  if d.get("isAvailable"):
+                      candidates.append((runtime, d))
+
+          if not candidates:
+              sys.exit("no available iOS simulators found")
+
+          # Prefer an exact "iPhone 16" match; fall back to any available
+          # iOS simulator so the workflow survives runner image churn.
+          exact = [c for c in candidates if c[1]["name"] == preferred]
+          pool = exact if exact else candidates
+
+          def runtime_key(item):
+              version = item[0].split()[-1]
+              return tuple(int(p) for p in version.split(".") if p.isdigit())
+
+          pool.sort(key=runtime_key, reverse=True)
+          runtime, device = pool[0]
+          print(f"udid={device['udid']}")
+          print(f"name={device['name']}")
+          PY
+
+      - name: Build PocketNode (iOS Simulator)
+        working-directory: ios
+        run: |
+          set -uo pipefail
+          mkdir -p build/logs
+          log=build/logs/xcodebuild-build.log
+          if command -v xcbeautify >/dev/null 2>&1; then
+            xcodebuild -project PocketNode.xcodeproj -scheme PocketNode \
+              -destination 'generic/platform=iOS Simulator' -configuration Debug \
+              CODE_SIGNING_ALLOWED=NO build 2>&1 | tee "$log" | xcbeautify
+            status=${PIPESTATUS[0]}
+          else
+            xcodebuild -project PocketNode.xcodeproj -scheme PocketNode \
+              -destination 'generic/platform=iOS Simulator' -configuration Debug \
+              CODE_SIGNING_ALLOWED=NO build > "$log" 2>&1
+            status=$?
+          fi
+          if [ "$status" -ne 0 ]; then
+            echo "xcodebuild build failed; tail of $log:"
+            tail -n 200 "$log"
+            exit "$status"
+          fi
+
+      - name: Test PocketNode (iOS Simulator)
+        working-directory: ios
+        env:
+          SIMULATOR_UDID: ${{ steps.simulator.outputs.udid }}
+          SIMULATOR_NAME: ${{ steps.simulator.outputs.name }}
+        run: |
+          set -uo pipefail
+          echo "Using simulator: $SIMULATOR_NAME ($SIMULATOR_UDID)"
+          mkdir -p build/logs
+          log=build/logs/xcodebuild-test.log
+          if command -v xcbeautify >/dev/null 2>&1; then
+            xcodebuild -project PocketNode.xcodeproj -scheme PocketNode \
+              -destination "platform=iOS Simulator,id=$SIMULATOR_UDID" -configuration Debug \
+              test 2>&1 | tee "$log" | xcbeautify
+            status=${PIPESTATUS[0]}
+          else
+            xcodebuild -project PocketNode.xcodeproj -scheme PocketNode \
+              -destination "platform=iOS Simulator,id=$SIMULATOR_UDID" -configuration Debug \
+              test > "$log" 2>&1
+            status=$?
+          fi
+          if [ "$status" -ne 0 ]; then
+            echo "xcodebuild test failed; tail of $log:"
+            tail -n 200 "$log"
+            exit "$status"
+          fi
+
+      - name: Upload test results
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ios-ci-failure-logs
+          path: |
+            android/shared/build/reports/tests/
+            ios/build/logs/
+          retention-days: 7
