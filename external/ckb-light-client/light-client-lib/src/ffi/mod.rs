@@ -4,8 +4,10 @@
 //! `jni_bridge` does for Android. Everything here is generated into Swift by
 //! `uniffi-bindgen` (proc-macro mode, no UDL); see `build-ios.sh`.
 
+use crate::bridge_core::dao;
 use crate::bridge_core::lifecycle;
 use crate::bridge_core::query;
+use crate::bridge_core::rpc;
 use crate::bridge_core::types::{self, notify_status, STATE_INIT};
 use crate::bridge_core::BridgeError;
 
@@ -22,6 +24,8 @@ pub enum LightClientError {
     NotInitialized,
     #[error("light client is already initialized")]
     AlreadyInitialized,
+    #[error("not found: {reason}")]
+    NotFound { reason: String },
     #[error("config error: {reason}")]
     Config { reason: String },
     #[error("storage error: {reason}")]
@@ -37,6 +41,7 @@ impl From<BridgeError> for LightClientError {
         match err {
             BridgeError::NotInitialized => Self::NotInitialized,
             BridgeError::AlreadyInitialized => Self::AlreadyInitialized,
+            BridgeError::NotFound(reason) => Self::NotFound { reason },
             BridgeError::Config(reason) => Self::Config { reason },
             BridgeError::Storage(reason) => Self::Storage { reason },
             BridgeError::Network(reason) => Self::Network { reason },
@@ -130,4 +135,130 @@ pub fn local_node_info() -> Result<String, LightClientError> {
 #[uniffi::export]
 pub fn get_peers() -> Result<String, LightClientError> {
     query::get_peers().map_err(Into::into)
+}
+
+/// Genesis block as a JSON string.
+#[uniffi::export]
+pub fn get_genesis_block() -> Result<String, LightClientError> {
+    query::get_genesis_block().map_err(Into::into)
+}
+
+/// Header for a block hash (`0x`-prefixed or bare) as a JSON string.
+#[uniffi::export]
+pub fn get_header(hash: String) -> Result<String, LightClientError> {
+    query::get_header(&hash).map_err(Into::into)
+}
+
+/// Header for a block number (decimal, or `0x`-prefixed hex) as a JSON string.
+#[uniffi::export]
+pub fn get_header_by_number(block_number: String) -> Result<String, LightClientError> {
+    query::get_header_by_number(&block_number).map_err(Into::into)
+}
+
+/// Fetch status for a header, as a JSON string; queues the fetch when unknown.
+#[uniffi::export]
+pub fn fetch_header(hash: String) -> Result<String, LightClientError> {
+    query::fetch_header(&hash).map_err(Into::into)
+}
+
+/// Set the filter scripts to sync (command 0 = all, 1 = partial, 2 = delete).
+#[uniffi::export]
+pub fn set_scripts(scripts_json: String, command: i32) -> Result<(), LightClientError> {
+    query::set_scripts(&scripts_json, command).map_err(Into::into)
+}
+
+/// Filter scripts currently synced for, as a JSON string.
+#[uniffi::export]
+pub fn get_scripts() -> Result<String, LightClientError> {
+    query::get_scripts().map_err(Into::into)
+}
+
+/// Live cells matching a JSON search key, as a JSON page (`order`: "asc"/"desc").
+#[uniffi::export]
+pub fn get_cells(
+    search_key_json: String,
+    order: String,
+    limit: i32,
+    cursor: String,
+) -> Result<String, LightClientError> {
+    query::get_cells(&search_key_json, &order, limit, &cursor).map_err(Into::into)
+}
+
+/// Transactions matching a JSON search key, as a JSON page (`order`: "asc"/"desc").
+#[uniffi::export]
+pub fn get_transactions(
+    search_key_json: String,
+    order: String,
+    limit: i32,
+    cursor: String,
+) -> Result<String, LightClientError> {
+    query::get_transactions(&search_key_json, &order, limit, &cursor).map_err(Into::into)
+}
+
+/// Total capacity of the cells matching a JSON search key, as a JSON string.
+#[uniffi::export]
+pub fn get_cells_capacity(search_key_json: String) -> Result<String, LightClientError> {
+    query::get_cells_capacity(&search_key_json).map_err(Into::into)
+}
+
+/// Verify a JSON transaction and queue it for broadcast; returns its hash as JSON.
+#[uniffi::export]
+pub fn send_transaction(tx_json: String) -> Result<String, LightClientError> {
+    query::send_transaction(&tx_json).map_err(Into::into)
+}
+
+/// Transaction and its status for a hash, as a JSON string.
+#[uniffi::export]
+pub fn get_transaction(hash: String) -> Result<String, LightClientError> {
+    query::get_transaction(&hash).map_err(Into::into)
+}
+
+/// Fetch status for a transaction, as a JSON string; queues the fetch when unknown.
+#[uniffi::export]
+pub fn fetch_transaction(hash: String) -> Result<String, LightClientError> {
+    query::fetch_transaction(&hash).map_err(Into::into)
+}
+
+/// Estimate the cycles a JSON transaction consumes. Not implemented yet: always throws.
+#[uniffi::export]
+pub fn estimate_cycles(tx_json: String) -> Result<String, LightClientError> {
+    query::estimate_cycles(&tx_json).map_err(Into::into)
+}
+
+/// Split a 32-byte DAO header field into its C, AR, S and U values, as JSON.
+#[uniffi::export]
+pub fn extract_dao_fields(dao_hex: String) -> Result<String, LightClientError> {
+    dao::extract_dao_fields(&dao_hex).map_err(Into::into)
+}
+
+/// Max withdrawable capacity in shannons for a DAO deposit (deposit + compensation).
+#[uniffi::export]
+pub fn calculate_max_withdraw(
+    deposit_header_dao_hex: String,
+    withdraw_header_dao_hex: String,
+    deposit_capacity: i64,
+    occupied_capacity: i64,
+) -> Result<i64, LightClientError> {
+    dao::calculate_max_withdraw(
+        &deposit_header_dao_hex,
+        &withdraw_header_dao_hex,
+        deposit_capacity,
+        occupied_capacity,
+    )
+    .map_err(Into::into)
+}
+
+/// Since value (absolute epoch, hex) that unlocks a DAO withdrawal's phase 2.
+#[uniffi::export]
+pub fn calculate_unlock_epoch(
+    deposit_epoch_hex: String,
+    withdraw_epoch_hex: String,
+) -> Result<String, LightClientError> {
+    dao::calculate_unlock_epoch(&deposit_epoch_hex, &withdraw_epoch_hex).map_err(Into::into)
+}
+
+/// Call a read-only node RPC method by name; returns a JSON-RPC 2.0 response.
+#[uniffi::export]
+pub fn call_rpc(method: String) -> Result<String, LightClientError> {
+    rpc::call_rpc(&method).map_err(Into::into)
 }

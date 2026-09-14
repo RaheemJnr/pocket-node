@@ -487,6 +487,38 @@ fileprivate struct FfiConverterUInt8: FfiConverterPrimitive {
 #if swift(>=5.8)
 @_documentation(visibility: private)
 #endif
+fileprivate struct FfiConverterInt32: FfiConverterPrimitive {
+    typealias FfiType = Int32
+    typealias SwiftType = Int32
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> Int32 {
+        return try lift(readInt(&buf))
+    }
+
+    public static func write(_ value: Int32, into buf: inout [UInt8]) {
+        writeInt(&buf, lower(value))
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+fileprivate struct FfiConverterInt64: FfiConverterPrimitive {
+    typealias FfiType = Int64
+    typealias SwiftType = Int64
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> Int64 {
+        return try lift(readInt(&buf))
+    }
+
+    public static func write(_ value: Int64, into buf: inout [UInt8]) {
+        writeInt(&buf, lower(value))
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
 fileprivate struct FfiConverterBool : FfiConverter {
     typealias FfiType = Int8
     typealias SwiftType = Bool
@@ -565,6 +597,8 @@ enum LightClientError: Swift.Error, Equatable, Hashable, Foundation.LocalizedErr
     
     case NotInitialized
     case AlreadyInitialized
+    case NotFound(reason: String
+    )
     case Config(reason: String
     )
     case Storage(reason: String
@@ -604,16 +638,19 @@ public struct FfiConverterTypeLightClientError: FfiConverterRustBuffer {
         
         case 1: return .NotInitialized
         case 2: return .AlreadyInitialized
-        case 3: return .Config(
+        case 3: return .NotFound(
             reason: try FfiConverterString.read(from: &buf)
             )
-        case 4: return .Storage(
+        case 4: return .Config(
             reason: try FfiConverterString.read(from: &buf)
             )
-        case 5: return .Network(
+        case 5: return .Storage(
             reason: try FfiConverterString.read(from: &buf)
             )
-        case 6: return .Internal(
+        case 6: return .Network(
+            reason: try FfiConverterString.read(from: &buf)
+            )
+        case 7: return .Internal(
             reason: try FfiConverterString.read(from: &buf)
             )
 
@@ -636,23 +673,28 @@ public struct FfiConverterTypeLightClientError: FfiConverterRustBuffer {
             writeInt(&buf, Int32(2))
         
         
-        case let .Config(reason):
+        case let .NotFound(reason):
             writeInt(&buf, Int32(3))
             FfiConverterString.write(reason, into: &buf)
             
         
-        case let .Storage(reason):
+        case let .Config(reason):
             writeInt(&buf, Int32(4))
             FfiConverterString.write(reason, into: &buf)
             
         
-        case let .Network(reason):
+        case let .Storage(reason):
             writeInt(&buf, Int32(5))
             FfiConverterString.write(reason, into: &buf)
             
         
-        case let .Internal(reason):
+        case let .Network(reason):
             writeInt(&buf, Int32(6))
+            FfiConverterString.write(reason, into: &buf)
+            
+        
+        case let .Internal(reason):
+            writeInt(&buf, Int32(7))
             FfiConverterString.write(reason, into: &buf)
             
         }
@@ -836,12 +878,160 @@ fileprivate struct FfiConverterOptionCallbackInterfaceStatusListener: FfiConvert
     }
 }
 /**
+ * Max withdrawable capacity in shannons for a DAO deposit (deposit + compensation).
+ */
+public func calculateMaxWithdraw(depositHeaderDaoHex: String, withdrawHeaderDaoHex: String, depositCapacity: Int64, occupiedCapacity: Int64)throws  -> Int64  {
+    return try  FfiConverterInt64.lift(try rustCallWithError(FfiConverterTypeLightClientError_lift) {
+        uniffiCallStatus in
+    uniffi_ckb_light_client_lib_fn_func_calculate_max_withdraw(
+        FfiConverterString.lower(depositHeaderDaoHex),
+        FfiConverterString.lower(withdrawHeaderDaoHex),
+        FfiConverterInt64.lower(depositCapacity),
+        FfiConverterInt64.lower(occupiedCapacity),uniffiCallStatus
+    )
+})
+}
+/**
+ * Since value (absolute epoch, hex) that unlocks a DAO withdrawal's phase 2.
+ */
+public func calculateUnlockEpoch(depositEpochHex: String, withdrawEpochHex: String)throws  -> String  {
+    return try  FfiConverterString.lift(try rustCallWithError(FfiConverterTypeLightClientError_lift) {
+        uniffiCallStatus in
+    uniffi_ckb_light_client_lib_fn_func_calculate_unlock_epoch(
+        FfiConverterString.lower(depositEpochHex),
+        FfiConverterString.lower(withdrawEpochHex),uniffiCallStatus
+    )
+})
+}
+/**
+ * Call a read-only node RPC method by name; returns a JSON-RPC 2.0 response.
+ */
+public func callRpc(method: String)throws  -> String  {
+    return try  FfiConverterString.lift(try rustCallWithError(FfiConverterTypeLightClientError_lift) {
+        uniffiCallStatus in
+    uniffi_ckb_light_client_lib_fn_func_call_rpc(
+        FfiConverterString.lower(method),uniffiCallStatus
+    )
+})
+}
+/**
+ * Estimate the cycles a JSON transaction consumes. Not implemented yet: always throws.
+ */
+public func estimateCycles(txJson: String)throws  -> String  {
+    return try  FfiConverterString.lift(try rustCallWithError(FfiConverterTypeLightClientError_lift) {
+        uniffiCallStatus in
+    uniffi_ckb_light_client_lib_fn_func_estimate_cycles(
+        FfiConverterString.lower(txJson),uniffiCallStatus
+    )
+})
+}
+/**
+ * Split a 32-byte DAO header field into its C, AR, S and U values, as JSON.
+ */
+public func extractDaoFields(daoHex: String)throws  -> String  {
+    return try  FfiConverterString.lift(try rustCallWithError(FfiConverterTypeLightClientError_lift) {
+        uniffiCallStatus in
+    uniffi_ckb_light_client_lib_fn_func_extract_dao_fields(
+        FfiConverterString.lower(daoHex),uniffiCallStatus
+    )
+})
+}
+/**
+ * Fetch status for a header, as a JSON string; queues the fetch when unknown.
+ */
+public func fetchHeader(hash: String)throws  -> String  {
+    return try  FfiConverterString.lift(try rustCallWithError(FfiConverterTypeLightClientError_lift) {
+        uniffiCallStatus in
+    uniffi_ckb_light_client_lib_fn_func_fetch_header(
+        FfiConverterString.lower(hash),uniffiCallStatus
+    )
+})
+}
+/**
+ * Fetch status for a transaction, as a JSON string; queues the fetch when unknown.
+ */
+public func fetchTransaction(hash: String)throws  -> String  {
+    return try  FfiConverterString.lift(try rustCallWithError(FfiConverterTypeLightClientError_lift) {
+        uniffiCallStatus in
+    uniffi_ckb_light_client_lib_fn_func_fetch_transaction(
+        FfiConverterString.lower(hash),uniffiCallStatus
+    )
+})
+}
+/**
+ * Live cells matching a JSON search key, as a JSON page (`order`: "asc"/"desc").
+ */
+public func getCells(searchKeyJson: String, order: String, limit: Int32, cursor: String)throws  -> String  {
+    return try  FfiConverterString.lift(try rustCallWithError(FfiConverterTypeLightClientError_lift) {
+        uniffiCallStatus in
+    uniffi_ckb_light_client_lib_fn_func_get_cells(
+        FfiConverterString.lower(searchKeyJson),
+        FfiConverterString.lower(order),
+        FfiConverterInt32.lower(limit),
+        FfiConverterString.lower(cursor),uniffiCallStatus
+    )
+})
+}
+/**
+ * Total capacity of the cells matching a JSON search key, as a JSON string.
+ */
+public func getCellsCapacity(searchKeyJson: String)throws  -> String  {
+    return try  FfiConverterString.lift(try rustCallWithError(FfiConverterTypeLightClientError_lift) {
+        uniffiCallStatus in
+    uniffi_ckb_light_client_lib_fn_func_get_cells_capacity(
+        FfiConverterString.lower(searchKeyJson),uniffiCallStatus
+    )
+})
+}
+/**
+ * Genesis block as a JSON string.
+ */
+public func getGenesisBlock()throws  -> String  {
+    return try  FfiConverterString.lift(try rustCallWithError(FfiConverterTypeLightClientError_lift) {
+        uniffiCallStatus in
+    uniffi_ckb_light_client_lib_fn_func_get_genesis_block(uniffiCallStatus
+    )
+})
+}
+/**
+ * Header for a block hash (`0x`-prefixed or bare) as a JSON string.
+ */
+public func getHeader(hash: String)throws  -> String  {
+    return try  FfiConverterString.lift(try rustCallWithError(FfiConverterTypeLightClientError_lift) {
+        uniffiCallStatus in
+    uniffi_ckb_light_client_lib_fn_func_get_header(
+        FfiConverterString.lower(hash),uniffiCallStatus
+    )
+})
+}
+/**
+ * Header for a block number (decimal, or `0x`-prefixed hex) as a JSON string.
+ */
+public func getHeaderByNumber(blockNumber: String)throws  -> String  {
+    return try  FfiConverterString.lift(try rustCallWithError(FfiConverterTypeLightClientError_lift) {
+        uniffiCallStatus in
+    uniffi_ckb_light_client_lib_fn_func_get_header_by_number(
+        FfiConverterString.lower(blockNumber),uniffiCallStatus
+    )
+})
+}
+/**
  * Connected peers as a JSON string.
  */
 public func getPeers()throws  -> String  {
     return try  FfiConverterString.lift(try rustCallWithError(FfiConverterTypeLightClientError_lift) {
         uniffiCallStatus in
     uniffi_ckb_light_client_lib_fn_func_get_peers(uniffiCallStatus
+    )
+})
+}
+/**
+ * Filter scripts currently synced for, as a JSON string.
+ */
+public func getScripts()throws  -> String  {
+    return try  FfiConverterString.lift(try rustCallWithError(FfiConverterTypeLightClientError_lift) {
+        uniffiCallStatus in
+    uniffi_ckb_light_client_lib_fn_func_get_scripts(uniffiCallStatus
     )
 })
 }
@@ -866,6 +1056,31 @@ public func getTipHeader()throws  -> String  {
     return try  FfiConverterString.lift(try rustCallWithError(FfiConverterTypeLightClientError_lift) {
         uniffiCallStatus in
     uniffi_ckb_light_client_lib_fn_func_get_tip_header(uniffiCallStatus
+    )
+})
+}
+/**
+ * Transaction and its status for a hash, as a JSON string.
+ */
+public func getTransaction(hash: String)throws  -> String  {
+    return try  FfiConverterString.lift(try rustCallWithError(FfiConverterTypeLightClientError_lift) {
+        uniffiCallStatus in
+    uniffi_ckb_light_client_lib_fn_func_get_transaction(
+        FfiConverterString.lower(hash),uniffiCallStatus
+    )
+})
+}
+/**
+ * Transactions matching a JSON search key, as a JSON page (`order`: "asc"/"desc").
+ */
+public func getTransactions(searchKeyJson: String, order: String, limit: Int32, cursor: String)throws  -> String  {
+    return try  FfiConverterString.lift(try rustCallWithError(FfiConverterTypeLightClientError_lift) {
+        uniffiCallStatus in
+    uniffi_ckb_light_client_lib_fn_func_get_transactions(
+        FfiConverterString.lower(searchKeyJson),
+        FfiConverterString.lower(order),
+        FfiConverterInt32.lower(limit),
+        FfiConverterString.lower(cursor),uniffiCallStatus
     )
 })
 }
@@ -913,6 +1128,28 @@ public func localNodeInfo()throws  -> String  {
 })
 }
 /**
+ * Verify a JSON transaction and queue it for broadcast; returns its hash as JSON.
+ */
+public func sendTransaction(txJson: String)throws  -> String  {
+    return try  FfiConverterString.lift(try rustCallWithError(FfiConverterTypeLightClientError_lift) {
+        uniffiCallStatus in
+    uniffi_ckb_light_client_lib_fn_func_send_transaction(
+        FfiConverterString.lower(txJson),uniffiCallStatus
+    )
+})
+}
+/**
+ * Set the filter scripts to sync (command 0 = all, 1 = partial, 2 = delete).
+ */
+public func setScripts(scriptsJson: String, command: Int32)throws   {try rustCallWithError(FfiConverterTypeLightClientError_lift) {
+        uniffiCallStatus in
+    uniffi_ckb_light_client_lib_fn_func_set_scripts(
+        FfiConverterString.lower(scriptsJson),
+        FfiConverterInt32.lower(command),uniffiCallStatus
+    )
+}
+}
+/**
  * Transition from INIT to RUNNING.
  *
  * Blocking: call it off the main thread along with the rest of the lifecycle
@@ -954,13 +1191,58 @@ private let initializationResult: InitializationResult = {
     if bindings_contract_version != scaffolding_contract_version {
         return InitializationResult.contractVersionMismatch
     }
+    if (uniffi_ckb_light_client_lib_checksum_func_calculate_max_withdraw() != 35999) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_ckb_light_client_lib_checksum_func_calculate_unlock_epoch() != 49158) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_ckb_light_client_lib_checksum_func_call_rpc() != 17826) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_ckb_light_client_lib_checksum_func_estimate_cycles() != 2689) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_ckb_light_client_lib_checksum_func_extract_dao_fields() != 14231) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_ckb_light_client_lib_checksum_func_fetch_header() != 32749) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_ckb_light_client_lib_checksum_func_fetch_transaction() != 9915) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_ckb_light_client_lib_checksum_func_get_cells() != 6945) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_ckb_light_client_lib_checksum_func_get_cells_capacity() != 6696) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_ckb_light_client_lib_checksum_func_get_genesis_block() != 18480) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_ckb_light_client_lib_checksum_func_get_header() != 22057) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_ckb_light_client_lib_checksum_func_get_header_by_number() != 6313) {
+        return InitializationResult.apiChecksumMismatch
+    }
     if (uniffi_ckb_light_client_lib_checksum_func_get_peers() != 46096) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_ckb_light_client_lib_checksum_func_get_scripts() != 56371) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_ckb_light_client_lib_checksum_func_get_status() != 47683) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_ckb_light_client_lib_checksum_func_get_tip_header() != 11636) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_ckb_light_client_lib_checksum_func_get_transaction() != 21207) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_ckb_light_client_lib_checksum_func_get_transactions() != 62226) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_ckb_light_client_lib_checksum_func_init_light_client() != 36491) {
@@ -970,6 +1252,12 @@ private let initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_ckb_light_client_lib_checksum_func_local_node_info() != 22703) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_ckb_light_client_lib_checksum_func_send_transaction() != 34763) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_ckb_light_client_lib_checksum_func_set_scripts() != 29973) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_ckb_light_client_lib_checksum_func_start_light_client() != 33644) {

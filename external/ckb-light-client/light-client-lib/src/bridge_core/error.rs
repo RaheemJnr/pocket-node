@@ -16,6 +16,11 @@ pub enum BridgeError {
     /// be reset, so the process must be restarted first.
     #[error("light client is already initialized")]
     AlreadyInitialized,
+    /// The thing asked for is legitimately absent, as opposed to the lookup
+    /// having failed. A light client only stores the blocks it matched, so an
+    /// unknown header is an ordinary answer rather than an error condition.
+    #[error("not found: {0}")]
+    NotFound(String),
     /// The TOML config could not be read or parsed.
     #[error("config error: {0}")]
     Config(String),
