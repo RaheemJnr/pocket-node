@@ -72,8 +72,8 @@ final class LightClientService {
         Task { await bootstrap() }
     }
 
-    /// Copies `testnet.toml` out of the bundle (once) and hands its directory to
-    /// the light client as the data directory.
+    /// Refreshes `testnet.toml` from the bundle and hands its directory to the
+    /// light client as the data directory.
     private func bootstrap() async {
         do {
             let dataDir = try Self.prepareDataDirectory(network: "testnet")
@@ -93,6 +93,14 @@ final class LightClientService {
             report(error)
         }
         await refresh()
+    }
+
+    /// Re-runs init after a failed bootstrap. The Rust side publishes its globals
+    /// only once init fully succeeds, so retrying after a failure is clean.
+    func retryInit() async {
+        guard !isInitialized else { return }
+        lastError = nil
+        await bootstrap()
     }
 
     func start() async {
@@ -196,13 +204,16 @@ final class LightClientService {
         return dataDir
     }
 
+    /// Rewrites the on-disk config from the bundle on every init, so an app
+    /// update that changes bootnodes actually takes effect. The config is not
+    /// user-editable, and `store.db`/`network/` alongside it are left untouched.
+    /// Android does the same in `GatewayRepository.initializeNode`.
     private static func installConfig(named network: String, into dataDir: URL) throws -> URL {
-        let destination = dataDir.appendingPathComponent("\(network).toml")
-        guard !FileManager.default.fileExists(atPath: destination.path) else { return destination }
         guard let source = Bundle.main.url(forResource: network, withExtension: "toml") else {
             throw LightClientError.Config(reason: "\(network).toml missing from the app bundle")
         }
-        try FileManager.default.copyItem(at: source, to: destination)
+        let destination = dataDir.appendingPathComponent("\(network).toml")
+        try Data(contentsOf: source).write(to: destination, options: .atomic)
         return destination
     }
 }

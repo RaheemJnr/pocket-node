@@ -26,6 +26,11 @@ struct NodeStatusView: View {
                     Text(error)
                         .font(.footnote)
                         .foregroundStyle(theme.error)
+
+                    if !service.isInitialized {
+                        Button("Retry") { Task { await service.retryInit() } }
+                            .accessibilityIdentifier("nodeStatus.retry")
+                    }
                 }
             }
 
@@ -33,7 +38,7 @@ struct NodeStatusView: View {
                 Button("Start") { Task { await service.start() } }
                     .disabled(service.status == .running || !service.isInitialized)
                 Button("Stop") { Task { await service.stop() } }
-                    .disabled(service.status == .stopped)
+                    .disabled(service.status == .stopped || service.status == .initializing)
             }
         }
         .navigationTitle("Node Status")
