@@ -11,8 +11,21 @@ repository = "https://github.com/nervosnetwork/ckb-light-client"
 [lib]
 crate-type = ["cdylib", "rlib", "staticlib"]
 
+# Generates Swift/Kotlin bindings from the `ffi` module. Gated on
+# `uniffi-cli` so the bindgen machinery (clap, uniffi_bindgen, askama) is
+# only pulled in for host builds and never links into the mobile slices.
+[[bin]]
+name = "uniffi-bindgen"
+path = "src/bin/uniffi-bindgen.rs"
+required-features = ["uniffi-cli"]
+
 [features]
 jni-bridge = []
+# Compiles the `ffi` module and the UniFFI scaffolding. This is what the iOS
+# slices build with.
+uniffi-bridge = ["dep:uniffi"]
+# Host-only: adds the bindgen CLI on top of `uniffi-bridge`.
+uniffi-cli = ["uniffi-bridge", "uniffi/cli"]
 portable = []
 
 [dependencies]
@@ -52,6 +65,7 @@ thiserror = "1.0.30"
 toml = "0.5.8"
 tokio = { version = "1.20" }
 serde_json = "1.0"
+uniffi = { version = "0.32", optional = true }
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 rusqlite = { version = "0.29.0", features = ["bundled"] }
@@ -64,6 +78,9 @@ ckb-stop-handler = "1"
 [target.'cfg(target_os = "android")'.dependencies]
 jni = "0.21"
 android_logger = "0.13"
+
+[target.'cfg(target_os = "ios")'.dependencies]
+oslog = { version = "0.2", default-features = false, features = ["logger"] }
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 web-time = "1.1.0"
