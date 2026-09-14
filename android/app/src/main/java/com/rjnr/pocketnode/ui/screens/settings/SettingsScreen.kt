@@ -82,8 +82,8 @@ import com.rjnr.pocketnode.data.gateway.models.displayName
 import com.rjnr.pocketnode.R
 import com.rjnr.pocketnode.ui.util.resolveString
 import com.rjnr.pocketnode.ui.components.SyncOptionsSheet
-import com.rjnr.pocketnode.data.wallet.SyncStrategy
-import com.rjnr.pocketnode.data.wallet.ThemeMode
+import com.rjnr.pocketnode.core.prefs.SyncStrategy
+import com.rjnr.pocketnode.core.prefs.ThemeMode
 import com.rjnr.pocketnode.ui.education.EducationSheet
 import com.rjnr.pocketnode.ui.education.EducationTopic
 import com.rjnr.pocketnode.ui.theme.CkbWalletTheme

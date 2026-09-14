@@ -1,9 +1,9 @@
 package com.rjnr.pocketnode.data.gateway
 
 import com.rjnr.pocketnode.core.log.Logger
+import com.rjnr.pocketnode.core.prefs.SyncPreferences
 import com.rjnr.pocketnode.data.gateway.models.AccountStatusResponse
-import com.rjnr.pocketnode.data.sync.SyncProgressTracker
-import com.rjnr.pocketnode.data.wallet.WalletPreferences
+import com.rjnr.pocketnode.data.sync.contract.SyncProgressTracker
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
@@ -75,7 +75,7 @@ interface SyncPollSource {
  */
 @Singleton
 class SyncPoller @Inject constructor(
-    private val walletPreferences: WalletPreferences,
+    private val syncPreferences: SyncPreferences,
     private val logger: Logger,
 ) {
 
@@ -222,7 +222,7 @@ class SyncPoller @Inject constructor(
                         val nowMs = System.currentTimeMillis()
                         if (syncedBlock > 0 && nowMs - lastSyncedAtWrittenMs > 60_000L) {
                             lastSyncedAtWrittenMs = nowMs
-                            walletPreferences.setLastSyncedAt(nowMs)
+                            syncPreferences.setLastSyncedAt(nowMs)
                         }
 
                         val justReachedTip = wasSyncing && info.isSynced

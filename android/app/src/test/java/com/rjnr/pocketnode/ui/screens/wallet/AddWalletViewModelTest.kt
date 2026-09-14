@@ -5,7 +5,7 @@ import com.rjnr.pocketnode.core.log.NoopLogger
 import androidx.lifecycle.SavedStateHandle
 import com.rjnr.pocketnode.data.database.entity.WalletEntity
 import com.rjnr.pocketnode.data.gateway.GatewayRepository
-import com.rjnr.pocketnode.data.migration.WalletKeyBundle
+import com.rjnr.pocketnode.data.crypto.WalletKeyBundle
 import com.rjnr.pocketnode.data.wallet.KeyManager
 import com.rjnr.pocketnode.data.wallet.MnemonicManager
 import com.rjnr.pocketnode.data.wallet.WalletKeyReader

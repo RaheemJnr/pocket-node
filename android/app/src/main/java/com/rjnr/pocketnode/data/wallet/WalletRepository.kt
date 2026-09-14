@@ -2,6 +2,8 @@ package com.rjnr.pocketnode.data.wallet
 
 import com.rjnr.pocketnode.core.crypto.hexToByteArray
 import com.rjnr.pocketnode.core.log.Logger
+import com.rjnr.pocketnode.core.prefs.AppStatePreferences
+import com.rjnr.pocketnode.core.prefs.SyncPreferences
 import com.rjnr.pocketnode.data.database.AppDatabase
 import com.rjnr.pocketnode.data.database.DatabaseMaintenanceUtil
 import com.rjnr.pocketnode.data.database.dao.BalanceCacheDao
@@ -13,7 +15,7 @@ import com.rjnr.pocketnode.data.database.entity.WalletEntity
 import androidx.room.withTransaction
 import com.rjnr.pocketnode.data.gateway.models.NetworkType
 import com.rjnr.pocketnode.data.gateway.models.SyncMode
-import com.rjnr.pocketnode.data.migration.WalletKeyBundle
+import com.rjnr.pocketnode.data.crypto.WalletKeyBundle
 import kotlinx.coroutines.flow.Flow
 import java.util.UUID
 import javax.inject.Inject
@@ -25,7 +27,8 @@ private const val TAG = "WalletRepository"
 class WalletRepository @Inject constructor(
     private val walletDao: WalletDao,
     private val keyManager: KeyManager,
-    private val walletPreferences: WalletPreferences,
+    private val appStatePreferences: AppStatePreferences,
+    private val syncPreferences: SyncPreferences,
     private val mnemonicManager: MnemonicManager,
     private val appDatabase: AppDatabase,
     private val transactionDao: TransactionDao,
@@ -41,12 +44,12 @@ class WalletRepository @Inject constructor(
     /**
      * Synchronous snapshot of the currently-active walletId, or null if
      * no wallet has been selected yet. Reads from
-     * [WalletPreferences.getActiveWalletId] directly so it can be called
+     * [AppStatePreferences.getActiveWalletId] directly so it can be called
      * outside a coroutine; the underlying SharedPreferences read is fast.
      * Used by V2-aware call sites that need to peek the kdfVersion before
      * deciding whether a BiometricPrompt CryptoObject step is required.
      */
-    fun activeWalletIdSnapshot(): String? = walletPreferences.getActiveWalletId()
+    fun activeWalletIdSnapshot(): String? = appStatePreferences.getActiveWalletId()
 
     fun getActiveWallet(): Flow<WalletEntity?> = walletDao.getActiveWallet()
 
@@ -92,8 +95,8 @@ class WalletRepository @Inject constructor(
      * import UI selected.
      */
     private fun markFreshWalletSyncMode(walletId: String) {
-        walletPreferences.setSyncMode(SyncMode.NEW_WALLET, NetworkType.MAINNET, walletId)
-        walletPreferences.setSyncMode(SyncMode.NEW_WALLET, NetworkType.TESTNET, walletId)
+        syncPreferences.setSyncMode(SyncMode.NEW_WALLET, NetworkType.MAINNET, walletId)
+        syncPreferences.setSyncMode(SyncMode.NEW_WALLET, NetworkType.TESTNET, walletId)
     }
 
     /**
@@ -149,7 +152,7 @@ class WalletRepository @Inject constructor(
         try {
             walletDao.deactivateAll()
             walletDao.insert(entity)
-            walletPreferences.setActiveWalletId(walletId)
+            appStatePreferences.setActiveWalletId(walletId)
             markFreshWalletSyncMode(walletId)
         } catch (e: Throwable) {
             logger.e(TAG, "Post-persist entity insert failed for $walletId; attempting rollback", e)
@@ -205,7 +208,7 @@ class WalletRepository @Inject constructor(
         try {
             walletDao.deactivateAll()
             walletDao.insert(entity)
-            walletPreferences.setActiveWalletId(walletId)
+            appStatePreferences.setActiveWalletId(walletId)
         } catch (e: Throwable) {
             logger.e(TAG, "Post-persist entity insert failed for $walletId; attempting rollback", e)
             runCatching { keyMaterialDao.delete(walletId) }
@@ -282,7 +285,7 @@ class WalletRepository @Inject constructor(
         try {
             walletDao.deactivateAll()
             walletDao.insert(entity)
-            walletPreferences.setActiveWalletId(walletId)
+            appStatePreferences.setActiveWalletId(walletId)
         } catch (e: Throwable) {
             logger.e(TAG, "Post-persist entity insert failed for $walletId; attempting rollback", e)
             runCatching { keyMaterialDao.delete(walletId) }
@@ -368,17 +371,17 @@ class WalletRepository @Inject constructor(
         try {
             walletDao.deactivateAll()
             walletDao.insert(entity)
-            walletPreferences.setActiveWalletId(walletId)
+            appStatePreferences.setActiveWalletId(walletId)
             if (explicitIndex != null) {
                 // Discovery restore: the account has on-chain HISTORY — fresh
                 // from-tip sync would hide exactly what made it discoverable.
                 // Inherit the parent's sync window per network instead.
                 for (net in listOf(NetworkType.MAINNET, NetworkType.TESTNET)) {
-                    walletPreferences.setSyncMode(
-                        walletPreferences.getSyncMode(net, parentWalletId), net, walletId
+                    syncPreferences.setSyncMode(
+                        syncPreferences.getSyncMode(net, parentWalletId), net, walletId
                     )
-                    walletPreferences.setCustomBlockHeight(
-                        walletPreferences.getCustomBlockHeight(net, parentWalletId), net, walletId
+                    syncPreferences.setCustomBlockHeight(
+                        syncPreferences.getCustomBlockHeight(net, parentWalletId), net, walletId
                     )
                 }
                 // Also inherit the parent's sync PROGRESS. The candidate
@@ -433,7 +436,7 @@ class WalletRepository @Inject constructor(
         walletDao.deactivateAll()
         walletDao.activate(walletId)
         walletDao.updateLastActiveAt(walletId, System.currentTimeMillis())
-        walletPreferences.setActiveWalletId(walletId)
+        appStatePreferences.setActiveWalletId(walletId)
         logger.d(TAG, "Switched to wallet: $walletId")
     }
 
@@ -455,7 +458,7 @@ class WalletRepository @Inject constructor(
     suspend fun deleteWallet(walletId: String) {
         val wallet = walletDao.getById(walletId)
             ?: throw IllegalArgumentException("Wallet not found: $walletId")
-        if (wallet.isActive || walletPreferences.getActiveWalletId() == walletId) {
+        if (wallet.isActive || appStatePreferences.getActiveWalletId() == walletId) {
             throw IllegalStateException("Cannot delete the active wallet. Switch to another wallet first.")
         }
         // Delete the wallet row and wallet-scoped caches first, all in one transaction.
@@ -504,7 +507,7 @@ class WalletRepository @Inject constructor(
         // Clear both the preference pointer and the DB row's `isActive`
         // flag up front so the per-wallet delete loop doesn't re-throw
         // "Cannot delete the active wallet" on the currently-active row.
-        walletPreferences.clearActiveWalletId()
+        appStatePreferences.clearActiveWalletId()
         walletDao.deactivateAll()
         // Snapshot the wallet list before mutation; iterating the live
         // result would skip rows as deletions land.

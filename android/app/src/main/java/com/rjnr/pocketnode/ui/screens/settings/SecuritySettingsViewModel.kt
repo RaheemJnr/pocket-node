@@ -8,9 +8,9 @@ import com.rjnr.pocketnode.R
 import com.rjnr.pocketnode.data.auth.AuthManager
 import com.rjnr.pocketnode.data.auth.PinManager
 import com.rjnr.pocketnode.data.database.dao.WalletDao
-import com.rjnr.pocketnode.data.wallet.KeyBackupManager
+import com.rjnr.pocketnode.data.crypto.KeyBackupManager
 import com.rjnr.pocketnode.data.wallet.KeyManager
-import com.rjnr.pocketnode.data.wallet.KeyMaterial
+import com.rjnr.pocketnode.data.crypto.KeyMaterial
 import com.rjnr.pocketnode.ui.util.UiMessage
 import dagger.hilt.android.lifecycle.HiltViewModel
 import kotlinx.coroutines.flow.MutableStateFlow

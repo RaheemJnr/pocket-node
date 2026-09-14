@@ -11,9 +11,9 @@ import com.rjnr.pocketnode.data.database.MIGRATION_2_3
 import com.rjnr.pocketnode.data.database.MIGRATION_3_4
 import com.rjnr.pocketnode.data.database.MIGRATION_4_5
 import com.rjnr.pocketnode.data.database.dao.WalletDao
-import com.rjnr.pocketnode.data.migration.KeyStoreMigrationHelper
-import com.rjnr.pocketnode.data.migration.KeystoreV2MigrationHelper
-import com.rjnr.pocketnode.data.migration.WalletKeyBundle
+import com.rjnr.pocketnode.data.crypto.KeyStoreMigrationHelper
+import com.rjnr.pocketnode.data.crypto.KeystoreV2MigrationHelper
+import com.rjnr.pocketnode.data.crypto.WalletKeyBundle
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.test.runTest
 import org.junit.After
@@ -70,7 +70,7 @@ class WalletRepositoryTest {
         v2Helper = KeystoreV2MigrationHelper(db.keyMaterialDao(), encryptionManager, migrationPrefs, logger = NoopLogger)
         walletPreferences = WalletPreferences(context, NoopLogger)
         repo = WalletRepository(
-            walletDao, keyManager, walletPreferences, mnemonicManager, db,
+            walletDao, keyManager, walletPreferences, walletPreferences, mnemonicManager, db,
             db.transactionDao(), db.balanceCacheDao(), db.daoCellDao(), db.keyMaterialDao(),
             db.subAccountCandidateDao(), SubAccountDiscovery(mnemonicManager, keyManager), NoopLogger
         )

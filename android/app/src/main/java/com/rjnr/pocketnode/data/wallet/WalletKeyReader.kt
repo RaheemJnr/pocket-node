@@ -5,10 +5,12 @@ import android.util.Log
 import androidx.fragment.app.FragmentActivity
 import com.rjnr.pocketnode.core.crypto.hexToByteArray
 import com.rjnr.pocketnode.data.auth.AuthManager
+import com.rjnr.pocketnode.data.crypto.KeyBackupManager
+import com.rjnr.pocketnode.data.crypto.KeyMaterial
 import com.rjnr.pocketnode.data.crypto.KeystoreEncryptionManager
 import com.rjnr.pocketnode.data.database.dao.KeyMaterialDao
-import com.rjnr.pocketnode.data.migration.DecryptedKeyData
-import com.rjnr.pocketnode.data.migration.KeyStoreMigrationHelper
+import com.rjnr.pocketnode.data.crypto.DecryptedKeyData
+import com.rjnr.pocketnode.data.crypto.KeyStoreMigrationHelper
 import javax.inject.Inject
 import javax.inject.Singleton
 import kotlinx.coroutines.launch

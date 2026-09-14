@@ -1,5 +1,6 @@
 package com.rjnr.pocketnode.data.gateway
 
+import com.rjnr.pocketnode.data.gateway.models.DaoConstants
 import com.rjnr.pocketnode.data.gateway.models.NetworkType
 import org.junit.Assert.assertArrayEquals
 import org.junit.Assert.assertEquals

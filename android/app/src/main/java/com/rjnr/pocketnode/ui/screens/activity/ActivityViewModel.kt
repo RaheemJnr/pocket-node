@@ -1,6 +1,8 @@
 package com.rjnr.pocketnode.ui.screens.activity
 
 import com.rjnr.pocketnode.core.log.Logger
+import com.rjnr.pocketnode.core.prefs.AppStatePreferences
+import com.rjnr.pocketnode.core.prefs.UiPreferences
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import androidx.paging.Pager
@@ -13,7 +15,6 @@ import com.rjnr.pocketnode.data.export.TransactionExporter
 import com.rjnr.pocketnode.data.gateway.GatewayRepository
 import com.rjnr.pocketnode.data.gateway.models.NetworkType
 import com.rjnr.pocketnode.data.gateway.models.TransactionRecord
-import com.rjnr.pocketnode.data.wallet.WalletPreferences
 import dagger.hilt.android.lifecycle.HiltViewModel
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableSharedFlow
@@ -43,7 +44,8 @@ data class ActivityUiState(
 class ActivityViewModel @Inject constructor(
     private val repository: GatewayRepository,
     private val transactionDao: TransactionDao,
-    private val walletPreferences: WalletPreferences,
+    private val appStatePreferences: AppStatePreferences,
+    private val uiPreferences: UiPreferences,
     private val logger: Logger,
 ) : ViewModel() {
 
@@ -63,7 +65,7 @@ class ActivityViewModel @Inject constructor(
     ) { filter, network ->
         filter to network
     }.flatMapLatest { (filter, network) ->
-        val walletId = walletPreferences.getActiveWalletId() ?: ""
+        val walletId = appStatePreferences.getActiveWalletId() ?: ""
         Pager(PagingConfig(pageSize = 20, enablePlaceholders = false)) {
             when (filter) {
                 Filter.ALL -> transactionDao.getTransactionsPaged(walletId, network.name)
@@ -72,7 +74,7 @@ class ActivityViewModel @Inject constructor(
             }
         }.flow.map { pagingData ->
             pagingData.map {
-                it.toTransactionRecord().copy(isBulk = walletPreferences.isBulkTxHash(it.txHash))
+                it.toTransactionRecord().copy(isBulk = uiPreferences.isBulkTxHash(it.txHash))
             }
         }
     }.cachedIn(viewModelScope)
@@ -141,7 +143,7 @@ class ActivityViewModel @Inject constructor(
     fun exportTransactions() {
         viewModelScope.launch {
             runCatching {
-                val walletId = walletPreferences.getActiveWalletId() ?: ""
+                val walletId = appStatePreferences.getActiveWalletId() ?: ""
                 val network = _uiState.value.currentNetwork.name
                 val entities = transactionDao.getAllByWalletAndNetwork(walletId, network)
                 TransactionExporter().exportToCsv(entities)

@@ -1,4 +1,4 @@
-package com.rjnr.pocketnode.data.sync
+package com.rjnr.pocketnode.data.sync.contract
 
 /**
  * Pure-logic tracker that calculates sync progress percentage and ETA

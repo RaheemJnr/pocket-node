@@ -5,8 +5,8 @@ import androidx.test.core.app.ApplicationProvider
 import com.rjnr.pocketnode.core.log.NoopLogger
 import com.rjnr.pocketnode.data.auth.PinManager
 import com.rjnr.pocketnode.data.crypto.Blake2b
-import com.rjnr.pocketnode.data.wallet.KeyBackupManager
-import com.rjnr.pocketnode.data.wallet.KeyMaterial
+import com.rjnr.pocketnode.data.crypto.KeyBackupManager
+import com.rjnr.pocketnode.data.crypto.KeyMaterial
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.test.StandardTestDispatcher

@@ -96,7 +96,7 @@ class AddWalletViewModel @Inject constructor(
     private suspend fun persistWalletKeys(
         activity: FragmentActivity,
         walletId: String,
-        bundle: com.rjnr.pocketnode.data.migration.WalletKeyBundle,
+        bundle: com.rjnr.pocketnode.data.crypto.WalletKeyBundle,
         walletType: String,
         mnemonicBackedUp: Boolean,
         promptTitle: String = "Secure wallet",

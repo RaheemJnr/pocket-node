@@ -8,6 +8,7 @@ import com.rjnr.pocketnode.data.database.dao.WalletDao
 import com.rjnr.pocketnode.data.database.entity.SyncProgressEntity
 import com.rjnr.pocketnode.data.database.entity.WalletEntity
 import com.rjnr.pocketnode.data.gateway.models.NetworkType
+import com.rjnr.pocketnode.data.crypto.KeyStoreMigrationHelper
 import com.rjnr.pocketnode.data.wallet.KeyManager
 import com.rjnr.pocketnode.data.wallet.WalletPreferences
 import java.util.UUID
@@ -28,6 +29,8 @@ private const val TAG = "WalletMigrationHelper"
 class WalletMigrationHelper @Inject constructor(
     private val walletDao: WalletDao,
     private val keyManager: KeyManager,
+    // Concrete (#461): uses the internal legacy sync_progress migration API,
+    // which is deliberately not part of any shared preference interface.
     private val walletPreferences: WalletPreferences,
     private val database: AppDatabase,
     private val syncProgressDao: SyncProgressDao,

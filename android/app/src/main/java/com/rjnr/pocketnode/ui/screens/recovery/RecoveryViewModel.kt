@@ -3,8 +3,8 @@ package com.rjnr.pocketnode.ui.screens.recovery
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.rjnr.pocketnode.data.auth.PinManager
-import com.rjnr.pocketnode.data.wallet.KeyBackupManager
-import com.rjnr.pocketnode.data.wallet.KeyMaterial
+import com.rjnr.pocketnode.data.crypto.KeyBackupManager
+import com.rjnr.pocketnode.data.crypto.KeyMaterial
 import dagger.hilt.android.lifecycle.HiltViewModel
 import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.Dispatchers

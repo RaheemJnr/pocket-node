@@ -1,4 +1,4 @@
-package com.rjnr.pocketnode.data.sync
+package com.rjnr.pocketnode.data.sync.contract
 
 import android.content.ComponentName
 import android.content.Context

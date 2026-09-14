@@ -34,8 +34,8 @@ import androidx.hilt.lifecycle.viewmodel.compose.hiltViewModel
 import androidx.lifecycle.ViewModel
 import com.composables.icons.lucide.Lucide
 import com.composables.icons.lucide.RefreshCw
+import com.rjnr.pocketnode.core.prefs.SyncPreferences
 import com.rjnr.pocketnode.data.gateway.GatewayRepository
-import com.rjnr.pocketnode.data.wallet.WalletPreferences
 import com.rjnr.pocketnode.ui.util.uaTestTag
 import dagger.hilt.android.lifecycle.HiltViewModel
 import kotlinx.coroutines.launch
@@ -56,21 +56,21 @@ import javax.inject.Inject
  */
 @HiltViewModel
 class BackgroundSyncOptInViewModel @Inject constructor(
-    private val walletPreferences: WalletPreferences,
+    private val syncPreferences: SyncPreferences,
     private val repository: GatewayRepository,
 ) : ViewModel() {
 
-    fun isAlreadyEnabled(): Boolean = walletPreferences.isBackgroundSyncEnabled()
+    fun isAlreadyEnabled(): Boolean = syncPreferences.isBackgroundSyncEnabled()
 
     fun enableBackgroundSync() {
-        walletPreferences.setBackgroundSyncEnabled(true)
+        syncPreferences.setBackgroundSyncEnabled(true)
         repository.startBackgroundSync()
     }
 
     fun declineBackgroundSync() {
         // Already the default, but persist explicitly so the choice is a
         // recorded decision, not an absence of one.
-        walletPreferences.setBackgroundSyncEnabled(false)
+        syncPreferences.setBackgroundSyncEnabled(false)
     }
 }
 

@@ -1,11 +1,10 @@
-package com.rjnr.pocketnode.data.migration
+package com.rjnr.pocketnode.data.crypto
 
 import android.content.Context
 import android.content.SharedPreferences
 import androidx.room.Room
 import androidx.test.core.app.ApplicationProvider
 import com.rjnr.pocketnode.core.log.NoopLogger
-import com.rjnr.pocketnode.data.crypto.KeystoreEncryptionManager
 import com.rjnr.pocketnode.data.database.AppDatabase
 import com.rjnr.pocketnode.data.database.MIGRATION_1_2
 import com.rjnr.pocketnode.data.database.MIGRATION_2_3

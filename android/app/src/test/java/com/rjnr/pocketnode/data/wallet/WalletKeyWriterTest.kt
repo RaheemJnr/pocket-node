@@ -7,11 +7,12 @@ import androidx.room.Room
 import androidx.test.core.app.ApplicationProvider
 import com.rjnr.pocketnode.core.log.NoopLogger
 import com.rjnr.pocketnode.data.auth.AuthManager
+import com.rjnr.pocketnode.data.crypto.KeyBackupManager
 import com.rjnr.pocketnode.data.crypto.KeystoreEncryptionManager
 import com.rjnr.pocketnode.data.database.AppDatabase
 import com.rjnr.pocketnode.data.database.dao.KeyMaterialDao
-import com.rjnr.pocketnode.data.migration.KeystoreV2MigrationHelper
-import com.rjnr.pocketnode.data.migration.WalletKeyBundle
+import com.rjnr.pocketnode.data.crypto.KeystoreV2MigrationHelper
+import com.rjnr.pocketnode.data.crypto.WalletKeyBundle
 import io.mockk.coEvery
 import io.mockk.coVerify
 import io.mockk.mockk
@@ -71,7 +72,7 @@ class WalletKeyWriterTest {
         // KeyStoreMigrationHelper backs the V1 software-only fallback path
         // added for users without a device lock. Tests below exercise the V2
         // path; the V1 helper is wired but not invoked.
-        val v1Helper = com.rjnr.pocketnode.data.migration.KeyStoreMigrationHelper(
+        val v1Helper = com.rjnr.pocketnode.data.crypto.KeyStoreMigrationHelper(
             keyMaterialDao, encryptionManager, prefs, NoopLogger
         )
         authManager = mockk(relaxed = true)

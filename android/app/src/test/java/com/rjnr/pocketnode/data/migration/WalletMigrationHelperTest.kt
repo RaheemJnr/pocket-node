@@ -14,6 +14,7 @@ import com.rjnr.pocketnode.data.database.MIGRATION_5_6
 import com.rjnr.pocketnode.data.database.MIGRATION_6_7
 import com.rjnr.pocketnode.data.database.dao.WalletDao
 import com.rjnr.pocketnode.data.database.entity.WalletEntity
+import com.rjnr.pocketnode.data.crypto.KeyStoreMigrationHelper
 import com.rjnr.pocketnode.data.wallet.KeyManager
 import com.rjnr.pocketnode.data.wallet.MnemonicManager
 import com.rjnr.pocketnode.data.wallet.WalletPreferences

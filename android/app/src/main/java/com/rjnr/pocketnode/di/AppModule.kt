@@ -58,8 +58,8 @@ import io.ktor.client.engine.android.Android
 import io.ktor.client.plugins.contentnegotiation.ContentNegotiation
 import io.ktor.serialization.kotlinx.json.json
 import kotlinx.serialization.json.Json
-import com.rjnr.pocketnode.data.migration.KeyStoreMigrationHelper
-import com.rjnr.pocketnode.data.wallet.KeyBackupManager
+import com.rjnr.pocketnode.data.crypto.KeyStoreMigrationHelper
+import com.rjnr.pocketnode.data.crypto.KeyBackupManager
 import android.content.SharedPreferences
 import java.io.File
 import javax.inject.Named
@@ -209,8 +209,8 @@ object AppModule {
         encryptionManager: KeystoreEncryptionManager,
         @Named("migrationPrefs") migrationPrefs: SharedPreferences,
         logger: Logger,
-    ): com.rjnr.pocketnode.data.migration.KeystoreV2MigrationHelper =
-        com.rjnr.pocketnode.data.migration.KeystoreV2MigrationHelper(
+    ): com.rjnr.pocketnode.data.crypto.KeystoreV2MigrationHelper =
+        com.rjnr.pocketnode.data.crypto.KeystoreV2MigrationHelper(
             keyMaterialDao, encryptionManager, migrationPrefs, logger = logger
         )
 
@@ -273,7 +273,7 @@ object AppModule {
         lightClient: com.rjnr.pocketnode.data.gateway.LightClientReadOnly,
         subAccountReconciler: com.rjnr.pocketnode.data.wallet.SubAccountReconciler,
         subAccountDiscovery: com.rjnr.pocketnode.data.wallet.SubAccountDiscovery,
-        syncServiceCommands: com.rjnr.pocketnode.data.sync.SyncServiceCommands,
+        syncServiceCommands: com.rjnr.pocketnode.data.sync.contract.SyncServiceCommands,
         nodeLifecycle: com.rjnr.pocketnode.data.gateway.NodeLifecycle,
         syncPoller: com.rjnr.pocketnode.data.gateway.SyncPoller,
         startupReconciler: com.rjnr.pocketnode.data.gateway.StartupReconciler,

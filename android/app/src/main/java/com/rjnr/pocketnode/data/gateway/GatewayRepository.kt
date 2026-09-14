@@ -13,7 +13,7 @@ import com.rjnr.pocketnode.data.database.entity.PendingBroadcastEntity
 import com.rjnr.pocketnode.data.database.entity.SyncProgressEntity
 import com.rjnr.pocketnode.data.database.entity.WalletEntity
 import com.rjnr.pocketnode.data.gateway.models.*
-import com.rjnr.pocketnode.data.sync.SyncServiceCommands
+import com.rjnr.pocketnode.data.sync.contract.SyncServiceCommands
 import com.rjnr.pocketnode.data.migration.WalletMigrationHelper
 import com.rjnr.pocketnode.data.transaction.TransactionBuilder
 import com.rjnr.pocketnode.data.transaction.RecipientOutput
@@ -28,7 +28,7 @@ import com.rjnr.pocketnode.data.wallet.gapLimitResolution
 import com.rjnr.pocketnode.data.wallet.nextScanWindow
 import com.rjnr.pocketnode.data.wallet.WalletInfo
 import com.rjnr.pocketnode.data.wallet.WalletPreferences
-import com.rjnr.pocketnode.data.wallet.SyncStrategy
+import com.rjnr.pocketnode.core.prefs.SyncStrategy
 import com.nervosnetwork.ckblightclient.LightClientNative
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.SupervisorJob
@@ -71,6 +71,7 @@ interface TipSource {
 @Singleton
 class GatewayRepository @Inject constructor(
     private val keyManager: KeyManager,
+    // Concrete (#461): touches all four preference domains.
     private val walletPreferences: WalletPreferences,
     private val json: Json,
     private val transactionBuilder: TransactionBuilder,

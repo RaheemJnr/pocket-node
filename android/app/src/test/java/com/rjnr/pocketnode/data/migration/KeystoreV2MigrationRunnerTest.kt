@@ -10,6 +10,8 @@ import com.rjnr.pocketnode.data.auth.AuthManager
 import com.rjnr.pocketnode.data.crypto.KeystoreEncryptionManager
 import com.rjnr.pocketnode.data.database.AppDatabase
 import com.rjnr.pocketnode.data.database.dao.KeyMaterialDao
+import com.rjnr.pocketnode.data.crypto.KeyStoreMigrationHelper
+import com.rjnr.pocketnode.data.crypto.KeystoreV2MigrationHelper
 import io.mockk.coEvery
 import io.mockk.coVerify
 import io.mockk.every

@@ -8,7 +8,7 @@ import com.rjnr.pocketnode.R
 import com.rjnr.pocketnode.data.auth.AuthManager
 import com.rjnr.pocketnode.data.auth.PinManager
 import com.rjnr.pocketnode.data.database.dao.WalletDao
-import com.rjnr.pocketnode.data.migration.KeystoreV2MigrationHelper
+import com.rjnr.pocketnode.data.crypto.KeystoreV2MigrationHelper
 import com.rjnr.pocketnode.data.migration.KeystoreV2MigrationRunner
 import com.rjnr.pocketnode.ui.util.UiMessage
 import dagger.hilt.android.lifecycle.HiltViewModel

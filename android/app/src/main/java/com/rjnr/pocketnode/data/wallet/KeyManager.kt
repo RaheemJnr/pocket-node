@@ -10,10 +10,12 @@ import com.rjnr.pocketnode.core.crypto.Secp256k1Signer
 import com.rjnr.pocketnode.core.crypto.hexToByteArray
 import com.rjnr.pocketnode.core.crypto.toHexString
 import com.rjnr.pocketnode.data.auth.AuthManager
+import com.rjnr.pocketnode.data.crypto.KeyBackupManager
+import com.rjnr.pocketnode.data.crypto.KeyMaterial
 import com.rjnr.pocketnode.data.gateway.models.NetworkType
 import com.rjnr.pocketnode.data.gateway.models.Script
-import com.rjnr.pocketnode.data.migration.KeyStoreMigrationHelper
-import com.rjnr.pocketnode.data.migration.WalletKeyBundle
+import com.rjnr.pocketnode.data.crypto.KeyStoreMigrationHelper
+import com.rjnr.pocketnode.data.crypto.WalletKeyBundle
 import androidx.annotation.VisibleForTesting
 import dagger.hilt.android.qualifiers.ApplicationContext
 import javax.inject.Inject

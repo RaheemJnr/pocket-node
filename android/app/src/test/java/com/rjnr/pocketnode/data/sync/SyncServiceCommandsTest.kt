@@ -1,5 +1,6 @@
 package com.rjnr.pocketnode.data.sync
 
+import com.rjnr.pocketnode.data.sync.contract.SyncServiceCommands
 import org.junit.Assert.assertEquals
 import org.junit.Test
 

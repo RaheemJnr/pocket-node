@@ -104,7 +104,7 @@ class SyncCoordinatorCustomBlockTest {
         coordinator = SyncCoordinator(
             walletDao = db.walletDao(),
             syncProgressDao = db.syncProgressDao(),
-            walletPreferences = walletPreferences,
+            syncPreferences = walletPreferences,
             keyManager = keyManager,
             json = json,
             lightClient = fakeBridge,

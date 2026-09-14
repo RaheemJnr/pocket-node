@@ -5,6 +5,7 @@ import androidx.fragment.app.FragmentActivity
 import com.rjnr.pocketnode.core.log.Logger
 import com.rjnr.pocketnode.data.auth.AuthManager
 import com.rjnr.pocketnode.data.crypto.KeystoreEncryptionManager
+import com.rjnr.pocketnode.data.crypto.KeystoreV2MigrationHelper
 import javax.inject.Inject
 import javax.inject.Singleton
 

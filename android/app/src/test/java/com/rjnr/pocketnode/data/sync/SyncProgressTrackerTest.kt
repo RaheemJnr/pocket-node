@@ -1,5 +1,6 @@
 package com.rjnr.pocketnode.data.sync
 
+import com.rjnr.pocketnode.data.sync.contract.SyncProgressTracker
 import org.junit.Assert.*
 import org.junit.Before
 import org.junit.Test
