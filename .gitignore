@@ -234,8 +234,6 @@ android/app/schemas/
 android/app/src/debug/assets/
 
 # ===================
-# Codemap (generated output only — the generator itself is tracked)
+# Codemap (local-only tooling — kept on disk, never tracked in the repo)
 # ===================
-tools/codemap/out/
-tools/codemap/.venv/
-tools/codemap/**/__pycache__/
+tools/codemap/
