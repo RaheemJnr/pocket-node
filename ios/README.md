@@ -28,3 +28,14 @@ project. A pre-build script phase runs
 - `xcodebuild -scheme PocketNode ... test` runs the offline unit tests.
 - `xcodebuild -scheme PocketNodeNetwork ... test` runs the Node Status
   acceptance test, which starts the node and waits for a real testnet tip.
+
+## CI
+
+`.github/workflows/ios-ci.yml` runs on macOS runners for every PR and push to
+`main` that touches `android/shared/**`, `ios/**`, or
+`external/ckb-light-client/**`: it builds and tests the shared KMP module
+(`:shared:iosSimulatorArm64Test`, `:shared:testAndroidHostTest`), builds the
+`CkbLightClientFFI.xcframework` via `build-ios.sh`, regenerates the Xcode
+project with `xcodegen`, then builds and tests the offline `PocketNode`
+scheme on a simulator resolved at run time. The networked `PocketNodeNetwork`
+scheme talks to real testnet peers and is intentionally not run in CI.
