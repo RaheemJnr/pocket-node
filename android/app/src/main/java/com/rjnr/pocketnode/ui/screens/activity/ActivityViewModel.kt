@@ -1,6 +1,6 @@
 package com.rjnr.pocketnode.ui.screens.activity
 
-import android.util.Log
+import com.rjnr.pocketnode.core.log.Logger
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import androidx.paging.Pager
@@ -43,7 +43,8 @@ data class ActivityUiState(
 class ActivityViewModel @Inject constructor(
     private val repository: GatewayRepository,
     private val transactionDao: TransactionDao,
-    private val walletPreferences: WalletPreferences
+    private val walletPreferences: WalletPreferences,
+    private val logger: Logger,
 ) : ViewModel() {
 
     enum class Filter { ALL, RECEIVED, SENT }
@@ -90,12 +91,12 @@ class ActivityViewModel @Inject constructor(
             _uiState.update { it.copy(isLoading = true, error = null) }
             repository.getTransactions()
                 .onSuccess {
-                    Log.d(TAG, "Cache refreshed")
+                    logger.d(TAG, "Cache refreshed")
                     _uiState.update { it.copy(isLoading = false) }
                     // Room cache is now updated, PagingSource auto-invalidates
                 }
                 .onFailure { error ->
-                    Log.e(TAG, "Failed to refresh cache", error)
+                    logger.e(TAG, "Failed to refresh cache", error)
                     _uiState.update {
                         it.copy(
                             isLoading = false,
@@ -124,7 +125,7 @@ class ActivityViewModel @Inject constructor(
         viewModelScope.launch {
             repository.retryBroadcast(txHash)
                 .onFailure { e ->
-                    Log.e(TAG, "retryFailedTransaction failed for $txHash", e)
+                    logger.e(TAG, "retryFailedTransaction failed for $txHash", e)
                     _uiState.update {
                         it.copy(
                             error = com.rjnr.pocketnode.ui.util.UiMessage.Resource(
@@ -147,7 +148,7 @@ class ActivityViewModel @Inject constructor(
             }.onSuccess { csv ->
                 _exportEvent.emit(csv)
             }.onFailure { error ->
-                Log.e(TAG, "Export failed", error)
+                logger.e(TAG, "Export failed", error)
                 _uiState.update {
                     it.copy(
                         error = com.rjnr.pocketnode.ui.util.UiMessage.Resource(

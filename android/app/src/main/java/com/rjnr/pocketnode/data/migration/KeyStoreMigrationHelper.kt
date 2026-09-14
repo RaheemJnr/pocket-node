@@ -1,7 +1,7 @@
 package com.rjnr.pocketnode.data.migration
 
 import android.content.SharedPreferences
-import android.util.Log
+import com.rjnr.pocketnode.core.log.Logger
 import com.rjnr.pocketnode.data.crypto.KeystoreEncryptionManager
 import com.rjnr.pocketnode.data.database.dao.KeyMaterialDao
 import com.rjnr.pocketnode.data.database.entity.KeyMaterialEntity
@@ -32,7 +32,8 @@ class V2KeyMaterialRequiresAuthException(walletId: String) :
 class KeyStoreMigrationHelper(
     private val keyMaterialDao: KeyMaterialDao,
     private val encryptionManager: KeystoreEncryptionManager,
-    private val migrationPrefs: SharedPreferences
+    private val migrationPrefs: SharedPreferences,
+    private val logger: Logger,
 ) {
 
     suspend fun migrateWallet(
@@ -109,7 +110,7 @@ class KeyStoreMigrationHelper(
             1 -> decryptV1Row(entity)
             2 -> throw V2KeyMaterialRequiresAuthException(walletId)
             else -> {
-                Log.e(TAG, "Unknown kdfVersion=${entity.kdfVersion} for walletId=$walletId")
+                logger.e(TAG, "Unknown kdfVersion=${entity.kdfVersion} for walletId=$walletId")
                 null
             }
         }
@@ -134,7 +135,7 @@ class KeyStoreMigrationHelper(
             1 -> decryptV1Row(entity)
             2 -> decryptV2Row(entity, v2DecryptCipher)
             else -> {
-                Log.e(TAG, "Unknown kdfVersion=${entity.kdfVersion} for walletId=$walletId")
+                logger.e(TAG, "Unknown kdfVersion=${entity.kdfVersion} for walletId=$walletId")
                 null
             }
         }
@@ -163,7 +164,7 @@ class KeyStoreMigrationHelper(
                 mnemonicBackedUp = entity.mnemonicBackedUp
             )
         } catch (e: Exception) {
-            Log.e(TAG, "Failed to decrypt V1 key material for ${entity.walletId}", e)
+            logger.e(TAG, "Failed to decrypt V1 key material for ${entity.walletId}", e)
             null
         }
     }
@@ -182,7 +183,7 @@ class KeyStoreMigrationHelper(
                 mnemonicBackedUp = entity.mnemonicBackedUp
             )
         } catch (e: Exception) {
-            Log.e(TAG, "Failed to decrypt V2 key material for ${entity.walletId}", e)
+            logger.e(TAG, "Failed to decrypt V2 key material for ${entity.walletId}", e)
             null
         }
     }

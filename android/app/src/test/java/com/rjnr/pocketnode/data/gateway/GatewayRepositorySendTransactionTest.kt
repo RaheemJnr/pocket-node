@@ -3,6 +3,7 @@ package com.rjnr.pocketnode.data.gateway
 import android.content.Context
 import androidx.room.Room
 import androidx.test.core.app.ApplicationProvider
+import com.rjnr.pocketnode.core.log.NoopLogger
 import com.rjnr.pocketnode.data.database.AppDatabase
 import com.rjnr.pocketnode.data.database.entity.PendingBroadcastEntity
 import kotlinx.coroutines.sync.Mutex
@@ -66,7 +67,7 @@ class GatewayRepositorySendTransactionTest {
         db = Room.inMemoryDatabaseBuilder(ctx, AppDatabase::class.java)
             .allowMainThreadQueries()
             .build()
-        cacheManager = CacheManager(db.transactionDao(), db.balanceCacheDao())
+        cacheManager = CacheManager(db.transactionDao(), db.balanceCacheDao(), NoopLogger)
     }
 
     @After

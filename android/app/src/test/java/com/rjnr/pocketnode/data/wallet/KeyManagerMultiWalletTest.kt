@@ -3,6 +3,7 @@ package com.rjnr.pocketnode.data.wallet
 import android.content.Context
 import androidx.room.Room
 import androidx.test.core.app.ApplicationProvider
+import com.rjnr.pocketnode.core.log.NoopLogger
 import com.rjnr.pocketnode.data.crypto.KeystoreEncryptionManager
 import com.rjnr.pocketnode.data.database.AppDatabase
 import com.rjnr.pocketnode.data.database.MIGRATION_1_2
@@ -52,11 +53,11 @@ class KeyManagerMultiWalletTest {
         encryptionManager = KeystoreEncryptionManager.createForTest()
         val migrationPrefs = context.getSharedPreferences("test_multi_migration", Context.MODE_PRIVATE)
         migrationPrefs.edit().clear().commit()
-        val migrationHelper = KeyStoreMigrationHelper(db.keyMaterialDao(), encryptionManager, migrationPrefs)
-        v2Helper = KeystoreV2MigrationHelper(db.keyMaterialDao(), encryptionManager, migrationPrefs)
+        val migrationHelper = KeyStoreMigrationHelper(db.keyMaterialDao(), encryptionManager, migrationPrefs, NoopLogger)
+        v2Helper = KeystoreV2MigrationHelper(db.keyMaterialDao(), encryptionManager, migrationPrefs, logger = NoopLogger)
 
         val mnemonicManager = MnemonicManager()
-        keyManager = KeyManager(context, mnemonicManager)
+        keyManager = KeyManager(context, mnemonicManager, NoopLogger)
         keyManager.keyStoreMigrationHelper = migrationHelper
     }
 

@@ -3,6 +3,7 @@ package com.rjnr.pocketnode.data.gateway
 import android.content.Context
 import androidx.room.Room
 import androidx.test.core.app.ApplicationProvider
+import com.rjnr.pocketnode.core.log.NoopLogger
 import com.rjnr.pocketnode.data.database.AppDatabase
 import com.rjnr.pocketnode.data.database.entity.WalletEntity
 import com.rjnr.pocketnode.data.gateway.models.NetworkType
@@ -95,10 +96,10 @@ class SyncCoordinatorCustomBlockTest {
         db = Room.inMemoryDatabaseBuilder(ctx, AppDatabase::class.java)
             .allowMainThreadQueries()
             .build()
-        walletPreferences = WalletPreferences(ctx)
+        walletPreferences = WalletPreferences(ctx, NoopLogger)
         // Real KeyManager — only deriveLockScriptFromAddress is exercised;
         // it's a pure bech32 decode that needs no other dependencies wired.
-        keyManager = KeyManager(ctx, MnemonicManager())
+        keyManager = KeyManager(ctx, MnemonicManager(), NoopLogger)
         fakeBridge = FakeLightClientBridge()
         coordinator = SyncCoordinator(
             walletDao = db.walletDao(),
@@ -109,6 +110,7 @@ class SyncCoordinatorCustomBlockTest {
             lightClient = fakeBridge,
             subAccountCandidateDao = db.subAccountCandidateDao(),
             transactionDao = db.transactionDao(),
+            logger = NoopLogger,
         )
     }
 

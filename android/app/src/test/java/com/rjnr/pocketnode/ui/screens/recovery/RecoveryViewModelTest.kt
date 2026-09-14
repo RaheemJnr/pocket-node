@@ -2,6 +2,7 @@ package com.rjnr.pocketnode.ui.screens.recovery
 
 import android.content.Context
 import androidx.test.core.app.ApplicationProvider
+import com.rjnr.pocketnode.core.log.NoopLogger
 import com.rjnr.pocketnode.data.auth.PinManager
 import com.rjnr.pocketnode.data.crypto.Blake2b
 import com.rjnr.pocketnode.data.wallet.KeyBackupManager
@@ -56,7 +57,7 @@ class RecoveryViewModelTest {
     }
 
     private fun createBackupManager(): KeyBackupManager =
-        KeyBackupManager(tempDir.root).also {
+        KeyBackupManager(tempDir.root, NoopLogger).also {
             it.kdfIterations = 1_000          // fast PBKDF2 for legacy reads
             it.argon2Iterations = 1           // fast Argon2id for v2 writes/reads
             it.argon2MemoryKb = 8
@@ -66,7 +67,7 @@ class RecoveryViewModelTest {
     /** A fast, in-memory PinManager with an optional stored PIN. */
     private fun createPinManager(pin: CharArray? = null): PinManager {
         val ctx = ApplicationProvider.getApplicationContext<Context>()
-        return PinManager(ctx, Blake2b()).apply {
+        return PinManager(ctx, Blake2b(), NoopLogger).apply {
             testPrefs = ctx.getSharedPreferences("test_recovery_pin", Context.MODE_PRIVATE)
             testPrefs!!.edit().clear().commit()
             timeProvider = { fakeTimeMs }

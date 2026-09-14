@@ -1,7 +1,7 @@
 package com.rjnr.pocketnode.data.migration
 
-import android.util.Log
 import androidx.room.withTransaction
+import com.rjnr.pocketnode.core.log.Logger
 import com.rjnr.pocketnode.data.database.AppDatabase
 import com.rjnr.pocketnode.data.database.dao.SyncProgressDao
 import com.rjnr.pocketnode.data.database.dao.WalletDao
@@ -32,6 +32,7 @@ class WalletMigrationHelper @Inject constructor(
     private val database: AppDatabase,
     private val syncProgressDao: SyncProgressDao,
     private val keyStoreMigrationHelper: KeyStoreMigrationHelper,
+    private val logger: Logger,
 ) {
     /**
      * Migrate the legacy single-wallet to the multi-wallet Room table.
@@ -57,7 +58,7 @@ class WalletMigrationHelper @Inject constructor(
         if (walletDao.count() > 0) return  // already migrated
         if (!keyManager.hasWallet()) return // no legacy wallet to migrate
 
-        Log.d(TAG, "Migrating legacy single-wallet to multi-wallet schema")
+        logger.d(TAG, "Migrating legacy single-wallet to multi-wallet schema")
 
         try {
             val info = keyManager.getWalletInfo()
@@ -102,9 +103,9 @@ class WalletMigrationHelper @Inject constructor(
             // Set active wallet ID in preferences
             walletPreferences.setActiveWalletId(walletId)
 
-            Log.d(TAG, "Migration complete: created wallet $walletId")
+            logger.d(TAG, "Migration complete: created wallet $walletId")
         } catch (e: Exception) {
-            Log.e(TAG, "Migration failed — legacy wallet intact, will retry next launch", e)
+            logger.e(TAG, "Migration failed — legacy wallet intact, will retry next launch", e)
         }
     }
 
@@ -153,7 +154,7 @@ class WalletMigrationHelper @Inject constructor(
             networks
         )
 
-        Log.d(TAG, "sync_progress migration complete: ${wallets.size} wallets x ${networks.size} networks")
+        logger.d(TAG, "sync_progress migration complete: ${wallets.size} wallets x ${networks.size} networks")
         return true
     }
 }

@@ -1,7 +1,7 @@
 package com.rjnr.pocketnode.data.gateway
 
-import android.util.Log
 import com.nervosnetwork.ckblightclient.LightClientNative
+import com.rjnr.pocketnode.core.log.Logger
 import com.rjnr.pocketnode.data.gateway.models.EpochInfo
 import com.rjnr.pocketnode.data.gateway.models.JniHeaderView
 import kotlinx.coroutines.Dispatchers
@@ -31,6 +31,7 @@ import javax.inject.Singleton
 @Singleton
 class LightClientReadOnly @Inject constructor(
     private val json: Json,
+    private val logger: Logger,
 ) {
 
     suspend fun getPeers(): String? = withContext(Dispatchers.IO) {
@@ -60,7 +61,7 @@ class LightClientReadOnly @Inject constructor(
             val tip = json.decodeFromString<JniHeaderView>(tipStr)
             tip.number.removePrefix("0x").toLong(16)
         } catch (e: Exception) {
-            Log.w(TAG, "currentTipNumberOrZero failed: ${e.message}")
+            logger.w(TAG, "currentTipNumberOrZero failed: ${e.message}")
             0L
         }
     }

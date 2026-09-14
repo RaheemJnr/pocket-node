@@ -2,7 +2,7 @@ package com.rjnr.pocketnode.ui.screens.auth
 
 import android.content.Context
 import android.content.Intent
-import android.util.Log
+import com.rjnr.pocketnode.core.log.Logger
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.rjnr.pocketnode.data.auth.PinManager
@@ -38,6 +38,7 @@ class ForgotPinViewModel @Inject constructor(
     private val pinManager: PinManager,
     private val cacheManager: CacheManager,
     private val daoSyncManager: DaoSyncManager,
+    private val logger: Logger,
 ) : ViewModel() {
 
     data class UiState(
@@ -70,7 +71,7 @@ class ForgotPinViewModel @Inject constructor(
                 cacheManager.clearAll()
                 daoSyncManager.clearAll()
                 pinManager.removePin(force = true)
-                Log.d(TAG, "factoryReset complete; restarting process")
+                logger.d(TAG, "factoryReset complete; restarting process")
 
                 // ProcessPhoenix-style restart mirroring switchNetwork in
                 // GatewayRepository. JNI state cannot be re-initialised
@@ -83,7 +84,7 @@ class ForgotPinViewModel @Inject constructor(
                 context.startActivity(intent)
                 android.os.Process.killProcess(android.os.Process.myPid())
             } catch (e: Throwable) {
-                Log.e(TAG, "factoryReset failed", e)
+                logger.e(TAG, "factoryReset failed", e)
                 _uiState.update {
                     it.copy(
                         isResetting = false,

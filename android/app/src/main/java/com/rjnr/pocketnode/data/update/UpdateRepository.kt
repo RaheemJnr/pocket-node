@@ -1,6 +1,6 @@
 package com.rjnr.pocketnode.data.update
 
-import android.util.Log
+import com.rjnr.pocketnode.core.log.Logger
 import com.rjnr.pocketnode.BuildConfig
 import io.ktor.client.HttpClient
 import io.ktor.client.request.get
@@ -47,7 +47,8 @@ data class UpdateInfo(
 @Singleton
 class UpdateRepository @Inject constructor(
     private val httpClient: HttpClient,
-    private val json: Json
+    private val json: Json,
+    private val logger: Logger,
 ) {
     suspend fun checkForUpdate(currentVersion: String): Result<UpdateInfo?> = runCatching {
         val response = httpClient.get(GITHUB_API_URL) {
@@ -71,7 +72,7 @@ class UpdateRepository @Inject constructor(
             fileSize = apkAsset?.size ?: 0
         )
     }.onFailure { error ->
-        Log.w(TAG, "Update check failed: ${error.message}")
+        logger.w(TAG, "Update check failed: ${error.message}")
     }
 
     companion object {

@@ -5,6 +5,7 @@ import android.content.SharedPreferences
 import androidx.fragment.app.FragmentActivity
 import androidx.room.Room
 import androidx.test.core.app.ApplicationProvider
+import com.rjnr.pocketnode.core.log.NoopLogger
 import com.rjnr.pocketnode.data.auth.AuthManager
 import com.rjnr.pocketnode.data.crypto.KeystoreEncryptionManager
 import com.rjnr.pocketnode.data.database.AppDatabase
@@ -50,10 +51,10 @@ class KeystoreV2MigrationRunnerTest {
         prefs = ctx.getSharedPreferences("test_v2_migration", Context.MODE_PRIVATE)
         prefs.edit().clear().commit()
 
-        legacyHelper = KeyStoreMigrationHelper(keyMaterialDao, encryptionManager, prefs)
-        helper = KeystoreV2MigrationHelper(keyMaterialDao, encryptionManager, prefs)
+        legacyHelper = KeyStoreMigrationHelper(keyMaterialDao, encryptionManager, prefs, NoopLogger)
+        helper = KeystoreV2MigrationHelper(keyMaterialDao, encryptionManager, prefs, logger = NoopLogger)
         authManager = mockk(relaxed = true)
-        runner = KeystoreV2MigrationRunner(helper, encryptionManager, authManager)
+        runner = KeystoreV2MigrationRunner(helper, encryptionManager, authManager, NoopLogger)
         activity = mockk(relaxed = true)
     }
 
@@ -104,7 +105,7 @@ class KeystoreV2MigrationRunnerTest {
             else
                 callOriginal()
         }
-        val runnerWithSpy = KeystoreV2MigrationRunner(helper, spiedEm, authManager)
+        val runnerWithSpy = KeystoreV2MigrationRunner(helper, spiedEm, authManager, NoopLogger)
         val outcome = runnerWithSpy.runMigration(activity)
 
         when (outcome) {

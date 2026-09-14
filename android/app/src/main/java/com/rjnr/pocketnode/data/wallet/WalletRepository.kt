@@ -1,7 +1,7 @@
 package com.rjnr.pocketnode.data.wallet
 
-import android.util.Log
 import com.rjnr.pocketnode.core.crypto.hexToByteArray
+import com.rjnr.pocketnode.core.log.Logger
 import com.rjnr.pocketnode.data.database.AppDatabase
 import com.rjnr.pocketnode.data.database.DatabaseMaintenanceUtil
 import com.rjnr.pocketnode.data.database.dao.BalanceCacheDao
@@ -34,6 +34,7 @@ class WalletRepository @Inject constructor(
     private val keyMaterialDao: KeyMaterialDao,
     private val subAccountCandidateDao: com.rjnr.pocketnode.data.database.dao.SubAccountCandidateDao,
     private val subAccountDiscovery: SubAccountDiscovery,
+    private val logger: Logger,
 ) {
     val walletsFlow: Flow<List<WalletEntity>> = walletDao.getAllFlow()
 
@@ -151,13 +152,13 @@ class WalletRepository @Inject constructor(
             walletPreferences.setActiveWalletId(walletId)
             markFreshWalletSyncMode(walletId)
         } catch (e: Throwable) {
-            Log.e(TAG, "Post-persist entity insert failed for $walletId; attempting rollback", e)
+            logger.e(TAG, "Post-persist entity insert failed for $walletId; attempting rollback", e)
             runCatching { keyMaterialDao.delete(walletId) }
-                .onFailure { Log.e(TAG, "Rollback delete failed for $walletId", it) }
+                .onFailure { logger.e(TAG, "Rollback delete failed for $walletId", it) }
             throw e
         }
 
-        Log.d(TAG, "Created wallet: ${entity.walletId} (${entity.name})")
+        logger.d(TAG, "Created wallet: ${entity.walletId} (${entity.name})")
         entity
     }
 
@@ -206,9 +207,9 @@ class WalletRepository @Inject constructor(
             walletDao.insert(entity)
             walletPreferences.setActiveWalletId(walletId)
         } catch (e: Throwable) {
-            Log.e(TAG, "Post-persist entity insert failed for $walletId; attempting rollback", e)
+            logger.e(TAG, "Post-persist entity insert failed for $walletId; attempting rollback", e)
             runCatching { keyMaterialDao.delete(walletId) }
-                .onFailure { Log.e(TAG, "Rollback delete failed for $walletId", it) }
+                .onFailure { logger.e(TAG, "Rollback delete failed for $walletId", it) }
             throw e
         }
 
@@ -233,9 +234,9 @@ class WalletRepository @Inject constructor(
                     )
                 }
             )
-        }.onFailure { Log.w(TAG, "Sub-account candidate derivation failed (non-fatal)", it) }
+        }.onFailure { logger.w(TAG, "Sub-account candidate derivation failed (non-fatal)", it) }
 
-        Log.d(TAG, "Imported wallet: ${entity.walletId} (${entity.name})")
+        logger.d(TAG, "Imported wallet: ${entity.walletId} (${entity.name})")
         entity
     }
 
@@ -283,13 +284,13 @@ class WalletRepository @Inject constructor(
             walletDao.insert(entity)
             walletPreferences.setActiveWalletId(walletId)
         } catch (e: Throwable) {
-            Log.e(TAG, "Post-persist entity insert failed for $walletId; attempting rollback", e)
+            logger.e(TAG, "Post-persist entity insert failed for $walletId; attempting rollback", e)
             runCatching { keyMaterialDao.delete(walletId) }
-                .onFailure { Log.e(TAG, "Rollback delete failed for $walletId", it) }
+                .onFailure { logger.e(TAG, "Rollback delete failed for $walletId", it) }
             throw e
         }
 
-        Log.d(TAG, "Imported raw key wallet: ${entity.walletId} (${entity.name})")
+        logger.d(TAG, "Imported raw key wallet: ${entity.walletId} (${entity.name})")
         entity
     }
 
@@ -398,14 +399,14 @@ class WalletRepository @Inject constructor(
                             )
                         }
                     }
-                }.onFailure { Log.w(TAG, "Progress inherit failed (non-fatal)", it) }
+                }.onFailure { logger.w(TAG, "Progress inherit failed (non-fatal)", it) }
             } else {
                 markFreshWalletSyncMode(walletId)
             }
         } catch (e: Throwable) {
-            Log.e(TAG, "Post-persist sub-account insert failed for $walletId; attempting rollback", e)
+            logger.e(TAG, "Post-persist sub-account insert failed for $walletId; attempting rollback", e)
             runCatching { keyMaterialDao.delete(walletId) }
-                .onFailure { Log.e(TAG, "Rollback delete failed for $walletId", it) }
+                .onFailure { logger.e(TAG, "Rollback delete failed for $walletId", it) }
             throw e
         }
 
@@ -419,7 +420,7 @@ class WalletRepository @Inject constructor(
             )
         }
 
-        Log.d(TAG, "Created sub-account: $walletId (parent: $parentWalletId, index: $nextIndex)")
+        logger.d(TAG, "Created sub-account: $walletId (parent: $parentWalletId, index: $nextIndex)")
         entity
     }
 
@@ -433,7 +434,7 @@ class WalletRepository @Inject constructor(
         walletDao.activate(walletId)
         walletDao.updateLastActiveAt(walletId, System.currentTimeMillis())
         walletPreferences.setActiveWalletId(walletId)
-        Log.d(TAG, "Switched to wallet: $walletId")
+        logger.d(TAG, "Switched to wallet: $walletId")
     }
 
     /**
@@ -472,7 +473,7 @@ class WalletRepository @Inject constructor(
         // VACUUM must run outside the transaction above — SQLite rejects VACUUM
         // when a transaction is open on the same connection.
         DatabaseMaintenanceUtil.vacuum(appDatabase)
-        Log.d(TAG, "Deleted wallet and caches: $walletId")
+        logger.d(TAG, "Deleted wallet and caches: $walletId")
     }
 
     suspend fun walletCount(): Int = walletDao.count()
@@ -512,11 +513,11 @@ class WalletRepository @Inject constructor(
             val subs = walletDao.getSubAccountsList(parent.walletId)
             for (sub in subs) {
                 runCatching { deleteWallet(sub.walletId) }
-                    .onFailure { Log.w(TAG, "factoryReset: sub ${sub.walletId} delete failed", it) }
+                    .onFailure { logger.w(TAG, "factoryReset: sub ${sub.walletId} delete failed", it) }
             }
             runCatching { deleteWallet(parent.walletId) }
-                .onFailure { Log.w(TAG, "factoryReset: parent ${parent.walletId} delete failed", it) }
+                .onFailure { logger.w(TAG, "factoryReset: parent ${parent.walletId} delete failed", it) }
         }
-        Log.d(TAG, "factoryReset: ${parents.size} parent wallet(s) wiped")
+        logger.d(TAG, "factoryReset: ${parents.size} parent wallet(s) wiped")
     }
 }

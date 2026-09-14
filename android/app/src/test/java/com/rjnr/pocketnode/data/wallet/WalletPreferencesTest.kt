@@ -2,6 +2,7 @@ package com.rjnr.pocketnode.data.wallet
 
 import android.content.Context
 import androidx.test.core.app.ApplicationProvider
+import com.rjnr.pocketnode.core.log.NoopLogger
 import com.rjnr.pocketnode.data.gateway.models.NetworkType
 import com.rjnr.pocketnode.data.gateway.models.SyncMode
 import org.junit.Assert.*
@@ -26,7 +27,7 @@ class WalletPreferencesTest {
 
     private fun rawPrefs() = context.getSharedPreferences("ckb_wallet_prefs", Context.MODE_PRIVATE)
 
-    private fun newPrefs() = WalletPreferences(context)
+    private fun newPrefs() = WalletPreferences(context, NoopLogger)
 
     // --- Default network ---
 

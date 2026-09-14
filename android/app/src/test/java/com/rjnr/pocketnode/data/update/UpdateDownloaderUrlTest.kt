@@ -2,6 +2,7 @@ package com.rjnr.pocketnode.data.update
 
 import android.content.Context
 import androidx.test.core.app.ApplicationProvider
+import com.rjnr.pocketnode.core.log.NoopLogger
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Before
@@ -24,7 +25,7 @@ class UpdateDownloaderUrlTest {
     @Before
     fun setUp() {
         val ctx = ApplicationProvider.getApplicationContext<Context>()
-        downloader = UpdateDownloader(ctx)
+        downloader = UpdateDownloader(ctx, NoopLogger)
     }
 
     @Test

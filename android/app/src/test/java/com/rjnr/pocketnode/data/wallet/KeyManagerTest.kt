@@ -3,6 +3,7 @@ package com.rjnr.pocketnode.data.wallet
 import android.content.Context
 import androidx.room.Room
 import androidx.test.core.app.ApplicationProvider
+import com.rjnr.pocketnode.core.log.NoopLogger
 import com.rjnr.pocketnode.data.crypto.KeystoreEncryptionManager
 import com.rjnr.pocketnode.data.database.AppDatabase
 import com.rjnr.pocketnode.data.database.MIGRATION_1_2
@@ -45,7 +46,7 @@ class KeyManagerTest {
     fun setUp() = runTest {
         val context = ApplicationProvider.getApplicationContext<Context>()
         mnemonicManager = MnemonicManager()
-        keyManager = KeyManager(context, mnemonicManager)
+        keyManager = KeyManager(context, mnemonicManager, NoopLogger)
         // Use plain SharedPreferences for testing (EncryptedSharedPreferences needs real KeyStore)
         keyManager.testPrefs = context.getSharedPreferences("test_keys", Context.MODE_PRIVATE)
 
@@ -57,7 +58,7 @@ class KeyManagerTest {
         val encryptionManager = KeystoreEncryptionManager.createForTest()
         val migrationPrefs = context.getSharedPreferences("test_migration", Context.MODE_PRIVATE)
         migrationPrefs.edit().clear().commit()
-        migrationHelper = KeyStoreMigrationHelper(db.keyMaterialDao(), encryptionManager, migrationPrefs)
+        migrationHelper = KeyStoreMigrationHelper(db.keyMaterialDao(), encryptionManager, migrationPrefs, NoopLogger)
         keyManager.keyStoreMigrationHelper = migrationHelper
 
         keyManager.deleteWallet()

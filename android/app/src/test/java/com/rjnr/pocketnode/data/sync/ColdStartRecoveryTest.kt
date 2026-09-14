@@ -1,5 +1,6 @@
 package com.rjnr.pocketnode.data.sync
 
+import com.rjnr.pocketnode.core.log.NoopLogger
 import com.rjnr.pocketnode.data.database.entity.PendingBroadcastEntity
 import kotlinx.coroutines.test.StandardTestDispatcher
 import kotlinx.coroutines.test.runTest
@@ -42,7 +43,8 @@ class ColdStartRecoveryTest {
         cache = cache,
         tipSource = FakeTipSource(),
         lifecycleProvider = LifecycleProvider { true },
-        dispatcher = StandardTestDispatcher(scheduler)
+        dispatcher = StandardTestDispatcher(scheduler),
+        logger = NoopLogger
     )
 
     @Test

@@ -2,7 +2,7 @@ package com.rjnr.pocketnode.data.migration
 
 import android.content.SharedPreferences
 import android.database.sqlite.SQLiteConstraintException
-import android.util.Log
+import com.rjnr.pocketnode.core.log.Logger
 import com.rjnr.pocketnode.data.crypto.KeystoreEncryptionManager
 import com.rjnr.pocketnode.data.database.dao.KeyMaterialDao
 import com.rjnr.pocketnode.data.database.entity.KeyMaterialEntity
@@ -56,7 +56,8 @@ class KeystoreV2MigrationHelper(
     private val keyMaterialDao: KeyMaterialDao,
     private val encryptionManager: KeystoreEncryptionManager,
     private val prefs: SharedPreferences,
-    private val nowProvider: () -> Long = { System.currentTimeMillis() }
+    private val nowProvider: () -> Long = { System.currentTimeMillis() },
+    private val logger: Logger,
 ) {
 
     private val json = Json {
@@ -81,7 +82,7 @@ class KeystoreV2MigrationHelper(
                 ?: throw IllegalStateException("No key_material row for walletId=$walletId")
 
             if (entity.kdfVersion == V2_VERSION) {
-                Log.i(TAG, "Wallet $walletId already on V2; nothing to do")
+                logger.i(TAG, "Wallet $walletId already on V2; nothing to do")
                 return@runCatching
             }
             if (entity.kdfVersion != V1_VERSION) {
@@ -119,7 +120,7 @@ class KeystoreV2MigrationHelper(
             )
             keyMaterialDao.upsert(migrated)
 
-            Log.i(TAG, "Migrated wallet $walletId from V1 to V2")
+            logger.i(TAG, "Migrated wallet $walletId from V1 to V2")
         }
     }
 
@@ -171,7 +172,7 @@ class KeystoreV2MigrationHelper(
                     e
                 )
             }
-            Log.i(TAG, "Wrote new V2 wallet row for $walletId")
+            logger.i(TAG, "Wrote new V2 wallet row for $walletId")
         }
     }
 
@@ -231,7 +232,7 @@ class KeystoreV2MigrationHelper(
             )
             keyMaterialDao.upsert(migrated)
 
-            Log.i(TAG, "Migrated wallet $walletId V1→V2 (extracted plaintext for caller)")
+            logger.i(TAG, "Migrated wallet $walletId V1→V2 (extracted plaintext for caller)")
             bundle
         }
     }
@@ -251,7 +252,7 @@ class KeystoreV2MigrationHelper(
             }
             encryptionManager.deleteV1Key()
             prefs.edit().putBoolean(KEY_MIGRATION_V2_COMPLETE, true).apply()
-            Log.i(TAG, "Keystore V2 migration finalized")
+            logger.i(TAG, "Keystore V2 migration finalized")
         }
     }
 
@@ -264,7 +265,7 @@ class KeystoreV2MigrationHelper(
     suspend fun readV2Bundle(walletId: String, v2DecryptCipher: Cipher): WalletKeyBundle? {
         val entity = keyMaterialDao.getByWalletId(walletId) ?: return null
         if (entity.kdfVersion != V2_VERSION) {
-            Log.e(TAG, "readV2Bundle: wallet $walletId is not on V2 (kdfVersion=${entity.kdfVersion})")
+            logger.e(TAG, "readV2Bundle: wallet $walletId is not on V2 (kdfVersion=${entity.kdfVersion})")
             return null
         }
         val bundleBytes = encryptionManager.decryptWithCipher(v2DecryptCipher, entity.encryptedPrivateKey)

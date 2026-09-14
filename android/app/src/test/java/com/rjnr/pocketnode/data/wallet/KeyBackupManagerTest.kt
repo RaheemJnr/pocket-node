@@ -1,5 +1,6 @@
 package com.rjnr.pocketnode.data.wallet
 
+import com.rjnr.pocketnode.core.log.NoopLogger
 import org.junit.Assert.*
 import org.junit.Before
 import org.junit.Rule
@@ -40,7 +41,7 @@ class KeyBackupManagerTest {
 
     @Before
     fun setUp() {
-        manager = KeyBackupManager(tempDir.root)
+        manager = KeyBackupManager(tempDir.root, NoopLogger)
         // Use low cost factors for fast tests. Production uses PBKDF2 600_000
         // (legacy reads) and Argon2id 64 MB / t=3 / p=4 (current writes).
         manager.kdfIterations = 1_000

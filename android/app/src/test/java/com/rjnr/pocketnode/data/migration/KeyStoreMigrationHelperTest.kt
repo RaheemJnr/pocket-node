@@ -4,6 +4,7 @@ import android.content.Context
 import android.content.SharedPreferences
 import androidx.room.Room
 import androidx.test.core.app.ApplicationProvider
+import com.rjnr.pocketnode.core.log.NoopLogger
 import com.rjnr.pocketnode.data.crypto.KeystoreEncryptionManager
 import com.rjnr.pocketnode.data.database.AppDatabase
 import com.rjnr.pocketnode.data.database.MIGRATION_1_2
@@ -42,7 +43,7 @@ class KeyStoreMigrationHelperTest {
         migrationPrefs = context.getSharedPreferences("test_migration", Context.MODE_PRIVATE)
         migrationPrefs.edit().clear().commit()
 
-        helper = KeyStoreMigrationHelper(keyMaterialDao, encryptionManager, migrationPrefs)
+        helper = KeyStoreMigrationHelper(keyMaterialDao, encryptionManager, migrationPrefs, NoopLogger)
     }
 
     @After
@@ -109,7 +110,7 @@ class KeyStoreMigrationHelperTest {
         // V2KeyMaterialRequiresAuthException rather than silently returning
         // garbage from the V1 cipher applied to a V2 ciphertext.
         helper.migrateWallet("alpha", "aa".repeat(32), "alpha mnemonic", "mnemonic", false)
-        val v2Helper = KeystoreV2MigrationHelper(keyMaterialDao, encryptionManager, migrationPrefs)
+        val v2Helper = KeystoreV2MigrationHelper(keyMaterialDao, encryptionManager, migrationPrefs, logger = NoopLogger)
         v2Helper.migrateWallet("alpha", encryptionManager.newEncryptCipherV2()).getOrThrow()
 
         try {
@@ -123,7 +124,7 @@ class KeyStoreMigrationHelperTest {
     @Test
     fun `readDecryptedKey with cipher returns V2 bundle data`() = runTest {
         helper.migrateWallet("beta", "bb".repeat(32), "beta mnemonic", "mnemonic", true)
-        val v2Helper = KeystoreV2MigrationHelper(keyMaterialDao, encryptionManager, migrationPrefs)
+        val v2Helper = KeystoreV2MigrationHelper(keyMaterialDao, encryptionManager, migrationPrefs, logger = NoopLogger)
         v2Helper.migrateWallet("beta", encryptionManager.newEncryptCipherV2()).getOrThrow()
 
         val entity = keyMaterialDao.getByWalletId("beta")!!
@@ -162,7 +163,7 @@ class KeyStoreMigrationHelperTest {
     @Test
     fun `getMnemonicBackedUpFlag returns flag on V2 row without decrypting`() = runTest {
         helper.migrateWallet("v2-flag", "aa".repeat(32), "v2 mnemonic", "mnemonic", true)
-        val v2Helper = KeystoreV2MigrationHelper(keyMaterialDao, encryptionManager, migrationPrefs)
+        val v2Helper = KeystoreV2MigrationHelper(keyMaterialDao, encryptionManager, migrationPrefs, logger = NoopLogger)
         v2Helper.migrateWallet("v2-flag", encryptionManager.newEncryptCipherV2()).getOrThrow()
         // kdfVersion is now 2; readDecryptedKey would throw here.
 
@@ -172,7 +173,7 @@ class KeyStoreMigrationHelperTest {
     @Test
     fun `getWalletTypeFlag returns walletType on V2 row without decrypting`() = runTest {
         helper.migrateWallet("v2-type", "bb".repeat(32), "type mnemonic", "mnemonic", false)
-        val v2Helper = KeystoreV2MigrationHelper(keyMaterialDao, encryptionManager, migrationPrefs)
+        val v2Helper = KeystoreV2MigrationHelper(keyMaterialDao, encryptionManager, migrationPrefs, logger = NoopLogger)
         v2Helper.migrateWallet("v2-type", encryptionManager.newEncryptCipherV2()).getOrThrow()
 
         assertEquals("mnemonic", helper.getWalletTypeFlag("v2-type"))
@@ -191,7 +192,7 @@ class KeyStoreMigrationHelperTest {
     @Test
     fun `setMnemonicBackedUpFlag flips flag on V2 row without re-encrypting`() = runTest {
         helper.migrateWallet("v2-set", "cc".repeat(32), "set mnemonic", "mnemonic", false)
-        val v2Helper = KeystoreV2MigrationHelper(keyMaterialDao, encryptionManager, migrationPrefs)
+        val v2Helper = KeystoreV2MigrationHelper(keyMaterialDao, encryptionManager, migrationPrefs, logger = NoopLogger)
         v2Helper.migrateWallet("v2-set", encryptionManager.newEncryptCipherV2()).getOrThrow()
 
         // Capture the V2 ciphertext + iv so we can prove the setter didn't touch them.
@@ -219,7 +220,7 @@ class KeyStoreMigrationHelperTest {
 
     @Test
     fun `writeNewV2Row writes a row at kdfVersion=2`() = runTest {
-        val v2Helper = KeystoreV2MigrationHelper(keyMaterialDao, encryptionManager, migrationPrefs)
+        val v2Helper = KeystoreV2MigrationHelper(keyMaterialDao, encryptionManager, migrationPrefs, logger = NoopLogger)
         val cipher = encryptionManager.newEncryptCipherV2()
         val bundle = WalletKeyBundle(
             privateKeyHex = "aa".repeat(32),
@@ -240,7 +241,7 @@ class KeyStoreMigrationHelperTest {
 
     @Test
     fun `writeNewV2Row rejects pre-existing wallet IDs`() = runTest {
-        val v2Helper = KeystoreV2MigrationHelper(keyMaterialDao, encryptionManager, migrationPrefs)
+        val v2Helper = KeystoreV2MigrationHelper(keyMaterialDao, encryptionManager, migrationPrefs, logger = NoopLogger)
         val bundle = WalletKeyBundle(privateKeyHex = "aa".repeat(32), mnemonic = "m")
         v2Helper.writeNewV2Row("dup", bundle, encryptionManager.newEncryptCipherV2(), "mnemonic", false).getOrThrow()
 

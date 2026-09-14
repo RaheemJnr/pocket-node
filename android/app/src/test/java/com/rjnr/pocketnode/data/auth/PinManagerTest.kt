@@ -2,6 +2,7 @@ package com.rjnr.pocketnode.data.auth
 
 import android.content.Context
 import androidx.test.core.app.ApplicationProvider
+import com.rjnr.pocketnode.core.log.NoopLogger
 import com.rjnr.pocketnode.data.crypto.Blake2b
 import org.junit.Assert.*
 import org.junit.Before
@@ -22,7 +23,7 @@ class PinManagerTest {
     fun setUp() {
         val context = ApplicationProvider.getApplicationContext<Context>()
         blake2b = Blake2b()
-        pinManager = PinManager(context, blake2b)
+        pinManager = PinManager(context, blake2b, NoopLogger)
         pinManager.testPrefs = context.getSharedPreferences("test_pin", Context.MODE_PRIVATE)
         pinManager.timeProvider = { fakeTimeMs }
         // Speed up Argon2id for unit tests. Production uses 64 MB / 3 iter / 4 lanes.
@@ -267,7 +268,7 @@ class PinManagerTest {
         assertTrue(pinManager.isLockedOut())
 
         val context = ApplicationProvider.getApplicationContext<Context>()
-        val newPinManager = PinManager(context, blake2b)
+        val newPinManager = PinManager(context, blake2b, NoopLogger)
         newPinManager.testPrefs = pinManager.testPrefs
         newPinManager.timeProvider = { fakeTimeMs }
         newPinManager.argon2Iterations = 1

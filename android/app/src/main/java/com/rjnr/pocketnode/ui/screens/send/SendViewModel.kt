@@ -1,7 +1,7 @@
 package com.rjnr.pocketnode.ui.screens.send
 
-import android.util.Log
 import androidx.fragment.app.FragmentActivity
+import com.rjnr.pocketnode.core.log.Logger
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.rjnr.pocketnode.data.auth.AuthManager
@@ -122,6 +122,7 @@ class SendViewModel @Inject constructor(
     private val contactRepository: ContactRepository,
     private val errorJournal: com.rjnr.pocketnode.data.diagnostics.ErrorJournal,
     private val walletPreferences: com.rjnr.pocketnode.data.wallet.WalletPreferences,
+    private val logger: Logger,
 ) : ViewModel() {
 
     private val _uiState = MutableStateFlow(SendUiState())
@@ -629,7 +630,7 @@ class SendViewModel @Inject constructor(
             afterSendBookkeeping(recipient)
             startPollingTransactionStatus(txHash, capturedAddress)
         } catch (e: Exception) {
-            Log.e(TAG, "V2 send failed", e)
+            logger.e(TAG, "V2 send failed", e)
             errorJournal.record("send", e.message ?: e.javaClass.simpleName)
             _uiState.update {
                 it.copy(
@@ -678,15 +679,15 @@ class SendViewModel @Inject constructor(
             }
 
             try {
-                Log.d(TAG, "Starting send transaction flow")
+                logger.d(TAG, "Starting send transaction flow")
                 // Recipient + amount + sender together are a full payment
                 // record; logcat is adb/bugreport-readable on debug builds.
                 // Redact the addresses, drop the amount (#321).
-                Log.d(TAG, "  Recipient: ${state.recipientAddress.redactAddress()}")
-                Log.d(TAG, "  From address: ${capturedAddress.redactAddress()}")
+                logger.d(TAG, "  Recipient: ${state.recipientAddress.redactAddress()}")
+                logger.d(TAG, "  From address: ${capturedAddress.redactAddress()}")
 
                 _uiState.update { it.copy(statusMessage = "Broadcasting transaction...") }
-                Log.d(TAG, "📡 prepareAndSend: fetching cells, filtering reserved, building, broadcasting...")
+                logger.d(TAG, "📡 prepareAndSend: fetching cells, filtering reserved, building, broadcasting...")
 
                 if (state.sendMode == SendMode.BULK) {
                     proceedWithBulkSend(amountShannons, capturedAddress, capturedKey)
@@ -698,7 +699,7 @@ class SendViewModel @Inject constructor(
                         amountShannons = amountShannons,
                         privateKey = capturedKey
                     ).getOrThrow()
-                    Log.d(TAG, "✅ Transaction sent! Hash: $txHash")
+                    logger.d(TAG, "✅ Transaction sent! Hash: $txHash")
 
                     _uiState.update {
                         it.copy(
@@ -719,9 +720,9 @@ class SendViewModel @Inject constructor(
                 }
 
             } catch (e: Exception) {
-                Log.e(TAG, "❌ Transaction failed", e)
-                Log.e(TAG, "  Error type: ${e.javaClass.simpleName}")
-                Log.e(TAG, "  Error message: ${e.message}")
+                logger.e(TAG, "❌ Transaction failed", e)
+                logger.e(TAG, "  Error type: ${e.javaClass.simpleName}")
+                logger.e(TAG, "  Error message: ${e.message}")
                 e.printStackTrace()
 
                 val userFriendlyError = parseErrorMessage(e)
@@ -802,7 +803,7 @@ class SendViewModel @Inject constructor(
                 )
             }
         } catch (e: Exception) {
-            Log.e(TAG, "Bulk send failed", e)
+            logger.e(TAG, "Bulk send failed", e)
             errorJournal.record("bulk-send", e.message ?: e.javaClass.simpleName)
             _uiState.update { state ->
                 // Item 4: a batch failed mid-airdrop. The batches before it are
@@ -842,23 +843,23 @@ class SendViewModel @Inject constructor(
             var consecutiveUnknowns = 0
             val previousBalance = _uiState.value.availableBalance
 
-            Log.d(TAG, "🔄 Starting to poll for tx status: ${txHash.redactHash()} (previous balance: $previousBalance)")
+            logger.d(TAG, "🔄 Starting to poll for tx status: ${txHash.redactHash()} (previous balance: $previousBalance)")
 
             while (attempts < MAX_POLLING_ATTEMPTS) {
                 delay(POLLING_INTERVAL_MS)
                 attempts++
 
-                Log.d(TAG, "🔄 Polling attempt #$attempts for $txHash")
+                logger.d(TAG, "🔄 Polling attempt #$attempts for $txHash")
 
                 try {
                     val statusResult = repository.getTransactionStatus(txHash)
                     statusResult.onSuccess { status ->
-                        Log.d(TAG, "📊 Poll result: status=${status.status}, confirmations=${status.confirmations}")
+                        logger.d(TAG, "📊 Poll result: status=${status.status}, confirmations=${status.confirmations}")
 
                         // Handle "unknown" status - tx might be in network mempool
                         if (status.isUnknown()) {
                             consecutiveUnknowns++
-                            Log.d(TAG, "⏳ Unknown status (attempt $consecutiveUnknowns) - tx likely in network mempool")
+                            logger.d(TAG, "⏳ Unknown status (attempt $consecutiveUnknowns) - tx likely in network mempool")
 
                             // Update UI to show we're waiting for network confirmation
                             _uiState.update {
@@ -871,7 +872,7 @@ class SendViewModel @Inject constructor(
                             // After many unknown responses, the tx was likely already confirmed
                             // but the light client hasn't synced that block yet
                             if (consecutiveUnknowns > 20) {
-                                Log.d(TAG, "✅ Many unknowns - assuming tx confirmed on network")
+                                logger.d(TAG, "✅ Many unknowns - assuming tx confirmed on network")
                                 // Poll for balance until light client syncs the change output
                                 pollForBalanceUpdate(address, previousBalance)
                                 _uiState.update {
@@ -892,7 +893,7 @@ class SendViewModel @Inject constructor(
 
                         // Stop polling only after reaching required confirmations
                         if (status.isConfirmed() && (status.confirmations ?: 0) >= REQUIRED_CONFIRMATIONS) {
-                            Log.d(TAG, "✅ Transaction fully confirmed with ${status.confirmations} confirmations")
+                            logger.d(TAG, "✅ Transaction fully confirmed with ${status.confirmations} confirmations")
                             // Poll for balance until light client syncs the change output
                             pollForBalanceUpdate(address, previousBalance)
                             _uiState.update {
@@ -903,17 +904,17 @@ class SendViewModel @Inject constructor(
                             return@launch
                         }
                     }.onFailure { e ->
-                        Log.w(TAG, "⚠️ Poll failed: ${e.message}")
+                        logger.w(TAG, "⚠️ Poll failed: ${e.message}")
                         // Continue polling on failure
                     }
                 } catch (e: Exception) {
-                    Log.e(TAG, "❌ Poll exception: ${e.message}")
+                    logger.e(TAG, "❌ Poll exception: ${e.message}")
                     // Continue polling on exception
                 }
             }
 
             // Max attempts reached
-            Log.d(TAG, "⏰ Polling timed out after $attempts attempts")
+            logger.d(TAG, "⏰ Polling timed out after $attempts attempts")
 
             // If we got here and got lots of unknowns, tx probably went through
             if (consecutiveUnknowns > 10) {
@@ -941,7 +942,7 @@ class SendViewModel @Inject constructor(
      * or a reasonable timeout is reached.
      */
     private suspend fun pollForBalanceUpdate(address: String, previousBalance: Long) {
-        Log.d(TAG, "💰 Starting balance polling (previous: $previousBalance shannons)")
+        logger.d(TAG, "💰 Starting balance polling (previous: $previousBalance shannons)")
 
         var balanceAttempts = 0
         val maxBalanceAttempts = 30 // Try for ~90 seconds
@@ -952,20 +953,20 @@ class SendViewModel @Inject constructor(
 
             repository.refreshBalance(address).onSuccess { balance ->
                 val newBalance = balance.capacityAsLong()
-                Log.d(TAG, "💰 Balance poll #$balanceAttempts: $newBalance shannons (${balance.capacityCkb} CKB)")
+                logger.d(TAG, "💰 Balance poll #$balanceAttempts: $newBalance shannons (${balance.capacityCkb} CKB)")
 
                 // Balance updated when it differs from pre-send value
                 // (for self-transfers, change is just the fee)
                 if (newBalance != previousBalance) {
-                    Log.d(TAG, "✅ Balance updated: $newBalance shannons")
+                    logger.d(TAG, "✅ Balance updated: $newBalance shannons")
                     return
                 }
             }.onFailure { e ->
-                Log.w(TAG, "⚠️ Balance poll failed: ${e.message}")
+                logger.w(TAG, "⚠️ Balance poll failed: ${e.message}")
             }
         }
 
-        Log.w(TAG, "⏰ Balance polling timed out - balance may update later when light client syncs")
+        logger.w(TAG, "⏰ Balance polling timed out - balance may update later when light client syncs")
         // Do one final refresh attempt
         repository.refreshBalance(address)
     }

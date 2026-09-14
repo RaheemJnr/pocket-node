@@ -2,7 +2,7 @@ package com.rjnr.pocketnode.data.wallet
 
 import android.content.Context
 import android.content.SharedPreferences
-import android.util.Log
+import com.rjnr.pocketnode.core.log.Logger
 import com.rjnr.pocketnode.data.gateway.models.NetworkType
 import com.rjnr.pocketnode.data.gateway.models.SyncMode
 import dagger.hilt.android.qualifiers.ApplicationContext
@@ -21,7 +21,8 @@ enum class SyncStrategy { ACTIVE_ONLY, ALL_WALLETS, BALANCED }
  */
 @Singleton
 class WalletPreferences @Inject constructor(
-    @ApplicationContext context: Context
+    @ApplicationContext context: Context,
+    private val logger: Logger,
 ) {
     private val prefs: SharedPreferences = context.getSharedPreferences(
         PREFS_NAME,
@@ -124,7 +125,7 @@ class WalletPreferences @Inject constructor(
         return try {
             NetworkType.valueOf(name ?: NetworkType.MAINNET.name)
         } catch (e: IllegalArgumentException) {
-            Log.w(TAG, "Unknown network name '$name', defaulting to MAINNET", e)
+            logger.w(TAG, "Unknown network name '$name', defaulting to MAINNET", e)
             NetworkType.MAINNET
         }
     }
@@ -176,7 +177,7 @@ class WalletPreferences @Inject constructor(
                   else networkKey(KEY_SYNC_MODE, net)
         val modeName = prefs.getString(key, null) ?: return null
         return runCatching { SyncMode.valueOf(modeName) }
-            .onFailure { Log.w(TAG, "Unknown sync mode '$modeName' in prefs", it) }
+            .onFailure { logger.w(TAG, "Unknown sync mode '$modeName' in prefs", it) }
             .getOrNull()
     }
 

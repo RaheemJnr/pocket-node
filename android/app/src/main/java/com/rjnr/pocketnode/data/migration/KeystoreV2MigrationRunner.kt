@@ -1,8 +1,8 @@
 package com.rjnr.pocketnode.data.migration
 
-import android.util.Log
 import androidx.biometric.BiometricPrompt
 import androidx.fragment.app.FragmentActivity
+import com.rjnr.pocketnode.core.log.Logger
 import com.rjnr.pocketnode.data.auth.AuthManager
 import com.rjnr.pocketnode.data.crypto.KeystoreEncryptionManager
 import javax.inject.Inject
@@ -38,6 +38,7 @@ class KeystoreV2MigrationRunner @Inject constructor(
     private val helper: KeystoreV2MigrationHelper,
     private val encryptionManager: KeystoreEncryptionManager,
     private val authManager: AuthManager,
+    private val logger: Logger,
 ) {
 
     sealed class Outcome {
@@ -110,12 +111,12 @@ class KeystoreV2MigrationRunner @Inject constructor(
                         // next wallet. v1.7.x returned Outcome.Cancelled on the first cancel
                         // which stranded subsequent wallets even when the user was willing
                         // to authenticate them.
-                        Log.w(TAG, "User cancelled biometric for $walletId; recording, continuing")
+                        logger.w(TAG, "User cancelled biometric for $walletId; recording, continuing")
                         failedWalletIds += walletId
                         continue
                     }
                     is AuthManager.CipherAuthResult.Error -> {
-                        Log.e(TAG, "Auth error code=${authResult.errorCode} for $walletId: ${authResult.errString}")
+                        logger.e(TAG, "Auth error code=${authResult.errorCode} for $walletId: ${authResult.errString}")
                         failedWalletIds += walletId
                         if (authResult.errorCode in SESSION_FATAL_ERROR_CODES) {
                             // Session-fatal: ERROR_LOCKOUT (~30s), ERROR_LOCKOUT_PERMANENT,
@@ -125,7 +126,7 @@ class KeystoreV2MigrationRunner @Inject constructor(
                             // wallet failed, re-import required". Break early instead so
                             // the user can retry the run later (#289 polish).
                             val remaining = pending.size - (pending.indexOf(walletId) + 1)
-                            Log.w(TAG, "Session-fatal biometric error code=${authResult.errorCode}; aborting run with $remaining wallets untouched")
+                            logger.w(TAG, "Session-fatal biometric error code=${authResult.errorCode}; aborting run with $remaining wallets untouched")
                             return Outcome.Failed(
                                 pendingCount = failedWalletIds.size + remaining,
                                 failedWalletIds = failedWalletIds.toList(),
@@ -137,7 +138,7 @@ class KeystoreV2MigrationRunner @Inject constructor(
                     is AuthManager.CipherAuthResult.Success -> {
                         val migrate = helper.migrateWallet(walletId, authResult.cipher)
                         if (migrate.isFailure) {
-                            Log.e(TAG, "Migrate failed for $walletId: ${migrate.exceptionOrNull()?.message}")
+                            logger.e(TAG, "Migrate failed for $walletId: ${migrate.exceptionOrNull()?.message}")
                             failedWalletIds += walletId
                             continue
                         }
@@ -148,7 +149,7 @@ class KeystoreV2MigrationRunner @Inject constructor(
                 // subsequent wallet in this run will throw the same — accumulating each as a
                 // per-wallet failure is correct because the resulting Outcome.Failed.reason
                 // ("re-import required") is the right user instruction.
-                Log.w(TAG, "KeyPermanentlyInvalidatedException for $walletId; recording, continuing", e)
+                logger.w(TAG, "KeyPermanentlyInvalidatedException for $walletId; recording, continuing", e)
                 failedWalletIds += walletId
                 continue
             } catch (e: java.security.InvalidAlgorithmParameterException) {
@@ -162,7 +163,7 @@ class KeystoreV2MigrationRunner @Inject constructor(
                 val cause = e.cause as? IllegalStateException
                 if (cause?.message?.contains("Secure lock screen", ignoreCase = true) == true) {
                     val remaining = pending.size - pending.indexOf(walletId)
-                    Log.w(TAG, "No secure lock on device; aborting V2 migration with $remaining wallets untouched", e)
+                    logger.w(TAG, "No secure lock on device; aborting V2 migration with $remaining wallets untouched", e)
                     return Outcome.Failed(
                         pendingCount = failedWalletIds.size + remaining,
                         failedWalletIds = failedWalletIds.toList(),
@@ -176,7 +177,7 @@ class KeystoreV2MigrationRunner @Inject constructor(
                 // (Observed on API 33 Pixel emulator during v1.7.3 testing.)
                 if (e.message?.contains("Secure lock screen", ignoreCase = true) == true) {
                     val remaining = pending.size - pending.indexOf(walletId)
-                    Log.w(TAG, "No secure lock on device; aborting V2 migration with $remaining wallets untouched", e)
+                    logger.w(TAG, "No secure lock on device; aborting V2 migration with $remaining wallets untouched", e)
                     return Outcome.Failed(
                         pendingCount = failedWalletIds.size + remaining,
                         failedWalletIds = failedWalletIds.toList(),

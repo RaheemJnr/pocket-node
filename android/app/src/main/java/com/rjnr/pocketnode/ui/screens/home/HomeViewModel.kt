@@ -1,7 +1,7 @@
 package com.rjnr.pocketnode.ui.screens.home
 
-import android.util.Log
 import androidx.fragment.app.FragmentActivity
+import com.rjnr.pocketnode.core.log.Logger
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.rjnr.pocketnode.data.database.entity.WalletEntity
@@ -59,6 +59,7 @@ class HomeViewModel @Inject constructor(
     private val seedPhraseAuthorizer: com.rjnr.pocketnode.data.wallet.SeedPhraseAuthorizer,
     private val keyMaterialDao: com.rjnr.pocketnode.data.database.dao.KeyMaterialDao,
     private val savedStateHandle: androidx.lifecycle.SavedStateHandle,
+    private val logger: Logger,
 ) : ViewModel() {
 
     /**
@@ -252,13 +253,13 @@ class HomeViewModel @Inject constructor(
 
         repository.initializeWallet()
             .onSuccess { info ->
-                Log.d(TAG, "Wallet initialized: ${info.testnetAddress.redactAddress()}")
+                logger.d(TAG, "Wallet initialized: ${info.testnetAddress.redactAddress()}")
                 _uiState.update { it.copy(walletInfo = info, isLoading = false) }
                 fetchPrice()
                 registerAndRefresh()
             }
             .onFailure { error ->
-                Log.e(TAG, "Wallet initialization failed", error)
+                logger.e(TAG, "Wallet initialization failed", error)
                 _uiState.update {
                     it.copy(error = error.message?.let(com.rjnr.pocketnode.ui.util.UiMessage::Raw), isLoading = false)
                 }
@@ -276,10 +277,10 @@ class HomeViewModel @Inject constructor(
                 val formatted = formatFiat(balanceCkb, price)
                 _uiState.update { it.copy(fiatBalance = formatted, ckbUsdPrice = price) }
                 lastPriceFetchAt = System.currentTimeMillis()
-                Log.d(TAG, "CKB price: $$price, fiat balance: $formatted")
+                logger.d(TAG, "CKB price: $$price, fiat balance: $formatted")
             }
             .onFailure { error ->
-                Log.w(TAG, "Price fetch failed (non-critical): ${error.message}")
+                logger.w(TAG, "Price fetch failed (non-critical): ${error.message}")
                 // Leave fiatBalance as-is; UI shows "≈ — USD" when null
             }
     }
@@ -305,7 +306,7 @@ class HomeViewModel @Inject constructor(
         // If already registered (e.g., ViewModel recreated by tab navigation),
         // skip re-registration to avoid resetting sync progress
         if (repository.isRegistered.value) {
-            Log.d(TAG, "Already registered, skipping re-registration")
+            logger.d(TAG, "Already registered, skipping re-registration")
             checkSyncStatusAndRefresh()
             return
         }
@@ -315,7 +316,7 @@ class HomeViewModel @Inject constructor(
         val savedCustomBlockHeight = repository.getSavedCustomBlockHeight()
         val hasCompletedInitialSync = repository.hasCompletedInitialSync()
 
-        Log.d(TAG, "Loading saved sync preferences: mode=$savedSyncMode, customBlock=$savedCustomBlockHeight, completedSync=$hasCompletedInitialSync")
+        logger.d(TAG, "Loading saved sync preferences: mode=$savedSyncMode, customBlock=$savedCustomBlockHeight, completedSync=$hasCompletedInitialSync")
 
         _uiState.update { it.copy(currentSyncMode = savedSyncMode, savedCustomBlockHeight = savedCustomBlockHeight) }
 
@@ -341,7 +342,7 @@ class HomeViewModel @Inject constructor(
         }
         val customBlockHeight = if (syncMode == SyncMode.CUSTOM) savedCustomBlockHeight else null
 
-        Log.d(TAG, "Registering account with sync mode: $syncMode")
+        logger.d(TAG, "Registering account with sync mode: $syncMode")
 
         repository.registerAccountWithStrategy(
             syncMode = syncMode,
@@ -349,12 +350,12 @@ class HomeViewModel @Inject constructor(
             savePreference = !hasCompletedInitialSync // Only save if first time
         )
             .onSuccess {
-                Log.d(TAG, "Account registered successfully with sync mode: $syncMode")
+                logger.d(TAG, "Account registered successfully with sync mode: $syncMode")
                 // Check sync status before fetching transactions
                 checkSyncStatusAndRefresh()
             }
             .onFailure { error ->
-                Log.e(TAG, "Registration failed", error)
+                logger.e(TAG, "Registration failed", error)
                 _uiState.update { it.copy(error = com.rjnr.pocketnode.ui.util.UiMessage.Resource(com.rjnr.pocketnode.R.string.vm_error_registration_failed, listOf(error.message ?: ""))) }
             }
     }
@@ -388,7 +389,7 @@ class HomeViewModel @Inject constructor(
                 }
 
                 if (progress.justReachedTip) {
-                    Log.d(TAG, "Sync just reached tip -- refreshing all data")
+                    logger.d(TAG, "Sync just reached tip -- refreshing all data")
                     refresh()
                 } else if (!progress.isSyncing && progress.tipBlockNumber > 0) {
                     // Periodically refresh when synced (the flow emits on each poll)
@@ -404,10 +405,10 @@ class HomeViewModel @Inject constructor(
         viewModelScope.launch {
             _uiState.update { it.copy(isRefreshing = true, error = null) }
 
-            Log.d(TAG, "Refreshing balance...")
+            logger.d(TAG, "Refreshing balance...")
             repository.refreshBalance()
                 .onSuccess { balance ->
-                    Log.d(TAG, "Balance: ${balance.capacityCkb} CKB")
+                    logger.d(TAG, "Balance: ${balance.capacityCkb} CKB")
                     // Recompute fiat with the cached price if available
                     val price = _uiState.value.ckbUsdPrice
                     if (price != null) {
@@ -415,7 +416,7 @@ class HomeViewModel @Inject constructor(
                     }
                 }
                 .onFailure { error ->
-                    Log.e(TAG, "Failed to refresh balance", error)
+                    logger.e(TAG, "Failed to refresh balance", error)
                 }
 
             // Refresh peer count (best-effort: parse JSON array size)
@@ -426,7 +427,7 @@ class HomeViewModel @Inject constructor(
                     _uiState.update { it.copy(peerCount = count) }
                 }
             } catch (e: Exception) {
-                Log.w(TAG, "Failed to refresh peer count", e)
+                logger.w(TAG, "Failed to refresh peer count", e)
             }
 
             refreshTransactionsOnly()
@@ -453,7 +454,7 @@ class HomeViewModel @Inject constructor(
             val address = if (network == NetworkType.MAINNET) wallet.mainnetAddress else wallet.testnetAddress
             if (address.isBlank()) continue
             runCatching { repository.refreshBalanceForWallet(wallet.walletId, address) }
-                .onFailure { Log.w(TAG, "Failed to refresh balance for ${wallet.walletId}", it) }
+                .onFailure { logger.w(TAG, "Failed to refresh balance for ${wallet.walletId}", it) }
         }
 
         val balanceMap = mutableMapOf<String, String>()
@@ -465,7 +466,7 @@ class HomeViewModel @Inject constructor(
                     balanceMap[wallet.walletId] = String.format(Locale.US, "%,.2f CKB", ckb)
                 }
             } catch (e: Exception) {
-                Log.w(TAG, "Failed to get cached balance for ${wallet.walletId}", e)
+                logger.w(TAG, "Failed to get cached balance for ${wallet.walletId}", e)
             }
         }
         _uiState.update { it.copy(walletBalances = balanceMap) }
@@ -473,16 +474,16 @@ class HomeViewModel @Inject constructor(
 
     private suspend fun refreshTransactionsOnly(silent: Boolean = false) {
         if (!txRefreshMutex.tryLock()) {
-            Log.d(TAG, "refreshTransactionsOnly skipped — already in flight")
+            logger.d(TAG, "refreshTransactionsOnly skipped — already in flight")
             return
         }
         try {
-            Log.d(TAG, "Fetching transactions (limit=50)...")
+            logger.d(TAG, "Fetching transactions (limit=50)...")
             repository.getTransactions(limit = 50)
                 .onSuccess { response ->
-                    Log.d(TAG, "Fetched ${response.items.size} transactions")
+                    logger.d(TAG, "Fetched ${response.items.size} transactions")
                     response.items.forEachIndexed { index, tx ->
-                        Log.d(TAG, "  [$index] ${tx.txHash.take(16)}... dir=${tx.direction} amount=${tx.balanceChange} conf=${tx.confirmations}")
+                        logger.d(TAG, "  [$index] ${tx.txHash.take(16)}... dir=${tx.direction} amount=${tx.balanceChange} conf=${tx.confirmations}")
                     }
                     // #382: detection runs inside getTransactions (the only
                     // place output scripts exist); here we read the flag and
@@ -506,7 +507,7 @@ class HomeViewModel @Inject constructor(
                     }
                 }
                 .onFailure { error ->
-                    Log.e(TAG, "Failed to fetch transactions", error)
+                    logger.e(TAG, "Failed to fetch transactions", error)
                     if (!silent) {
                         _uiState.update {
                             it.copy(error = com.rjnr.pocketnode.ui.util.UiMessage.Resource(com.rjnr.pocketnode.R.string.vm_error_load_transactions_failed, listOf(error.message ?: "")))
@@ -538,7 +539,7 @@ class HomeViewModel @Inject constructor(
             }
             repository.retryBroadcast(txHash)
                 .onFailure { e ->
-                    Log.e(TAG, "retryFailedTransaction failed for $txHash", e)
+                    logger.e(TAG, "retryFailedTransaction failed for $txHash", e)
                     _uiState.update { it.copy(error = com.rjnr.pocketnode.ui.util.UiMessage.Resource(com.rjnr.pocketnode.R.string.vm_error_retry_failed, listOf(e.message ?: ""))) }
                 }
         }
@@ -557,11 +558,11 @@ class HomeViewModel @Inject constructor(
         // Original purpose stands: re-selecting an already-applied mode must not
         // wipe progress and re-sync (#108).
         if (repository.isSyncSettingApplied(syncMode, customBlockHeight)) {
-            Log.d(TAG, "changeSyncMode: already registered at this setting — no-op")
+            logger.d(TAG, "changeSyncMode: already registered at this setting — no-op")
             return
         }
         viewModelScope.launch {
-            Log.d(TAG, "Changing sync mode to: $syncMode, customBlock: $customBlockHeight")
+            logger.d(TAG, "Changing sync mode to: $syncMode, customBlock: $customBlockHeight")
 
             repository.stopSyncPolling()
             syncStallDetector.reset()
@@ -582,12 +583,12 @@ class HomeViewModel @Inject constructor(
 
             repository.resyncAccount(syncMode, customBlockHeight)
                 .onSuccess {
-                    Log.d(TAG, "Resync initiated successfully")
+                    logger.d(TAG, "Resync initiated successfully")
                     _uiState.update { it.copy(isLoading = false) }
                     checkSyncStatusAndRefresh()
                 }
                 .onFailure { error ->
-                    Log.e(TAG, "Resync failed", error)
+                    logger.e(TAG, "Resync failed", error)
                     _uiState.update {
                         it.copy(
                             isLoading = false,
@@ -700,7 +701,7 @@ class HomeViewModel @Inject constructor(
                 ) }
                 refresh()
             } catch (e: Exception) {
-                Log.e(TAG, "Failed to switch wallet", e)
+                logger.e(TAG, "Failed to switch wallet", e)
                 _uiState.update { it.copy(isSwitchingWallet = false, error = com.rjnr.pocketnode.ui.util.UiMessage.Resource(com.rjnr.pocketnode.R.string.vm_error_switch_wallet_failed, listOf(e.message ?: ""))) }
             }
         }
@@ -744,7 +745,7 @@ class HomeViewModel @Inject constructor(
 
             repository.switchNetwork(target)
                 .onSuccess {
-                    Log.d(TAG, "Network switched to ${target.name}")
+                    logger.d(TAG, "Network switched to ${target.name}")
                     _uiState.update {
                         it.copy(address = repository.getCurrentAddress() ?: "")
                     }
@@ -752,7 +753,7 @@ class HomeViewModel @Inject constructor(
                     checkSyncStatusAndRefresh()
                 }
                 .onFailure { error ->
-                    Log.e(TAG, "Network switch failed", error)
+                    logger.e(TAG, "Network switch failed", error)
                     _uiState.update {
                         it.copy(
                             isSyncing = false,
@@ -768,12 +769,12 @@ class HomeViewModel @Inject constructor(
             updateRepository.checkForUpdate(BuildConfig.VERSION_NAME)
                 .onSuccess { info ->
                     if (info != null) {
-                        Log.d(TAG, "Update available: ${info.latestVersion}")
+                        logger.d(TAG, "Update available: ${info.latestVersion}")
                         _uiState.update { it.copy(updateInfo = info, showUpdateDialog = true) }
                     }
                 }
                 .onFailure { error ->
-                    Log.w(TAG, "Update check failed (non-critical): ${error.message}")
+                    logger.w(TAG, "Update check failed (non-critical): ${error.message}")
                 }
         }
     }
@@ -963,11 +964,11 @@ class HomeViewModel @Inject constructor(
             }
             result
                 .onSuccess {
-                    Log.i(TAG, "gap-limit scan started (window $it)")
+                    logger.i(TAG, "gap-limit scan started (window $it)")
                     refreshTransactionsOnly(silent = true)
                 }
                 .onFailure { e ->
-                    Log.e(TAG, "gap-limit scan failed", e)
+                    logger.e(TAG, "gap-limit scan failed", e)
                     _uiState.update {
                         it.copy(
                             gapLimitScanning = false,
@@ -1047,7 +1048,7 @@ class HomeViewModel @Inject constructor(
             }
             result
                 .onSuccess { txHash ->
-                    Log.i(TAG, "sweep broadcast: ${txHash.take(16)}...")
+                    logger.i(TAG, "sweep broadcast: ${txHash.take(16)}...")
                     _uiState.update {
                         it.copy(
                             sweepInProgress = false,
@@ -1059,7 +1060,7 @@ class HomeViewModel @Inject constructor(
                     refresh()
                 }
                 .onFailure { e ->
-                    Log.e(TAG, "sweep failed", e)
+                    logger.e(TAG, "sweep failed", e)
                     _uiState.update {
                         it.copy(
                             sweepInProgress = false,

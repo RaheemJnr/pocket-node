@@ -1,7 +1,7 @@
 package com.rjnr.pocketnode.ui.screens.wallet
 
-import android.util.Log
 import androidx.fragment.app.FragmentActivity
+import com.rjnr.pocketnode.core.log.Logger
 import androidx.lifecycle.SavedStateHandle
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
@@ -43,6 +43,7 @@ class WalletSettingsViewModel @Inject constructor(
     private val migrationHelper: com.rjnr.pocketnode.data.migration.KeystoreV2MigrationHelper,
     private val encryptionManager: com.rjnr.pocketnode.data.crypto.KeystoreEncryptionManager,
     private val authManager: com.rjnr.pocketnode.data.auth.AuthManager,
+    private val logger: Logger,
 ) : ViewModel() {
 
     private val walletId: String = savedStateHandle["walletId"] ?: ""
@@ -220,7 +221,7 @@ class WalletSettingsViewModel @Inject constructor(
                 walletRepository.deleteWallet(walletId)
                 _uiState.update { it.copy(showDeleteConfirm = false, deleted = true) }
             } catch (e: Exception) {
-                Log.e(TAG, "Failed to delete wallet", e)
+                logger.e(TAG, "Failed to delete wallet", e)
                 _uiState.update {
                     it.copy(showDeleteConfirm = false, error = com.rjnr.pocketnode.ui.util.UiMessage.Resource(com.rjnr.pocketnode.R.string.vm_error_delete_failed, listOf(e.message ?: "")))
                 }
@@ -287,12 +288,12 @@ class WalletSettingsViewModel @Inject constructor(
                 val words = try {
                     keyManager.getMnemonicForWallet(walletId)
                 } catch (e: Exception) {
-                    Log.e(TAG, "Failed to get mnemonic", e)
+                    logger.e(TAG, "Failed to get mnemonic", e)
                     null
                 }
                 _uiState.update { it.copy(privateKeyHex = keyHex, mnemonicWords = words) }
             } catch (e: Exception) {
-                Log.e(TAG, "Failed to load sensitive data", e)
+                logger.e(TAG, "Failed to load sensitive data", e)
             }
         }
     }
@@ -338,11 +339,11 @@ class WalletSettingsViewModel @Inject constructor(
                     // without the PIN. If there is no PIN either, there is
                     // nothing to gate with, so proceed.
                     if (noLockRevealNeedsPin(pinManager.hasPin(), _uiState.value.seedPhraseUnlocked)) {
-                        Log.i(TAG, "No secure lock — gating V1 reveal behind app PIN for $walletId")
+                        logger.i(TAG, "No secure lock — gating V1 reveal behind app PIN for $walletId")
                         _uiState.update { it.copy(pinVerifyRequested = true) }
                         return@launch
                     }
-                    Log.i(TAG, "No secure lock, no PIN — V1 reveal for $walletId")
+                    logger.i(TAG, "No secure lock, no PIN — V1 reveal for $walletId")
                     loadSensitiveData()
                     // The screen gate is `seedPhraseUnlocked || !requiresPin`;
                     // flip so the loaded words show.
@@ -352,7 +353,7 @@ class WalletSettingsViewModel @Inject constructor(
                 val cipher = try {
                     encryptionManager.newEncryptCipherV2()
                 } catch (e: Throwable) {
-                    Log.e(TAG, "V2 cipher creation failed", e)
+                    logger.e(TAG, "V2 cipher creation failed", e)
                     _uiState.update { it.copy(error = com.rjnr.pocketnode.ui.util.UiMessage.Resource(com.rjnr.pocketnode.R.string.vm_error_cannot_read_wallet_key, listOf(e.message ?: "cipher"))) }
                     return@launch
                 }
@@ -374,7 +375,7 @@ class WalletSettingsViewModel @Inject constructor(
                     is com.rjnr.pocketnode.data.auth.AuthManager.CipherAuthResult.Success -> {
                         val bundle = migrationHelper.migrateWalletAndExtract(walletId, auth.cipher)
                             .getOrElse { e ->
-                                Log.e(TAG, "V1 → V2 migrate-and-extract failed for $walletId", e)
+                                logger.e(TAG, "V1 → V2 migrate-and-extract failed for $walletId", e)
                                 _uiState.update {
                                     it.copy(error = com.rjnr.pocketnode.ui.util.UiMessage.Resource(com.rjnr.pocketnode.R.string.vm_error_cannot_read_wallet_key, listOf(e.message ?: "migrate")))
                                 }
@@ -524,7 +525,7 @@ class WalletSettingsViewModel @Inject constructor(
                         val isCancelled = e is WalletKeyWriter.PersistException
                             && e.result is WalletKeyWriter.Result.Cancelled
                         if (!isCancelled) {
-                            Log.e(TAG, "Failed to create V2 sub-account", e)
+                            logger.e(TAG, "Failed to create V2 sub-account", e)
                             _uiState.update {
                                 it.copy(error = com.rjnr.pocketnode.ui.util.UiMessage.Resource(
                                     com.rjnr.pocketnode.R.string.vm_error_create_account_failed,

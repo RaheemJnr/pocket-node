@@ -1,6 +1,6 @@
 package com.rjnr.pocketnode.data.sync
 
-import android.util.Log
+import com.rjnr.pocketnode.core.log.Logger
 import com.rjnr.pocketnode.data.database.dao.PendingBroadcastDao
 import com.rjnr.pocketnode.data.gateway.GatewayRepository
 import com.rjnr.pocketnode.data.gateway.TipSource
@@ -36,7 +36,8 @@ class BroadcastWatchdog(
     private val cache: TransactionStatusUpdater,
     private val tipSource: TipSource,
     private val lifecycleProvider: LifecycleProvider,
-    dispatcher: CoroutineDispatcher
+    dispatcher: CoroutineDispatcher,
+    private val logger: Logger
 ) {
     /** Hilt entry point — uses [Dispatchers.IO]. Tests construct via the primary ctor. */
     @Inject constructor(
@@ -44,8 +45,9 @@ class BroadcastWatchdog(
         statusGateway: TransactionStatusGateway,
         cache: TransactionStatusUpdater,
         tipSource: TipSource,
-        lifecycleProvider: LifecycleProvider
-    ) : this(dao, statusGateway, cache, tipSource, lifecycleProvider, Dispatchers.IO)
+        lifecycleProvider: LifecycleProvider,
+        logger: Logger
+    ) : this(dao, statusGateway, cache, tipSource, lifecycleProvider, Dispatchers.IO, logger)
 
     private val scope = CoroutineScope(SupervisorJob() + dispatcher)
     private var tipJob: Job? = null
@@ -69,7 +71,7 @@ class BroadcastWatchdog(
                     val (walletId, network) = tipSource.activeWalletAndNetworkOrNull()
                         ?: return@runCatching
                     checkAll(currentTip = tip, walletId = walletId, network = network)
-                }.onFailure { Log.w(TAG, "fallback checkAll: ${it.message}") }
+                }.onFailure { logger.w(TAG, "fallback checkAll: ${it.message}") }
             }
         }
     }
@@ -88,7 +90,7 @@ class BroadcastWatchdog(
             // hiccup; we want the row to stay non-terminal AND we want sibling
             // rows in the same pass to still be processed.
             runCatching { processRow(row, currentTip, now) }
-                .onFailure { Log.w(TAG, "checkAll: row ${row.txHash} failed: ${it.message}") }
+                .onFailure { logger.w(TAG, "checkAll: row ${row.txHash} failed: ${it.message}") }
         }
     }
 
@@ -120,7 +122,7 @@ class BroadcastWatchdog(
                 // on a tx that itself never landed). Mark FAILED so the user
                 // sees a terminal state and the retry CTA, instead of stuck-pending.
                 if (currentTip >= row.submittedAtTipBlock + BLOCK_TIMEOUT) {
-                    Log.w(TAG, "in-pool past +$BLOCK_TIMEOUT blocks for ${row.txHash} (submitted at ${row.submittedAtTipBlock}, tip $currentTip) — network rejected; marking FAILED")
+                    logger.w(TAG, "in-pool past +$BLOCK_TIMEOUT blocks for ${row.txHash} (submitted at ${row.submittedAtTipBlock}, tip $currentTip) — network rejected; marking FAILED")
                     cache.updateTransactionStatus(row.txHash, "FAILED")
                     dao.compareAndUpdateState(
                         hash = row.txHash, expected = row.state,
@@ -150,7 +152,7 @@ class BroadcastWatchdog(
                 }
             }
             TxFetchResult.Exception -> {
-                Log.w(TAG, "fetch exception for ${row.txHash}; no state change")
+                logger.w(TAG, "fetch exception for ${row.txHash}; no state change")
             }
         }
     }

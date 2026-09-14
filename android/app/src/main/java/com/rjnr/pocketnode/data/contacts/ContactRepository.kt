@@ -1,6 +1,6 @@
 package com.rjnr.pocketnode.data.contacts
 
-import android.util.Log
+import com.rjnr.pocketnode.core.log.Logger
 import com.rjnr.pocketnode.data.database.dao.ContactDao
 import com.rjnr.pocketnode.data.database.entity.ContactEntity
 import com.rjnr.pocketnode.data.gateway.models.NetworkType
@@ -41,6 +41,7 @@ import com.rjnr.pocketnode.util.redactAddress
 class ContactRepository @Inject constructor(
     private val contactDao: ContactDao,
     private val walletRepository: WalletRepository,
+    private val logger: Logger,
 ) {
 
     /**
@@ -216,7 +217,7 @@ class ContactRepository @Inject constructor(
             val match = contactDao.getByAddress(address) ?: return
             contactDao.markUsed(match.id, nowProvider())
         } catch (e: Exception) {
-            Log.w(TAG, "markUsed failed for address=${address.redactAddress()}", e)
+            logger.w(TAG, "markUsed failed for address=${address.redactAddress()}", e)
         }
     }
 

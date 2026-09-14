@@ -3,6 +3,7 @@ package com.rjnr.pocketnode.data.gateway
 import android.content.Context
 import androidx.room.Room
 import androidx.test.core.app.ApplicationProvider
+import com.rjnr.pocketnode.core.log.NoopLogger
 import com.rjnr.pocketnode.data.database.AppDatabase
 import com.rjnr.pocketnode.data.gateway.models.JniHeaderView
 import kotlinx.coroutines.test.runTest
@@ -27,7 +28,7 @@ class DaoSyncManagerTest {
         db = Room.inMemoryDatabaseBuilder(context, AppDatabase::class.java)
             .allowMainThreadQueries()
             .build()
-        manager = DaoSyncManager(db.headerCacheDao(), db.daoCellDao(), db.pendingDaoWithdrawDao())
+        manager = DaoSyncManager(db.headerCacheDao(), db.daoCellDao(), db.pendingDaoWithdrawDao(), NoopLogger)
     }
 
     @After

@@ -5,6 +5,7 @@ import androidx.room.Room
 import androidx.room.RoomDatabase
 import com.rjnr.pocketnode.data.auth.AuthManager
 import com.rjnr.pocketnode.data.auth.PinManager
+import com.rjnr.pocketnode.core.log.Logger
 import com.rjnr.pocketnode.data.crypto.Blake2b
 import com.rjnr.pocketnode.data.database.AppDatabase
 import com.rjnr.pocketnode.data.crypto.KeystoreEncryptionManager
@@ -79,8 +80,9 @@ object AppModule {
         mnemonicManager: MnemonicManager,
         keyBackupManager: KeyBackupManager,
         keyStoreMigrationHelper: KeyStoreMigrationHelper,
-        authManager: AuthManager
-    ): KeyManager = KeyManager(context, mnemonicManager).also {
+        authManager: AuthManager,
+        logger: Logger,
+    ): KeyManager = KeyManager(context, mnemonicManager, logger).also {
         it.keyBackupManager = keyBackupManager
         it.keyStoreMigrationHelper = keyStoreMigrationHelper
         it.authManager = authManager
@@ -89,8 +91,9 @@ object AppModule {
     @Provides
     @Singleton
     fun provideKeyBackupManager(
-        @ApplicationContext context: Context
-    ): KeyBackupManager = KeyBackupManager(File(context.filesDir, "key_backups"))
+        @ApplicationContext context: Context,
+        logger: Logger,
+    ): KeyBackupManager = KeyBackupManager(File(context.filesDir, "key_backups"), logger)
 
     @Provides
     @Singleton
@@ -125,8 +128,9 @@ object AppModule {
     @Singleton
     fun providePinManager(
         @ApplicationContext context: Context,
-        blake2b: Blake2b
-    ): PinManager = PinManager(context, blake2b)
+        blake2b: Blake2b,
+        logger: Logger,
+    ): PinManager = PinManager(context, blake2b, logger)
 
     @Provides
     @Singleton
@@ -194,26 +198,29 @@ object AppModule {
     fun provideKeyStoreMigrationHelper(
         keyMaterialDao: KeyMaterialDao,
         encryptionManager: KeystoreEncryptionManager,
-        @Named("migrationPrefs") migrationPrefs: SharedPreferences
-    ): KeyStoreMigrationHelper = KeyStoreMigrationHelper(keyMaterialDao, encryptionManager, migrationPrefs)
+        @Named("migrationPrefs") migrationPrefs: SharedPreferences,
+        logger: Logger,
+    ): KeyStoreMigrationHelper = KeyStoreMigrationHelper(keyMaterialDao, encryptionManager, migrationPrefs, logger)
 
     @Provides
     @Singleton
     fun provideKeystoreV2MigrationHelper(
         keyMaterialDao: KeyMaterialDao,
         encryptionManager: KeystoreEncryptionManager,
-        @Named("migrationPrefs") migrationPrefs: SharedPreferences
+        @Named("migrationPrefs") migrationPrefs: SharedPreferences,
+        logger: Logger,
     ): com.rjnr.pocketnode.data.migration.KeystoreV2MigrationHelper =
         com.rjnr.pocketnode.data.migration.KeystoreV2MigrationHelper(
-            keyMaterialDao, encryptionManager, migrationPrefs
+            keyMaterialDao, encryptionManager, migrationPrefs, logger = logger
         )
 
     @Provides
     @Singleton
     fun provideCacheManager(
         transactionDao: TransactionDao,
-        balanceCacheDao: BalanceCacheDao
-    ): CacheManager = CacheManager(transactionDao, balanceCacheDao)
+        balanceCacheDao: BalanceCacheDao,
+        logger: Logger,
+    ): CacheManager = CacheManager(transactionDao, balanceCacheDao, logger)
 
     @Provides
     @Singleton
@@ -221,7 +228,8 @@ object AppModule {
         headerCacheDao: HeaderCacheDao,
         daoCellDao: DaoCellDao,
         pendingDaoWithdrawDao: com.rjnr.pocketnode.data.database.dao.PendingDaoWithdrawDao,
-    ): DaoSyncManager = DaoSyncManager(headerCacheDao, daoCellDao, pendingDaoWithdrawDao)
+        logger: Logger,
+    ): DaoSyncManager = DaoSyncManager(headerCacheDao, daoCellDao, pendingDaoWithdrawDao, logger)
 
     @Provides
     @Singleton
@@ -266,7 +274,8 @@ object AppModule {
         lightClient: com.rjnr.pocketnode.data.gateway.LightClientReadOnly,
         subAccountReconciler: com.rjnr.pocketnode.data.wallet.SubAccountReconciler,
         subAccountDiscovery: com.rjnr.pocketnode.data.wallet.SubAccountDiscovery,
-    ): GatewayRepository = GatewayRepository(context, keyManager, walletPreferences, json, transactionBuilder, cacheManager, daoSyncManager, walletMigrationHelper, walletDao, appDatabase, headerCacheDao, syncProgressDao, pendingBroadcastDao, broadcastClient, syncCoordinator, daoHeaderResolver, daoDepositReader, lightClient, subAccountReconciler, subAccountDiscovery)
+        logger: Logger,
+    ): GatewayRepository = GatewayRepository(context, keyManager, walletPreferences, json, transactionBuilder, cacheManager, daoSyncManager, walletMigrationHelper, walletDao, appDatabase, headerCacheDao, syncProgressDao, pendingBroadcastDao, broadcastClient, syncCoordinator, daoHeaderResolver, daoDepositReader, lightClient, subAccountReconciler, subAccountDiscovery, logger)
 
     /**
      * Production activity probe for sub-account discovery (#82 phase 2):

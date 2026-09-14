@@ -1,7 +1,7 @@
 package com.rjnr.pocketnode.ui.screens.onboarding
 
-import android.util.Log
 import androidx.fragment.app.FragmentActivity
+import com.rjnr.pocketnode.core.log.Logger
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.rjnr.pocketnode.data.auth.AuthManager
@@ -41,6 +41,7 @@ class OnboardingViewModel @Inject constructor(
     private val walletRepository: WalletRepository,
     private val authManager: AuthManager,
     private val walletKeyWriter: WalletKeyWriter,
+    private val logger: Logger,
 ) : ViewModel() {
 
     private val _uiState = MutableStateFlow(OnboardingUiState())
@@ -126,11 +127,11 @@ class OnboardingViewModel @Inject constructor(
                 },
             )
             result.onSuccess { entity ->
-                Log.d(TAG, "Created wallet entity: ${entity.walletId}")
+                logger.d(TAG, "Created wallet entity: ${entity.walletId}")
                 repository.onActiveWalletChanged(entity)
                 _uiState.update { it.copy(isLoading = false, isWalletCreated = true) }
             }.onFailure { error ->
-                Log.e(TAG, "Wallet creation failed", error)
+                logger.e(TAG, "Wallet creation failed", error)
                 _uiState.update {
                     it.copy(isLoading = false, error = persistErrorMessage(error))
                 }

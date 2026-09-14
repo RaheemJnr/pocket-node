@@ -1,7 +1,7 @@
 package com.rjnr.pocketnode.data.diagnostics
 
 import android.content.Context
-import android.util.Log
+import com.rjnr.pocketnode.core.log.Logger
 import dagger.hilt.android.qualifiers.ApplicationContext
 import java.io.File
 import java.text.SimpleDateFormat
@@ -27,6 +27,7 @@ import javax.inject.Singleton
 @Singleton
 class ErrorJournal @Inject constructor(
     @ApplicationContext private val context: Context,
+    private val logger: Logger,
 ) {
 
     data class Entry(val atMs: Long, val tag: String, val message: String)
@@ -45,7 +46,7 @@ class ErrorJournal @Inject constructor(
                 while (entries.size > MAX_ENTRIES) entries.removeAt(0)
                 persist(entries)
             }
-        }.onFailure { Log.w(TAG, "journal record failed", it) }
+        }.onFailure { logger.w(TAG, "journal record failed", it) }
     }
 
     fun entries(): List<Entry> = runCatching {

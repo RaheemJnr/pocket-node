@@ -1,7 +1,7 @@
 package com.rjnr.pocketnode.data.gateway
 
-import android.util.Log
 import com.nervosnetwork.ckblightclient.LightClientNative
+import com.rjnr.pocketnode.core.log.Logger
 import com.rjnr.pocketnode.data.database.dao.SyncProgressDao
 import com.rjnr.pocketnode.data.database.dao.WalletDao
 import com.rjnr.pocketnode.data.database.entity.SyncProgressEntity
@@ -217,6 +217,7 @@ class SyncCoordinator @Inject constructor(
     private val lightClient: LightClientBridge,
     private val subAccountCandidateDao: com.rjnr.pocketnode.data.database.dao.SubAccountCandidateDao,
     private val transactionDao: com.rjnr.pocketnode.data.database.dao.TransactionDao,
+    private val logger: Logger,
 ) {
 
     /**
@@ -277,7 +278,7 @@ class SyncCoordinator @Inject constructor(
             }.getOrNull() ?: emptyMap()
             val (clamped, clampedCount) = clampPartialRewinds(statuses, currentByArgs)
             if (clampedCount > 0) {
-                Log.w(TAG, "setScripts PARTIAL: clamped $clampedCount rewind(s) to current block (#332)")
+                logger.w(TAG, "setScripts PARTIAL: clamped $clampedCount rewind(s) to current block (#332)")
             }
             clamped
         } else {
@@ -293,7 +294,7 @@ class SyncCoordinator @Inject constructor(
         // chasing #150-class sync stalls.
         effectiveStatuses.zip(walletIds).forEach { (status, walletId) ->
             val startBlock = status.blockNumber.removePrefix("0x").toLongOrNull(16) ?: -1L
-            Log.i(
+            logger.i(
                 TAG,
                 "setScripts cmd=$cmd walletId=$walletId network=${network.name} " +
                     "startBlock=$startBlock (hex=${status.blockNumber})"
@@ -301,7 +302,7 @@ class SyncCoordinator @Inject constructor(
         }
         val ok = lightClient.setScripts(jsonStr, cmd)
         if (!ok) {
-            Log.w(TAG, "setScripts cmd=$cmd returned false — light client refused registration")
+            logger.w(TAG, "setScripts cmd=$cmd returned false — light client refused registration")
             return false
         }
 
@@ -414,7 +415,7 @@ class SyncCoordinator @Inject constructor(
                     fromBlock,
                 )
             }.onFailure {
-                Log.w(TAG, "recordCandidateRegistrations failed for ${reg.candidate.derivationPath}: ${it.message}")
+                logger.w(TAG, "recordCandidateRegistrations failed for ${reg.candidate.derivationPath}: ${it.message}")
             }
         }
     }
@@ -449,7 +450,7 @@ class SyncCoordinator @Inject constructor(
 
         if (dropped.isNotEmpty()) {
             val maxProgress = progress.values.maxOrNull() ?: 0L
-            Log.i(
+            logger.i(
                 TAG,
                 "BALANCED: dropped ${dropped.size} laggards: " +
                     dropped.map { "${it.walletId}(lag=${maxProgress - (progress[it.walletId] ?: 0L)})" }
@@ -470,7 +471,7 @@ class SyncCoordinator @Inject constructor(
 
         if (newSet == lastBalancedEligibleSet) return
 
-        Log.i(
+        logger.i(
             TAG,
             "BALANCED set changed (was=$lastBalancedEligibleSet, now=$newSet): re-registering"
         )
@@ -520,7 +521,7 @@ class SyncCoordinator @Inject constructor(
         val wallets = candidateWallets.take(MAX_CONCURRENT_WALLET_SCRIPTS)
         if (candidateWallets.size > wallets.size) {
             val droppedIds = candidateWallets.drop(wallets.size).map { it.walletId }
-            Log.i(
+            logger.i(
                 TAG,
                 "${strategy.name}: syncing top-${wallets.size} of ${candidateWallets.size} wallets " +
                     "(dropped: $droppedIds)"
@@ -560,13 +561,13 @@ class SyncCoordinator @Inject constructor(
             delay(TIP_WAIT_POLL_MS)
         }
         if (tipHeight == 0L) {
-            Log.w(
+            logger.w(
                 TAG,
                 "tip header still null after ${TIP_WAIT_BUDGET_MS}ms ($tipPolls polls); " +
                     "falling back to checkpoint. fromBlock may be stale."
             )
         } else if (tipPolls > 0) {
-            Log.i(TAG, "tip resolved after $tipPolls poll(s): $tipHeight")
+            logger.i(TAG, "tip resolved after $tipPolls poll(s): $tipHeight")
         }
 
         // Per-wallet lock-script recovery. Address-only path — V2 wallets
@@ -581,7 +582,7 @@ class SyncCoordinator @Inject constructor(
                             wallet.testnetAddress.ifBlank { wallet.mainnetAddress }
                         )
                     } catch (e: Exception) {
-                        Log.w(TAG, "Cannot decode address for wallet ${wallet.walletId}, skipping", e)
+                        logger.w(TAG, "Cannot decode address for wallet ${wallet.walletId}, skipping", e)
                         return@async null
                     }
 
@@ -641,13 +642,13 @@ class SyncCoordinator @Inject constructor(
         }
 
         if (pairs.isEmpty()) {
-            Log.w(TAG, "registerAllWalletScripts: no scripts to register")
+            logger.w(TAG, "registerAllWalletScripts: no scripts to register")
             return@withContext
         }
 
         val scriptStatuses = pairs.map { it.second }
         val walletIds = pairs.map { it.first }
-        Log.d(TAG, "Registering ${scriptStatuses.size} wallet scripts with light client")
+        logger.d(TAG, "Registering ${scriptStatuses.size} wallet scripts with light client")
         val result = setScriptsAndRecord(scriptStatuses, walletIds, LightClientNative.CMD_SET_SCRIPTS_ALL, ctx.network)
         if (!result) throw Exception("Failed to set scripts for all wallets")
 

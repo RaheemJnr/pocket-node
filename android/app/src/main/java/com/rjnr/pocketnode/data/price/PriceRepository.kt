@@ -2,7 +2,7 @@ package com.rjnr.pocketnode.data.price
 
 import android.content.Context
 import android.content.SharedPreferences
-import android.util.Log
+import com.rjnr.pocketnode.core.log.Logger
 import dagger.hilt.android.qualifiers.ApplicationContext
 import io.ktor.client.HttpClient
 import io.ktor.client.request.get
@@ -35,7 +35,8 @@ import javax.inject.Singleton
 class PriceRepository @Inject constructor(
     private val httpClient: HttpClient,
     private val json: Json,
-    @ApplicationContext context: Context
+    @ApplicationContext context: Context,
+    private val logger: Logger,
 ) {
     private val prefs: SharedPreferences =
         context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
@@ -49,7 +50,7 @@ class PriceRepository @Inject constructor(
             cachePrice(price)
             return@withContext Result.success(price)
         }
-        Log.w(TAG, "CoinGecko fetch failed: ${primary.exceptionOrNull()?.message}; trying Binance")
+        logger.w(TAG, "CoinGecko fetch failed: ${primary.exceptionOrNull()?.message}; trying Binance")
 
         val fallback = runCatching { fetchFromBinance() }
         if (fallback.isSuccess) {
@@ -57,11 +58,11 @@ class PriceRepository @Inject constructor(
             cachePrice(price)
             return@withContext Result.success(price)
         }
-        Log.w(TAG, "Binance fetch failed: ${fallback.exceptionOrNull()?.message}; checking cache")
+        logger.w(TAG, "Binance fetch failed: ${fallback.exceptionOrNull()?.message}; checking cache")
 
         val cached = cachedPriceIfFresh()
         if (cached != null) {
-            Log.d(TAG, "Using cached CKB/USD price: $cached")
+            logger.d(TAG, "Using cached CKB/USD price: $cached")
             return@withContext Result.success(cached)
         }
 

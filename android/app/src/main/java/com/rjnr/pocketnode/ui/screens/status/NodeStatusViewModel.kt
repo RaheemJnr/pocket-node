@@ -1,6 +1,6 @@
 package com.rjnr.pocketnode.ui.screens.status
 
-import android.util.Log
+import com.rjnr.pocketnode.core.log.Logger
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.rjnr.pocketnode.data.database.AppDatabase
@@ -41,6 +41,7 @@ class NodeStatusViewModel @Inject constructor(
     private val json: Json,
     private val appDatabase: AppDatabase,
     private val errorJournal: com.rjnr.pocketnode.data.diagnostics.ErrorJournal,
+    private val logger: Logger,
 ) : ViewModel() {
 
     /** Copy-all payload for the App errors card. */
@@ -153,7 +154,7 @@ class NodeStatusViewModel @Inject constructor(
                     line = reader.readLine()
                 }
             } catch (e: Exception) {
-                Log.e("NodeStatusVM", "Error reading logs", e)
+                logger.e("NodeStatusVM", "Error reading logs", e)
                 _uiState.update { it.copy(logs = it.logs + "Error reading logs: ${e.message}") }
             }
         }

@@ -1,5 +1,6 @@
 package com.rjnr.pocketnode.ui.screens.settings
 
+import com.rjnr.pocketnode.core.log.Logger
 import androidx.lifecycle.SavedStateHandle
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
@@ -67,7 +68,8 @@ class SecuritySettingsViewModel @Inject constructor(
     private val pinManager: PinManager,
     private val keyBackupManager: KeyBackupManager,
     private val keyManager: KeyManager,
-    private val walletDao: WalletDao
+    private val walletDao: WalletDao,
+    private val logger: Logger,
 ) : ViewModel() {
 
     private val _uiState = MutableStateFlow(SecuritySettingsUiState())
@@ -221,7 +223,7 @@ class SecuritySettingsViewModel @Inject constructor(
                     val privateKey = try {
                         keyManager.getPrivateKeyForWallet(wallet.walletId) ?: continue
                     } catch (e: Exception) {
-                        android.util.Log.i(
+                        logger.i(
                             "SecuritySettingsVM",
                             "Skipping V2-protected wallet ${wallet.walletId} during PIN backup",
                         )
@@ -241,7 +243,7 @@ class SecuritySettingsViewModel @Inject constructor(
                     keyBackupManager.writeBackup(wallet.walletId, material, pin.toCharArray())
                 }
             } catch (e: Exception) {
-                android.util.Log.w("SecuritySettingsVM", "Failed to write backups on PIN creation", e)
+                logger.w("SecuritySettingsVM", "Failed to write backups on PIN creation", e)
             }
         }
     }

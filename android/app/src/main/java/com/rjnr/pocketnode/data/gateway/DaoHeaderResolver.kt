@@ -1,7 +1,7 @@
 package com.rjnr.pocketnode.data.gateway
 
-import android.util.Log
 import com.nervosnetwork.ckblightclient.LightClientNative
+import com.rjnr.pocketnode.core.log.Logger
 import com.rjnr.pocketnode.data.gateway.models.JniFetchHeaderResponse
 import com.rjnr.pocketnode.data.gateway.models.JniFetchTransactionResponse
 import com.rjnr.pocketnode.data.gateway.models.JniHeaderView
@@ -40,6 +40,7 @@ import javax.inject.Singleton
 class DaoHeaderResolver @Inject constructor(
     private val json: Json,
     private val daoSyncManager: DaoSyncManager,
+    private val logger: Logger,
 ) {
 
     /**
@@ -58,20 +59,20 @@ class DaoHeaderResolver @Inject constructor(
             if (txWithStatus.txStatus.blockHash != null) {
                 return txWithStatus.txStatus.blockHash
             }
-            Log.d(TAG, "  get_transaction found tx but no block_hash, trying fetch_transaction...")
+            logger.d(TAG, "  get_transaction found tx but no block_hash, trying fetch_transaction...")
         } else {
-            Log.d(TAG, "  get_transaction returned null, trying fetch_transaction...")
+            logger.d(TAG, "  get_transaction returned null, trying fetch_transaction...")
         }
 
         // Fallback: fetch from peers (may need retries as it's async)
         for (attempt in 1..3) {
             val fetchJson = LightClientNative.nativeFetchTransaction(txHash)
             if (fetchJson == null) {
-                Log.w(TAG, "  fetch_transaction returned null on attempt $attempt")
+                logger.w(TAG, "  fetch_transaction returned null on attempt $attempt")
                 break
             }
             val fetchResp = json.decodeFromString<JniFetchTransactionResponse>(fetchJson)
-            Log.d(TAG, "  fetch_transaction attempt $attempt: status=${fetchResp.status}")
+            logger.d(TAG, "  fetch_transaction attempt $attempt: status=${fetchResp.status}")
             val fetched = fetchResp.data
             if (fetchResp.status == "fetched" && fetched != null) {
                 return fetched.txStatus.blockHash
@@ -95,11 +96,11 @@ class DaoHeaderResolver @Inject constructor(
         for (attempt in 1..3) {
             val fetchJson = LightClientNative.nativeFetchHeader(blockHash)
             if (fetchJson == null) {
-                Log.w(TAG, "  fetch_header returned null on attempt $attempt")
+                logger.w(TAG, "  fetch_header returned null on attempt $attempt")
                 break
             }
             val fetchResp = json.decodeFromString<JniFetchHeaderResponse>(fetchJson)
-            Log.d(TAG, "  fetch_header attempt $attempt: status=${fetchResp.status}")
+            logger.d(TAG, "  fetch_header attempt $attempt: status=${fetchResp.status}")
             if (fetchResp.status == "fetched" && fetchResp.data != null) {
                 return fetchResp.data
             }

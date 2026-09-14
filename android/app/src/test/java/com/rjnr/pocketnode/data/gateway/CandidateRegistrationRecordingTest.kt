@@ -3,6 +3,7 @@ package com.rjnr.pocketnode.data.gateway
 import android.content.Context
 import androidx.room.Room
 import androidx.test.core.app.ApplicationProvider
+import com.rjnr.pocketnode.core.log.NoopLogger
 import com.rjnr.pocketnode.data.database.AppDatabase
 import com.rjnr.pocketnode.data.database.entity.SubAccountCandidateEntity
 import com.rjnr.pocketnode.data.gateway.models.JniScriptStatus
@@ -52,12 +53,13 @@ class CandidateRegistrationRecordingTest {
         coordinator = SyncCoordinator(
             db.walletDao(),
             db.syncProgressDao(),
-            WalletPreferences(context),
-            KeyManager(context, mnemonicManager),
+            WalletPreferences(context, NoopLogger),
+            KeyManager(context, mnemonicManager, NoopLogger),
             Json { ignoreUnknownKeys = true },
             fakeBridge,
             db.subAccountCandidateDao(),
             db.transactionDao(),
+            NoopLogger,
         )
     }
 

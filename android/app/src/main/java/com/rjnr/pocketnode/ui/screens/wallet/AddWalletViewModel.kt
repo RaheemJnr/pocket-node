@@ -1,7 +1,7 @@
 package com.rjnr.pocketnode.ui.screens.wallet
 
-import android.util.Log
 import androidx.fragment.app.FragmentActivity
+import com.rjnr.pocketnode.core.log.Logger
 import androidx.lifecycle.SavedStateHandle
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
@@ -50,6 +50,7 @@ class AddWalletViewModel @Inject constructor(
     private val walletKeyReader: WalletKeyReader,
     private val walletKeyWriter: WalletKeyWriter,
     private val authManager: com.rjnr.pocketnode.data.auth.AuthManager,
+    private val logger: Logger,
 ) : ViewModel() {
 
     /**
@@ -250,7 +251,7 @@ class AddWalletViewModel @Inject constructor(
                 gatewayRepository.onActiveWalletChanged(wallet)
                 _uiState.update { it.copy(isLoading = false, createdWallet = wallet) }
             }.onFailure { error ->
-                Log.e(TAG, "Sub-account creation failed", error)
+                logger.e(TAG, "Sub-account creation failed", error)
                 _uiState.update { it.copy(isLoading = false, error = persistErrorMessage(error)) }
             }
         }
@@ -356,7 +357,7 @@ class AddWalletViewModel @Inject constructor(
                     it.copy(isLoading = false, createdWallet = wallet, isNewlyGenerated = true)
                 }
             }.onFailure { error ->
-                Log.e(TAG, "Wallet creation failed", error)
+                logger.e(TAG, "Wallet creation failed", error)
                 _uiState.update { it.copy(isLoading = false, error = persistErrorMessage(error)) }
             }
         }
@@ -407,7 +408,7 @@ class AddWalletViewModel @Inject constructor(
                 gatewayRepository.onActiveWalletChanged(wallet)
                 _uiState.update { it.copy(isLoading = false, createdWallet = wallet) }
             }.onFailure { error ->
-                Log.e(TAG, "Mnemonic import failed", error)
+                logger.e(TAG, "Mnemonic import failed", error)
                 _uiState.update { it.copy(isLoading = false, error = persistErrorMessage(error)) }
             }
         }
@@ -446,7 +447,7 @@ class AddWalletViewModel @Inject constructor(
                 gatewayRepository.onActiveWalletChanged(wallet)
                 _uiState.update { it.copy(isLoading = false, createdWallet = wallet) }
             }.onFailure { error ->
-                Log.e(TAG, "Raw key import failed", error)
+                logger.e(TAG, "Raw key import failed", error)
                 _uiState.update { it.copy(isLoading = false, error = persistErrorMessage(error)) }
             }
         }
