@@ -9,11 +9,17 @@
 set -euo pipefail
 cd "$(dirname "$0")"
 
+for tool in rustup cargo xcodebuild; do
+    command -v "$tool" >/dev/null 2>&1 || { echo "ERROR: $tool not found on PATH"; exit 1; }
+done
+
 echo "======================================"
 echo "CKB Light Client - iOS Build"
 echo "======================================"
 echo ""
 
+# Apple Silicon only (design D3 in docs/IOS_M1_DESIGN.md): no x86_64 simulator
+# slice. Add "x86_64-apple-ios" here if an Intel Mac ever needs to run the sim.
 RUST_TARGETS=("aarch64-apple-ios" "aarch64-apple-ios-sim")
 
 export IPHONEOS_DEPLOYMENT_TARGET="${IPHONEOS_DEPLOYMENT_TARGET:-15.0}"
