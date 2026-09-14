@@ -5,10 +5,7 @@ import com.rjnr.pocketnode.data.gateway.models.*
 import com.rjnr.pocketnode.data.validation.NetworkValidator
 import org.junit.Assert.*
 import org.junit.Test
-import org.junit.runner.RunWith
-import org.robolectric.RobolectricTestRunner
 
-@RunWith(RobolectricTestRunner::class)
 class TransactionBuilderDaoTest {
 
     private val builder = TransactionBuilder(NetworkValidator())

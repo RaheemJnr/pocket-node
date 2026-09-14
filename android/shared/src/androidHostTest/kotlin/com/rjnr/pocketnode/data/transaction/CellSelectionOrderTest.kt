@@ -7,8 +7,6 @@ import com.rjnr.pocketnode.data.validation.NetworkValidator
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
 import org.junit.Test
-import org.junit.runner.RunWith
-import org.robolectric.RobolectricTestRunner
 
 /**
  * Cell selection order (learned from Neuron's cells.ts, which sorts ascending
@@ -21,7 +19,6 @@ import org.robolectric.RobolectricTestRunner
  * that from stranding the remainder below the 61 CKB minimum (which would be
  * refused as dust change — a regression a naive smallest-first would cause).
  */
-@RunWith(RobolectricTestRunner::class)
 class CellSelectionOrderTest {
 
     private val builder = TransactionBuilder(NetworkValidator())

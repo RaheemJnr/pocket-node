@@ -42,6 +42,11 @@ kotlin {
         getByName("androidHostTest").dependencies {
             // JVM JNI payload so host-side unit tests can call libsecp256k1.
             implementation(libs.secp256k1.kmp.jni.jvm)
+            // JUnit 4 + MockK: the TransactionBuilder suites moved here from the
+            // app module unchanged apart from dropping a vestigial Robolectric
+            // runner (#455). Same coordinates the app module uses.
+            implementation("junit:junit:4.13.2")
+            implementation(libs.mockk)
             // Differential tests only: the CKB Java SDK is the reference these
             // primitives are proved against. It must never appear on a shipping
             // classpath — :app's `checkNoCkbSdkOnRuntimeClasspath` task enforces
@@ -50,6 +55,26 @@ kotlin {
             // `utils` (Blake2b, ECKeyPair, Sign, Numeric) is only a runtime dep of
             // `core`, so the differential tests have to ask for it by name.
             implementation(libs.ckb.sdk.utils.difftest)
+        }
+    }
+}
+
+// MockK uses ByteBuddy. On JDK 21+ self-attach is restricted (JEP 451), so the agent is
+// preloaded with -javaagent instead of relying on dynamic attach. Mirrors the same
+// workaround in app/build.gradle.kts.
+val byteBuddyAgent: Configuration by configurations.creating
+
+dependencies {
+    byteBuddyAgent("net.bytebuddy:byte-buddy-agent:1.14.17")
+}
+
+tasks.withType<Test>().configureEach {
+    doFirst {
+        val agentJar = byteBuddyAgent.resolvedConfiguration.resolvedArtifacts
+            .map { it.file }
+            .firstOrNull { it.name.startsWith("byte-buddy-agent") }
+        if (agentJar != null) {
+            jvmArgs("-javaagent:${agentJar.absolutePath}")
         }
     }
 }

@@ -8,10 +8,7 @@ import io.mockk.mockk
 import org.junit.Assert.*
 import org.junit.Before
 import org.junit.Test
-import org.junit.runner.RunWith
-import org.robolectric.RobolectricTestRunner
 
-@RunWith(RobolectricTestRunner::class)
 class TransactionBuilderTest {
 
     private lateinit var builder: TransactionBuilder
