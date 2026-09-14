@@ -4,6 +4,7 @@ import android.os.Bundle
 import android.util.Log
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
+import com.rjnr.pocketnode.core.log.Logger
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
@@ -59,6 +60,9 @@ class MainActivity : FragmentActivity() {
     @Inject
     lateinit var syncWorkScheduler: SyncWorkScheduler
 
+    @Inject
+    lateinit var logger: Logger
+
     private val _requireReauth = mutableStateOf(false)
 
     // Cached at startup — updated when wallet state changes
@@ -84,7 +88,7 @@ class MainActivity : FragmentActivity() {
             val current = BuildConfig.VERSION_CODE
             if (PinManager.shouldResetAttemptsForUpgrade(lastSeen, current)) {
                 pinManager.resetFailedAttempts()
-                Log.i("MainActivity", "PIN attempt counter reset after upgrade $lastSeen -> $current (#370)")
+                logger.i("MainActivity", "PIN attempt counter reset after upgrade $lastSeen -> $current (#370)")
             }
             if (lastSeen != current) walletPreferences.setLastSeenVersionCode(current)
         }

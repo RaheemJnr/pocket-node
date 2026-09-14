@@ -1,6 +1,6 @@
 package com.rjnr.pocketnode.ui.screens.wallet
 
-import android.util.Log
+import com.rjnr.pocketnode.core.log.Logger
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.rjnr.pocketnode.data.gateway.GatewayRepository
@@ -24,6 +24,7 @@ class WalletManagerViewModel @Inject constructor(
     private val walletKeyReader: com.rjnr.pocketnode.data.wallet.WalletKeyReader,
     private val walletKeyWriter: com.rjnr.pocketnode.data.wallet.WalletKeyWriter,
     private val authManager: com.rjnr.pocketnode.data.auth.AuthManager,
+    private val logger: Logger,
 ) : ViewModel() {
 
     private fun canCreateV2BoundKey(): Boolean =
@@ -146,7 +147,7 @@ class WalletManagerViewModel @Inject constructor(
                             restored++
                             gatewayRepository.onActiveWalletChanged(wallet)
                         }.onFailure { e ->
-                            Log.e(TAG, "Restore failed for $parentId index ${candidate.accountIndex}", e)
+                            logger.e(TAG, "Restore failed for $parentId index ${candidate.accountIndex}", e)
                         }
                     }
                 }
@@ -172,7 +173,7 @@ class WalletManagerViewModel @Inject constructor(
                 val wallet = walletRepository.getById(walletId) ?: return@launch
                 gatewayRepository.onActiveWalletChanged(wallet)
             } catch (e: Exception) {
-                Log.e(TAG, "Failed to switch wallet", e)
+                logger.e(TAG, "Failed to switch wallet", e)
                 _uiState.update {
                     it.copy(
                         error = com.rjnr.pocketnode.ui.util.UiMessage.Resource(

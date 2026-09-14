@@ -1,6 +1,7 @@
 package com.rjnr.pocketnode.ui.screens.wallet
 
 import androidx.fragment.app.FragmentActivity
+import com.rjnr.pocketnode.core.log.NoopLogger
 import androidx.lifecycle.SavedStateHandle
 import com.rjnr.pocketnode.data.database.entity.WalletEntity
 import com.rjnr.pocketnode.data.gateway.GatewayRepository
@@ -87,6 +88,7 @@ class AddWalletViewModelTest {
         walletKeyReader = walletKeyReader,
         walletKeyWriter = walletKeyWriter,
         authManager = authManager,
+        logger = NoopLogger,
     )
 
     @Test

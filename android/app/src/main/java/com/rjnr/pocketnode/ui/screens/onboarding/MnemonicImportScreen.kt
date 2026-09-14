@@ -19,7 +19,7 @@ import androidx.fragment.app.FragmentActivity
 import androidx.hilt.lifecycle.viewmodel.compose.hiltViewModel
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
-import android.util.Log
+import com.rjnr.pocketnode.core.log.Logger
 import com.rjnr.pocketnode.data.gateway.GatewayRepository
 import com.rjnr.pocketnode.data.gateway.models.NetworkType
 import com.rjnr.pocketnode.data.gateway.models.SyncMode
@@ -61,6 +61,7 @@ class MnemonicImportViewModel @Inject constructor(
     private val walletRepository: WalletRepository,
     private val walletKeyWriter: WalletKeyWriter,
     private val authManager: com.rjnr.pocketnode.data.auth.AuthManager,
+    private val logger: Logger,
 ) : ViewModel() {
 
     private val _uiState = MutableStateFlow(MnemonicImportUiState())
@@ -165,7 +166,7 @@ class MnemonicImportViewModel @Inject constructor(
                 },
             )
             result.onSuccess { entity ->
-                Log.d(TAG, "Imported wallet entity: ${entity.walletId}")
+                logger.d(TAG, "Imported wallet entity: ${entity.walletId}")
                 repository.onActiveWalletChanged(entity)
                 val showDialog = repository.currentNetwork == NetworkType.MAINNET
                 _uiState.update {
@@ -176,7 +177,7 @@ class MnemonicImportViewModel @Inject constructor(
                     )
                 }
             }.onFailure { error ->
-                Log.e(TAG, "Mnemonic import failed", error)
+                logger.e(TAG, "Mnemonic import failed", error)
                 val msg = persistErrorMessageRaw(error)
                 _uiState.update { it.copy(isImporting = false, error = msg) }
             }
@@ -214,7 +215,7 @@ class MnemonicImportViewModel @Inject constructor(
                 }
             }
             result.onSuccess { entity ->
-                Log.d(TAG, "Imported raw key wallet entity: ${entity.walletId}")
+                logger.d(TAG, "Imported raw key wallet entity: ${entity.walletId}")
                 repository.onActiveWalletChanged(entity)
                 val showDialog = repository.currentNetwork == NetworkType.MAINNET
                 _uiState.update {
@@ -225,7 +226,7 @@ class MnemonicImportViewModel @Inject constructor(
                     )
                 }
             }.onFailure { error ->
-                Log.e(TAG, "Private key import failed", error)
+                logger.e(TAG, "Private key import failed", error)
                 val msg = persistErrorMessageRaw(error)
                 _uiState.update { it.copy(isImporting = false, error = msg) }
             }

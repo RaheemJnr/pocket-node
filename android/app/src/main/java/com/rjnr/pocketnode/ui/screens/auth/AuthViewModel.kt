@@ -1,7 +1,7 @@
 package com.rjnr.pocketnode.ui.screens.auth
 
-import android.util.Log
 import androidx.fragment.app.FragmentActivity
+import com.rjnr.pocketnode.core.log.Logger
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.rjnr.pocketnode.R
@@ -35,6 +35,7 @@ class AuthViewModel @Inject constructor(
     private val migrationRunner: KeystoreV2MigrationRunner,
     private val migrationHelper: KeystoreV2MigrationHelper,
     private val walletDao: WalletDao,
+    private val logger: Logger,
 ) : ViewModel() {
 
     private val _uiState = MutableStateFlow(AuthUiState())
@@ -111,7 +112,7 @@ class AuthViewModel @Inject constructor(
                 // during v1.7.3 testing after importing a wallet via the
                 // V1 fallback path and switching network (which force-kills
                 // the process and re-enters AuthScreen).
-                Log.i(TAG, "Skipping V1→V2 migration: ${pending.size} pending but no device credential")
+                logger.i(TAG, "Skipping V1→V2 migration: ${pending.size} pending but no device credential")
                 onComplete()
                 return@launch
             }
@@ -121,7 +122,7 @@ class AuthViewModel @Inject constructor(
                 // finalize() is unlikely to fail here (nothing to delete on a
                 // fresh install) but log if it does so the failure isn't silent.
                 migrationHelper.finalize().onFailure { e ->
-                    Log.w(TAG, "finalize on empty-pending failed", e)
+                    logger.w(TAG, "finalize on empty-pending failed", e)
                 }
                 onComplete()
                 return@launch
@@ -138,7 +139,7 @@ class AuthViewModel @Inject constructor(
                         }
                     }
                     is KeystoreV2MigrationRunner.Outcome.Failed -> {
-                        Log.e(TAG, "Migration failed: ${outcome.reason} for ${outcome.failedWalletIds}")
+                        logger.e(TAG, "Migration failed: ${outcome.reason} for ${outcome.failedWalletIds}")
                         val errorMessage = if (outcome.failedWalletIds.isEmpty()) {
                             "Migration could not complete. Tap an affected wallet to retry, or re-import from your recovery phrase."
                         } else {
