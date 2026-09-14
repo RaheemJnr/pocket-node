@@ -23,10 +23,8 @@ object Secp256k1Signer {
 
     /** The 33-byte compressed public key for [privateKey]. */
     fun publicKey(privateKey: ByteArray): ByteArray {
-        require(privateKey.size == PRIVATE_KEY_SIZE) {
-            "Private key must be $PRIVATE_KEY_SIZE bytes, got ${privateKey.size}"
-        }
-        return Secp256k1.pubKeyCompress(Secp256k1.pubkeyCreate(privateKey))
+        val key = normalizeKey(privateKey)
+        return Secp256k1.pubKeyCompress(Secp256k1.pubkeyCreate(key))
     }
 
     /**
@@ -37,11 +35,9 @@ object Secp256k1Signer {
         require(message32.size == MESSAGE_SIZE) {
             "Message must be $MESSAGE_SIZE bytes, got ${message32.size}"
         }
-        require(privateKey.size == PRIVATE_KEY_SIZE) {
-            "Private key must be $PRIVATE_KEY_SIZE bytes, got ${privateKey.size}"
-        }
-        val compact = Secp256k1.sign(message32, privateKey)
-        val expected = publicKey(privateKey)
+        val key = normalizeKey(privateKey)
+        val compact = Secp256k1.sign(message32, key)
+        val expected = Secp256k1.pubKeyCompress(Secp256k1.pubkeyCreate(key))
         var recId = -1
         for (candidate in 0..3) {
             val recovered = try {
@@ -77,5 +73,34 @@ object Secp256k1Signer {
         } catch (e: Exception) {
             false
         }
+    }
+
+    /**
+     * Left-pads [privateKey] to 32 bytes and range-checks it.
+     *
+     * The CKB Java SDK took keys as `BigInteger`, so a legacy record whose hex
+     * was stored without leading zero padding (a key numerically below 2^248,
+     * roughly 1 in 256) decoded to fewer than 32 bytes and still signed. Keep
+     * accepting those rather than locking their owners out; libsecp256k1 needs
+     * a fixed-width scalar, so pad on the left, which is what `BigInteger`
+     * did implicitly.
+     *
+     * @throws IllegalArgumentException if the key is empty, longer than 32
+     *   bytes, zero, or not below the curve order.
+     */
+    private fun normalizeKey(privateKey: ByteArray): ByteArray {
+        require(privateKey.isNotEmpty() && privateKey.size <= PRIVATE_KEY_SIZE) {
+            "Private key must be 1..$PRIVATE_KEY_SIZE bytes, got ${privateKey.size}"
+        }
+        val key = if (privateKey.size == PRIVATE_KEY_SIZE) {
+            privateKey
+        } else {
+            ByteArray(PRIVATE_KEY_SIZE).also {
+                privateKey.copyInto(it, PRIVATE_KEY_SIZE - privateKey.size)
+            }
+        }
+        // libsecp256k1's own check: rejects zero and anything >= the group order.
+        require(Secp256k1.secKeyVerify(key)) { "Private key is not a valid secp256k1 scalar" }
+        return key
     }
 }

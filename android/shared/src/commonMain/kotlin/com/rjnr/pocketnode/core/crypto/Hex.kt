@@ -3,18 +3,19 @@ package com.rjnr.pocketnode.core.crypto
 /**
  * Hex codec for the shared KMP module.
  *
- * Byte-for-byte compatible with `org.nervos.ckb.utils.Numeric.toHexString` /
- * `Numeric.hexStringToByteArray`, which this replaces (#454). The quirks below
- * are the SDK's and are reproduced deliberately so the swap is behaviour
- * preserving on every input the app already feeds through it:
+ * Replaces `org.nervos.ckb.utils.Numeric.toHexString` / `hexStringToByteArray`
+ * (#454). It matches the SDK byte for byte on every *well-formed* input, and
+ * keeps the two shapes the app actually feeds it:
  *
  *  - the `0x` / `0X` prefix is optional on decode and only stripped when the
  *    string is longer than one character;
- *  - an odd-length string is decoded as if it had a leading `0` nibble;
- *  - a character that is not a hex digit decodes as `-1` (like
- *    `java.lang.Character.digit`) rather than throwing, so malformed input
- *    yields the same garbage bytes it does today instead of a new exception
- *    type escaping from the transaction-serialisation path.
+ *  - an odd-length string is decoded as if it had a leading `0` nibble.
+ *
+ * It deliberately does NOT match the SDK on malformed input. `Numeric` decodes
+ * a non-hex character to `-1` (it leans on `java.lang.Character.digit`) and
+ * returns silently corrupted bytes, so a malformed code hash or args would
+ * encode into a valid-looking but wrong CKB address. This decoder throws
+ * instead — the private helper it replaced in `AddressUtils` threw too.
  */
 private const val HEX_DIGITS = "0123456789abcdef"
 
@@ -32,7 +33,11 @@ fun ByteArray.toHexStringNoPrefix(): String {
 /** Lowercase hex with the `0x` prefix — matches `Numeric.toHexString(byte[])`. */
 fun ByteArray.toHexString(): String = "0x" + toHexStringNoPrefix()
 
-/** Matches `Numeric.hexStringToByteArray` — see the file KDoc for the quirks. */
+/**
+ * Decodes hex, with or without a `0x` prefix and with odd length tolerated.
+ *
+ * @throws IllegalArgumentException if any character is not a hex digit.
+ */
 fun String.hexToByteArray(): ByteArray {
     val cleaned = if (length > 1 && this[0] == '0' && (this[1] == 'x' || this[1] == 'X')) {
         substring(2)
@@ -46,23 +51,31 @@ fun String.hexToByteArray(): ByteArray {
     var i: Int
     if (len % 2 != 0) {
         out = ByteArray(len / 2 + 1)
-        out[0] = hexDigit(cleaned[0]).toByte()
+        out[0] = hexDigit(cleaned, 0).toByte()
         i = 1
     } else {
         out = ByteArray(len / 2)
         i = 0
     }
     while (i < len) {
-        out[(i + 1) / 2] = ((hexDigit(cleaned[i]) shl 4) + hexDigit(cleaned[i + 1])).toByte()
+        out[(i + 1) / 2] = ((hexDigit(cleaned, i) shl 4) + hexDigit(cleaned, i + 1)).toByte()
         i += 2
     }
     return out
 }
 
-/** `java.lang.Character.digit(c, 16)` for ASCII: `-1` when [c] is not a hex digit. */
-private fun hexDigit(c: Char): Int = when (c) {
-    in '0'..'9' -> c - '0'
-    in 'a'..'f' -> c - 'a' + 10
-    in 'A'..'F' -> c - 'A' + 10
-    else -> -1
+/**
+ * The nibble at [index], or [IllegalArgumentException].
+ *
+ * The message carries the index only. This decoder sits on the private-key read
+ * path (`data.privateKeyHex.hexToByteArray()`), so the offending character must
+ * not reach a log line.
+ */
+private fun hexDigit(s: String, index: Int): Int {
+    return when (val c = s[index]) {
+        in '0'..'9' -> c - '0'
+        in 'a'..'f' -> c - 'a' + 10
+        in 'A'..'F' -> c - 'A' + 10
+        else -> throw IllegalArgumentException("Invalid hex character at index $index")
+    }
 }

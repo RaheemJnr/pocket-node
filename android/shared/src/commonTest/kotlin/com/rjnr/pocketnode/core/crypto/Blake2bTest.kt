@@ -8,8 +8,9 @@ import kotlin.test.assertEquals
 class Blake2bTest {
 
     @Test
-    fun personalizationIsSixteenBytes() {
-        assertEquals(16, Blake2b.CKB_HASH_PERSONALIZATION.size)
+    fun producesA32ByteDigest() {
+        assertEquals(32, Blake2b.DIGEST_LENGTH)
+        assertEquals(32, Blake2b.digest(ByteArray(0)).size)
     }
 
     @Test

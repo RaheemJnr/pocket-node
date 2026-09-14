@@ -1,7 +1,9 @@
 package com.rjnr.pocketnode.core.crypto
 
 import kotlin.test.Test
+import kotlin.test.assertContentEquals
 import kotlin.test.assertEquals
+import kotlin.test.assertFailsWith
 import kotlin.test.assertFalse
 import kotlin.test.assertTrue
 
@@ -54,6 +56,63 @@ class Secp256k1SignerTest {
             val message = Blake2b.digest(byteArrayOf(i.toByte()))
             val s = Secp256k1Signer.signRecoverable(message, one).copyOfRange(32, 64)
             assertTrue(compareUnsigned(s, halfOrder) <= 0, "s must be canonical (low), got ${s.toHexString()}")
+        }
+    }
+
+    @Test
+    fun acceptsAnUnpaddedShortKeyAsTheLeftPadded32ByteOne() {
+        // The Java SDK took keys as BigInteger, so a legacy record stored without
+        // leading zero padding decoded to fewer than 32 bytes and still signed.
+        // A 31-byte key must behave exactly like the same key zero-padded to 32.
+        val padded =
+            "0x0011223344556677889900112233445566778899001122334455667788990011".hexToByteArray()
+        val short = padded.copyOfRange(1, 32)
+        assertEquals(31, short.size)
+        assertEquals(32, padded.size)
+        assertContentEquals(Secp256k1Signer.publicKey(padded), Secp256k1Signer.publicKey(short))
+
+        val message = Blake2b.digest("short key".encodeToByteArray())
+        assertContentEquals(
+            Secp256k1Signer.signRecoverable(message, padded),
+            Secp256k1Signer.signRecoverable(message, short),
+        )
+    }
+
+    @Test
+    fun acceptsASingleByteKey() {
+        val short = byteArrayOf(1)
+        assertContentEquals(Secp256k1Signer.publicKey(one), Secp256k1Signer.publicKey(short))
+    }
+
+    @Test
+    fun rejectsOutOfRangeKeys() {
+        val message = Blake2b.digest("nope".encodeToByteArray())
+        val n = "0xfffffffffffffffffffffffffffffffebaaedce6af48a03bbfd25e8cd0364141".hexToByteArray()
+        val bad = mapOf(
+            "empty" to ByteArray(0),
+            "33 bytes" to ByteArray(33) { 1 },
+            "zero" to ByteArray(32),
+            "short zero" to ByteArray(4),
+            "curve order" to n,
+            "above curve order" to ByteArray(32) { 0xFF.toByte() },
+        )
+        for ((label, key) in bad) {
+            assertFailsWith<IllegalArgumentException>("expected rejection of $label") {
+                Secp256k1Signer.publicKey(key)
+            }
+            assertFailsWith<IllegalArgumentException>("expected rejection of $label") {
+                Secp256k1Signer.signRecoverable(message, key)
+            }
+        }
+    }
+
+    @Test
+    fun rejectsAMessageThatIsNot32Bytes() {
+        assertFailsWith<IllegalArgumentException> {
+            Secp256k1Signer.signRecoverable(ByteArray(31), one)
+        }
+        assertFailsWith<IllegalArgumentException> {
+            Secp256k1Signer.signRecoverable(ByteArray(33), one)
         }
     }
 

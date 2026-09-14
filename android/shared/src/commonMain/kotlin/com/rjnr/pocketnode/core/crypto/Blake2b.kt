@@ -22,8 +22,15 @@ class Blake2b {
     fun doFinal(): ByteArray = digest.digest()
 
     companion object {
-        /** The 16 personalization bytes CKB mixes into the BLAKE2b parameter block. */
-        val CKB_HASH_PERSONALIZATION: ByteArray = "ckb-default-hash".encodeToByteArray()
+        /**
+         * The 16 personalization bytes CKB mixes into the BLAKE2b parameter block.
+         *
+         * Private: a public `ByteArray` constant is shared mutable state, and a
+         * caller that wrote into it would silently change every hash this app
+         * computes — including transaction hashes and lock args.
+         */
+        private val CKB_HASH_PERSONALIZATION: ByteArray = "ckb-default-hash".encodeToByteArray()
+
         const val DIGEST_LENGTH: Int = 32
 
         fun digest(input: ByteArray): ByteArray = Blake2b().update(input).doFinal()

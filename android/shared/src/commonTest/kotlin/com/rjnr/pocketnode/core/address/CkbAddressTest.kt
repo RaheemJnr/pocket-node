@@ -108,6 +108,121 @@ class CkbAddressTest {
         assertFailsWith<AddressFormatException> { CkbAddress.decode(foreign) }
     }
 
+    // --- Structural negatives -------------------------------------------------
+    // Every one of these is a well-formed bech32 string carrying a malformed CKB
+    // payload, so the checksum passes and only the payload rules can catch it.
+    // A decoder that shrugged any of them off would hand back a lock script that
+    // is not the one the address names.
+
+    /** Re-encodes an arbitrary payload so the checksum is valid and only the payload is wrong. */
+    private fun addressOf(
+        payload: ByteArray,
+        encoding: Bech32Encoding = Bech32Encoding.BECH32M,
+        hrp: String = CkbAddress.HRP_MAINNET,
+    ): String = Bech32m.encode(encoding, hrp, Bech32m.convertBits(payload, 8, 5, pad = true))
+
+    private val codeHashBytes get() = secp256k1CodeHash.hexToByteArray()
+    private val argsBytes get() = args.hexToByteArray()
+
+    @Test
+    fun rejectsATruncatedFullPayload() {
+        // Code hash cut short. Zero-filling the rest would silently name a
+        // different script.
+        assertFailsWith<AddressFormatException> {
+            CkbAddress.decode(addressOf(byteArrayOf(0x00) + codeHashBytes.copyOfRange(0, 20)))
+        }
+        // Full code hash but no hash-type byte and no args.
+        assertFailsWith<AddressFormatException> {
+            CkbAddress.decode(addressOf(byteArrayOf(0x00) + codeHashBytes))
+        }
+    }
+
+    @Test
+    fun rejectsAnUnknownFormatByte() {
+        // 0x03 sits in the gap between the short (0x01) and deprecated-full
+        // (0x02 / 0x04) headers.
+        assertFailsWith<AddressFormatException> {
+            CkbAddress.decode(
+                addressOf(byteArrayOf(0x03) + codeHashBytes + byteArrayOf(0x01) + argsBytes)
+            )
+        }
+        assertFailsWith<AddressFormatException> {
+            CkbAddress.decode(
+                addressOf(byteArrayOf(0x05) + codeHashBytes + byteArrayOf(0x01) + argsBytes)
+            )
+        }
+    }
+
+    @Test
+    fun rejectsAnUnknownHashTypeByte() {
+        // Packed hash types are 0x00, 0x01, 0x02 and 0x04 — note the gap at 0x03.
+        for (unknown in listOf(0x03, 0x05, 0xFF)) {
+            assertFailsWith<AddressFormatException>("hash type $unknown must be rejected") {
+                CkbAddress.decode(
+                    addressOf(
+                        byteArrayOf(0x00) + codeHashBytes + byteArrayOf(unknown.toByte()) + argsBytes
+                    )
+                )
+            }
+        }
+    }
+
+    @Test
+    fun rejectsShortAddressesWithTheWrongArgsLength() {
+        // secp256k1 (index 0x00) and multisig (0x01) are blake160, exactly 20 bytes.
+        for (index in listOf(0x00, 0x01)) {
+            for (length in listOf(19, 21)) {
+                assertFailsWith<AddressFormatException>("index $index length $length") {
+                    CkbAddress.decode(
+                        addressOf(
+                            byteArrayOf(0x01, index.toByte()) + ByteArray(length) { 0x11 },
+                            Bech32Encoding.BECH32,
+                        )
+                    )
+                }
+            }
+        }
+        // anyone-can-pay (0x02) allows 20..22 for the optional minimum fields.
+        for (length in listOf(19, 23)) {
+            assertFailsWith<AddressFormatException>("acp length $length") {
+                CkbAddress.decode(
+                    addressOf(
+                        byteArrayOf(0x01, 0x02) + ByteArray(length) { 0x11 },
+                        Bech32Encoding.BECH32,
+                    )
+                )
+            }
+        }
+    }
+
+    @Test
+    fun rejectsAnUnknownShortCodeHashIndex() {
+        assertFailsWith<AddressFormatException> {
+            CkbAddress.decode(
+                addressOf(byteArrayOf(0x01, 0x03) + argsBytes, Bech32Encoding.BECH32)
+            )
+        }
+    }
+
+    @Test
+    fun acceptsAnAllUppercaseAddressAndRejectsMixedCase() {
+        // BIP-173 allows an all-uppercase string; only mixing the two is illegal.
+        val upper = fullAddress.uppercase()
+        assertEquals(CkbAddress.decode(fullAddress).args.toHexString(), CkbAddress.decode(upper).args.toHexString())
+        assertEquals(CkbAddress.HRP_MAINNET, CkbAddress.decode(upper).hrp)
+        assertFailsWith<AddressFormatException> {
+            CkbAddress.decode("CKB1" + fullAddress.substring(4))
+        }
+    }
+
+    @Test
+    fun rejectsAnUppercaseButUnknownHumanReadablePart() {
+        val data = Bech32m.decode(fullAddress).data
+        assertFailsWith<AddressFormatException> {
+            CkbAddress.decode(Bech32m.encode(Bech32Encoding.BECH32M, "CKX", data).uppercase())
+        }
+    }
+
     @Test
     fun rejectsAFullPayloadCarriedByTheWrongChecksumConstant() {
         val data = Bech32m.decode(fullAddress).data

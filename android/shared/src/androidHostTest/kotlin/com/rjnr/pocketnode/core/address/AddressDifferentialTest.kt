@@ -4,6 +4,7 @@ import com.rjnr.pocketnode.core.crypto.toHexString
 import kotlin.random.Random
 import kotlin.test.Test
 import kotlin.test.assertEquals
+import kotlin.test.assertTrue
 import org.nervos.ckb.Network
 import org.nervos.ckb.type.Script
 import org.nervos.ckb.utils.Numeric
@@ -154,6 +155,117 @@ class AddressDifferentialTest {
                 )
             }
         }
+    }
+
+    /** Re-encodes an arbitrary payload so the checksum is valid and only the payload is wrong. */
+    private fun addressOf(
+        payload: ByteArray,
+        encoding: Bech32Encoding = Bech32Encoding.BECH32M,
+        hrp: String = CkbAddress.HRP_MAINNET,
+    ): String = Bech32m.encode(encoding, hrp, Bech32m.convertBits(payload, 8, 5, pad = true))
+
+    @Test
+    fun structuralNegativesAreRejectedByBothDecoders() {
+        val codeHash = secp256k1CodeHash
+        val args = Numeric.hexStringToByteArray("0xb39bbc0b3673c7d36450bc14cfcdad2d559c6c64")
+        val cases = linkedMapOf(
+            "unknown format byte 0x03" to
+                addressOf(byteArrayOf(0x03) + codeHash + byteArrayOf(0x01) + args),
+            "unknown format byte 0x05" to
+                addressOf(byteArrayOf(0x05) + codeHash + byteArrayOf(0x01) + args),
+            "unknown hash type 0x03" to
+                addressOf(byteArrayOf(0x00) + codeHash + byteArrayOf(0x03) + args),
+            "unknown hash type 0xff" to
+                addressOf(byteArrayOf(0x00) + codeHash + byteArrayOf(0xFF.toByte()) + args),
+            "short secp256k1 args 19 bytes" to
+                addressOf(byteArrayOf(0x01, 0x00) + ByteArray(19) { 0x11 }, Bech32Encoding.BECH32),
+            "short secp256k1 args 21 bytes" to
+                addressOf(byteArrayOf(0x01, 0x00) + ByteArray(21) { 0x11 }, Bech32Encoding.BECH32),
+            "short multisig args 19 bytes" to
+                addressOf(byteArrayOf(0x01, 0x01) + ByteArray(19) { 0x11 }, Bech32Encoding.BECH32),
+            "short acp args 23 bytes" to
+                addressOf(byteArrayOf(0x01, 0x02) + ByteArray(23) { 0x11 }, Bech32Encoding.BECH32),
+            "unknown short code hash index 0x03" to
+                addressOf(byteArrayOf(0x01, 0x03) + args, Bech32Encoding.BECH32),
+            "full payload in bech32 not bech32m" to
+                addressOf(byteArrayOf(0x00) + codeHash + byteArrayOf(0x01) + args, Bech32Encoding.BECH32),
+            "deprecated full payload in bech32m not bech32" to
+                addressOf(byteArrayOf(0x04) + codeHash + args, Bech32Encoding.BECH32M),
+            "foreign hrp" to
+                addressOf(byteArrayOf(0x00) + codeHash + byteArrayOf(0x01) + args, hrp = "bc"),
+        )
+        for ((label, address) in cases) {
+            assertEquals(
+                false,
+                runCatching { Address.decode(address) }.isSuccess,
+                "the SDK accepted '$label'; this fixture no longer tests what it claims",
+            )
+            assertEquals(
+                false,
+                runCatching { CkbAddress.decode(address) }.isSuccess,
+                "we accepted '$label'",
+            )
+        }
+    }
+
+    @Test
+    fun truncatedPayloadsAreRejectedByBoth_butOnlyWeRejectThemOnPurpose() {
+        // Both decoders reject these, so the outcome is parity and asserted as
+        // such. HOW they reject is not, and it is why our decoder length-checks
+        // explicitly instead of copying the SDK's control flow: `Address` reads
+        // the code hash with `Arrays.copyOfRange(payload, 1, 33)`, which
+        // zero-fills past the end of a short payload rather than failing. What
+        // actually stops a truncated address there is the unchecked `payload[33]`
+        // one line later, throwing ArrayIndexOutOfBoundsException — an accident
+        // of the reading order, not a rule, and not the AddressFormatException a
+        // caller would catch. Verified: all five inputs below come back
+        // AIOOBE/IllegalArgumentException from the SDK.
+        val codeHash = secp256k1CodeHash
+        val truncated = listOf(
+            "code hash cut to 20 bytes" to
+                addressOf(byteArrayOf(0x00) + codeHash.copyOfRange(0, 20)),
+            "no hash type byte" to addressOf(byteArrayOf(0x00) + codeHash),
+            "header only" to addressOf(byteArrayOf(0x00)),
+            "deprecated full, code hash cut to 20 bytes" to
+                addressOf(byteArrayOf(0x04) + codeHash.copyOfRange(0, 20), Bech32Encoding.BECH32),
+            "short address header only" to
+                addressOf(byteArrayOf(0x01), Bech32Encoding.BECH32),
+        )
+        for ((label, address) in truncated) {
+            assertEquals(
+                false,
+                runCatching { Address.decode(address) }.isSuccess,
+                "the SDK accepted truncated payload '$label'",
+            )
+            val ours = runCatching { CkbAddress.decode(address) }
+            assertEquals(false, ours.isSuccess, "we accepted truncated payload '$label'")
+            assertTrue(
+                ours.exceptionOrNull() is AddressFormatException,
+                "'$label' must fail as AddressFormatException, got " +
+                    "${ours.exceptionOrNull()?.let { it::class.simpleName }}",
+            )
+        }
+    }
+
+    @Test
+    fun bothDecodersAcceptAnAllUppercaseAddressAndRejectMixedCase() {
+        val args = Numeric.hexStringToByteArray("0xb39bbc0b3673c7d36450bc14cfcdad2d559c6c64")
+        val valid = Address(Script(secp256k1CodeHash, args, Script.HashType.TYPE), Network.MAINNET).encode()
+
+        val upper = valid.uppercase()
+        assertEquals(
+            Numeric.toHexString(Address.decode(upper).script.args),
+            CkbAddress.decode(upper).args.toHexString(),
+            "uppercase address must decode to the same args in both",
+        )
+
+        val mixed = "CKB1" + valid.substring(4)
+        assertEquals(
+            runCatching { Address.decode(mixed) }.isSuccess,
+            runCatching { CkbAddress.decode(mixed) }.isSuccess,
+            "mixed case acceptance must match",
+        )
+        assertEquals(false, runCatching { CkbAddress.decode(mixed) }.isSuccess, "we accepted mixed case")
     }
 
     @Test

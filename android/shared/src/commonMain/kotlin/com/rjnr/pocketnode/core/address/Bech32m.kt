@@ -26,10 +26,30 @@ object Bech32m {
     private const val BECH32_CONST = 1
     private const val BECH32M_CONST = 0x2bc830a3
 
-    /** Encodes [values] (5-bit groups) under [hrp], appending the [encoding] checksum. */
+    /**
+     * Encodes [values] (5-bit groups) under [hrp], appending the [encoding] checksum.
+     *
+     * Validates its inputs to the same standard [decode] does: an out-of-range
+     * group or an hrp character outside printable ASCII would otherwise produce
+     * a string that does not round-trip, and for an address that means a
+     * well-formed-looking payment destination nobody can spend from.
+     */
     fun encode(encoding: Bech32Encoding, hrp: String, values: ByteArray): String {
         if (hrp.isEmpty()) throw AddressFormatException("Human-readable part is too short")
         if (hrp.length > 83) throw AddressFormatException("Human-readable part is too long")
+        for (i in hrp.indices) {
+            val c = hrp[i]
+            // Same charset rule as decode(). '1' stays legal: the separator is
+            // the LAST '1', and the data charset excludes it, so an hrp
+            // containing one still round-trips (BIP-173).
+            if (c.code < 33 || c.code > 126) {
+                throw AddressFormatException("Invalid character '$c' at $i")
+            }
+        }
+        for (i in values.indices) {
+            val v = values[i].toInt()
+            if (v < 0 || v > 31) throw AddressFormatException("Data value '$v' at $i is not 5 bits")
+        }
         val lowerHrp = hrp.lowercase()
         val checksum = createChecksum(encoding, lowerHrp, values)
         val out = StringBuilder(lowerHrp.length + 1 + values.size + checksum.size)

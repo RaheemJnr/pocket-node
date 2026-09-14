@@ -31,6 +31,13 @@ import javax.inject.Singleton
  *  - Hex `String`s handed out by EncryptedSharedPreferences / Room TEXT
  *    columns — immutable, GC-managed.
  *  - libsecp256k1's internal copies of the key made during signing.
+ *  - The plaintext 32-byte key [getPrivateKey] materialises. [sign] and
+ *    [getWalletInfo] call it and do NOT zero the array they get back, so a
+ *    readable copy of the key survives on the heap until GC after every
+ *    in-process signature. Callers that hold the key themselves (SendViewModel,
+ *    the GatewayRepository DAO overloads) do zero theirs; these two do not, and
+ *    fixing it properly means the ByteArray storage rewrite in #335 rather than
+ *    a local `fill(0)` that still leaves the hex `String` behind.
  *
  * The full String→ByteArray storage rewrite (prefs re-encode, Room BLOB
  * migration, backup format v3) is tracked in #335 and intentionally NOT

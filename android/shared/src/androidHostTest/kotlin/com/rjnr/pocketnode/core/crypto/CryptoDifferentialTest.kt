@@ -15,8 +15,17 @@ import org.nervos.ckb.crypto.Blake2b as SdkBlake2b
  * replaced (#454).
  *
  * The SDK is a TEST-ONLY dependency of this source set — it must never appear on
- * a production classpath again. A disagreement here is a signing bug, not a test
- * bug: do not relax an assertion to make it pass.
+ * a production classpath again (:app's `checkNoCkbSdkOnRuntimeClasspath` task
+ * enforces that). A disagreement here is a signing bug, not a test bug: do not
+ * relax an assertion to make it pass.
+ *
+ * Inputs are all WELL FORMED on purpose. Our hex decoder deliberately diverges
+ * from `Numeric` on malformed input — `Numeric` turns a non-hex character into a
+ * `-1` nibble and returns corrupted bytes, we throw — so comparing the two on
+ * garbage would assert a behaviour we chose not to keep. The rejection cases
+ * live in the commonTest known-answer suite instead.
+ *
+ * Assertion messages never carry key bytes; see [keyFingerprint].
  */
 class CryptoDifferentialTest {
 
@@ -29,6 +38,16 @@ class CryptoDifferentialTest {
             "fffffffffffffffffffffffffffffffebaaedce6af48a03bbfd25e8cd0364141", 16,
         )
     }
+
+    /**
+     * A short, non-reversible label for a private key.
+     *
+     * Assertion messages end up in CI logs and JUnit XML, so they must never
+     * carry key bytes. The seeded iteration index already reproduces any
+     * failure exactly; this only disambiguates which key was in play.
+     */
+    private fun keyFingerprint(key: ByteArray): String =
+        Blake2b.digest(key).copyOfRange(0, 8).toHexString()
 
     /** A uniformly random private key in [1, n-1]. */
     private fun Random.privateKey(): ByteArray {
@@ -78,7 +97,7 @@ class CryptoDifferentialTest {
             assertEquals(
                 Numeric.toHexString(sdk),
                 Secp256k1Signer.publicKey(key).toHexString(),
-                "public key mismatch at iteration $i for key ${Numeric.toHexString(key)}",
+                "public key mismatch at iteration $i for key fingerprint ${keyFingerprint(key)}",
             )
         }
     }
@@ -95,7 +114,7 @@ class CryptoDifferentialTest {
             assertEquals(
                 Numeric.toHexString(sdk),
                 ours.toHexString(),
-                "signature mismatch at iteration $i for key ${Numeric.toHexString(key)} " +
+                "signature mismatch at iteration $i for key fingerprint ${keyFingerprint(key)} " +
                     "message ${Numeric.toHexString(message)}",
             )
         }
