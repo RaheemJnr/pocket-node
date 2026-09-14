@@ -2,10 +2,10 @@ package com.rjnr.pocketnode.data.wallet
 
 import cash.z.ecc.android.bip39.Mnemonics
 import cash.z.ecc.android.bip39.toSeed
+import com.rjnr.pocketnode.core.crypto.Secp256k1Signer
 import org.bouncycastle.crypto.digests.SHA512Digest
 import org.bouncycastle.crypto.macs.HMac
 import org.bouncycastle.crypto.params.KeyParameter
-import org.nervos.ckb.crypto.secp256k1.ECKeyPair
 import java.math.BigInteger
 import javax.inject.Inject
 import javax.inject.Singleton
@@ -132,8 +132,7 @@ class MnemonicManager @Inject constructor() {
      * Normal child derivation: data = compressedPubKey || index BE
      */
     private fun deriveNormalChild(parent: ExtendedKey, index: Int): ExtendedKey {
-        val compressedPubKey = ECKeyPair.create(BigInteger(1, parent.key))
-            .getEncodedPublicKey(true) // 33 bytes
+        val compressedPubKey = Secp256k1Signer.publicKey(parent.key) // 33 bytes
 
         val data = ByteArray(37)
         System.arraycopy(compressedPubKey, 0, data, 0, 33)

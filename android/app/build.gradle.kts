@@ -314,9 +314,9 @@ dependencies {
     implementation(libs.secp256k1.kmp.jni.android)
     implementation(libs.kotlin.bip39)
 
-    // CKB SDK
-    implementation(libs.ckb.sdk.core)
-    implementation(libs.ckb.sdk.utils)
+    // BouncyCastle: PIN KDF and the BIP32 HMAC-SHA512 ladder. The CKB Java SDK
+    // it used to sit next to is gone — blake2b, secp256k1, hex and the address
+    // codec now come from :shared (#454).
     implementation(libs.bouncycastle)
 
     // Room (for caching)
@@ -350,6 +350,9 @@ dependencies {
     testImplementation("androidx.test:core:1.6.1")
     testImplementation(libs.mockk)
     testImplementation(libs.kotlinx.coroutines.test)
+    // Host-side unit tests call libsecp256k1 through :shared; the Android JNI
+    // artifact only carries Android .so files, so the JVM payload is needed here.
+    testImplementation(libs.secp256k1.kmp.jni.jvm)
 
     // Instrumented tests
     androidTestImplementation("androidx.test.ext:junit:1.2.1")

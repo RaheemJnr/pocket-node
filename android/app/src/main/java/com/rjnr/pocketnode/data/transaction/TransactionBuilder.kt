@@ -1,5 +1,9 @@
 package com.rjnr.pocketnode.data.transaction
 
+import com.rjnr.pocketnode.core.crypto.Blake2b
+import com.rjnr.pocketnode.core.crypto.Secp256k1Signer
+import com.rjnr.pocketnode.core.crypto.hexToByteArray
+import com.rjnr.pocketnode.core.crypto.toHexString
 import com.rjnr.pocketnode.core.log.Logger
 import com.rjnr.pocketnode.core.log.NoopLogger
 import com.rjnr.pocketnode.data.gateway.DaoConstants
@@ -7,12 +11,7 @@ import com.rjnr.pocketnode.data.gateway.models.*
 import com.rjnr.pocketnode.data.validation.NetworkValidator
 import com.rjnr.pocketnode.data.wallet.AddressUtils
 import com.rjnr.pocketnode.util.toHex
-import org.nervos.ckb.crypto.Blake2b
-import org.nervos.ckb.crypto.secp256k1.ECKeyPair
-import org.nervos.ckb.crypto.secp256k1.Sign
-import org.nervos.ckb.utils.Numeric
 import java.io.ByteArrayOutputStream
-import java.math.BigInteger
 import javax.inject.Inject
 import javax.inject.Singleton
 import com.rjnr.pocketnode.util.redactAddress
@@ -232,11 +231,9 @@ class TransactionBuilder @Inject constructor(
             }
             val message = blake2b.doFinal()
 
-            val keyPair = ECKeyPair.create(BigInteger(1, keysByLockArgs.getValue(args)))
-            val signature = Sign.signMessage(message, keyPair).signature
+            val signature = Secp256k1Signer.signRecoverable(message, keysByLockArgs.getValue(args))
             val signedWitness = serializeWitnessArgs(signature, null, null)
-            witnesses[memberIndices.first()] =
-                "0x" + signedWitness.joinToString("") { "%02x".format(it) }
+            witnesses[memberIndices.first()] = signedWitness.toHexString()
         }
 
         tx.copy(witnesses = witnesses)
@@ -756,13 +753,11 @@ class TransactionBuilder @Inject constructor(
         val message = blake2b.doFinal()
 
         // 4. Sign the message
-        val keyPair = ECKeyPair.create(BigInteger(1, privateKey))
-        val signatureData = Sign.signMessage(message, keyPair)
-        val signature = signatureData.signature
+        val signature = Secp256k1Signer.signRecoverable(message, privateKey)
 
         // 5. Create signed witness
         val signedWitnessArgs = serializeWitnessArgs(signature, witnessInputType, null)
-        val signedWitnessHex = "0x" + signedWitnessArgs.joinToString("") { "%02x".format(it) }
+        val signedWitnessHex = signedWitnessArgs.toHexString()
 
         // 6. Build witnesses list
         val witnesses = mutableListOf(signedWitnessHex)
@@ -854,11 +849,11 @@ class TransactionBuilder @Inject constructor(
     }
 
     private fun serializeByte32(hex: String): ByteArray {
-        return Numeric.hexStringToByteArray(hex)
+        return hex.hexToByteArray()
     }
 
     private fun serializeBytes(hex: String): ByteArray {
-        val bytes = Numeric.hexStringToByteArray(hex)
+        val bytes = hex.hexToByteArray()
         val output = ByteArrayOutputStream()
         output.write(littleEndianInt(bytes.size))
         output.write(bytes)

@@ -3,6 +3,7 @@ package com.rjnr.pocketnode.data.wallet
 import android.security.keystore.KeyPermanentlyInvalidatedException
 import android.util.Log
 import androidx.fragment.app.FragmentActivity
+import com.rjnr.pocketnode.core.crypto.hexToByteArray
 import com.rjnr.pocketnode.data.auth.AuthManager
 import com.rjnr.pocketnode.data.crypto.KeystoreEncryptionManager
 import com.rjnr.pocketnode.data.database.dao.KeyMaterialDao
@@ -10,7 +11,6 @@ import com.rjnr.pocketnode.data.migration.DecryptedKeyData
 import com.rjnr.pocketnode.data.migration.KeyStoreMigrationHelper
 import javax.inject.Inject
 import javax.inject.Singleton
-import org.nervos.ckb.utils.Numeric
 import kotlinx.coroutines.launch
 
 /**
@@ -129,7 +129,7 @@ class WalletKeyReader @Inject constructor(
         val data = keyStoreMigrationHelper.readDecryptedKey(walletId)
             ?: return MaterialResult.NotAvailable("V1 decrypt failed for $walletId")
         return MaterialResult.Success(
-            privateKey = Numeric.hexStringToByteArray(data.privateKeyHex),
+            privateKey = data.privateKeyHex.hexToByteArray(),
             mnemonic = data.mnemonic,
             walletType = data.walletType,
             mnemonicBackedUp = data.mnemonicBackedUp,
@@ -181,7 +181,7 @@ class WalletKeyReader @Inject constructor(
                 } ?: return MaterialResult.NotAvailable("V2 decrypt failed for $walletId")
                 tryOpportunisticBackup(walletId, data)
                 MaterialResult.Success(
-                    privateKey = Numeric.hexStringToByteArray(data.privateKeyHex),
+                    privateKey = data.privateKeyHex.hexToByteArray(),
                     mnemonic = data.mnemonic,
                     walletType = data.walletType,
                     mnemonicBackedUp = data.mnemonicBackedUp,
@@ -193,7 +193,7 @@ class WalletKeyReader @Inject constructor(
     private suspend fun readV1(walletId: String): Result {
         val data = keyStoreMigrationHelper.readDecryptedKey(walletId)
             ?: return Result.NotAvailable("V1 decrypt failed for $walletId")
-        return Result.Success(Numeric.hexStringToByteArray(data.privateKeyHex))
+        return Result.Success(data.privateKeyHex.hexToByteArray())
     }
 
     private suspend fun readV2(
@@ -240,7 +240,7 @@ class WalletKeyReader @Inject constructor(
                     null
                 } ?: return Result.NotAvailable("V2 decrypt failed for $walletId")
                 tryOpportunisticBackup(walletId, data)
-                Result.Success(Numeric.hexStringToByteArray(data.privateKeyHex))
+                Result.Success(data.privateKeyHex.hexToByteArray())
             }
         }
     }

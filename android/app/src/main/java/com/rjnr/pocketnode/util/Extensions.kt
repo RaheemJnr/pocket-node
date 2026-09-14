@@ -1,6 +1,9 @@
 package com.rjnr.pocketnode.util
 
-fun ByteArray.toHex(): String = joinToString("") { "%02x".format(it) }
+import com.rjnr.pocketnode.core.crypto.toHexStringNoPrefix
+
+/** Unprefixed lowercase hex. Delegates to the shared codec so there is one encoder (#454). */
+fun ByteArray.toHex(): String = toHexStringNoPrefix()
 
 fun String.hexToBytes(): ByteArray {
     val hex = removePrefix("0x")

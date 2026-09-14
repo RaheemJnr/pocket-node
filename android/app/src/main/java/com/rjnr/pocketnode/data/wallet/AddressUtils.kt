@@ -1,12 +1,14 @@
 package com.rjnr.pocketnode.data.wallet
 
+import com.rjnr.pocketnode.core.address.CkbAddress
+import com.rjnr.pocketnode.core.address.DecodedAddress
+import com.rjnr.pocketnode.core.crypto.hexToByteArray
+import com.rjnr.pocketnode.core.crypto.toHexString
 import com.rjnr.pocketnode.data.gateway.models.NetworkType
 import com.rjnr.pocketnode.data.gateway.models.Script
-import org.nervos.ckb.Network
-import org.nervos.ckb.utils.address.Address
 
 /**
- * Address utilities using official CKB SDK implementation.
+ * Address utilities built on the shared multiplatform CKB address codec (#454).
  */
 object AddressUtils {
 
@@ -16,18 +18,7 @@ object AddressUtils {
      */
     fun parseAddress(address: String): Script? {
         return try {
-            val decoded = Address.decode(address)
-            val script = decoded.script
-            Script(
-                codeHash = "0x" + script.codeHash.joinToString("") { "%02x".format(it) },
-                hashType = when (script.hashType) {
-                    org.nervos.ckb.type.Script.HashType.TYPE -> "type"
-                    org.nervos.ckb.type.Script.HashType.DATA -> "data"
-                    org.nervos.ckb.type.Script.HashType.DATA1 -> "data1"
-                    org.nervos.ckb.type.Script.HashType.DATA2 -> "data2"
-                },
-                args = "0x" + script.args.joinToString("") { "%02x".format(it) }
-            )
+            decode(address)
         } catch (e: Exception) {
             null
         }
@@ -37,42 +28,32 @@ object AddressUtils {
      * Encode a Script to a CKB address string.
      */
     fun encode(script: Script, network: NetworkType): String {
-        val ckbNetwork = when (network) {
-            NetworkType.TESTNET -> Network.TESTNET
-            NetworkType.MAINNET -> Network.MAINNET
+        val hrp = when (network) {
+            NetworkType.TESTNET -> CkbAddress.HRP_TESTNET
+            NetworkType.MAINNET -> CkbAddress.HRP_MAINNET
         }
 
-        val codeHashBytes = script.codeHash.removePrefix("0x").hexToBytes()
-        val argsBytes = script.args.removePrefix("0x").hexToBytes()
         val hashType = when (script.hashType) {
-            "type" -> org.nervos.ckb.type.Script.HashType.TYPE
-            "data" -> org.nervos.ckb.type.Script.HashType.DATA
-            "data1" -> org.nervos.ckb.type.Script.HashType.DATA1
-            "data2" -> org.nervos.ckb.type.Script.HashType.DATA2
-            else -> org.nervos.ckb.type.Script.HashType.TYPE
+            "type" -> CkbAddress.HASH_TYPE_TYPE
+            "data" -> CkbAddress.HASH_TYPE_DATA
+            "data1" -> CkbAddress.HASH_TYPE_DATA1
+            "data2" -> CkbAddress.HASH_TYPE_DATA2
+            else -> CkbAddress.HASH_TYPE_TYPE
         }
 
-        val ckbScript = org.nervos.ckb.type.Script(codeHashBytes, argsBytes, hashType)
-        val address = Address(ckbScript, ckbNetwork)
-        return address.encode()
+        return CkbAddress.encodeFull(
+            hrp = hrp,
+            codeHash = script.codeHash.hexToByteArray(),
+            hashType = hashType,
+            args = script.args.hexToByteArray()
+        )
     }
 
     /**
      * Decode a CKB address to extract the Script.
      */
     fun decode(address: String): Script {
-        val decoded = Address.decode(address)
-        val script = decoded.script
-        return Script(
-            codeHash = "0x" + script.codeHash.joinToString("") { "%02x".format(it) },
-            hashType = when (script.hashType) {
-                org.nervos.ckb.type.Script.HashType.TYPE -> "type"
-                org.nervos.ckb.type.Script.HashType.DATA -> "data"
-                org.nervos.ckb.type.Script.HashType.DATA1 -> "data1"
-                org.nervos.ckb.type.Script.HashType.DATA2 -> "data2"
-            },
-            args = "0x" + script.args.joinToString("") { "%02x".format(it) }
-        )
+        return CkbAddress.decode(address).toScript()
     }
 
     /**
@@ -80,7 +61,7 @@ object AddressUtils {
      */
     fun isValid(address: String): Boolean {
         return try {
-            Address.decode(address)
+            CkbAddress.decode(address)
             true
         } catch (e: Exception) {
             false
@@ -92,10 +73,9 @@ object AddressUtils {
      */
     fun getNetwork(address: String): NetworkType? {
         return try {
-            val decoded = Address.decode(address)
-            when (decoded.network) {
-                Network.TESTNET -> NetworkType.TESTNET
-                Network.MAINNET -> NetworkType.MAINNET
+            when (CkbAddress.decode(address).hrp) {
+                CkbAddress.HRP_TESTNET -> NetworkType.TESTNET
+                CkbAddress.HRP_MAINNET -> NetworkType.MAINNET
                 else -> null
             }
         } catch (e: Exception) {
@@ -103,9 +83,15 @@ object AddressUtils {
         }
     }
 
-    private fun String.hexToBytes(): ByteArray {
-        val hex = this.removePrefix("0x")
-        if (hex.isEmpty()) return byteArrayOf()
-        return hex.chunked(2).map { it.toInt(16).toByte() }.toByteArray()
-    }
+    private fun DecodedAddress.toScript(): Script = Script(
+        codeHash = codeHash.toHexString(),
+        hashType = when (hashType) {
+            CkbAddress.HASH_TYPE_TYPE -> "type"
+            CkbAddress.HASH_TYPE_DATA -> "data"
+            CkbAddress.HASH_TYPE_DATA1 -> "data1"
+            CkbAddress.HASH_TYPE_DATA2 -> "data2"
+            else -> throw IllegalArgumentException("Unknown script hash type $hashType")
+        },
+        args = args.toHexString()
+    )
 }
