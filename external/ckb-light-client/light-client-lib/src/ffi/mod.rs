@@ -4,8 +4,10 @@
 //! `jni_bridge` does for Android. Everything here is generated into Swift by
 //! `uniffi-bindgen` (proc-macro mode, no UDL); see `build-ios.sh`.
 
+use crate::bridge_core::dao;
 use crate::bridge_core::lifecycle;
 use crate::bridge_core::query;
+use crate::bridge_core::rpc;
 use crate::bridge_core::types::{self, notify_status, STATE_INIT};
 use crate::bridge_core::BridgeError;
 
@@ -218,4 +220,42 @@ pub fn fetch_transaction(hash: String) -> Result<String, LightClientError> {
 #[uniffi::export]
 pub fn estimate_cycles(tx_json: String) -> Result<String, LightClientError> {
     query::estimate_cycles(&tx_json).map_err(Into::into)
+}
+
+/// Split a 32-byte DAO header field into its C, AR, S and U values, as JSON.
+#[uniffi::export]
+pub fn extract_dao_fields(dao_hex: String) -> Result<String, LightClientError> {
+    dao::extract_dao_fields(&dao_hex).map_err(Into::into)
+}
+
+/// Max withdrawable capacity in shannons for a DAO deposit (deposit + compensation).
+#[uniffi::export]
+pub fn calculate_max_withdraw(
+    deposit_header_dao_hex: String,
+    withdraw_header_dao_hex: String,
+    deposit_capacity: i64,
+    occupied_capacity: i64,
+) -> Result<i64, LightClientError> {
+    dao::calculate_max_withdraw(
+        &deposit_header_dao_hex,
+        &withdraw_header_dao_hex,
+        deposit_capacity,
+        occupied_capacity,
+    )
+    .map_err(Into::into)
+}
+
+/// Since value (absolute epoch, hex) that unlocks a DAO withdrawal's phase 2.
+#[uniffi::export]
+pub fn calculate_unlock_epoch(
+    deposit_epoch_hex: String,
+    withdraw_epoch_hex: String,
+) -> Result<String, LightClientError> {
+    dao::calculate_unlock_epoch(&deposit_epoch_hex, &withdraw_epoch_hex).map_err(Into::into)
+}
+
+/// Call a read-only node RPC method by name; returns a JSON-RPC 2.0 response.
+#[uniffi::export]
+pub fn call_rpc(method: String) -> Result<String, LightClientError> {
+    rpc::call_rpc(&method).map_err(Into::into)
 }

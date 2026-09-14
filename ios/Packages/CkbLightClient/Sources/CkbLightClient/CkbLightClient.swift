@@ -503,6 +503,22 @@ fileprivate struct FfiConverterInt32: FfiConverterPrimitive {
 #if swift(>=5.8)
 @_documentation(visibility: private)
 #endif
+fileprivate struct FfiConverterInt64: FfiConverterPrimitive {
+    typealias FfiType = Int64
+    typealias SwiftType = Int64
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> Int64 {
+        return try lift(readInt(&buf))
+    }
+
+    public static func write(_ value: Int64, into buf: inout [UInt8]) {
+        writeInt(&buf, lower(value))
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
 fileprivate struct FfiConverterBool : FfiConverter {
     typealias FfiType = Int8
     typealias SwiftType = Bool
@@ -852,6 +868,43 @@ fileprivate struct FfiConverterOptionCallbackInterfaceStatusListener: FfiConvert
     }
 }
 /**
+ * Max withdrawable capacity in shannons for a DAO deposit (deposit + compensation).
+ */
+public func calculateMaxWithdraw(depositHeaderDaoHex: String, withdrawHeaderDaoHex: String, depositCapacity: Int64, occupiedCapacity: Int64)throws  -> Int64  {
+    return try  FfiConverterInt64.lift(try rustCallWithError(FfiConverterTypeLightClientError_lift) {
+        uniffiCallStatus in
+    uniffi_ckb_light_client_lib_fn_func_calculate_max_withdraw(
+        FfiConverterString.lower(depositHeaderDaoHex),
+        FfiConverterString.lower(withdrawHeaderDaoHex),
+        FfiConverterInt64.lower(depositCapacity),
+        FfiConverterInt64.lower(occupiedCapacity),uniffiCallStatus
+    )
+})
+}
+/**
+ * Since value (absolute epoch, hex) that unlocks a DAO withdrawal's phase 2.
+ */
+public func calculateUnlockEpoch(depositEpochHex: String, withdrawEpochHex: String)throws  -> String  {
+    return try  FfiConverterString.lift(try rustCallWithError(FfiConverterTypeLightClientError_lift) {
+        uniffiCallStatus in
+    uniffi_ckb_light_client_lib_fn_func_calculate_unlock_epoch(
+        FfiConverterString.lower(depositEpochHex),
+        FfiConverterString.lower(withdrawEpochHex),uniffiCallStatus
+    )
+})
+}
+/**
+ * Call a read-only node RPC method by name; returns a JSON-RPC 2.0 response.
+ */
+public func callRpc(method: String)throws  -> String  {
+    return try  FfiConverterString.lift(try rustCallWithError(FfiConverterTypeLightClientError_lift) {
+        uniffiCallStatus in
+    uniffi_ckb_light_client_lib_fn_func_call_rpc(
+        FfiConverterString.lower(method),uniffiCallStatus
+    )
+})
+}
+/**
  * Estimate the cycles a JSON transaction consumes. Not implemented yet: always throws.
  */
 public func estimateCycles(txJson: String)throws  -> String  {
@@ -859,6 +912,17 @@ public func estimateCycles(txJson: String)throws  -> String  {
         uniffiCallStatus in
     uniffi_ckb_light_client_lib_fn_func_estimate_cycles(
         FfiConverterString.lower(txJson),uniffiCallStatus
+    )
+})
+}
+/**
+ * Split a 32-byte DAO header field into its C, AR, S and U values, as JSON.
+ */
+public func extractDaoFields(daoHex: String)throws  -> String  {
+    return try  FfiConverterString.lift(try rustCallWithError(FfiConverterTypeLightClientError_lift) {
+        uniffiCallStatus in
+    uniffi_ckb_light_client_lib_fn_func_extract_dao_fields(
+        FfiConverterString.lower(daoHex),uniffiCallStatus
     )
 })
 }
@@ -1117,7 +1181,19 @@ private let initializationResult: InitializationResult = {
     if bindings_contract_version != scaffolding_contract_version {
         return InitializationResult.contractVersionMismatch
     }
+    if (uniffi_ckb_light_client_lib_checksum_func_calculate_max_withdraw() != 35999) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_ckb_light_client_lib_checksum_func_calculate_unlock_epoch() != 49158) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_ckb_light_client_lib_checksum_func_call_rpc() != 17826) {
+        return InitializationResult.apiChecksumMismatch
+    }
     if (uniffi_ckb_light_client_lib_checksum_func_estimate_cycles() != 2689) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_ckb_light_client_lib_checksum_func_extract_dao_fields() != 14231) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_ckb_light_client_lib_checksum_func_fetch_header() != 32749) {

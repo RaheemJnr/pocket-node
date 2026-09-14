@@ -10,6 +10,8 @@
 //! - `error`: [`error::BridgeError`], the single error type of the core API
 //! - `lifecycle`: init/start/stop/status
 //! - `query`: query APIs returning the same JSON strings the JNI bridge returns
+//! - `dao`: Nervos DAO arithmetic helpers (no node state involved)
+//! - `rpc`: JSON-RPC 2.0 passthrough for a few read-only node methods
 //!
 //! ## State machine
 //!
@@ -17,9 +19,11 @@
 //! - 1 (RUNNING): Running
 //! - 2 (STOPPED): Stopped
 
+pub mod dao;
 pub mod error;
 pub mod lifecycle;
 pub mod query;
+pub mod rpc;
 pub mod types;
 
 pub use error::BridgeError;
