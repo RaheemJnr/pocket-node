@@ -26,6 +26,7 @@ private actor LightClientRunner {
     }
 
     func start() throws { try startLightClient() }
+    func isInitialized() -> Bool { CkbLightClient.isInitialized() }
     func stop() throws { try stopLightClient() }
     func status() -> UInt8 { getStatus() }
     func tipHeader() throws -> String { try getTipHeader() }
@@ -52,6 +53,9 @@ private final class StatusRelay: StatusListener {
 @Observable
 final class LightClientService {
     private(set) var status: NodeStatus = .initializing
+    /// `status == .initializing` is ambiguous on its own: it covers both "init
+    /// has not finished" and "initialized, waiting for Start".
+    private(set) var isInitialized = false
     private(set) var tipNumber: Int = 0
     private(set) var tipHash: String = ""
     private(set) var peerCount: Int = 0
@@ -113,11 +117,15 @@ final class LightClientService {
         await refresh()
     }
 
-    /// Pulls status, tip header and peer count. Individual query failures are
-    /// expected while the node is still handshaking, so they only clear the
-    /// affected field.
+    /// Pulls status, tip header and peer count. The chain queries reject
+    /// anything but the running state, so they are skipped until the node is
+    /// started; individual failures after that are transient and leave the
+    /// affected field at its last value.
     func refresh() async {
         apply(rawStatus: await runner.status())
+        isInitialized = await runner.isInitialized()
+
+        guard status == .running else { return }
 
         do {
             let json = try await runner.tipHeader()
