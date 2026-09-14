@@ -75,6 +75,10 @@ pub enum IteratorMode<'a> {
 
 impl Storage {
     pub fn new<P: AsRef<Path>>(path: P) -> Self {
+        let path = path.as_ref();
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent).expect("Failed to create sqlite parent directory");
+        }
         let conn = Connection::open(path).expect("Failed to open sqlite");
         
         // Optimize for performance
