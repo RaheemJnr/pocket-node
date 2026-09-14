@@ -1,7 +1,6 @@
 package com.rjnr.pocketnode.data.sync
 
 import android.app.Service
-import android.content.Context
 import android.content.Intent
 import android.content.pm.ServiceInfo
 import android.os.IBinder
@@ -141,15 +140,5 @@ class SyncForegroundService : Service() {
 
     companion object {
         private const val TAG = "SyncForegroundService"
-
-        fun start(context: Context) {
-            val intent = Intent(context, SyncForegroundService::class.java)
-            context.startForegroundService(intent)
-        }
-
-        fun stop(context: Context) {
-            val intent = Intent(context, SyncForegroundService::class.java)
-            context.stopService(intent)
-        }
     }
 }

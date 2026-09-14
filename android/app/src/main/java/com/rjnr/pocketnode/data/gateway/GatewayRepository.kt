@@ -14,7 +14,7 @@ import com.rjnr.pocketnode.data.database.entity.PendingBroadcastEntity
 import com.rjnr.pocketnode.data.database.entity.SyncProgressEntity
 import com.rjnr.pocketnode.data.database.entity.WalletEntity
 import com.rjnr.pocketnode.data.gateway.models.*
-import com.rjnr.pocketnode.data.sync.SyncForegroundService
+import com.rjnr.pocketnode.data.sync.SyncServiceCommands
 import com.rjnr.pocketnode.data.sync.SyncProgressTracker
 import com.rjnr.pocketnode.data.migration.WalletMigrationHelper
 import com.rjnr.pocketnode.data.transaction.TransactionBuilder
@@ -120,6 +120,7 @@ class GatewayRepository @Inject constructor(
     private val lightClient: LightClientReadOnly,
     private val subAccountReconciler: com.rjnr.pocketnode.data.wallet.SubAccountReconciler,
     private val subAccountDiscovery: com.rjnr.pocketnode.data.wallet.SubAccountDiscovery,
+    private val syncServiceCommands: SyncServiceCommands,
     private val logger: Logger,
 ) : TipSource {
     private val sendMutex = Mutex()
@@ -3040,7 +3041,7 @@ class GatewayRepository @Inject constructor(
             return
         }
         logger.d(TAG, "Starting background sync service")
-        SyncForegroundService.start(context)
+        syncServiceCommands.start()
     }
 
     /**
@@ -3048,7 +3049,7 @@ class GatewayRepository @Inject constructor(
      */
     fun stopBackgroundSync() {
         logger.d(TAG, "Stopping background sync service")
-        SyncForegroundService.stop(context)
+        syncServiceCommands.stop()
     }
 
     companion object {
