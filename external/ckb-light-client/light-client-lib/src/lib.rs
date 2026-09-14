@@ -19,3 +19,10 @@ pub mod bridge_core;
 // JNI bridge for Android
 #[cfg(all(feature = "jni-bridge", target_os = "android"))]
 pub mod jni_bridge;
+
+// UniFFI bridge for iOS
+#[cfg(feature = "uniffi-bridge")]
+pub mod ffi;
+
+#[cfg(feature = "uniffi-bridge")]
+uniffi::setup_scaffolding!("CkbLightClient");
