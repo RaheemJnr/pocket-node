@@ -4,12 +4,18 @@
 //!
 //! ## Init invariants
 //!
-//! `init` registers the status listener (and, on Android, the JNI bridge
-//! populates its `JAVA_VM` / `STATUS_CALLBACK` `OnceLock`s) only *after* every
-//! other fallible step has succeeded. This guarantees:
+//! `init` publishes *no* global state until every fallible step has succeeded.
+//! The runtime, network controller, consensus, peers, storage and the status
+//! listener are all held in locals through the fallible section and only
+//! `.set()` into their `OnceLock`s at the very end, with nothing fallible
+//! between two of those sets. On Android the JNI bridge likewise populates its
+//! `JAVA_VM` / `STATUS_CALLBACK` `OnceLock`s only after `init` returned `Ok`.
+//! This guarantees:
 //!
-//! - If init returns `Err`, no listener is installed, so a retry runs cleanly
-//!   without colliding with leftover state from the previous attempt.
+//! - If init returns `Err`, every `OnceLock` is still empty, so a retry runs
+//!   cleanly instead of wedging on a leftover global from the previous attempt.
+//! - The tokio runtime is dropped (and therefore shut down) on the failure
+//!   paths rather than leaked into a `OnceLock` that can never be cleared.
 //! - Platform handles held by the caller (such as the JNI `GlobalRef` for the
 //!   status callback) are dropped automatically on the early-return paths, so
 //!   failure cannot leak them.
@@ -44,7 +50,11 @@ use std::sync::{Arc, RwLock};
 /// Android keeps `android_logger` (logcat); iOS routes `log` records to the
 /// unified logging system so node output shows up in Console.app and the Xcode
 /// console. Other hosts (unit tests, desktop) install nothing.
-fn init_platform_logger() {
+///
+/// Idempotent, and safe to call before [`init`]: a platform bridge that logs
+/// during its own argument marshalling calls this first so those records are
+/// not dropped on the floor.
+pub fn init_logging() {
     #[cfg(target_os = "android")]
     android_logger::init_once(
         android_logger::Config::default()
@@ -91,7 +101,7 @@ pub fn init(
         return Err(BridgeError::AlreadyInitialized);
     }
 
-    init_platform_logger();
+    init_logging();
 
     info!("Platform logger initialized with Debug level");
     info!("Starting CKB Light Client initialization...");
@@ -218,15 +228,12 @@ pub fn init(
         SupportProtocols::Filter.protocol_id(),
     ];
 
-    // Create tokio runtime
+    // Create tokio runtime. It is held locally until every fallible step has
+    // succeeded: on an early return the local is dropped, which shuts the
+    // runtime down instead of leaking it into a global that can never be
+    // cleared.
     info!("Creating tokio runtime...");
     let (runtime_handle, _receiver, runtime) = new_global_runtime(None);
-
-    // Store runtime
-    RUNTIME.set(runtime).map_err(|_| {
-        error!("Failed to store runtime");
-        BridgeError::Internal("runtime already set".to_owned())
-    })?;
 
     // Start network service
     info!("Starting network service...");
@@ -247,46 +254,59 @@ pub fn init(
         BridgeError::Network(e.to_string())
     })?;
 
-    // Store network controller
-    NET_CONTROL.set(network_controller.clone()).map_err(|_| {
-        error!("Failed to store network controller");
-        BridgeError::Internal("network controller already set".to_owned())
-    })?;
-
     // Create StorageWithChainData
     let swc = StorageWithChainData::new(storage.clone(), Arc::clone(&peers), pending_txs.clone());
-
-    // Store global state
-    STORAGE_WITH_DATA.set(swc).map_err(|_| {
-        error!("Failed to store StorageWithChainData");
-        BridgeError::Internal("storage already set".to_owned())
-    })?;
-
-    let consensus_arc = Arc::new(consensus);
-    CONSENSUS.set(consensus_arc.clone()).map_err(|_| {
-        error!("Failed to store consensus");
-        BridgeError::Internal("consensus already set".to_owned())
-    })?;
-
-    PEERS.set(peers.clone()).map_err(|_| {
-        error!("Failed to store peers");
-        BridgeError::Internal("peers already set".to_owned())
-    })?;
 
     // Start RPC server if configured
     info!("Starting RPC server on {}...", run_env.rpc.listen_address);
     // Note: RPC server implementation would go here
     // For now, we're skipping RPC server startup to keep the implementation focused
 
-    // All fallible init has succeeded. Register the status listener last so
-    // that a failure above this point would have left it unset, allowing a
-    // clean retry. (See audit #186 Finding High 4.)
+    // ---- Publish global state ----
+    //
+    // Everything below is infallible in practice and nothing fallible runs
+    // between two `.set()` calls, so init either publishes all of the globals
+    // or none of them. That is what makes a retry after a failed init clean:
+    // every OnceLock is still empty. (See audit #186 Finding High 4.)
+    //
+    // A `.set()` can only report an error if another thread initialized
+    // concurrently, which the `is_initialized()` guard at the top of this
+    // function already rejects for the supported single-caller flow.
+    //
+    // `STORAGE_WITH_DATA` is published last of the OnceLocks because
+    // `is_initialized()` keys off it, and the status listener just before it
+    // so a caller can never be notified about a half-published init.
+    RUNTIME.set(runtime).map_err(|_| {
+        error!("Failed to store runtime");
+        BridgeError::Internal("runtime already set".to_owned())
+    })?;
+
+    NET_CONTROL.set(network_controller).map_err(|_| {
+        error!("Failed to store network controller");
+        BridgeError::Internal("network controller already set".to_owned())
+    })?;
+
+    CONSENSUS.set(Arc::new(consensus)).map_err(|_| {
+        error!("Failed to store consensus");
+        BridgeError::Internal("consensus already set".to_owned())
+    })?;
+
+    PEERS.set(peers).map_err(|_| {
+        error!("Failed to store peers");
+        BridgeError::Internal("peers already set".to_owned())
+    })?;
+
     if let Some(listener) = listener {
         STATUS_LISTENER.set(listener).map_err(|_| {
             error!("Failed to store status listener (already set?)");
             BridgeError::Internal("status listener already set".to_owned())
         })?;
     }
+
+    STORAGE_WITH_DATA.set(swc).map_err(|_| {
+        error!("Failed to store StorageWithChainData");
+        BridgeError::Internal("storage already set".to_owned())
+    })?;
 
     // Set state to INIT
     set_state(STATE_INIT);

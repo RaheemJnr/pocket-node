@@ -21,8 +21,8 @@ pub mod bridge_core;
 pub mod jni_bridge;
 
 // UniFFI bridge for iOS
-#[cfg(feature = "uniffi-bridge")]
+#[cfg(all(feature = "uniffi-bridge", not(target_arch = "wasm32")))]
 pub mod ffi;
 
-#[cfg(feature = "uniffi-bridge")]
+#[cfg(all(feature = "uniffi-bridge", not(target_arch = "wasm32")))]
 uniffi::setup_scaffolding!("CkbLightClient");

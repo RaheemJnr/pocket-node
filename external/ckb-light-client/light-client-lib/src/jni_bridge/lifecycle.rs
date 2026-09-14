@@ -52,6 +52,11 @@ pub extern "C" fn Java_com_nervosnetwork_ckblightclient_LightClientNative_native
     status_callback: JObject,
 ) -> jboolean {
     guard_jni(JNI_FALSE, move || {
+        // Install the logger before anything that can log, so the failure
+        // paths below (and `bridge_core::init`'s own "Already initialized!")
+        // reach logcat. Idempotent; `bridge_core::init` calls it again.
+        lifecycle::init_logging();
+
         // Check if already initialized
         if is_initialized() {
             error!("Already initialized!");
