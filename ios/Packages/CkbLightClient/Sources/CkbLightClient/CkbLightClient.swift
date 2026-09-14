@@ -852,12 +852,34 @@ fileprivate struct FfiConverterOptionCallbackInterfaceStatusListener: FfiConvert
     }
 }
 /**
+ * Estimate the cycles a JSON transaction consumes. Not implemented yet: always throws.
+ */
+public func estimateCycles(txJson: String)throws  -> String  {
+    return try  FfiConverterString.lift(try rustCallWithError(FfiConverterTypeLightClientError_lift) {
+        uniffiCallStatus in
+    uniffi_ckb_light_client_lib_fn_func_estimate_cycles(
+        FfiConverterString.lower(txJson),uniffiCallStatus
+    )
+})
+}
+/**
  * Fetch status for a header, as a JSON string; queues the fetch when unknown.
  */
 public func fetchHeader(hash: String)throws  -> String  {
     return try  FfiConverterString.lift(try rustCallWithError(FfiConverterTypeLightClientError_lift) {
         uniffiCallStatus in
     uniffi_ckb_light_client_lib_fn_func_fetch_header(
+        FfiConverterString.lower(hash),uniffiCallStatus
+    )
+})
+}
+/**
+ * Fetch status for a transaction, as a JSON string; queues the fetch when unknown.
+ */
+public func fetchTransaction(hash: String)throws  -> String  {
+    return try  FfiConverterString.lift(try rustCallWithError(FfiConverterTypeLightClientError_lift) {
+        uniffiCallStatus in
+    uniffi_ckb_light_client_lib_fn_func_fetch_transaction(
         FfiConverterString.lower(hash),uniffiCallStatus
     )
 })
@@ -964,6 +986,17 @@ public func getTipHeader()throws  -> String  {
 })
 }
 /**
+ * Transaction and its status for a hash, as a JSON string.
+ */
+public func getTransaction(hash: String)throws  -> String  {
+    return try  FfiConverterString.lift(try rustCallWithError(FfiConverterTypeLightClientError_lift) {
+        uniffiCallStatus in
+    uniffi_ckb_light_client_lib_fn_func_get_transaction(
+        FfiConverterString.lower(hash),uniffiCallStatus
+    )
+})
+}
+/**
  * Transactions matching a JSON search key, as a JSON page (`order`: "asc"/"desc").
  */
 public func getTransactions(searchKeyJson: String, order: String, limit: Int32, cursor: String)throws  -> String  {
@@ -1021,6 +1054,17 @@ public func localNodeInfo()throws  -> String  {
 })
 }
 /**
+ * Verify a JSON transaction and queue it for broadcast; returns its hash as JSON.
+ */
+public func sendTransaction(txJson: String)throws  -> String  {
+    return try  FfiConverterString.lift(try rustCallWithError(FfiConverterTypeLightClientError_lift) {
+        uniffiCallStatus in
+    uniffi_ckb_light_client_lib_fn_func_send_transaction(
+        FfiConverterString.lower(txJson),uniffiCallStatus
+    )
+})
+}
+/**
  * Set the filter scripts to sync (command 0 = all, 1 = partial, 2 = delete).
  */
 public func setScripts(scriptsJson: String, command: Int32)throws   {try rustCallWithError(FfiConverterTypeLightClientError_lift) {
@@ -1073,7 +1117,13 @@ private let initializationResult: InitializationResult = {
     if bindings_contract_version != scaffolding_contract_version {
         return InitializationResult.contractVersionMismatch
     }
+    if (uniffi_ckb_light_client_lib_checksum_func_estimate_cycles() != 2689) {
+        return InitializationResult.apiChecksumMismatch
+    }
     if (uniffi_ckb_light_client_lib_checksum_func_fetch_header() != 32749) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_ckb_light_client_lib_checksum_func_fetch_transaction() != 9915) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_ckb_light_client_lib_checksum_func_get_cells() != 6945) {
@@ -1103,6 +1153,9 @@ private let initializationResult: InitializationResult = {
     if (uniffi_ckb_light_client_lib_checksum_func_get_tip_header() != 11636) {
         return InitializationResult.apiChecksumMismatch
     }
+    if (uniffi_ckb_light_client_lib_checksum_func_get_transaction() != 21207) {
+        return InitializationResult.apiChecksumMismatch
+    }
     if (uniffi_ckb_light_client_lib_checksum_func_get_transactions() != 62226) {
         return InitializationResult.apiChecksumMismatch
     }
@@ -1113,6 +1166,9 @@ private let initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_ckb_light_client_lib_checksum_func_local_node_info() != 22703) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_ckb_light_client_lib_checksum_func_send_transaction() != 34763) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_ckb_light_client_lib_checksum_func_set_scripts() != 29973) {

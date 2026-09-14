@@ -195,3 +195,27 @@ pub fn get_transactions(
 pub fn get_cells_capacity(search_key_json: String) -> Result<String, LightClientError> {
     query::get_cells_capacity(&search_key_json).map_err(Into::into)
 }
+
+/// Verify a JSON transaction and queue it for broadcast; returns its hash as JSON.
+#[uniffi::export]
+pub fn send_transaction(tx_json: String) -> Result<String, LightClientError> {
+    query::send_transaction(&tx_json).map_err(Into::into)
+}
+
+/// Transaction and its status for a hash, as a JSON string.
+#[uniffi::export]
+pub fn get_transaction(hash: String) -> Result<String, LightClientError> {
+    query::get_transaction(&hash).map_err(Into::into)
+}
+
+/// Fetch status for a transaction, as a JSON string; queues the fetch when unknown.
+#[uniffi::export]
+pub fn fetch_transaction(hash: String) -> Result<String, LightClientError> {
+    query::fetch_transaction(&hash).map_err(Into::into)
+}
+
+/// Estimate the cycles a JSON transaction consumes. Not implemented yet: always throws.
+#[uniffi::export]
+pub fn estimate_cycles(tx_json: String) -> Result<String, LightClientError> {
+    query::estimate_cycles(&tx_json).map_err(Into::into)
+}

@@ -7,10 +7,12 @@ use super::error::BridgeError;
 use super::types::*;
 use crate::service::{
     Cell, CellType, CellsCapacity, FetchStatus, LocalNode, Pagination, RemoteNode, ScriptStatus,
-    ScriptType, SearchKey, SetScriptsCommand, Tx, TxWithCell,
+    ScriptType, SearchKey, SetScriptsCommand, Status, TransactionWithStatus, Tx, TxStatus,
+    TxWithCell,
 };
 use crate::storage::{self, extract_raw_data, Direction, IteratorMode, Key, KeyPrefix};
-use ckb_jsonrpc_types::{BlockView, HeaderView, JsonBytes};
+use crate::verify::verify_tx;
+use ckb_jsonrpc_types::{BlockView, HeaderView, JsonBytes, Transaction};
 use ckb_network::extract_peer_id;
 use ckb_systemtime::unix_time_as_millis;
 use ckb_traits::HeaderProvider;
@@ -21,6 +23,7 @@ use ckb_types::{
 };
 use log::{debug, error, warn};
 use std::str::FromStr;
+use std::sync::Arc;
 
 /// Bail out unless the light client is running, matching the JNI `check_running!`
 /// behaviour (warn, then report failure to the caller).
@@ -730,4 +733,234 @@ pub fn get_cells_capacity(search_key_str: &str) -> Result<String, BridgeError> {
     };
 
     to_json(&result)
+}
+
+/// Verify a transaction and add it to the pending pool.
+///
+/// Returns the transaction hash as a JSON string on success. Failures carry
+/// the real reason (malformed JSON, verification failure, uninitialized
+/// globals) so callers can surface it instead of a generic network message.
+pub fn send_transaction(tx_str: &str) -> Result<String, BridgeError> {
+    ensure_running()?;
+
+    let tx: Transaction = serde_json::from_str(tx_str).map_err(|e| {
+        error!("Failed to parse transaction JSON: {}", e);
+        BridgeError::Internal(format!("malformed transaction: {}", e))
+    })?;
+
+    let swc = STORAGE_WITH_DATA.get().ok_or_else(|| {
+        error!("Storage not initialized");
+        BridgeError::Storage("light client not ready (storage not initialized)".to_owned())
+    })?;
+
+    let consensus = CONSENSUS.get().map(Arc::clone).ok_or_else(|| {
+        error!("Consensus not initialized");
+        BridgeError::Internal("light client not ready (consensus not initialized)".to_owned())
+    })?;
+
+    // Convert to packed transaction and view
+    let packed_tx: packed::Transaction = tx.into();
+    let tx_view = packed_tx.into_view();
+
+    // Verify the transaction
+    let last_state = swc.storage().get_last_state().1.into_view();
+    let cycles = verify_tx(tx_view.clone(), swc, consensus, &last_state).map_err(|e| {
+        // Return the real reason (e.g. Unknown(OutPoint) for an
+        // unresolvable input, Dead, capacity, or a script error) so the
+        // caller can show it instead of a misleading network message.
+        error!("Transaction verification failed: {:?}", e);
+        BridgeError::Internal(format!("verification failed: {:?}", e))
+    })?;
+
+    // Add to pending transactions. Recover from poisoning rather than
+    // double-panic on a lock that was poisoned by a prior panic — a
+    // re-panic across the FFI boundary is undefined behavior.
+    let mut pending_write = match swc.pending_txs().write() {
+        Ok(g) => g,
+        Err(poisoned) => {
+            error!("pending_txs write lock poisoned; recovering: {:?}", poisoned);
+            poisoned.into_inner()
+        }
+    };
+    pending_write.push(tx_view.clone(), cycles);
+    drop(pending_write);
+
+    debug!("Transaction added to pending pool: {}", tx_view.hash());
+
+    // Return the transaction hash
+    let tx_hash: H256 = tx_view.hash().unpack();
+    to_json(&tx_hash)
+}
+
+/// Transaction and its status, as a JSON `TransactionWithStatus`.
+///
+/// Reports `Unknown` (rather than failing) for a hash that is neither stored
+/// nor pending.
+pub fn get_transaction(hash_str: &str) -> Result<String, BridgeError> {
+    ensure_running()?;
+
+    // Strip 0x prefix if present — callers often pass "0xabc..." but
+    // H256::from_str expects no prefix
+    let byte32 = parse_byte32("get_transaction", hash_str)?;
+
+    let swc = STORAGE_WITH_DATA.get().ok_or_else(|| {
+        error!("get_transaction: storage not initialized");
+        BridgeError::Storage("storage not initialized".to_owned())
+    })?;
+
+    // Recover from poisoning rather than double-panic across the FFI boundary.
+    let pending_read = match swc.pending_txs().read() {
+        Ok(g) => g,
+        Err(poisoned) => {
+            error!("get_transaction: pending_txs read lock poisoned; recovering");
+            poisoned.into_inner()
+        }
+    };
+
+    let result = if let Some((transaction, header)) =
+        swc.storage().get_transaction_with_header(&byte32)
+    {
+        debug!("get_transaction: found committed tx {}", hash_str);
+        TransactionWithStatus {
+            transaction: Some(transaction.into_view().into()),
+            cycles: None,
+            tx_status: TxStatus {
+                block_hash: Some(header.into_view().hash().unpack()),
+                status: Status::Committed,
+            },
+        }
+    } else if let Some((transaction, cycles, _)) = pending_read.get(&byte32) {
+        debug!("get_transaction: found pending tx {}", hash_str);
+        TransactionWithStatus {
+            transaction: Some(transaction.into_view().into()),
+            cycles: Some(cycles.into()),
+            tx_status: TxStatus {
+                block_hash: None,
+                status: Status::Pending,
+            },
+        }
+    } else {
+        warn!(
+            "get_transaction: tx not found in storage or pending: {}",
+            hash_str
+        );
+        TransactionWithStatus {
+            transaction: None,
+            cycles: None,
+            tx_status: TxStatus {
+                block_hash: None,
+                status: Status::Unknown,
+            },
+        }
+    };
+
+    to_json(&result)
+}
+
+/// Fetch status for a transaction, as a JSON `FetchStatus<TransactionWithStatus>`.
+///
+/// Returns the transaction when it is stored or pending, otherwise reports
+/// (and, on the first call, queues) the fetch.
+pub fn fetch_transaction(hash_str: &str) -> Result<String, BridgeError> {
+    ensure_running()?;
+
+    let byte32 = parse_byte32("fetch_transaction", hash_str)?;
+    let tx_hash: H256 = byte32.unpack();
+
+    let swc = STORAGE_WITH_DATA.get().ok_or_else(|| {
+        error!("fetch_transaction: storage not initialized");
+        BridgeError::Storage("storage not initialized".to_owned())
+    })?;
+
+    // 1. Check if tx is already in local storage (committed)
+    if let Some((transaction, header)) = swc.storage().get_transaction_with_header(&byte32) {
+        debug!("fetch_transaction: tx {} already in storage", hash_str);
+        let tws = TransactionWithStatus {
+            transaction: Some(transaction.into_view().into()),
+            cycles: None,
+            tx_status: TxStatus {
+                block_hash: Some(header.into_view().hash().unpack()),
+                status: Status::Committed,
+            },
+        };
+        let fetch_status: FetchStatus<TransactionWithStatus> = FetchStatus::Fetched { data: tws };
+        return to_json(&fetch_status);
+    }
+
+    // 2. Check if tx is in pending pool. Recover from poisoning to avoid
+    // double-panic across the FFI boundary.
+    let pending_read = match swc.pending_txs().read() {
+        Ok(g) => g,
+        Err(poisoned) => {
+            error!("fetch_transaction: pending_txs read lock poisoned; recovering");
+            poisoned.into_inner()
+        }
+    };
+    if let Some((transaction, cycles, _)) = pending_read.get(&byte32) {
+        debug!("fetch_transaction: tx {} is pending", hash_str);
+        let tws = TransactionWithStatus {
+            transaction: Some(transaction.into_view().into()),
+            cycles: Some(cycles.into()),
+            tx_status: TxStatus {
+                block_hash: None,
+                status: Status::Pending,
+            },
+        };
+        let fetch_status: FetchStatus<TransactionWithStatus> = FetchStatus::Fetched { data: tws };
+        return to_json(&fetch_status);
+    }
+
+    // 3. Check fetch queue status or add to fetch queue
+    // Verify network controller is available before queuing fetches
+    let _net_controller = NET_CONTROL.get().ok_or_else(|| {
+        error!("fetch_transaction: network controller not initialized");
+        BridgeError::Network("network controller not initialized".to_owned())
+    })?;
+
+    let now = unix_time_as_millis();
+    let fetch_status: FetchStatus<TransactionWithStatus> =
+        if let Some((added_ts, first_sent, missing)) = swc.get_tx_fetch_info(&tx_hash) {
+            if missing {
+                // Previously missing — re-add to fetch queue for retry.
+                // Return NotFound (not Added) to mirror WASM/RPC behavior (rpc.rs:876-879):
+                // the caller learns the tx was not found on the previous attempt.
+                // On subsequent polls the status will progress to Added → Fetching → Fetched.
+                debug!(
+                    "fetch_transaction: tx {} was missing, re-adding to fetch queue",
+                    hash_str
+                );
+                swc.add_fetch_tx(tx_hash, now);
+                FetchStatus::NotFound
+            } else if first_sent > 0 {
+                debug!("fetch_transaction: tx {} is being fetched", hash_str);
+                FetchStatus::Fetching {
+                    first_sent: first_sent.into(),
+                }
+            } else {
+                debug!("fetch_transaction: tx {} is queued for fetch", hash_str);
+                FetchStatus::Added {
+                    timestamp: added_ts.into(),
+                }
+            }
+        } else {
+            // Not in fetch queue — add it
+            debug!("fetch_transaction: adding tx {} to fetch queue", hash_str);
+            swc.add_fetch_tx(tx_hash, now);
+            FetchStatus::Added {
+                timestamp: now.into(),
+            }
+        };
+
+    to_json(&fetch_status)
+}
+
+/// Estimate the cycles a transaction consumes.
+///
+/// Not implemented yet; always reports failure (the Android bridge has
+/// returned null here since the JNI bridge was written).
+pub fn estimate_cycles(_tx_str: &str) -> Result<String, BridgeError> {
+    warn!("estimate_cycles not yet implemented");
+    Err(BridgeError::Internal(
+        "estimate_cycles is not implemented".to_owned(),
+    ))
 }
