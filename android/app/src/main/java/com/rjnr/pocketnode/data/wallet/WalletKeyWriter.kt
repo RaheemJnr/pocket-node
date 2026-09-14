@@ -4,11 +4,13 @@ import android.security.keystore.KeyPermanentlyInvalidatedException
 import androidx.fragment.app.FragmentActivity
 import com.rjnr.pocketnode.core.log.Logger
 import com.rjnr.pocketnode.data.auth.AuthManager
+import com.rjnr.pocketnode.data.crypto.KeyBackupManager
+import com.rjnr.pocketnode.data.crypto.KeyMaterial
 import com.rjnr.pocketnode.data.crypto.KeystoreEncryptionManager
 import com.rjnr.pocketnode.data.database.dao.KeyMaterialDao
-import com.rjnr.pocketnode.data.migration.KeyStoreMigrationHelper
-import com.rjnr.pocketnode.data.migration.KeystoreV2MigrationHelper
-import com.rjnr.pocketnode.data.migration.WalletKeyBundle
+import com.rjnr.pocketnode.data.crypto.KeyStoreMigrationHelper
+import com.rjnr.pocketnode.data.crypto.KeystoreV2MigrationHelper
+import com.rjnr.pocketnode.data.crypto.WalletKeyBundle
 import java.util.Arrays
 import javax.inject.Inject
 import javax.inject.Singleton

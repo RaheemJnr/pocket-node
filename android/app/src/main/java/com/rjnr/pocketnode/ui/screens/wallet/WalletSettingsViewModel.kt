@@ -42,7 +42,7 @@ class WalletSettingsViewModel @Inject constructor(
     private val walletKeyReader: WalletKeyReader,
     private val walletKeyWriter: WalletKeyWriter,
     private val keyMaterialDao: KeyMaterialDao,
-    private val migrationHelper: com.rjnr.pocketnode.data.migration.KeystoreV2MigrationHelper,
+    private val migrationHelper: com.rjnr.pocketnode.data.crypto.KeystoreV2MigrationHelper,
     private val encryptionManager: com.rjnr.pocketnode.data.crypto.KeystoreEncryptionManager,
     private val authManager: com.rjnr.pocketnode.data.auth.AuthManager,
     private val logger: Logger,

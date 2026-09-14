@@ -3,6 +3,7 @@ package com.rjnr.pocketnode.data.gateway
 import com.nervosnetwork.ckblightclient.LightClientNative
 import com.rjnr.pocketnode.core.log.Logger
 import com.rjnr.pocketnode.data.gateway.models.DaoCellStatus
+import com.rjnr.pocketnode.data.gateway.models.DaoConstants
 import com.rjnr.pocketnode.data.gateway.models.DaoDeposit
 import com.rjnr.pocketnode.data.gateway.models.EpochInfo
 import com.rjnr.pocketnode.data.gateway.models.JniCell

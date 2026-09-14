@@ -12,7 +12,7 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
-import com.rjnr.pocketnode.data.gateway.DaoConstants
+import com.rjnr.pocketnode.data.gateway.models.DaoConstants
 import com.rjnr.pocketnode.data.gateway.models.DaoCellStatus
 import androidx.compose.ui.res.stringResource
 import com.rjnr.pocketnode.R

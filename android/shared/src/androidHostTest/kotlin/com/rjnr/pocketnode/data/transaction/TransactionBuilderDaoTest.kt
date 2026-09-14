@@ -1,6 +1,6 @@
 package com.rjnr.pocketnode.data.transaction
 
-import com.rjnr.pocketnode.data.gateway.DaoConstants
+import com.rjnr.pocketnode.data.gateway.models.DaoConstants
 import com.rjnr.pocketnode.data.gateway.models.*
 import com.rjnr.pocketnode.data.validation.NetworkValidator
 import org.junit.Assert.*

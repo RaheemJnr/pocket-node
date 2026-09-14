@@ -18,7 +18,7 @@ import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.rjnr.pocketnode.R
-import com.rjnr.pocketnode.data.gateway.DaoConstants
+import com.rjnr.pocketnode.data.gateway.models.DaoConstants
 import com.rjnr.pocketnode.util.sanitizeAmount
 
 @OptIn(ExperimentalMaterial3Api::class)

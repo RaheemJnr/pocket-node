@@ -10,7 +10,7 @@ import com.rjnr.pocketnode.data.database.MIGRATION_1_2
 import com.rjnr.pocketnode.data.database.MIGRATION_2_3
 import com.rjnr.pocketnode.data.database.MIGRATION_3_4
 import com.rjnr.pocketnode.data.database.MIGRATION_4_5
-import com.rjnr.pocketnode.data.migration.KeyStoreMigrationHelper
+import com.rjnr.pocketnode.data.crypto.KeyStoreMigrationHelper
 import kotlinx.coroutines.test.runTest
 import org.junit.After
 import org.junit.Assert.*

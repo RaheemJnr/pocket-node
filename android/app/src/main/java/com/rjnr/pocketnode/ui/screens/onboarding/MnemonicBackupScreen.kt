@@ -99,7 +99,7 @@ class MnemonicBackupViewModel @Inject constructor(
             // verify we fetch the words via WalletKeyReader (#289 follow-up).
             val words = try {
                 repository.getMnemonic()
-            } catch (e: com.rjnr.pocketnode.data.migration.V2KeyMaterialRequiresAuthException) {
+            } catch (e: com.rjnr.pocketnode.data.crypto.V2KeyMaterialRequiresAuthException) {
                 _uiState.update { it.copy(pinRequiredForMnemonic = true) }
                 return@launch
             }

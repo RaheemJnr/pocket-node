@@ -9,7 +9,7 @@ import com.rjnr.pocketnode.core.format.shannonsToCkbString
 import com.rjnr.pocketnode.core.log.Logger
 import com.rjnr.pocketnode.core.log.NoopLogger
 import com.rjnr.pocketnode.core.molecule.ByteArrayBuilder
-import com.rjnr.pocketnode.data.gateway.DaoConstants
+import com.rjnr.pocketnode.data.gateway.models.DaoConstants
 import com.rjnr.pocketnode.data.gateway.models.*
 import com.rjnr.pocketnode.data.validation.NetworkValidator
 import com.rjnr.pocketnode.data.wallet.AddressUtils

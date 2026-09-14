@@ -1,9 +1,5 @@
-package com.rjnr.pocketnode.data.gateway
+package com.rjnr.pocketnode.data.gateway.models
 
-import com.rjnr.pocketnode.data.gateway.models.CellDep
-import com.rjnr.pocketnode.data.gateway.models.NetworkType
-import com.rjnr.pocketnode.data.gateway.models.OutPoint
-import com.rjnr.pocketnode.data.gateway.models.Script
 
 object DaoConstants {
     // DAO type script — same code hash on both networks

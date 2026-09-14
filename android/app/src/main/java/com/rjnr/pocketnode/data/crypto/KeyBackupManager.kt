@@ -1,4 +1,4 @@
-package com.rjnr.pocketnode.data.wallet
+package com.rjnr.pocketnode.data.crypto
 
 import androidx.annotation.VisibleForTesting
 import com.rjnr.pocketnode.core.log.Logger

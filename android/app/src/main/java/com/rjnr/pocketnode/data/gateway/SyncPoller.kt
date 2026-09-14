@@ -3,7 +3,7 @@ package com.rjnr.pocketnode.data.gateway
 import com.rjnr.pocketnode.core.log.Logger
 import com.rjnr.pocketnode.core.prefs.SyncPreferences
 import com.rjnr.pocketnode.data.gateway.models.AccountStatusResponse
-import com.rjnr.pocketnode.data.sync.SyncProgressTracker
+import com.rjnr.pocketnode.data.sync.contract.SyncProgressTracker
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay

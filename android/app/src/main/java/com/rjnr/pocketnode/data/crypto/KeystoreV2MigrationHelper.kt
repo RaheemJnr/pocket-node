@@ -1,9 +1,8 @@
-package com.rjnr.pocketnode.data.migration
+package com.rjnr.pocketnode.data.crypto
 
 import android.content.SharedPreferences
 import android.database.sqlite.SQLiteConstraintException
 import com.rjnr.pocketnode.core.log.Logger
-import com.rjnr.pocketnode.data.crypto.KeystoreEncryptionManager
 import com.rjnr.pocketnode.data.database.dao.KeyMaterialDao
 import com.rjnr.pocketnode.data.database.entity.KeyMaterialEntity
 import javax.crypto.Cipher

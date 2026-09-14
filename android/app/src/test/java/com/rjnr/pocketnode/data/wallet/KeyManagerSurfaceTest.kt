@@ -10,7 +10,7 @@ import org.junit.Test
  * V2 direct-write path landed. Reintroducing any of them risks reopening
  * the V1-stays-V1 hole — new wallets would silently land on the legacy
  * unrestricted Keystore key instead of going through [WalletKeyWriter] /
- * [com.rjnr.pocketnode.data.migration.KeystoreV2MigrationHelper.writeNewV2Row].
+ * [com.rjnr.pocketnode.data.crypto.KeystoreV2MigrationHelper.writeNewV2Row].
  *
  * If you intentionally need to add a function with one of these names,
  * delete it from [deletedFunctionNames] and add a code comment justifying

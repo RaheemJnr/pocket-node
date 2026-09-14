@@ -15,7 +15,7 @@ import com.rjnr.pocketnode.data.database.entity.WalletEntity
 import androidx.room.withTransaction
 import com.rjnr.pocketnode.data.gateway.models.NetworkType
 import com.rjnr.pocketnode.data.gateway.models.SyncMode
-import com.rjnr.pocketnode.data.migration.WalletKeyBundle
+import com.rjnr.pocketnode.data.crypto.WalletKeyBundle
 import kotlinx.coroutines.flow.Flow
 import java.util.UUID
 import javax.inject.Inject
