@@ -5,8 +5,8 @@
 //!
 //! ## Architecture
 //!
-//! - `types`: Global state management using OnceLock pattern
-//! - `lifecycle`: Init/start/stop/status lifecycle management
+//! - `types`: JVM handles; the shared globals live in [`crate::bridge_core`]
+//! - `lifecycle`: Init/start/stop/status wrappers over `bridge_core::lifecycle`
 //! - `callbacks`: Log and status callbacks with batching
 //! - `query`: 17 query APIs matching WASM implementation
 //!
