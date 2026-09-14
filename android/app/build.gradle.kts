@@ -240,10 +240,6 @@ android {
         targetCompatibility = JavaVersion.VERSION_17
     }
 
-    kotlinOptions {
-        jvmTarget = "17"
-    }
-
     buildFeatures {
         compose = true
         buildConfig = true
@@ -262,12 +258,20 @@ android {
 
 }
 
+kotlin {
+    compilerOptions {
+        jvmTarget.set(org.jetbrains.kotlin.gradle.dsl.JvmTarget.JVM_17)
+    }
+}
+
 // Pinned to the version mockk transitively brings in. Preloaded as a -javaagent
 // for unit tests so MockK works on JDK 21+ without self-attach.
 val byteBuddyAgent: Configuration by configurations.creating
 
 dependencies {
     byteBuddyAgent("net.bytebuddy:byte-buddy-agent:1.14.17")
+
+    implementation(project(":shared"))
 
     // Core
     implementation(libs.androidx.core.ktx)
