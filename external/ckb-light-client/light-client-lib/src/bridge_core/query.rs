@@ -176,7 +176,7 @@ pub fn get_header(hash_str: &str) -> Result<String, BridgeError> {
             let header_view: HeaderView = header.into();
             to_json(&header_view)
         }
-        None => Err(BridgeError::Internal(format!(
+        None => Err(BridgeError::NotFound(format!(
             "header not found for hash '{}'",
             hash_str
         ))),
@@ -215,7 +215,7 @@ pub fn get_header_by_number(number_str: &str) -> Result<String, BridgeError> {
                 "get_header_by_number: no block hash for number {}",
                 block_num
             );
-            return Err(BridgeError::Internal(format!(
+            return Err(BridgeError::NotFound(format!(
                 "no block hash for number {}",
                 block_num
             )));
@@ -248,7 +248,7 @@ pub fn get_header_by_number(number_str: &str) -> Result<String, BridgeError> {
                 "get_header_by_number: block hash found but header missing for number {}",
                 block_num
             );
-            Err(BridgeError::Internal(format!(
+            Err(BridgeError::NotFound(format!(
                 "header missing for number {}",
                 block_num
             )))
@@ -857,9 +857,12 @@ pub fn send_transaction(tx_str: &str) -> Result<String, BridgeError> {
         BridgeError::Storage("light client not ready (storage not initialized)".to_owned())
     })?;
 
+    // Consensus and storage are published together at the tail of
+    // `lifecycle::init`, so reaching this with storage present means the client
+    // is not actually initialized rather than that sending failed.
     let consensus = CONSENSUS.get().map(Arc::clone).ok_or_else(|| {
         error!("Consensus not initialized");
-        BridgeError::Internal("light client not ready (consensus not initialized)".to_owned())
+        BridgeError::NotInitialized
     })?;
 
     // Convert to packed transaction and view

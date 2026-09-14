@@ -58,7 +58,8 @@ fn optional_jstring(env: &mut JNIEnv, value: &JString) -> String {
 /// and the reason has always been the bare message, so unwrap the payload.
 fn error_detail(err: &BridgeError) -> String {
     match err {
-        BridgeError::Config(reason)
+        BridgeError::NotFound(reason)
+        | BridgeError::Config(reason)
         | BridgeError::Storage(reason)
         | BridgeError::Network(reason)
         | BridgeError::Internal(reason) => reason.clone(),
@@ -330,6 +331,11 @@ pub extern "C" fn Java_com_nervosnetwork_ckblightclient_LightClientNative_native
 
         match bridge_query::send_transaction(&tx_str) {
             Ok(json) => json_to_jstring(&mut env, &json),
+            // The is_running check above can go stale between here and the
+            // core's own check. Kotlin has always seen a plain null for a
+            // client that is not running, so keep the sentinel for real send
+            // failures only.
+            Err(BridgeError::NotInitialized) => ptr::null_mut(),
             // Kotlin reads the reason off the sentinel prefix, so pass the
             // bridge error's detail through rather than its Display form.
             Err(err) => send_error_jstring(&mut env, &error_detail(&err)),

@@ -24,6 +24,8 @@ pub enum LightClientError {
     NotInitialized,
     #[error("light client is already initialized")]
     AlreadyInitialized,
+    #[error("not found: {reason}")]
+    NotFound { reason: String },
     #[error("config error: {reason}")]
     Config { reason: String },
     #[error("storage error: {reason}")]
@@ -39,6 +41,7 @@ impl From<BridgeError> for LightClientError {
         match err {
             BridgeError::NotInitialized => Self::NotInitialized,
             BridgeError::AlreadyInitialized => Self::AlreadyInitialized,
+            BridgeError::NotFound(reason) => Self::NotFound { reason },
             BridgeError::Config(reason) => Self::Config { reason },
             BridgeError::Storage(reason) => Self::Storage { reason },
             BridgeError::Network(reason) => Self::Network { reason },

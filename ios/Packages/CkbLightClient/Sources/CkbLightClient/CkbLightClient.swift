@@ -597,6 +597,8 @@ enum LightClientError: Swift.Error, Equatable, Hashable, Foundation.LocalizedErr
     
     case NotInitialized
     case AlreadyInitialized
+    case NotFound(reason: String
+    )
     case Config(reason: String
     )
     case Storage(reason: String
@@ -636,16 +638,19 @@ public struct FfiConverterTypeLightClientError: FfiConverterRustBuffer {
         
         case 1: return .NotInitialized
         case 2: return .AlreadyInitialized
-        case 3: return .Config(
+        case 3: return .NotFound(
             reason: try FfiConverterString.read(from: &buf)
             )
-        case 4: return .Storage(
+        case 4: return .Config(
             reason: try FfiConverterString.read(from: &buf)
             )
-        case 5: return .Network(
+        case 5: return .Storage(
             reason: try FfiConverterString.read(from: &buf)
             )
-        case 6: return .Internal(
+        case 6: return .Network(
+            reason: try FfiConverterString.read(from: &buf)
+            )
+        case 7: return .Internal(
             reason: try FfiConverterString.read(from: &buf)
             )
 
@@ -668,23 +673,28 @@ public struct FfiConverterTypeLightClientError: FfiConverterRustBuffer {
             writeInt(&buf, Int32(2))
         
         
-        case let .Config(reason):
+        case let .NotFound(reason):
             writeInt(&buf, Int32(3))
             FfiConverterString.write(reason, into: &buf)
             
         
-        case let .Storage(reason):
+        case let .Config(reason):
             writeInt(&buf, Int32(4))
             FfiConverterString.write(reason, into: &buf)
             
         
-        case let .Network(reason):
+        case let .Storage(reason):
             writeInt(&buf, Int32(5))
             FfiConverterString.write(reason, into: &buf)
             
         
-        case let .Internal(reason):
+        case let .Network(reason):
             writeInt(&buf, Int32(6))
+            FfiConverterString.write(reason, into: &buf)
+            
+        
+        case let .Internal(reason):
+            writeInt(&buf, Int32(7))
             FfiConverterString.write(reason, into: &buf)
             
         }
