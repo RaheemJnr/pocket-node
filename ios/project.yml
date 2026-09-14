@@ -1,0 +1,110 @@
+name: PocketNode
+options:
+  bundleIdPrefix: com.rjnr
+  deploymentTarget:
+    iOS: "17.0"
+  createIntermediateGroups: true
+  minimumXcodeGenVersion: "2.40.0"
+
+settings:
+  base:
+    SWIFT_VERSION: "6.0"
+    IPHONEOS_DEPLOYMENT_TARGET: "17.0"
+    ENABLE_USER_SCRIPT_SANDBOXING: NO
+    # The CkbLightClientFFI xcframework and PocketNodeCore.framework ship
+    # arm64 device + arm64 simulator slices only (Apple Silicon).
+    "EXCLUDED_ARCHS[sdk=iphonesimulator*]": x86_64
+
+packages:
+  CkbLightClient:
+    path: Packages/CkbLightClient
+
+targets:
+  PocketNode:
+    type: application
+    platform: iOS
+    deploymentTarget: "17.0"
+    sources:
+      - path: PocketNode
+        excludes:
+          - "Resources/**"
+      - path: PocketNode/Resources
+        buildPhase: resources
+    dependencies:
+      - package: CkbLightClient
+    info:
+      path: PocketNode/Info.plist
+      properties:
+        CFBundleDisplayName: Pocket Node
+        CFBundleShortVersionString: "1.0.0"
+        CFBundleVersion: "1"
+        UILaunchScreen: {}
+        UIApplicationSceneManifest:
+          UIApplicationSupportsMultipleScenes: false
+        UISupportedInterfaceOrientations:
+          - UIInterfaceOrientationPortrait
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.rjnr.pocketnode
+        TARGETED_DEVICE_FAMILY: "1"
+        SWIFT_VERSION: "6.0"
+        GENERATE_INFOPLIST_FILE: NO
+        FRAMEWORK_SEARCH_PATHS: $(inherited) $(SRCROOT)/../android/shared/build/xcode-frameworks/$(CONFIGURATION)/$(SDK_NAME)
+        OTHER_LDFLAGS: $(inherited) -framework PocketNodeCore
+        ENABLE_USER_SCRIPT_SANDBOXING: NO
+    preBuildScripts:
+      - name: Build PocketNodeCore (KMP)
+        basedOnDependencyAnalysis: false
+        script: |
+          cd "$SRCROOT/../android" && ./gradlew :shared:embedAndSignAppleFrameworkForXcode
+
+  PocketNodeTests:
+    type: bundle.unit-test
+    platform: iOS
+    deploymentTarget: "17.0"
+    sources:
+      - PocketNodeTests
+    dependencies:
+      - target: PocketNode
+      - package: CkbLightClient
+    settings:
+      base:
+        SWIFT_VERSION: "6.0"
+        GENERATE_INFOPLIST_FILE: YES
+
+  PocketNodeUITests:
+    type: bundle.ui-testing
+    platform: iOS
+    deploymentTarget: "17.0"
+    sources:
+      - PocketNodeUITests
+    dependencies:
+      - target: PocketNode
+    settings:
+      base:
+        SWIFT_VERSION: "6.0"
+        GENERATE_INFOPLIST_FILE: YES
+        TEST_TARGET_NAME: PocketNode
+
+schemes:
+  PocketNode:
+    build:
+      targets:
+        PocketNode: all
+    run:
+      config: Debug
+    test:
+      config: Debug
+      targets:
+        - PocketNodeTests
+
+  # Networked acceptance run; kept out of the default scheme so CI and everyday
+  # test runs stay offline.
+  PocketNodeNetwork:
+    build:
+      targets:
+        PocketNode: all
+    test:
+      config: Debug
+      targets:
+        - PocketNodeUITests
