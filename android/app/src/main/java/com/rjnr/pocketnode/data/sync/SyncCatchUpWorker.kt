@@ -1,10 +1,10 @@
 package com.rjnr.pocketnode.data.sync
 
 import android.content.Context
-import android.util.Log
 import androidx.hilt.work.HiltWorker
 import androidx.work.CoroutineWorker
 import androidx.work.WorkerParameters
+import com.rjnr.pocketnode.core.log.Logger
 import com.rjnr.pocketnode.BuildConfig
 import com.rjnr.pocketnode.data.gateway.GatewayRepository
 import dagger.assisted.Assisted
@@ -40,6 +40,7 @@ class SyncCatchUpWorker @AssistedInject constructor(
     @Assisted appContext: Context,
     @Assisted params: WorkerParameters,
     private val repository: GatewayRepository,
+    private val logger: Logger,
 ) : CoroutineWorker(appContext, params) {
 
     override suspend fun doWork(): Result {
@@ -49,7 +50,7 @@ class SyncCatchUpWorker @AssistedInject constructor(
         if (BuildConfig.BG_FGS_ENABLED) return Result.success()
 
         if (!repository.hasWallet()) {
-            Log.d(TAG, "No wallet; nothing to catch up")
+            logger.d(TAG, "No wallet; nothing to catch up")
             return Result.success()
         }
 
@@ -88,10 +89,10 @@ class SyncCatchUpWorker @AssistedInject constructor(
                 result
             } ?: "timed-out-still-syncing"
 
-            Log.i(TAG, "catch-up finished: $outcome")
+            logger.i(TAG, "catch-up finished: $outcome")
             Result.success() // best-effort in every case; next run continues
         } catch (e: Exception) {
-            Log.w(TAG, "catch-up failed; will retry with backoff", e)
+            logger.w(TAG, "catch-up failed; will retry with backoff", e)
             Result.retry()
         }
     }

@@ -1,7 +1,7 @@
 package com.rjnr.pocketnode.data.sync
 
 import android.content.Context
-import android.util.Log
+import com.rjnr.pocketnode.core.log.Logger
 import androidx.work.BackoffPolicy
 import androidx.work.Constraints
 import androidx.work.ExistingPeriodicWorkPolicy
@@ -32,6 +32,7 @@ import javax.inject.Singleton
 @Singleton
 class SyncWorkScheduler @Inject constructor(
     @ApplicationContext private val context: Context,
+    private val logger: Logger,
 ) {
     private val workManager get() = WorkManager.getInstance(context)
 
@@ -63,7 +64,7 @@ class SyncWorkScheduler @Inject constructor(
             ExistingPeriodicWorkPolicy.KEEP,
             request,
         )
-        Log.d(TAG, "Periodic catch-up scheduled (${PERIODIC_INTERVAL_HOURS}h)")
+        logger.d(TAG, "Periodic catch-up scheduled (${PERIODIC_INTERVAL_HOURS}h)")
     }
 
     /** Enqueued when the app goes to the background (MainActivity.onStop). */
@@ -80,7 +81,7 @@ class SyncWorkScheduler @Inject constructor(
             ExistingWorkPolicy.KEEP,
             request,
         )
-        Log.d(TAG, "One-time background catch-up enqueued")
+        logger.d(TAG, "One-time background catch-up enqueued")
     }
 
     companion object {

@@ -2,6 +2,7 @@ package com.rjnr.pocketnode.data.update
 
 import android.content.Context
 import androidx.test.core.app.ApplicationProvider
+import com.rjnr.pocketnode.core.log.NoopLogger
 import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
@@ -36,7 +37,7 @@ class UpdateDownloaderSignatureTest {
     @Before
     fun setUp() {
         ctx = ApplicationProvider.getApplicationContext()
-        downloader = UpdateDownloader(ctx)
+        downloader = UpdateDownloader(ctx, NoopLogger)
     }
 
     @After

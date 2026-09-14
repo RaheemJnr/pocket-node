@@ -1,5 +1,6 @@
 package com.rjnr.pocketnode.data.sync
 
+import com.rjnr.pocketnode.core.log.NoopLogger
 import com.rjnr.pocketnode.data.database.dao.PendingBroadcastDao
 import com.rjnr.pocketnode.data.database.entity.PendingBroadcastEntity
 import com.rjnr.pocketnode.data.gateway.TransactionStatusUpdater
@@ -35,7 +36,8 @@ class BroadcastWatchdogTest {
         cache = cache,
         tipSource = FakeTipSource(),
         lifecycleProvider = { true },
-        dispatcher = StandardTestDispatcher(scheduler)
+        dispatcher = StandardTestDispatcher(scheduler),
+        logger = NoopLogger
     )
 
     @Test

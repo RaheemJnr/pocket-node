@@ -5,8 +5,8 @@ import android.content.Intent
 import android.net.Uri
 import android.os.StatFs
 import android.provider.Settings
-import android.util.Log
 import androidx.core.content.FileProvider
+import com.rjnr.pocketnode.core.log.Logger
 import dagger.hilt.android.qualifiers.ApplicationContext
 import io.ktor.client.HttpClient
 import io.ktor.client.engine.android.Android
@@ -77,7 +77,8 @@ sealed class DownloadState {
 
 @Singleton
 class UpdateDownloader @Inject constructor(
-    @ApplicationContext private val context: Context
+    @ApplicationContext private val context: Context,
+    private val logger: Logger,
 ) {
     // Standalone scope, not tied to a single ViewModel. A download started
     // from HomeScreen needs to keep running while the user navigates around.
@@ -162,7 +163,7 @@ class UpdateDownloader @Inject constructor(
         // line of defense, but there's no reason to stream attacker-chosen
         // bytes to disk first.
         if (!isAllowedApkUrl(apkUrl)) {
-            Log.e(TAG, "Refusing update download from disallowed URL host")
+            logger.e(TAG, "Refusing update download from disallowed URL host")
             _state.value = DownloadState.Failed("Update download blocked: untrusted source.")
             return
         }
@@ -247,10 +248,10 @@ class UpdateDownloader @Inject constructor(
                         out.flush()
                     }
                 }
-                Log.d(TAG, "Download complete: ${apkFile.length()} bytes")
+                logger.d(TAG, "Download complete: ${apkFile.length()} bytes")
                 _state.value = DownloadState.ReadyToInstall
             } catch (e: CancellationException) {
-                Log.d(TAG, "Download cancelled")
+                logger.d(TAG, "Download cancelled")
                 if (apkFile.exists()) apkFile.delete()
                 // Do not touch _state here. If a newer download has already
                 // started, it owns the state; resetting to Idle would clear
@@ -258,11 +259,11 @@ class UpdateDownloader @Inject constructor(
                 // its start, overwriting any stale Idle anyway.
                 throw e
             } catch (e: HttpRequestTimeoutException) {
-                Log.w(TAG, "Download timed out", e)
+                logger.w(TAG, "Download timed out", e)
                 if (apkFile.exists()) apkFile.delete()
                 _state.value = DownloadState.Failed("Download timed out. Tap retry.")
             } catch (e: Exception) {
-                Log.w(TAG, "Download failed", e)
+                logger.w(TAG, "Download failed", e)
                 if (apkFile.exists()) apkFile.delete()
                 _state.value = DownloadState.Failed(e.message ?: "Download failed")
             }
@@ -290,7 +291,7 @@ class UpdateDownloader @Inject constructor(
         val apkFile = apkFile()
         val verification = verifyApkSignature(apkFile)
         if (verification != SignatureCheck.Ok) {
-            Log.e(TAG, "APK signature verification failed: $verification")
+            logger.e(TAG, "APK signature verification failed: $verification")
             _state.value = DownloadState.Failed(
                 "Update file failed signature check. Re-download from pocket-node.com or " +
                     "github.com/RaheemJnr/pocket-node/releases. (${verification.code})"
@@ -329,7 +330,7 @@ class UpdateDownloader @Inject constructor(
             .replace(" ", "")
             .lowercase()
         if (expected.isEmpty()) {
-            Log.w(TAG, "RELEASE_CERT_SHA256 not set; skipping APK signature verification (debug build?)")
+            logger.w(TAG, "RELEASE_CERT_SHA256 not set; skipping APK signature verification (debug build?)")
             return SignatureCheck.DisabledNoConstant
         }
         val certs: Array<android.content.pm.Signature> = try {
@@ -348,7 +349,7 @@ class UpdateDownloader @Inject constructor(
                 info.signatures ?: emptyArray()
             }
         } catch (e: Throwable) {
-            Log.e(TAG, "Failed to read APK signatures", e)
+            logger.e(TAG, "Failed to read APK signatures", e)
             return SignatureCheck.ReadError(e.javaClass.simpleName)
         }
         if (certs.isEmpty()) return SignatureCheck.NoSigners
@@ -377,7 +378,7 @@ class UpdateDownloader @Inject constructor(
     private fun launchSystemInstaller() {
         val apkFile = apkFile()
         if (!apkFile.exists()) {
-            Log.e(TAG, "APK file not found at ${apkFile.absolutePath}")
+            logger.e(TAG, "APK file not found at ${apkFile.absolutePath}")
             _state.value = DownloadState.Failed("APK file not found after download")
             return
         }
@@ -423,7 +424,7 @@ class UpdateDownloader @Inject constructor(
         val apkFile = apkFile()
         if (apkFile.exists()) {
             val deleted = apkFile.delete()
-            Log.d(TAG, "cleanupStaleApk: deleted=$deleted size=${apkFile.length()}")
+            logger.d(TAG, "cleanupStaleApk: deleted=$deleted size=${apkFile.length()}")
         }
     }
 

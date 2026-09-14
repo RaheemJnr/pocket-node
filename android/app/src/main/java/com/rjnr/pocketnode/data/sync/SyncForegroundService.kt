@@ -5,8 +5,8 @@ import android.content.Context
 import android.content.Intent
 import android.content.pm.ServiceInfo
 import android.os.IBinder
-import android.util.Log
 import androidx.core.app.ServiceCompat
+import com.rjnr.pocketnode.core.log.Logger
 import com.rjnr.pocketnode.data.gateway.GatewayRepository
 import com.rjnr.pocketnode.data.wallet.WalletPreferences
 import dagger.hilt.android.AndroidEntryPoint
@@ -25,6 +25,7 @@ class SyncForegroundService : Service() {
     @Inject lateinit var gatewayRepository: GatewayRepository
     @Inject lateinit var walletPreferences: WalletPreferences
     @Inject lateinit var syncNotificationManager: SyncNotificationManager
+    @Inject lateinit var logger: Logger
 
     private val serviceScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private var observeJob: Job? = null
@@ -32,7 +33,7 @@ class SyncForegroundService : Service() {
     override fun onBind(intent: Intent?): IBinder? = null
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
-        Log.d(TAG, "onStartCommand (flags=$flags, startId=$startId)")
+        logger.d(TAG, "onStartCommand (flags=$flags, startId=$startId)")
         // startForeground can throw on Android 12+ if the system rejects the
         // start (ForegroundServiceStartNotAllowedException), and on Android 14+
         // if the service-type declaration is missing or mismatched. Samsung's
@@ -42,7 +43,7 @@ class SyncForegroundService : Service() {
         try {
             startAsForeground()
         } catch (e: Throwable) {
-            Log.e(TAG, "startForeground failed; stopping self to avoid crash", e)
+            logger.e(TAG, "startForeground failed; stopping self to avoid crash", e)
             stopSelf(startId)
             return START_NOT_STICKY
         }
@@ -53,12 +54,12 @@ class SyncForegroundService : Service() {
                 try {
                     // Re-init wallet if needed (e.g. after process restart via START_STICKY)
                     if (gatewayRepository.walletInfo.value == null) {
-                        Log.d(TAG, "Wallet not initialized, attempting re-init")
+                        logger.d(TAG, "Wallet not initialized, attempting re-init")
                         gatewayRepository.initializeWallet()
                     }
                     gatewayRepository.startSyncPolling()
                 } catch (e: Throwable) {
-                    Log.e(TAG, "Service-scope sync bootstrap failed", e)
+                    logger.e(TAG, "Service-scope sync bootstrap failed", e)
                 }
             }
             observeProgress()
@@ -97,7 +98,7 @@ class SyncForegroundService : Service() {
                     }
                     syncNotificationManager.notify(notification)
                 } catch (e: Throwable) {
-                    Log.w(TAG, "notification update failed; continuing", e)
+                    logger.w(TAG, "notification update failed; continuing", e)
                 }
             }
         }
@@ -117,7 +118,7 @@ class SyncForegroundService : Service() {
      * starts a new FGS instance and the system grants a fresh budget.
      */
     override fun onTimeout(startId: Int) {
-        Log.w(TAG, "FGS dataSync timeout received (startId=$startId, API 34 path). Stopping cleanly.")
+        logger.w(TAG, "FGS dataSync timeout received (startId=$startId, API 34 path). Stopping cleanly.")
         stopSelf(startId)
     }
 
@@ -127,7 +128,7 @@ class SyncForegroundService : Service() {
      * the process.
      */
     override fun onTimeout(startId: Int, fgsType: Int) {
-        Log.w(TAG, "FGS timeout received (startId=$startId, fgsType=$fgsType, API 35 path). Stopping cleanly.")
+        logger.w(TAG, "FGS timeout received (startId=$startId, fgsType=$fgsType, API 35 path). Stopping cleanly.")
         stopSelf(startId)
     }
 
@@ -135,7 +136,7 @@ class SyncForegroundService : Service() {
         super.onDestroy()
         observeJob?.cancel()
         serviceScope.cancel()
-        Log.d(TAG, "Service destroyed")
+        logger.d(TAG, "Service destroyed")
     }
 
     companion object {

@@ -3,6 +3,7 @@ package com.rjnr.pocketnode.data.contacts
 import android.content.Context
 import androidx.room.Room
 import androidx.test.core.app.ApplicationProvider
+import com.rjnr.pocketnode.core.log.NoopLogger
 import com.rjnr.pocketnode.data.database.AppDatabase
 import com.rjnr.pocketnode.data.database.dao.ContactDao
 import com.rjnr.pocketnode.data.gateway.models.NetworkType
@@ -57,7 +58,7 @@ class ContactRepositoryTest {
         contactDao = db.contactDao()
         walletRepository = mockk(relaxed = true)
         every { walletRepository.activeWalletIdSnapshot() } returns "wallet-1"
-        repo = ContactRepository(contactDao, walletRepository).apply {
+        repo = ContactRepository(contactDao, walletRepository, NoopLogger).apply {
             setClockForTest { fakeNow }
         }
     }
