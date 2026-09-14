@@ -15,6 +15,10 @@ secp256k1 = "0.21.0"
 room = "2.8.4"
 ksp = "2.3.10"
 ckbSdk = "4.0.0"
+kotlincryptoBlake2 = "0.8.0"
+# Java SDK, kept ONLY as a differential-test dependency for the shared crypto
+# primitives (:shared androidHostTest). Never on any production classpath.
+ckbSdkDiffTest = "4.0.0"
 bouncycastle = "1.70"
 biometric = "1.1.0"
 bip39 = "1.0.8"
@@ -59,12 +63,19 @@ androidx-hilt-compiler = { group = "androidx.hilt", name = "hilt-compiler", vers
 # Security & Crypto
 androidx-biometric = { group = "androidx.biometric", name = "biometric", version.ref = "biometric" }
 androidx-security-crypto = { group = "androidx.security", name = "security-crypto", version.ref = "securityCrypto" }
+secp256k1-kmp = { group = "fr.acinq.secp256k1", name = "secp256k1-kmp", version.ref = "secp256k1" }
 secp256k1-kmp-jni-android = { group = "fr.acinq.secp256k1", name = "secp256k1-kmp-jni-android", version.ref = "secp256k1" }
+secp256k1-kmp-jni-jvm = { group = "fr.acinq.secp256k1", name = "secp256k1-kmp-jni-jvm", version.ref = "secp256k1" }
+kotlincrypto-blake2 = { group = "org.kotlincrypto.hash", name = "blake2", version.ref = "kotlincryptoBlake2" }
 kotlin-bip39 = { group = "cash.z.ecc.android", name = "kotlin-bip39", version.ref = "bip39" }
 
 # CKB SDK
 ckb-sdk-core = { group = "org.nervos.ckb", name = "core", version.ref = "ckbSdk" }
 ckb-sdk-utils = { group = "org.nervos.ckb", name = "utils", version.ref = "ckbSdk" }
+
+# CKB SDK (differential tests only — see ckbSdkDiffTest)
+ckb-sdk-core-difftest = { group = "org.nervos.ckb", name = "core", version.ref = "ckbSdkDiffTest" }
+ckb-sdk-utils-difftest = { group = "org.nervos.ckb", name = "utils", version.ref = "ckbSdkDiffTest" }
 bouncycastle = { group = "org.bouncycastle", name = "bcprov-jdk15on", version.ref = "bouncycastle" }
 
 # Room
