@@ -3,8 +3,8 @@ package com.rjnr.pocketnode.data.gateway
 import android.content.Context
 import com.nervosnetwork.ckblightclient.LightClientNative
 import com.rjnr.pocketnode.core.log.Logger
+import com.rjnr.pocketnode.core.prefs.NetworkPreferences
 import com.rjnr.pocketnode.data.gateway.models.NetworkType
-import com.rjnr.pocketnode.data.wallet.WalletPreferences
 import dagger.hilt.android.qualifiers.ApplicationContext
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -40,7 +40,7 @@ import javax.inject.Singleton
 @Singleton
 class NodeLifecycle @Inject constructor(
     @ApplicationContext private val context: Context,
-    private val walletPreferences: WalletPreferences,
+    private val networkPreferences: NetworkPreferences,
     private val cacheManager: CacheManager,
     private val daoSyncManager: DaoSyncManager,
     private val logger: Logger,
@@ -49,7 +49,7 @@ class NodeLifecycle @Inject constructor(
     private val _nodeStatus = MutableStateFlow("Stopped")
     val nodeStatus: StateFlow<String> = _nodeStatus.asStateFlow()
 
-    private val _network = MutableStateFlow(walletPreferences.getSelectedNetwork())
+    private val _network = MutableStateFlow(networkPreferences.getSelectedNetwork())
     val network: StateFlow<NetworkType> = _network.asStateFlow()
     val currentNetwork: NetworkType get() = _network.value
 
@@ -224,7 +224,7 @@ class NodeLifecycle @Inject constructor(
      *
      * Process death safety: setSelectedNetwork() uses commit() (synchronous) so the preference
      * is guaranteed on disk before killProcess(). On restart, initializeNode() reads the new
-     * network from WalletPreferences. Data directories are isolated per network.
+     * network from NetworkPreferences. Data directories are isolated per network.
      */
     suspend fun switchNetwork(target: NetworkType): Result<Unit> = runCatching {
         if (target == currentNetwork) return@runCatching
@@ -238,13 +238,13 @@ class NodeLifecycle @Inject constructor(
             // nativeStop() blocks indefinitely (peer disconnection loop) and nativeInit() rejects
             // calls while already initialized ("Already initialized!"). The only reliable path is
             // to persist the selection and restart the process — Android will relaunch the app and
-            // initializeNode() will pick up the new network from WalletPreferences.
+            // initializeNode() will pick up the new network from NetworkPreferences.
 
             // Clear Room caches before process restart
             cacheManager.clearAll()
             daoSyncManager.clearAll()
 
-            walletPreferences.setSelectedNetwork(target) // uses commit() — synchronous flush
+            networkPreferences.setSelectedNetwork(target) // uses commit() — synchronous flush
             logger.d(TAG, "Persisted ${target.name}, restarting process for clean JNI init")
 
             // ProcessPhoenix-style restart: launch fresh activity before killing process.

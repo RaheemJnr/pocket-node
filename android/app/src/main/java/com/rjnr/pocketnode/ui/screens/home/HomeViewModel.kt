@@ -55,6 +55,8 @@ class HomeViewModel @Inject constructor(
     private val pinManager: PinManager,
     private val authManager: AuthManager,
     private val cacheManager: CacheManager,
+    // Concrete (#461): spans SyncPreferences, UiPreferences and
+    // AppStatePreferences, and observes the Android-only coachmark StateFlow.
     private val walletPreferences: com.rjnr.pocketnode.data.wallet.WalletPreferences,
     private val seedPhraseAuthorizer: com.rjnr.pocketnode.data.wallet.SeedPhraseAuthorizer,
     private val keyMaterialDao: com.rjnr.pocketnode.data.database.dao.KeyMaterialDao,

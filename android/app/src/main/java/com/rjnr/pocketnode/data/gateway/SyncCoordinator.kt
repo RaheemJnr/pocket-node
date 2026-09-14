@@ -2,6 +2,8 @@ package com.rjnr.pocketnode.data.gateway
 
 import com.nervosnetwork.ckblightclient.LightClientNative
 import com.rjnr.pocketnode.core.log.Logger
+import com.rjnr.pocketnode.core.prefs.SyncPreferences
+import com.rjnr.pocketnode.core.prefs.SyncStrategy
 import com.rjnr.pocketnode.data.database.dao.SyncProgressDao
 import com.rjnr.pocketnode.data.database.dao.WalletDao
 import com.rjnr.pocketnode.data.database.entity.SyncProgressEntity
@@ -13,8 +15,6 @@ import com.rjnr.pocketnode.data.gateway.models.SyncMode
 import com.rjnr.pocketnode.data.gateway.models.getCheckpoint
 import com.rjnr.pocketnode.data.gateway.models.toFromBlock
 import com.rjnr.pocketnode.data.wallet.KeyManager
-import com.rjnr.pocketnode.data.wallet.SyncStrategy
-import com.rjnr.pocketnode.data.wallet.WalletPreferences
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
@@ -211,7 +211,7 @@ class LightClientNativeBridge @Inject constructor() : LightClientBridge {
 class SyncCoordinator @Inject constructor(
     private val walletDao: WalletDao,
     private val syncProgressDao: SyncProgressDao,
-    private val walletPreferences: WalletPreferences,
+    private val syncPreferences: SyncPreferences,
     private val keyManager: KeyManager,
     private val json: Json,
     private val lightClient: LightClientBridge,
@@ -506,7 +506,7 @@ class SyncCoordinator @Inject constructor(
 
         val allWallets = preFetchedWallets
             ?: walletDao.getAll().sortedByDescending { it.lastActiveAt }
-        val strategy = walletPreferences.getSyncStrategy()
+        val strategy = syncPreferences.getSyncStrategy()
 
         // Step 1: BALANCED filter runs BEFORE the cap (Q2=A in design).
         val candidateWallets = preFilteredCandidates ?: when (strategy) {
@@ -592,8 +592,8 @@ class SyncCoordinator @Inject constructor(
                     if (savedBlock > 0) {
                         blockNum = savedBlock.toString()
                     } else {
-                        val syncMode = walletPreferences.getSyncMode(walletId = wallet.walletId)
-                        val customHeight = walletPreferences.getCustomBlockHeight(walletId = wallet.walletId)
+                        val syncMode = syncPreferences.getSyncMode(walletId = wallet.walletId)
+                        val customHeight = syncPreferences.getCustomBlockHeight(walletId = wallet.walletId)
                         val calculated = syncMode.toFromBlock(
                             if (syncMode == SyncMode.CUSTOM) customHeight else null,
                             tipHeight,
@@ -622,8 +622,8 @@ class SyncCoordinator @Inject constructor(
                     // #382 P1: candidates get their own HISTORICAL start —
                     // inheriting the parent's resume height registered them
                     // at ~tip on synced wallets, where a scan finds nothing.
-                    val syncModeForWallet = walletPreferences.getSyncMode(walletId = wallet.walletId)
-                    val customForWallet = walletPreferences.getCustomBlockHeight(walletId = wallet.walletId)
+                    val syncModeForWallet = syncPreferences.getSyncMode(walletId = wallet.walletId)
+                    val customForWallet = syncPreferences.getCustomBlockHeight(walletId = wallet.walletId)
                     val candidateHex = "0x" + candidateScanStart(
                         historicalStartBlock(syncModeForWallet, customForWallet, tipHeight, ctx.network),
                         earliestCachedTxBlock(wallet.walletId, ctx.network.name),

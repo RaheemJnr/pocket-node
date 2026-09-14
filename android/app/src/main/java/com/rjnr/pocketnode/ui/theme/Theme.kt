@@ -20,7 +20,7 @@ import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.core.view.WindowCompat
 import com.rjnr.pocketnode.R
-import com.rjnr.pocketnode.data.wallet.ThemeMode
+import com.rjnr.pocketnode.core.prefs.ThemeMode
 
 // Brand colors
 val PocketGreen = Color(0xFF1DD781)

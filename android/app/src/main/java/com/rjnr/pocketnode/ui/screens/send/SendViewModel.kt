@@ -121,7 +121,7 @@ class SendViewModel @Inject constructor(
     private val keyMaterialDao: KeyMaterialDao,
     private val contactRepository: ContactRepository,
     private val errorJournal: com.rjnr.pocketnode.data.diagnostics.ErrorJournal,
-    private val walletPreferences: com.rjnr.pocketnode.data.wallet.WalletPreferences,
+    private val uiPreferences: com.rjnr.pocketnode.core.prefs.UiPreferences,
     private val logger: Logger,
 ) : ViewModel() {
 
@@ -188,7 +188,7 @@ class SendViewModel @Inject constructor(
     init {
         // Bulk-airdrop easter egg is unlocked from Settings > Version (7 taps);
         // the Send screen just reads the persisted flag to show/hide the toggle.
-        _uiState.update { it.copy(bulkUnlocked = walletPreferences.isBulkSendUnlocked()) }
+        _uiState.update { it.copy(bulkUnlocked = uiPreferences.isBulkSendUnlocked()) }
 
         viewModelScope.launch {
             repository.balance.collect { balance ->

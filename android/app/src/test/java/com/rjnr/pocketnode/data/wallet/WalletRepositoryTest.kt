@@ -70,7 +70,7 @@ class WalletRepositoryTest {
         v2Helper = KeystoreV2MigrationHelper(db.keyMaterialDao(), encryptionManager, migrationPrefs, logger = NoopLogger)
         walletPreferences = WalletPreferences(context, NoopLogger)
         repo = WalletRepository(
-            walletDao, keyManager, walletPreferences, mnemonicManager, db,
+            walletDao, keyManager, walletPreferences, walletPreferences, mnemonicManager, db,
             db.transactionDao(), db.balanceCacheDao(), db.daoCellDao(), db.keyMaterialDao(),
             db.subAccountCandidateDao(), SubAccountDiscovery(mnemonicManager, keyManager), NoopLogger
         )

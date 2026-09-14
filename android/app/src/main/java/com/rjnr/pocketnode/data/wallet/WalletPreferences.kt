@@ -3,6 +3,12 @@ package com.rjnr.pocketnode.data.wallet
 import android.content.Context
 import android.content.SharedPreferences
 import com.rjnr.pocketnode.core.log.Logger
+import com.rjnr.pocketnode.core.prefs.AppStatePreferences
+import com.rjnr.pocketnode.core.prefs.NetworkPreferences
+import com.rjnr.pocketnode.core.prefs.SyncPreferences
+import com.rjnr.pocketnode.core.prefs.SyncStrategy
+import com.rjnr.pocketnode.core.prefs.ThemeMode
+import com.rjnr.pocketnode.core.prefs.UiPreferences
 import com.rjnr.pocketnode.data.gateway.models.NetworkType
 import com.rjnr.pocketnode.data.gateway.models.SyncMode
 import dagger.hilt.android.qualifiers.ApplicationContext
@@ -12,18 +18,29 @@ import kotlinx.coroutines.flow.asStateFlow
 import javax.inject.Inject
 import javax.inject.Singleton
 
-enum class ThemeMode { SYSTEM, LIGHT, DARK }
-enum class SyncStrategy { ACTIVE_ONLY, ALL_WALLETS, BALANCED }
-
 /**
- * Manages wallet preferences for persisting user settings like sync mode.
- * All per-network preferences are namespaced by network name to prevent cross-contamination.
+ * The single SharedPreferences-backed implementation of every preference
+ * domain (#461). The domains themselves are declared as small interfaces in
+ * `com.rjnr.pocketnode.core.prefs` so iOS can implement them on UserDefaults;
+ * keys, defaults, the per-network namespacing and the one-time key migration
+ * stay here, in one file, so there is exactly one place where a preference
+ * key is spelled.
+ *
+ * Consumers should inject the narrowest interface they use
+ * ([SyncPreferences], [UiPreferences], [NetworkPreferences],
+ * [AppStatePreferences]); Hilt binds all four to this singleton in
+ * `di/SharedModule.kt`. Injecting the concrete class is reserved for the few
+ * callers that span three domains or need the Android-only reactive
+ * properties / legacy migration API below.
+ *
+ * All per-network preferences are namespaced by network name to prevent
+ * cross-contamination.
  */
 @Singleton
 class WalletPreferences @Inject constructor(
     @ApplicationContext context: Context,
     private val logger: Logger,
-) {
+) : SyncPreferences, UiPreferences, NetworkPreferences, AppStatePreferences {
     private val prefs: SharedPreferences = context.getSharedPreferences(
         PREFS_NAME,
         Context.MODE_PRIVATE
@@ -31,6 +48,8 @@ class WalletPreferences @Inject constructor(
 
     // --- sync_progress prefs → Room migration (#105 / #112) ---
     // Self-contained API so SharedPreferences never escapes this class.
+    // Deliberately not on any of the shared interfaces: it is a one-shot
+    // Android upgrade path, not a preference domain iOS will ever have.
     // Remove these three methods once the migration helper is retired.
 
     /** True once `migrateSyncProgressToRoomIfNeeded` has run successfully. */
@@ -69,6 +88,8 @@ class WalletPreferences @Inject constructor(
     }
 
     private val _themeMode = MutableStateFlow(readThemeMode())
+
+    /** Android-only reactive view of [getThemeMode]; not on [UiPreferences]. */
     val themeModeFlow: StateFlow<ThemeMode> = _themeMode.asStateFlow()
 
     private fun readThemeMode(): ThemeMode {
@@ -80,9 +101,9 @@ class WalletPreferences @Inject constructor(
         }
     }
 
-    fun getThemeMode(): ThemeMode = _themeMode.value
+    override fun getThemeMode(): ThemeMode = _themeMode.value
 
-    fun setThemeMode(mode: ThemeMode) {
+    override fun setThemeMode(mode: ThemeMode) {
         prefs.edit().putString(KEY_THEME_MODE, mode.name).apply()
         _themeMode.value = mode
     }
@@ -92,9 +113,9 @@ class WalletPreferences @Inject constructor(
      * per-device by a secret tap gesture on the Send screen (founder-only
      * easter egg). Persisted so it stays unlocked once activated.
      */
-    fun isBulkSendUnlocked(): Boolean = prefs.getBoolean(KEY_BULK_SEND_UNLOCKED, false)
+    override fun isBulkSendUnlocked(): Boolean = prefs.getBoolean(KEY_BULK_SEND_UNLOCKED, false)
 
-    fun setBulkSendUnlocked(unlocked: Boolean) {
+    override fun setBulkSendUnlocked(unlocked: Boolean) {
         prefs.edit().putBoolean(KEY_BULK_SEND_UNLOCKED, unlocked).apply()
     }
 
@@ -104,10 +125,10 @@ class WalletPreferences @Inject constructor(
      * set across wallets/networks is fine; the set only grows on the rare bulk
      * send (founder easter egg).
      */
-    fun isBulkTxHash(hash: String): Boolean =
+    override fun isBulkTxHash(hash: String): Boolean =
         prefs.getStringSet(KEY_BULK_TX_HASHES, emptySet())?.contains(hash) == true
 
-    fun addBulkTxHash(hash: String) {
+    override fun addBulkTxHash(hash: String) {
         // Copy the returned set before mutating — SharedPreferences hands back a
         // shared instance that must not be modified in place.
         val current = prefs.getStringSet(KEY_BULK_TX_HASHES, emptySet()) ?: emptySet()
@@ -120,7 +141,7 @@ class WalletPreferences @Inject constructor(
 
     // --- Network selection (global, not namespaced) ---
 
-    fun getSelectedNetwork(): NetworkType {
+    override fun getSelectedNetwork(): NetworkType {
         val name = prefs.getString(KEY_SELECTED_NETWORK, NetworkType.MAINNET.name)
         return try {
             NetworkType.valueOf(name ?: NetworkType.MAINNET.name)
@@ -130,7 +151,7 @@ class WalletPreferences @Inject constructor(
         }
     }
 
-    fun setSelectedNetwork(network: NetworkType) {
+    override fun setSelectedNetwork(network: NetworkType) {
         // commit() instead of apply() — must flush synchronously before Process.killProcess()
         prefs.edit().putString(KEY_SELECTED_NETWORK, network.name).commit()
     }
@@ -140,9 +161,9 @@ class WalletPreferences @Inject constructor(
      * recorded (fresh install). Used to detect an overwrite install / upgrade
      * and reset the PIN failed-attempt counter once.
      */
-    fun getLastSeenVersionCode(): Int = prefs.getInt(KEY_LAST_SEEN_VERSION_CODE, 0)
+    override fun getLastSeenVersionCode(): Int = prefs.getInt(KEY_LAST_SEEN_VERSION_CODE, 0)
 
-    fun setLastSeenVersionCode(code: Int) {
+    override fun setLastSeenVersionCode(code: Int) {
         // commit(): the upgrade check runs during cold start before the PIN
         // gate; the write must land before a possible Process.killProcess().
         prefs.edit().putInt(KEY_LAST_SEEN_VERSION_CODE, code).commit()
@@ -171,7 +192,7 @@ class WalletPreferences @Inject constructor(
      * per-wallet key was set by `markFreshWalletSyncMode` is not silently
      * overwritten by a network-default heuristic.
      */
-    fun getSyncModeOrNull(network: NetworkType? = null, walletId: String? = null): SyncMode? {
+    override fun getSyncModeOrNull(network: NetworkType?, walletId: String?): SyncMode? {
         val net = network ?: getSelectedNetwork()
         val key = if (walletId != null) walletNetworkKey(walletId, net.name, KEY_SYNC_MODE)
                   else networkKey(KEY_SYNC_MODE, net)
@@ -181,7 +202,7 @@ class WalletPreferences @Inject constructor(
             .getOrNull()
     }
 
-    fun getSyncMode(network: NetworkType? = null, walletId: String? = null): SyncMode {
+    override fun getSyncMode(network: NetworkType?, walletId: String?): SyncMode {
         // Default to NEW_WALLET when nothing is explicitly stored. For a fresh
         // wallet there is no past activity to find, and choosing RECENT here
         // would silently kick off a 30-day re-scan that the user didn't ask for.
@@ -190,7 +211,7 @@ class WalletPreferences @Inject constructor(
         return getSyncModeOrNull(network, walletId) ?: SyncMode.NEW_WALLET
     }
 
-    fun setSyncMode(mode: SyncMode, network: NetworkType? = null, walletId: String? = null) {
+    override fun setSyncMode(mode: SyncMode, network: NetworkType?, walletId: String?) {
         val net = network ?: getSelectedNetwork()
         val key = if (walletId != null) walletNetworkKey(walletId, net.name, KEY_SYNC_MODE)
                   else networkKey(KEY_SYNC_MODE, net)
@@ -199,7 +220,7 @@ class WalletPreferences @Inject constructor(
 
     // --- Custom block height ---
 
-    fun getCustomBlockHeight(network: NetworkType? = null, walletId: String? = null): Long? {
+    override fun getCustomBlockHeight(network: NetworkType?, walletId: String?): Long? {
         val net = network ?: getSelectedNetwork()
         val key = if (walletId != null) walletNetworkKey(walletId, net.name, KEY_CUSTOM_BLOCK_HEIGHT)
                   else networkKey(KEY_CUSTOM_BLOCK_HEIGHT, net)
@@ -207,7 +228,7 @@ class WalletPreferences @Inject constructor(
         return if (height >= 0) height else null
     }
 
-    fun setCustomBlockHeight(height: Long?, network: NetworkType? = null, walletId: String? = null) {
+    override fun setCustomBlockHeight(height: Long?, network: NetworkType?, walletId: String?) {
         val net = network ?: getSelectedNetwork()
         val key = if (walletId != null) walletNetworkKey(walletId, net.name, KEY_CUSTOM_BLOCK_HEIGHT)
                   else networkKey(KEY_CUSTOM_BLOCK_HEIGHT, net)
@@ -220,14 +241,14 @@ class WalletPreferences @Inject constructor(
 
     // --- Initial sync ---
 
-    fun hasCompletedInitialSync(network: NetworkType? = null, walletId: String? = null): Boolean {
+    override fun hasCompletedInitialSync(network: NetworkType?, walletId: String?): Boolean {
         val net = network ?: getSelectedNetwork()
         val key = if (walletId != null) walletNetworkKey(walletId, net.name, KEY_INITIAL_SYNC_COMPLETED)
                   else networkKey(KEY_INITIAL_SYNC_COMPLETED, net)
         return prefs.getBoolean(key, false)
     }
 
-    fun setInitialSyncCompleted(completed: Boolean, network: NetworkType? = null, walletId: String? = null) {
+    override fun setInitialSyncCompleted(completed: Boolean, network: NetworkType?, walletId: String?) {
         val net = network ?: getSelectedNetwork()
         val key = if (walletId != null) walletNetworkKey(walletId, net.name, KEY_INITIAL_SYNC_COMPLETED)
                   else networkKey(KEY_INITIAL_SYNC_COMPLETED, net)
@@ -244,24 +265,24 @@ class WalletPreferences @Inject constructor(
     // per wallet+network so it does not repeat each launch; cleared only by an
     // explicit resync.
 
-    fun isZeroCellRescanDone(walletId: String, network: NetworkType? = null): Boolean {
+    override fun isZeroCellRescanDone(walletId: String, network: NetworkType?): Boolean {
         val net = network ?: getSelectedNetwork()
         return prefs.getBoolean(walletNetworkKey(walletId, net.name, KEY_ZERO_CELL_RESCAN_DONE), false)
     }
 
-    fun setZeroCellRescanDone(walletId: String, network: NetworkType? = null) {
+    override fun setZeroCellRescanDone(walletId: String, network: NetworkType?) {
         val net = network ?: getSelectedNetwork()
         prefs.edit().putBoolean(walletNetworkKey(walletId, net.name, KEY_ZERO_CELL_RESCAN_DONE), true).apply()
     }
 
-    fun clearZeroCellRescanDone(walletId: String, network: NetworkType? = null) {
+    override fun clearZeroCellRescanDone(walletId: String, network: NetworkType?) {
         val net = network ?: getSelectedNetwork()
         prefs.edit().remove(walletNetworkKey(walletId, net.name, KEY_ZERO_CELL_RESCAN_DONE)).apply()
     }
 
     // --- Background sync (global, not per-network) ---
 
-    fun isBackgroundSyncEnabled(): Boolean {
+    override fun isBackgroundSyncEnabled(): Boolean {
         // Default OFF (#116). Previous default was true, but on Android 13+
         // the foreground service requires POST_NOTIFICATIONS to actually run;
         // setting this to true before the user grants notifications produces
@@ -271,7 +292,7 @@ class WalletPreferences @Inject constructor(
         return prefs.getBoolean(KEY_BACKGROUND_SYNC, false)
     }
 
-    fun setBackgroundSyncEnabled(enabled: Boolean) {
+    override fun setBackgroundSyncEnabled(enabled: Boolean) {
         prefs.edit().putBoolean(KEY_BACKGROUND_SYNC, enabled).commit()
     }
 
@@ -280,18 +301,18 @@ class WalletPreferences @Inject constructor(
      * sync poll (throttled there to ~1/min); read by the Home staleness
      * pill. 0 = never synced.
      */
-    fun getLastSyncedAt(): Long = prefs.getLong(KEY_LAST_SYNCED_AT, 0L)
+    override fun getLastSyncedAt(): Long = prefs.getLong(KEY_LAST_SYNCED_AT, 0L)
 
-    fun setLastSyncedAt(timestampMs: Long) {
+    override fun setLastSyncedAt(timestampMs: Long) {
         // apply(), not commit(): hot path (sync poll), durability loss of one
         // sample is harmless.
         prefs.edit().putLong(KEY_LAST_SYNCED_AT, timestampMs).apply()
     }
 
     /** Home staleness pill dismissal (#286) — dismiss is permanent, not a nag. */
-    fun isBgSyncPillDismissed(): Boolean = prefs.getBoolean(KEY_BG_SYNC_PILL_DISMISSED, false)
+    override fun isBgSyncPillDismissed(): Boolean = prefs.getBoolean(KEY_BG_SYNC_PILL_DISMISSED, false)
 
-    fun setBgSyncPillDismissed() {
+    override fun setBgSyncPillDismissed() {
         prefs.edit().putBoolean(KEY_BG_SYNC_PILL_DISMISSED, true).apply()
     }
 
@@ -300,28 +321,28 @@ class WalletPreferences @Inject constructor(
     // no script we track (seed also used in Neuron/standard BIP44 wallets).
     // Sticky per wallet+network; the Tier 2 deep scan clears it.
 
-    fun isGapLimitSignalDetected(network: NetworkType? = null, walletId: String? = null): Boolean {
+    override fun isGapLimitSignalDetected(network: NetworkType?, walletId: String?): Boolean {
         val net = network ?: getSelectedNetwork()
         val key = if (walletId != null) walletNetworkKey(walletId, net.name, KEY_GAP_LIMIT_SIGNAL)
                   else networkKey(KEY_GAP_LIMIT_SIGNAL, net)
         return prefs.getBoolean(key, false)
     }
 
-    fun setGapLimitSignalDetected(detected: Boolean, network: NetworkType? = null, walletId: String? = null) {
+    override fun setGapLimitSignalDetected(detected: Boolean, network: NetworkType?, walletId: String?) {
         val net = network ?: getSelectedNetwork()
         val key = if (walletId != null) walletNetworkKey(walletId, net.name, KEY_GAP_LIMIT_SIGNAL)
                   else networkKey(KEY_GAP_LIMIT_SIGNAL, net)
         prefs.edit().putBoolean(key, detected).apply()
     }
 
-    fun isGapLimitBannerDismissed(network: NetworkType? = null, walletId: String? = null): Boolean {
+    override fun isGapLimitBannerDismissed(network: NetworkType?, walletId: String?): Boolean {
         val net = network ?: getSelectedNetwork()
         val key = if (walletId != null) walletNetworkKey(walletId, net.name, KEY_GAP_LIMIT_BANNER_DISMISSED)
                   else networkKey(KEY_GAP_LIMIT_BANNER_DISMISSED, net)
         return prefs.getBoolean(key, false)
     }
 
-    fun setGapLimitBannerDismissed(network: NetworkType? = null, walletId: String? = null) {
+    override fun setGapLimitBannerDismissed(network: NetworkType?, walletId: String?) {
         val net = network ?: getSelectedNetwork()
         val key = if (walletId != null) walletNetworkKey(walletId, net.name, KEY_GAP_LIMIT_BANNER_DISMISSED)
                   else networkKey(KEY_GAP_LIMIT_BANNER_DISMISSED, net)
@@ -330,17 +351,17 @@ class WalletPreferences @Inject constructor(
 
     // --- Database maintenance ---
 
-    fun getLastVacuumAt(): Long = prefs.getLong(KEY_LAST_VACUUM_AT, 0L)
+    override fun getLastVacuumAt(): Long = prefs.getLong(KEY_LAST_VACUUM_AT, 0L)
 
-    fun setLastVacuumAt(timestampMs: Long) {
+    override fun setLastVacuumAt(timestampMs: Long) {
         prefs.edit().putLong(KEY_LAST_VACUUM_AT, timestampMs).apply()
     }
 
     // --- Active wallet (M3 multi-wallet) ---
 
-    fun getActiveWalletId(): String? = prefs.getString(KEY_ACTIVE_WALLET_ID, null)
+    override fun getActiveWalletId(): String? = prefs.getString(KEY_ACTIVE_WALLET_ID, null)
 
-    fun setActiveWalletId(walletId: String) {
+    override fun setActiveWalletId(walletId: String) {
         prefs.edit().putString(KEY_ACTIVE_WALLET_ID, walletId).apply()
     }
 
@@ -349,13 +370,13 @@ class WalletPreferences @Inject constructor(
      * factory-reset path so that the active-wallet guard in
      * [WalletRepository.deleteWallet] does not block bulk deletion.
      */
-    fun clearActiveWalletId() {
+    override fun clearActiveWalletId() {
         prefs.edit().remove(KEY_ACTIVE_WALLET_ID).apply()
     }
 
     // --- Sync strategy (M3 multi-wallet) ---
 
-    fun getSyncStrategy(): SyncStrategy {
+    override fun getSyncStrategy(): SyncStrategy {
         val name = prefs.getString(KEY_SYNC_STRATEGY, SyncStrategy.ALL_WALLETS.name)
         return try {
             SyncStrategy.valueOf(name ?: SyncStrategy.ALL_WALLETS.name)
@@ -364,7 +385,7 @@ class WalletPreferences @Inject constructor(
         }
     }
 
-    fun setSyncStrategy(strategy: SyncStrategy) {
+    override fun setSyncStrategy(strategy: SyncStrategy) {
         prefs.edit().putString(KEY_SYNC_STRATEGY, strategy.name).apply()
     }
 
@@ -372,9 +393,13 @@ class WalletPreferences @Inject constructor(
 
     private val _hasSeenSyncCoachmark =
         MutableStateFlow(prefs.getBoolean(KEY_SYNC_COACHMARK_SEEN, false))
+
+    /** Android-only reactive view of [hasSeenSyncCoachmark]; not on [UiPreferences]. */
     val hasSeenSyncCoachmarkFlow: StateFlow<Boolean> = _hasSeenSyncCoachmark.asStateFlow()
 
-    fun markSyncCoachmarkSeen() {
+    override fun hasSeenSyncCoachmark(): Boolean = _hasSeenSyncCoachmark.value
+
+    override fun markSyncCoachmarkSeen() {
         prefs.edit().putBoolean(KEY_SYNC_COACHMARK_SEEN, true).apply()
         _hasSeenSyncCoachmark.value = true
     }

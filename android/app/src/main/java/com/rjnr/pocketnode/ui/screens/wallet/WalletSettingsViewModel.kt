@@ -2,6 +2,8 @@ package com.rjnr.pocketnode.ui.screens.wallet
 
 import androidx.fragment.app.FragmentActivity
 import com.rjnr.pocketnode.core.log.Logger
+import com.rjnr.pocketnode.core.prefs.AppStatePreferences
+import com.rjnr.pocketnode.core.prefs.NetworkPreferences
 import androidx.lifecycle.SavedStateHandle
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
@@ -14,7 +16,6 @@ import com.rjnr.pocketnode.data.database.entity.WalletEntity
 import com.rjnr.pocketnode.data.wallet.KeyManager
 import com.rjnr.pocketnode.data.wallet.WalletKeyReader
 import com.rjnr.pocketnode.data.wallet.WalletKeyWriter
-import com.rjnr.pocketnode.data.wallet.WalletPreferences
 import com.rjnr.pocketnode.data.wallet.WalletRepository
 import dagger.hilt.android.lifecycle.HiltViewModel
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -36,7 +37,8 @@ class WalletSettingsViewModel @Inject constructor(
     private val pinManager: PinManager,
     private val daoCellDao: DaoCellDao,
     private val transactionDao: TransactionDao,
-    private val walletPreferences: WalletPreferences,
+    private val appStatePreferences: AppStatePreferences,
+    private val networkPreferences: NetworkPreferences,
     private val walletKeyReader: WalletKeyReader,
     private val walletKeyWriter: WalletKeyWriter,
     private val keyMaterialDao: KeyMaterialDao,
@@ -147,7 +149,7 @@ class WalletSettingsViewModel @Inject constructor(
             }
 
             // Check for active DAO deposits
-            val network = walletPreferences.getSelectedNetwork().name
+            val network = networkPreferences.getSelectedNetwork().name
             val daoDeposits = daoCellDao.getActiveByWalletAndNetwork(walletId, network)
             val hasDaoDeposits = daoDeposits.isNotEmpty()
             val daoAmount = if (hasDaoDeposits) {
@@ -179,7 +181,7 @@ class WalletSettingsViewModel @Inject constructor(
             try {
                 val current = _uiState.value.wallet
                 val isActive = current?.isActive == true ||
-                    walletPreferences.getActiveWalletId() == walletId
+                    appStatePreferences.getActiveWalletId() == walletId
 
                 if (isActive) {
                     // Auto-switch to a sibling before delete. The previous

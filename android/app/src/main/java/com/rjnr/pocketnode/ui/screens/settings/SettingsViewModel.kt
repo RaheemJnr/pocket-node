@@ -3,6 +3,8 @@ package com.rjnr.pocketnode.ui.screens.settings
 import androidx.fragment.app.FragmentActivity
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
+import com.rjnr.pocketnode.core.prefs.SyncStrategy
+import com.rjnr.pocketnode.core.prefs.ThemeMode
 import com.rjnr.pocketnode.BuildConfig
 import com.rjnr.pocketnode.data.auth.PinManager
 import com.rjnr.pocketnode.data.database.dao.KeyMaterialDao
@@ -11,8 +13,6 @@ import com.rjnr.pocketnode.data.update.UpdateRepository
 import com.rjnr.pocketnode.data.gateway.models.NetworkType
 import com.rjnr.pocketnode.data.gateway.models.SyncMode
 import com.rjnr.pocketnode.data.wallet.SeedPhraseAuthorizer
-import com.rjnr.pocketnode.data.wallet.SyncStrategy
-import com.rjnr.pocketnode.data.wallet.ThemeMode
 import com.rjnr.pocketnode.data.wallet.WalletPreferences
 import com.rjnr.pocketnode.data.wallet.WalletRepository
 import dagger.hilt.android.lifecycle.HiltViewModel
@@ -26,6 +26,8 @@ import javax.inject.Inject
 @HiltViewModel
 class SettingsViewModel @Inject constructor(
     private val repository: GatewayRepository,
+    // Concrete (#461): the Settings screen is the one surface that edits all
+    // three of SyncPreferences, UiPreferences and AppStatePreferences.
     private val walletPrefs: WalletPreferences,
     private val pinManager: PinManager,
     private val walletRepository: WalletRepository,

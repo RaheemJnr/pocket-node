@@ -43,6 +43,8 @@ class MainActivity : FragmentActivity() {
     lateinit var pinManager: PinManager
 
     @Inject
+    // Concrete (#461): needs the Android-only reactive themeModeFlow alongside
+    // AppStatePreferences' version-code pair.
     lateinit var walletPreferences: WalletPreferences
 
     @Inject

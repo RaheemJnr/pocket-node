@@ -7,7 +7,6 @@ import android.os.IBinder
 import androidx.core.app.ServiceCompat
 import com.rjnr.pocketnode.core.log.Logger
 import com.rjnr.pocketnode.data.gateway.GatewayRepository
-import com.rjnr.pocketnode.data.wallet.WalletPreferences
 import dagger.hilt.android.AndroidEntryPoint
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -22,7 +21,6 @@ import javax.inject.Inject
 class SyncForegroundService : Service() {
 
     @Inject lateinit var gatewayRepository: GatewayRepository
-    @Inject lateinit var walletPreferences: WalletPreferences
     @Inject lateinit var syncNotificationManager: SyncNotificationManager
     @Inject lateinit var logger: Logger
 

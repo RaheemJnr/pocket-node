@@ -28,6 +28,8 @@ private const val TAG = "WalletMigrationHelper"
 class WalletMigrationHelper @Inject constructor(
     private val walletDao: WalletDao,
     private val keyManager: KeyManager,
+    // Concrete (#461): uses the internal legacy sync_progress migration API,
+    // which is deliberately not part of any shared preference interface.
     private val walletPreferences: WalletPreferences,
     private val database: AppDatabase,
     private val syncProgressDao: SyncProgressDao,
