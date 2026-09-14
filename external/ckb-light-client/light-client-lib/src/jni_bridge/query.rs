@@ -379,12 +379,13 @@ pub extern "C" fn Java_com_nervosnetwork_ckblightclient_LightClientNative_native
 pub extern "C" fn Java_com_nervosnetwork_ckblightclient_LightClientNative_nativeEstimateCycles(
     mut env: JNIEnv,
     _class: JClass,
-    tx_json: JString,
+    _tx_json: JString,
 ) -> jstring {
     guard_jni(std::ptr::null_mut(), move || {
-        let tx_str = optional_jstring(&mut env, &tx_json);
-
-        match bridge_query::estimate_cycles(&tx_str) {
+        // The argument stays unread while this is unimplemented, exactly as
+        // before: there is no point crossing the JVM boundary for a string the
+        // core function ignores.
+        match bridge_query::estimate_cycles("") {
             Ok(json) => json_to_jstring(&mut env, &json),
             Err(_) => ptr::null_mut(),
         }

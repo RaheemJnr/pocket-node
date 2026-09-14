@@ -227,18 +227,38 @@ pub fn calculate_unlock_epoch(
         ));
     }
 
+    // Every arithmetic step below is checked. The values a real chain produces
+    // cannot overflow (epoch indices and lengths are 16-bit fields and epoch
+    // numbers are 56-bit), but this runs under UniFFI with no panic guard, so
+    // a hostile or corrupt header must not be able to abort the process.
+    let overflow = || {
+        error!("Epoch arithmetic overflowed");
+        BridgeError::Internal("epoch arithmetic overflowed".to_owned())
+    };
+
     // Calculate deposited epochs (withdraw fraction > deposit fraction means +1)
-    let deposited_epochs = if withdraw_epoch.index() * deposit_epoch.length()
-        > deposit_epoch.index() * withdraw_epoch.length()
-    {
-        withdraw_number - deposit_number + 1
+    let withdraw_fraction = withdraw_epoch
+        .index()
+        .checked_mul(deposit_epoch.length())
+        .ok_or_else(overflow)?;
+    let deposit_fraction = deposit_epoch
+        .index()
+        .checked_mul(withdraw_epoch.length())
+        .ok_or_else(overflow)?;
+    // withdraw_number >= deposit_number was checked above, so this cannot wrap.
+    let elapsed_epochs = withdraw_number - deposit_number;
+    let deposited_epochs = if withdraw_fraction > deposit_fraction {
+        elapsed_epochs.checked_add(1).ok_or_else(overflow)?
     } else {
-        withdraw_number - deposit_number
+        elapsed_epochs
     };
 
     // Round up to next 180-epoch boundary
-    let lock_epochs = ((deposited_epochs + 179) / 180) * 180;
-    let minimal_unlock_epoch = deposit_number + lock_epochs;
+    let lock_epochs = deposited_epochs
+        .checked_add(179)
+        .and_then(|rounded| (rounded / 180).checked_mul(180))
+        .ok_or_else(overflow)?;
+    let minimal_unlock_epoch = deposit_number.checked_add(lock_epochs).ok_or_else(overflow)?;
 
     // Encode as absolute epoch since value (0x20 prefix = absolute epoch flag).
     // dao.c's minimal unlock point is (deposit_number + lock_epochs,

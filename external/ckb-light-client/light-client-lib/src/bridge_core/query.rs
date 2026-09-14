@@ -355,7 +355,9 @@ pub fn set_scripts(scripts_str: &str, command: i32) -> Result<(), BridgeError> {
         BridgeError::Network("peers not initialized".to_owned())
     })?;
 
-    // Lock matched_blocks and clear them
+    // Lock matched_blocks and clear them.
+    // `blocking_write` panics inside a tokio runtime context, so this must only
+    // ever be called from a plain platform thread (the JNI and UniFFI callers).
     let mut matched_blocks = peers.matched_blocks().blocking_write();
     peers.clear_matched_blocks(&mut matched_blocks);
 
@@ -439,6 +441,70 @@ fn parse_search_key(search_key_str: &str) -> Result<SearchKey, BridgeError> {
     })
 }
 
+/// Decode the trailing fields of a cell index key: block number, tx index and
+/// output index.
+///
+/// Key layout: `prefix + script_data + block_number(8) + tx_index(4) + output_index(4)`.
+/// `None` means the key is too short to carry them — a corrupt index rather
+/// than a missing cell. Bounds-checked because this runs under UniFFI too,
+/// where there is no `guard_jni` to turn an out-of-range index into a null.
+fn decode_cell_key(key: &[u8]) -> Option<(u64, u32, u32)> {
+    let len = key.len();
+    // checked_sub first: it short-circuits before the other offsets are formed.
+    let block_number = u64::from_be_bytes(key.get(len.checked_sub(16)?..len - 8)?.try_into().ok()?);
+    let tx_index = u32::from_be_bytes(key.get(len - 8..len - 4)?.try_into().ok()?);
+    let output_index = u32::from_be_bytes(key.get(len - 4..)?.try_into().ok()?);
+    Some((block_number, tx_index, output_index))
+}
+
+/// Decode just the output index off the end of a cell index key.
+///
+/// `get_cells_capacity` needs nothing else, so it accepts the same keys it
+/// always did rather than requiring the full 16-byte tail.
+fn decode_cell_output_index(key: &[u8]) -> Option<u32> {
+    let len = key.len();
+    Some(u32::from_be_bytes(
+        key.get(len.checked_sub(4)?..)?.try_into().ok()?,
+    ))
+}
+
+/// Decode the trailing fields of a transaction index key: block number, tx
+/// index, io index and the io-type flag.
+///
+/// Key layout: `... + block_number(8) + tx_index(4) + io_index(4) + io_type(1)`.
+/// `None` means a corrupt index, as for [`decode_cell_key`].
+fn decode_tx_key(key: &[u8]) -> Option<(u64, u32, u32, u8)> {
+    let len = key.len();
+    let block_number = u64::from_be_bytes(key.get(len.checked_sub(17)?..len - 9)?.try_into().ok()?);
+    let tx_index = u32::from_be_bytes(key.get(len - 9..len - 5)?.try_into().ok()?);
+    let io_index = u32::from_be_bytes(key.get(len - 5..len - 1)?.try_into().ok()?);
+    let io_type = *key.last()?;
+    Some((block_number, tx_index, io_index, io_type))
+}
+
+/// Strip the block number (8) and tx index (4) a stored `Value::Transaction`
+/// carries in front of the molecule-encoded transaction.
+///
+/// `None` means the stored value is shorter than that prefix, i.e. corrupt.
+fn stored_tx_body(value: &[u8]) -> Option<&[u8]> {
+    value.get(12..)
+}
+
+/// Report a too-short index key.
+fn corrupt_key(context: &str, len: usize) -> BridgeError {
+    error!("{}: index key too short to decode: {} bytes", context, len);
+    BridgeError::Storage(format!("corrupt index key ({} bytes)", len))
+}
+
+/// Report a too-short stored transaction value.
+fn corrupt_tx_value(context: &str, len: usize) -> BridgeError {
+    error!(
+        "{}: stored transaction value too short: {} bytes",
+        context, len
+    );
+    BridgeError::Storage(format!("corrupt stored transaction value ({} bytes)", len))
+}
+
 /// Live cells matching a search key, as a JSON `Pagination<Cell>`.
 pub fn get_cells(
     search_key_str: &str,
@@ -470,42 +536,54 @@ pub fn get_cells(
     let items = swc
         .storage()
         .iterator_collect(mode, |(key, _)| key.starts_with(&prefix));
-    let iter = items.into_iter().skip(skip);
 
+    // A row that cannot be decoded is skipped, exactly as before; only a
+    // structurally corrupt key or stored value (which used to panic here)
+    // fails the whole query.
+    let limit = limit.max(0) as usize;
     let mut last_key = Vec::new();
-    let cells: Vec<Cell> = iter
-        .filter_map(|(key, value)| {
-            let tx_hash = packed::Byte32::from_slice(&value).ok()?;
-            let output_index = u32::from_be_bytes(key[key.len() - 4..].try_into().ok()?);
+    let mut cells: Vec<Cell> = Vec::new();
 
-            // Get the transaction to extract output details
-            let tx_data = swc.storage().get(Key::TxHash(&tx_hash).into_vec()).ok()??;
-            let tx = packed::Transaction::from_slice(&tx_data[12..]).ok()?;
+    for (key, value) in items.into_iter().skip(skip) {
+        if cells.len() >= limit {
+            break;
+        }
 
-            let output = tx.raw().outputs().get(output_index as usize)?;
-            let output_data = tx.raw().outputs_data().get(output_index as usize);
+        let (block_number, tx_index, output_index) =
+            decode_cell_key(&key).ok_or_else(|| corrupt_key("get_cells", key.len()))?;
 
-            // Extract block number from key
-            // Key structure: prefix + script_data + block_number(8) + tx_index(4) + output_index(4)
-            let key_len = key.len();
-            let block_number = u64::from_be_bytes(key[key_len - 16..key_len - 8].try_into().ok()?);
-            let tx_index = u32::from_be_bytes(key[key_len - 8..key_len - 4].try_into().ok()?);
+        let Ok(tx_hash) = packed::Byte32::from_slice(&value) else {
+            continue;
+        };
 
-            last_key = key.to_vec();
+        // Get the transaction to extract output details
+        let Ok(Some(tx_data)) = swc.storage().get(Key::TxHash(&tx_hash).into_vec()) else {
+            continue;
+        };
+        let tx_body = stored_tx_body(&tx_data)
+            .ok_or_else(|| corrupt_tx_value("get_cells", tx_data.len()))?;
+        let Ok(tx) = packed::Transaction::from_slice(tx_body) else {
+            continue;
+        };
 
-            Some(Cell {
-                output: output.into(),
-                output_data: output_data.map(|d| JsonBytes::from_bytes(d.raw_data())),
-                out_point: ckb_jsonrpc_types::OutPoint {
-                    tx_hash: tx_hash.unpack(),
-                    index: output_index.into(),
-                },
-                block_number: block_number.into(),
-                tx_index: tx_index.into(),
-            })
-        })
-        .take(limit.max(0) as usize)
-        .collect();
+        let Some(output) = tx.raw().outputs().get(output_index as usize) else {
+            continue;
+        };
+        let output_data = tx.raw().outputs_data().get(output_index as usize);
+
+        last_key = key.to_vec();
+
+        cells.push(Cell {
+            output: output.into(),
+            output_data: output_data.map(|d| JsonBytes::from_bytes(d.raw_data())),
+            out_point: ckb_jsonrpc_types::OutPoint {
+                tx_hash: tx_hash.unpack(),
+                index: output_index.into(),
+            },
+            block_number: block_number.into(),
+            tx_index: tx_index.into(),
+        });
+    }
 
     let result = Pagination {
         objects: cells,
@@ -542,28 +620,41 @@ pub fn get_transactions(
     let items = swc
         .storage()
         .iterator_collect(mode, |(key, _)| key.starts_with(&prefix));
-    let iter = items.into_iter().skip(skip);
-
+    // As in `get_cells`: an undecodable row is skipped, a structurally corrupt
+    // key or stored value fails the query instead of panicking.
+    let limit = limit.max(0) as usize;
     let mut last_key = Vec::new();
-    let txs: Vec<Tx> = iter
-        .filter_map(|(key, value)| {
-            let tx_hash = packed::Byte32::from_slice(&value).ok()?;
-            let tx = packed::Transaction::from_slice(
-                &swc.storage().get(Key::TxHash(&tx_hash).into_vec()).ok()??[12..],
-            )
-            .ok()?;
+    let mut txs: Vec<Tx> = Vec::new();
 
-            let block_number =
-                u64::from_be_bytes(key[key.len() - 17..key.len() - 9].try_into().ok()?);
-            let tx_index = u32::from_be_bytes(key[key.len() - 9..key.len() - 5].try_into().ok()?);
-            let io_index = u32::from_be_bytes(key[key.len() - 5..key.len() - 1].try_into().ok()?);
-            let io_type = if *key.last()? == 0 {
-                CellType::Input
-            } else {
-                CellType::Output
-            };
+    for (key, value) in items.into_iter().skip(skip) {
+        if txs.len() >= limit {
+            break;
+        }
 
-            let io_capacity = if io_type == CellType::Input {
+        let (block_number, tx_index, io_index, io_type_flag) =
+            decode_tx_key(&key).ok_or_else(|| corrupt_key("get_transactions", key.len()))?;
+        let io_type = if io_type_flag == 0 {
+            CellType::Input
+        } else {
+            CellType::Output
+        };
+
+        let Ok(tx_hash) = packed::Byte32::from_slice(&value) else {
+            continue;
+        };
+        let Ok(Some(tx_data)) = swc.storage().get(Key::TxHash(&tx_hash).into_vec()) else {
+            continue;
+        };
+        let tx_body = stored_tx_body(&tx_data)
+            .ok_or_else(|| corrupt_tx_value("get_transactions", tx_data.len()))?;
+        let Ok(tx) = packed::Transaction::from_slice(tx_body) else {
+            continue;
+        };
+
+        // Wrapped in a closure so the `?`-on-Option skip paths below (including
+        // the documented prev-tx ones) keep dropping just this row.
+        let io_capacity = (|| -> Option<u64> {
+            Some(if io_type == CellType::Input {
                 // For input, io_index indexes into the inputs array; the spent
                 // cell's capacity lives in the output that created it, so we
                 // resolve it from the previous transaction.
@@ -659,20 +750,22 @@ pub fn get_transactions(
                         );
                         0
                     })
-            };
+            })
+        })();
+        let Some(io_capacity) = io_capacity else {
+            continue;
+        };
 
-            last_key = key.to_vec();
-            Some(Tx::Ungrouped(TxWithCell {
-                transaction: tx.into_view().into(),
-                block_number: block_number.into(),
-                tx_index: tx_index.into(),
-                io_index: io_index.into(),
-                io_type,
-                io_capacity: io_capacity.into(),
-            }))
-        })
-        .take(limit.max(0) as usize)
-        .collect();
+        last_key = key.to_vec();
+        txs.push(Tx::Ungrouped(TxWithCell {
+            transaction: tx.into_view().into(),
+            block_number: block_number.into(),
+            tx_index: tx_index.into(),
+            io_index: io_index.into(),
+            io_type,
+            io_capacity: io_capacity.into(),
+        }));
+    }
 
     let result = Pagination {
         objects: txs,
@@ -706,21 +799,32 @@ pub fn get_cells_capacity(search_key_str: &str) -> Result<String, BridgeError> {
         .storage()
         .iterator_collect(mode, |(key, _)| key.starts_with(&prefix));
 
-    let capacity: u64 = items
-        .into_iter()
-        .filter_map(|(key, value)| {
-            let tx_hash = packed::Byte32::from_slice(&value).ok()?;
-            let output_index = u32::from_be_bytes(key[key.len() - 4..].try_into().ok()?);
+    // Same split as `get_cells`: skip an undecodable row, fail on a corrupt
+    // key or stored value. `saturating_add` replaces the `sum()` that would
+    // have panicked in a debug build on an overflow the chain cannot produce.
+    let mut capacity: u64 = 0;
+    for (key, value) in items {
+        let output_index = decode_cell_output_index(&key)
+            .ok_or_else(|| corrupt_key("get_cells_capacity", key.len()))?;
 
-            let tx = packed::Transaction::from_slice(
-                &swc.storage().get(Key::TxHash(&tx_hash).into_vec()).ok()??[12..],
-            )
-            .ok()?;
-            let output = tx.raw().outputs().get(output_index as usize)?;
+        let Ok(tx_hash) = packed::Byte32::from_slice(&value) else {
+            continue;
+        };
+        let Ok(Some(tx_data)) = swc.storage().get(Key::TxHash(&tx_hash).into_vec()) else {
+            continue;
+        };
+        let tx_body = stored_tx_body(&tx_data)
+            .ok_or_else(|| corrupt_tx_value("get_cells_capacity", tx_data.len()))?;
+        let Ok(tx) = packed::Transaction::from_slice(tx_body) else {
+            continue;
+        };
+        let Some(output) = tx.raw().outputs().get(output_index as usize) else {
+            continue;
+        };
 
-            Some(Unpack::<core::Capacity>::unpack(&output.capacity()).as_u64())
-        })
-        .sum();
+        capacity =
+            capacity.saturating_add(Unpack::<core::Capacity>::unpack(&output.capacity()).as_u64());
+    }
 
     // Get tip header for block info
     let tip_header = swc.storage().get_tip_header();
