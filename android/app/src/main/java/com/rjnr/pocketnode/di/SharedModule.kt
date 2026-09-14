@@ -1,6 +1,7 @@
 package com.rjnr.pocketnode.di
 
 import com.rjnr.pocketnode.core.log.Logger
+import com.rjnr.pocketnode.data.validation.NetworkValidator
 import com.rjnr.pocketnode.util.AndroidLogger
 import dagger.Module
 import dagger.Provides
@@ -19,4 +20,8 @@ object SharedModule {
     @Provides
     @Singleton
     fun provideLogger(): Logger = AndroidLogger()
+
+    @Provides
+    @Singleton
+    fun provideNetworkValidator(): NetworkValidator = NetworkValidator()
 }

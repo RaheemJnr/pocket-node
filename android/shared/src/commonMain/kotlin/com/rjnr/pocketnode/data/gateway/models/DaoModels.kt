@@ -1,6 +1,5 @@
 package com.rjnr.pocketnode.data.gateway.models
 
-import com.rjnr.pocketnode.data.auth.AuthMethod
 import kotlinx.serialization.Serializable
 
 // -- 7-state enum (modeled after Neuron's getDAOCellStatus.ts) --
@@ -89,37 +88,6 @@ data class DaoOverview(
     val currentApc: Double = 0.0,
     val activeCount: Int = 0,
     val completedCount: Int = 0
-)
-
-// -- ViewModel UI state --
-
-enum class DaoTab { ACTIVE, COMPLETED }
-
-sealed class DaoAction {
-    data class Depositing(val amount: Long) : DaoAction()
-    data class Withdrawing(val outPoint: OutPoint) : DaoAction()
-    data class Unlocking(val outPoint: OutPoint) : DaoAction()
-}
-
-data class DaoUiState(
-    val overview: DaoOverview = DaoOverview(),
-    val activeDeposits: List<DaoDeposit> = emptyList(),
-    val completedDeposits: List<DaoDeposit> = emptyList(),
-    val selectedTab: DaoTab = DaoTab.ACTIVE,
-    // Initial-load spinner. Driven once on first refresh; subsequent refreshes
-    // surface through `isRefreshing` (the pull-to-refresh indicator) instead.
-    val isLoading: Boolean = true,
-    // Pull-to-refresh indicator. Distinct from `isLoading` so the user can
-    // refresh without the screen blanking out into a fullscreen spinner.
-    val isRefreshing: Boolean = false,
-    val error: com.rjnr.pocketnode.ui.util.UiMessage? = null,
-    val pendingAction: DaoAction? = null,
-    val requiresAuth: Boolean = false,
-    val authMethod: AuthMethod? = null,
-    // #332: cached deposits that predate the sync window — drives the
-    // deeper-rescan banner on DaoScreen.
-    val outsideWindowCount: Int = 0,
-    val isDeepRescanning: Boolean = false
 )
 
 // -- DAO header field extraction result --

@@ -72,8 +72,9 @@ class DaoHeaderResolver @Inject constructor(
             }
             val fetchResp = json.decodeFromString<JniFetchTransactionResponse>(fetchJson)
             Log.d(TAG, "  fetch_transaction attempt $attempt: status=${fetchResp.status}")
-            if (fetchResp.status == "fetched" && fetchResp.data != null) {
-                return fetchResp.data.txStatus.blockHash
+            val fetched = fetchResp.data
+            if (fetchResp.status == "fetched" && fetched != null) {
+                return fetched.txStatus.blockHash
             }
             // "fetching" or "added" — wait and retry
             if (fetchResp.status == "fetching" || fetchResp.status == "added") {

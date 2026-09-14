@@ -1,5 +1,7 @@
 package com.rjnr.pocketnode.data.gateway.models
 
+import com.rjnr.pocketnode.core.format.formatDecimal
+import com.rjnr.pocketnode.core.time.currentTimeMillis
 import kotlinx.serialization.SerialName
 import kotlinx.serialization.Serializable
 
@@ -120,9 +122,9 @@ data class TransactionRecord(
     fun formattedAmount(): String {
         val amount = balanceChangeAsCkb()
         val formattedValue = when {
-            amount >= 1.0 -> String.format("%.2f", amount)
-            amount >= 0.0001 -> String.format("%.4f", amount)
-            else -> String.format("%.8f", amount)
+            amount >= 1.0 -> formatDecimal(amount, 2)
+            amount >= 0.0001 -> formatDecimal(amount, 4)
+            else -> formatDecimal(amount, 8)
         }
         return when (direction) {
             "in", "dao_unlock" -> "+$formattedValue CKB"
@@ -138,8 +140,8 @@ data class TransactionRecord(
      */
     fun compactConfirmations(): String {
         return when {
-            confirmations >= 1_000_000 -> "%.1fM".format(confirmations / 1_000_000.0)
-            confirmations >= 1_000 -> "%.1fK".format(confirmations / 1_000.0)
+            confirmations >= 1_000_000 -> formatDecimal(confirmations / 1_000_000.0, 1) + "M"
+            confirmations >= 1_000 -> formatDecimal(confirmations / 1_000.0, 1) + "K"
             else -> confirmations.toString()
         }
     }
@@ -172,7 +174,7 @@ data class TransactionRecord(
             return if (confirmations > 0) "Confirmed" else "Pending"
         }
 
-        val now = System.currentTimeMillis()
+        val now = currentTimeMillis()
         val diff = now - timestamp
 
         val seconds = diff / 1000

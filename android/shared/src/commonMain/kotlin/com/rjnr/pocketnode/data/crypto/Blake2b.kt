@@ -1,15 +1,12 @@
 package com.rjnr.pocketnode.data.crypto
 
 import com.rjnr.pocketnode.core.crypto.Blake2b as SharedBlake2b
-import javax.inject.Inject
-import javax.inject.Singleton
 
 /**
  * Blake2b-256 wrapper over the shared multiplatform implementation.
  * BLAKE2b-256 with CKB personalization (#454).
  */
-@Singleton
-class Blake2b @Inject constructor() {
+class Blake2b {
 
     /**
      * Hash input bytes using Blake2b-256 with CKB personalization.
