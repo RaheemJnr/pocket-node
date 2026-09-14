@@ -271,6 +271,8 @@ val byteBuddyAgent: Configuration by configurations.creating
 dependencies {
     byteBuddyAgent("net.bytebuddy:byte-buddy-agent:1.14.17")
 
+    implementation(project(":shared"))
+
     // Core
     implementation(libs.androidx.core.ktx)
     implementation(libs.androidx.lifecycle.runtime.ktx)
