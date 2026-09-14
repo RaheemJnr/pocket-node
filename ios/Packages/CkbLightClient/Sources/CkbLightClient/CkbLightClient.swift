@@ -863,6 +863,31 @@ public func fetchHeader(hash: String)throws  -> String  {
 })
 }
 /**
+ * Live cells matching a JSON search key, as a JSON page (`order`: "asc"/"desc").
+ */
+public func getCells(searchKeyJson: String, order: String, limit: Int32, cursor: String)throws  -> String  {
+    return try  FfiConverterString.lift(try rustCallWithError(FfiConverterTypeLightClientError_lift) {
+        uniffiCallStatus in
+    uniffi_ckb_light_client_lib_fn_func_get_cells(
+        FfiConverterString.lower(searchKeyJson),
+        FfiConverterString.lower(order),
+        FfiConverterInt32.lower(limit),
+        FfiConverterString.lower(cursor),uniffiCallStatus
+    )
+})
+}
+/**
+ * Total capacity of the cells matching a JSON search key, as a JSON string.
+ */
+public func getCellsCapacity(searchKeyJson: String)throws  -> String  {
+    return try  FfiConverterString.lift(try rustCallWithError(FfiConverterTypeLightClientError_lift) {
+        uniffiCallStatus in
+    uniffi_ckb_light_client_lib_fn_func_get_cells_capacity(
+        FfiConverterString.lower(searchKeyJson),uniffiCallStatus
+    )
+})
+}
+/**
  * Genesis block as a JSON string.
  */
 public func getGenesisBlock()throws  -> String  {
@@ -935,6 +960,20 @@ public func getTipHeader()throws  -> String  {
     return try  FfiConverterString.lift(try rustCallWithError(FfiConverterTypeLightClientError_lift) {
         uniffiCallStatus in
     uniffi_ckb_light_client_lib_fn_func_get_tip_header(uniffiCallStatus
+    )
+})
+}
+/**
+ * Transactions matching a JSON search key, as a JSON page (`order`: "asc"/"desc").
+ */
+public func getTransactions(searchKeyJson: String, order: String, limit: Int32, cursor: String)throws  -> String  {
+    return try  FfiConverterString.lift(try rustCallWithError(FfiConverterTypeLightClientError_lift) {
+        uniffiCallStatus in
+    uniffi_ckb_light_client_lib_fn_func_get_transactions(
+        FfiConverterString.lower(searchKeyJson),
+        FfiConverterString.lower(order),
+        FfiConverterInt32.lower(limit),
+        FfiConverterString.lower(cursor),uniffiCallStatus
     )
 })
 }
@@ -1037,6 +1076,12 @@ private let initializationResult: InitializationResult = {
     if (uniffi_ckb_light_client_lib_checksum_func_fetch_header() != 32749) {
         return InitializationResult.apiChecksumMismatch
     }
+    if (uniffi_ckb_light_client_lib_checksum_func_get_cells() != 6945) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_ckb_light_client_lib_checksum_func_get_cells_capacity() != 6696) {
+        return InitializationResult.apiChecksumMismatch
+    }
     if (uniffi_ckb_light_client_lib_checksum_func_get_genesis_block() != 18480) {
         return InitializationResult.apiChecksumMismatch
     }
@@ -1056,6 +1101,9 @@ private let initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_ckb_light_client_lib_checksum_func_get_tip_header() != 11636) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_ckb_light_client_lib_checksum_func_get_transactions() != 62226) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_ckb_light_client_lib_checksum_func_init_light_client() != 36491) {

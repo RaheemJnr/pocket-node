@@ -167,3 +167,31 @@ pub fn set_scripts(scripts_json: String, command: i32) -> Result<(), LightClient
 pub fn get_scripts() -> Result<String, LightClientError> {
     query::get_scripts().map_err(Into::into)
 }
+
+/// Live cells matching a JSON search key, as a JSON page (`order`: "asc"/"desc").
+#[uniffi::export]
+pub fn get_cells(
+    search_key_json: String,
+    order: String,
+    limit: i32,
+    cursor: String,
+) -> Result<String, LightClientError> {
+    query::get_cells(&search_key_json, &order, limit, &cursor).map_err(Into::into)
+}
+
+/// Transactions matching a JSON search key, as a JSON page (`order`: "asc"/"desc").
+#[uniffi::export]
+pub fn get_transactions(
+    search_key_json: String,
+    order: String,
+    limit: i32,
+    cursor: String,
+) -> Result<String, LightClientError> {
+    query::get_transactions(&search_key_json, &order, limit, &cursor).map_err(Into::into)
+}
+
+/// Total capacity of the cells matching a JSON search key, as a JSON string.
+#[uniffi::export]
+pub fn get_cells_capacity(search_key_json: String) -> Result<String, LightClientError> {
+    query::get_cells_capacity(&search_key_json).map_err(Into::into)
+}

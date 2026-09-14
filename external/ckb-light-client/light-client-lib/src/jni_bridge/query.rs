@@ -6,14 +6,11 @@
 use super::panic_guard::guard_jni;
 use super::types::*;
 use crate::bridge_core::query as bridge_query;
-use crate::service::{
-    Cell, CellType, CellsCapacity, FetchStatus, Pagination, ScriptType, SearchKey, Tx, TxWithCell,
-};
-use crate::storage::{extract_raw_data, Direction, IteratorMode, Key, KeyPrefix};
+use crate::service::FetchStatus;
 use crate::verify::verify_tx;
-use ckb_jsonrpc_types::{JsonBytes, Transaction};
+use ckb_jsonrpc_types::Transaction;
 use ckb_systemtime::unix_time_as_millis;
-use ckb_types::{core, packed, prelude::{*, IntoHeaderView, IntoTransactionView}, H256};
+use ckb_types::{packed, prelude::{*, IntoHeaderView, IntoTransactionView}, H256};
 use jni::objects::{JClass, JString};
 use jni::sys::jstring;
 use jni::JNIEnv;
@@ -57,6 +54,15 @@ fn jstring_to_string(env: &mut JNIEnv, value: &JString, context: &str) -> Option
             error!("{}: failed to read string argument: {}", context, e);
             None
         }
+    }
+}
+
+/// Helper to read an optional `JString` argument, treating an unreadable value
+/// as an empty string.
+fn optional_jstring(env: &mut JNIEnv, value: &JString) -> String {
+    match env.get_string(value) {
+        Ok(s) => s.into(),
+        Err(_) => String::new(),
     }
 }
 
@@ -265,137 +271,22 @@ pub extern "C" fn Java_com_nervosnetwork_ckblightclient_LightClientNative_native
     cursor_jstr: JString,
 ) -> jstring {
     guard_jni(std::ptr::null_mut(), move || {
-    check_running!(env);
+        let search_key_str = match jstring_to_string(&mut env, &search_key_json, "nativeGetCells") {
+            Some(s) => s,
+            None => return ptr::null_mut(),
+        };
+        let order_str = match jstring_to_string(&mut env, &order_jstr, "nativeGetCells") {
+            Some(s) => s,
+            None => return ptr::null_mut(),
+        };
+        // A missing/unreadable cursor means "first page", matching the
+        // historical behaviour of this export.
+        let cursor_str = optional_jstring(&mut env, &cursor_jstr);
 
-    let search_key_str: String = match env.get_string(&search_key_json) {
-        Ok(s) => s.into(),
-        Err(e) => {
-            error!("Failed to get search_key string: {}", e);
-            return ptr::null_mut();
+        match bridge_query::get_cells(&search_key_str, &order_str, limit, &cursor_str) {
+            Ok(json) => json_to_jstring(&mut env, &json),
+            Err(_) => ptr::null_mut(),
         }
-    };
-
-    let search_key: SearchKey = match serde_json::from_str(&search_key_str) {
-        Ok(s) => s,
-        Err(e) => {
-            error!("Failed to parse search_key JSON: {}", e);
-            return ptr::null_mut();
-        }
-    };
-
-    let order_str: String = match env.get_string(&order_jstr) {
-        Ok(s) => s.into(),
-        Err(e) => {
-            error!("Failed to get order string: {}", e);
-            return ptr::null_mut();
-        }
-    };
-
-    let direction = if order_str == "asc" {
-        Direction::Forward
-    } else {
-        Direction::Reverse
-    };
-
-    let cursor_str: String = match env.get_string(&cursor_jstr) {
-        Ok(s) => s.into(),
-        Err(_) => "".to_string(),
-    };
-
-    let swc = match STORAGE_WITH_DATA.get() {
-        Some(s) => s,
-        None => {
-            error!("Storage not initialized");
-            return ptr::null_mut();
-        }
-    };
-
-    // Build prefix based on script type (use Cell prefix, not Tx prefix)
-    let mut prefix = match search_key.script_type {
-        ScriptType::Lock => vec![KeyPrefix::CellLockScript as u8],
-        ScriptType::Type => vec![KeyPrefix::CellTypeScript as u8],
-    };
-    let script: packed::Script = search_key.script.clone().into();
-    prefix.extend_from_slice(extract_raw_data(&script).as_slice());
-
-    // Determine from_key based on cursor
-    let (from_key, skip): (Vec<u8>, usize) = if cursor_str.is_empty() {
-        if matches!(direction, Direction::Forward) {
-            (prefix.clone(), 0)
-        } else {
-            let mut key = prefix.clone();
-            key.extend(vec![0xff; 100]); // Max key for reverse iteration
-            (key, 0)
-        }
-    } else {
-        // Cursor round-trip fix: `last_cursor` is emitted as a JsonBytes, which
-        // reaches us as a bare `0x..` hex string. serde_json::from_str on the
-        // raw hex fails (it wants a QUOTED JSON string) and silently fell back
-        // to `prefix`, so every page-2 fetch returned empty and reads capped at
-        // 100 items. Wrap it as the JSON string JsonBytes deserializes from.
-        match serde_json::from_str::<JsonBytes>(&format!("\"{}\"", cursor_str)) {
-            Ok(cursor) => (cursor.as_bytes().to_vec(), 1),
-            Err(_) => (prefix.clone(), 0),
-        }
-    };
-
-    let mode = IteratorMode::From(&from_key, direction);
-    let items = swc.storage().iterator_collect(mode, |(key, _)| key.starts_with(&prefix));
-    let iter = items.into_iter().skip(skip);
-
-    let mut last_key = Vec::new();
-    let cells: Vec<Cell> = iter
-        .filter_map(|(key, value)| {
-            let tx_hash = packed::Byte32::from_slice(&value).ok()?;
-            let output_index = u32::from_be_bytes(
-                key[key.len() - 4..]
-                    .try_into()
-                    .ok()?
-            );
-
-            // Get the transaction to extract output details
-            let tx_data = swc.storage().get(Key::TxHash(&tx_hash).into_vec()).ok()??;
-            let tx = packed::Transaction::from_slice(&tx_data[12..]).ok()?;
-
-            let output = tx.raw().outputs().get(output_index as usize)?;
-            let output_data = tx.raw().outputs_data().get(output_index as usize);
-
-            // Extract block number from key
-            // Key structure: prefix + script_data + block_number(8) + tx_index(4) + output_index(4)
-            let key_len = key.len();
-            let block_number = u64::from_be_bytes(
-                key[key_len - 16..key_len - 8]
-                    .try_into()
-                    .ok()?
-            );
-            let tx_index = u32::from_be_bytes(
-                key[key_len - 8..key_len - 4]
-                    .try_into()
-                    .ok()?
-            );
-
-            last_key = key.to_vec();
-
-            Some(Cell {
-                output: output.into(),
-                output_data: output_data.map(|d| JsonBytes::from_bytes(d.raw_data())),
-                out_point: ckb_jsonrpc_types::OutPoint {
-                    tx_hash: tx_hash.unpack(),
-                    index: output_index.into(),
-                },
-                block_number: block_number.into(),
-                tx_index: tx_index.into(),
-            })
-        })
-        .take(limit.max(0) as usize)
-        .collect();
-
-    let result = Pagination {
-        objects: cells,
-        last_cursor: JsonBytes::from_vec(last_key),
-    };
-
-    to_jstring(&mut env, &result)
     })
 }
 
@@ -409,230 +300,21 @@ pub extern "C" fn Java_com_nervosnetwork_ckblightclient_LightClientNative_native
     cursor_jstr: JString,
 ) -> jstring {
     guard_jni(std::ptr::null_mut(), move || {
-
-    check_running!(env);
-
-    let search_key_str: String = match env.get_string(&search_key_json) {
-        Ok(s) => s.into(),
-        Err(e) => {
-            error!("Failed to get search_key string: {}", e);
-            return ptr::null_mut();
-        }
-    };
-
-    let search_key: SearchKey = match serde_json::from_str(&search_key_str) {
-        Ok(s) => s,
-        Err(e) => {
-            error!("Failed to parse search_key JSON: {}", e);
-            return ptr::null_mut();
-        }
-    };
-
-    let order_str: String = match env.get_string(&order_jstr) {
-        Ok(s) => s.into(),
-        Err(e) => {
-            error!("Failed to get order string: {}", e);
-            return ptr::null_mut();
-        }
-    };
-
-    let direction = if order_str == "asc" {
-        Direction::Forward
-    } else {
-        Direction::Reverse
-    };
-
-    let cursor_str: String = match env.get_string(&cursor_jstr) {
-        Ok(s) => s.into(),
-        Err(_) => "".to_string(),
-    };
-
-    let swc = match STORAGE_WITH_DATA.get() {
-        Some(s) => s,
-        None => {
-            error!("Storage not initialized");
-            return ptr::null_mut();
-        }
-    };
-
-    // Build prefix based on script type
-    let mut prefix = match search_key.script_type {
-        ScriptType::Lock => vec![KeyPrefix::TxLockScript as u8],
-        ScriptType::Type => vec![KeyPrefix::TxTypeScript as u8],
-    };
-    let script: packed::Script = search_key.script.clone().into();
-    prefix.extend_from_slice(extract_raw_data(&script).as_slice());
-
-    // Determine from_key
-    let (from_key, skip): (Vec<u8>, usize) = if cursor_str.is_empty() {
-        if matches!(direction, Direction::Forward) {
-            (prefix.clone(), 0)
-        } else {
-            let mut key = prefix.clone();
-            key.extend(vec![0xff; 100]); // Max key
-            (key, 0)
-        }
-    } else {
-        // Cursor round-trip fix: `last_cursor` is emitted as a JsonBytes, which
-        // reaches us as a bare `0x..` hex string. serde_json::from_str on the
-        // raw hex fails (it wants a QUOTED JSON string) and silently fell back
-        // to `prefix`, so every page-2 fetch returned empty and reads capped at
-        // 100 items. Wrap it as the JSON string JsonBytes deserializes from.
-        match serde_json::from_str::<JsonBytes>(&format!("\"{}\"", cursor_str)) {
-            Ok(cursor) => (cursor.as_bytes().to_vec(), 1),
-            Err(_) => (prefix.clone(), 0),
-        }
-    };
-
-    let mode = IteratorMode::From(&from_key, direction);
-    let items = swc.storage().iterator_collect(mode, |(key, _)| key.starts_with(&prefix));
-    let iter = items.into_iter().skip(skip);
-
-    let mut last_key = Vec::new();
-    let txs: Vec<Tx> = iter
-        .filter_map(|(key, value)| {
-            let tx_hash = packed::Byte32::from_slice(&value).ok()?;
-            let tx = packed::Transaction::from_slice(
-                &swc.storage()
-                    .get(Key::TxHash(&tx_hash).into_vec())
-                    .ok()??[12..],
-            )
-            .ok()?;
-
-            let block_number = u64::from_be_bytes(
-                key[key.len() - 17..key.len() - 9]
-                    .try_into()
-                    .ok()?
-            );
-            let tx_index = u32::from_be_bytes(
-                key[key.len() - 9..key.len() - 5]
-                    .try_into()
-                    .ok()?
-            );
-            let io_index = u32::from_be_bytes(
-                key[key.len() - 5..key.len() - 1]
-                    .try_into()
-                    .ok()?
-            );
-            let io_type = if *key.last()? == 0 {
-                CellType::Input
-            } else {
-                CellType::Output
+        let search_key_str =
+            match jstring_to_string(&mut env, &search_key_json, "nativeGetTransactions") {
+                Some(s) => s,
+                None => return ptr::null_mut(),
             };
+        let order_str = match jstring_to_string(&mut env, &order_jstr, "nativeGetTransactions") {
+            Some(s) => s,
+            None => return ptr::null_mut(),
+        };
+        let cursor_str = optional_jstring(&mut env, &cursor_jstr);
 
-            let io_capacity = if io_type == CellType::Input {
-                // For input, io_index indexes into the inputs array; the spent
-                // cell's capacity lives in the output that created it, so we
-                // resolve it from the previous transaction.
-                let input = tx.raw().inputs().get(io_index as usize)?;
-                let out_point = input.previous_output();
-                let prev_index: u32 = out_point.index().unpack();
-                let prev_hash: H256 = out_point.tx_hash().unpack();
-                let cur_hash: H256 = tx_hash.unpack();
-
-                // The Ok(None) arm below is a near-unreachable defensive guard,
-                // NOT the source of wrong activity amounts. `filter_block`
-                // (storage/db/native.rs) only writes an input's index entry
-                // inside `if let Some(prev_tx) = self.get_transaction(prev_hash)`
-                // — it resolves the spent cell's lock from the locally-stored
-                // previous tx to decide the input is ours — and nothing prunes
-                // stored txs (the only delete is reorg rollback_to_block). So
-                // whenever an input IS indexed, its previous tx is in storage
-                // permanently, and this lookup resolves. Ok(None) can therefore
-                // only happen on DB corruption or a mid-read reorg; we log and
-                // drop that row rather than trust a bogus capacity.
-                //
-                // The genuine amount error lives at the WRITE layer, upstream of
-                // this code and unfixable here: a cell funded BEFORE the sync
-                // start block is never in storage, so filter_block never matches
-                // or indexes the input that spends it. A tx mixing such a
-                // pre-window input with an in-window output to us then shows only
-                // the output, so its net looks positive and — because the Kotlin
-                // side classifies direction by net sign — a send can render as a
-                // receive. The spent cell's lock is genuinely unknowable from
-                // local data, so no computation here recovers it. The remedy is
-                // sync COVERAGE: sync from at/before the wallet's first funding
-                // block (the Custom height option) so no cell is ever pre-window
-                // and every amount is correct by construction. See
-                // docs/SYNC_COVERAGE_AND_AMOUNTS.md.
-                //
-                // The malformed-data arm reports 0 (behavior preserved); both
-                // arms log so anything unexpected is diagnosable in logcat.
-                let prev_tx_bytes = match swc
-                    .storage()
-                    .get(Key::TxHash(&out_point.tx_hash()).into_vec())
-                {
-                    Ok(Some(bytes)) => bytes,
-                    Ok(None) => {
-                        warn!(
-                            "nativeGetTransactions: indexed input references prev tx {:#x} \
-                             not in storage (unexpected: DB corruption or mid-read reorg, since \
-                             filter_block only indexes inputs whose prev tx it stored); \
-                             input {}:{} of tx {:#x} dropped",
-                            prev_hash, prev_index, io_index, cur_hash
-                        );
-                        return None;
-                    }
-                    Err(e) => {
-                        error!(
-                            "nativeGetTransactions: storage error resolving input capacity \
-                             for tx {:#x}: {}",
-                            cur_hash, e
-                        );
-                        return None;
-                    }
-                };
-                prev_tx_bytes
-                    .get(12..) // Skip block number (8) and tx index (4) in Value::Transaction
-                    .and_then(|data| {
-                        let prev_tx = packed::Transaction::from_slice(data).ok()?;
-                        prev_tx.raw().outputs().get(prev_index as usize)
-                    })
-                    .map(|output: packed::CellOutput| Unpack::<core::Capacity>::unpack(&output.capacity()).as_u64())
-                    .unwrap_or_else(|| {
-                        warn!(
-                            "nativeGetTransactions: malformed prev tx {:#x} for input {}:{} \
-                             of tx {:#x}; capacity reported as 0",
-                            prev_hash, prev_index, io_index, cur_hash
-                        );
-                        0
-                    })
-            } else {
-                // For output, read capacity directly from the current transaction.
-                let cur_hash: H256 = tx_hash.unpack();
-                tx.raw()
-                    .outputs()
-                    .get(io_index as usize)
-                    .map(|output: packed::CellOutput| Unpack::<core::Capacity>::unpack(&output.capacity()).as_u64())
-                    .unwrap_or_else(|| {
-                        warn!(
-                            "nativeGetTransactions: output io_index {} out of range for tx {:#x}; \
-                             capacity reported as 0",
-                            io_index, cur_hash
-                        );
-                        0
-                    })
-            };
-
-            last_key = key.to_vec();
-            Some(Tx::Ungrouped(TxWithCell {
-                transaction: tx.into_view().into(),
-                block_number: block_number.into(),
-                tx_index: tx_index.into(),
-                io_index: io_index.into(),
-                io_type,
-                io_capacity: io_capacity.into(),
-            }))
-        })
-        .take(limit.max(0) as usize)
-        .collect();
-
-    let result = Pagination {
-        objects: txs,
-        last_cursor: JsonBytes::from_vec(last_key),
-    };
-
-    to_jstring(&mut env, &result)
+        match bridge_query::get_transactions(&search_key_str, &order_str, limit, &cursor_str) {
+            Ok(json) => json_to_jstring(&mut env, &json),
+            Err(_) => ptr::null_mut(),
+        }
     })
 }
 
@@ -643,81 +325,16 @@ pub extern "C" fn Java_com_nervosnetwork_ckblightclient_LightClientNative_native
     search_key_json: JString,
 ) -> jstring {
     guard_jni(std::ptr::null_mut(), move || {
+        let search_key_str =
+            match jstring_to_string(&mut env, &search_key_json, "nativeGetCellsCapacity") {
+                Some(s) => s,
+                None => return ptr::null_mut(),
+            };
 
-    check_running!(env);
-
-    let search_key_str: String = match env.get_string(&search_key_json) {
-        Ok(s) => s.into(),
-        Err(e) => {
-            error!("Failed to get search_key string: {}", e);
-            return ptr::null_mut();
+        match bridge_query::get_cells_capacity(&search_key_str) {
+            Ok(json) => json_to_jstring(&mut env, &json),
+            Err(_) => ptr::null_mut(),
         }
-    };
-
-    let search_key: SearchKey = match serde_json::from_str(&search_key_str) {
-        Ok(s) => s,
-        Err(e) => {
-            error!("Failed to parse search_key JSON: {}", e);
-            return ptr::null_mut();
-        }
-    };
-
-    let swc = match STORAGE_WITH_DATA.get() {
-        Some(s) => s,
-        None => {
-            error!("Storage not initialized");
-            return ptr::null_mut();
-        }
-    };
-
-    // Build prefix based on script type
-    let mut prefix = match search_key.script_type {
-        ScriptType::Lock => vec![KeyPrefix::CellLockScript as u8],
-        ScriptType::Type => vec![KeyPrefix::CellTypeScript as u8],
-    };
-    let script: packed::Script = search_key.script.clone().into();
-    prefix.extend_from_slice(extract_raw_data(&script).as_slice());
-
-    // Iterate over cells and sum capacity
-    let mode = IteratorMode::From(prefix.as_ref(), Direction::Forward);
-    let items = swc.storage().iterator_collect(mode, |(key, _)| key.starts_with(&prefix));
-
-    let capacity: u64 = items
-        .into_iter()
-        .filter_map(|(key, value)| {
-            let tx_hash = packed::Byte32::from_slice(&value).ok()?;
-            let output_index = u32::from_be_bytes(
-                key[key.len() - 4..]
-                    .try_into()
-                    .ok()?
-            );
-
-            let tx = packed::Transaction::from_slice(
-                &swc.storage()
-                    .get(Key::TxHash(&tx_hash).into_vec())
-                    .ok()??[12..],
-            )
-            .ok()?;
-            let output = tx
-                .raw()
-                .outputs()
-                .get(output_index as usize)?;
-
-            Some(Unpack::<core::Capacity>::unpack(&output.capacity()).as_u64())
-        })
-        .sum();
-
-    // Get tip header for block info
-    let tip_header = swc.storage().get_tip_header();
-    let tip_view = tip_header.into_view();
-
-    let result = CellsCapacity {
-        capacity: capacity.into(),
-        block_hash: tip_view.hash().unpack(),
-        block_number: tip_view.number().into(),
-    };
-
-    to_jstring(&mut env, &result)
     })
 }
 

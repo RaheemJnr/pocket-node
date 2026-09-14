@@ -5,15 +5,18 @@
 
 use super::error::BridgeError;
 use super::types::*;
-use crate::service::{FetchStatus, LocalNode, RemoteNode, ScriptStatus, ScriptType, SetScriptsCommand};
-use crate::storage::{self, Key};
-use ckb_jsonrpc_types::{BlockView, HeaderView};
+use crate::service::{
+    Cell, CellType, CellsCapacity, FetchStatus, LocalNode, Pagination, RemoteNode, ScriptStatus,
+    ScriptType, SearchKey, SetScriptsCommand, Tx, TxWithCell,
+};
+use crate::storage::{self, extract_raw_data, Direction, IteratorMode, Key, KeyPrefix};
+use ckb_jsonrpc_types::{BlockView, HeaderView, JsonBytes};
 use ckb_network::extract_peer_id;
 use ckb_systemtime::unix_time_as_millis;
 use ckb_traits::HeaderProvider;
 use ckb_types::{
-    packed,
-    prelude::{IntoBlockView, IntoHeaderView, *},
+    core, packed,
+    prelude::{IntoBlockView, IntoHeaderView, IntoTransactionView, *},
     H256,
 };
 use log::{debug, error, warn};
@@ -380,4 +383,351 @@ pub fn get_scripts() -> Result<String, BridgeError> {
         .collect();
 
     to_json(&scripts)
+}
+
+/// Resolve the iteration direction the JNI/Swift callers pass as `"asc"`/`"desc"`.
+fn direction_of(order: &str) -> Direction {
+    if order == "asc" {
+        Direction::Forward
+    } else {
+        Direction::Reverse
+    }
+}
+
+/// Build the storage key prefix a search key scans under.
+fn search_prefix(search_key: &SearchKey, lock_prefix: KeyPrefix, type_prefix: KeyPrefix) -> Vec<u8> {
+    let mut prefix = match search_key.script_type {
+        ScriptType::Lock => vec![lock_prefix as u8],
+        ScriptType::Type => vec![type_prefix as u8],
+    };
+    let script: packed::Script = search_key.script.clone().into();
+    prefix.extend_from_slice(extract_raw_data(&script).as_slice());
+    prefix
+}
+
+/// Starting key and skip count for a paginated scan.
+fn from_key_for(prefix: &[u8], direction: Direction, cursor_str: &str) -> (Vec<u8>, usize) {
+    if cursor_str.is_empty() {
+        if matches!(direction, Direction::Forward) {
+            (prefix.to_vec(), 0)
+        } else {
+            let mut key = prefix.to_vec();
+            key.extend(vec![0xff; 100]); // Max key for reverse iteration
+            (key, 0)
+        }
+    } else {
+        // Cursor round-trip fix: `last_cursor` is emitted as a JsonBytes, which
+        // reaches us as a bare `0x..` hex string. serde_json::from_str on the
+        // raw hex fails (it wants a QUOTED JSON string) and silently fell back
+        // to `prefix`, so every page-2 fetch returned empty and reads capped at
+        // 100 items. Wrap it as the JSON string JsonBytes deserializes from.
+        match serde_json::from_str::<JsonBytes>(&format!("\"{}\"", cursor_str)) {
+            Ok(cursor) => (cursor.as_bytes().to_vec(), 1),
+            Err(_) => (prefix.to_vec(), 0),
+        }
+    }
+}
+
+/// Parse a `SearchKey` JSON argument.
+fn parse_search_key(search_key_str: &str) -> Result<SearchKey, BridgeError> {
+    serde_json::from_str(search_key_str).map_err(|e| {
+        error!("Failed to parse search_key JSON: {}", e);
+        BridgeError::Internal(format!("failed to parse search_key JSON: {}", e))
+    })
+}
+
+/// Live cells matching a search key, as a JSON `Pagination<Cell>`.
+pub fn get_cells(
+    search_key_str: &str,
+    order: &str,
+    limit: i32,
+    cursor_str: &str,
+) -> Result<String, BridgeError> {
+    ensure_running()?;
+
+    let search_key = parse_search_key(search_key_str)?;
+    let direction = direction_of(order);
+
+    let swc = STORAGE_WITH_DATA.get().ok_or_else(|| {
+        error!("Storage not initialized");
+        BridgeError::Storage("storage not initialized".to_owned())
+    })?;
+
+    // Build prefix based on script type (use Cell prefix, not Tx prefix)
+    let prefix = search_prefix(
+        &search_key,
+        KeyPrefix::CellLockScript,
+        KeyPrefix::CellTypeScript,
+    );
+
+    // Determine from_key based on cursor
+    let (from_key, skip) = from_key_for(&prefix, direction, cursor_str);
+
+    let mode = IteratorMode::From(&from_key, direction);
+    let items = swc
+        .storage()
+        .iterator_collect(mode, |(key, _)| key.starts_with(&prefix));
+    let iter = items.into_iter().skip(skip);
+
+    let mut last_key = Vec::new();
+    let cells: Vec<Cell> = iter
+        .filter_map(|(key, value)| {
+            let tx_hash = packed::Byte32::from_slice(&value).ok()?;
+            let output_index = u32::from_be_bytes(key[key.len() - 4..].try_into().ok()?);
+
+            // Get the transaction to extract output details
+            let tx_data = swc.storage().get(Key::TxHash(&tx_hash).into_vec()).ok()??;
+            let tx = packed::Transaction::from_slice(&tx_data[12..]).ok()?;
+
+            let output = tx.raw().outputs().get(output_index as usize)?;
+            let output_data = tx.raw().outputs_data().get(output_index as usize);
+
+            // Extract block number from key
+            // Key structure: prefix + script_data + block_number(8) + tx_index(4) + output_index(4)
+            let key_len = key.len();
+            let block_number = u64::from_be_bytes(key[key_len - 16..key_len - 8].try_into().ok()?);
+            let tx_index = u32::from_be_bytes(key[key_len - 8..key_len - 4].try_into().ok()?);
+
+            last_key = key.to_vec();
+
+            Some(Cell {
+                output: output.into(),
+                output_data: output_data.map(|d| JsonBytes::from_bytes(d.raw_data())),
+                out_point: ckb_jsonrpc_types::OutPoint {
+                    tx_hash: tx_hash.unpack(),
+                    index: output_index.into(),
+                },
+                block_number: block_number.into(),
+                tx_index: tx_index.into(),
+            })
+        })
+        .take(limit.max(0) as usize)
+        .collect();
+
+    let result = Pagination {
+        objects: cells,
+        last_cursor: JsonBytes::from_vec(last_key),
+    };
+
+    to_json(&result)
+}
+
+/// Transactions matching a search key, as a JSON `Pagination<Tx>`.
+pub fn get_transactions(
+    search_key_str: &str,
+    order: &str,
+    limit: i32,
+    cursor_str: &str,
+) -> Result<String, BridgeError> {
+    ensure_running()?;
+
+    let search_key = parse_search_key(search_key_str)?;
+    let direction = direction_of(order);
+
+    let swc = STORAGE_WITH_DATA.get().ok_or_else(|| {
+        error!("Storage not initialized");
+        BridgeError::Storage("storage not initialized".to_owned())
+    })?;
+
+    // Build prefix based on script type
+    let prefix = search_prefix(&search_key, KeyPrefix::TxLockScript, KeyPrefix::TxTypeScript);
+
+    // Determine from_key
+    let (from_key, skip) = from_key_for(&prefix, direction, cursor_str);
+
+    let mode = IteratorMode::From(&from_key, direction);
+    let items = swc
+        .storage()
+        .iterator_collect(mode, |(key, _)| key.starts_with(&prefix));
+    let iter = items.into_iter().skip(skip);
+
+    let mut last_key = Vec::new();
+    let txs: Vec<Tx> = iter
+        .filter_map(|(key, value)| {
+            let tx_hash = packed::Byte32::from_slice(&value).ok()?;
+            let tx = packed::Transaction::from_slice(
+                &swc.storage().get(Key::TxHash(&tx_hash).into_vec()).ok()??[12..],
+            )
+            .ok()?;
+
+            let block_number =
+                u64::from_be_bytes(key[key.len() - 17..key.len() - 9].try_into().ok()?);
+            let tx_index = u32::from_be_bytes(key[key.len() - 9..key.len() - 5].try_into().ok()?);
+            let io_index = u32::from_be_bytes(key[key.len() - 5..key.len() - 1].try_into().ok()?);
+            let io_type = if *key.last()? == 0 {
+                CellType::Input
+            } else {
+                CellType::Output
+            };
+
+            let io_capacity = if io_type == CellType::Input {
+                // For input, io_index indexes into the inputs array; the spent
+                // cell's capacity lives in the output that created it, so we
+                // resolve it from the previous transaction.
+                let input = tx.raw().inputs().get(io_index as usize)?;
+                let out_point = input.previous_output();
+                let prev_index: u32 = out_point.index().unpack();
+                let prev_hash: H256 = out_point.tx_hash().unpack();
+                let cur_hash: H256 = tx_hash.unpack();
+
+                // The Ok(None) arm below is a near-unreachable defensive guard,
+                // NOT the source of wrong activity amounts. `filter_block`
+                // (storage/db/native.rs) only writes an input's index entry
+                // inside `if let Some(prev_tx) = self.get_transaction(prev_hash)`
+                // — it resolves the spent cell's lock from the locally-stored
+                // previous tx to decide the input is ours — and nothing prunes
+                // stored txs (the only delete is reorg rollback_to_block). So
+                // whenever an input IS indexed, its previous tx is in storage
+                // permanently, and this lookup resolves. Ok(None) can therefore
+                // only happen on DB corruption or a mid-read reorg; we log and
+                // drop that row rather than trust a bogus capacity.
+                //
+                // The genuine amount error lives at the WRITE layer, upstream of
+                // this code and unfixable here: a cell funded BEFORE the sync
+                // start block is never in storage, so filter_block never matches
+                // or indexes the input that spends it. A tx mixing such a
+                // pre-window input with an in-window output to us then shows only
+                // the output, so its net looks positive and — because the Kotlin
+                // side classifies direction by net sign — a send can render as a
+                // receive. The spent cell's lock is genuinely unknowable from
+                // local data, so no computation here recovers it. The remedy is
+                // sync COVERAGE: sync from at/before the wallet's first funding
+                // block (the Custom height option) so no cell is ever pre-window
+                // and every amount is correct by construction. See
+                // docs/SYNC_COVERAGE_AND_AMOUNTS.md.
+                //
+                // The malformed-data arm reports 0 (behavior preserved); both
+                // arms log so anything unexpected is diagnosable in logcat.
+                let prev_tx_bytes = match swc
+                    .storage()
+                    .get(Key::TxHash(&out_point.tx_hash()).into_vec())
+                {
+                    Ok(Some(bytes)) => bytes,
+                    Ok(None) => {
+                        warn!(
+                            "get_transactions: indexed input references prev tx {:#x} \
+                             not in storage (unexpected: DB corruption or mid-read reorg, since \
+                             filter_block only indexes inputs whose prev tx it stored); \
+                             input {}:{} of tx {:#x} dropped",
+                            prev_hash, prev_index, io_index, cur_hash
+                        );
+                        return None;
+                    }
+                    Err(e) => {
+                        error!(
+                            "get_transactions: storage error resolving input capacity \
+                             for tx {:#x}: {}",
+                            cur_hash, e
+                        );
+                        return None;
+                    }
+                };
+                prev_tx_bytes
+                    .get(12..) // Skip block number (8) and tx index (4) in Value::Transaction
+                    .and_then(|data| {
+                        let prev_tx = packed::Transaction::from_slice(data).ok()?;
+                        prev_tx.raw().outputs().get(prev_index as usize)
+                    })
+                    .map(|output: packed::CellOutput| {
+                        Unpack::<core::Capacity>::unpack(&output.capacity()).as_u64()
+                    })
+                    .unwrap_or_else(|| {
+                        warn!(
+                            "get_transactions: malformed prev tx {:#x} for input {}:{} \
+                             of tx {:#x}; capacity reported as 0",
+                            prev_hash, prev_index, io_index, cur_hash
+                        );
+                        0
+                    })
+            } else {
+                // For output, read capacity directly from the current transaction.
+                let cur_hash: H256 = tx_hash.unpack();
+                tx.raw()
+                    .outputs()
+                    .get(io_index as usize)
+                    .map(|output: packed::CellOutput| {
+                        Unpack::<core::Capacity>::unpack(&output.capacity()).as_u64()
+                    })
+                    .unwrap_or_else(|| {
+                        warn!(
+                            "get_transactions: output io_index {} out of range for tx {:#x}; \
+                             capacity reported as 0",
+                            io_index, cur_hash
+                        );
+                        0
+                    })
+            };
+
+            last_key = key.to_vec();
+            Some(Tx::Ungrouped(TxWithCell {
+                transaction: tx.into_view().into(),
+                block_number: block_number.into(),
+                tx_index: tx_index.into(),
+                io_index: io_index.into(),
+                io_type,
+                io_capacity: io_capacity.into(),
+            }))
+        })
+        .take(limit.max(0) as usize)
+        .collect();
+
+    let result = Pagination {
+        objects: txs,
+        last_cursor: JsonBytes::from_vec(last_key),
+    };
+
+    to_json(&result)
+}
+
+/// Total capacity of the cells matching a search key, as a JSON `CellsCapacity`.
+pub fn get_cells_capacity(search_key_str: &str) -> Result<String, BridgeError> {
+    ensure_running()?;
+
+    let search_key = parse_search_key(search_key_str)?;
+
+    let swc = STORAGE_WITH_DATA.get().ok_or_else(|| {
+        error!("Storage not initialized");
+        BridgeError::Storage("storage not initialized".to_owned())
+    })?;
+
+    // Build prefix based on script type
+    let prefix = search_prefix(
+        &search_key,
+        KeyPrefix::CellLockScript,
+        KeyPrefix::CellTypeScript,
+    );
+
+    // Iterate over cells and sum capacity
+    let mode = IteratorMode::From(prefix.as_ref(), Direction::Forward);
+    let items = swc
+        .storage()
+        .iterator_collect(mode, |(key, _)| key.starts_with(&prefix));
+
+    let capacity: u64 = items
+        .into_iter()
+        .filter_map(|(key, value)| {
+            let tx_hash = packed::Byte32::from_slice(&value).ok()?;
+            let output_index = u32::from_be_bytes(key[key.len() - 4..].try_into().ok()?);
+
+            let tx = packed::Transaction::from_slice(
+                &swc.storage().get(Key::TxHash(&tx_hash).into_vec()).ok()??[12..],
+            )
+            .ok()?;
+            let output = tx.raw().outputs().get(output_index as usize)?;
+
+            Some(Unpack::<core::Capacity>::unpack(&output.capacity()).as_u64())
+        })
+        .sum();
+
+    // Get tip header for block info
+    let tip_header = swc.storage().get_tip_header();
+    let tip_view = tip_header.into_view();
+
+    let result = CellsCapacity {
+        capacity: capacity.into(),
+        block_hash: tip_view.hash().unpack(),
+        block_number: tip_view.number().into(),
+    };
+
+    to_json(&result)
 }
