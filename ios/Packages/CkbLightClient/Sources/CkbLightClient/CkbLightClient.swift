@@ -487,6 +487,30 @@ fileprivate struct FfiConverterUInt8: FfiConverterPrimitive {
 #if swift(>=5.8)
 @_documentation(visibility: private)
 #endif
+fileprivate struct FfiConverterBool : FfiConverter {
+    typealias FfiType = Int8
+    typealias SwiftType = Bool
+
+    public static func lift(_ value: Int8) throws -> Bool {
+        return value != 0
+    }
+
+    public static func lower(_ value: Bool) -> Int8 {
+        return value ? 1 : 0
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> Bool {
+        return try lift(readInt(&buf))
+    }
+
+    public static func write(_ value: Bool, into buf: inout [UInt8]) {
+        writeInt(&buf, lower(value))
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
 fileprivate struct FfiConverterString: FfiConverter {
     typealias SwiftType = String
     typealias FfiType = RustBuffer
@@ -823,6 +847,10 @@ public func getPeers()throws  -> String  {
 }
 /**
  * Current state (0 = INIT, 1 = RUNNING, 2 = STOPPED).
+ *
+ * Note that 0 is reported both before and after a successful init, since
+ * INIT is the resting state of a client that has not been started. Use
+ * [`is_initialized`] to tell those two apart.
  */
 public func getStatus() -> UInt8  {
     return try!  FfiConverterUInt8.lift(try! rustCall() {
@@ -848,6 +876,9 @@ public func getTipHeader()throws  -> String  {
  * non-empty, overrides the store and network paths from that config with
  * `<data_dir>/store.db` and `<data_dir>/network` — iOS containers move between
  * installs, so the paths cannot be baked into the bundled TOML.
+ *
+ * Blocking: this reads the config from disk, opens the store and starts the
+ * network service, so it can take seconds. Do not call it on the main thread.
  */
 public func initLightClient(configPath: String, dataDir: String, listener: StatusListener?)throws   {try rustCallWithError(FfiConverterTypeLightClientError_lift) {
         uniffiCallStatus in
@@ -857,6 +888,19 @@ public func initLightClient(configPath: String, dataDir: String, listener: Statu
         FfiConverterOptionCallbackInterfaceStatusListener.lower(listener),uniffiCallStatus
     )
 }
+}
+/**
+ * Whether [`init_light_client`] has completed successfully.
+ *
+ * Disambiguates the two meanings of a `get_status()` of 0: not initialized
+ * yet, versus initialized and waiting for [`start_light_client`].
+ */
+public func isInitialized() -> Bool  {
+    return try!  FfiConverterBool.lift(try! rustCall() {
+        uniffiCallStatus in
+    uniffi_ckb_light_client_lib_fn_func_is_initialized(uniffiCallStatus
+    )
+})
 }
 /**
  * Local node info as a JSON string.
@@ -870,6 +914,10 @@ public func localNodeInfo()throws  -> String  {
 }
 /**
  * Transition from INIT to RUNNING.
+ *
+ * Blocking: call it off the main thread along with the rest of the lifecycle
+ * API. It is cheap today, but it is part of the same blocking surface and is
+ * not guaranteed to stay that way.
  */
 public func startLightClient()throws   {try rustCallWithError(FfiConverterTypeLightClientError_lift) {
         uniffiCallStatus in
@@ -879,6 +927,10 @@ public func startLightClient()throws   {try rustCallWithError(FfiConverterTypeLi
 }
 /**
  * Gracefully shut the light client down.
+ *
+ * Blocking: broadcasts exit signals and then waits for every CKB service to
+ * exit, which can take a while when peers are connected. Do not call it on
+ * the main thread.
  */
 public func stopLightClient()throws   {try rustCallWithError(FfiConverterTypeLightClientError_lift) {
         uniffiCallStatus in
@@ -905,22 +957,25 @@ private let initializationResult: InitializationResult = {
     if (uniffi_ckb_light_client_lib_checksum_func_get_peers() != 46096) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_ckb_light_client_lib_checksum_func_get_status() != 24133) {
+    if (uniffi_ckb_light_client_lib_checksum_func_get_status() != 47683) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_ckb_light_client_lib_checksum_func_get_tip_header() != 11636) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_ckb_light_client_lib_checksum_func_init_light_client() != 9762) {
+    if (uniffi_ckb_light_client_lib_checksum_func_init_light_client() != 36491) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_ckb_light_client_lib_checksum_func_is_initialized() != 62081) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_ckb_light_client_lib_checksum_func_local_node_info() != 22703) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_ckb_light_client_lib_checksum_func_start_light_client() != 40398) {
+    if (uniffi_ckb_light_client_lib_checksum_func_start_light_client() != 33644) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_ckb_light_client_lib_checksum_func_stop_light_client() != 5530) {
+    if (uniffi_ckb_light_client_lib_checksum_func_stop_light_client() != 47147) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_ckb_light_client_lib_checksum_method_statuslistener_on_status() != 1869) {

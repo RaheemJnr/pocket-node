@@ -6,7 +6,7 @@
 
 use crate::bridge_core::lifecycle;
 use crate::bridge_core::query;
-use crate::bridge_core::types::{notify_status, STATE_INIT};
+use crate::bridge_core::types::{self, notify_status, STATE_INIT};
 use crate::bridge_core::BridgeError;
 
 /// Receives light-client state changes (0 = INIT, 1 = RUNNING, 2 = STOPPED).
@@ -51,6 +51,9 @@ impl From<BridgeError> for LightClientError {
 /// non-empty, overrides the store and network paths from that config with
 /// `<data_dir>/store.db` and `<data_dir>/network` — iOS containers move between
 /// installs, so the paths cannot be baked into the bundled TOML.
+///
+/// Blocking: this reads the config from disk, opens the store and starts the
+/// network service, so it can take seconds. Do not call it on the main thread.
 #[uniffi::export]
 pub fn init_light_client(
     config_path: String,
@@ -73,21 +76,42 @@ pub fn init_light_client(
 }
 
 /// Transition from INIT to RUNNING.
+///
+/// Blocking: call it off the main thread along with the rest of the lifecycle
+/// API. It is cheap today, but it is part of the same blocking surface and is
+/// not guaranteed to stay that way.
 #[uniffi::export]
 pub fn start_light_client() -> Result<(), LightClientError> {
     lifecycle::start().map_err(Into::into)
 }
 
 /// Gracefully shut the light client down.
+///
+/// Blocking: broadcasts exit signals and then waits for every CKB service to
+/// exit, which can take a while when peers are connected. Do not call it on
+/// the main thread.
 #[uniffi::export]
 pub fn stop_light_client() -> Result<(), LightClientError> {
     lifecycle::stop().map_err(Into::into)
 }
 
 /// Current state (0 = INIT, 1 = RUNNING, 2 = STOPPED).
+///
+/// Note that 0 is reported both before and after a successful init, since
+/// INIT is the resting state of a client that has not been started. Use
+/// [`is_initialized`] to tell those two apart.
 #[uniffi::export]
 pub fn get_status() -> u8 {
     lifecycle::status()
+}
+
+/// Whether [`init_light_client`] has completed successfully.
+///
+/// Disambiguates the two meanings of a `get_status()` of 0: not initialized
+/// yet, versus initialized and waiting for [`start_light_client`].
+#[uniffi::export]
+pub fn is_initialized() -> bool {
+    types::is_initialized()
 }
 
 /// Tip header as a JSON string.
