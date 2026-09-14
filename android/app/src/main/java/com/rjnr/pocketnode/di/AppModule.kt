@@ -5,6 +5,7 @@ import androidx.room.Room
 import androidx.room.RoomDatabase
 import com.rjnr.pocketnode.data.auth.AuthManager
 import com.rjnr.pocketnode.data.auth.PinManager
+import com.rjnr.pocketnode.core.log.Logger
 import com.rjnr.pocketnode.data.crypto.Blake2b
 import com.rjnr.pocketnode.data.database.AppDatabase
 import com.rjnr.pocketnode.data.crypto.KeystoreEncryptionManager
@@ -212,8 +213,9 @@ object AppModule {
     @Singleton
     fun provideCacheManager(
         transactionDao: TransactionDao,
-        balanceCacheDao: BalanceCacheDao
-    ): CacheManager = CacheManager(transactionDao, balanceCacheDao)
+        balanceCacheDao: BalanceCacheDao,
+        logger: Logger,
+    ): CacheManager = CacheManager(transactionDao, balanceCacheDao, logger)
 
     @Provides
     @Singleton
@@ -221,7 +223,8 @@ object AppModule {
         headerCacheDao: HeaderCacheDao,
         daoCellDao: DaoCellDao,
         pendingDaoWithdrawDao: com.rjnr.pocketnode.data.database.dao.PendingDaoWithdrawDao,
-    ): DaoSyncManager = DaoSyncManager(headerCacheDao, daoCellDao, pendingDaoWithdrawDao)
+        logger: Logger,
+    ): DaoSyncManager = DaoSyncManager(headerCacheDao, daoCellDao, pendingDaoWithdrawDao, logger)
 
     @Provides
     @Singleton
@@ -266,7 +269,8 @@ object AppModule {
         lightClient: com.rjnr.pocketnode.data.gateway.LightClientReadOnly,
         subAccountReconciler: com.rjnr.pocketnode.data.wallet.SubAccountReconciler,
         subAccountDiscovery: com.rjnr.pocketnode.data.wallet.SubAccountDiscovery,
-    ): GatewayRepository = GatewayRepository(context, keyManager, walletPreferences, json, transactionBuilder, cacheManager, daoSyncManager, walletMigrationHelper, walletDao, appDatabase, headerCacheDao, syncProgressDao, pendingBroadcastDao, broadcastClient, syncCoordinator, daoHeaderResolver, daoDepositReader, lightClient, subAccountReconciler, subAccountDiscovery)
+        logger: Logger,
+    ): GatewayRepository = GatewayRepository(context, keyManager, walletPreferences, json, transactionBuilder, cacheManager, daoSyncManager, walletMigrationHelper, walletDao, appDatabase, headerCacheDao, syncProgressDao, pendingBroadcastDao, broadcastClient, syncCoordinator, daoHeaderResolver, daoDepositReader, lightClient, subAccountReconciler, subAccountDiscovery, logger)
 
     /**
      * Production activity probe for sub-account discovery (#82 phase 2):

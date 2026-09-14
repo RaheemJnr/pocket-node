@@ -3,6 +3,7 @@ package com.rjnr.pocketnode.data.gateway
 import android.content.Context
 import androidx.room.Room
 import androidx.test.core.app.ApplicationProvider
+import com.rjnr.pocketnode.core.log.NoopLogger
 import com.rjnr.pocketnode.data.database.AppDatabase
 import com.rjnr.pocketnode.data.database.entity.WalletEntity
 import com.rjnr.pocketnode.data.gateway.models.NetworkType
@@ -109,6 +110,7 @@ class SyncCoordinatorCustomBlockTest {
             lightClient = fakeBridge,
             subAccountCandidateDao = db.subAccountCandidateDao(),
             transactionDao = db.transactionDao(),
+            logger = NoopLogger,
         )
     }
 

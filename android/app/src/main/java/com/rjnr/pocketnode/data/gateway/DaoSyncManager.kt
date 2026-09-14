@@ -1,6 +1,6 @@
 package com.rjnr.pocketnode.data.gateway
 
-import android.util.Log
+import com.rjnr.pocketnode.core.log.Logger
 import com.rjnr.pocketnode.data.database.dao.DaoCellDao
 import com.rjnr.pocketnode.data.database.dao.PendingDaoWithdrawDao
 import com.rjnr.pocketnode.data.database.dao.HeaderCacheDao
@@ -16,6 +16,7 @@ class DaoSyncManager @Inject constructor(
     private val headerCacheDao: HeaderCacheDao,
     private val daoCellDao: DaoCellDao,
     private val pendingDaoWithdrawDao: PendingDaoWithdrawDao,
+    private val logger: Logger,
 ) {
     // --- Header cache (permanent — block headers are immutable) ---
 
@@ -25,7 +26,7 @@ class DaoSyncManager @Inject constructor(
         } catch (e: CancellationException) {
             throw e
         } catch (e: Exception) {
-            Log.w(TAG, "Failed to read header cache", e)
+            logger.w(TAG, "Failed to read header cache", e)
             null
         }
     }
@@ -36,7 +37,7 @@ class DaoSyncManager @Inject constructor(
         } catch (e: CancellationException) {
             throw e
         } catch (e: Exception) {
-            Log.w(TAG, "Failed to write header cache", e)
+            logger.w(TAG, "Failed to write header cache", e)
         }
     }
 
@@ -49,7 +50,7 @@ class DaoSyncManager @Inject constructor(
         } catch (e: CancellationException) {
             throw e
         } catch (e: Exception) {
-            Log.w(TAG, "Failed to read active deposits", e)
+            logger.w(TAG, "Failed to read active deposits", e)
             emptyList()
         }
     }
@@ -61,7 +62,7 @@ class DaoSyncManager @Inject constructor(
         } catch (e: CancellationException) {
             throw e
         } catch (e: Exception) {
-            Log.w(TAG, "Failed to read completed deposits", e)
+            logger.w(TAG, "Failed to read completed deposits", e)
             emptyList()
         }
     }
@@ -72,7 +73,7 @@ class DaoSyncManager @Inject constructor(
         } catch (e: CancellationException) {
             throw e
         } catch (e: Exception) {
-            Log.w(TAG, "Failed to read DAO cell", e)
+            logger.w(TAG, "Failed to read DAO cell", e)
             null
         }
     }
@@ -83,7 +84,7 @@ class DaoSyncManager @Inject constructor(
         } catch (e: CancellationException) {
             throw e
         } catch (e: Exception) {
-            Log.w(TAG, "Failed to upsert DAO cell", e)
+            logger.w(TAG, "Failed to upsert DAO cell", e)
         }
     }
 
@@ -93,7 +94,7 @@ class DaoSyncManager @Inject constructor(
         } catch (e: CancellationException) {
             throw e
         } catch (e: Exception) {
-            Log.w(TAG, "Failed to upsert DAO cells", e)
+            logger.w(TAG, "Failed to upsert DAO cells", e)
         }
     }
 
@@ -103,7 +104,7 @@ class DaoSyncManager @Inject constructor(
         } catch (e: CancellationException) {
             throw e
         } catch (e: Exception) {
-            Log.w(TAG, "Failed to update DAO cell status", e)
+            logger.w(TAG, "Failed to update DAO cell status", e)
         }
     }
 
@@ -130,11 +131,11 @@ class DaoSyncManager @Inject constructor(
                     walletId = walletId
                 )
             )
-            Log.d(TAG, "Pending DAO deposit cached: $txHash")
+            logger.d(TAG, "Pending DAO deposit cached: $txHash")
         } catch (e: CancellationException) {
             throw e
         } catch (e: Exception) {
-            Log.w(TAG, "Failed to cache pending deposit", e)
+            logger.w(TAG, "Failed to cache pending deposit", e)
         }
     }
 
@@ -145,11 +146,11 @@ class DaoSyncManager @Inject constructor(
             headerCacheDao.deleteByNetwork(network)
             daoCellDao.deleteByNetwork(network)
             pendingDaoWithdrawDao.deleteByNetwork(network)
-            Log.d(TAG, "DAO caches cleared for $network")
+            logger.d(TAG, "DAO caches cleared for $network")
         } catch (e: CancellationException) {
             throw e
         } catch (e: Exception) {
-            Log.w(TAG, "Failed to clear DAO caches", e)
+            logger.w(TAG, "Failed to clear DAO caches", e)
         }
     }
 
@@ -158,11 +159,11 @@ class DaoSyncManager @Inject constructor(
             headerCacheDao.deleteAll()
             daoCellDao.deleteAll()
             pendingDaoWithdrawDao.deleteAll()
-            Log.d(TAG, "All DAO caches cleared")
+            logger.d(TAG, "All DAO caches cleared")
         } catch (e: CancellationException) {
             throw e
         } catch (e: Exception) {
-            Log.w(TAG, "Failed to clear DAO caches", e)
+            logger.w(TAG, "Failed to clear DAO caches", e)
         }
     }
 

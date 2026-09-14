@@ -1,7 +1,7 @@
 package com.rjnr.pocketnode.data.gateway
 
-import android.util.Log
 import com.nervosnetwork.ckblightclient.LightClientNative
+import com.rjnr.pocketnode.core.log.Logger
 import com.rjnr.pocketnode.data.gateway.models.DaoCellStatus
 import com.rjnr.pocketnode.data.gateway.models.DaoDeposit
 import com.rjnr.pocketnode.data.gateway.models.EpochInfo
@@ -56,6 +56,7 @@ import javax.inject.Singleton
 class DaoDepositReader @Inject constructor(
     private val json: Json,
     private val daoHeaderResolver: DaoHeaderResolver,
+    private val logger: Logger,
 ) {
 
     /**
@@ -92,14 +93,14 @@ class DaoDepositReader @Inject constructor(
             cellPages++
         } while (cellsCursor != null && cellPages < MAX_PAGES)
         if (cellPages >= MAX_PAGES) {
-            Log.w(TAG, "list: hit $MAX_PAGES-page cap walking DAO cells — list may be incomplete")
+            logger.w(TAG, "list: hit $MAX_PAGES-page cap walking DAO cells — list may be incomplete")
         }
 
         // Filter locally: only cells whose type script matches DAO code hash
         val daoCells = allCellObjects.filter { cell ->
             cell.output.type?.codeHash == DaoConstants.DAO_CODE_HASH
         }
-        Log.d(TAG, "📋 getDaoDeposits: ${daoCells.size} DAO cells out of ${allCellObjects.size} total")
+        logger.d(TAG, "📋 getDaoDeposits: ${daoCells.size} DAO cells out of ${allCellObjects.size} total")
 
         // Paginate transactions to find spent outpoints (same runaway guard).
         val spentOutpoints = mutableSetOf<String>()
@@ -118,14 +119,14 @@ class DaoDepositReader @Inject constructor(
             txPages++
         } while (txCursor != null && txPages < MAX_PAGES)
         if (txPages >= MAX_PAGES) {
-            Log.w(TAG, "list: hit $MAX_PAGES-page cap walking DAO spent-set — result may be incomplete")
+            logger.w(TAG, "list: hit $MAX_PAGES-page cap walking DAO spent-set — result may be incomplete")
         }
 
         val liveDaoCells = daoCells.filter { cell ->
             val key = "${cell.outPoint.txHash}:${cell.outPoint.index}"
             key !in spentOutpoints
         }
-        Log.d(TAG, "📋 getDaoDeposits: ${liveDaoCells.size} live DAO cells")
+        logger.d(TAG, "📋 getDaoDeposits: ${liveDaoCells.size} live DAO cells")
 
         val deposits = mutableListOf<DaoDeposit>()
         for (jniCell in liveDaoCells) {
@@ -134,7 +135,7 @@ class DaoDepositReader @Inject constructor(
             runCatching { resolveOneDeposit(jniCell, currentEpoch, network) }
                 .onSuccess { deposits += it }
                 .onFailure {
-                    Log.w(
+                    logger.w(
                         TAG,
                         "Skipping unparseable DAO cell " +
                             "${jniCell.outPoint.txHash.take(20)}...:${jniCell.outPoint.index} — ${it.message}"
@@ -161,7 +162,7 @@ class DaoDepositReader @Inject constructor(
 
         // Determine if deposit or withdrawing cell
         val isWithdrawing = data.length == 16 && data != "0000000000000000"
-        Log.d(TAG, "🏦 Processing DAO cell: $cellId, data=$data, isWithdrawing=$isWithdrawing, capacity=$capacityShannons")
+        logger.d(TAG, "🏦 Processing DAO cell: $cellId, data=$data, isWithdrawing=$isWithdrawing, capacity=$capacityShannons")
 
         var depositBlockNumber = cell.blockNumber.removePrefix("0x").toLong(16)
         var depositBlockHash = ""
@@ -264,7 +265,7 @@ class DaoDepositReader @Inject constructor(
                 }
             }
         } else {
-            Log.d(TAG, "  No header available for $cellId — showing deposit with basic info")
+            logger.d(TAG, "  No header available for $cellId — showing deposit with basic info")
             if (isWithdrawing) {
                 val depositBlockNum = data.chunked(2)
                     .map { it.toInt(16).toByte() }
@@ -304,7 +305,7 @@ class DaoDepositReader @Inject constructor(
             val elapsedDays = (endTimeMs - depositTimestampMs) / 86_400_000.0
             if (elapsedDays >= 1.0) {
                 apc = (compensation.toDouble() / capacityShannons) / (elapsedDays / 365.25) * 100.0
-                Log.d(
+                logger.d(
                     TAG,
                     "APC for $cellId: compensation=$compensation capacity=$capacityShannons " +
                         "elapsedDays=${"%.2f".format(elapsedDays)} apc=${"%.4f".format(apc)}% " +
@@ -328,7 +329,7 @@ class DaoDepositReader @Inject constructor(
             unlockEpoch = unlockEpoch,
         )
 
-        Log.d(TAG, "✅ DAO deposit added: $cellId, status=$status, capacity=$capacityShannons")
+        logger.d(TAG, "✅ DAO deposit added: $cellId, status=$status, capacity=$capacityShannons")
         return DaoDeposit(
             outPoint = cell.outPoint,
             capacity = capacityShannons,

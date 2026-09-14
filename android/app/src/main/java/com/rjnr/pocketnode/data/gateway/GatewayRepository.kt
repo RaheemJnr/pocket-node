@@ -1,7 +1,7 @@
 package com.rjnr.pocketnode.data.gateway
 
 import android.content.Context
-import android.util.Log
+import com.rjnr.pocketnode.core.log.Logger
 import com.rjnr.pocketnode.BuildConfig
 import com.rjnr.pocketnode.data.database.AppDatabase
 import com.rjnr.pocketnode.data.database.DatabaseMaintenanceUtil
@@ -120,6 +120,7 @@ class GatewayRepository @Inject constructor(
     private val lightClient: LightClientReadOnly,
     private val subAccountReconciler: com.rjnr.pocketnode.data.wallet.SubAccountReconciler,
     private val subAccountDiscovery: com.rjnr.pocketnode.data.wallet.SubAccountDiscovery,
+    private val logger: Logger,
 ) : TipSource {
     private val sendMutex = Mutex()
 
@@ -185,7 +186,7 @@ class GatewayRepository @Inject constructor(
     // turn what used to be a process crash into a single ERROR line in
     // logcat.
     private val coroutineExceptionHandler = kotlinx.coroutines.CoroutineExceptionHandler { _, e ->
-        Log.e(TAG, "Uncaught exception in GatewayRepository scope; suppressed to avoid process crash", e)
+        logger.e(TAG, "Uncaught exception in GatewayRepository scope; suppressed to avoid process crash", e)
     }
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO + coroutineExceptionHandler)
     private val _nodeReady = MutableStateFlow<Boolean?>(null)
@@ -240,13 +241,13 @@ class GatewayRepository @Inject constructor(
                 runCatching {
                     if (DatabaseMaintenanceUtil.vacuumIfDue(appDatabase, walletPreferences.getLastVacuumAt())) {
                         walletPreferences.setLastVacuumAt(System.currentTimeMillis())
-                        Log.d(TAG, "Periodic VACUUM completed")
+                        logger.d(TAG, "Periodic VACUUM completed")
                     }
-                }.onFailure { Log.w(TAG, "Periodic VACUUM failed (non-fatal)", it) }
+                }.onFailure { logger.w(TAG, "Periodic VACUUM failed (non-fatal)", it) }
 
                 initializeNode(currentNetwork)
             } catch (e: Exception) {
-                Log.e(TAG, "Startup sequence failed before node init", e)
+                logger.e(TAG, "Startup sequence failed before node init", e)
                 _nodeReady.value = false
             }
         }
@@ -359,44 +360,44 @@ class GatewayRepository @Inject constructor(
         // If mainnet subdir already exists or there's nothing to migrate, skip
         if (mainnetDir.exists() || (!storeDb.exists() && !networkDir.exists())) return
 
-        Log.d(TAG, "Migrating data directory to per-network layout...")
+        logger.d(TAG, "Migrating data directory to per-network layout...")
         if (!mainnetDir.mkdirs() && !mainnetDir.exists()) {
-            Log.e(TAG, "Failed to create mainnet directory, skipping migration")
+            logger.e(TAG, "Failed to create mainnet directory, skipping migration")
             return
         }
 
         var migrationOk = true
         if (storeDb.exists()) {
             if (storeDb.renameTo(File(mainnetDir, "store.db"))) {
-                Log.d(TAG, "Moved store.db -> mainnet/store.db")
+                logger.d(TAG, "Moved store.db -> mainnet/store.db")
             } else {
-                Log.e(TAG, "Failed to move store.db to mainnet/store.db")
+                logger.e(TAG, "Failed to move store.db to mainnet/store.db")
                 migrationOk = false
             }
         }
         if (networkDir.exists()) {
             if (networkDir.renameTo(File(mainnetDir, "network"))) {
-                Log.d(TAG, "Moved network/ -> mainnet/network/")
+                logger.d(TAG, "Moved network/ -> mainnet/network/")
             } else {
-                Log.e(TAG, "Failed to move network/ to mainnet/network/")
+                logger.e(TAG, "Failed to move network/ to mainnet/network/")
                 migrationOk = false
             }
         }
         if (!migrationOk) {
-            Log.e(TAG, "Migration incomplete — manual intervention may be needed")
+            logger.e(TAG, "Migration incomplete — manual intervention may be needed")
         }
     }
 
     private suspend fun initializeNode(targetNetwork: NetworkType) {
         try {
             _nodeReady.value = null // Reset for re-initialization
-            Log.d(TAG, "Initializing embedded node for ${targetNetwork.name}...")
+            logger.d(TAG, "Initializing embedded node for ${targetNetwork.name}...")
 
             val configName = "${targetNetwork.name.lowercase()}.toml"
             val configFile = File(context.filesDir, configName)
 
             // Copy config from assets (deterministic, no retry needed)
-            Log.d(TAG, "Copying config from assets: $configName")
+            logger.d(TAG, "Copying config from assets: $configName")
             try {
                 context.assets.open(configName).use { input ->
                     configFile.outputStream().use { output ->
@@ -404,7 +405,7 @@ class GatewayRepository @Inject constructor(
                     }
                 }
             } catch (e: Exception) {
-                Log.e(TAG, "Failed to copy $configName from assets", e)
+                logger.e(TAG, "Failed to copy $configName from assets", e)
                 _nodeReady.value = false
                 return
             }
@@ -413,9 +414,9 @@ class GatewayRepository @Inject constructor(
             val configContent = configFile.readText()
             val dataDir = File(context.filesDir, "data/${targetNetwork.name.lowercase()}")
             if (!dataDir.exists()) {
-                Log.d(TAG, "Creating data directory: ${dataDir.absolutePath}")
+                logger.d(TAG, "Creating data directory: ${dataDir.absolutePath}")
                 if (!dataDir.mkdirs()) {
-                    Log.e(TAG, "Failed to create data directory")
+                    logger.e(TAG, "Failed to create data directory")
                     _nodeReady.value = false
                     return
                 }
@@ -425,27 +426,27 @@ class GatewayRepository @Inject constructor(
                 .replace("path = \"data/store\"", "path = \"${File(dataDir, "store.db").absolutePath}\"")
                 .replace("path = \"data/network\"", "path = \"${File(dataDir, "network").absolutePath}\"")
             configFile.writeText(newConfig)
-            Log.d(TAG, "Config updated with absolute paths for ${targetNetwork.name}")
+            logger.d(TAG, "Config updated with absolute paths for ${targetNetwork.name}")
 
             // Init and start JNI with retry (transient failures can occur)
             val maxRetries = 3
             val backoffMs = longArrayOf(2_000, 4_000, 8_000)
 
             for (attempt in 1..maxRetries) {
-                Log.d(TAG, "JNI init attempt $attempt/$maxRetries...")
+                logger.d(TAG, "JNI init attempt $attempt/$maxRetries...")
 
                 val initResult = LightClientNative.nativeInit(
                     configFile.absolutePath,
                     object : LightClientNative.StatusCallback {
                         override fun onStatusChange(status: String, data: String) {
-                            Log.d(TAG, "Native Status Change: $status")
+                            logger.d(TAG, "Native Status Change: $status")
                             _nodeStatus.value = status
                         }
                     }
                 )
 
                 if (!initResult) {
-                    Log.e(TAG, "nativeInit returned false (attempt $attempt)")
+                    logger.e(TAG, "nativeInit returned false (attempt $attempt)")
                     if (attempt < maxRetries) {
                         delay(backoffMs[attempt - 1])
                         continue
@@ -456,7 +457,7 @@ class GatewayRepository @Inject constructor(
 
                 val startResult = LightClientNative.nativeStart()
                 if (startResult) {
-                    Log.d(TAG, "Node started successfully on ${targetNetwork.name} (attempt $attempt)")
+                    logger.d(TAG, "Node started successfully on ${targetNetwork.name} (attempt $attempt)")
                     _nodeReady.value = true
 
                     // Cold-start recovery: surface any BROADCASTING orphan rows for the
@@ -468,7 +469,7 @@ class GatewayRepository @Inject constructor(
                         val orphans = pendingBroadcastDao.getActive(activeWalletId, currentNetwork.name)
                         val broadcasting = orphans.count { it.state == "BROADCASTING" }
                         if (broadcasting > 0) {
-                            Log.w(
+                            logger.w(
                                 TAG,
                                 "Cold-start: $broadcasting BROADCASTING orphan(s) on ${currentNetwork.name}; watchdog will resolve"
                             )
@@ -483,7 +484,7 @@ class GatewayRepository @Inject constructor(
                     runCatching {
                         val orphanHashes = cacheManager.getOrphanPendingHashes(activeWalletId, currentNetwork.name)
                         if (orphanHashes.isNotEmpty()) {
-                            Log.w(TAG, "Legacy reconcile: ${orphanHashes.size} orphan PENDING tx(s) on ${currentNetwork.name}")
+                            logger.w(TAG, "Legacy reconcile: ${orphanHashes.size} orphan PENDING tx(s) on ${currentNetwork.name}")
                             scope.launch {
                                 delay(15_000) // give light client time to be ready
                                 for (hash in orphanHashes) {
@@ -502,7 +503,7 @@ class GatewayRepository @Inject constructor(
                                     }
                                     if (newStatus != null) {
                                         cacheManager.updateTransactionStatus(hash, newStatus)
-                                        Log.d(TAG, "Legacy reconcile: $hash → $newStatus")
+                                        logger.d(TAG, "Legacy reconcile: $hash → $newStatus")
                                     }
                                 }
                             }
@@ -514,7 +515,7 @@ class GatewayRepository @Inject constructor(
                     return
                 }
 
-                Log.e(TAG, "nativeStart returned false (attempt $attempt)")
+                logger.e(TAG, "nativeStart returned false (attempt $attempt)")
                 if (attempt < maxRetries) {
                     delay(backoffMs[attempt - 1])
                 } else {
@@ -523,7 +524,7 @@ class GatewayRepository @Inject constructor(
             }
 
         } catch (e: Exception) {
-            Log.e(TAG, "Setup error during node initialization", e)
+            logger.e(TAG, "Setup error during node initialization", e)
             _nodeReady.value = false
         }
     }
@@ -545,7 +546,7 @@ class GatewayRepository @Inject constructor(
 
         _isSwitchingNetwork.value = true
         try {
-            Log.d(TAG, "Switching network: ${currentNetwork.name} -> ${target.name}")
+            logger.d(TAG, "Switching network: ${currentNetwork.name} -> ${target.name}")
 
             // The JNI light client does not support re-initialization in the same process lifetime:
             // nativeStop() blocks indefinitely (peer disconnection loop) and nativeInit() rejects
@@ -558,7 +559,7 @@ class GatewayRepository @Inject constructor(
             daoSyncManager.clearAll()
 
             walletPreferences.setSelectedNetwork(target) // uses commit() — synchronous flush
-            Log.d(TAG, "Persisted ${target.name}, restarting process for clean JNI init")
+            logger.d(TAG, "Persisted ${target.name}, restarting process for clean JNI init")
 
             // ProcessPhoenix-style restart: launch fresh activity before killing process.
             // This ensures the app visibly restarts on all devices/launchers.
@@ -746,18 +747,18 @@ class GatewayRepository @Inject constructor(
         val blockNum: String = when {
             // If force resync requested, recalculate from sync mode
             forceResync -> {
-                Log.d(TAG, "Force resync requested, recalculating from sync mode")
+                logger.d(TAG, "Force resync requested, recalculating from sync mode")
                 syncMode.toFromBlock(customBlockHeight, tipHeight, currentNetwork)
             }
             // Resume from saved progress if available (use the higher value)
             savedBlock > 0 || existingScriptBlock > 0 -> {
                 val resumeBlock = maxOf(savedBlock, existingScriptBlock)
-                Log.d(TAG, "Resuming sync from saved block: $resumeBlock (saved=$savedBlock, existing=$existingScriptBlock)")
+                logger.d(TAG, "Resuming sync from saved block: $resumeBlock (saved=$savedBlock, existing=$existingScriptBlock)")
                 resumeBlock.toString()
             }
             // First time: calculate based on sync mode
             else -> {
-                Log.d(TAG, "First time sync, calculating from mode: $syncMode")
+                logger.d(TAG, "First time sync, calculating from mode: $syncMode")
                 syncMode.toFromBlock(customBlockHeight, tipHeight, currentNetwork)
             }
         }
@@ -770,16 +771,16 @@ class GatewayRepository @Inject constructor(
 
         if (blockNumLong > tipHeight && tipHeight > 0) {
             val recentBlock = (tipHeight - 200_000).coerceAtLeast(0L)
-            Log.w(TAG, "Detected future block number ($blockNumLong > $tipHeight). " +
+            logger.w(TAG, "Detected future block number ($blockNumLong > $tipHeight). " +
                     "Resetting to RECENT height: $recentBlock")
             finalBlockNum = recentBlock.toString()
         } else if (blockNumLong == 0L && syncMode != SyncMode.FULL_HISTORY && checkpoint > 0) {
             // If it resolved to 0 but we aren't doing full history, use checkpoint
-            Log.d(TAG, "Block resolved to 0 but mode is $syncMode. Using checkpoint $checkpoint")
+            logger.d(TAG, "Block resolved to 0 but mode is $syncMode. Using checkpoint $checkpoint")
             finalBlockNum = checkpoint.toString()
         }
 
-        Log.d(TAG, "🔄 Sync mode $syncMode: tip=$tipHeight, targetBlock=$finalBlockNum")
+        logger.d(TAG, "🔄 Sync mode $syncMode: tip=$tipHeight, targetBlock=$finalBlockNum")
 
         val blockNumberHex = "0x${finalBlockNum.toLongOrNull()?.toString(16) ?: "0"}"
         val scriptStatuses = listOf(
@@ -887,13 +888,13 @@ class GatewayRepository @Inject constructor(
         val chain = runCatching {
             appDatabase.subAccountCandidateDao().getForParent(wId).filter { it.accountIndex == 0 }
         }.onFailure {
-            Log.w(TAG, "getGapLimitStatus: candidate read failed, treating as not scanned: ${it.message}")
+            logger.w(TAG, "getGapLimitStatus: candidate read failed, treating as not scanned: ${it.message}")
         }.getOrDefault(emptyList())
         val resolution = gapLimitResolution(chain)
         if (resolution == GapLimitResolution.CLEAR &&
             walletPreferences.isGapLimitSignalDetected(currentNetwork, wId)
         ) {
-            Log.i(TAG, "gap-limit scan completed clean — retiring Tier 1 signal for $wId")
+            logger.i(TAG, "gap-limit scan completed clean — retiring Tier 1 signal for $wId")
             walletPreferences.setGapLimitSignalDetected(false, currentNetwork, wId)
         }
         if (resolution != GapLimitResolution.FOUND) return GapLimitStatus(resolution, 0, 0L)
@@ -909,7 +910,7 @@ class GatewayRepository @Inject constructor(
                     total += cap
                     count++
                 }
-            }.onFailure { Log.w(TAG, "gap-limit capacity read failed for ${cand.derivationPath}: ${it.message}") }
+            }.onFailure { logger.w(TAG, "gap-limit capacity read failed for ${cand.derivationPath}: ${it.message}") }
         }
         return GapLimitStatus(resolution, count, total)
     }
@@ -974,7 +975,7 @@ class GatewayRepository @Inject constructor(
             // reconciler's probe re-judges them: activity -> FOUND, still
             // nothing -> EMPTY again shortly.
             val reArmed = dao.reArmEmptyChainSlots(wId)
-            if (reArmed > 0) Log.i(TAG, "gap-limit scan: re-armed $reArmed retired slot(s)")
+            if (reArmed > 0) logger.i(TAG, "gap-limit scan: re-armed $reArmed retired slot(s)")
             // Fresh registration pass so new candidate scripts join the filter.
             registerAccountWithStrategy(
                 getSavedSyncMode(), getSavedCustomBlockHeight(), savePreference = false
@@ -1012,7 +1013,7 @@ class GatewayRepository @Inject constructor(
             pendingBroadcastDao.getActive(activeWalletId, currentNetwork.name)
                 .flatMap { json.decodeFromString<List<OutPoint>>(it.reservedInputs) }
                 .forEach { spent += "${it.txHash}:${it.index}" }
-        }.onFailure { Log.w(TAG, "liveUntypedCellsFor: reservation read failed: ${it.message}") }
+        }.onFailure { logger.w(TAG, "liveUntypedCellsFor: reservation read failed: ${it.message}") }
         val live = mutableListOf<JniCell>()
         var cursor: String? = null
         var pages = 0
@@ -1136,7 +1137,7 @@ class GatewayRepository @Inject constructor(
                 if (activeWalletId != wId) throw Exception("Wallet changed during the sweep; try again")
                 val signed = transactionBuilder.signSweep(plan.transaction, plan.inputLockArgs, keys).getOrThrow()
                 val txHash = sendTransaction(signed, expectedWalletId = wId).getOrThrow()
-                Log.i(TAG, "gap-limit sweep broadcast: ${plan.inputLockArgs.size} inputs, ${keys.size} groups")
+                logger.i(TAG, "gap-limit sweep broadcast: ${plan.inputLockArgs.size} inputs, ${keys.size} groups")
                 txHash
             } finally {
                 keys.values.forEach { it.fill(0) }
@@ -1148,14 +1149,14 @@ class GatewayRepository @Inject constructor(
     }
     
     suspend fun forceResetSync(): Result<Unit> = runCatching {
-        Log.w(TAG, "Forcing sync reset...")
+        logger.w(TAG, "Forcing sync reset...")
         // Only clear sync-related preferences for the active wallet, not all preferences
         setWalletSyncBlock(activeWalletId, 0L)
         walletPreferences.setInitialSyncCompleted(false, walletId = activeWalletId.ifEmpty { null })
         _isRegistered.value = false
         _balance.value = null
         registerAccount(SyncMode.RECENT)
-        Log.i(TAG, "Sync reset complete. Registered as RECENT.")
+        logger.i(TAG, "Sync reset complete. Registered as RECENT.")
     }
 
     suspend fun refreshBalance(address: String? = null): Result<BalanceResponse> = runCatching {
@@ -1168,12 +1169,12 @@ class GatewayRepository @Inject constructor(
         }
 
         val searchKey = JniSearchKey(script = info.script)
-        Log.d(TAG, "🔍 Fetching balance for script args ${searchKey.script.args.redactAddress()}")
+        logger.d(TAG, "🔍 Fetching balance for script args ${searchKey.script.args.redactAddress()}")
 
         val responseJson = LightClientNative.nativeGetCellsCapacity(json.encodeToString(searchKey))
             ?: throw Exception(readPathNullMessage("get balance", lightClientReadyForRead()))
 
-        Log.d(TAG, "📊 Raw capacity response: $responseJson")
+        logger.d(TAG, "📊 Raw capacity response: $responseJson")
 
         val cap = json.decodeFromString<JniCellsCapacity>(responseJson)
 
@@ -1182,14 +1183,14 @@ class GatewayRepository @Inject constructor(
 
         // The light client's nativeGetCellsCapacity may include spent cells
         // We need to calculate the true balance by getting live cells only
-        Log.d(TAG, "🔍 Calculating true balance by filtering out spent cells...")
+        logger.d(TAG, "🔍 Calculating true balance by filtering out spent cells...")
 
         try {
             // ALL spent outpoints, cursor-walked (see fetchAllSpentOutpoints
             // KDoc — the old single limit=100 page under/over-counted balances
             // for wallets with >100 transactions).
             val spentOutpoints = fetchAllSpentOutpoints(json.encodeToString(searchKey))
-            Log.d(TAG, "📋 Found ${spentOutpoints.size} spent outpoints")
+            logger.d(TAG, "📋 Found ${spentOutpoints.size} spent outpoints")
 
             // Walk ALL cells the same way — one page hid everything past the
             // first 100 cells from the balance.
@@ -1226,21 +1227,21 @@ class GatewayRepository @Inject constructor(
                         // page (#321). toLongOrNull also guards u64 > Long.MAX.
                         val cellCapacity = cell.output.capacity.removePrefix("0x").toLongOrNull(16)
                         if (cellCapacity == null) {
-                            Log.w(TAG, "Skipping cell $outpointKey with unparseable capacity ${cell.output.capacity}")
+                            logger.w(TAG, "Skipping cell $outpointKey with unparseable capacity ${cell.output.capacity}")
                         } else if (cell.output.type != null) {
                             typedCellCount++
-                            Log.d(TAG, "🔒 DAO/typed cell excluded from balance: $outpointKey = $cellCapacity shannons")
+                            logger.d(TAG, "🔒 DAO/typed cell excluded from balance: $outpointKey = $cellCapacity shannons")
                         } else {
                             liveCapacity += cellCapacity
                             liveCellCount++
-                            Log.d(TAG, "✅ Live cell: $outpointKey = $cellCapacity shannons")
+                            logger.d(TAG, "✅ Live cell: $outpointKey = $cellCapacity shannons")
                         }
                     } else {
-                        Log.d(TAG, "❌ Spent cell: $outpointKey (filtered out)")
+                        logger.d(TAG, "❌ Spent cell: $outpointKey (filtered out)")
                     }
                 }
 
-                Log.d(TAG, "💰 Live balance: $liveCellCount cells, $liveCapacity shannons")
+                logger.d(TAG, "💰 Live balance: $liveCellCount cells, $liveCapacity shannons")
                 capacityVal = liveCapacity
 
                 // Rescue rescan (#332): only for a wallet that is GENUINELY
@@ -1273,12 +1274,12 @@ class GatewayRepository @Inject constructor(
                     ) {
                         balanceRescanAttempted.add(activeWalletId)
                         walletPreferences.setZeroCellRescanDone(activeWalletId)
-                        Log.w(TAG, "🔄 Have ${txPag.objects.size} transactions but 0 live cells - triggering rescan")
+                        logger.w(TAG, "🔄 Have ${txPag.objects.size} transactions but 0 live cells - triggering rescan")
                         val earliestBlock = txPag.objects
                             .mapNotNull { it.blockNumber.removePrefix("0x").toLongOrNull(16) }
                             .minOrNull() ?: 0L
                         val rescanFrom = (earliestBlock - 100).coerceAtLeast(0L)
-                        Log.d(TAG, "🔄 Rescan from block $rescanFrom (earliest tx at $earliestBlock)")
+                        logger.d(TAG, "🔄 Rescan from block $rescanFrom (earliest tx at $earliestBlock)")
 
                         val blockNumberHex = "0x${rescanFrom.toString(16)}"
                         val scriptStatuses = listOf(
@@ -1300,18 +1301,18 @@ class GatewayRepository @Inject constructor(
                         // progress as it advances. Persisting the regression made
                         // it survive restarts — re-registering from the rewound
                         // block forever (#332).
-                        Log.d(TAG, "✅ Rescan triggered (partial) - balance should update on next refresh")
+                        logger.d(TAG, "✅ Rescan triggered (partial) - balance should update on next refresh")
                     }
                 }
             }
         } catch (e: Exception) {
-            Log.e(TAG, "Failed to calculate live balance: ${e.message}")
+            logger.e(TAG, "Failed to calculate live balance: ${e.message}")
             // Fall back to the raw capacity value if filtering fails
         }
 
         val ckbVal = capacityVal / 100_000_000.0
 
-        Log.d(TAG, "💰 Final balance: $capacityVal shannons = $ckbVal CKB (at block ${cap.blockNumber})")
+        logger.d(TAG, "💰 Final balance: $capacityVal shannons = $ckbVal CKB (at block ${cap.blockNumber})")
 
         val resp = BalanceResponse(
             address = addr,
@@ -1379,7 +1380,7 @@ class GatewayRepository @Inject constructor(
                 capacityVal = liveCapacity
             }
         } catch (e: Exception) {
-            Log.w(TAG, "refreshBalanceForWallet($walletId): live filter failed, using raw capacity: ${e.message}")
+            logger.w(TAG, "refreshBalanceForWallet($walletId): live filter failed, using raw capacity: ${e.message}")
         }
 
         val resp = BalanceResponse(
@@ -1426,7 +1427,7 @@ class GatewayRepository @Inject constructor(
                 setWalletSyncBlock(walletId, block)
                 anyUpdated = true
                 if (walletId == activeWalletId) {
-                    Log.d(TAG, "💾 Saved sync progress: block $block (wallet=$walletId)")
+                    logger.d(TAG, "💾 Saved sync progress: block $block (wallet=$walletId)")
                 }
             }
         }
@@ -1447,7 +1448,7 @@ class GatewayRepository @Inject constructor(
                 },
                 tipHeight = tipNumber,
             )
-        }.onFailure { Log.w(TAG, "Sub-account candidate reconcile failed (non-fatal)", it) }
+        }.onFailure { logger.w(TAG, "Sub-account candidate reconcile failed (non-fatal)", it) }
 
         // Active wallet's block for the sync-progress display below.
         val activeArgs = _walletInfo.value?.script?.args
@@ -1459,7 +1460,7 @@ class GatewayRepository @Inject constructor(
         }
 
         // Log sync progress for debugging
-        Log.d(TAG, "📈 SYNC STATUS: tip=$tipNumber, scriptBlock=$scriptBlockNumber, " +
+        logger.d(TAG, "📈 SYNC STATUS: tip=$tipNumber, scriptBlock=$scriptBlockNumber, " +
                 "behind=${tipNumber - scriptBlockNumber} blocks")
 
         // Calculate progress relative to sync start (not absolute tip ratio).
@@ -1488,7 +1489,7 @@ class GatewayRepository @Inject constructor(
                 scriptBlockNumber >= tipNumber - 10 &&
                 scriptBlockNumber <= tipNumber + 10 // Handle slight mismatches safely
         
-        Log.d(TAG, "📊 SYNC PROGRESS: ${(progress * 100).toInt()}% synced, isSynced=$isSynced")
+        logger.d(TAG, "📊 SYNC PROGRESS: ${(progress * 100).toInt()}% synced, isSynced=$isSynced")
 
         AccountStatusResponse(
             address = addr,
@@ -1514,12 +1515,12 @@ class GatewayRepository @Inject constructor(
         }
         val searchKey = JniSearchKey(script = script)
 
-        Log.d(TAG, "🔍 getCells: Fetching cells for script args ${searchKey.script.args.redactAddress()}")
+        logger.d(TAG, "🔍 getCells: Fetching cells for script args ${searchKey.script.args.redactAddress()}")
 
         // ALL spent outpoints, cursor-walked to the end (see helper KDoc —
         // the old single limit=100 page broke wallets with >100 txs).
         val spentOutpoints = fetchAllSpentOutpoints(json.encodeToString(searchKey))
-        Log.d(TAG, "📋 getCells: Found ${spentOutpoints.size} spent outpoints")
+        logger.d(TAG, "📋 getCells: Found ${spentOutpoints.size} spent outpoints")
 
         // Walk the cell cursor too: a wallet holding >`limit` cells only ever
         // exposed its first page to coin selection and the balance math.
@@ -1543,24 +1544,24 @@ class GatewayRepository @Inject constructor(
             cellCursor = page.lastCursor
         }
         if (cellPages >= MAX_CELL_PAGES) {
-            Log.w(TAG, "getCells: hit $MAX_CELL_PAGES-page cap (${allCells.size} cells) — set may be incomplete")
+            logger.w(TAG, "getCells: hit $MAX_CELL_PAGES-page cap (${allCells.size} cells) — set may be incomplete")
         }
 
         val liveCells = allCells.filter { cell ->
             val outpointKey = "${cell.outPoint.txHash}:${cell.outPoint.index}"
             val isLive = outpointKey !in spentOutpoints
             if (!isLive) {
-                Log.d(TAG, "❌ getCells: Filtering out spent cell: $outpointKey")
+                logger.d(TAG, "❌ getCells: Filtering out spent cell: $outpointKey")
             }
             // Also exclude cells with type scripts (DAO cells) — they can't be spent as regular inputs
             val hasTypeScript = cell.output.type != null
             if (hasTypeScript && isLive) {
-                Log.d(TAG, "🔒 getCells: Excluding typed cell (DAO): $outpointKey")
+                logger.d(TAG, "🔒 getCells: Excluding typed cell (DAO): $outpointKey")
             }
             isLive && !hasTypeScript
         }.map { it.toCell() }
 
-        Log.d(TAG, "✅ getCells: ${liveCells.size} live cells (filtered from ${allCells.size} total)")
+        logger.d(TAG, "✅ getCells: ${liveCells.size} live cells (filtered from ${allCells.size} total)")
 
         CellsResponse(liveCells, lastCursorOut)
     }
@@ -1585,7 +1586,7 @@ class GatewayRepository @Inject constructor(
                 ?.let { json.decodeFromString<JniPagination<JniTxWithCell>>(it) }
         }
         if (walk.hitCap) {
-            Log.w(TAG, "fetchAllSpentOutpoints: hit $MAX_TX_PAGES-page cap — spent set may be incomplete")
+            logger.w(TAG, "fetchAllSpentOutpoints: hit $MAX_TX_PAGES-page cap — spent set may be incomplete")
         }
         return spentOutpointsOf(walk.items).toMutableSet()
     }
@@ -1702,7 +1703,7 @@ class GatewayRepository @Inject constructor(
             // keeps the real cell.
             val filtered = (liveFiltered + pendingChange)
                 .distinctBy { "${it.outPoint.txHash}:${it.outPoint.index}" }
-            Log.d(
+            logger.d(
                 TAG,
                 "buildReserveAndSend: ${cellsResult.items.size} live, ${reserved.size} reserved, " +
                     "${pendingChange.size} synthetic-change, ${filtered.size} available"
@@ -1857,8 +1858,8 @@ class GatewayRepository @Inject constructor(
          */
         expectedWalletId: String? = null,
     ): Result<String> = runCatching {
-        Log.d(TAG, "📤 sendTransaction: building JSON")
-        Log.d(TAG, "  Inputs: ${transaction.cellInputs.size}, Outputs: ${transaction.cellOutputs.size}")
+        logger.d(TAG, "📤 sendTransaction: building JSON")
+        logger.d(TAG, "  Inputs: ${transaction.cellInputs.size}, Outputs: ${transaction.cellOutputs.size}")
 
         // Pre-flight checks (defense-in-depth, TransactionBuilder also validates)
         require(transaction.cellInputs.isNotEmpty()) { "Transaction has no inputs" }
@@ -1907,7 +1908,7 @@ class GatewayRepository @Inject constructor(
         val balanceChangeHex = "0x${recipientOutgoingShannons(outgoingOutputs).toString(16)}"
         val now = System.currentTimeMillis()
 
-        Log.d(TAG, "📤 sendTransaction: JSON length=${txJson.length}, preHash=$txHash")
+        logger.d(TAG, "📤 sendTransaction: JSON length=${txJson.length}, preHash=$txHash")
 
         // Critical section: pre-broadcast inserts under sendMutex.
         // Idempotent: skip insert if a row already exists for this hash
@@ -1939,7 +1940,7 @@ class GatewayRepository @Inject constructor(
                     fee = "0x0"
                 )
             } else {
-                Log.d(TAG, "sendTransaction: row exists (state=${existing.state}) — skipping insert")
+                logger.d(TAG, "sendTransaction: row exists (state=${existing.state}) — skipping insert")
             }
         }
 
@@ -1981,7 +1982,7 @@ class GatewayRepository @Inject constructor(
             // If it fires in production, the tx WAS broadcast under returnedHash but
             // our pre-broadcast hash derivation disagrees. Re-key both rows so cleanup
             // paths align with what the network sees.
-            Log.e(TAG, "❌ Hash mismatch! pre=$txHash returned=$returnedHash — re-keying rows")
+            logger.e(TAG, "❌ Hash mismatch! pre=$txHash returned=$returnedHash — re-keying rows")
             pendingBroadcastDao.delete(txHash)
             cacheManager.deleteTransaction(txHash)
             pendingBroadcastDao.insert(
@@ -2014,11 +2015,11 @@ class GatewayRepository @Inject constructor(
                 now = System.currentTimeMillis()
             )
             if (ok != 1) {
-                Log.w(TAG, "compareAndUpdateState saw row not in BROADCASTING (race?); proceeding")
+                logger.w(TAG, "compareAndUpdateState saw row not in BROADCASTING (race?); proceeding")
             }
         }
 
-        Log.d(TAG, "✅ sendTransaction: returnedHash=$returnedHash")
+        logger.d(TAG, "✅ sendTransaction: returnedHash=$returnedHash")
 
         // After sending, nudge the light client to rescan from a few blocks back
         // so it picks up the new change output when the tx confirms. Capture the
@@ -2034,7 +2035,7 @@ class GatewayRepository @Inject constructor(
                 // silent balance/history loss. The ongoing scan will find the
                 // change output anyway; only fast-path when already synced.
                 if (_syncProgress.value.isSyncing) {
-                    Log.d(TAG, "Skipping post-send partial re-register: wallet still catching up")
+                    logger.d(TAG, "Skipping post-send partial re-register: wallet still catching up")
                     return@launch
                 }
                 val tipStr = LightClientNative.nativeGetTipHeader()
@@ -2042,7 +2043,7 @@ class GatewayRepository @Inject constructor(
                     val tip = json.decodeFromString<JniHeaderView>(tipStr)
                     val tipNumber = tip.number.removePrefix("0x").toLongOrNull(16) ?: 0L
                     val rescanFrom = (tipNumber - 10).coerceAtLeast(0L)
-                    Log.d(TAG, "🔄 Partial re-register from block $rescanFrom to catch change output")
+                    logger.d(TAG, "🔄 Partial re-register from block $rescanFrom to catch change output")
 
                     val blockNumberHex = "0x${rescanFrom.toString(16)}"
                     // Only register lock script (not DAO type) with PARTIAL mode
@@ -2056,7 +2057,7 @@ class GatewayRepository @Inject constructor(
                     setScriptsAndRecord(scriptStatuses, listOf(senderWalletId), LightClientNative.CMD_SET_SCRIPTS_PARTIAL)
                 }
             } catch (e: Exception) {
-                Log.e(TAG, "Failed to re-register script after send: ${e.message}")
+                logger.e(TAG, "Failed to re-register script after send: ${e.message}")
             }
         }
 
@@ -2091,10 +2092,10 @@ class GatewayRepository @Inject constructor(
         }
         if (walk.pagesWalked == 0) throw Exception("Failed to get transactions")
         if (walk.hitCap) {
-            Log.w(TAG, "getTransactions: hit $MAX_TX_PAGES-page cap (${walk.items.size} interactions) — history may be incomplete")
+            logger.w(TAG, "getTransactions: hit $MAX_TX_PAGES-page cap (${walk.items.size} interactions) — history may be incomplete")
         }
         val allInteractions = walk.items
-        Log.d(TAG, "📡 getTransactions: ${allInteractions.size} interactions walked")
+        logger.d(TAG, "📡 getTransactions: ${allInteractions.size} interactions walked")
 
         // Net per transaction, computed once over the COMPLETE walk (the #388
         // fix: a boundary-straddling tx must not be scored from a partial page).
@@ -2123,7 +2124,7 @@ class GatewayRepository @Inject constructor(
                 addAll(appDatabase.subAccountCandidateDao().getAllScriptArgs())
             }
         }.getOrElse {
-            Log.w(TAG, "getTransactions: known-scripts set incomplete: ${it.message}")
+            logger.w(TAG, "getTransactions: known-scripts set incomplete: ${it.message}")
             setOf(myScript.args)
         }
         var gapLimitSignal = false
@@ -2156,7 +2157,7 @@ class GatewayRepository @Inject constructor(
                 isUnknownChangeSignature(netChangeShannons, tx.outputs, knownLockArgs)
             ) {
                 gapLimitSignal = true
-                Log.i(TAG, "getTransactions: gap-limit signature in $txHash (#382)")
+                logger.i(TAG, "getTransactions: gap-limit signature in $txHash (#382)")
             }
 
             // For display, we show the absolute value as the amount
@@ -2202,7 +2203,7 @@ class GatewayRepository @Inject constructor(
                     }
                 } else HeaderInfo(null, null)
             }.onFailure { e ->
-                Log.w(TAG, "getTransactions: failed to fetch header for $txHash: ${e.message}")
+                logger.w(TAG, "getTransactions: failed to fetch header for $txHash: ${e.message}")
             }.getOrElse { HeaderInfo(null, null) }
 
             // Derive confirmations from tip block height vs transaction block number
@@ -2287,11 +2288,11 @@ class GatewayRepository @Inject constructor(
     }
 
     suspend fun getTransactionStatus(txHash: String): Result<TransactionStatusResponse> = runCatching {
-        Log.d(TAG, "🔍 getTransactionStatus: Checking status for $txHash")
+        logger.d(TAG, "🔍 getTransactionStatus: Checking status for $txHash")
 
         val resJson = LightClientNative.nativeGetTransaction(txHash)
         if (resJson == null) {
-            Log.w(TAG, "⚠️ getTransactionStatus: Native returned null for $txHash")
+            logger.w(TAG, "⚠️ getTransactionStatus: Native returned null for $txHash")
             // Return unknown status instead of throwing - tx might still be in network mempool
             return@runCatching TransactionStatusResponse(
                 txHash = txHash,
@@ -2301,11 +2302,11 @@ class GatewayRepository @Inject constructor(
             )
         }
 
-        Log.d(TAG, "📦 getTransactionStatus: Response: ${resJson.take(500)}")
+        logger.d(TAG, "📦 getTransactionStatus: Response: ${resJson.take(500)}")
         val txWithStatus = json.decodeFromString<JniTransactionWithStatus>(resJson)
 
         val status = txWithStatus.txStatus.status
-        Log.d(TAG, "📊 getTransactionStatus: Raw status='$status', blockHash=${txWithStatus.txStatus.blockHash}")
+        logger.d(TAG, "📊 getTransactionStatus: Raw status='$status', blockHash=${txWithStatus.txStatus.blockHash}")
 
         // Calculate actual confirmations from tip - txBlock
         val confirmations = if (status == "committed" && txWithStatus.txStatus.blockHash != null) {
@@ -2324,11 +2325,11 @@ class GatewayRepository @Inject constructor(
                     } else {
                         1 // malformed tx-block number; committed means at least 1
                     }
-                    Log.d(TAG, "📈 Tip: $tipNumber, txBlock: $txBlockNumber, confirmations: $realConfirmations")
+                    logger.d(TAG, "📈 Tip: $tipNumber, txBlock: $txBlockNumber, confirmations: $realConfirmations")
                     realConfirmations
                 } else {
                     // Can't get tx block header — committed means at least 1
-                    Log.d(TAG, "📈 Tip: $tipNumber, txBlock header unavailable, using 1")
+                    logger.d(TAG, "📈 Tip: $tipNumber, txBlock header unavailable, using 1")
                     1
                 }
             } else {
@@ -2338,7 +2339,7 @@ class GatewayRepository @Inject constructor(
             0
         }
 
-        Log.d(TAG, "✅ getTransactionStatus: status=$status, confirmations=$confirmations")
+        logger.d(TAG, "✅ getTransactionStatus: status=$status, confirmations=$confirmations")
 
         TransactionStatusResponse(
             txHash = txHash,
@@ -2386,7 +2387,7 @@ class GatewayRepository @Inject constructor(
             }
             match?.blockNumber?.removePrefix("0x")?.toLongOrNull(16) ?: 0L
         } catch (e: Exception) {
-            Log.w(TAG, "Failed to get existing script block: ${e.message}")
+            logger.w(TAG, "Failed to get existing script block: ${e.message}")
             0L
         }
     }
@@ -2504,7 +2505,7 @@ class GatewayRepository @Inject constructor(
 
         runCatching {
             daoSyncManager.upsertDaoCells(live.map { it.toDaoCellEntity(network, walletId, nowMs) })
-        }.onFailure { Log.w(TAG, "DAO write-through failed: ${it.message}") }
+        }.onFailure { logger.w(TAG, "DAO write-through failed: ${it.message}") }
 
         val windowStart = getExistingScriptBlock()
         val liveKeys = live.map { "${it.outPoint.txHash}:${it.outPoint.index}" }.toSet()
@@ -2552,7 +2553,7 @@ class GatewayRepository @Inject constructor(
             }
         }
         if (outsideWindow.isNotEmpty()) {
-            Log.i(TAG, "DAO merge: ${outsideWindow.size} cached deposit(s) predate sync window (start=$windowStart)")
+            logger.i(TAG, "DAO merge: ${outsideWindow.size} cached deposit(s) predate sync window (start=$windowStart)")
         }
         return live + outsideWindow
     }
@@ -2587,7 +2588,7 @@ class GatewayRepository @Inject constructor(
             allowRewind = true, // explicitly user-initiated rewind
         )
         if (!ok) throw Exception("Light client refused script registration")
-        Log.i(TAG, "DAO deep rescan: rewound script to block $target (oldest cached deposit at $oldest)")
+        logger.i(TAG, "DAO deep rescan: rewound script to block $target (oldest cached deposit at $oldest)")
         target
     }
 
@@ -2657,7 +2658,7 @@ class GatewayRepository @Inject constructor(
                 network = net
             )
         }
-        Log.d(TAG, "DAO deposit sent: $txHash")
+        logger.d(TAG, "DAO deposit sent: $txHash")
 
         // Track pending deposit in Room so UI shows it before JNI confirms
         daoSyncManager.insertPendingDeposit(txHash, amountShannons, currentNetwork.name, walletId = activeWalletId)
@@ -2726,7 +2727,7 @@ class GatewayRepository @Inject constructor(
                 availableCells = availableCells
             )
         }
-        Log.d(TAG, "DAO withdraw (phase 1) sent: $txHash")
+        logger.d(TAG, "DAO withdraw (phase 1) sent: $txHash")
 
         // #347: persist the in-flight withdraw so the deposit renders as
         // WITHDRAWING ("Confirming…") across restart and can't be withdrawn
@@ -2742,7 +2743,7 @@ class GatewayRepository @Inject constructor(
                     createdAt = System.currentTimeMillis(),
                 )
             )
-        }.onFailure { Log.w(TAG, "Failed to persist pending withdraw marker: ${it.message}") }
+        }.onFailure { logger.w(TAG, "Failed to persist pending withdraw marker: ${it.message}") }
 
         txHash
     }
@@ -2825,7 +2826,7 @@ class GatewayRepository @Inject constructor(
         // reservation filter doesn't apply. sendTransaction still reserves this
         // input and serializes the pre-broadcast insert under sendMutex (#320).
         val txHash = sendTransaction(tx).getOrThrow()
-        Log.d(TAG, "DAO unlock (phase 2) sent: $txHash")
+        logger.d(TAG, "DAO unlock (phase 2) sent: $txHash")
         txHash
     }
 
@@ -2893,7 +2894,7 @@ class GatewayRepository @Inject constructor(
         val generation = ++syncPollingGeneration
 
         syncPollingJob = scope.launch {
-            Log.d(TAG, "Starting centralized sync polling")
+            logger.d(TAG, "Starting centralized sync polling")
             while (true) {
                 // Wrap each poll iteration so an exception (JNI panic-returned-
                 // null, state mutation race, notification update failure)
@@ -2906,7 +2907,7 @@ class GatewayRepository @Inject constructor(
                 } catch (e: kotlinx.coroutines.CancellationException) {
                     throw e // honour structured concurrency
                 } catch (e: Throwable) {
-                    Log.e(TAG, "syncPoll iteration failed; continuing", e)
+                    logger.e(TAG, "syncPoll iteration failed; continuing", e)
                 }
                 // Synced cadence is 10s (was 30s): balance only refreshes off
                 // this poll, so a confirmed incoming tx could lag up to ~30s
@@ -2951,7 +2952,7 @@ class GatewayRepository @Inject constructor(
                         // Logged once every poll cycle so support can see the
                         // delta between syncedBlock and tipBlock in logcat
                         // without enabling verbose JNI logging.
-                        Log.i(
+                        logger.i(
                             TAG,
                             "syncPoll synced=$syncedBlock tip=$tipBlock " +
                                 "delta=${tipBlock - syncedBlock} progress=${status.syncProgress}"
@@ -2993,7 +2994,7 @@ class GatewayRepository @Inject constructor(
                         )
                     }
                     .onFailure { e ->
-                        Log.e(TAG, "Sync polling: failed to get account status", e)
+                        logger.e(TAG, "Sync polling: failed to get account status", e)
                     }
     }
 
@@ -3014,7 +3015,7 @@ class GatewayRepository @Inject constructor(
         // HomeViewModel's combine doesn't see stale state during the gap.
         firstCatchingUpAtMs = null
         _syncProgress.value = _syncProgress.value.copy(firstCatchingUpAtMs = null)
-        Log.d(TAG, "Stopped centralized sync polling")
+        logger.d(TAG, "Stopped centralized sync polling")
     }
 
     // ========================================
@@ -3031,14 +3032,14 @@ class GatewayRepository @Inject constructor(
         // site, so the manifest overlay that strips FOREGROUND_SERVICE_* can never
         // be paired with a startForegroundService() that would then crash.
         if (!BuildConfig.BG_FGS_ENABLED) {
-            Log.d(TAG, "FGS compiled out for this build (Play); sync stays foreground-first")
+            logger.d(TAG, "FGS compiled out for this build (Play); sync stays foreground-first")
             return
         }
         if (!walletPreferences.isBackgroundSyncEnabled()) {
-            Log.d(TAG, "Background sync disabled, not starting service")
+            logger.d(TAG, "Background sync disabled, not starting service")
             return
         }
-        Log.d(TAG, "Starting background sync service")
+        logger.d(TAG, "Starting background sync service")
         SyncForegroundService.start(context)
     }
 
@@ -3046,7 +3047,7 @@ class GatewayRepository @Inject constructor(
      * Stop the foreground sync service.
      */
     fun stopBackgroundSync() {
-        Log.d(TAG, "Stopping background sync service")
+        logger.d(TAG, "Stopping background sync service")
         SyncForegroundService.stop(context)
     }
 

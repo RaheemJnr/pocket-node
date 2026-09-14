@@ -1,6 +1,6 @@
 package com.rjnr.pocketnode.data.gateway
 
-import android.util.Log
+import com.rjnr.pocketnode.core.log.Logger
 import com.rjnr.pocketnode.data.database.dao.BalanceCacheDao
 import com.rjnr.pocketnode.data.database.dao.TransactionDao
 import com.rjnr.pocketnode.data.database.entity.BalanceCacheEntity
@@ -22,7 +22,8 @@ interface TransactionStatusUpdater {
 @Singleton
 class CacheManager @Inject constructor(
     private val transactionDao: TransactionDao,
-    private val balanceCacheDao: BalanceCacheDao
+    private val balanceCacheDao: BalanceCacheDao,
+    private val logger: Logger,
 ) : TransactionStatusUpdater {
     // --- Balance cache ---
 
@@ -32,7 +33,7 @@ class CacheManager @Inject constructor(
         } catch (e: CancellationException) {
             throw e
         } catch (e: Exception) {
-            Log.w(TAG, "Failed to read balance cache", e)
+            logger.w(TAG, "Failed to read balance cache", e)
             null
         }
     }
@@ -43,7 +44,7 @@ class CacheManager @Inject constructor(
         } catch (e: CancellationException) {
             throw e
         } catch (e: Exception) {
-            Log.w(TAG, "Failed to write balance cache", e)
+            logger.w(TAG, "Failed to write balance cache", e)
         }
     }
 
@@ -70,7 +71,7 @@ class CacheManager @Inject constructor(
         } catch (e: CancellationException) {
             throw e
         } catch (e: Exception) {
-            Log.w(TAG, "Failed to write transaction cache", e)
+            logger.w(TAG, "Failed to write transaction cache", e)
         }
     }
 
@@ -101,11 +102,11 @@ class CacheManager @Inject constructor(
                     walletId = walletId
                 )
             )
-            Log.d(TAG, "Pending transaction cached in Room: $txHash")
+            logger.d(TAG, "Pending transaction cached in Room: $txHash")
         } catch (e: CancellationException) {
             throw e
         } catch (e: Exception) {
-            Log.w(TAG, "Failed to cache pending tx", e)
+            logger.w(TAG, "Failed to cache pending tx", e)
         }
     }
 
@@ -126,7 +127,7 @@ class CacheManager @Inject constructor(
         } catch (e: CancellationException) {
             throw e
         } catch (e: Exception) {
-            Log.w(TAG, "Failed to delete transaction $txHash", e)
+            logger.w(TAG, "Failed to delete transaction $txHash", e)
         }
     }
 
@@ -144,7 +145,7 @@ class CacheManager @Inject constructor(
         } catch (e: CancellationException) {
             throw e
         } catch (e: Exception) {
-            Log.w(TAG, "Failed to read pending transactions", e)
+            logger.w(TAG, "Failed to read pending transactions", e)
             emptyList()
         }
     }
@@ -155,11 +156,11 @@ class CacheManager @Inject constructor(
         try {
             transactionDao.deleteAll()
             balanceCacheDao.deleteAll()
-            Log.d(TAG, "All caches cleared")
+            logger.d(TAG, "All caches cleared")
         } catch (e: CancellationException) {
             throw e
         } catch (e: Exception) {
-            Log.w(TAG, "Failed to clear caches", e)
+            logger.w(TAG, "Failed to clear caches", e)
         }
     }
 
