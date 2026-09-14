@@ -5,14 +5,14 @@
 
 use super::panic_guard::guard_jni;
 use super::types::*;
+use crate::bridge_core::query as bridge_query;
 use crate::service::{
-    Cell, CellType, CellsCapacity, FetchStatus, LocalNode, Pagination, RemoteNode, 
-    ScriptType, SearchKey, SetScriptsCommand, Tx, TxWithCell,
+    Cell, CellType, CellsCapacity, FetchStatus, Pagination, ScriptType, SearchKey,
+    SetScriptsCommand, Tx, TxWithCell,
 };
 use crate::storage::{self, extract_raw_data, Key, KeyPrefix, Direction, IteratorMode};
 use crate::verify::verify_tx;
 use ckb_jsonrpc_types::{BlockView, HeaderView, JsonBytes, Transaction};
-use ckb_network::extract_peer_id;
 use ckb_systemtime::unix_time_as_millis;
 use ckb_traits::HeaderProvider;
 use ckb_types::{core, packed, prelude::{*, IntoHeaderView, IntoTransactionView}, H256};
@@ -51,6 +51,17 @@ fn send_error_jstring(env: &mut JNIEnv, reason: &str) -> jstring {
     }
 }
 
+/// Helper to create a JString from a JSON string produced by `bridge_core`
+fn json_to_jstring(env: &mut JNIEnv, json: &str) -> jstring {
+    match env.new_string(json) {
+        Ok(s) => s.into_raw(),
+        Err(e) => {
+            error!("Failed to create JString: {}", e);
+            ptr::null_mut()
+        }
+    }
+}
+
 /// Helper to create JString from serde result
 fn to_jstring<T: serde::Serialize>(env: &mut JNIEnv, value: &T) -> jstring {
     match serde_json::to_string(value) {
@@ -75,20 +86,10 @@ pub extern "C" fn Java_com_nervosnetwork_ckblightclient_LightClientNative_native
     _class: JClass,
 ) -> jstring {
     guard_jni(std::ptr::null_mut(), move || {
-    check_running!(env);
-
-    let swc = match STORAGE_WITH_DATA.get() {
-        Some(s) => s,
-        None => {
-            error!("Storage not initialized");
-            return ptr::null_mut();
+        match bridge_query::get_tip_header() {
+            Ok(json) => json_to_jstring(&mut env, &json),
+            Err(_) => ptr::null_mut(),
         }
-    };
-
-    let tip_header = swc.storage().get_tip_header();
-    let header_view: HeaderView = tip_header.into_view().into();
-
-    to_jstring(&mut env, &header_view)
     })
 }
 
@@ -448,36 +449,10 @@ pub extern "C" fn Java_com_nervosnetwork_ckblightclient_LightClientNative_native
     _class: JClass,
 ) -> jstring {
     guard_jni(std::ptr::null_mut(), move || {
-    check_running!(env);
-
-    let net_controller = match NET_CONTROL.get() {
-        Some(nc) => nc,
-        None => {
-            error!("Network controller not initialized");
-            return ptr::null_mut();
+        match bridge_query::local_node_info() {
+            Ok(json) => json_to_jstring(&mut env, &json),
+            Err(_) => ptr::null_mut(),
         }
-    };
-
-    let _consensus = match CONSENSUS.get() {
-        Some(c) => c,
-        None => {
-            error!("Consensus not initialized");
-            return ptr::null_mut();
-        }
-    };
-
-    let node_id = net_controller.node_id();
-
-    let node_info = LocalNode {
-        active: is_running(),
-        addresses: vec![], // TODO: get actual addresses
-        connections: (net_controller.connected_peers().len() as u64).into(),
-        node_id,
-        protocols: vec![], // TODO: get actual protocols
-        version: env!("CARGO_PKG_VERSION").to_owned(),
-    };
-
-    to_jstring(&mut env, &node_info)
     })
 }
 
@@ -488,45 +463,10 @@ pub extern "C" fn Java_com_nervosnetwork_ckblightclient_LightClientNative_native
     _class: JClass,
 ) -> jstring {
     guard_jni(std::ptr::null_mut(), move || {
-    check_running!(env);
-
-    let net_controller = match NET_CONTROL.get() {
-        Some(nc) => nc,
-        None => {
-            error!("Network controller not initialized");
-            return ptr::null_mut();
+        match bridge_query::get_peers() {
+            Ok(json) => json_to_jstring(&mut env, &json),
+            Err(_) => ptr::null_mut(),
         }
-    };
-
-    let mut remote_nodes = Vec::new();
-
-    // connected_peers() returns Vec<(SessionId, Peer)>
-    for (_session_id, peer) in net_controller.connected_peers() {
-        // Extract peer_id from the connected address
-        let node_id = extract_peer_id(&peer.connected_addr)
-            .map(|id| id.to_base58())
-            .unwrap_or_else(|| "unknown".to_owned());
-
-        // Calculate connection duration in milliseconds
-        let connected_duration_ms = peer.connected_time.elapsed().as_millis() as u64;
-
-        let remote_node = RemoteNode {
-            version: peer
-                .identify_info
-                .as_ref()
-                .map(|info| info.client_version.clone())
-                .unwrap_or_else(|| "unknown".to_owned()),
-            node_id,
-            addresses: vec![], // TODO: get actual addresses
-            connected_duration: connected_duration_ms.into(),
-            sync_state: None,  // TODO: get sync state
-            protocols: vec![], // TODO: get actual protocols
-        };
-
-        remote_nodes.push(remote_node);
-    }
-
-    to_jstring(&mut env, &remote_nodes)
     })
 }
 
