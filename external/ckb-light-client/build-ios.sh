@@ -77,7 +77,9 @@ cargo run --release \
 # The .swift file is checked in as the package source; the C header and
 # modulemap become the xcframework's headers.
 mkdir -p "$SOURCES_DIR" "$INCLUDE_DIR"
-rm -f "$SOURCES_DIR"/*.swift
+# Replace only the generated file by name; any hand-written Swift alongside it
+# in the package sources must survive a regeneration.
+rm -f "$SOURCES_DIR/CkbLightClient.swift"
 mv "$GENERATED_DIR"/*.swift "$SOURCES_DIR/"
 mv "$GENERATED_DIR"/*.h "$INCLUDE_DIR/"
 # uniffi emits <namespace>FFI.modulemap (module CkbLightClientFFI, which is what
