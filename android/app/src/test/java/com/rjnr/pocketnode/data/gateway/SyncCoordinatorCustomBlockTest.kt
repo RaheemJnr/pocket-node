@@ -96,10 +96,10 @@ class SyncCoordinatorCustomBlockTest {
         db = Room.inMemoryDatabaseBuilder(ctx, AppDatabase::class.java)
             .allowMainThreadQueries()
             .build()
-        walletPreferences = WalletPreferences(ctx)
+        walletPreferences = WalletPreferences(ctx, NoopLogger)
         // Real KeyManager — only deriveLockScriptFromAddress is exercised;
         // it's a pure bech32 decode that needs no other dependencies wired.
-        keyManager = KeyManager(ctx, MnemonicManager())
+        keyManager = KeyManager(ctx, MnemonicManager(), NoopLogger)
         fakeBridge = FakeLightClientBridge()
         coordinator = SyncCoordinator(
             walletDao = db.walletDao(),

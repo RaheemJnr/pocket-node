@@ -2,9 +2,9 @@ package com.rjnr.pocketnode.data.wallet
 
 import android.content.Context
 import android.content.SharedPreferences
-import android.util.Log
 import androidx.security.crypto.EncryptedSharedPreferences
 import androidx.security.crypto.MasterKey
+import com.rjnr.pocketnode.core.log.Logger
 import com.rjnr.pocketnode.core.crypto.Blake2b
 import com.rjnr.pocketnode.core.crypto.Secp256k1Signer
 import com.rjnr.pocketnode.core.crypto.hexToByteArray
@@ -47,7 +47,8 @@ import javax.inject.Singleton
 @Singleton
 class KeyManager @Inject constructor(
     @ApplicationContext private val context: Context,
-    private val mnemonicManager: MnemonicManager
+    private val mnemonicManager: MnemonicManager,
+    private val logger: Logger,
 ) {
     @VisibleForTesting
     internal var testPrefs: SharedPreferences? = null
@@ -123,7 +124,7 @@ class KeyManager @Inject constructor(
         try {
             createEncryptedPrefs(useStrongBox = true)
         } catch (e: Exception) {
-            Log.w(TAG, "StrongBox-backed prefs failed, trying without StrongBox", e)
+            logger.w(TAG, "StrongBox-backed prefs failed, trying without StrongBox", e)
             // NEVER delete the prefs file — it may contain the user's only copy of
             // their private key and mnemonic. Try without StrongBox instead.
             try {
@@ -131,7 +132,7 @@ class KeyManager @Inject constructor(
             } catch (e2: Exception) {
                 // Both attempts failed — the keystore or prefs file is genuinely corrupted.
                 // Surface the error so the user sees a warning. Do NOT delete the file.
-                Log.e(TAG, "EncryptedSharedPreferences completely unreadable", e2)
+                logger.e(TAG, "EncryptedSharedPreferences completely unreadable", e2)
                 walletResetDueToCorruption = true
                 // Last resort: try StrongBox one more time (sometimes transient)
                 createEncryptedPrefs(useStrongBox = true)
@@ -377,12 +378,12 @@ class KeyManager @Inject constructor(
         return try {
             createEncryptedPrefsForWallet(fileName, useStrongBox = true)
         } catch (e: Exception) {
-            Log.w(TAG, "Wallet prefs ($walletId) StrongBox failed, trying without", e)
+            logger.w(TAG, "Wallet prefs ($walletId) StrongBox failed, trying without", e)
             // NEVER delete — may contain user's only key material
             try {
                 createEncryptedPrefsForWallet(fileName, useStrongBox = false)
             } catch (e2: Exception) {
-                Log.e(TAG, "Wallet prefs ($walletId) completely unreadable", e2)
+                logger.e(TAG, "Wallet prefs ($walletId) completely unreadable", e2)
                 createEncryptedPrefsForWallet(fileName, useStrongBox = true)
             }
         }
@@ -523,7 +524,7 @@ class KeyManager @Inject constructor(
                     getPrivateKeyForWallet(wallet.walletId)
                         ?.joinToString("") { "%02x".format(it) }
                 } catch (e: Exception) {
-                    Log.w(TAG, "Cannot read ESP key for ${wallet.walletId}, skipping", e)
+                    logger.w(TAG, "Cannot read ESP key for ${wallet.walletId}, skipping", e)
                     continue
                 } ?: continue
 
@@ -542,15 +543,15 @@ class KeyManager @Inject constructor(
                 // Verify round-trip
                 val check = helper.readDecryptedKey(wallet.walletId)
                 if (check == null || check.privateKeyHex != privKeyHex) {
-                    Log.e(TAG, "Round-trip verification failed for ${wallet.walletId}")
+                    logger.e(TAG, "Round-trip verification failed for ${wallet.walletId}")
                     return // Abort — don't mark complete, retry next launch
                 }
             }
 
             helper.markMigrationComplete()
-            Log.i(TAG, "ESP to Room migration complete for ${wallets.size} wallets")
+            logger.i(TAG, "ESP to Room migration complete for ${wallets.size} wallets")
         } catch (e: Exception) {
-            Log.e(TAG, "ESP to Room migration failed", e)
+            logger.e(TAG, "ESP to Room migration failed", e)
         }
     }
 
@@ -565,7 +566,7 @@ class KeyManager @Inject constructor(
         try {
             context.deleteSharedPreferences("ckb_wallet_keys")
         } catch (e: Exception) {
-            Log.w(TAG, "Failed to delete global ESP file", e)
+            logger.w(TAG, "Failed to delete global ESP file", e)
         }
 
         val prefsDir = java.io.File(context.filesDir.parent, "shared_prefs")
@@ -573,11 +574,11 @@ class KeyManager @Inject constructor(
             ?.filter { it.name.startsWith("ckb_wallet_keys_") }
             ?.forEach { file ->
                 try { file.delete() } catch (e: Exception) {
-                    Log.w(TAG, "Failed to delete ESP file: ${file.name}", e)
+                    logger.w(TAG, "Failed to delete ESP file: ${file.name}", e)
                 }
             }
 
-        Log.i(TAG, "ESP files deleted after successful Room migration")
+        logger.i(TAG, "ESP files deleted after successful Room migration")
     }
 
     private fun writeBackupIfPinAvailable(walletId: String, buildMaterial: () -> KeyMaterial) {
@@ -589,7 +590,7 @@ class KeyManager @Inject constructor(
             // later backup writes in the same session.
             manager.writeBackup(walletId, buildMaterial(), pin.copyOf())
         } catch (e: Exception) {
-            Log.w(TAG, "Backup write failed for $walletId", e)
+            logger.w(TAG, "Backup write failed for $walletId", e)
         }
     }
 

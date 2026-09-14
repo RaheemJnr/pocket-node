@@ -1,8 +1,8 @@
 package com.rjnr.pocketnode.data.wallet
 
 import android.security.keystore.KeyPermanentlyInvalidatedException
-import android.util.Log
 import androidx.fragment.app.FragmentActivity
+import com.rjnr.pocketnode.core.log.Logger
 import com.rjnr.pocketnode.data.auth.AuthManager
 import com.rjnr.pocketnode.data.crypto.KeystoreEncryptionManager
 import com.rjnr.pocketnode.data.database.dao.KeyMaterialDao
@@ -37,6 +37,7 @@ class WalletKeyWriter @Inject constructor(
     private val encryptionManager: KeystoreEncryptionManager,
     private val authManager: AuthManager,
     private val keyBackupManager: KeyBackupManager,
+    private val logger: Logger,
 ) {
 
     sealed class Result {
@@ -115,14 +116,14 @@ class WalletKeyWriter @Inject constructor(
         // persistNewWalletV1Fallback AFTER showing the informed-consent
         // "Continue without a device lock?" dialog, matching onboarding.
         if (!authManager.isBiometricEnrolled() && !authManager.hasDeviceCredential()) {
-            Log.i(TAG, "No secure lock on device — returning NoSecureLock for $walletId")
+            logger.i(TAG, "No secure lock on device — returning NoSecureLock for $walletId")
             return Result.NoSecureLock
         }
 
         val cipher = try {
             encryptionManager.newEncryptCipherV2()
         } catch (e: KeyPermanentlyInvalidatedException) {
-            Log.w(TAG, "V2 key invalidated when generating cipher for $walletId", e)
+            logger.w(TAG, "V2 key invalidated when generating cipher for $walletId", e)
             return Result.KeyInvalidated
         } catch (e: java.security.InvalidAlgorithmParameterException) {
             // KeyGenerator.init wraps the Keystore "Secure lock screen must be
@@ -133,14 +134,14 @@ class WalletKeyWriter @Inject constructor(
             if (e.cause?.message?.contains("Secure lock screen", ignoreCase = true) == true) {
                 // Race: the lock was removed mid-flow. Same as the pre-gate —
                 // return NoSecureLock (F1) rather than silently downgrading.
-                Log.w(TAG, "V2 key creation refused mid-flow (no secure lock); NoSecureLock", e)
+                logger.w(TAG, "V2 key creation refused mid-flow (no secure lock); NoSecureLock", e)
                 return Result.NoSecureLock
             }
             throw e
         } catch (e: IllegalStateException) {
             // Same condition, unwrapped form (older API levels).
             if (e.message?.contains("Secure lock screen", ignoreCase = true) == true) {
-                Log.w(TAG, "V2 key creation refused mid-flow (no secure lock); NoSecureLock", e)
+                logger.w(TAG, "V2 key creation refused mid-flow (no secure lock); NoSecureLock", e)
                 return Result.NoSecureLock
             }
             throw e
@@ -192,13 +193,13 @@ class WalletKeyWriter @Inject constructor(
                                     pin = pin,
                                 )
                             } catch (e: Throwable) {
-                                Log.e(TAG, "PIN backup write failed for $walletId; rolling back key_material row", e)
+                                logger.e(TAG, "PIN backup write failed for $walletId; rolling back key_material row", e)
                                 // Best-effort rollback so we don't leave an orphan Room row
                                 // without a matching backup blob.
                                 try {
                                     keyMaterialDao.delete(walletId)
                                 } catch (rollback: Throwable) {
-                                    Log.e(TAG, "Rollback of key_material delete also failed for $walletId", rollback)
+                                    logger.e(TAG, "Rollback of key_material delete also failed for $walletId", rollback)
                                 }
                                 return@withContext Result.WriteFailed(e)
                             }
@@ -249,10 +250,10 @@ class WalletKeyWriter @Inject constructor(
                     walletType = walletType,
                     mnemonicBackedUp = mnemonicBackedUp,
                 )
-                Log.i(TAG, "Wrote new V1 wallet row for $walletId (no device credential)")
+                logger.i(TAG, "Wrote new V1 wallet row for $walletId (no device credential)")
                 Result.Success
             } catch (e: Throwable) {
-                Log.e(TAG, "V1 fallback write failed for $walletId", e)
+                logger.e(TAG, "V1 fallback write failed for $walletId", e)
                 Result.WriteFailed(e)
             }
         }

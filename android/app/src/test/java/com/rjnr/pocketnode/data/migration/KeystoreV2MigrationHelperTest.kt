@@ -4,6 +4,7 @@ import android.content.Context
 import android.content.SharedPreferences
 import androidx.room.Room
 import androidx.test.core.app.ApplicationProvider
+import com.rjnr.pocketnode.core.log.NoopLogger
 import com.rjnr.pocketnode.data.crypto.KeystoreEncryptionManager
 import com.rjnr.pocketnode.data.database.AppDatabase
 import com.rjnr.pocketnode.data.database.dao.KeyMaterialDao
@@ -41,12 +42,13 @@ class KeystoreV2MigrationHelperTest {
         migrationPrefs.edit().clear().commit()
 
         // V1 helper to seed pre-v1.7.0 wallets into the in-memory DB
-        v1Helper = KeyStoreMigrationHelper(keyMaterialDao, encryptionManager, migrationPrefs)
+        v1Helper = KeyStoreMigrationHelper(keyMaterialDao, encryptionManager, migrationPrefs, NoopLogger)
         v2Helper = KeystoreV2MigrationHelper(
             keyMaterialDao,
             encryptionManager,
             migrationPrefs,
-            nowProvider = { fakeNow }
+            nowProvider = { fakeNow },
+            logger = NoopLogger,
         )
     }
 
@@ -209,7 +211,8 @@ class KeystoreV2MigrationHelperTest {
             keyMaterialDao,
             encryptionManager,
             migrationPrefs,
-            nowProvider = { fakeNow }
+            nowProvider = { fakeNow },
+            logger = NoopLogger,
         )
         val resumed = v2HelperAfterCrash.pendingWalletIds()
         assertEquals(listOf("gamma"), resumed)

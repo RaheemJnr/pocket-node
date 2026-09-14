@@ -2,10 +2,10 @@ package com.rjnr.pocketnode.data.auth
 
 import android.content.Context
 import android.content.SharedPreferences
-import android.util.Log
 import androidx.annotation.VisibleForTesting
 import androidx.security.crypto.EncryptedSharedPreferences
 import androidx.security.crypto.MasterKey
+import com.rjnr.pocketnode.core.log.Logger
 import com.rjnr.pocketnode.data.crypto.Blake2b
 import com.rjnr.pocketnode.data.wallet.KeyBackupManager
 import dagger.hilt.android.qualifiers.ApplicationContext
@@ -38,7 +38,8 @@ import org.bouncycastle.crypto.params.Argon2Parameters
 @Singleton
 class PinManager @Inject constructor(
     @ApplicationContext private val context: Context,
-    private val blake2b: Blake2b
+    private val blake2b: Blake2b,
+    private val logger: Logger,
 ) {
     @VisibleForTesting
     internal var testPrefs: SharedPreferences? = null
@@ -62,11 +63,11 @@ class PinManager @Inject constructor(
         try {
             createEncryptedPrefs(useStrongBox = true)
         } catch (e: Exception) {
-            Log.w(TAG, "StrongBox-backed pin prefs failed, trying without StrongBox", e)
+            logger.w(TAG, "StrongBox-backed pin prefs failed, trying without StrongBox", e)
             try {
                 createEncryptedPrefs(useStrongBox = false)
             } catch (e2: Exception) {
-                Log.e(TAG, "Pin prefs completely unreadable", e2)
+                logger.e(TAG, "Pin prefs completely unreadable", e2)
                 createEncryptedPrefs(useStrongBox = true)
             }
         }
@@ -142,7 +143,7 @@ class PinManager @Inject constructor(
             KDF_VERSION_ARGON2ID -> hashPinArgon2id(pinBytes) == storedHash
             KDF_VERSION_LEGACY_BLAKE2B -> hashPinBlake2b(pinBytes) == storedHash
             else -> {
-                Log.e(TAG, "Unknown KDF version $kdfVersion, refusing to verify")
+                logger.e(TAG, "Unknown KDF version $kdfVersion, refusing to verify")
                 return false
             }
         }
@@ -159,9 +160,9 @@ class PinManager @Inject constructor(
                         .putString(KEY_PIN_HASH, newHash)
                         .putInt(KEY_KDF_VERSION, KDF_VERSION_ARGON2ID)
                         .apply()
-                    Log.i(TAG, "Migrated PIN hash to Argon2id")
+                    logger.i(TAG, "Migrated PIN hash to Argon2id")
                 }.onFailure {
-                    Log.w(TAG, "PIN Argon2id migration write failed (will retry next entry)", it)
+                    logger.w(TAG, "PIN Argon2id migration write failed (will retry next entry)", it)
                 }
             }
             onSuccessfulPin()

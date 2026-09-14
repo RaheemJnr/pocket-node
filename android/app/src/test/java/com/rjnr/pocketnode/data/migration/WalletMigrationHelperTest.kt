@@ -3,6 +3,7 @@ package com.rjnr.pocketnode.data.migration
 import android.content.Context
 import androidx.room.Room
 import androidx.test.core.app.ApplicationProvider
+import com.rjnr.pocketnode.core.log.NoopLogger
 import com.rjnr.pocketnode.data.crypto.KeystoreEncryptionManager
 import com.rjnr.pocketnode.data.database.AppDatabase
 import com.rjnr.pocketnode.data.database.MIGRATION_1_2
@@ -51,16 +52,16 @@ class WalletMigrationHelperTest {
             .allowMainThreadQueries()
             .build()
         walletDao = db.walletDao()
-        keyManager = KeyManager(context, MnemonicManager())
+        keyManager = KeyManager(context, MnemonicManager(), NoopLogger)
         val encryptionManager = KeystoreEncryptionManager.createForTest()
         val migrationPrefs = context.getSharedPreferences("test_wallet_mig", Context.MODE_PRIVATE)
         migrationPrefs.edit().clear().commit()
-        keyStoreMigrationHelper = KeyStoreMigrationHelper(db.keyMaterialDao(), encryptionManager, migrationPrefs)
+        keyStoreMigrationHelper = KeyStoreMigrationHelper(db.keyMaterialDao(), encryptionManager, migrationPrefs, NoopLogger)
         keyManager.keyStoreMigrationHelper = keyStoreMigrationHelper
         legacyPrefs = context.getSharedPreferences("ckb_wallet_prefs", Context.MODE_PRIVATE)
         legacyPrefs.edit().clear().commit()
-        walletPreferences = WalletPreferences(context)
-        helper = WalletMigrationHelper(walletDao, keyManager, walletPreferences, db, db.syncProgressDao(), keyStoreMigrationHelper)
+        walletPreferences = WalletPreferences(context, NoopLogger)
+        helper = WalletMigrationHelper(walletDao, keyManager, walletPreferences, db, db.syncProgressDao(), keyStoreMigrationHelper, NoopLogger)
     }
 
     /**

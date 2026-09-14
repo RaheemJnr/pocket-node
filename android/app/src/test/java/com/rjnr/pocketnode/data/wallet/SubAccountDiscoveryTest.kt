@@ -2,6 +2,7 @@ package com.rjnr.pocketnode.data.wallet
 
 import android.content.Context
 import androidx.test.core.app.ApplicationProvider
+import com.rjnr.pocketnode.core.log.NoopLogger
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNotEquals
 import org.junit.Assert.assertTrue
@@ -32,7 +33,7 @@ class SubAccountDiscoveryTest {
     fun setup() {
         val context = ApplicationProvider.getApplicationContext<Context>()
         mnemonicManager = MnemonicManager()
-        keyManager = KeyManager(context, mnemonicManager)
+        keyManager = KeyManager(context, mnemonicManager, NoopLogger)
         discovery = SubAccountDiscovery(mnemonicManager, keyManager)
     }
 

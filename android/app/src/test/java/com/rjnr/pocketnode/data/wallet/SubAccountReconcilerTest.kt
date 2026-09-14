@@ -3,6 +3,7 @@ package com.rjnr.pocketnode.data.wallet
 import android.content.Context
 import androidx.room.Room
 import androidx.test.core.app.ApplicationProvider
+import com.rjnr.pocketnode.core.log.NoopLogger
 import com.rjnr.pocketnode.data.database.AppDatabase
 import com.rjnr.pocketnode.data.database.dao.SubAccountCandidateDao
 import com.rjnr.pocketnode.data.database.entity.SubAccountCandidateEntity
@@ -61,7 +62,7 @@ class SubAccountReconcilerTest {
     @Test
     fun `history flips PENDING to FOUND`() = runTest {
         seed(1, "0xaa")
-        val r = SubAccountReconciler(dao) { true }
+        val r = SubAccountReconciler(dao, NoopLogger) { true }
         r.reconcileNow(mapOf("0xaa" to 500L), tipHeight = 10_000L)
         assertEquals(SubAccountCandidateEntity.STATE_FOUND, stateOf(1))
     }
@@ -69,7 +70,7 @@ class SubAccountReconcilerTest {
     @Test
     fun `no history near tip with real coverage retires candidate as EMPTY`() = runTest {
         seed(1, "0xaa", registeredFrom = 100_000L)
-        val r = SubAccountReconciler(dao) { false }
+        val r = SubAccountReconciler(dao, NoopLogger) { false }
         r.reconcileNow(mapOf("0xaa" to 199_500L), tipHeight = 200_000L)
         assertEquals(SubAccountCandidateEntity.STATE_EMPTY, stateOf(1))
     }
@@ -77,7 +78,7 @@ class SubAccountReconcilerTest {
     @Test
     fun `no history mid-scan stays PENDING`() = runTest {
         seed(1, "0xaa")
-        val r = SubAccountReconciler(dao) { false }
+        val r = SubAccountReconciler(dao, NoopLogger) { false }
         r.reconcileNow(mapOf("0xaa" to 2_000L), tipHeight = 10_000L)
         assertEquals(SubAccountCandidateEntity.STATE_PENDING, stateOf(1))
     }
@@ -85,7 +86,7 @@ class SubAccountReconcilerTest {
     @Test
     fun `unknown tip never declares EMPTY`() = runTest {
         seed(1, "0xaa")
-        val r = SubAccountReconciler(dao) { false }
+        val r = SubAccountReconciler(dao, NoopLogger) { false }
         r.reconcileNow(mapOf("0xaa" to 9_999_999L), tipHeight = 0L)
         assertEquals(SubAccountCandidateEntity.STATE_PENDING, stateOf(1))
     }
@@ -100,7 +101,7 @@ class SubAccountReconcilerTest {
     fun `no history at tip with zero coverage stays PENDING`() = runTest {
         seed(1, "0xaa", registeredFrom = 9_990L) // registered basically at tip
         seed(2, "0xbb", registeredFrom = 0L)     // never recorded a start
-        val r = SubAccountReconciler(dao) { false }
+        val r = SubAccountReconciler(dao, NoopLogger) { false }
         r.reconcileNow(mapOf("0xaa" to 10_000L, "0xbb" to 10_000L), tipHeight = 10_000L)
         assertEquals(SubAccountCandidateEntity.STATE_PENDING, stateOf(1))
         assertEquals(SubAccountCandidateEntity.STATE_PENDING, stateOf(2))
@@ -110,7 +111,7 @@ class SubAccountReconcilerTest {
     fun `unregistered script or indeterminate probe stays PENDING`() = runTest {
         seed(1, "0xaa") // not in scannedByArgs
         seed(2, "0xbb") // probe returns null
-        val r = SubAccountReconciler(dao) { args -> if (args == "0xbb") null else true }
+        val r = SubAccountReconciler(dao, NoopLogger) { args -> if (args == "0xbb") null else true }
         r.reconcileNow(mapOf("0xbb" to 9_500L), tipHeight = 10_000L)
         assertEquals(SubAccountCandidateEntity.STATE_PENDING, stateOf(1))
         assertEquals(SubAccountCandidateEntity.STATE_PENDING, stateOf(2))
@@ -160,11 +161,11 @@ class SubAccountReconcilerTest {
     @Test
     fun `FOUND survives later empty-looking passes`() = runTest {
         seed(1, "0xaa", registeredFrom = 100_000L)
-        val r = SubAccountReconciler(dao) { true }
+        val r = SubAccountReconciler(dao, NoopLogger) { true }
         r.reconcileNow(mapOf("0xaa" to 199_500L), tipHeight = 200_000L)
         // Second pass with a probe that now says no history (e.g. transient
         // light-client hiccup) must not demote FOUND — only PENDING is judged.
-        val r2 = SubAccountReconciler(dao) { false }
+        val r2 = SubAccountReconciler(dao, NoopLogger) { false }
         r2.reconcileNow(mapOf("0xaa" to 199_900L), tipHeight = 200_000L)
         assertEquals(SubAccountCandidateEntity.STATE_FOUND, stateOf(1))
     }

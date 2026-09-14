@@ -5,6 +5,7 @@ import android.content.SharedPreferences
 import androidx.fragment.app.FragmentActivity
 import androidx.room.Room
 import androidx.test.core.app.ApplicationProvider
+import com.rjnr.pocketnode.core.log.NoopLogger
 import com.rjnr.pocketnode.data.auth.AuthManager
 import com.rjnr.pocketnode.data.crypto.KeystoreEncryptionManager
 import com.rjnr.pocketnode.data.database.AppDatabase
@@ -66,12 +67,12 @@ class WalletKeyWriterTest {
         encryptionManager = KeystoreEncryptionManager.createForTest()
         prefs = ctx.getSharedPreferences("test_v2_writer", Context.MODE_PRIVATE)
         prefs.edit().clear().commit()
-        helper = KeystoreV2MigrationHelper(keyMaterialDao, encryptionManager, prefs)
+        helper = KeystoreV2MigrationHelper(keyMaterialDao, encryptionManager, prefs, logger = NoopLogger)
         // KeyStoreMigrationHelper backs the V1 software-only fallback path
         // added for users without a device lock. Tests below exercise the V2
         // path; the V1 helper is wired but not invoked.
         val v1Helper = com.rjnr.pocketnode.data.migration.KeyStoreMigrationHelper(
-            keyMaterialDao, encryptionManager, prefs
+            keyMaterialDao, encryptionManager, prefs, NoopLogger
         )
         authManager = mockk(relaxed = true)
         // Default: device HAS a secure lock so tests exercise the V2 path.
@@ -85,6 +86,7 @@ class WalletKeyWriterTest {
             encryptionManager = encryptionManager,
             authManager = authManager,
             keyBackupManager = keyBackupManager,
+            logger = NoopLogger,
         )
         activity = mockk(relaxed = true)
     }

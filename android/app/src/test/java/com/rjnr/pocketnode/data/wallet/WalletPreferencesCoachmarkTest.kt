@@ -1,6 +1,7 @@
 package com.rjnr.pocketnode.data.wallet
 
 import androidx.test.core.app.ApplicationProvider
+import com.rjnr.pocketnode.core.log.NoopLogger
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.test.runTest
 import org.junit.Test
@@ -18,18 +19,18 @@ class WalletPreferencesCoachmarkTest {
 
     @Test
     fun `default has not seen sync coachmark`() = runTest {
-        val prefs = WalletPreferences(ctx).also { it.clear() }
+        val prefs = WalletPreferences(ctx, NoopLogger).also { it.clear() }
         assertFalse(prefs.hasSeenSyncCoachmarkFlow.first())
     }
 
     @Test
     fun `mark seen persists`() = runTest {
-        val prefs = WalletPreferences(ctx).also { it.clear() }
+        val prefs = WalletPreferences(ctx, NoopLogger).also { it.clear() }
         prefs.markSyncCoachmarkSeen()
         assertTrue(prefs.hasSeenSyncCoachmarkFlow.first())
 
         // New instance reads same SharedPreferences file.
-        val reread = WalletPreferences(ctx)
+        val reread = WalletPreferences(ctx, NoopLogger)
         assertTrue(reread.hasSeenSyncCoachmarkFlow.first())
     }
 }

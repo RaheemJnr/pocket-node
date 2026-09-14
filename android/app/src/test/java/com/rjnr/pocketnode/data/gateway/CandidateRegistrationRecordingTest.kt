@@ -53,8 +53,8 @@ class CandidateRegistrationRecordingTest {
         coordinator = SyncCoordinator(
             db.walletDao(),
             db.syncProgressDao(),
-            WalletPreferences(context),
-            KeyManager(context, mnemonicManager),
+            WalletPreferences(context, NoopLogger),
+            KeyManager(context, mnemonicManager, NoopLogger),
             Json { ignoreUnknownKeys = true },
             fakeBridge,
             db.subAccountCandidateDao(),

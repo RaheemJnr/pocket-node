@@ -1,6 +1,6 @@
 package com.rjnr.pocketnode.data.wallet
 
-import android.util.Log
+import com.rjnr.pocketnode.core.log.Logger
 import com.rjnr.pocketnode.data.database.dao.SubAccountCandidateDao
 import com.rjnr.pocketnode.data.database.entity.SubAccountCandidateEntity
 import javax.inject.Inject
@@ -34,6 +34,7 @@ fun interface SubAccountActivityProbe {
 @Singleton
 class SubAccountReconciler @Inject constructor(
     private val candidateDao: SubAccountCandidateDao,
+    private val logger: Logger,
     private val probe: SubAccountActivityProbe,
 ) {
 
@@ -61,7 +62,7 @@ class SubAccountReconciler @Inject constructor(
             val active = probe.hasActivity(candidate.scriptArgs) ?: return@forEach
             when {
                 active -> {
-                    Log.i(
+                    logger.i(
                         TAG,
                         "Candidate found: parent=${candidate.parentWalletId} " +
                             "path=${candidate.derivationPath} has on-chain history"

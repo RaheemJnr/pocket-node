@@ -2,6 +2,7 @@ package com.rjnr.pocketnode.data.wallet
 
 import android.content.Context
 import androidx.test.core.app.ApplicationProvider
+import com.rjnr.pocketnode.core.log.NoopLogger
 import com.rjnr.pocketnode.data.gateway.models.NetworkType
 import com.rjnr.pocketnode.data.gateway.models.SyncMode
 import org.junit.Assert.*
@@ -18,7 +19,7 @@ class WalletPreferencesMultiWalletTest {
     @Before
     fun setUp() {
         val context = ApplicationProvider.getApplicationContext<Context>()
-        prefs = WalletPreferences(context)
+        prefs = WalletPreferences(context, NoopLogger)
     }
 
     @Test

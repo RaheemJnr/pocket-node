@@ -1,7 +1,7 @@
 package com.rjnr.pocketnode.data.wallet
 
-import android.util.Log
 import androidx.annotation.VisibleForTesting
+import com.rjnr.pocketnode.core.log.Logger
 import kotlinx.serialization.ExperimentalSerializationApi
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.json.Json
@@ -33,7 +33,8 @@ data class KeyMaterial(
 
 @Singleton
 class KeyBackupManager @Inject constructor(
-    private val backupDir: File
+    private val backupDir: File,
+    private val logger: Logger,
 ) {
     private val json = Json { ignoreUnknownKeys = true; encodeDefaults = true }
 
@@ -100,7 +101,7 @@ class KeyBackupManager @Inject constructor(
         return try {
             val bytes = file.readBytes()
             if (bytes.size < HEADER_SIZE || !bytes.sliceArray(0 until 4).contentEquals(MAGIC)) {
-                Log.w(TAG, "Backup file for $walletId has invalid magic header")
+                logger.w(TAG, "Backup file for $walletId has invalid magic header")
                 return null
             }
             // Byte 4 selects the KDF: v1 = PBKDF2 (legacy), v2 = Argon2id.
@@ -123,7 +124,7 @@ class KeyBackupManager @Inject constructor(
                 plaintext.fill(0)
             }
         } catch (e: Exception) {
-            Log.w(TAG, "Failed to read backup for $walletId", e)
+            logger.w(TAG, "Failed to read backup for $walletId", e)
             null
         }
     }

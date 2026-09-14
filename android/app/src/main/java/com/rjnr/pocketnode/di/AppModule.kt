@@ -80,8 +80,9 @@ object AppModule {
         mnemonicManager: MnemonicManager,
         keyBackupManager: KeyBackupManager,
         keyStoreMigrationHelper: KeyStoreMigrationHelper,
-        authManager: AuthManager
-    ): KeyManager = KeyManager(context, mnemonicManager).also {
+        authManager: AuthManager,
+        logger: Logger,
+    ): KeyManager = KeyManager(context, mnemonicManager, logger).also {
         it.keyBackupManager = keyBackupManager
         it.keyStoreMigrationHelper = keyStoreMigrationHelper
         it.authManager = authManager
@@ -90,8 +91,9 @@ object AppModule {
     @Provides
     @Singleton
     fun provideKeyBackupManager(
-        @ApplicationContext context: Context
-    ): KeyBackupManager = KeyBackupManager(File(context.filesDir, "key_backups"))
+        @ApplicationContext context: Context,
+        logger: Logger,
+    ): KeyBackupManager = KeyBackupManager(File(context.filesDir, "key_backups"), logger)
 
     @Provides
     @Singleton
@@ -126,8 +128,9 @@ object AppModule {
     @Singleton
     fun providePinManager(
         @ApplicationContext context: Context,
-        blake2b: Blake2b
-    ): PinManager = PinManager(context, blake2b)
+        blake2b: Blake2b,
+        logger: Logger,
+    ): PinManager = PinManager(context, blake2b, logger)
 
     @Provides
     @Singleton
@@ -195,18 +198,20 @@ object AppModule {
     fun provideKeyStoreMigrationHelper(
         keyMaterialDao: KeyMaterialDao,
         encryptionManager: KeystoreEncryptionManager,
-        @Named("migrationPrefs") migrationPrefs: SharedPreferences
-    ): KeyStoreMigrationHelper = KeyStoreMigrationHelper(keyMaterialDao, encryptionManager, migrationPrefs)
+        @Named("migrationPrefs") migrationPrefs: SharedPreferences,
+        logger: Logger,
+    ): KeyStoreMigrationHelper = KeyStoreMigrationHelper(keyMaterialDao, encryptionManager, migrationPrefs, logger)
 
     @Provides
     @Singleton
     fun provideKeystoreV2MigrationHelper(
         keyMaterialDao: KeyMaterialDao,
         encryptionManager: KeystoreEncryptionManager,
-        @Named("migrationPrefs") migrationPrefs: SharedPreferences
+        @Named("migrationPrefs") migrationPrefs: SharedPreferences,
+        logger: Logger,
     ): com.rjnr.pocketnode.data.migration.KeystoreV2MigrationHelper =
         com.rjnr.pocketnode.data.migration.KeystoreV2MigrationHelper(
-            keyMaterialDao, encryptionManager, migrationPrefs
+            keyMaterialDao, encryptionManager, migrationPrefs, logger = logger
         )
 
     @Provides
