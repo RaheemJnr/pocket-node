@@ -288,7 +288,7 @@ class WalletKeyReader @Inject constructor(
             } catch (e: Throwable) {
                 Log.w(TAG, "Opportunistic backup write failed for $walletId", e)
             } finally {
-                java.util.Arrays.fill(sessionPin, ' ')
+                java.util.Arrays.fill(sessionPin, '\u0000')
             }
         }
     }
