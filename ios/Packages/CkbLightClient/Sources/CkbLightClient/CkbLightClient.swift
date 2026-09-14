@@ -487,6 +487,22 @@ fileprivate struct FfiConverterUInt8: FfiConverterPrimitive {
 #if swift(>=5.8)
 @_documentation(visibility: private)
 #endif
+fileprivate struct FfiConverterInt32: FfiConverterPrimitive {
+    typealias FfiType = Int32
+    typealias SwiftType = Int32
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> Int32 {
+        return try lift(readInt(&buf))
+    }
+
+    public static func write(_ value: Int32, into buf: inout [UInt8]) {
+        writeInt(&buf, lower(value))
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
 fileprivate struct FfiConverterBool : FfiConverter {
     typealias FfiType = Int8
     typealias SwiftType = Bool
@@ -836,12 +852,65 @@ fileprivate struct FfiConverterOptionCallbackInterfaceStatusListener: FfiConvert
     }
 }
 /**
+ * Fetch status for a header, as a JSON string; queues the fetch when unknown.
+ */
+public func fetchHeader(hash: String)throws  -> String  {
+    return try  FfiConverterString.lift(try rustCallWithError(FfiConverterTypeLightClientError_lift) {
+        uniffiCallStatus in
+    uniffi_ckb_light_client_lib_fn_func_fetch_header(
+        FfiConverterString.lower(hash),uniffiCallStatus
+    )
+})
+}
+/**
+ * Genesis block as a JSON string.
+ */
+public func getGenesisBlock()throws  -> String  {
+    return try  FfiConverterString.lift(try rustCallWithError(FfiConverterTypeLightClientError_lift) {
+        uniffiCallStatus in
+    uniffi_ckb_light_client_lib_fn_func_get_genesis_block(uniffiCallStatus
+    )
+})
+}
+/**
+ * Header for a block hash (`0x`-prefixed or bare) as a JSON string.
+ */
+public func getHeader(hash: String)throws  -> String  {
+    return try  FfiConverterString.lift(try rustCallWithError(FfiConverterTypeLightClientError_lift) {
+        uniffiCallStatus in
+    uniffi_ckb_light_client_lib_fn_func_get_header(
+        FfiConverterString.lower(hash),uniffiCallStatus
+    )
+})
+}
+/**
+ * Header for a block number (decimal, or `0x`-prefixed hex) as a JSON string.
+ */
+public func getHeaderByNumber(blockNumber: String)throws  -> String  {
+    return try  FfiConverterString.lift(try rustCallWithError(FfiConverterTypeLightClientError_lift) {
+        uniffiCallStatus in
+    uniffi_ckb_light_client_lib_fn_func_get_header_by_number(
+        FfiConverterString.lower(blockNumber),uniffiCallStatus
+    )
+})
+}
+/**
  * Connected peers as a JSON string.
  */
 public func getPeers()throws  -> String  {
     return try  FfiConverterString.lift(try rustCallWithError(FfiConverterTypeLightClientError_lift) {
         uniffiCallStatus in
     uniffi_ckb_light_client_lib_fn_func_get_peers(uniffiCallStatus
+    )
+})
+}
+/**
+ * Filter scripts currently synced for, as a JSON string.
+ */
+public func getScripts()throws  -> String  {
+    return try  FfiConverterString.lift(try rustCallWithError(FfiConverterTypeLightClientError_lift) {
+        uniffiCallStatus in
+    uniffi_ckb_light_client_lib_fn_func_get_scripts(uniffiCallStatus
     )
 })
 }
@@ -913,6 +982,17 @@ public func localNodeInfo()throws  -> String  {
 })
 }
 /**
+ * Set the filter scripts to sync (command 0 = all, 1 = partial, 2 = delete).
+ */
+public func setScripts(scriptsJson: String, command: Int32)throws   {try rustCallWithError(FfiConverterTypeLightClientError_lift) {
+        uniffiCallStatus in
+    uniffi_ckb_light_client_lib_fn_func_set_scripts(
+        FfiConverterString.lower(scriptsJson),
+        FfiConverterInt32.lower(command),uniffiCallStatus
+    )
+}
+}
+/**
  * Transition from INIT to RUNNING.
  *
  * Blocking: call it off the main thread along with the rest of the lifecycle
@@ -954,7 +1034,22 @@ private let initializationResult: InitializationResult = {
     if bindings_contract_version != scaffolding_contract_version {
         return InitializationResult.contractVersionMismatch
     }
+    if (uniffi_ckb_light_client_lib_checksum_func_fetch_header() != 32749) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_ckb_light_client_lib_checksum_func_get_genesis_block() != 18480) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_ckb_light_client_lib_checksum_func_get_header() != 22057) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_ckb_light_client_lib_checksum_func_get_header_by_number() != 6313) {
+        return InitializationResult.apiChecksumMismatch
+    }
     if (uniffi_ckb_light_client_lib_checksum_func_get_peers() != 46096) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_ckb_light_client_lib_checksum_func_get_scripts() != 56371) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_ckb_light_client_lib_checksum_func_get_status() != 47683) {
@@ -970,6 +1065,9 @@ private let initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_ckb_light_client_lib_checksum_func_local_node_info() != 22703) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_ckb_light_client_lib_checksum_func_set_scripts() != 29973) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_ckb_light_client_lib_checksum_func_start_light_client() != 33644) {

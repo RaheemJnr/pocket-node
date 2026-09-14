@@ -7,14 +7,12 @@ use super::panic_guard::guard_jni;
 use super::types::*;
 use crate::bridge_core::query as bridge_query;
 use crate::service::{
-    Cell, CellType, CellsCapacity, FetchStatus, Pagination, ScriptType, SearchKey,
-    SetScriptsCommand, Tx, TxWithCell,
+    Cell, CellType, CellsCapacity, FetchStatus, Pagination, ScriptType, SearchKey, Tx, TxWithCell,
 };
-use crate::storage::{self, extract_raw_data, Key, KeyPrefix, Direction, IteratorMode};
+use crate::storage::{extract_raw_data, Direction, IteratorMode, Key, KeyPrefix};
 use crate::verify::verify_tx;
-use ckb_jsonrpc_types::{BlockView, HeaderView, JsonBytes, Transaction};
+use ckb_jsonrpc_types::{JsonBytes, Transaction};
 use ckb_systemtime::unix_time_as_millis;
-use ckb_traits::HeaderProvider;
 use ckb_types::{core, packed, prelude::{*, IntoHeaderView, IntoTransactionView}, H256};
 use jni::objects::{JClass, JString};
 use jni::sys::jstring;
@@ -47,6 +45,17 @@ fn send_error_jstring(env: &mut JNIEnv, reason: &str) -> jstring {
         Err(e) => {
             error!("Failed to create send-error JString: {}", e);
             ptr::null_mut()
+        }
+    }
+}
+
+/// Helper to read a `JString` argument, logging and reporting failure as `None`.
+fn jstring_to_string(env: &mut JNIEnv, value: &JString, context: &str) -> Option<String> {
+    match env.get_string(value) {
+        Ok(s) => Some(s.into()),
+        Err(e) => {
+            error!("{}: failed to read string argument: {}", context, e);
+            None
         }
     }
 }
@@ -100,22 +109,10 @@ pub extern "C" fn Java_com_nervosnetwork_ckblightclient_LightClientNative_native
     _class: JClass,
 ) -> jstring {
     guard_jni(std::ptr::null_mut(), move || {
-    check_running!(env);
-
-    let swc = match STORAGE_WITH_DATA.get() {
-        Some(s) => s,
-        None => {
-            error!("Storage not initialized");
-            return ptr::null_mut();
+        match bridge_query::get_genesis_block() {
+            Ok(json) => json_to_jstring(&mut env, &json),
+            Err(_) => ptr::null_mut(),
         }
-    };
-
-    let genesis_block = swc.storage().get_genesis_block();
-
-    // Convert packed::Block to BlockView via core::BlockView
-    let core_block_view: ckb_types::core::BlockView = genesis_block.into_view();
-    let block_view: BlockView = core_block_view.into();
-    to_jstring(&mut env, &block_view)
     })
 }
 
@@ -127,50 +124,15 @@ pub extern "C" fn Java_com_nervosnetwork_ckblightclient_LightClientNative_native
     hash: JString,
 ) -> jstring {
     guard_jni(std::ptr::null_mut(), move || {
-    check_running!(env);
+        let hash_str = match jstring_to_string(&mut env, &hash, "nativeGetHeader") {
+            Some(s) => s,
+            None => return ptr::null_mut(),
+        };
 
-    let hash_str: String = match env.get_string(&hash) {
-        Ok(s) => s.into(),
-        Err(e) => {
-            error!("Failed to get hash string: {}", e);
-            return ptr::null_mut();
+        match bridge_query::get_header(&hash_str) {
+            Ok(json) => json_to_jstring(&mut env, &json),
+            Err(_) => ptr::null_mut(),
         }
-    };
-
-    let swc = match STORAGE_WITH_DATA.get() {
-        Some(s) => s,
-        None => {
-            error!("Storage not initialized");
-            return ptr::null_mut();
-        }
-    };
-
-    let hash_hex = hash_str.strip_prefix("0x").unwrap_or(&hash_str);
-    let h256 = match H256::from_str(hash_hex) {
-        Ok(h) => h,
-        Err(e) => {
-            error!("nativeGetHeader: invalid hash '{}': {}", hash_str, e);
-            return ptr::null_mut();
-        }
-    };
-
-    // H256 is always 32 bytes so the conversion cannot fail in practice;
-    // pattern-match anyway to avoid an FFI panic landmine.
-    let hash = match packed::Byte32::from_slice(h256.as_bytes()) {
-        Ok(h) => h,
-        Err(e) => {
-            error!("nativeGetHeader: Byte32 conversion failed: {}", e);
-            return ptr::null_mut();
-        }
-    };
-
-    match swc.storage().get_header(&hash) {
-        Some(header) => {
-            let header_view: HeaderView = header.into();
-            to_jstring(&mut env, &header_view)
-        }
-        None => ptr::null_mut(),
-    }
     })
 }
 
@@ -183,66 +145,16 @@ pub extern "C" fn Java_com_nervosnetwork_ckblightclient_LightClientNative_native
     block_number: JString,
 ) -> jstring {
     guard_jni(std::ptr::null_mut(), move || {
-    check_running!(env);
+        let number_str =
+            match jstring_to_string(&mut env, &block_number, "nativeGetHeaderByNumber") {
+                Some(s) => s,
+                None => return ptr::null_mut(),
+            };
 
-    let number_str: String = match env.get_string(&block_number) {
-        Ok(s) => s.into(),
-        Err(e) => {
-            error!("nativeGetHeaderByNumber: failed to get string: {}", e);
-            return ptr::null_mut();
+        match bridge_query::get_header_by_number(&number_str) {
+            Ok(json) => json_to_jstring(&mut env, &json),
+            Err(_) => ptr::null_mut(),
         }
-    };
-
-    // Strip 0x prefix if present and parse as u64
-    let num_hex = number_str.strip_prefix("0x").unwrap_or(&number_str);
-    let block_num: u64 = match u64::from_str_radix(num_hex, if number_str.starts_with("0x") { 16 } else { 10 }) {
-        Ok(n) => n,
-        Err(e) => {
-            warn!("nativeGetHeaderByNumber: invalid block number '{}': {}", number_str, e);
-            return ptr::null_mut();
-        }
-    };
-
-    let swc = match STORAGE_WITH_DATA.get() {
-        Some(s) => s,
-        None => {
-            error!("nativeGetHeaderByNumber: storage not initialized");
-            return ptr::null_mut();
-        }
-    };
-
-    // Hop 1: BlockNumber → BlockHash
-    let block_hash_bytes = match swc.storage().get(Key::BlockNumber(block_num).into_vec()) {
-        Ok(Some(bytes)) => bytes,
-        Ok(None) => {
-            debug!("nativeGetHeaderByNumber: no block hash for number {}", block_num);
-            return ptr::null_mut();
-        }
-        Err(e) => {
-            error!("nativeGetHeaderByNumber: db error for block {}: {}", block_num, e);
-            return ptr::null_mut();
-        }
-    };
-
-    let block_hash = match packed::Byte32::from_slice(&block_hash_bytes) {
-        Ok(h) => h,
-        Err(e) => {
-            error!("nativeGetHeaderByNumber: malformed block hash for block {}: {}", block_num, e);
-            return ptr::null_mut();
-        }
-    };
-
-    // Hop 2: BlockHash → Header
-    match swc.storage().get_header(&block_hash) {
-        Some(header) => {
-            let header_view: HeaderView = header.into();
-            to_jstring(&mut env, &header_view)
-        }
-        None => {
-            warn!("nativeGetHeaderByNumber: block hash found but header missing for number {}", block_num);
-            ptr::null_mut()
-        }
-    }
     })
 }
 
@@ -254,77 +166,15 @@ pub extern "C" fn Java_com_nervosnetwork_ckblightclient_LightClientNative_native
     hash: JString,
 ) -> jstring {
     guard_jni(std::ptr::null_mut(), move || {
-    check_running!(env);
-
-    let hash_str: String = match env.get_string(&hash) {
-        Ok(s) => s.into(),
-        Err(e) => {
-            error!("Failed to get hash string: {}", e);
-            return ptr::null_mut();
-        }
-    };
-
-    let swc = match STORAGE_WITH_DATA.get() {
-        Some(s) => s,
-        None => {
-            error!("Storage not initialized");
-            return ptr::null_mut();
-        }
-    };
-
-    let peers = match PEERS.get() {
-        Some(p) => p,
-        None => {
-            error!("Peers not initialized");
-            return ptr::null_mut();
-        }
-    };
-
-    let hash_hex = hash_str.strip_prefix("0x").unwrap_or(&hash_str);
-    let h256 = match H256::from_str(hash_hex) {
-        Ok(h) => h,
-        Err(e) => {
-            error!("nativeFetchHeader: invalid hash '{}': {}", hash_str, e);
-            return ptr::null_mut();
-        }
-    };
-
-    let hash = match packed::Byte32::from_slice(h256.as_bytes()) {
-        Ok(h) => h,
-        Err(e) => {
-            error!("nativeFetchHeader: Byte32 conversion failed: {}", e);
-            return ptr::null_mut();
-        }
-    };
-
-    let fetch_status: FetchStatus<HeaderView> =
-        if let Some(header) = swc.storage().get_header(&hash) {
-            FetchStatus::Fetched {
-                data: header.into(),
-            }
-        } else if peers.fetching_headers().contains_key(&hash) {
-            FetchStatus::Fetching {
-                first_sent: 0.into(),
-            }
-        } else {
-            // Add to fetch queue
-            let _net_controller = match NET_CONTROL.get() {
-                Some(nc) => nc,
-                None => {
-                    error!("Network controller not initialized");
-                    return ptr::null_mut();
-                }
-            };
-
-            let timestamp = unix_time_as_millis();
-            peers.add_fetch_header(hash.clone(), timestamp);
-
-            FetchStatus::Added {
-                timestamp: timestamp.into(),
-            }
+        let hash_str = match jstring_to_string(&mut env, &hash, "nativeFetchHeader") {
+            Some(s) => s,
+            None => return ptr::null_mut(),
         };
 
-    to_jstring(&mut env, &fetch_status)
+        match bridge_query::fetch_header(&hash_str) {
+            Ok(json) => json_to_jstring(&mut env, &json),
+            Err(_) => ptr::null_mut(),
+        }
     })
 }
 
@@ -337,74 +187,15 @@ pub extern "C" fn Java_com_nervosnetwork_ckblightclient_LightClientNative_native
     command: i32,
 ) -> jni::sys::jboolean {
     guard_jni(jni::sys::JNI_FALSE, move || {
-    if !is_running() {
-        warn!("Light client not running");
-        return jni::sys::JNI_FALSE;
-    }
+        let scripts_str = match jstring_to_string(&mut env, &scripts_json, "nativeSetScripts") {
+            Some(s) => s,
+            None => return jni::sys::JNI_FALSE,
+        };
 
-    let scripts_str: String = match env.get_string(&scripts_json) {
-        Ok(s) => s.into(),
-        Err(e) => {
-            error!("Failed to get scripts JSON: {}", e);
-            return jni::sys::JNI_FALSE;
+        match bridge_query::set_scripts(&scripts_str, command) {
+            Ok(()) => jni::sys::JNI_TRUE,
+            Err(_) => jni::sys::JNI_FALSE,
         }
-    };
-
-    let scripts_json: Vec<crate::service::ScriptStatus> = match serde_json::from_str(&scripts_str) {
-        Ok(s) => s,
-        Err(e) => {
-            error!("Failed to parse scripts JSON: {}", e);
-            return jni::sys::JNI_FALSE;
-        }
-    };
-
-    // Convert service::ScriptStatus to storage::ScriptStatus
-    let scripts: Vec<storage::ScriptStatus> = scripts_json
-        .into_iter()
-        .map(|s| storage::ScriptStatus {
-            script: s.script.into(),
-            script_type: match s.script_type {
-                crate::service::ScriptType::Lock => storage::ScriptType::Lock,
-                crate::service::ScriptType::Type => storage::ScriptType::Type,
-            },
-            block_number: s.block_number.into(),
-        })
-        .collect();
-
-    let cmd = match command {
-        0 => SetScriptsCommand::All,
-        1 => SetScriptsCommand::Partial,
-        2 => SetScriptsCommand::Delete,
-        _ => {
-            error!("Invalid command: {}", command);
-            return jni::sys::JNI_FALSE;
-        }
-    };
-
-    let swc = match STORAGE_WITH_DATA.get() {
-        Some(s) => s,
-        None => {
-            error!("Storage not initialized");
-            return jni::sys::JNI_FALSE;
-        }
-    };
-
-    swc.storage().update_filter_scripts(scripts, cmd.into());
-
-    // Clear matched blocks when scripts change
-    let peers = match PEERS.get() {
-        Some(p) => p,
-        None => {
-            error!("Peers not initialized");
-            return jni::sys::JNI_FALSE;
-        }
-    };
-
-    // Lock matched_blocks and clear them
-    let mut matched_blocks = peers.matched_blocks().blocking_write();
-    peers.clear_matched_blocks(&mut matched_blocks);
-
-    jni::sys::JNI_TRUE
     })
 }
 
@@ -415,30 +206,10 @@ pub extern "C" fn Java_com_nervosnetwork_ckblightclient_LightClientNative_native
     _class: JClass,
 ) -> jstring {
     guard_jni(std::ptr::null_mut(), move || {
-    check_running!(env);
-
-    let swc = match STORAGE_WITH_DATA.get() {
-        Some(s) => s,
-        None => {
-            error!("Storage not initialized");
-            return ptr::null_mut();
+        match bridge_query::get_scripts() {
+            Ok(json) => json_to_jstring(&mut env, &json),
+            Err(_) => ptr::null_mut(),
         }
-    };
-
-    let scripts = swc.storage().get_filter_scripts();
-    // Convert storage::ScriptStatus to service::ScriptStatus for serialization
-    let scripts: Vec<crate::service::ScriptStatus> = scripts
-        .into_iter()
-        .map(|s| crate::service::ScriptStatus {
-            script: s.script.into(),
-            script_type: match s.script_type {
-                storage::ScriptType::Lock => crate::service::ScriptType::Lock,
-                storage::ScriptType::Type => crate::service::ScriptType::Type,
-            },
-            block_number: s.block_number.into(),
-        })
-        .collect();
-    to_jstring(&mut env, &scripts)
     })
 }
 

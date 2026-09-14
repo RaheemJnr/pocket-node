@@ -131,3 +131,39 @@ pub fn local_node_info() -> Result<String, LightClientError> {
 pub fn get_peers() -> Result<String, LightClientError> {
     query::get_peers().map_err(Into::into)
 }
+
+/// Genesis block as a JSON string.
+#[uniffi::export]
+pub fn get_genesis_block() -> Result<String, LightClientError> {
+    query::get_genesis_block().map_err(Into::into)
+}
+
+/// Header for a block hash (`0x`-prefixed or bare) as a JSON string.
+#[uniffi::export]
+pub fn get_header(hash: String) -> Result<String, LightClientError> {
+    query::get_header(&hash).map_err(Into::into)
+}
+
+/// Header for a block number (decimal, or `0x`-prefixed hex) as a JSON string.
+#[uniffi::export]
+pub fn get_header_by_number(block_number: String) -> Result<String, LightClientError> {
+    query::get_header_by_number(&block_number).map_err(Into::into)
+}
+
+/// Fetch status for a header, as a JSON string; queues the fetch when unknown.
+#[uniffi::export]
+pub fn fetch_header(hash: String) -> Result<String, LightClientError> {
+    query::fetch_header(&hash).map_err(Into::into)
+}
+
+/// Set the filter scripts to sync (command 0 = all, 1 = partial, 2 = delete).
+#[uniffi::export]
+pub fn set_scripts(scripts_json: String, command: i32) -> Result<(), LightClientError> {
+    query::set_scripts(&scripts_json, command).map_err(Into::into)
+}
+
+/// Filter scripts currently synced for, as a JSON string.
+#[uniffi::export]
+pub fn get_scripts() -> Result<String, LightClientError> {
+    query::get_scripts().map_err(Into::into)
+}
