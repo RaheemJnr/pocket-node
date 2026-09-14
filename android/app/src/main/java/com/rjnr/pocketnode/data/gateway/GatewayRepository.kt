@@ -92,6 +92,7 @@ class GatewayRepository @Inject constructor(
     private val syncServiceCommands: SyncServiceCommands,
     private val nodeLifecycle: NodeLifecycle,
     private val syncPoller: SyncPoller,
+    private val startupReconciler: StartupReconciler,
     private val logger: Logger,
 ) : TipSource, SyncPollSource {
     private val sendMutex = Mutex()
@@ -287,60 +288,17 @@ class GatewayRepository @Inject constructor(
 
     /**
      * Repository-side work that runs immediately after the embedded node
-     * starts, passed to [NodeLifecycle.initializeNode]. Kept here (not in
-     * [NodeLifecycle]) because it touches the tx cache, pending broadcasts and
-     * the sync poll.
+     * starts, passed to [NodeLifecycle.initializeNode]. The cold-start
+     * pending-tx reconciliation itself lives on [StartupReconciler] (#460);
+     * this keeps the order: reconcile, poll, background sync.
      */
     private suspend fun onNodeStarted() {
-        // Cold-start recovery: surface any BROADCASTING orphan rows for the
-        // active network so the watchdog can resolve them on the next tip.
-        // Network-scoped — LightClientNative is per-network; querying for a
-        // hash on a network whose light client isn't running would return null
-        // spuriously and drive valid orphans to a false FAILED. (#115 §5)
-        runCatching {
-            val orphans = pendingBroadcastDao.getActive(activeWalletId, currentNetwork.name)
-            val broadcasting = orphans.count { it.state == "BROADCASTING" }
-            if (broadcasting > 0) {
-                logger.w(
-                    TAG,
-                    "Cold-start: $broadcasting BROADCASTING orphan(s) on ${currentNetwork.name}; watchdog will resolve"
-                )
-            }
-        }
-
-        // Legacy reconciliation: PENDING `transactions` rows that predate
-        // pending_broadcasts have no broadcast row, so the watchdog can't
-        // see them. Query the light client directly: on chain → CONFIRMED,
-        // not found → FAILED, in pool → leave alone (the natural pending state).
-        // (#115 — addresses the user's "old ghosts still showing pending" case.)
-        runCatching {
-            val orphanHashes = cacheManager.getOrphanPendingHashes(activeWalletId, currentNetwork.name)
-            if (orphanHashes.isNotEmpty()) {
-                logger.w(TAG, "Legacy reconcile: ${orphanHashes.size} orphan PENDING tx(s) on ${currentNetwork.name}")
-                scope.launch {
-                    delay(15_000) // give light client time to be ready
-                    for (hash in orphanHashes) {
-                        val result = getTransactionStatus(hash)
-                        // Distinguish transient lookup failure (Result.failure) from
-                        // a successful "unknown" response. Only the latter means the
-                        // light client knows it doesn't have the tx; the former is a
-                        // JNI/RPC hiccup and must NOT permanently mark the row FAILED.
-                        val resp = result.getOrNull()
-                        val newStatus = when {
-                            result.isFailure -> null      // transient — retry next init
-                            resp == null -> null           // defensive
-                            resp.status == "unknown" -> "FAILED"
-                            resp.blockHash != null -> "CONFIRMED"
-                            else -> null  // still in pool — leave PENDING
-                        }
-                        if (newStatus != null) {
-                            cacheManager.updateTransactionStatus(hash, newStatus)
-                            logger.d(TAG, "Legacy reconcile: $hash → $newStatus")
-                        }
-                    }
-                }
-            }
-        }
+        startupReconciler.reconcile(
+            walletId = activeWalletId,
+            networkName = currentNetwork.name,
+            scope = scope,
+            statusSource = { hash -> getTransactionStatus(hash) },
+        )
 
         startSyncPolling()
         startBackgroundSync()
