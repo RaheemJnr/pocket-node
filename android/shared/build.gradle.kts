@@ -45,7 +45,7 @@ kotlin {
             // JUnit 4 + MockK: the TransactionBuilder suites moved here from the
             // app module unchanged apart from dropping a vestigial Robolectric
             // runner (#455). Same coordinates the app module uses.
-            implementation("junit:junit:4.13.2")
+            implementation(libs.junit)
             implementation(libs.mockk)
             // Differential tests only: the CKB Java SDK is the reference these
             // primitives are proved against. It must never appear on a shipping
@@ -65,16 +65,21 @@ kotlin {
 val byteBuddyAgent: Configuration by configurations.creating
 
 dependencies {
-    byteBuddyAgent("net.bytebuddy:byte-buddy-agent:1.14.17")
+    byteBuddyAgent(libs.bytebuddy.agent)
+}
+
+/**
+ * Supplies the -javaagent flag at execution time from a lazily resolved [FileCollection].
+ * Resolving the configuration inside a `doFirst` instead (via `resolvedConfiguration`) reaches
+ * back into the Project from a task action, which breaks the configuration cache.
+ */
+class ByteBuddyAgentArgumentProvider(
+    @get:Classpath val agentJar: FileCollection,
+) : CommandLineArgumentProvider {
+    override fun asArguments(): Iterable<String> =
+        listOf("-javaagent:${agentJar.singleFile.absolutePath}")
 }
 
 tasks.withType<Test>().configureEach {
-    doFirst {
-        val agentJar = byteBuddyAgent.resolvedConfiguration.resolvedArtifacts
-            .map { it.file }
-            .firstOrNull { it.name.startsWith("byte-buddy-agent") }
-        if (agentJar != null) {
-            jvmArgs("-javaagent:${agentJar.absolutePath}")
-        }
-    }
+    jvmArgumentProviders.add(ByteBuddyAgentArgumentProvider(byteBuddyAgent))
 }

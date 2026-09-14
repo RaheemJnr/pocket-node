@@ -28,6 +28,8 @@ zxing = "3.5.3"
 ktor = "3.0.3"
 lucide = "1.1.0"
 mockk = "1.13.16"
+junit = "4.13.2"
+byteBuddy = "1.14.17"
 coroutinesTest = "1.10.1"
 paging = "3.3.6"
 androidxBrowser = "1.8.0"
@@ -95,6 +97,9 @@ androidx-browser = { group = "androidx.browser", name = "browser", version.ref =
 
 # Testing
 mockk = { group = "io.mockk", name = "mockk", version.ref = "mockk" }
+junit = { group = "junit", name = "junit", version.ref = "junit" }
+# Preloaded as a -javaagent for MockK: JDK 21+ restricts ByteBuddy's self-attach (JEP 451).
+bytebuddy-agent = { group = "net.bytebuddy", name = "byte-buddy-agent", version.ref = "byteBuddy" }
 kotlinx-coroutines-test = { group = "org.jetbrains.kotlinx", name = "kotlinx-coroutines-test", version.ref = "coroutinesTest" }
 
 # Ktor HTTP client

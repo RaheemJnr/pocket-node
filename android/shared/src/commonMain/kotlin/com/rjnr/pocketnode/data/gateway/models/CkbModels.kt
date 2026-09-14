@@ -1,9 +1,11 @@
 package com.rjnr.pocketnode.data.gateway.models
 
-import com.rjnr.pocketnode.core.format.formatDecimal
-import com.rjnr.pocketnode.core.time.currentTimeMillis
+import com.rjnr.pocketnode.core.format.formatFixedPoint
 import kotlinx.serialization.SerialName
 import kotlinx.serialization.Serializable
+
+/** 1 CKB = 100,000,000 shannons, so a shannon amount is a decimal scaled by 10^-8. */
+private const val SHANNON_SCALE_DIGITS = 8
 
 @Serializable
 data class Script(
@@ -111,20 +113,22 @@ data class TransactionRecord(
     /**
      * Get balance change as CKB amount (from shannons)
      */
-    fun balanceChangeAsCkb(): Double {
-        val shannons = balanceChange.removePrefix("0x").toLongOrNull(16) ?: 0L
-        return shannons / 100_000_000.0
-    }
+    fun balanceChangeAsCkb(): Double = balanceChangeShannons() / 100_000_000.0
+
+    /** The raw signed shannon amount. Amounts are formatted from this, never from a Double. */
+    private fun balanceChangeShannons(): Long =
+        balanceChange.removePrefix("0x").toLongOrNull(16) ?: 0L
 
     /**
      * Get formatted amount string with sign
      */
     fun formattedAmount(): String {
-        val amount = balanceChangeAsCkb()
+        val shannons = balanceChangeShannons()
+        // Thresholds are the exact shannon equivalents of the 1 CKB / 0.0001 CKB cutoffs.
         val formattedValue = when {
-            amount >= 1.0 -> formatDecimal(amount, 2)
-            amount >= 0.0001 -> formatDecimal(amount, 4)
-            else -> formatDecimal(amount, 8)
+            shannons >= 100_000_000L -> formatFixedPoint(shannons, SHANNON_SCALE_DIGITS, 2)
+            shannons >= 10_000L -> formatFixedPoint(shannons, SHANNON_SCALE_DIGITS, 4)
+            else -> formatFixedPoint(shannons, SHANNON_SCALE_DIGITS, 8)
         }
         return when (direction) {
             "in", "dao_unlock" -> "+$formattedValue CKB"
@@ -140,8 +144,8 @@ data class TransactionRecord(
      */
     fun compactConfirmations(): String {
         return when {
-            confirmations >= 1_000_000 -> formatDecimal(confirmations / 1_000_000.0, 1) + "M"
-            confirmations >= 1_000 -> formatDecimal(confirmations / 1_000.0, 1) + "K"
+            confirmations >= 1_000_000 -> formatFixedPoint(confirmations.toLong(), 6, 1) + "M"
+            confirmations >= 1_000 -> formatFixedPoint(confirmations.toLong(), 3, 1) + "K"
             else -> confirmations.toString()
         }
     }
@@ -166,16 +170,18 @@ data class TransactionRecord(
     fun isPending(): Boolean = confirmations == 0
 
     /**
-     * Get relative time string (e.g., "2 hours ago", "Yesterday")
+     * Get relative time string (e.g., "2 hours ago", "Yesterday").
+     *
+     * [nowMillis] is passed in rather than read from a platform clock: shared code takes the
+     * current time from its caller instead of adding an expect/actual seam for it (D1).
      */
-    fun getRelativeTimeString(): String {
+    fun getRelativeTimeString(nowMillis: Long): String {
         // If no timestamp but has confirmations, show as confirmed without time
         if (timestamp == 0L) {
             return if (confirmations > 0) "Confirmed" else "Pending"
         }
 
-        val now = currentTimeMillis()
-        val diff = now - timestamp
+        val diff = nowMillis - timestamp
 
         val seconds = diff / 1000
         val minutes = seconds / 60
