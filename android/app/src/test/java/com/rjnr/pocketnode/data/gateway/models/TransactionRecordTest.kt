@@ -124,18 +124,19 @@ class TransactionRecordTest {
     @Test
     fun `getRelativeTimeString returns Pending for zero timestamp zero confirmations`() {
         val record = makeRecord(timestamp = 0L, confirmations = 0)
-        assertEquals("Pending", record.getRelativeTimeString())
+        assertEquals("Pending", record.getRelativeTimeString(System.currentTimeMillis()))
     }
 
     @Test
     fun `getRelativeTimeString returns Confirmed for zero timestamp with confirmations`() {
         val record = makeRecord(timestamp = 0L, confirmations = 5)
-        assertEquals("Confirmed", record.getRelativeTimeString())
+        assertEquals("Confirmed", record.getRelativeTimeString(System.currentTimeMillis()))
     }
 
     @Test
     fun `getRelativeTimeString returns Just now for recent timestamp`() {
-        val record = makeRecord(timestamp = System.currentTimeMillis() - 5_000)
-        assertEquals("Just now", record.getRelativeTimeString())
+        val now = System.currentTimeMillis()
+        val record = makeRecord(timestamp = now - 5_000)
+        assertEquals("Just now", record.getRelativeTimeString(now))
     }
 }

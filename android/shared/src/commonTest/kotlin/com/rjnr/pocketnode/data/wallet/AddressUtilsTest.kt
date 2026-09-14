@@ -2,8 +2,9 @@ package com.rjnr.pocketnode.data.wallet
 
 import com.rjnr.pocketnode.data.gateway.models.NetworkType
 import com.rjnr.pocketnode.data.gateway.models.Script
-import org.junit.Assert.*
-import org.junit.Test
+import kotlin.test.Test
+import kotlin.test.assertEquals
+import kotlin.test.assertTrue
 
 class AddressUtilsTest {
 
@@ -15,25 +16,25 @@ class AddressUtilsTest {
     )
 
     @Test
-    fun `encode mainnet address starts with ckb1`() {
+    fun encodeMainnetAddressStartsWithCkb1() {
         val address = AddressUtils.encode(testScript, NetworkType.MAINNET)
-        assertTrue("Mainnet address must start with ckb1, got: $address", address.startsWith("ckb1"))
+        assertTrue(address.startsWith("ckb1"), "Mainnet address must start with ckb1, got: $address")
     }
 
     @Test
-    fun `encode testnet address starts with ckt1`() {
+    fun encodeTestnetAddressStartsWithCkt1() {
         val address = AddressUtils.encode(testScript, NetworkType.TESTNET)
-        assertTrue("Testnet address must start with ckt1, got: $address", address.startsWith("ckt1"))
+        assertTrue(address.startsWith("ckt1"), "Testnet address must start with ckt1, got: $address")
     }
 
     @Test
-    fun `getNetwork returns MAINNET for ckb1 address`() {
+    fun getNetworkReturnsMainnetForCkb1Address() {
         val address = AddressUtils.encode(testScript, NetworkType.MAINNET)
         assertEquals(NetworkType.MAINNET, AddressUtils.getNetwork(address))
     }
 
     @Test
-    fun `getNetwork returns TESTNET for ckt1 address`() {
+    fun getNetworkReturnsTestnetForCkt1Address() {
         val address = AddressUtils.encode(testScript, NetworkType.TESTNET)
         assertEquals(NetworkType.TESTNET, AddressUtils.getNetwork(address))
     }

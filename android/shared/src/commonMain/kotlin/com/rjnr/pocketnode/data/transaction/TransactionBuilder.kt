@@ -4,16 +4,16 @@ import com.rjnr.pocketnode.core.crypto.Blake2b
 import com.rjnr.pocketnode.core.crypto.Secp256k1Signer
 import com.rjnr.pocketnode.core.crypto.hexToByteArray
 import com.rjnr.pocketnode.core.crypto.toHexString
+import com.rjnr.pocketnode.core.crypto.toHexStringNoPrefix
+import com.rjnr.pocketnode.core.format.shannonsToCkbString
 import com.rjnr.pocketnode.core.log.Logger
 import com.rjnr.pocketnode.core.log.NoopLogger
+import com.rjnr.pocketnode.core.molecule.ByteArrayBuilder
 import com.rjnr.pocketnode.data.gateway.DaoConstants
 import com.rjnr.pocketnode.data.gateway.models.*
 import com.rjnr.pocketnode.data.validation.NetworkValidator
 import com.rjnr.pocketnode.data.wallet.AddressUtils
 import com.rjnr.pocketnode.util.toHex
-import java.io.ByteArrayOutputStream
-import javax.inject.Inject
-import javax.inject.Singleton
 import com.rjnr.pocketnode.util.redactAddress
 
 /** #382 Tier 3: one sweep input — a live untyped cell plus the lock args that identify its signing group. */
@@ -37,8 +37,7 @@ data class RecipientOutput(
     val amountShannons: Long,
 )
 
-@Singleton
-class TransactionBuilder @Inject constructor(
+class TransactionBuilder(
     private val networkValidator: NetworkValidator,
     private val logger: Logger = NoopLogger
 ) {
@@ -390,10 +389,7 @@ class TransactionBuilder @Inject constructor(
                 // different amount that allows for a valid change output, OR
                 // send the full balance minus fee (which yields an exact fit
                 // with no change output at all).
-                val changeCkbStr = java.math.BigDecimal(change)
-                    .divide(java.math.BigDecimal(100_000_000))
-                    .stripTrailingZeros()
-                    .toPlainString()
+                val changeCkbStr = shannonsToCkbString(change)
                 val minCkb = MIN_CELL_CAPACITY / 100_000_000
                 logger.w(TAG, "  Dust change refused: $change shannons ($changeCkbStr CKB) below min $MIN_CELL_CAPACITY")
                 throw IllegalStateException(
@@ -472,7 +468,7 @@ class TransactionBuilder @Inject constructor(
             )
         )
         val outputsData = mutableListOf(
-            "0x" + DaoConstants.DAO_DEPOSIT_DATA.joinToString("") { "%02x".format(it) }
+            "0x" + DaoConstants.DAO_DEPOSIT_DATA.toHexStringNoPrefix()
         )
 
         // Same dust-change refusal as buildTransfer (#287). DAO deposit must
@@ -484,10 +480,7 @@ class TransactionBuilder @Inject constructor(
                 outputsData.add("0x")
             }
             else -> {
-                val changeCkbStr = java.math.BigDecimal(change)
-                    .divide(java.math.BigDecimal(100_000_000))
-                    .stripTrailingZeros()
-                    .toPlainString()
+                val changeCkbStr = shannonsToCkbString(change)
                 throw IllegalStateException(
                     "Dust change refused: this DAO deposit would leave $changeCkbStr CKB " +
                         "below the ${MIN_CELL_CAPACITY / 100_000_000} CKB minimum, which would be silently absorbed " +
@@ -541,7 +534,7 @@ class TransactionBuilder @Inject constructor(
             blockNumberBytes[i] = (num and 0xFF).toByte()
             num = num shr 8
         }
-        val blockNumberHex = "0x" + blockNumberBytes.joinToString("") { "%02x".format(it) }
+        val blockNumberHex = "0x" + blockNumberBytes.toHexStringNoPrefix()
 
         val inputs = listOf(CellInput(previousOutput = depositCell.outPoint)) +
             feeCells.map { CellInput(previousOutput = it.outPoint) }
@@ -564,10 +557,7 @@ class TransactionBuilder @Inject constructor(
                 outputsData.add("0x")
             }
             else -> {
-                val changeCkbStr = java.math.BigDecimal(change)
-                    .divide(java.math.BigDecimal(100_000_000))
-                    .stripTrailingZeros()
-                    .toPlainString()
+                val changeCkbStr = shannonsToCkbString(change)
                 throw IllegalStateException(
                     "Dust change refused: this DAO withdraw would leave $changeCkbStr CKB " +
                         "below the ${MIN_CELL_CAPACITY / 100_000_000} CKB minimum, which would be silently absorbed " +
@@ -795,7 +785,7 @@ class TransactionBuilder @Inject constructor(
             currentOffset += field.size
         }
 
-        val output = ByteArrayOutputStream()
+        val output = ByteArrayBuilder()
         output.write(littleEndianInt(currentOffset)) // full size
         for (offset in offsets) {
             output.write(littleEndianInt(offset))
@@ -807,7 +797,7 @@ class TransactionBuilder @Inject constructor(
     }
 
     private fun serializeFixVec(items: List<ByteArray>): ByteArray {
-        val output = ByteArrayOutputStream()
+        val output = ByteArrayBuilder()
         output.write(littleEndianInt(items.size))
         for (item in items) {
             output.write(item)
@@ -829,7 +819,7 @@ class TransactionBuilder @Inject constructor(
             currentOffset += item.size
         }
 
-        val output = ByteArrayOutputStream()
+        val output = ByteArrayBuilder()
         output.write(littleEndianInt(currentOffset)) // full size
         for (offset in offsets) {
             output.write(littleEndianInt(offset))
@@ -854,7 +844,7 @@ class TransactionBuilder @Inject constructor(
 
     private fun serializeBytes(hex: String): ByteArray {
         val bytes = hex.hexToByteArray()
-        val output = ByteArrayOutputStream()
+        val output = ByteArrayBuilder()
         output.write(littleEndianInt(bytes.size))
         output.write(bytes)
         return output.toByteArray()
@@ -965,7 +955,7 @@ class TransactionBuilder @Inject constructor(
     }
 
     private fun serializeBytesRaw(data: ByteArray): ByteArray {
-        val output = ByteArrayOutputStream()
+        val output = ByteArrayBuilder()
         output.write(littleEndianInt(data.size))
         output.write(data)
         return output.toByteArray()

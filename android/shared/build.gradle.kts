@@ -1,6 +1,7 @@
 plugins {
     alias(libs.plugins.kotlin.multiplatform)
     alias(libs.plugins.android.kotlin.multiplatform.library)
+    alias(libs.plugins.kotlin.serialization)
 }
 
 kotlin {
@@ -29,6 +30,7 @@ kotlin {
         commonMain.dependencies {
             implementation(libs.secp256k1.kmp)
             implementation(libs.kotlincrypto.blake2)
+            implementation(libs.kotlinx.serialization.json)
         }
         commonTest.dependencies {
             implementation(kotlin("test"))
@@ -40,6 +42,11 @@ kotlin {
         getByName("androidHostTest").dependencies {
             // JVM JNI payload so host-side unit tests can call libsecp256k1.
             implementation(libs.secp256k1.kmp.jni.jvm)
+            // JUnit 4 + MockK: the TransactionBuilder suites moved here from the
+            // app module unchanged apart from dropping a vestigial Robolectric
+            // runner (#455). Same coordinates the app module uses.
+            implementation(libs.junit)
+            implementation(libs.mockk)
             // Differential tests only: the CKB Java SDK is the reference these
             // primitives are proved against. It must never appear on a shipping
             // classpath — :app's `checkNoCkbSdkOnRuntimeClasspath` task enforces
@@ -50,4 +57,29 @@ kotlin {
             implementation(libs.ckb.sdk.utils.difftest)
         }
     }
+}
+
+// MockK uses ByteBuddy. On JDK 21+ self-attach is restricted (JEP 451), so the agent is
+// preloaded with -javaagent instead of relying on dynamic attach. Mirrors the same
+// workaround in app/build.gradle.kts.
+val byteBuddyAgent: Configuration by configurations.creating
+
+dependencies {
+    byteBuddyAgent(libs.bytebuddy.agent)
+}
+
+/**
+ * Supplies the -javaagent flag at execution time from a lazily resolved [FileCollection].
+ * Resolving the configuration inside a `doFirst` instead (via `resolvedConfiguration`) reaches
+ * back into the Project from a task action, which breaks the configuration cache.
+ */
+class ByteBuddyAgentArgumentProvider(
+    @get:Classpath val agentJar: FileCollection,
+) : CommandLineArgumentProvider {
+    override fun asArguments(): Iterable<String> =
+        listOf("-javaagent:${agentJar.singleFile.absolutePath}")
+}
+
+tasks.withType<Test>().configureEach {
+    jvmArgumentProviders.add(ByteBuddyAgentArgumentProvider(byteBuddyAgent))
 }

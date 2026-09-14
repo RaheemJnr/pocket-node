@@ -8,8 +8,6 @@ import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNotEquals
 import org.junit.Assert.assertTrue
 import org.junit.Test
-import org.junit.runner.RunWith
-import org.robolectric.RobolectricTestRunner
 
 /**
  * #382 Tier 3: the sweep spends cells locked by MULTIPLE secp256k1 scripts
@@ -21,7 +19,6 @@ import org.robolectric.RobolectricTestRunner
  * Fee: G full WitnessArgs items (one per group), not one — the transfer
  * formula undercounts a sweep by 85 bytes per extra group.
  */
-@RunWith(RobolectricTestRunner::class)
 class TransactionBuilderSweepTest {
 
     private val builder = TransactionBuilder(NetworkValidator())

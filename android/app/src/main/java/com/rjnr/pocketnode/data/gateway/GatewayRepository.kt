@@ -2189,11 +2189,12 @@ class GatewayRepository @Inject constructor(
                             // Header not cached locally — ask light client to fetch it
                             val fetchJson = LightClientNative.nativeFetchHeader(blockHashFromStatus)
                             val fetchResult = fetchJson?.let { json.decodeFromString<JniFetchHeaderResponse>(it) }
-                            if (fetchResult?.status == "fetched" && fetchResult.data != null) {
+                            val fetchedHeader = fetchResult?.data
+                            if (fetchResult?.status == "fetched" && fetchedHeader != null) {
                                 runCatching {
-                                    headerCacheDao.upsert(HeaderCacheEntity.from(fetchResult.data, currentNetwork.name))
+                                    headerCacheDao.upsert(HeaderCacheEntity.from(fetchedHeader, currentNetwork.name))
                                 }
-                                HeaderInfo(timestampHex = fetchResult.data.timestamp, hash = fetchResult.data.hash)
+                                HeaderInfo(timestampHex = fetchedHeader.timestamp, hash = fetchedHeader.hash)
                             } else {
                                 HeaderInfo(null, null)
                             }

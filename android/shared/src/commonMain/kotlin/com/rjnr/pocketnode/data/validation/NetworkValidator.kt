@@ -2,11 +2,8 @@ package com.rjnr.pocketnode.data.validation
 
 import com.rjnr.pocketnode.data.gateway.models.NetworkType
 import com.rjnr.pocketnode.data.wallet.AddressUtils
-import javax.inject.Inject
-import javax.inject.Singleton
 
-@Singleton
-class NetworkValidator @Inject constructor() {
+class NetworkValidator {
 
     fun validateTransferAddresses(
         fromAddress: String,

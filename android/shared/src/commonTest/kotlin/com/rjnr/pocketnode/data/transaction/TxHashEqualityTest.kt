@@ -6,9 +6,9 @@ import com.rjnr.pocketnode.data.gateway.models.OutPoint
 import com.rjnr.pocketnode.data.gateway.models.Script
 import com.rjnr.pocketnode.data.gateway.models.Transaction
 import com.rjnr.pocketnode.data.validation.NetworkValidator
-import org.junit.Assert.assertEquals
-import org.junit.Assert.assertTrue
-import org.junit.Test
+import kotlin.test.Test
+import kotlin.test.assertEquals
+import kotlin.test.assertTrue
 
 class TxHashEqualityTest {
 
@@ -41,21 +41,21 @@ class TxHashEqualityTest {
     )
 
     @Test
-    fun `computeTxHash returns 0x-prefixed 64-char lowercase hex`() {
+    fun computeTxHashReturnsPrefixed64CharLowercaseHex() {
         val hash = builder.computeTxHash(sampleTx())
-        assertTrue("expected 0x prefix, got $hash", hash.startsWith("0x"))
+        assertTrue(hash.startsWith("0x"), "expected 0x prefix, got $hash")
         assertEquals(66, hash.length)
         assertEquals(hash, hash.lowercase())
     }
 
     @Test
-    fun `computeTxHash is deterministic across calls`() {
+    fun computeTxHashIsDeterministicAcrossCalls() {
         val tx = sampleTx()
         assertEquals(builder.computeTxHash(tx), builder.computeTxHash(tx))
     }
 
     @Test
-    fun `computeTxHash ignores witnesses`() {
+    fun computeTxHashIgnoresWitnesses() {
         val tx1 = sampleTx().copy(witnesses = listOf("0x"))
         val tx2 = sampleTx().copy(witnesses = listOf("0x" + "ff".repeat(65)))
         assertEquals(builder.computeTxHash(tx1), builder.computeTxHash(tx2))

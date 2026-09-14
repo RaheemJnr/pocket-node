@@ -6,8 +6,6 @@ import com.rjnr.pocketnode.data.gateway.models.Script
 import com.rjnr.pocketnode.data.validation.NetworkValidator
 import org.junit.Assert.assertEquals
 import org.junit.Test
-import org.junit.runner.RunWith
-import org.robolectric.RobolectricTestRunner
 
 /**
  * calculateMaxSendable must use pure integer math (no Double precision loss)
@@ -15,7 +13,6 @@ import org.robolectric.RobolectricTestRunner
  * every cell, so the 1-input assumption underestimated the fee on fragmented
  * wallets and the resulting send failed with insufficient funds (#321).
  */
-@RunWith(RobolectricTestRunner::class)
 class TransactionBuilderMaxSendTest {
 
     private val builder = TransactionBuilder(NetworkValidator())
