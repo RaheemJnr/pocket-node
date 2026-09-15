@@ -53,7 +53,7 @@ final class ReceiveViewModelTests: XCTestCase {
         try walletStore.save(makeRecord())
         preferences.setSelectedNetwork(network: .testnet)
 
-        let vm = ReceiveViewModel(walletStore: walletStore, preferences: preferences, onBackUp: {})
+        let vm = ReceiveViewModel(walletStore: walletStore, preferences: preferences, hasPin: { true }, onBackUp: {})
 
         XCTAssertEqual(vm.address, makeRecord().testnetAddress)
     }
@@ -62,7 +62,7 @@ final class ReceiveViewModelTests: XCTestCase {
         try walletStore.save(makeRecord())
         preferences.setSelectedNetwork(network: .mainnet)
 
-        let vm = ReceiveViewModel(walletStore: walletStore, preferences: preferences, onBackUp: {})
+        let vm = ReceiveViewModel(walletStore: walletStore, preferences: preferences, hasPin: { true }, onBackUp: {})
 
         XCTAssertEqual(vm.address, makeRecord().mainnetAddress)
     }
@@ -70,7 +70,7 @@ final class ReceiveViewModelTests: XCTestCase {
     func testRefreshPicksUpANetworkSwitch() throws {
         try walletStore.save(makeRecord())
         preferences.setSelectedNetwork(network: .mainnet)
-        let vm = ReceiveViewModel(walletStore: walletStore, preferences: preferences, onBackUp: {})
+        let vm = ReceiveViewModel(walletStore: walletStore, preferences: preferences, hasPin: { true }, onBackUp: {})
         XCTAssertEqual(vm.address, makeRecord().mainnetAddress)
 
         preferences.setSelectedNetwork(network: .testnet)
@@ -80,7 +80,7 @@ final class ReceiveViewModelTests: XCTestCase {
     }
 
     func testAddressIsEmptyWithNoWalletStored() {
-        let vm = ReceiveViewModel(walletStore: walletStore, preferences: preferences, onBackUp: {})
+        let vm = ReceiveViewModel(walletStore: walletStore, preferences: preferences, hasPin: { true }, onBackUp: {})
 
         XCTAssertEqual(vm.address, "")
     }
@@ -90,7 +90,7 @@ final class ReceiveViewModelTests: XCTestCase {
     func testShowsBackupPromptForAnUnbackedUpMnemonicWallet() throws {
         try walletStore.save(makeRecord(type: "mnemonic", backedUp: false))
 
-        let vm = ReceiveViewModel(walletStore: walletStore, preferences: preferences, onBackUp: {})
+        let vm = ReceiveViewModel(walletStore: walletStore, preferences: preferences, hasPin: { true }, onBackUp: {})
 
         XCTAssertTrue(vm.showBackupPrompt)
     }
@@ -98,7 +98,7 @@ final class ReceiveViewModelTests: XCTestCase {
     func testHidesBackupPromptForABackedUpMnemonicWallet() throws {
         try walletStore.save(makeRecord(type: "mnemonic", backedUp: true))
 
-        let vm = ReceiveViewModel(walletStore: walletStore, preferences: preferences, onBackUp: {})
+        let vm = ReceiveViewModel(walletStore: walletStore, preferences: preferences, hasPin: { true }, onBackUp: {})
 
         XCTAssertFalse(vm.showBackupPrompt)
     }
@@ -106,7 +106,7 @@ final class ReceiveViewModelTests: XCTestCase {
     func testHidesBackupPromptForARawKeyWalletEvenIfNotBackedUp() throws {
         try walletStore.save(makeRecord(type: "raw_key", backedUp: false))
 
-        let vm = ReceiveViewModel(walletStore: walletStore, preferences: preferences, onBackUp: {})
+        let vm = ReceiveViewModel(walletStore: walletStore, preferences: preferences, hasPin: { true }, onBackUp: {})
 
         XCTAssertFalse(vm.showBackupPrompt)
     }
@@ -114,7 +114,7 @@ final class ReceiveViewModelTests: XCTestCase {
     func testDismissBackupPromptHidesItWithoutCallingOnBackUp() throws {
         try walletStore.save(makeRecord(type: "mnemonic", backedUp: false))
         var backUpCalled = false
-        let vm = ReceiveViewModel(walletStore: walletStore, preferences: preferences, onBackUp: { backUpCalled = true })
+        let vm = ReceiveViewModel(walletStore: walletStore, preferences: preferences, hasPin: { true }, onBackUp: { backUpCalled = true })
         XCTAssertTrue(vm.showBackupPrompt)
 
         vm.dismissBackupPrompt()
@@ -126,11 +126,61 @@ final class ReceiveViewModelTests: XCTestCase {
     func testBackUpNowHidesThePromptAndCallsOnBackUp() throws {
         try walletStore.save(makeRecord(type: "mnemonic", backedUp: false))
         var backUpCalled = false
-        let vm = ReceiveViewModel(walletStore: walletStore, preferences: preferences, onBackUp: { backUpCalled = true })
+        let vm = ReceiveViewModel(walletStore: walletStore, preferences: preferences, hasPin: { true }, onBackUp: { backUpCalled = true })
 
         vm.backUpNow()
 
         XCTAssertFalse(vm.showBackupPrompt)
         XCTAssertTrue(backUpCalled)
+    }
+
+    func testDismissedPromptDoesNotReappearOnRefresh() throws {
+        try walletStore.save(makeRecord(type: "mnemonic", backedUp: false))
+        let vm = ReceiveViewModel(walletStore: walletStore, preferences: preferences, hasPin: { true }, onBackUp: {})
+        XCTAssertTrue(vm.showBackupPrompt)
+
+        vm.dismissBackupPrompt()
+        vm.refresh()
+        vm.refresh()
+
+        XCTAssertFalse(vm.showBackupPrompt, "a dismissed prompt must not re-fire on a later refresh, e.g. .onAppear")
+    }
+
+    func testShowsBackupPromptForABackedUpMnemonicWalletWithNoPin() throws {
+        try walletStore.save(makeRecord(type: "mnemonic", backedUp: true))
+
+        let vm = ReceiveViewModel(walletStore: walletStore, preferences: preferences, hasPin: { false }, onBackUp: {})
+
+        XCTAssertTrue(vm.showBackupPrompt, "a backed-up wallet with no PIN still needs the nudge")
+        XCTAssertEqual(vm.backupPromptMessage, ReceiveViewModel.pinNeededMessage)
+    }
+
+    func testHidesBackupPromptWhenBackedUpAndPinIsSet() throws {
+        try walletStore.save(makeRecord(type: "mnemonic", backedUp: true))
+
+        let vm = ReceiveViewModel(walletStore: walletStore, preferences: preferences, hasPin: { true }, onBackUp: {})
+
+        XCTAssertFalse(vm.showBackupPrompt)
+    }
+
+    func testBackupPromptMessageIsTheBackupCopyWhenBackupIsMissing() throws {
+        try walletStore.save(makeRecord(type: "mnemonic", backedUp: false))
+
+        let vm = ReceiveViewModel(walletStore: walletStore, preferences: preferences, hasPin: { false }, onBackUp: {})
+
+        XCTAssertEqual(vm.backupPromptMessage, ReceiveViewModel.backupNeededMessage)
+    }
+
+    // MARK: - Network heading
+
+    func testNetworkHeadingMatchesTheSelectedNetwork() throws {
+        try walletStore.save(makeRecord())
+        preferences.setSelectedNetwork(network: .testnet)
+        let vm = ReceiveViewModel(walletStore: walletStore, preferences: preferences, hasPin: { true }, onBackUp: {})
+        XCTAssertEqual(vm.networkHeading, "CKB Testnet Address")
+
+        preferences.setSelectedNetwork(network: .mainnet)
+        vm.refresh()
+        XCTAssertEqual(vm.networkHeading, "CKB Mainnet Address")
     }
 }

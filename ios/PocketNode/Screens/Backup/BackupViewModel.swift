@@ -56,7 +56,7 @@ final class BackupViewModel {
     private(set) var errorMessage: String?
 
     private let walletKeyStore: any WalletKeyReading
-    private let walletStore: WalletStore
+    private let walletStore: any WalletRecordStoring
     private let auth: any AuthGating
     private let isOnboarding: Bool
     private let hasPin: () -> Bool
@@ -72,7 +72,7 @@ final class BackupViewModel {
     ///     system RNG in production.
     init(
         walletKeyStore: any WalletKeyReading,
-        walletStore: WalletStore,
+        walletStore: any WalletRecordStoring,
         auth: any AuthGating,
         isOnboarding: Bool,
         hasPin: @escaping () -> Bool,
@@ -146,6 +146,7 @@ final class BackupViewModel {
     /// repeat guess on the same layout cannot pass.
     func submitVerify() {
         guard step == .verify else { return }
+        guard !quiz.isEmpty else { return }
         let allCorrect = quiz.allSatisfy { selections[$0.position] == $0.correctWord }
         guard allCorrect else {
             quiz = BackupQuiz.generate(words: words, rng: &rng)
@@ -157,12 +158,21 @@ final class BackupViewModel {
     }
 
     /// Persists `mnemonicBackedUp = true` against the stored wallet record and
-    /// advances to `.success`, wiping the phrase from memory. Idempotent: a
-    /// missing wallet record (should not happen once a wallet exists) simply
-    /// skips the write rather than throwing.
-    func markBackedUpAndComplete() {
-        if let record = walletStore.load() {
-            try? walletStore.save(record.withMnemonicBackedUp(true))
+    /// advances to `.success`, wiping the phrase from memory. Only reachable
+    /// from a passing `submitVerify()`. A missing wallet record or a failed
+    /// save is a hard stop, not a silent success: `.verify` stays put with the
+    /// words and selections intact so the user can retry, rather than being
+    /// told the backup is done when it was never recorded.
+    private func markBackedUpAndComplete() {
+        guard let record = walletStore.load() else {
+            errorMessage = Self.saveFailedMessage
+            return
+        }
+        do {
+            try walletStore.save(record.withMnemonicBackedUp(true))
+        } catch {
+            errorMessage = Self.saveFailedMessage
+            return
         }
         wipeWords()
         step = .success
@@ -177,16 +187,34 @@ final class BackupViewModel {
         step = .gate
     }
 
+    /// Called when the OS posts `UIApplication.userDidTakeScreenshotNotification`
+    /// while the phrase is on screen. `PrivacyShield` cannot block a
+    /// screenshot itself — iOS exposes no such API for ordinary views — so
+    /// this is the mitigation: wipe the phrase, drop back to the gate, and
+    /// tell the user why so the disappearance is not mistaken for a bug.
+    func onScreenshotTaken() {
+        guard step == .display || step == .verify else { return }
+        wipeWords()
+        step = .gate
+        errorMessage = Self.screenshotTakenMessage
+    }
+
     private func wipeWords() {
         words = []
         quiz = []
         selections = [:]
+        errorMessage = nil
     }
 
     static let revealReason = "Reveal recovery phrase"
 
     static let unreadableKeyMaterialMessage =
         "Could not read this wallet's keys. Restore from your recovery phrase if this persists."
+
+    static let saveFailedMessage = "Could not save your backup status. Try again."
+
+    static let screenshotTakenMessage =
+        "A screenshot was taken. For your safety the phrase was hidden; reveal it again to continue."
 }
 
 private extension WalletRecord {

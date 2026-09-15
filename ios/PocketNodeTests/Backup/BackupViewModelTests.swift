@@ -242,4 +242,118 @@ final class BackupViewModelTests: XCTestCase {
 
         XCTAssertEqual(vm.step, .success, "success is terminal; backgrounding must not re-arm the gate")
     }
+
+    // MARK: - Screenshot mitigation (M1)
+
+    func testOnScreenshotTakenWipesWordsReturnsToGateAndSetsAnInfoMessage() async {
+        let (vm, _, _) = makeViewModel()
+        await vm.reveal()
+        XCTAssertEqual(vm.step, .display)
+        XCTAssertFalse(vm.words.isEmpty)
+
+        vm.onScreenshotTaken()
+
+        XCTAssertEqual(vm.step, .gate)
+        XCTAssertTrue(vm.words.isEmpty)
+        XCTAssertTrue(vm.quiz.isEmpty)
+        XCTAssertEqual(vm.errorMessage, BackupViewModel.screenshotTakenMessage)
+    }
+
+    func testOnScreenshotTakenFromVerifyWipesSelections() async {
+        let (vm, _, _) = makeViewModel()
+        await vm.reveal()
+        vm.advanceToVerify()
+        vm.select(position: vm.quiz[0].position, word: vm.quiz[0].correctWord)
+
+        vm.onScreenshotTaken()
+
+        XCTAssertEqual(vm.step, .gate)
+        XCTAssertTrue(vm.selections.isEmpty)
+        XCTAssertEqual(vm.errorMessage, BackupViewModel.screenshotTakenMessage)
+    }
+
+    func testOnScreenshotTakenIsANoOpOnTheGateStep() {
+        let (vm, _, _) = makeViewModel()
+        XCTAssertEqual(vm.step, .gate)
+
+        vm.onScreenshotTaken()
+
+        XCTAssertEqual(vm.step, .gate)
+        XCTAssertNil(vm.errorMessage)
+    }
+
+    // MARK: - Save-failure handling (H1)
+
+    private func makeViewModel(
+        store: any WalletRecordStoring,
+        bundle: WalletKeyBundle = WalletKeyBundle(
+            privateKeyHex: "00",
+            mnemonic: "abandon ability able about above absent absorb abstract absurd abuse access accident"
+        )
+    ) -> BackupViewModel {
+        BackupViewModel(
+            walletKeyStore: StubWalletKeyReader(result: .success(bundle)),
+            walletStore: store,
+            auth: StubAuthGate(),
+            isOnboarding: false,
+            hasPin: { true },
+            rng: SeededRandomNumberGenerator(seed: 123)
+        )
+    }
+
+    private func passVerify(_ vm: BackupViewModel) async {
+        await vm.reveal()
+        vm.advanceToVerify()
+        for prompt in vm.quiz {
+            vm.select(position: prompt.position, word: prompt.correctWord)
+        }
+    }
+
+    func testMissingWalletRecordSetsAnErrorAndStaysOnVerifyWithWordsIntact() async {
+        let store = StubWalletRecordStore()
+        let vm = makeViewModel(store: store)
+        await passVerify(vm)
+
+        vm.submitVerify()
+
+        XCTAssertEqual(vm.step, .verify, "a missing wallet record must not be reported as a successful backup")
+        XCTAssertEqual(vm.errorMessage, BackupViewModel.saveFailedMessage)
+        XCTAssertFalse(vm.words.isEmpty, "the phrase must stay intact so the user can retry")
+    }
+
+    func testSaveFailureSetsAnErrorAndStaysOnVerifyWithWordsIntact() async {
+        let store = StubWalletRecordStore()
+        store.recordToLoad = makeRecord()
+        store.saveError = StubWalletRecordStoreError.saveFailed
+        let vm = makeViewModel(store: store)
+        await passVerify(vm)
+
+        vm.submitVerify()
+
+        XCTAssertEqual(vm.step, .verify, "a save failure must not be reported as a successful backup")
+        XCTAssertEqual(vm.errorMessage, BackupViewModel.saveFailedMessage)
+        XCTAssertFalse(vm.words.isEmpty, "the phrase must stay intact so the user can retry")
+    }
+
+    // MARK: - Empty quiz guard (H2)
+
+    func testSubmitVerifyIsANoOpWithAnEmptyQuiz() async {
+        let store = StubWalletRecordStore()
+        store.recordToLoad = makeRecord()
+        // A non-empty, non-nil mnemonic that splits to zero words: the only
+        // way `.verify` is reachable with an empty quiz (`BackupQuiz.generate`
+        // returns `[]` for empty `words`, and `advanceToVerify()` does not
+        // itself check the quiz).
+        let vm = makeViewModel(store: store, bundle: WalletKeyBundle(privateKeyHex: "00", mnemonic: "   "))
+        await vm.reveal()
+        XCTAssertEqual(vm.step, .display)
+        vm.advanceToVerify()
+        XCTAssertEqual(vm.step, .verify)
+        XCTAssertTrue(vm.quiz.isEmpty)
+
+        vm.submitVerify()
+
+        XCTAssertEqual(vm.step, .verify, "submitVerify must no-op rather than act on an empty quiz")
+        XCTAssertTrue(store.savedRecords.isEmpty)
+    }
 }

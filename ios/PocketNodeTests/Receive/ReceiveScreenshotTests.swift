@@ -50,7 +50,7 @@ final class ReceiveScreenshotTests: XCTestCase {
         )
         let preferences = UserDefaultsPreferences(defaults: defaults)
         preferences.setSelectedNetwork(network: .testnet)
-        let vm = ReceiveViewModel(walletStore: walletStore, preferences: preferences, onBackUp: {})
+        let vm = ReceiveViewModel(walletStore: walletStore, preferences: preferences, hasPin: { true }, onBackUp: {})
 
         let image = render(ReceiveView(viewModel: vm))
 
