@@ -5,7 +5,9 @@ import android.content.SharedPreferences
 import androidx.annotation.VisibleForTesting
 import androidx.security.crypto.EncryptedSharedPreferences
 import androidx.security.crypto.MasterKey
-import com.rjnr.pocketnode.core.crypto.Argon2id
+import com.rjnr.pocketnode.core.crypto.EntropySource
+import com.rjnr.pocketnode.core.crypto.hexToByteArray
+import com.rjnr.pocketnode.core.crypto.toHexStringNoPrefix
 import com.rjnr.pocketnode.core.log.Logger
 import com.rjnr.pocketnode.data.crypto.Blake2b
 import com.rjnr.pocketnode.data.crypto.KeyBackupManager
@@ -15,16 +17,18 @@ import javax.inject.Inject
 import javax.inject.Singleton
 
 /**
- * Stores and verifies the device PIN.
+ * Android adapter for [PinPolicy].
  *
- * The PIN hash is Argon2id-derived (since v1.7.0 / KDF v2). Legacy hashes
- * from v1.6.x and earlier used a single Blake2b-256 pass; the legacy path
- * is preserved for verification and silently re-hashed to Argon2id on the
- * first successful entry.
+ * The hashing, verification and lockout schedule itself lives in the shared KMP
+ * module (#510) so iOS applies an identical one. What stays here is everything
+ * platform-bound: the EncryptedSharedPreferences the state is persisted in, the
+ * StrongBox fallback when that keystore is unavailable, the backup-file guard on
+ * [removePin], the `String`/`CharArray` entry points the UI calls, and the
+ * `SecureRandom` the salt comes from.
  *
- * The failure counter is cumulative across sessions and resets on a
- * successful verification or an explicit `setPin`. Lockout duration
- * escalates with attempt count up to a permanent lockout at 10+ failures.
+ * The prefs keys, the stored values and the public API are unchanged from the
+ * pre-extraction version, so an upgrading install verifies its existing PIN and
+ * keeps its existing lockout state.
  *
  * The counter (and lockout state) live in EncryptedSharedPreferences, which
  * survive an app upgrade / overwrite install by design (#370). Resetting it
@@ -37,7 +41,12 @@ import javax.inject.Singleton
 @Singleton
 class PinManager @Inject constructor(
     @ApplicationContext private val context: Context,
-    private val blake2b: Blake2b,
+    /**
+     * Unused since the legacy Blake2b PIN path moved into [PinPolicy], which
+     * calls the shared `core.crypto.Blake2b` directly. Kept so the constructor
+     * signature (and the `AppModule` provider that calls it) is untouched.
+     */
+    @Suppress("unused") private val blake2b: Blake2b,
     private val logger: Logger,
 ) {
     @VisibleForTesting
@@ -90,89 +99,61 @@ class PinManager @Inject constructor(
     @VisibleForTesting
     internal var timeProvider: () -> Long = { System.currentTimeMillis() }
 
+    private val store = PrefsPinStore()
+
+    private val policy = PinPolicy(
+        store = store,
+        entropy = SecureRandomEntropySource,
+        // Read through the property, not captured by value: tests replace
+        // `timeProvider` after construction.
+        clock = { timeProvider() },
+        logger = logger,
+    )
+
     /**
      * Argon2id parameters. Defaults follow OWASP ASVS 4.0.3 baseline.
      * Tests override these to avoid 64 MB / 300 ms per verify.
      */
     @VisibleForTesting
-    internal var argon2Iterations: Int = 3
+    internal var argon2Iterations: Int
+        get() = policy.argon2Params.iterations
+        set(value) {
+            policy.argon2Params = policy.argon2Params.copy(iterations = value)
+        }
+
     @VisibleForTesting
-    internal var argon2MemoryKb: Int = 64 * 1024
+    internal var argon2MemoryKb: Int
+        get() = policy.argon2Params.memoryKib
+        set(value) {
+            policy.argon2Params = policy.argon2Params.copy(memoryKib = value)
+        }
+
     @VisibleForTesting
-    internal var argon2Parallelism: Int = 4
+    internal var argon2Parallelism: Int
+        get() = policy.argon2Params.parallelism
+        set(value) {
+            policy.argon2Params = policy.argon2Params.copy(parallelism = value)
+        }
 
     fun setPin(pin: String) {
         require(pin.length == PIN_LENGTH && pin.all { it.isDigit() }) {
             "PIN must be exactly $PIN_LENGTH digits"
         }
-        val hash = hashPinArgon2id(pin.toByteArray(Charsets.UTF_8))
-        writeFreshPin(hash)
+        policy.setPin(pin.toByteArray(Charsets.UTF_8))
     }
 
     fun setPinFromChars(pin: CharArray) {
         require(pin.size == PIN_LENGTH && pin.all { it.isDigit() }) {
             "PIN must be exactly $PIN_LENGTH digits"
         }
-        val hash = hashPinArgon2id(charsToUtf8Bytes(pin))
-        writeFreshPin(hash)
+        policy.setPin(charsToUtf8Bytes(pin))
     }
 
-    private fun writeFreshPin(hash: String) {
-        prefs.edit()
-            .putString(KEY_PIN_HASH, hash)
-            .putInt(KEY_KDF_VERSION, KDF_VERSION_ARGON2ID)
-            .putInt(KEY_FAILED_ATTEMPTS, 0)
-            .remove(KEY_LAST_FAILED_AT)
-            .remove(KEY_LOCKOUT_UNTIL)
-            .apply()
-    }
+    fun verifyPin(pin: String): Boolean = policy.verify(pin.toByteArray(Charsets.UTF_8))
 
-    fun verifyPin(pin: String): Boolean = verifyInternal(pin.toByteArray(Charsets.UTF_8))
+    fun verifyPinFromChars(pin: CharArray): Boolean = policy.verify(charsToUtf8Bytes(pin))
 
-    fun verifyPinFromChars(pin: CharArray): Boolean = verifyInternal(charsToUtf8Bytes(pin))
-
-    private fun verifyInternal(pinBytes: ByteArray): Boolean {
-        if (isLockedOut()) return false
-        if (!hasPin()) return false
-
-        val storedHash = prefs.getString(KEY_PIN_HASH, null) ?: return false
-        val kdfVersion = prefs.getInt(KEY_KDF_VERSION, KDF_VERSION_LEGACY_BLAKE2B)
-
-        val matches = when (kdfVersion) {
-            KDF_VERSION_ARGON2ID -> hashPinArgon2id(pinBytes) == storedHash
-            KDF_VERSION_LEGACY_BLAKE2B -> hashPinBlake2b(pinBytes) == storedHash
-            else -> {
-                logger.e(TAG, "Unknown KDF version $kdfVersion, refusing to verify")
-                return false
-            }
-        }
-
-        return if (matches) {
-            if (kdfVersion == KDF_VERSION_LEGACY_BLAKE2B) {
-                // Silent migration: re-derive the same plaintext PIN under
-                // Argon2id and overwrite the stored hash. The next verify
-                // will use Argon2id. Failure here is non-fatal — we still
-                // accepted the PIN, the migration retries on the next entry.
-                runCatching {
-                    val newHash = hashPinArgon2id(pinBytes)
-                    prefs.edit()
-                        .putString(KEY_PIN_HASH, newHash)
-                        .putInt(KEY_KDF_VERSION, KDF_VERSION_ARGON2ID)
-                        .apply()
-                    logger.i(TAG, "Migrated PIN hash to Argon2id")
-                }.onFailure {
-                    logger.w(TAG, "PIN Argon2id migration write failed (will retry next entry)", it)
-                }
-            }
-            onSuccessfulPin()
-            true
-        } else {
-            recordFailedAttempt()
-            false
-        }
-    }
-
-    fun hasPin(): Boolean = prefs.contains(KEY_PIN_HASH)
+    fun hasPin(): Boolean = policy.hasPin()
 
     fun removePin(force: Boolean = false) {
         if (!force && backupChecker?.invoke() == true) {
@@ -181,14 +162,7 @@ class PinManager @Inject constructor(
                 "Use force=true to delete backups and remove PIN."
             )
         }
-        prefs.edit()
-            .remove(KEY_PIN_HASH)
-            .remove(KEY_KDF_VERSION)
-            .remove(KEY_SALT)
-            .remove(KEY_FAILED_ATTEMPTS)
-            .remove(KEY_LAST_FAILED_AT)
-            .remove(KEY_LOCKOUT_UNTIL)
-            .apply()
+        policy.removePin()
     }
 
     /**
@@ -197,148 +171,125 @@ class PinManager @Inject constructor(
      * user who fumbled their PIN before upgrading is not still staring at "out
      * of attempts" on the freshly upgraded build. Committed synchronously
      * because the caller runs it during cold start, before the PIN gate reads
-     * the lockout state.
+     * the lockout state, so it goes straight to the store rather than through
+     * [PinPolicy.resetFailedAttempts] (which writes with `apply()`). The fields
+     * cleared are the same ones, via `clearFailureState`.
      */
     fun resetFailedAttempts() {
-        prefs.edit()
-            .putInt(KEY_FAILED_ATTEMPTS, 0)
-            .remove(KEY_LAST_FAILED_AT)
-            .remove(KEY_LOCKOUT_UNTIL)
-            .commit()
+        store.update(durable = true) { clearFailureState() }
     }
 
-    fun getRemainingAttempts(): Int {
-        val failed = prefs.getInt(KEY_FAILED_ATTEMPTS, 0)
-        return (MAX_ATTEMPTS - failed).coerceAtLeast(0)
-    }
+    fun getRemainingAttempts(): Int = policy.getRemainingAttempts()
 
-    fun isLockedOut(): Boolean {
-        val lockoutUntil = prefs.getLong(KEY_LOCKOUT_UNTIL, 0L)
-        if (lockoutUntil == 0L) return false
-        // Lockout expires naturally; the counter stays put so subsequent
-        // failures continue escalating. The counter only resets on a
-        // successful verify (subject to the 24h decay window) or on setPin.
-        return timeProvider() < lockoutUntil
-    }
+    fun isLockedOut(): Boolean = policy.isLockedOut()
 
-    fun getLockoutRemainingMs(): Long {
-        val lockoutUntil = prefs.getLong(KEY_LOCKOUT_UNTIL, 0L)
-        if (lockoutUntil == 0L) return 0L
-        return (lockoutUntil - timeProvider()).coerceAtLeast(0L)
-    }
+    fun getLockoutRemainingMs(): Long = policy.getLockoutRemainingMs()
 
     /** True if the wallet has hit the permanent-lockout threshold (10+ failures). */
-    fun isPermanentlyLocked(): Boolean {
-        val attempts = prefs.getInt(KEY_FAILED_ATTEMPTS, 0)
-        return attempts >= MAX_ATTEMPTS_BEFORE_PERMANENT
-    }
-
-    private fun recordFailedAttempt() {
-        val attempts = prefs.getInt(KEY_FAILED_ATTEMPTS, 0) + 1
-        val now = timeProvider()
-        val editor = prefs.edit()
-            .putInt(KEY_FAILED_ATTEMPTS, attempts)
-            .putLong(KEY_LAST_FAILED_AT, now)
-
-        val lockoutMs = lockoutDurationFor(attempts)
-        if (lockoutMs > 0) {
-            val lockoutUntil = if (lockoutMs == Long.MAX_VALUE) {
-                Long.MAX_VALUE
-            } else {
-                now + lockoutMs
-            }
-            editor.putLong(KEY_LOCKOUT_UNTIL, lockoutUntil)
-        }
-        editor.apply()
-    }
-
-    private fun lockoutDurationFor(attempts: Int): Long = when {
-        attempts < MAX_ATTEMPTS -> 0L
-        attempts == 5 -> 30_000L              // 30 s
-        attempts == 6 -> 60_000L              // 1 min
-        attempts == 7 -> 300_000L             // 5 min
-        attempts == 8 -> 1_800_000L           // 30 min
-        attempts == 9 -> 3_600_000L           // 1 h
-        else -> Long.MAX_VALUE                // permanent
-    }
-
-    private fun onSuccessfulPin() {
-        // A correct PIN resets the counter to max, matching platform
-        // convention (Android lockscreen does the same). The previous 24h
-        // decay window kept the counter after success to slow an attacker
-        // grinding between owner unlocks, but in practice it left the OWNER
-        // staring at "out of attempts" + the recovery dialog on every unlock
-        // for a day after fumbling their PIN (device-test report, 2026-07).
-        // Escalating lockouts (30s at 5 failures -> permanent at 10) still
-        // bound brute force between successes.
-        prefs.edit()
-            .remove(KEY_LOCKOUT_UNTIL)
-            .putInt(KEY_FAILED_ATTEMPTS, 0)
-            .remove(KEY_LAST_FAILED_AT)
-            .apply()
-    }
-
-    private fun hashPinArgon2id(pinBytes: ByteArray): String {
-        val salt = getOrCreateSalt()
-        // Shared KMP Argon2id (#509), byte-identical to the BouncyCastle
-        // generator this replaced, so hashes written by earlier versions still
-        // verify and an iOS build derives the same hash from the same PIN.
-        val output = Argon2id.hash(
-            password = pinBytes,
-            salt = salt,
-            params = Argon2id.Params(
-                iterations = argon2Iterations,
-                memoryKib = argon2MemoryKb,
-                parallelism = argon2Parallelism,
-                tagLength = HASH_OUTPUT_BYTES,
-            ),
-        )
-        return output.joinToString("") { "%02x".format(it) }
-    }
-
-    private fun hashPinBlake2b(pinBytes: ByteArray): String {
-        val salt = getOrCreateSalt()
-        val input = salt + pinBytes
-        val hash = blake2b.hash(input)
-        return hash.joinToString("") { "%02x".format(it) }
-    }
+    fun isPermanentlyLocked(): Boolean = policy.isPermanentlyLocked()
 
     private fun charsToUtf8Bytes(pin: CharArray): ByteArray {
         // Avoid going through String to keep the PIN out of the string intern pool.
         return String(pin).toByteArray(Charsets.UTF_8)
     }
 
-    private fun getOrCreateSalt(): ByteArray {
-        val existingHex = prefs.getString(KEY_SALT, null)
-        if (existingHex != null) {
-            return hexToBytes(existingHex)
+    /**
+     * [PinStore] over this manager's EncryptedSharedPreferences.
+     *
+     * Reads `prefs` on every call rather than caching it, because `testPrefs` is
+     * assigned after construction and `encryptedPrefs` is deliberately lazy (it
+     * touches the keystore).
+     */
+    private inner class PrefsPinStore : PinStore {
+
+        override fun getPinHash(): String? = prefs.getString(KEY_PIN_HASH, null)
+
+        override fun getSalt(): ByteArray? =
+            prefs.getString(KEY_SALT, null)?.hexToByteArray()
+
+        override fun getKdfVersion(): Int? =
+            if (prefs.contains(KEY_KDF_VERSION)) prefs.getInt(KEY_KDF_VERSION, 0) else null
+
+        override fun getFailedAttempts(): Int = prefs.getInt(KEY_FAILED_ATTEMPTS, 0)
+
+        override fun getLastFailedAt(): Long? =
+            if (prefs.contains(KEY_LAST_FAILED_AT)) prefs.getLong(KEY_LAST_FAILED_AT, 0L) else null
+
+        override fun getLockoutUntil(): Long? =
+            if (prefs.contains(KEY_LOCKOUT_UNTIL)) prefs.getLong(KEY_LOCKOUT_UNTIL, 0L) else null
+
+        override fun update(block: PinStore.Editor.() -> Unit) = update(durable = false, block)
+
+        /** @param durable `true` to `commit()` instead of `apply()`. */
+        fun update(durable: Boolean, block: PinStore.Editor.() -> Unit) {
+            val editor = prefs.edit()
+            PrefsEditor(editor).block()
+            if (durable) editor.commit() else editor.apply()
         }
-        val salt = ByteArray(SALT_SIZE)
-        SecureRandom().nextBytes(salt)
-        val hex = salt.joinToString("") { "%02x".format(it) }
-        prefs.edit().putString(KEY_SALT, hex).apply()
-        return salt
     }
 
-    private fun hexToBytes(hex: String): ByteArray {
-        return ByteArray(hex.length / 2) { i ->
-            hex.substring(i * 2, i * 2 + 2).toInt(16).toByte()
+    private class PrefsEditor(private val editor: SharedPreferences.Editor) : PinStore.Editor {
+        override fun pinHash(v: String?) {
+            if (v == null) editor.remove(KEY_PIN_HASH) else editor.putString(KEY_PIN_HASH, v)
         }
+
+        override fun salt(v: ByteArray?) {
+            if (v == null) {
+                editor.remove(KEY_SALT)
+            } else {
+                editor.putString(KEY_SALT, v.toHexStringNoPrefix())
+            }
+        }
+
+        override fun kdfVersion(v: Int?) {
+            if (v == null) editor.remove(KEY_KDF_VERSION) else editor.putInt(KEY_KDF_VERSION, v)
+        }
+
+        override fun failedAttempts(v: Int?) {
+            if (v == null) {
+                editor.remove(KEY_FAILED_ATTEMPTS)
+            } else {
+                editor.putInt(KEY_FAILED_ATTEMPTS, v)
+            }
+        }
+
+        override fun lastFailedAt(v: Long?) {
+            if (v == null) {
+                editor.remove(KEY_LAST_FAILED_AT)
+            } else {
+                editor.putLong(KEY_LAST_FAILED_AT, v)
+            }
+        }
+
+        override fun lockoutUntil(v: Long?) {
+            if (v == null) {
+                editor.remove(KEY_LOCKOUT_UNTIL)
+            } else {
+                editor.putLong(KEY_LOCKOUT_UNTIL, v)
+            }
+        }
+    }
+
+    /** `commonMain` has no `SecureRandom`, so the salt entropy comes from here. */
+    private object SecureRandomEntropySource : EntropySource {
+        private val random = SecureRandom()
+
+        override fun nextBytes(n: Int): ByteArray = ByteArray(n).also(random::nextBytes)
     }
 
     companion object {
         private const val TAG = "PinManager"
         internal const val PREFS_NAME = "ckb_pin_prefs"
-        internal const val PIN_LENGTH = 6
-        internal const val MAX_ATTEMPTS = 5
-        internal const val MAX_ATTEMPTS_BEFORE_PERMANENT = 10
-        internal const val LOCKOUT_DURATION_MS = 30_000L // first lockout (attempts=5)
-        internal const val LOCKOUT_DECAY_MS = 24 * 60 * 60 * 1000L // 24 h
-        internal const val SALT_SIZE = 32
-        internal const val HASH_OUTPUT_BYTES = 32
+        internal const val PIN_LENGTH = PinPolicy.PIN_LENGTH
+        internal const val MAX_ATTEMPTS = PinPolicy.MAX_ATTEMPTS
+        internal const val MAX_ATTEMPTS_BEFORE_PERMANENT = PinPolicy.MAX_ATTEMPTS_BEFORE_PERMANENT
+        internal const val LOCKOUT_DURATION_MS = PinPolicy.LOCKOUT_DURATION_MS // first lockout (attempts=5)
+        internal const val LOCKOUT_DECAY_MS = PinPolicy.LOCKOUT_DECAY_MS // 24 h
+        internal const val SALT_SIZE = PinPolicy.SALT_SIZE
+        internal const val HASH_OUTPUT_BYTES = PinPolicy.HASH_OUTPUT_BYTES
 
-        internal const val KDF_VERSION_LEGACY_BLAKE2B = 1
-        internal const val KDF_VERSION_ARGON2ID = 2
+        internal const val KDF_VERSION_LEGACY_BLAKE2B = PinPolicy.KDF_VERSION_LEGACY_BLAKE2B
+        internal const val KDF_VERSION_ARGON2ID = PinPolicy.KDF_VERSION_ARGON2ID
 
         private const val KEY_PIN_HASH = "pin_hash"
         private const val KEY_SALT = "pin_salt"
