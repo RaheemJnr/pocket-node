@@ -83,6 +83,10 @@ kotlin-bip39-difftest = { group = "cash.z.ecc.android", name = "kotlin-bip39", v
 ckb-sdk-core-difftest = { group = "org.nervos.ckb", name = "core", version.ref = "ckbSdkDiffTest" }
 ckb-sdk-utils-difftest = { group = "org.nervos.ckb", name = "utils", version.ref = "ckbSdkDiffTest" }
 bouncycastle = { group = "org.bouncycastle", name = "bcprov-jdk15on", version.ref = "bouncycastle" }
+# The same artifact again, under a name that makes its role obvious: BouncyCastle is
+# JVM-only, so it is the reference the shared Argon2id is proved against in :shared
+# androidHostTest and it ships nowhere from that source set (#509).
+bouncycastle-difftest = { group = "org.bouncycastle", name = "bcprov-jdk15on", version.ref = "bouncycastle" }
 
 # Room
 room-runtime = { group = "androidx.room", name = "room-runtime", version.ref = "room" }
