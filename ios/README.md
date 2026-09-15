@@ -53,6 +53,37 @@ protocol; `isHardwareBacked` reports which one is in play. Keychain items
 survive app deletion, so `InstallMarker` wipes them on the first launch of a
 fresh install.
 
+## Authentication
+
+`PocketNode/Services/Auth/` holds the lock. `AuthService` owns the session
+state (`noPin` / `locked` / `unlocked`), locks on `scenePhase == .background`
+only, and exposes `requireAuth(reason:)` for step-up auth on a single action
+(the recovery phrase reveal, later the send confirmation). `BiometricService`
+wraps `LocalAuthentication` with `.deviceOwnerAuthenticationWithBiometrics`:
+the device passcode is deliberately not a fallback, our own 6-digit PIN is.
+
+`PinService` wraps the shared Kotlin `PinPolicy` (`data/auth/PinPolicy.kt`), so
+the Argon2id hashing and the lockout schedule are literally the same code
+Android runs: 5 failures lock for 30 s, then 1 min, 5 min, 30 min, 1 h, and a
+permanent lock at 10. `KeychainPinStore` supplies the six storage fields under
+its own Keychain service (`com.rjnr.pocketnode.pin`), where Android supplies
+`EncryptedSharedPreferences`. The Keychain has no multi-item transaction, so
+`KeychainPinStore.apply` orders the writes such that any interrupted prefix
+leaves a safe state; the rules are documented on that method. The counter
+persists across reinstalls by design (#370), except on the first launch of a
+fresh install, where `AppContainer` clears the PIN service on the same signal
+`InstallMarker` uses for the wallet.
+
+Argon2id runs on `PinPolicyActor`, off the main actor: 64 MiB at t=3 is around
+150 ms in a release build and over a second in a debug one. Tests lower the
+cost via `Argon2Cost.testing` and drive the schedule with an injected clock
+(`PocketNodeTests/Auth/`).
+
+`Screens/Auth/` has the UI: `PinEntryView` (the reusable 6-digit pad, no
+keyboard), `LockView` (the app-wide gate `RootView` shows while locked) and
+`PinSetupView` (create, confirm, then the biometric opt-in). Onboarding (#515)
+is what sets the first PIN; until one exists nothing is gated.
+
 ## Preferences and wallet metadata
 
 `PocketNode/Services/Preferences/UserDefaultsPreferences.swift` implements
