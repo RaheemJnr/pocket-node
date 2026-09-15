@@ -4,6 +4,7 @@ import kotlin.math.pow
 import kotlin.random.Random
 import kotlin.test.Test
 import kotlin.test.assertEquals
+import kotlin.test.assertTrue
 import org.bouncycastle.crypto.generators.Argon2BytesGenerator
 import org.bouncycastle.crypto.params.Argon2Parameters
 
@@ -34,11 +35,21 @@ class Argon2idDifferentialTest {
         /** Of those, how many run somewhere in [16 MiB, 64 MiB). */
         const val CASES_AT_16_TO_64_MIB = 20
 
+        /** Roughly one case in four also carries a secret and associated data. */
+        const val EXTRA_INPUT_ODDS = 4
+
         const val KIB_64_MIB = 64 * 1024
         const val KIB_16_MIB = 16 * 1024
+
+        /** The parameters `PinManager` actually ships with. */
+        const val PIN_ITERATIONS = 3
+        const val PIN_MEMORY_KIB = 64 * 1024
+        const val PIN_PARALLELISM = 4
+        const val PIN_TAG_LENGTH = 32
+        const val PIN_SALT_LENGTH = 32
     }
 
-    private data class Case(
+    private class Case(
         val index: Int,
         val password: ByteArray,
         val salt: ByteArray,
@@ -46,11 +57,45 @@ class Argon2idDifferentialTest {
         val memoryKib: Int,
         val parallelism: Int,
         val tagLength: Int,
+        val secret: ByteArray? = null,
+        val associatedData: ByteArray? = null,
     ) {
         /** Parameters only. The password never goes into a log line. */
         fun describe(): String =
-            "case $index: t=$iterations m=${memoryKib}KiB p=$parallelism " +
-                "tag=$tagLength passwordLen=${password.size} saltLen=${salt.size}"
+            "case $index: t=$iterations m=${memoryKib}KiB p=$parallelism tag=$tagLength " +
+                "passwordLen=${password.size} saltLen=${salt.size} " +
+                "secretLen=${secret?.size ?: 0} adLen=${associatedData?.size ?: 0}"
+    }
+
+    /**
+     * The production tuple, spelled out rather than sampled.
+     *
+     * The random sweep below covers this corner too, but only by luck of the seed. A
+     * regression at exactly (t=3, m=64 MiB, p=4, 32-byte salt, 32-byte tag) locks every
+     * existing user out of their wallet, so it gets its own case and its own real
+     * six-digit PINs.
+     */
+    @Test
+    fun `matches BouncyCastle at the production PIN parameters`() {
+        val salt = ByteArray(PIN_SALT_LENGTH) { (it * 7 + 3).toByte() }
+
+        for (pin in listOf("000000", "123456", "987654")) {
+            val case = Case(
+                index = -1,
+                password = pin.toByteArray(Charsets.UTF_8),
+                salt = salt,
+                iterations = PIN_ITERATIONS,
+                memoryKib = PIN_MEMORY_KIB,
+                parallelism = PIN_PARALLELISM,
+                tagLength = PIN_TAG_LENGTH,
+            )
+
+            assertEquals(
+                bouncyCastle(case).toHexStringNoPrefix(),
+                ours(case).toHexStringNoPrefix(),
+                "production PIN parameters, pin length ${pin.length}",
+            )
+        }
     }
 
     @Test
@@ -72,23 +117,23 @@ class Argon2idDifferentialTest {
             cases.count { it.memoryKib >= KIB_16_MIB },
             "cases at 16 MiB or more",
         )
+        // The secret and associated-data inputs feed H0 and nothing else, but they are
+        // the two arguments with no coverage at all from the PIN call site.
+        assertTrue(
+            cases.count { it.secret != null } >= CASES / EXTRA_INPUT_ODDS / 2,
+            "cases carrying a secret and associated data",
+        )
+        // Every parallelism must appear, including at the small-memory end.
+        assertEquals(
+            setOf(1, 2, 3, 4),
+            cases.map { it.parallelism }.toSet(),
+            "parallelism coverage",
+        )
 
         for (case in cases) {
-            val ours = Argon2id.hash(
-                password = case.password,
-                salt = case.salt,
-                params = Argon2id.Params(
-                    iterations = case.iterations,
-                    memoryKib = case.memoryKib,
-                    parallelism = case.parallelism,
-                    tagLength = case.tagLength,
-                ),
-            )
-            val reference = bouncyCastle(case)
-
             assertEquals(
-                reference.toHexStringNoPrefix(),
-                ours.toHexStringNoPrefix(),
+                bouncyCastle(case).toHexStringNoPrefix(),
+                ours(case).toHexStringNoPrefix(),
                 case.describe(),
             )
         }
@@ -121,28 +166,49 @@ class Argon2idDifferentialTest {
     }
 
     private fun randomCase(random: Random, index: Int, memoryKib: Int): Case {
-        val parallelism = random.nextInt(1, 5)
+        // Parallelism is drawn after the memory cost and bounded by it. Raising the
+        // memory to fit the lanes instead would push every small case up to 32 KiB and
+        // leave the 8-to-31 KiB region tested at p=1 only.
+        val maxParallelism = minOf(4, memoryKib / 8)
+        val withExtraInputs = random.nextInt(EXTRA_INPUT_ODDS) == 0
         return Case(
             index = index,
             password = random.nextBytes(random.nextInt(0, 65)),
             salt = random.nextBytes(random.nextInt(8, 33)),
             iterations = random.nextInt(1, 4),
-            // Argon2 needs 8 KiB per lane; the small end of the range can undershoot that.
-            memoryKib = maxOf(memoryKib, 8 * parallelism),
-            parallelism = parallelism,
+            memoryKib = memoryKib,
+            parallelism = random.nextInt(1, maxParallelism + 1),
             tagLength = random.nextInt(16, 65),
+            secret = if (withExtraInputs) random.nextBytes(random.nextInt(1, 33)) else null,
+            associatedData = if (withExtraInputs) random.nextBytes(random.nextInt(1, 33)) else null,
         )
     }
 
+    private fun ours(case: Case): ByteArray = Argon2id.hash(
+        password = case.password,
+        salt = case.salt,
+        params = Argon2id.Params(
+            iterations = case.iterations,
+            memoryKib = case.memoryKib,
+            parallelism = case.parallelism,
+            tagLength = case.tagLength,
+        ),
+        secret = case.secret,
+        associatedData = case.associatedData,
+    )
+
     private fun bouncyCastle(case: Case): ByteArray {
-        val params = Argon2Parameters.Builder(Argon2Parameters.ARGON2_id)
+        val builder = Argon2Parameters.Builder(Argon2Parameters.ARGON2_id)
             .withVersion(Argon2Parameters.ARGON2_VERSION_13)
             .withIterations(case.iterations)
             .withMemoryAsKB(case.memoryKib)
             .withParallelism(case.parallelism)
             .withSalt(case.salt)
-            .build()
-        val generator = Argon2BytesGenerator().also { it.init(params) }
+        case.secret?.let { builder.withSecret(it) }
+        // `withAdditional`, not `withAdditionalData`: BouncyCastle 1.70's spelling.
+        case.associatedData?.let { builder.withAdditional(it) }
+
+        val generator = Argon2BytesGenerator().also { it.init(builder.build()) }
         val out = ByteArray(case.tagLength)
         generator.generateBytes(case.password, out)
         return out

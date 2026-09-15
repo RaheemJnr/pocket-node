@@ -18,7 +18,17 @@ import org.kotlincrypto.hash.blake2.BLAKE2b
  * parameter sets keeps that honest.
  *
  * This is a pure function: it holds no state between calls and zeroes its working
- * memory, H0 and the final block before returning.
+ * memory, H0 and the final block on the way out, including when an exception escapes.
+ *
+ * Two divergences from BouncyCastle are deliberate, and both are stricter rather than
+ * different: a memory cost below `8 * parallelism` throws instead of being silently
+ * raised to the minimum, and a salt shorter than 8 bytes throws instead of being
+ * accepted. BouncyCastle's clamping turns a caller's mistake into a quietly weaker KDF
+ * with no way to notice, and RFC 9106 requires the 8-byte salt outright. Neither case
+ * can arise from `PinManager`, which passes a 32-byte salt and 64 MiB; they would only
+ * ever fire on a new call site, which is exactly when a caller wants to hear about it.
+ * Every parameter set that is valid for both implementations produces the same tag,
+ * which is what the differential test pins down.
  */
 object Argon2id {
 
@@ -78,73 +88,81 @@ object Argon2id {
 
         val h0 = computeH0(password, salt, secret, associatedData, params)
 
-        val memory = LongArray(blockCount * WORDS_PER_BLOCK)
-
-        // B[i][0] and B[i][1] = H'^1024(H0 || LE32(index) || LE32(lane)).
         val initInput = ByteArray(H0_LENGTH + 8)
-        h0.copyInto(initInput, 0)
         val blockBytes = ByteArray(BLOCK_BYTES)
-        for (lane in 0 until lanes) {
-            for (index in 0..1) {
-                writeLe32(initInput, H0_LENGTH, index)
-                writeLe32(initInput, H0_LENGTH + 4, lane)
-                hPrime(blockBytes, initInput)
-                loadBlock(memory, (lane * laneLength + index) * WORDS_PER_BLOCK, blockBytes)
-            }
-        }
-
+        val finalBlock = LongArray(WORDS_PER_BLOCK)
         val blockR = LongArray(WORDS_PER_BLOCK)
         val blockTmp = LongArray(WORDS_PER_BLOCK)
         val zeroBlock = LongArray(WORDS_PER_BLOCK)
         val inputBlock = LongArray(WORDS_PER_BLOCK)
         val addressBlock = LongArray(WORDS_PER_BLOCK)
 
-        for (pass in 0 until params.iterations) {
-            for (slice in 0 until SYNC_POINTS) {
-                for (lane in 0 until lanes) {
-                    fillSegment(
-                        memory = memory,
-                        pass = pass,
-                        slice = slice,
-                        lane = lane,
-                        lanes = lanes,
-                        blockCount = blockCount,
-                        laneLength = laneLength,
-                        segmentLength = segmentLength,
-                        iterations = params.iterations,
-                        blockR = blockR,
-                        blockTmp = blockTmp,
-                        zeroBlock = zeroBlock,
-                        inputBlock = inputBlock,
-                        addressBlock = addressBlock,
-                    )
+        // Held outside the try so the wipe can reach it whatever happens inside, and
+        // nullable because the allocation itself is the most likely thing to fail: on a
+        // memory-pressured Android device an OutOfMemoryError on this 64 MiB array must
+        // not leave H0 and the half-filled blocks sitting in the heap.
+        var memory: LongArray? = null
+        try {
+            val blocks = LongArray(blockCount * WORDS_PER_BLOCK)
+            memory = blocks
+
+            // B[i][0] and B[i][1] = H'^1024(H0 || LE32(index) || LE32(lane)).
+            h0.copyInto(initInput, 0)
+            for (lane in 0 until lanes) {
+                for (index in 0..1) {
+                    writeLe32(initInput, H0_LENGTH, index)
+                    writeLe32(initInput, H0_LENGTH + 4, lane)
+                    hPrime(blockBytes, initInput)
+                    loadBlock(blocks, (lane * laneLength + index) * WORDS_PER_BLOCK, blockBytes)
                 }
             }
-        }
 
-        // C = B[0][q-1] xor B[1][q-1] xor ... xor B[p-1][q-1]; Tag = H'^T(C).
-        val finalBlock = LongArray(WORDS_PER_BLOCK)
-        for (lane in 0 until lanes) {
-            val offset = (lane * laneLength + laneLength - 1) * WORDS_PER_BLOCK
-            for (i in 0 until WORDS_PER_BLOCK) {
-                finalBlock[i] = finalBlock[i] xor memory[offset + i]
+            for (pass in 0 until params.iterations) {
+                for (slice in 0 until SYNC_POINTS) {
+                    for (lane in 0 until lanes) {
+                        fillSegment(
+                            memory = blocks,
+                            pass = pass,
+                            slice = slice,
+                            lane = lane,
+                            lanes = lanes,
+                            blockCount = blockCount,
+                            laneLength = laneLength,
+                            segmentLength = segmentLength,
+                            iterations = params.iterations,
+                            blockR = blockR,
+                            blockTmp = blockTmp,
+                            zeroBlock = zeroBlock,
+                            inputBlock = inputBlock,
+                            addressBlock = addressBlock,
+                        )
+                    }
+                }
             }
+
+            // C = B[0][q-1] xor B[1][q-1] xor ... xor B[p-1][q-1]; Tag = H'^T(C).
+            for (lane in 0 until lanes) {
+                val offset = (lane * laneLength + laneLength - 1) * WORDS_PER_BLOCK
+                for (i in 0 until WORDS_PER_BLOCK) {
+                    finalBlock[i] = finalBlock[i] xor blocks[offset + i]
+                }
+            }
+            storeBlock(blockBytes, finalBlock, 0)
+            val tag = ByteArray(params.tagLength)
+            hPrime(tag, blockBytes)
+            return tag
+        } finally {
+            memory?.fill(0L)
+            h0.fill(0)
+            initInput.fill(0)
+            blockBytes.fill(0)
+            finalBlock.fill(0L)
+            blockR.fill(0L)
+            blockTmp.fill(0L)
+            zeroBlock.fill(0L)
+            inputBlock.fill(0L)
+            addressBlock.fill(0L)
         }
-        storeBlock(blockBytes, finalBlock, 0)
-        val tag = ByteArray(params.tagLength)
-        hPrime(tag, blockBytes)
-
-        memory.fill(0L)
-        h0.fill(0)
-        initInput.fill(0)
-        blockBytes.fill(0)
-        finalBlock.fill(0L)
-        blockR.fill(0L)
-        blockTmp.fill(0L)
-        inputBlock.fill(0L)
-        addressBlock.fill(0L)
-
-        return tag
     }
 
     // -- H0 and H' ---------------------------------------------------------
@@ -239,7 +257,8 @@ object Argon2id {
         val dataIndependent = pass == 0 && slice < SYNC_POINTS / 2
 
         if (dataIndependent) {
-            zeroBlock.fill(0L)
+            // zeroBlock is never written to, only read as the all-zero G operand, so it
+            // needs no reset here; hash() zeroes it with everything else on the way out.
             inputBlock.fill(0L)
             inputBlock[0] = pass.toLong()
             inputBlock[1] = lane.toLong()
@@ -350,6 +369,9 @@ object Argon2id {
 
         var relativePosition = pseudoRand.toULong()
         relativePosition = (relativePosition * relativePosition) shr 32
+        // The `- 1uL` is safe only because referenceAreaSize is never 0: the `m >= 8p`
+        // guard in hash() forces segmentLength >= 2, which makes every branch above at
+        // least 1. If that guard were relaxed the widening would wrap to 2^64 - 1 here.
         relativePosition = referenceAreaSize.toULong() - 1uL -
             ((referenceAreaSize.toULong() * relativePosition) shr 32)
 
