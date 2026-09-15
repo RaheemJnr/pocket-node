@@ -14,6 +14,7 @@ import com.rjnr.pocketnode.data.crypto.KeyBackupManager
 import com.rjnr.pocketnode.data.crypto.KeyMaterial
 import com.rjnr.pocketnode.data.gateway.models.NetworkType
 import com.rjnr.pocketnode.data.gateway.models.Script
+import com.rjnr.pocketnode.data.crypto.DecryptedKeyData
 import com.rjnr.pocketnode.data.crypto.KeyStoreMigrationHelper
 import com.rjnr.pocketnode.data.crypto.WalletKeyBundle
 import androidx.annotation.VisibleForTesting
@@ -57,6 +58,16 @@ class KeyManager @Inject constructor(
 
     @VisibleForTesting
     internal var keyBackupManager: KeyBackupManager? = null
+
+    /**
+     * Per-wallet stand-ins for the deprecated EncryptedSharedPreferences
+     * files, keyed by walletId. EncryptedSharedPreferences needs a real
+     * KeyStore, so unit tests covering the legacy fallback path substitute
+     * plain SharedPreferences here (same role as [testPrefs] for the
+     * "default" bucket).
+     */
+    @VisibleForTesting
+    internal val testWalletPrefs: MutableMap<String, SharedPreferences> = mutableMapOf()
 
     @VisibleForTesting
     internal var keyStoreMigrationHelper: KeyStoreMigrationHelper? = null
@@ -199,15 +210,37 @@ class KeyManager @Inject constructor(
         return "keyMaterial=$total(v1=$v1,v2=$v2) espKey=$espKey"
     }
 
-    suspend fun getMnemonic(): List<String>? {
-        val helper = keyStoreMigrationHelper
-        if (helper != null) {
-            val data = helper.readDecryptedKey("default")
-            if (data != null) {
-                return data.mnemonic?.split(" ")
-            }
+    /**
+     * Read [walletId]'s key material from Room, failing closed when the
+     * wallet has a `key_material` row that cannot be read (#496).
+     *
+     * Returning null means "this wallet has no Room row at all" -- a
+     * genuinely legacy, pre-Room install whose only copy of the key still
+     * lives in the deprecated EncryptedSharedPreferences file. Those are
+     * the only wallets allowed to take the ESP fallback; for every wallet
+     * Room knows about, an unreadable row is an inconsistency we surface
+     * rather than paper over with the legacy plaintext copy.
+     *
+     * V2 (auth-bound) rows still throw
+     * [com.rjnr.pocketnode.data.crypto.V2KeyMaterialRequiresAuthException]
+     * out of [KeyStoreMigrationHelper.readDecryptedKey] -- that fail-closed
+     * path is unchanged; callers must supply an authenticated Cipher.
+     */
+    private suspend fun readRoomKeyOrFailClosed(walletId: String): DecryptedKeyData? {
+        val helper = keyStoreMigrationHelper ?: return null
+        helper.readDecryptedKey(walletId)?.let { return it }
+        if (helper.hasKeyMaterialRow(walletId)) {
+            // Never log key material -- walletId and the failure mode only.
+            logger.e(TAG, "key_material row for walletId=$walletId is unreadable; refusing legacy prefs fallback")
+            throw IllegalStateException("key material missing for wallet")
         }
-        // Fallback to ESP
+        logger.w(TAG, "No key_material row for walletId=$walletId; reading legacy prefs (migration pending)")
+        return null
+    }
+
+    suspend fun getMnemonic(): List<String>? {
+        readRoomKeyOrFailClosed("default")?.let { return it.mnemonic?.split(" ") }
+        // Fallback to ESP -- legacy wallets with no Room row only (#496)
         val joined = prefs.getString(KEY_MNEMONIC, null) ?: return null
         return joined.split(" ")
     }
@@ -276,14 +309,8 @@ class KeyManager @Inject constructor(
 
     suspend fun getPrivateKey(): ByteArray {
         // Try Room first
-        val helper = keyStoreMigrationHelper
-        if (helper != null) {
-            val data = helper.readDecryptedKey("default")
-            if (data != null) {
-                return data.privateKeyHex.hexToByteArray()
-            }
-        }
-        // Fallback to ESP
+        readRoomKeyOrFailClosed("default")?.let { return it.privateKeyHex.hexToByteArray() }
+        // Fallback to ESP -- legacy wallets with no Room row only (#496)
         val hex = prefs.getString(KEY_PRIVATE_KEY, null)
             ?: throw IllegalStateException("No wallet found")
         return hex.hexToByteArray()
@@ -376,6 +403,7 @@ class KeyManager @Inject constructor(
 
     @Deprecated("ESP fallback — remove after one release cycle")
     private fun getWalletPrefs(walletId: String): SharedPreferences {
+        testWalletPrefs[walletId]?.let { return it }
         val fileName = "ckb_wallet_keys_$walletId"
         return try {
             createEncryptedPrefsForWallet(fileName, useStrongBox = true)
@@ -405,27 +433,15 @@ class KeyManager @Inject constructor(
     }
 
     suspend fun getMnemonicForWallet(walletId: String): List<String>? {
-        val helper = keyStoreMigrationHelper
-        if (helper != null) {
-            val data = helper.readDecryptedKey(walletId)
-            if (data != null) {
-                return data.mnemonic?.split(" ")
-            }
-        }
-        // Fallback to ESP
+        readRoomKeyOrFailClosed(walletId)?.let { return it.mnemonic?.split(" ") }
+        // Fallback to ESP -- legacy wallets with no Room row only (#496)
         val joined = getWalletPrefs(walletId).getString(KEY_MNEMONIC, null) ?: return null
         return joined.split(" ")
     }
 
     suspend fun getPrivateKeyForWallet(walletId: String): ByteArray? {
-        val helper = keyStoreMigrationHelper
-        if (helper != null) {
-            val data = helper.readDecryptedKey(walletId)
-            if (data != null) {
-                return data.privateKeyHex.hexToByteArray()
-            }
-        }
-        // Fallback to ESP
+        readRoomKeyOrFailClosed(walletId)?.let { return it.privateKeyHex.hexToByteArray() }
+        // Fallback to ESP -- legacy wallets with no Room row only (#496)
         val hex = getWalletPrefs(walletId).getString(KEY_PRIVATE_KEY, null) ?: return null
         return hex.hexToByteArray()
     }
@@ -522,17 +538,21 @@ class KeyManager @Inject constructor(
                 )
                 if (!espFile.exists()) continue
 
+                // Read ESP directly instead of via getPrivateKeyForWallet /
+                // getMnemonicForWallet: those now fail closed when a key_material
+                // row exists but cannot be decrypted (#496), and this loop is
+                // precisely the path that repairs such a row from the legacy copy.
+                // Room has already been shown to hold nothing readable (the
+                // `continue` above) and the ESP file is known to exist.
+                val espPrefs = getWalletPrefs(wallet.walletId)
                 val privKeyHex = try {
-                    getPrivateKeyForWallet(wallet.walletId)
-                        ?.joinToString("") { "%02x".format(it) }
+                    espPrefs.getString(KEY_PRIVATE_KEY, null)
                 } catch (e: Exception) {
                     logger.w(TAG, "Cannot read ESP key for ${wallet.walletId}, skipping", e)
                     continue
                 } ?: continue
 
-                // Only consult ESP prefs now that we've confirmed ESP was authoritative.
-                val espPrefs = getWalletPrefs(wallet.walletId)
-                val mnemonic = getMnemonicForWallet(wallet.walletId)?.joinToString(" ")
+                val mnemonic = espPrefs.getString(KEY_MNEMONIC, null)
                 // ESP stored the authoritative walletType via savePrivateKey/storeKeysForWallet.
                 // Fall back to the mnemonic-presence inference only when the pref is absent
                 // (e.g. corrupted prefs), so future wallet types round-trip unchanged.

@@ -75,6 +75,20 @@ class KeyStoreMigrationHelper(
         keyMaterialDao.getMnemonicBackedUp(walletId)
 
     /**
+     * True when [walletId] has a `key_material` row, regardless of whether
+     * its ciphertext can currently be decrypted.
+     *
+     * [readDecryptedKey] returns null both for "no row at all" (a genuinely
+     * legacy, pre-Room wallet) and for "row present but unreadable"
+     * (unknown kdfVersion, corrupt ciphertext). Callers that keep a legacy
+     * EncryptedSharedPreferences fallback must tell the two apart so that a
+     * wallet whose Room material is broken fails closed instead of silently
+     * serving the plaintext legacy copy (#496).
+     */
+    suspend fun hasKeyMaterialRow(walletId: String): Boolean =
+        keyMaterialDao.getKdfVersion(walletId) != null
+
+    /**
      * Read the plaintext walletType column without decrypting. Same
      * V2-safe contract as [getMnemonicBackedUpFlag].
      */
