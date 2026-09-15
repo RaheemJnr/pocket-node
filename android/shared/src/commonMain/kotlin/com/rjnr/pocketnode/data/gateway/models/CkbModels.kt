@@ -167,13 +167,26 @@ data class TransactionRecord(
      * Every direction we can originate — "out", "self", and the three DAO
      * ops — pays a fee. A plain "in" was paid for by the sender, so showing
      * a fee row there would be wrong at any value.
+     *
+     * "dao_unlock" is the one case that can be hidden despite paying a fee.
+     * An unlock's output is worth deposit + compensation − fee while its
+     * input declares only the deposit, so Σ(inputs) − Σ(outputs) is negative
+     * and [feeShannons] can only ever come from the planned value recorded
+     * when this device sent it. When that is absent (the unlock was made on
+     * another device, or predates #497) the row is dropped: "Pending" here
+     * would be a promise that never resolves.
      */
-    fun paysNetworkFee(): Boolean = direction != "in"
+    fun paysNetworkFee(): Boolean = when (direction) {
+        "in" -> false
+        "dao_unlock" -> feeShannons != null
+        else -> true
+    }
 
     /**
      * The network fee as a CKB string (8 decimals, trailing zeros trimmed),
      * or null when [feeShannons] is not known yet. Callers render null as
-     * "Pending" rather than hiding the row — see [paysNetworkFee].
+     * "Pending" for the rows [paysNetworkFee] keeps — which already excludes
+     * the one direction ("dao_unlock") whose fee can never arrive later.
      */
     fun formattedFee(): String? = feeShannons?.let { "${shannonsToCkbString(it)} CKB" }
 

@@ -44,9 +44,35 @@ class TransactionRecordFeeTest {
 
     @Test
     fun `every direction we originate shows the fee row`() {
-        listOf("out", "self", "dao_deposit", "dao_withdraw", "dao_unlock").forEach {
+        listOf("out", "self", "dao_deposit", "dao_withdraw").forEach {
             assertTrue("$it should pay a network fee", makeRecord(direction = it).paysNetworkFee())
         }
+    }
+
+    @Test
+    fun `dao unlock shows the fee row once the planned fee is recorded`() {
+        assertTrue(makeRecord(direction = "dao_unlock", feeShannons = 10_000L).paysNetworkFee())
+        assertEquals(
+            "0.0001 CKB",
+            makeRecord(direction = "dao_unlock", feeShannons = 10_000L).formattedFee()
+        )
+    }
+
+    @Test
+    fun `dao unlock with no recorded fee hides the row instead of saying Pending`() {
+        // An unlock's output is worth deposit + compensation - fee while its
+        // input declares only the deposit, so the confirmed-path formula goes
+        // negative and never resolves. Showing "Pending" forever is worse than
+        // showing nothing.
+        assertFalse(makeRecord(direction = "dao_unlock", feeShannons = null).paysNetworkFee())
+    }
+
+    @Test
+    fun `an outgoing transfer with no fee yet still says Pending`() {
+        // Contrast with the unlock above: a transfer's fee does arrive once
+        // the light client resolves its inputs, so the row stays.
+        assertTrue(makeRecord(direction = "out", feeShannons = null).paysNetworkFee())
+        assertNull(makeRecord(direction = "out", feeShannons = null).formattedFee())
     }
 
     // --- formatting ---

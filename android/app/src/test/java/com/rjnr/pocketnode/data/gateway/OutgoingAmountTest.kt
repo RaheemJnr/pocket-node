@@ -185,4 +185,73 @@ class OutgoingAmountTest {
             )
         )
     }
+
+    // An unparseable capacity arrives as null rather than as the `?: 0L` the
+    // surrounding display code uses: read as 0 it would move the fee by that
+    // cell's whole value, which for a 61 CKB cell is six million times the
+    // fee itself. One bad entry poisons the result.
+
+    @Test
+    fun `an unparseable input capacity poisons the fee to unknown`() {
+        assertNull(
+            computeFeeShannons(
+                resolvedInputs = listOf(100 * ckb, null),
+                declaredInputCount = 2,
+                outputCapacities = listOf(150 * ckb),
+            )
+        )
+    }
+
+    @Test
+    fun `an unparseable output capacity poisons the fee to unknown`() {
+        assertNull(
+            computeFeeShannons(
+                resolvedInputs = listOf(200 * ckb),
+                declaredInputCount = 1,
+                outputCapacities = listOf(150 * ckb, null),
+            )
+        )
+    }
+
+    // ---------------------------------------------------------------------
+    // daoUnlockFeeShannons (#497): an unlock's fee is knowable only at build
+    // time, from maxWithdraw. Σ(inputs) − Σ(outputs) reads fee − compensation
+    // on chain, so the confirmed path can never recover it.
+    // ---------------------------------------------------------------------
+
+    @Test
+    fun `unlock fee is maxWithdraw minus what the output pays out`() {
+        // 10,000 deposit + 12.5 compensation unlocked, 0.0001 CKB fee.
+        val maxWithdraw = 10_012_50000000L
+        val fee = daoUnlockFeeShannons(
+            maxWithdraw = maxWithdraw,
+            outputCapacities = listOf(maxWithdraw - 10_000L),
+        )
+        assertEquals(10_000L, fee)
+    }
+
+    @Test
+    fun `unlock fee ignores the deposit-versus-compensation split entirely`() {
+        // Same fee whatever the compensation was — that is the whole point of
+        // computing it here instead of from the confirmed transaction.
+        assertEquals(
+            10_000L,
+            daoUnlockFeeShannons(1_000_000L, listOf(990_000L))
+        )
+    }
+
+    @Test
+    fun `unlock fee is unknown when an output capacity will not parse`() {
+        assertNull(daoUnlockFeeShannons(1_000_000L, listOf(990_000L, null)))
+    }
+
+    @Test
+    fun `unlock fee is unknown when there are no outputs`() {
+        assertNull(daoUnlockFeeShannons(1_000_000L, emptyList()))
+    }
+
+    @Test
+    fun `unlock fee is unknown rather than negative when outputs exceed maxWithdraw`() {
+        assertNull(daoUnlockFeeShannons(1_000_000L, listOf(1_500_000L)))
+    }
 }

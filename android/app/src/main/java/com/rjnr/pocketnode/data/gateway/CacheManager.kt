@@ -56,8 +56,7 @@ class CacheManager @Inject constructor(
             // erase the planned fee we wrote when the user sent it — the
             // insert below is REPLACE, so carry the cached value forward.
             val knownFees = if (records.any { it.feeShannons == null }) {
-                transactionDao.getKnownFees(records.map { it.txHash })
-                    .associate { it.txHash to it.feeShannons }
+                knownFeesFor(records.map { it.txHash })
             } else {
                 emptyMap()
             }
@@ -122,6 +121,19 @@ class CacheManager @Inject constructor(
         }
     }
 
+    /**
+     * Fees already cached for [hashes], chunked under SQLite's limit on bound
+     * variables (999 by default). A complete history walk hands
+     * [cacheTransactions] every transaction the wallet has ever made, so an
+     * unchunked `IN (:hashes)` throws on any wallet past ~1,000 transactions —
+     * and the catch around the caller would swallow that and skip `insertAll`,
+     * silently stopping history caching altogether.
+     */
+    private suspend fun knownFeesFor(hashes: List<String>): Map<String, Long> =
+        hashes.chunked(SQLITE_VARIABLE_CHUNK)
+            .flatMap { transactionDao.getKnownFees(it) }
+            .associate { it.txHash to it.feeShannons }
+
     override suspend fun updateTransactionStatus(hash: String, status: String) {
         // Propagate failures — BroadcastWatchdog runs this BEFORE the terminal
         // CAS specifically so a DB hiccup leaves the pending row recoverable.
@@ -177,6 +189,9 @@ class CacheManager @Inject constructor(
     }
 
     companion object {
+        /** SQLite binds at most 999 variables per statement; stay clear of it. */
+        private const val SQLITE_VARIABLE_CHUNK = 900
+
         private const val TAG = "CacheManager"
     }
 }

@@ -27,6 +27,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import com.rjnr.pocketnode.R
+import com.rjnr.pocketnode.core.format.formatCkbTrimmed
 import com.rjnr.pocketnode.ui.util.truncateAddress
 import java.math.BigDecimal
 import java.math.RoundingMode
@@ -103,7 +104,14 @@ fun SendReviewSheet(
             Spacer(Modifier.height(12.dp))
             ReviewRow(
                 label = stringResource(R.string.send_review_fee),
-                value = stringResource(R.string.send_review_ckb, formatReviewCkb(review.feeShannons)),
+                // Fees use the shared trimmed formatter so this string is
+                // character-identical to the "Network fee" the transaction
+                // detail sheet shows for the same send (#497). Amount and
+                // total keep formatReviewCkb's 2-decimal minimum.
+                value = stringResource(
+                    R.string.send_review_ckb,
+                    formatCkbTrimmed(review.feeShannons),
+                ),
             )
 
             HorizontalDivider(modifier = Modifier.padding(vertical = 16.dp))
