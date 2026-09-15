@@ -38,6 +38,9 @@ targets:
         CFBundleDisplayName: Pocket Node
         CFBundleShortVersionString: "1.0.0"
         CFBundleVersion: "1"
+        # Unwrapping the wallet's data key raises a Face ID prompt; without this
+        # string iOS kills the app instead of showing it.
+        NSFaceIDUsageDescription: Pocket Node uses Face ID to unlock your wallet keys.
         UILaunchScreen: {}
         UIApplicationSceneManifest:
           UIApplicationSupportsMultipleScenes: false
