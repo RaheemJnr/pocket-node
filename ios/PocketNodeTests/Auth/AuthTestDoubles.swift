@@ -15,7 +15,7 @@ final class StubBiometrics: BiometricAuthenticating, @unchecked Sendable {
 
     init(
         availability: BiometricAvailability = .faceID,
-        result: Result<Void, BiometricError> = .success(())
+        result: Result<Void, BiometricError> = .success(Void())
     ) {
         self._availability = availability
         self._result = result
