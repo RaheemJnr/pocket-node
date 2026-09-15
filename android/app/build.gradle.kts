@@ -79,12 +79,6 @@ android {
             }
         }
 
-        // ksp { arg("room.schemaLocation", "$projectDir/schemas") } is
-        // deliberately omitted, because turning on Room schema export
-        // crashes KSP with an AbstractMethodError between Room 2.8.4's
-        // bundled kotlinx-serialization-core and the project's
-        // kotlinx-serialization-json:1.8.0 (tracked in #149). Re-enable
-        // once the dep conflict is resolved.
     }
 
     testOptions {
@@ -262,6 +256,14 @@ kotlin {
     compilerOptions {
         jvmTarget.set(org.jetbrains.kotlin.gradle.dsl.JvmTarget.JVM_17)
     }
+}
+
+// Room schema export. Previously disabled (#149) because turning it on
+// crashed KSP with an AbstractMethodError between Room 2.8.4's bundled
+// kotlinx-serialization-core and the project's kotlinx-serialization-json.
+// Re-verified clean on Kotlin 2.3.10 / KSP 2.3.10 / Room 2.8.4.
+ksp {
+    arg("room.schemaLocation", "$projectDir/schemas")
 }
 
 // Pinned to the version mockk transitively brings in. Preloaded as a -javaagent
