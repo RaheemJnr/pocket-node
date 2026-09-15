@@ -115,12 +115,39 @@ actor PinPolicyActor {
     /// Verifies `digits`, refusing to even hash them if the store cannot record
     /// the outcome.
     ///
-    /// - Throws: ``PinServiceError/storeUnavailable(_:)`` when the write probe
-    ///   fails, so no comparison is made, or when the policy's own writes were
-    ///   refused after one was. Both are fail-closed: a check whose result
-    ///   cannot be recorded is not a check, it is a free guess.
+    /// - Throws: ``PinServiceError/storeUnavailable(_:)`` when the store cannot
+    ///   be read or written well enough to make the attempt meaningful. Three
+    ///   checks run before a single byte is hashed, and every one of them fails
+    ///   closed:
+    ///
+    ///   1. **Presence.** An unreadable store must not reach the policy, which
+    ///      would read the missing hash as "no PIN is set" and answer false.
+    ///   2. **Writability.** A store that takes reads but refuses writes would
+    ///      let every failed attempt go unrecorded, so the counter would never
+    ///      reach a lockout and the guessing would be unlimited.
+    ///   3. **Readability of the hash and salt.** A transient failure on the
+    ///      salt alone is the worst of the three: the policy would mint a
+    ///      replacement and destroy the only salt the stored hash matches.
+    ///
+    ///   A refused write after the comparison is surfaced the same way, even
+    ///   for a PIN that matched, because an attempt that was not recorded is
+    ///   not an attempt.
     func verify(digits: [UInt8]) throws -> Bool {
+        switch store.presence() {
+        case .unknown:
+            throw PinServiceError.storeUnavailable(errSecInteractionNotAllowed)
+        case .absent:
+            // Nothing to verify against. Not an error, just false, and no
+            // hashing and no attempt spent.
+            return false
+        case .present:
+            break
+        }
+
         if let failure = store.probeWrite() {
+            throw PinServiceError.storeUnavailable(failure.status)
+        }
+        if let failure = store.probeCriticalReads() {
             throw PinServiceError.storeUnavailable(failure.status)
         }
 
@@ -138,8 +165,17 @@ actor PinPolicyActor {
         return matched
     }
 
-    func removePin() {
+    /// Clears the PIN.
+    ///
+    /// - Throws: ``PinServiceError/storeUnavailable(_:)`` if any of the deletes
+    ///   was refused. A PIN that is still stored must not be reported as gone:
+    ///   the caller would drop the lock in front of it.
+    func removePin() throws {
+        store.clearFailure()
         policy.removePin()
+        if let failure = store.takeFailure() {
+            throw PinServiceError.storeUnavailable(failure.status)
+        }
     }
 
     func snapshot() -> PinState {
@@ -238,7 +274,9 @@ final class PinService {
         do {
             try await policy.setPin(digits: digits)
         } catch {
-            await policy.removePin()
+            // Best effort: if this is refused too the hash is still there, and
+            // the refresh below is what reports that honestly.
+            try? await policy.removePin()
             await refresh()
             throw error
         }
@@ -267,8 +305,18 @@ final class PinService {
     }
 
     /// Clears the PIN, its salt, its KDF version and all failure state.
-    func removePin() async {
-        await policy.removePin()
+    ///
+    /// - Throws: ``PinServiceError/storeUnavailable(_:)`` if a delete was
+    ///   refused, in which case ``pinPresence`` still reports the PIN that is
+    ///   really there. The published state is refreshed either way, so a caller
+    ///   that ignores the error still sees the truth.
+    func removePin() async throws {
+        do {
+            try await policy.removePin()
+        } catch {
+            await refresh()
+            throw error
+        }
         await refresh()
     }
 

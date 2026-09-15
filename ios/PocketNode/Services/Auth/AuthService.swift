@@ -140,6 +140,11 @@ final class AuthService {
         state = .locked
         biometricMessage = nil
         storeMessage = nil
+        // An outstanding step-up request cannot survive the lock. Its sheet is
+        // torn down with the rest of the UI, so leaving the continuation
+        // suspended would hang whatever asked (a recovery phrase reveal, later
+        // a send) with no way left to answer it. Refuse it explicitly.
+        resolveChallenge(granted: false)
     }
 
     /// Marks the session authenticated. Only for callers that have already
@@ -225,10 +230,16 @@ final class AuthService {
 
     /// Removes the PIN and the biometric opt-in with it: unlocking with a face
     /// and no second factor to fall back to is not a state worth having.
-    func removePin() async {
-        await pin.removePin()
+    ///
+    /// - Throws: ``PinServiceError/storeUnavailable(_:)`` if the Keychain
+    ///   refused a delete. The state is re-derived from what is actually
+    ///   stored in both outcomes, so a PIN that survived the attempt still
+    ///   gates the app, and the biometric opt-in is only dropped once there is
+    ///   really no PIN left for it to stand in for.
+    func removePin() async throws {
+        defer { state = pin.pinPresence == .absent ? .noPin : .locked }
+        try await pin.removePin()
         isBiometricEnabled = false
-        state = .noPin
     }
 
     // MARK: - Step-up auth for a single action
@@ -242,7 +253,13 @@ final class AuthService {
     /// intent. With no PIN configured there is nothing to check and it returns
     /// true.
     func requireAuth(reason: String) async -> Bool {
-        guard pin.hasPin else { return true }
+        // Only a confirmed absence waves the request through. An unreadable
+        // store is not "no PIN is configured", and granting a recovery phrase
+        // reveal because the Keychain happened to be unreadable would be the
+        // same hole as opening the wallet on it. `.unknown` falls through to
+        // the PIN challenge, which fails closed on its own via the probes in
+        // `PinService.verify`.
+        guard pin.pinPresence != .absent else { return true }
 
         if canUseBiometrics {
             switch await biometrics.authenticate(reason: reason) {

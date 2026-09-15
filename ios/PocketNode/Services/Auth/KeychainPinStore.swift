@@ -91,13 +91,27 @@ enum PinPresence: Equatable, Sendable {
 ///
 /// ## Read failures
 ///
-/// The `PinStore` getters cannot signal an error, so a Keychain read that fails
-/// is reported as "absent" and recorded in ``lastFailure``. These items are
-/// deleted outright by the system when the device passcode is removed, so
-/// unreadable and absent are the same recoverable state in practice: the user
-/// sets a PIN again. A write failure is not swallowed the same way, because
-/// silently not storing a PIN the user believes they set would be worse;
-/// ``takeFailure()`` lets `PinService` turn one into a thrown error.
+/// The `PinStore` getters return `nil` when a read fails, because the Kotlin
+/// seam gives them no way to say anything else: the protocol is non-throwing,
+/// and a Kotlin exception thrown back across the bridge is fatal on iOS rather
+/// than catchable. That `nil` is a limitation of the seam, **not** a statement
+/// that the field is absent, and nothing in this file treats it as one.
+///
+/// Every decision that matters is therefore made outside the getters, from
+/// ``lastFailure``, and every one of them fails closed:
+///
+/// - ``presence()`` reports ``PinPresence/unknown`` rather than `absent`, so
+///   an unreadable store locks the app instead of opening it.
+/// - `PinService.verify` refuses to hash at all unless the store proves it can
+///   be written (``probeWrite()``) and that the hash and salt read back
+///   cleanly. A silent `nil` salt would otherwise reach the shared policy's
+///   `getOrCreateSalt`, which would mint a fresh one and leave the stored hash
+///   unverifiable for good.
+/// - `PinService.setPin` and `removePin` surface a refused write or delete as a
+///   thrown error, since silently not storing (or not clearing) a PIN the user
+///   believes they changed is worse than telling them it failed.
+///
+/// ``takeFailure()`` is how a caller scopes ``lastFailure`` to one operation.
 final class KeychainPinStore: NSObject, PocketNodeCore.PinStore {
     /// Separate from `KeychainStore.defaultService`: nothing here is Enclave
     /// protected, and `InstallMarker`'s wipe of the key service must not sweep
@@ -113,6 +127,14 @@ final class KeychainPinStore: NSObject, PocketNodeCore.PinStore {
 
     init(keychain: any KeyValueStoring = KeychainStore(service: KeychainPinStore.defaultService)) {
         self.keychain = keychain
+        super.init()
+        // ``probeWrite()`` deletes its own scratch item, but a crash or a
+        // refused delete between the two halves would strand one. It holds
+        // nothing, yet leaving Keychain litter behind under the PIN service
+        // makes every later dump of this service harder to read. Best effort:
+        // a failure here says nothing about whether the store works, so it must
+        // not be recorded as one.
+        try? keychain.delete(account: PinAccount.writeProbe)
     }
 
     /// Returns and clears ``lastFailure``, so a caller can scope it to one
@@ -161,6 +183,25 @@ final class KeychainPinStore: NSObject, PocketNodeCore.PinStore {
     /// lockout. Probing costs two Keychain operations and turns that into a
     /// refusal to check at all.
     ///
+    /// Whether the two fields a verification depends on can actually be read.
+    ///
+    /// The hash is obvious. The salt is the subtle one: the shared policy's
+    /// `getOrCreateSalt` treats a `nil` salt as "none has been generated yet"
+    /// and mints a fresh one, which is correct for a first use and catastrophic
+    /// for a transient read failure. It would overwrite the salt the stored
+    /// hash was derived from, and the user's real PIN would then never verify
+    /// again, on this launch or any later one. Checking first turns that
+    /// permanent loss into a retryable error.
+    ///
+    /// - Returns: the failure, or nil when both fields read cleanly. A field
+    ///   that is genuinely absent is not a failure.
+    func probeCriticalReads() -> KeychainError? {
+        clearFailure()
+        _ = getPinHash()
+        _ = getSalt()
+        return takeFailure()
+    }
+
     /// - Returns: the failure, or nil when the store took both operations.
     func probeWrite() -> KeychainError? {
         do {
