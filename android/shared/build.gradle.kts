@@ -61,6 +61,11 @@ kotlin {
             // Same arrangement for BIP-39: kotlin-bip39 is JVM-only, so it is the
             // reference `Bip39` is proved against here and ships nowhere (#507).
             implementation(libs.kotlin.bip39.difftest)
+            // And again for Argon2id: BouncyCastle's Argon2BytesGenerator is the
+            // reference the shared implementation is proved against. It stays an app
+            // dependency for now (the BIP-32 code still uses it) but must never reach
+            // the shared module's production classpath (#509).
+            implementation(libs.bouncycastle.difftest)
         }
     }
 }

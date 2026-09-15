@@ -5,6 +5,7 @@ import android.content.SharedPreferences
 import androidx.annotation.VisibleForTesting
 import androidx.security.crypto.EncryptedSharedPreferences
 import androidx.security.crypto.MasterKey
+import com.rjnr.pocketnode.core.crypto.Argon2id
 import com.rjnr.pocketnode.core.log.Logger
 import com.rjnr.pocketnode.data.crypto.Blake2b
 import com.rjnr.pocketnode.data.crypto.KeyBackupManager
@@ -12,8 +13,6 @@ import dagger.hilt.android.qualifiers.ApplicationContext
 import java.security.SecureRandom
 import javax.inject.Inject
 import javax.inject.Singleton
-import org.bouncycastle.crypto.generators.Argon2BytesGenerator
-import org.bouncycastle.crypto.params.Argon2Parameters
 
 /**
  * Stores and verifies the device PIN.
@@ -281,16 +280,19 @@ class PinManager @Inject constructor(
 
     private fun hashPinArgon2id(pinBytes: ByteArray): String {
         val salt = getOrCreateSalt()
-        val params = Argon2Parameters.Builder(Argon2Parameters.ARGON2_id)
-            .withVersion(Argon2Parameters.ARGON2_VERSION_13)
-            .withIterations(argon2Iterations)
-            .withMemoryAsKB(argon2MemoryKb)
-            .withParallelism(argon2Parallelism)
-            .withSalt(salt)
-            .build()
-        val gen = Argon2BytesGenerator().also { it.init(params) }
-        val output = ByteArray(HASH_OUTPUT_BYTES)
-        gen.generateBytes(pinBytes, output)
+        // Shared KMP Argon2id (#509), byte-identical to the BouncyCastle
+        // generator this replaced, so hashes written by earlier versions still
+        // verify and an iOS build derives the same hash from the same PIN.
+        val output = Argon2id.hash(
+            password = pinBytes,
+            salt = salt,
+            params = Argon2id.Params(
+                iterations = argon2Iterations,
+                memoryKib = argon2MemoryKb,
+                parallelism = argon2Parallelism,
+                tagLength = HASH_OUTPUT_BYTES,
+            ),
+        )
         return output.joinToString("") { "%02x".format(it) }
     }
 
