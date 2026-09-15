@@ -41,6 +41,17 @@ class Bip39DifferentialTest {
         /** Validation samples, each mutated two different ways. */
         const val VALIDATION_ITERATIONS = 200
 
+        /**
+         * Every entropy length BIP-39 allows: 16, 20, 24, 28 and 32 bytes, which
+         * are the 12, 15, 18, 21 and 24 word phrases.
+         *
+         * The app only ever generates 12 and 24, but it can be asked to IMPORT
+         * any of the five, and the odd lengths are where the bit-packing is
+         * least forgiving: 20, 24 and 28 bytes give checksums of 5, 6 and 7
+         * bits, none of which land on a byte boundary.
+         */
+        val ENTROPY_LENGTHS = listOf(16, 20, 24, 28, 32)
+
         /** Printable ASCII, the range where skipping NFKD is safe. */
         const val ASCII_PASSPHRASE_ALPHABET =
             "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789 !#\$%&*+-_=?@"
@@ -57,6 +68,10 @@ class Bip39DifferentialTest {
         Blake2b.digest(words.joinToString(" ").encodeToByteArray())
             .copyOfRange(0, 8)
             .toHexStringNoPrefix()
+
+    /** Cycles through [ENTROPY_LENGTHS] so a run covers all five evenly. */
+    private fun entropyLengthFor(iteration: Int): Int =
+        ENTROPY_LENGTHS[iteration % ENTROPY_LENGTHS.size]
 
     /** The reference library's words for [entropy]. */
     private fun referenceWords(entropy: ByteArray): List<String> =
@@ -78,11 +93,9 @@ class Bip39DifferentialTest {
     @Test
     fun words_match_the_reference_for_random_entropy() {
         val random = Random(SEED)
-        var twelve = 0
-        var twentyFour = 0
+        val wordCounts = mutableMapOf<Int, Int>()
         repeat(ITERATIONS) { iteration ->
-            val entropyLength = if (iteration % 2 == 0) 16 else 32
-            val entropy = random.nextBytes(entropyLength)
+            val entropy = random.nextBytes(entropyLengthFor(iteration))
 
             val expected = referenceWords(entropy)
             val actual = Bip39.entropyToMnemonic(entropy)
@@ -92,17 +105,21 @@ class Bip39DifferentialTest {
                 actual,
                 "entropyToMnemonic disagreed at iteration $iteration (${fingerprint(expected)})",
             )
-            if (entropyLength == 16) twelve++ else twentyFour++
+            wordCounts[actual.size] = (wordCounts[actual.size] ?: 0) + 1
         }
-        assertEquals(ITERATIONS / 2, twelve)
-        assertEquals(ITERATIONS / 2, twentyFour)
+        // Proves the run actually reached all five phrase lengths, so a future
+        // edit to the rotation cannot quietly shrink the coverage.
+        assertEquals(
+            listOf(12, 15, 18, 21, 24).associateWith { ITERATIONS / ENTROPY_LENGTHS.size },
+            wordCounts.toMap(),
+        )
     }
 
     @Test
     fun seeds_match_the_reference_with_an_empty_passphrase() {
         val random = Random(SEED)
         repeat(ITERATIONS) { iteration ->
-            val entropy = random.nextBytes(if (iteration % 2 == 0) 16 else 32)
+            val entropy = random.nextBytes(entropyLengthFor(iteration))
             val words = Bip39.entropyToMnemonic(entropy)
 
             val expected = referenceSeed(words, "")
@@ -120,7 +137,7 @@ class Bip39DifferentialTest {
     fun seeds_match_the_reference_with_a_random_ascii_passphrase() {
         val random = Random(SEED + 1)
         repeat(PASSPHRASE_ITERATIONS) { iteration ->
-            val entropy = random.nextBytes(if (iteration % 2 == 0) 16 else 32)
+            val entropy = random.nextBytes(entropyLengthFor(iteration))
             val words = Bip39.entropyToMnemonic(entropy)
             val passphrase = random.asciiPassphrase()
 
@@ -139,7 +156,7 @@ class Bip39DifferentialTest {
     fun entropy_round_trips_against_the_reference() {
         val random = Random(SEED + 2)
         repeat(VALIDATION_ITERATIONS) { iteration ->
-            val entropy = random.nextBytes(if (iteration % 2 == 0) 16 else 32)
+            val entropy = random.nextBytes(entropyLengthFor(iteration))
             val words = Bip39.entropyToMnemonic(entropy)
 
             val expected = Mnemonics.MnemonicCode(words.joinToString(" ")).use { it.toEntropy() }
