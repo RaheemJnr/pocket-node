@@ -5,6 +5,7 @@ import android.content.SharedPreferences
 import androidx.annotation.VisibleForTesting
 import androidx.security.crypto.EncryptedSharedPreferences
 import androidx.security.crypto.MasterKey
+import com.rjnr.pocketnode.core.crypto.Argon2id
 import com.rjnr.pocketnode.core.crypto.EntropySource
 import com.rjnr.pocketnode.core.crypto.hexToByteArray
 import com.rjnr.pocketnode.core.crypto.toHexStringNoPrefix
@@ -101,41 +102,61 @@ class PinManager @Inject constructor(
 
     private val store = PrefsPinStore()
 
-    private val policy = PinPolicy(
+    /**
+     * Argon2id cost. Defaults follow the OWASP ASVS 4.0.3 baseline; tests lower
+     * them to avoid 64 MB / 300 ms per verify.
+     */
+    private var argon2Params = Argon2id.Params(
+        iterations = PinPolicy.ARGON2_ITERATIONS,
+        memoryKib = PinPolicy.ARGON2_MEMORY_KIB,
+        parallelism = PinPolicy.ARGON2_PARALLELISM,
+        tagLength = PinPolicy.HASH_OUTPUT_BYTES,
+    )
+
+    /**
+     * Rebuilt whenever [argon2Params] changes: `PinPolicy.argon2Params` has an
+     * `internal` setter, which this module cannot reach. The policy holds no
+     * state of its own beyond those parameters (everything else lives in
+     * [store]), so replacing the instance is equivalent to mutating it.
+     */
+    private var policy = newPolicy()
+
+    private fun newPolicy() = PinPolicy(
         store = store,
         entropy = SecureRandomEntropySource,
         // Read through the property, not captured by value: tests replace
         // `timeProvider` after construction.
         clock = { timeProvider() },
         logger = logger,
+        argon2Params = argon2Params,
     )
 
-    /**
-     * Argon2id parameters. Defaults follow OWASP ASVS 4.0.3 baseline.
-     * Tests override these to avoid 64 MB / 300 ms per verify.
-     */
+    private fun setArgon2Params(params: Argon2id.Params) {
+        argon2Params = params
+        policy = newPolicy()
+    }
+
     @VisibleForTesting
     internal var argon2Iterations: Int
-        get() = policy.argon2Params.iterations
-        set(value) {
-            policy.argon2Params = policy.argon2Params.copy(iterations = value)
-        }
+        get() = argon2Params.iterations
+        set(value) = setArgon2Params(argon2Params.copy(iterations = value))
 
     @VisibleForTesting
     internal var argon2MemoryKb: Int
-        get() = policy.argon2Params.memoryKib
-        set(value) {
-            policy.argon2Params = policy.argon2Params.copy(memoryKib = value)
-        }
+        get() = argon2Params.memoryKib
+        set(value) = setArgon2Params(argon2Params.copy(memoryKib = value))
 
     @VisibleForTesting
     internal var argon2Parallelism: Int
-        get() = policy.argon2Params.parallelism
-        set(value) {
-            policy.argon2Params = policy.argon2Params.copy(parallelism = value)
-        }
+        get() = argon2Params.parallelism
+        set(value) = setArgon2Params(argon2Params.copy(parallelism = value))
 
     fun setPin(pin: String) {
+        // Deliberately wider than the policy's own check, which accepts only
+        // ASCII 0-9 bytes: `Char.isDigit()` also passes Arabic-Indic and other
+        // Unicode digits. The PIN keypad emits ASCII only, so in practice the
+        // two agree; a non-ASCII digit arriving from anywhere else is rejected
+        // by the policy a moment later rather than silently stored.
         require(pin.length == PIN_LENGTH && pin.all { it.isDigit() }) {
             "PIN must be exactly $PIN_LENGTH digits"
         }
@@ -171,12 +192,10 @@ class PinManager @Inject constructor(
      * user who fumbled their PIN before upgrading is not still staring at "out
      * of attempts" on the freshly upgraded build. Committed synchronously
      * because the caller runs it during cold start, before the PIN gate reads
-     * the lockout state, so it goes straight to the store rather than through
-     * [PinPolicy.resetFailedAttempts] (which writes with `apply()`). The fields
-     * cleared are the same ones, via `clearFailureState`.
+     * the lockout state.
      */
     fun resetFailedAttempts() {
-        store.update(durable = true) { clearFailureState() }
+        policy.resetFailedAttempts(durable = true)
     }
 
     fun getRemainingAttempts(): Int = policy.getRemainingAttempts()
@@ -218,13 +237,15 @@ class PinManager @Inject constructor(
         override fun getLockoutUntil(): Long? =
             if (prefs.contains(KEY_LOCKOUT_UNTIL)) prefs.getLong(KEY_LOCKOUT_UNTIL, 0L) else null
 
-        override fun update(block: PinStore.Editor.() -> Unit) = update(durable = false, block)
+        override fun update(block: PinStore.Editor.() -> Unit) = edit(commit = false, block)
 
-        /** @param durable `true` to `commit()` instead of `apply()`. */
-        fun update(durable: Boolean, block: PinStore.Editor.() -> Unit) {
+        override fun updateDurable(block: PinStore.Editor.() -> Unit) = edit(commit = true, block)
+
+        /** @param commit `true` to `commit()` (synchronous) rather than `apply()`. */
+        private fun edit(commit: Boolean, block: PinStore.Editor.() -> Unit) {
             val editor = prefs.edit()
             PrefsEditor(editor).block()
-            if (durable) editor.commit() else editor.apply()
+            if (commit) editor.commit() else editor.apply()
         }
     }
 

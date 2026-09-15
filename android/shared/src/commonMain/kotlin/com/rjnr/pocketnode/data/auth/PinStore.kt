@@ -46,6 +46,17 @@ interface PinStore {
      */
     fun update(block: Editor.() -> Unit)
 
+    /**
+     * Like [update], but the write must have reached durable storage before it
+     * returns.
+     *
+     * Used for the post-upgrade counter reset, which runs during cold start and
+     * must be visible to the PIN gate that reads the lockout state moments
+     * later. Defaults to [update]; a platform whose ordinary write is already
+     * synchronous can leave it alone.
+     */
+    fun updateDurable(block: Editor.() -> Unit) = update(block)
+
     /** Collects the field changes of one [PinStore.update]. `null` removes the field. */
     interface Editor {
         fun pinHash(v: String?)

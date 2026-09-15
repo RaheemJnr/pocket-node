@@ -67,8 +67,10 @@ class PinPolicyTest {
         val policy = policyWithFreshStore()
         assertFalse(policy.hasPin())
         assertFalse(policy.verify(pin))
-        // Nothing to brute-force yet, so nothing is counted against the user.
-        assertEquals(0, store.attempts)
+        // Nothing to brute-force yet, so nothing is counted against the user
+        // and nothing is written at all.
+        assertNull(store.attempts)
+        assertEquals(0, policy.getRemainingAttempts() - PinPolicy.MAX_ATTEMPTS)
     }
 
     @Test
@@ -251,10 +253,28 @@ class PinPolicyTest {
         policy.resetFailedAttempts()
         assertFalse(policy.isLockedOut())
         assertEquals(PinPolicy.MAX_ATTEMPTS, policy.getRemainingAttempts())
+        assertEquals(0, store.attempts, "the counter is zeroed, not removed, while a PIN is set")
         assertNull(store.lastFailure)
         assertNull(store.lockout)
         assertTrue(policy.hasPin())
         assertTrue(policy.verify(pin))
+    }
+
+    @Test
+    fun aDurableResetGoesThroughTheDurableWrite() {
+        val policy = policyWithFreshStore()
+        policy.setPin(pin)
+        repeat(PinPolicy.MAX_ATTEMPTS) { policy.verify(wrongPin) }
+        val before = store.durableWrites
+
+        policy.resetFailedAttempts(durable = true)
+        assertEquals(before + 1, store.durableWrites)
+        assertFalse(policy.isLockedOut())
+        assertEquals(PinPolicy.MAX_ATTEMPTS, policy.getRemainingAttempts())
+
+        // The default stays on the ordinary write.
+        policy.resetFailedAttempts()
+        assertEquals(before + 1, store.durableWrites)
     }
 
     @Test
@@ -268,7 +288,9 @@ class PinPolicyTest {
         assertNull(store.hash)
         assertNull(store.saltBytes)
         assertNull(store.kdf)
-        assertEquals(0, store.attempts)
+        // Removed, not zeroed: "no PIN configured" must not be stored the same
+        // way as "a PIN with no failures against it".
+        assertNull(store.attempts)
         assertNull(store.lastFailure)
         assertNull(store.lockout)
     }
@@ -377,6 +399,25 @@ class PinPolicyTest {
         assertEquals(PinPolicy.KDF_VERSION_ARGON2ID, store.kdf)
     }
 
+    @Test
+    fun aCorrectPinIsAcceptedEvenIfTheCounterResetCannotBeWritten() {
+        val policy = policyWithFreshStore()
+        policy.setPin(pin)
+        assertFalse(policy.verify(wrongPin))
+        assertEquals(1, store.attempts)
+
+        // The next write is the post-success counter reset. Losing it must not
+        // cost the user access to their own wallet.
+        store.throwOnNextUpdate = true
+        assertTrue(policy.verify(pin))
+
+        // The reset did not land, so the counter is still where it was and the
+        // next success retries it.
+        assertEquals(1, store.attempts)
+        assertTrue(policy.verify(pin))
+        assertEquals(0, store.attempts)
+    }
+
     private object FixedEntropy : EntropySource {
         // Deterministic, so a hash computed in one test is reproducible in the
         // next. Never do this outside a test.
@@ -390,19 +431,27 @@ class PinPolicyTest {
         var hash: String? = null
         var saltBytes: ByteArray? = null
         var kdf: Int? = null
-        var attempts: Int = 0
+        var attempts: Int? = null
         var lastFailure: Long? = null
         var lockout: Long? = null
 
-        /** Consumed by the next [update], which throws instead of writing. */
+        /** Consumed by the next write, which throws instead of storing anything. */
         var throwOnNextUpdate: Boolean = false
+
+        /** Counts the writes that asked to be durable. */
+        var durableWrites: Int = 0
 
         override fun getPinHash(): String? = hash
         override fun getSalt(): ByteArray? = saltBytes
         override fun getKdfVersion(): Int? = kdf
-        override fun getFailedAttempts(): Int = attempts
+        override fun getFailedAttempts(): Int = attempts ?: 0
         override fun getLastFailedAt(): Long? = lastFailure
         override fun getLockoutUntil(): Long? = lockout
+
+        override fun updateDurable(block: PinStore.Editor.() -> Unit) {
+            durableWrites++
+            update(block)
+        }
 
         override fun update(block: PinStore.Editor.() -> Unit) {
             if (throwOnNextUpdate) {
@@ -421,7 +470,7 @@ class PinPolicyTest {
                 override fun pinHash(v: String?) { newHash = v }
                 override fun salt(v: ByteArray?) { newSalt = v }
                 override fun kdfVersion(v: Int?) { newKdf = v }
-                override fun failedAttempts(v: Int?) { newAttempts = v ?: 0 }
+                override fun failedAttempts(v: Int?) { newAttempts = v }
                 override fun lastFailedAt(v: Long?) { newLastFailure = v }
                 override fun lockoutUntil(v: Long?) { newLockout = v }
             }.block()
