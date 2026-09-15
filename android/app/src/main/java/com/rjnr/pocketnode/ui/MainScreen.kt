@@ -43,7 +43,6 @@ fun MainScreen(
     onNavigateToNodeStatus: () -> Unit,
     onNavigateToBackup: () -> Unit,
     onNavigateToSecuritySettings: () -> Unit,
-    onNavigateToImport: () -> Unit,
     onNavigateToPinVerify: () -> Unit = {},
     onNavigateToSecurityChecklist: () -> Unit = {},
     onNavigateToWalletManager: () -> Unit = {},
@@ -182,9 +181,7 @@ fun MainScreen(
             composable(BottomTab.Settings.route) {
                 SettingsScreen(
                     onNavigateToNodeStatus = onNavigateToNodeStatus,
-                    onNavigateToBackup = onNavigateToBackup,
                     onNavigateToSecuritySettings = onNavigateToSecuritySettings,
-                    onNavigateToImport = onNavigateToImport,
                     onNavigateToWalletManager = onNavigateToWalletManager,
                     onNavigateToContacts = onNavigateToContacts,
                     onNavigateToFaq = onNavigateToFaq,
@@ -211,8 +208,7 @@ fun MainScreenPreview() {
             onNavigateToReceive = {},
             onNavigateToNodeStatus = {},
             onNavigateToBackup = {},
-            onNavigateToSecuritySettings = {},
-            onNavigateToImport = {}
+            onNavigateToSecuritySettings = {}
         )
     }
 }

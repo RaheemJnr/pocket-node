@@ -418,7 +418,6 @@ fun CkbNavGraph(
                 onNavigateToNodeStatus = { navController.navigate(Screen.NodeStatus.route) },
                 onNavigateToBackup = { navController.navigate(Screen.MnemonicBackup.createRoute()) },
                 onNavigateToSecuritySettings = { navController.navigate(Screen.SecuritySettings.route) },
-                onNavigateToImport = { navController.navigate(Screen.MnemonicImport.route) },
                 onNavigateToPinVerify = {
                     navController.navigate(Screen.PinEntry.createRoute("verify"))
                 },
