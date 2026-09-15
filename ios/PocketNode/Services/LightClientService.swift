@@ -181,6 +181,7 @@ final class LightClientService {
         case let .Config(reason): return "Configuration error: \(reason)"
         case let .Storage(reason): return "Storage error: \(reason)"
         case let .Network(reason): return "Network error: \(reason)"
+        case let .NotFound(reason): return "Not found: \(reason)"
         case let .Internal(reason): return "Internal error: \(reason)"
         }
     }
