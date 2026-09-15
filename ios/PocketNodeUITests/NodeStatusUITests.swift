@@ -49,9 +49,13 @@ final class NodeStatusUITests: XCTestCase {
         // #487: Stop used to deadlock in the bridge, so the screen sat on
         // "Running" forever. It now has to reach Stopped promptly, and stay
         // there — a stopped node cannot be restarted in-process.
+        // Every assertion here waits: the button states and the footer are
+        // redrawn from a status that arrives asynchronously (the Rust listener
+        // callback, then the 5s refresh), so reading them the instant after the
+        // tap races the render.
         let status = app.staticTexts["nodeStatus.status"]
         let stop = app.buttons["Stop"]
-        XCTAssertTrue(stop.isEnabled, "Stop should be enabled while running")
+        wait(for: [enabled(stop)], timeout: Self.stopTimeout)
         stop.tap()
 
         let stopped = expectation(for: NSPredicate(format: "label ENDSWITH %@", "Stopped"),
@@ -65,9 +69,20 @@ final class NodeStatusUITests: XCTestCase {
         stoppedShot.lifetime = .keepAlways
         add(stoppedShot)
 
-        XCTAssertFalse(start.isEnabled, "Start must stay disabled after a stop")
-        XCTAssertTrue(app.staticTexts["nodeStatus.relaunchNotice"].exists,
-                      "The relaunch notice should explain why Start is disabled")
+        // Stop is terminal, so Start must not come back.
+        wait(for: [disabled(start)], timeout: Self.stopTimeout)
+        XCTAssertTrue(
+            app.staticTexts["nodeStatus.relaunchNotice"].waitForExistence(timeout: Self.stopTimeout),
+            "The relaunch notice should explain why Start is disabled"
+        )
+    }
+
+    private func enabled(_ element: XCUIElement) -> XCTestExpectation {
+        expectation(for: NSPredicate(format: "isEnabled == true"), evaluatedWith: element)
+    }
+
+    private func disabled(_ element: XCUIElement) -> XCTestExpectation {
+        expectation(for: NSPredicate(format: "isEnabled == false"), evaluatedWith: element)
     }
 
     /// A `LabeledContent` row reads back as "Tip block, 1 234 567", so take the

@@ -60,6 +60,9 @@ impl From<BridgeError> for LightClientError {
 /// `<data_dir>/store.db` and `<data_dir>/network` — iOS containers move between
 /// installs, so the paths cannot be baked into the bundled TOML.
 ///
+/// Fails with [`LightClientError::Stopped`] once the node has been stopped: the
+/// globals cannot be cleared, so a re-init is no more possible than a restart.
+///
 /// Blocking: this reads the config from disk, opens the store and starts the
 /// network service, so it can take seconds. Do not call it on the main thread.
 #[uniffi::export]

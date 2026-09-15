@@ -44,10 +44,38 @@ struct NodeControls: Equatable {
     }
 }
 
-/// Serializes every UniFFI call onto a background executor. `initLightClient`
-/// and `startLightClient` block while the P2P service comes up, so none of them
-/// may run on the main actor.
+/// Runs an actor's jobs on a dedicated serial `DispatchQueue`.
+///
+/// A plain actor runs on the cooperative thread pool, which is sized to the
+/// core count and assumes its jobs never block. The UniFFI lifecycle calls do
+/// block - `initLightClient` opens the store and brings the P2P service up,
+/// `stopLightClient` drains the network for up to two seconds - so leaving them
+/// on the pool takes a core away from every other task in the process for the
+/// duration. A private queue gives them a thread of their own to block.
+private final class SerialQueueExecutor: SerialExecutor {
+    private let queue = DispatchQueue(label: "com.rjnr.pocketnode.lightclient")
+
+    func enqueue(_ job: consuming ExecutorJob) {
+        let job = UnownedJob(job)
+        let executor = asUnownedSerialExecutor()
+        queue.async { job.runSynchronously(on: executor) }
+    }
+
+    func asUnownedSerialExecutor() -> UnownedSerialExecutor {
+        UnownedSerialExecutor(ordinary: self)
+    }
+}
+
+/// Serializes every UniFFI call off the main actor, onto the private queue
+/// above: `initLightClient` and `startLightClient` block while the P2P service
+/// comes up, so none of them may run on the main actor.
 private actor LightClientRunner {
+    private let executor = SerialQueueExecutor()
+
+    nonisolated var unownedExecutor: UnownedSerialExecutor {
+        executor.asUnownedSerialExecutor()
+    }
+
     func initialize(configPath: String, dataDir: String, listener: StatusListener?) throws {
         try initLightClient(configPath: configPath, dataDir: dataDir, listener: listener)
     }

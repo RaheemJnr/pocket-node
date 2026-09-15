@@ -1098,6 +1098,9 @@ public func getTransactions(searchKeyJson: String, order: String, limit: Int32, 
  * `<data_dir>/store.db` and `<data_dir>/network` — iOS containers move between
  * installs, so the paths cannot be baked into the bundled TOML.
  *
+ * Fails with [`LightClientError::Stopped`] once the node has been stopped: the
+ * globals cannot be cleared, so a re-init is no more possible than a restart.
+ *
  * Blocking: this reads the config from disk, opens the store and starts the
  * network service, so it can take seconds. Do not call it on the main thread.
  */
@@ -1259,7 +1262,7 @@ private let initializationResult: InitializationResult = {
     if (uniffi_ckb_light_client_lib_checksum_func_get_transactions() != 62226) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_ckb_light_client_lib_checksum_func_init_light_client() != 36491) {
+    if (uniffi_ckb_light_client_lib_checksum_func_init_light_client() != 55156) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_ckb_light_client_lib_checksum_func_is_initialized() != 62081) {

@@ -100,6 +100,13 @@ pub fn init(
     data_dir: &str,
     listener: Option<Box<dyn Fn(u8) + Send + Sync>>,
 ) -> Result<(), BridgeError> {
+    // A stopped client is not merely "already initialized": nothing can bring
+    // it back this process, so report that the same way `start` does.
+    if is_stopped() {
+        error!("Cannot re-initialize: the light client was stopped; the app must be relaunched");
+        return Err(BridgeError::Stopped);
+    }
+
     // Check if already initialized
     if is_initialized() {
         error!("Already initialized!");
@@ -410,11 +417,16 @@ pub(crate) fn shutdown_sequence(
         if peers_left == 0 {
             return ShutdownOutcome::Quiesced { waited };
         }
-        if waited >= grace || interval.is_zero() {
+        // Decide *before* sleeping whether the next step still fits inside the
+        // grace: sleeping first and re-checking afterwards overshoots by up to
+        // one interval, which is the whole budget when the interval is the
+        // coarser of the two. A zero interval would spin instead of waiting.
+        let next = waited.saturating_add(interval);
+        if next > grace || interval.is_zero() {
             return ShutdownOutcome::GraceExpired { peers_left };
         }
         sleep(interval);
-        waited += interval;
+        waited = next;
     }
 }
 
@@ -454,15 +466,23 @@ fn connected_peer_count() -> usize {
 /// peer registry gives us the useful half of that wait with a guaranteed
 /// return.
 pub fn stop() -> Result<(), BridgeError> {
-    // A second stop is not an error the caller can act on, but it is worth
-    // distinguishing from "never initialized" in the logs and on the UI.
-    if is_stopped() {
-        warn!("Already stopped");
-        return Err(BridgeError::Stopped);
-    }
-
-    // Check if running
-    if !is_running() {
+    // Claim the transition in one atomic step. A check-then-set would let two
+    // concurrent stops both pass the check and then both broadcast and notify;
+    // here exactly one caller wins and every other one is told it lost.
+    //
+    // The state therefore reads STOPPED for the duration of the drain below,
+    // while the network is still closing its sessions. That is deliberate: the
+    // alternative is a window in which the state still says RUNNING but the
+    // exit signal has gone out, which is what the UI must never see — a caller
+    // polling `status()` would show a running node that is on its way down.
+    // Nothing in the drain needs the RUNNING state.
+    if !try_transition(&STATE, STATE_RUNNING, STATE_STOPPED) {
+        // A second stop is not an error the caller can act on, but it is worth
+        // distinguishing from "never initialized" in the logs and on the UI.
+        if is_stopped() {
+            warn!("Already stopped");
+            return Err(BridgeError::Stopped);
+        }
         warn!("Not in RUNNING state! Current state: {}", get_state());
         return Err(BridgeError::NotInitialized);
     }
@@ -488,9 +508,6 @@ pub fn stop() -> Result<(), BridgeError> {
         }
     }
 
-    // Transition to STOPPED
-    set_state(STATE_STOPPED);
-
     info!("CKB Light Client stopped successfully!");
 
     // Notify status listener
@@ -513,6 +530,7 @@ pub fn status() -> u8 {
 mod tests {
     use super::*;
     use std::cell::RefCell;
+    use std::sync::atomic::{AtomicU8, AtomicUsize};
 
     /// `shutdown_sequence` must broadcast first and only then start polling:
     /// that ordering is the whole bug in #487, where the wait ran against a
@@ -593,6 +611,64 @@ mod tests {
             shutdown_sequence(|| {}, || 1, |_| {}, Duration::from_secs(2), Duration::ZERO);
 
         assert_eq!(outcome, ShutdownOutcome::GraceExpired { peers_left: 1 });
+    }
+
+    /// A grace period shorter than one poll interval must not buy itself a full
+    /// interval of sleep: the wait is a bound, not a floor.
+    #[test]
+    fn shutdown_sequence_never_overshoots_the_grace_period() {
+        let slept = RefCell::new(Vec::new());
+
+        let outcome = shutdown_sequence(
+            || {},
+            || 1,
+            |interval| slept.borrow_mut().push(interval),
+            Duration::from_millis(50),
+            Duration::from_millis(500),
+        );
+
+        assert_eq!(outcome, ShutdownOutcome::GraceExpired { peers_left: 1 });
+        assert!(
+            slept.borrow().is_empty(),
+            "slept {:?} for a 50ms grace",
+            slept.borrow()
+        );
+    }
+
+    /// Only one of a crowd of concurrent stops may claim the transition, so only
+    /// one broadcasts and notifies.
+    #[test]
+    fn only_one_caller_wins_the_transition_to_stopped() {
+        let state = Arc::new(AtomicU8::new(STATE_RUNNING));
+        let winners = Arc::new(AtomicUsize::new(0));
+
+        let threads: Vec<_> = (0..8)
+            .map(|_| {
+                let state = Arc::clone(&state);
+                let winners = Arc::clone(&winners);
+                std::thread::spawn(move || {
+                    if try_transition(&state, STATE_RUNNING, STATE_STOPPED) {
+                        winners.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                    }
+                })
+            })
+            .collect();
+
+        for thread in threads {
+            thread.join().expect("thread");
+        }
+
+        assert_eq!(winners.load(std::sync::atomic::Ordering::SeqCst), 1);
+        assert_eq!(state.load(std::sync::atomic::Ordering::SeqCst), STATE_STOPPED);
+    }
+
+    /// A transition from the wrong state changes nothing.
+    #[test]
+    fn transition_from_the_wrong_state_is_refused() {
+        let state = AtomicU8::new(STATE_INIT);
+
+        assert!(!try_transition(&state, STATE_RUNNING, STATE_STOPPED));
+        assert_eq!(state.load(std::sync::atomic::Ordering::SeqCst), STATE_INIT);
     }
 
     /// Nothing in this test binary ever calls `init`, so the process-global
@@ -680,6 +756,21 @@ listen_address = "127.0.0.1:0"
         assert!(
             matches!(start(), Err(BridgeError::Stopped)),
             "start after stop must report Stopped"
+        );
+        assert!(
+            matches!(
+                init(
+                    config_path.to_str().expect("utf-8 path"),
+                    dir.path().to_str().expect("utf-8 path"),
+                    None
+                ),
+                Err(BridgeError::Stopped)
+            ),
+            "init after stop must report Stopped, not AlreadyInitialized"
+        );
+        assert!(
+            matches!(stop(), Err(BridgeError::Stopped)),
+            "a second stop must report Stopped"
         );
     }
 }
