@@ -475,6 +475,17 @@
     <string name="send_bulk_recipients_placeholder">Paste one CKB address per line</string>
     <string name="send_bulk_summary">%1$d valid · %2$d duplicates removed · %3$d invalid · %4$d batches</string>
     <string name="send_bulk_total_amount">Total send amount: %1$s CKB</string>
+    <!-- #490: pre-broadcast review sheet -->
+    <string name="send_review_title">Review transaction</string>
+    <string name="send_review_subtitle">Check the details. This cannot be undone once confirmed.</string>
+    <string name="send_review_recipient">Recipient</string>
+    <string name="send_review_recipients">Recipients</string>
+    <string name="send_review_amount">Amount</string>
+    <string name="send_review_fee">Network fee</string>
+    <string name="send_review_total">Total</string>
+    <string name="send_review_ckb">%1$s CKB</string>
+    <string name="send_review_confirm">Confirm</string>
+    <string name="send_review_cancel">Cancel</string>
     <string name="send_bulk_progress">Batch %1$d of %2$d · %3$d recipients submitted</string>
 
     <string name="save_contact_dialog_title">Save to contacts?</string>
@@ -513,6 +524,10 @@
     <string name="sweep_dialog_confirm">Move funds</string>
     <string name="sweep_broadcast">Your funds are on the way to your main address. The transaction will appear in Activity.</string>
     <string name="sweep_failed">Could not move the funds: %1$s</string>
+    <plurals name="send_review_recipient_count">
+        <item quantity="one">%d address</item>
+        <item quantity="other">%d addresses</item>
+    </plurals>
     <plurals name="found_funds_body">
         <item quantity="one">These funds sit on %d extra address created from your recovery phrase by another wallet app. They belong to you and are safe. You can move them to your main address in one transaction.</item>
         <item quantity="other">These funds sit on %d extra addresses created from your recovery phrase by another wallet app. They belong to you and are safe. You can move them to your main address in one transaction.</item>

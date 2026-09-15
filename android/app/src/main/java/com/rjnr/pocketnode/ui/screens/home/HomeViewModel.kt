@@ -24,6 +24,7 @@ import com.rjnr.pocketnode.data.wallet.KeyManager
 import com.rjnr.pocketnode.data.wallet.WalletInfo
 import com.rjnr.pocketnode.data.wallet.WalletRepository
 import com.rjnr.pocketnode.ui.components.WalletGroup
+import com.rjnr.pocketnode.ui.util.addressFor
 import dagger.hilt.android.lifecycle.HiltViewModel
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.*
@@ -453,7 +454,7 @@ class HomeViewModel @Inject constructor(
         // refreshBalance(), so skip it here to avoid duplicate cell walks.
         for (wallet in wallets) {
             if (wallet.walletId == activeWalletId) continue
-            val address = if (network == NetworkType.MAINNET) wallet.mainnetAddress else wallet.testnetAddress
+            val address = wallet.addressFor(network)
             if (address.isBlank()) continue
             runCatching { repository.refreshBalanceForWallet(wallet.walletId, address) }
                 .onFailure { logger.w(TAG, "Failed to refresh balance for ${wallet.walletId}", it) }

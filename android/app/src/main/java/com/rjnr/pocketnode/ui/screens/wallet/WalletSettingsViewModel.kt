@@ -13,6 +13,7 @@ import com.rjnr.pocketnode.data.database.dao.KeyMaterialDao
 import com.rjnr.pocketnode.data.database.dao.TransactionDao
 import com.rjnr.pocketnode.data.database.dao.WalletDao
 import com.rjnr.pocketnode.data.database.entity.WalletEntity
+import com.rjnr.pocketnode.data.gateway.models.NetworkType
 import com.rjnr.pocketnode.data.wallet.KeyManager
 import com.rjnr.pocketnode.data.wallet.WalletKeyReader
 import com.rjnr.pocketnode.data.wallet.WalletKeyWriter
@@ -54,6 +55,7 @@ class WalletSettingsViewModel @Inject constructor(
     val uiState: StateFlow<WalletSettingsUiState> = _uiState.asStateFlow()
 
     init {
+        _uiState.update { it.copy(network = networkPreferences.getSelectedNetwork()) }
         loadWallet()
         observeSubAccounts()
     }
@@ -561,6 +563,8 @@ class WalletSettingsViewModel @Inject constructor(
 data class WalletSettingsUiState(
     val wallet: WalletEntity? = null,
     val subAccounts: List<WalletEntity> = emptyList(),
+    /** Active network — sub-account rows encode their address with its hrp (#489). */
+    val network: NetworkType = NetworkType.MAINNET,
     /** F1/F3: show the no-device-lock consent dialog before a V1 sub-account write. */
     val showNoLockConsent: Boolean = false,
     val isEditing: Boolean = false,

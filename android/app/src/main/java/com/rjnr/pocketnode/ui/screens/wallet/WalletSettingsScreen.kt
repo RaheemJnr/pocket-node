@@ -55,6 +55,8 @@ import com.composables.icons.lucide.Plus
 import androidx.compose.ui.res.stringResource
 import com.rjnr.pocketnode.R
 import com.rjnr.pocketnode.data.database.entity.WalletEntity
+import com.rjnr.pocketnode.data.gateway.models.NetworkType
+import com.rjnr.pocketnode.ui.util.addressFor
 import com.rjnr.pocketnode.ui.util.resolveString
 import com.rjnr.pocketnode.ui.components.WalletAvatar
 import com.rjnr.pocketnode.ui.util.SensitiveClipboard
@@ -559,7 +561,7 @@ fun WalletSettingsScreen(
                         )
                     } else {
                         uiState.subAccounts.forEach { subAccount ->
-                            SubAccountRow(subAccount)
+                            SubAccountRow(subAccount, uiState.network)
                         }
                     }
 
@@ -632,7 +634,7 @@ private fun SettingsActionRow(
 }
 
 @Composable
-private fun SubAccountRow(wallet: WalletEntity) {
+private fun SubAccountRow(wallet: WalletEntity, network: NetworkType) {
     Row(
         modifier = Modifier
             .fillMaxWidth()
@@ -652,7 +654,8 @@ private fun SubAccountRow(wallet: WalletEntity) {
                 fontWeight = FontWeight.Medium
             )
             Text(
-                text = wallet.mainnetAddress,
+                // Encoded for the active network, not always mainnet (#489)
+                text = wallet.addressFor(network),
                 style = MaterialTheme.typography.bodySmall,
                 fontFamily = FontFamily.Monospace,
                 maxLines = 1,

@@ -82,6 +82,7 @@ import com.composables.icons.lucide.TriangleAlert
 import com.composables.icons.lucide.Users
 import androidx.compose.ui.res.stringResource
 import com.rjnr.pocketnode.R
+import com.rjnr.pocketnode.ui.util.addressFor
 import com.rjnr.pocketnode.ui.util.resolveString
 import com.composables.icons.lucide.X
 import com.rjnr.pocketnode.data.database.entity.WalletEntity
@@ -228,6 +229,24 @@ fun SendScreen(
                 showContactPicker = false
             },
             loadContacts = { q -> viewModel.searchContacts(q) },
+        )
+    }
+
+    // #490: mandatory review before anything is signed or broadcast. The auth
+    // gate (if "Authenticate before sending" is on, or the wallet is on
+    // kdfVersion=2) runs after Confirm, so there is exactly one prompt.
+    uiState.reviewRequest?.let { review ->
+        SendReviewSheet(
+            review = review,
+            onConfirm = {
+                val activity = context as? FragmentActivity
+                if (activity != null) {
+                    viewModel.confirmSend(activity)
+                } else {
+                    viewModel.confirmSend()
+                }
+            },
+            onCancel = { viewModel.cancelReview() },
         )
     }
 
@@ -523,8 +542,7 @@ private fun SendScreenUI(
                         onDismissRequest = { showMyWallets = false }
                     ) {
                         uiState.otherWallets.forEach { wallet ->
-                            val address = if (uiState.networkType == NetworkType.MAINNET)
-                                wallet.mainnetAddress else wallet.testnetAddress
+                            val address = wallet.addressFor(uiState.networkType)
                             DropdownMenuItem(
                                 text = { Text(wallet.name) },
                                 // Guard against wallet rows that haven't populated the address

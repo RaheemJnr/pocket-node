@@ -52,6 +52,27 @@ private data class BulkParseResult(
     val duplicateCount: Int,
 )
 
+/**
+ * What the pre-broadcast review sheet renders (#490).
+ *
+ * Built from validated inputs, so every field is final: confirming it is the
+ * user's last decision point. It is a snapshot rather than a set of flags on
+ * [SendUiState] so the sheet can never disagree with the amount that is about
+ * to be signed — editing the form is only reachable after Cancel clears it.
+ */
+data class SendReview(
+    val isBulk: Boolean,
+    /** Empty in bulk mode — [recipientCount] carries the payload instead. */
+    val recipientAddress: String,
+    /** Address-book name for [recipientAddress], when the address is saved. */
+    val recipientName: String?,
+    val recipientCount: Int,
+    /** Total capacity leaving the wallet, excluding the fee. */
+    val amountShannons: Long,
+    val feeShannons: Long,
+    val totalShannons: Long,
+)
+
 data class SendUiState(
     /** Founder-only easter egg: the Single/Bulk toggle is hidden until unlocked. */
     val bulkUnlocked: Boolean = false,
@@ -107,6 +128,13 @@ data class SendUiState(
      * re-appears for the same recipient. (#197)
      */
     val saveContactPromptAddress: String? = null,
+    /**
+     * Non-null while the review sheet is up. Set by [SendViewModel.sendTransaction]
+     * after validation and cleared by confirm or cancel; nothing broadcasts
+     * while it is non-null, and nothing broadcasts without it having been set
+     * first. (#490)
+     */
+    val reviewRequest: SendReview? = null,
 )
 
 @HiltViewModel
@@ -130,6 +158,15 @@ class SendViewModel @Inject constructor(
 
     private var pollingJob: Job? = null
     private var sendJob: Job? = null
+
+    /**
+     * Fee shown on the review sheet the user just confirmed, for a single
+     * send. Passed down to the broadcast so the repository can refuse if a
+     * re-plan under the send mutex no longer agrees (#490). Null for bulk
+     * (several transactions, no single fee) and whenever no review is in
+     * flight.
+     */
+    private var confirmedFeeShannons: Long? = null
 
     /**
      * Addresses the user has explicitly dismissed the "Save to contacts?"
@@ -407,18 +444,13 @@ class SendViewModel @Inject constructor(
     /**
      * Legacy entry point (V1 wallets). Kept so non-Compose callers and
      * tests that don't have a `FragmentActivity` still work. On a V2
-     * wallet this returns an error — Compose callers should use the
+     * wallet [confirmSend] returns an error — Compose callers should use the
      * [sendTransaction] overload that accepts an activity.
      */
     fun sendTransaction() {
         viewModelScope.launch {
-            if (peekActiveKdfVersion() == 2) {
-                _uiState.update {
-                    it.copy(error = com.rjnr.pocketnode.ui.util.UiMessage.Resource(com.rjnr.pocketnode.R.string.vm_error_send_v2_reopen))
-                }
-                return@launch
-            }
-            sendTransactionV1OrFallback()
+            if (!validateInputs()) return@launch
+            showReview()
         }
     }
 
@@ -428,13 +460,133 @@ class SendViewModel @Inject constructor(
      * BiometricPrompt CryptoObject dance. Otherwise falls back to the
      * V1 flow (which itself may show a non-CryptoObject biometric gate
      * via the existing `requiresAuth` state, unchanged from v1.6.x).
+     *
+     * Both entry points now stop at the review sheet (#490). Nothing is
+     * built, signed or broadcast until [confirmSend]; the auth gate — the
+     * V1 `requiresAuth` prompt or the V2 CryptoObject prompt — follows the
+     * confirmation rather than replacing it, so "Authenticate before
+     * sending = off" no longer means "no confirmation at all".
      */
     fun sendTransaction(activity: FragmentActivity) {
         viewModelScope.launch {
             if (!validateInputs()) return@launch
+            showReview()
+        }
+    }
 
+    /**
+     * Builds the review snapshot from already-validated inputs.
+     *
+     * A single send is priced by [GatewayRepository.previewTransfer], which
+     * runs the real cell selection and fee math against the cells the send
+     * will spend. `estimatedFee` in the form is a 1-input guess, and cell
+     * selection is smallest-first, so a fragmented wallet pays materially more
+     * than that guess — the sheet must not quote it (#490).
+     */
+    private suspend fun showReview() {
+        confirmedFeeShannons = null
+        val state = _uiState.value
+        val amountShannons = parseAmountShannons(state.amountCkb) ?: return
+
+        if (state.sendMode == SendMode.BULK) {
+            // A bulk send is several transactions (BULK_BATCH_SIZE recipients
+            // each), so there is no single transaction to price. The sheet
+            // quotes the per-batch estimate and the confirm path skips the
+            // fee re-check.
+            val preview = state.refreshBulkPreview(amountShannonsOverride = amountShannons)
+            _uiState.update {
+                it.copy(
+                    reviewRequest = SendReview(
+                        isBulk = true,
+                        recipientAddress = "",
+                        recipientName = null,
+                        recipientCount = preview.bulkValidRecipients.size,
+                        amountShannons = preview.bulkTotalAmountShannons,
+                        feeShannons = preview.estimatedFee,
+                        totalShannons = preview.bulkTotalAmountShannons + preview.estimatedFee,
+                    ),
+                    error = null,
+                )
+            }
+            return
+        }
+
+        val fromAddress = repository.getCurrentAddress()
+        if (fromAddress == null) {
+            _uiState.update { it.copy(error = com.rjnr.pocketnode.ui.util.UiMessage.Resource(com.rjnr.pocketnode.R.string.vm_error_wallet_not_initialized)) }
+            return
+        }
+
+        _uiState.update { it.copy(isLoading = true, statusMessage = "Preparing transaction...") }
+        val plan = runCatching {
+            repository.previewTransfer(
+                fromAddress = fromAddress,
+                recipients = listOf(RecipientOutput(state.recipientAddress, amountShannons)),
+            )
+        }
+        _uiState.update { it.copy(isLoading = false, statusMessage = "") }
+
+        plan.onFailure { e ->
+            logger.e(TAG, "Send preview failed", e)
+            _uiState.update {
+                it.copy(
+                    error = com.rjnr.pocketnode.ui.util.UiMessage.Raw(mapSendErrorMessage(e.message)),
+                    errorDetail = e.message,
+                )
+            }
+        }.onSuccess { transferPlan ->
+            _uiState.update {
+                it.copy(
+                    reviewRequest = SendReview(
+                        isBulk = false,
+                        recipientAddress = state.recipientAddress,
+                        recipientName = state.matchedContact
+                            ?.takeIf { contact -> contact.address == state.recipientAddress }?.name,
+                        recipientCount = 1,
+                        amountShannons = amountShannons,
+                        feeShannons = transferPlan.feeShannons,
+                        totalShannons = amountShannons + transferPlan.feeShannons,
+                    ),
+                    // The form's fee line was the 1-input guess; replace it with
+                    // the planned fee so both surfaces agree.
+                    estimatedFee = transferPlan.feeShannons,
+                    error = null,
+                )
+            }
+        }
+    }
+
+    /** Review dismissed without sending: back to the form, nothing broadcast. */
+    fun cancelReview() {
+        confirmedFeeShannons = null
+        _uiState.update { it.copy(reviewRequest = null) }
+    }
+
+    /** Confirm from the review sheet — V2-capable (Compose) caller. */
+    fun confirmSend(activity: FragmentActivity) = confirmSendInternal(activity)
+
+    /** Confirm from the review sheet — caller without a FragmentActivity. */
+    fun confirmSend() = confirmSendInternal(null)
+
+    private fun confirmSendInternal(activity: FragmentActivity?) {
+        // No review on screen means nothing was confirmed: refuse rather than
+        // broadcast. Also makes a double-tap on Confirm a no-op.
+        val review = _uiState.value.reviewRequest ?: return
+        // The fee the user actually agreed to. The send re-plans under the
+        // send mutex and aborts if this no longer matches, so the broadcast
+        // can never pay a number the sheet did not show (#490).
+        confirmedFeeShannons = review.feeShannons.takeIf { !review.isBulk }
+        _uiState.update { it.copy(reviewRequest = null) }
+
+        viewModelScope.launch {
             val kdfVersion = peekActiveKdfVersion()
             if (kdfVersion == 2) {
+                if (activity == null) {
+                    _uiState.update {
+                        it.copy(error = com.rjnr.pocketnode.ui.util.UiMessage.Resource(com.rjnr.pocketnode.R.string.vm_error_send_v2_reopen))
+                    }
+                    return@launch
+                }
                 executeSendV2(activity)
             } else {
                 sendTransactionV1OrFallback()
@@ -615,6 +767,7 @@ class SendViewModel @Inject constructor(
                 toAddress = recipient,
                 amountShannons = amountShannons,
                 privateKey = privateKey,
+                expectedFeeShannons = confirmedFeeShannons,
             ).getOrThrow()
             _uiState.update {
                 it.copy(
@@ -697,7 +850,8 @@ class SendViewModel @Inject constructor(
                         fromAddress = capturedAddress,
                         toAddress = recipient,
                         amountShannons = amountShannons,
-                        privateKey = capturedKey
+                        privateKey = capturedKey,
+                        expectedFeeShannons = confirmedFeeShannons,
                     ).getOrThrow()
                     logger.d(TAG, "✅ Transaction sent! Hash: $txHash")
 
