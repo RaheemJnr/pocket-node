@@ -247,6 +247,8 @@ fun SendScreen(
                 }
             },
             onCancel = { viewModel.cancelReview() },
+            sweepWarningAcknowledged = uiState.sweepWarningAcknowledged,
+            onSweepWarningAcknowledgedChange = viewModel::setSweepWarningAcknowledged,
         )
     }
 
