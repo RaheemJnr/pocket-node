@@ -144,8 +144,12 @@ pub extern "C" fn Java_com_nervosnetwork_ckblightclient_LightClientNative_native
 ///
 /// This gracefully shuts down the light client:
 /// - Broadcast exit signals
-/// - Wait for services to stop
+/// - Give the network a bounded moment to close its sessions
 /// - Transition to STOPPED state
+///
+/// Terminal: the node cannot be started again without relaunching the process.
+/// The Android app never calls this (it restarts the process instead, #218).
+/// Returns JNI_TRUE on success, JNI_FALSE on any error.
 #[no_mangle]
 pub extern "C" fn Java_com_nervosnetwork_ckblightclient_LightClientNative_nativeStop(
     _env: JNIEnv,

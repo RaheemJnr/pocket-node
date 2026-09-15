@@ -597,6 +597,7 @@ enum LightClientError: Swift.Error, Equatable, Hashable, Foundation.LocalizedErr
     
     case NotInitialized
     case AlreadyInitialized
+    case Stopped
     case NotFound(reason: String
     )
     case Config(reason: String
@@ -638,19 +639,20 @@ public struct FfiConverterTypeLightClientError: FfiConverterRustBuffer {
         
         case 1: return .NotInitialized
         case 2: return .AlreadyInitialized
-        case 3: return .NotFound(
+        case 3: return .Stopped
+        case 4: return .NotFound(
             reason: try FfiConverterString.read(from: &buf)
             )
-        case 4: return .Config(
+        case 5: return .Config(
             reason: try FfiConverterString.read(from: &buf)
             )
-        case 5: return .Storage(
+        case 6: return .Storage(
             reason: try FfiConverterString.read(from: &buf)
             )
-        case 6: return .Network(
+        case 7: return .Network(
             reason: try FfiConverterString.read(from: &buf)
             )
-        case 7: return .Internal(
+        case 8: return .Internal(
             reason: try FfiConverterString.read(from: &buf)
             )
 
@@ -673,28 +675,32 @@ public struct FfiConverterTypeLightClientError: FfiConverterRustBuffer {
             writeInt(&buf, Int32(2))
         
         
-        case let .NotFound(reason):
+        case .Stopped:
             writeInt(&buf, Int32(3))
-            FfiConverterString.write(reason, into: &buf)
-            
         
-        case let .Config(reason):
+        
+        case let .NotFound(reason):
             writeInt(&buf, Int32(4))
             FfiConverterString.write(reason, into: &buf)
             
         
-        case let .Storage(reason):
+        case let .Config(reason):
             writeInt(&buf, Int32(5))
             FfiConverterString.write(reason, into: &buf)
             
         
-        case let .Network(reason):
+        case let .Storage(reason):
             writeInt(&buf, Int32(6))
             FfiConverterString.write(reason, into: &buf)
             
         
-        case let .Internal(reason):
+        case let .Network(reason):
             writeInt(&buf, Int32(7))
+            FfiConverterString.write(reason, into: &buf)
+            
+        
+        case let .Internal(reason):
+            writeInt(&buf, Int32(8))
             FfiConverterString.write(reason, into: &buf)
             
         }
@@ -1152,6 +1158,10 @@ public func setScripts(scriptsJson: String, command: Int32)throws   {try rustCal
 /**
  * Transition from INIT to RUNNING.
  *
+ * Fails with [`LightClientError::Stopped`] once the node has been stopped:
+ * stop is terminal for the life of the process, and the app has to be
+ * relaunched to run a node again.
+ *
  * Blocking: call it off the main thread along with the rest of the lifecycle
  * API. It is cheap today, but it is part of the same blocking surface and is
  * not guaranteed to stay that way.
@@ -1163,11 +1173,15 @@ public func startLightClient()throws   {try rustCallWithError(FfiConverterTypeLi
 }
 }
 /**
- * Gracefully shut the light client down.
+ * Gracefully shut the light client down, for good.
  *
- * Blocking: broadcasts exit signals and then waits for every CKB service to
- * exit, which can take a while when peers are connected. Do not call it on
- * the main thread.
+ * The node cannot be started again in this process — the Rust globals live in
+ * `OnceLock`s that stop cannot clear — so [`start_light_client`] afterwards
+ * returns [`LightClientError::Stopped`] and the app has to be relaunched.
+ *
+ * Blocking: broadcasts the exit signal and then gives the network up to two
+ * seconds to close its sessions. It always returns. Do not call it on the main
+ * thread.
  */
 public func stopLightClient()throws   {try rustCallWithError(FfiConverterTypeLightClientError_lift) {
         uniffiCallStatus in
@@ -1260,10 +1274,10 @@ private let initializationResult: InitializationResult = {
     if (uniffi_ckb_light_client_lib_checksum_func_set_scripts() != 29973) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_ckb_light_client_lib_checksum_func_start_light_client() != 33644) {
+    if (uniffi_ckb_light_client_lib_checksum_func_start_light_client() != 16774) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_ckb_light_client_lib_checksum_func_stop_light_client() != 47147) {
+    if (uniffi_ckb_light_client_lib_checksum_func_stop_light_client() != 42447) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_ckb_light_client_lib_checksum_method_statuslistener_on_status() != 1869) {

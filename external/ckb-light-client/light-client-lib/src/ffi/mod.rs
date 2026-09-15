@@ -24,6 +24,8 @@ pub enum LightClientError {
     NotInitialized,
     #[error("light client is already initialized")]
     AlreadyInitialized,
+    #[error("light client has been stopped; relaunch the app to start it again")]
+    Stopped,
     #[error("not found: {reason}")]
     NotFound { reason: String },
     #[error("config error: {reason}")]
@@ -41,6 +43,7 @@ impl From<BridgeError> for LightClientError {
         match err {
             BridgeError::NotInitialized => Self::NotInitialized,
             BridgeError::AlreadyInitialized => Self::AlreadyInitialized,
+            BridgeError::Stopped => Self::Stopped,
             BridgeError::NotFound(reason) => Self::NotFound { reason },
             BridgeError::Config(reason) => Self::Config { reason },
             BridgeError::Storage(reason) => Self::Storage { reason },
@@ -82,6 +85,10 @@ pub fn init_light_client(
 
 /// Transition from INIT to RUNNING.
 ///
+/// Fails with [`LightClientError::Stopped`] once the node has been stopped:
+/// stop is terminal for the life of the process, and the app has to be
+/// relaunched to run a node again.
+///
 /// Blocking: call it off the main thread along with the rest of the lifecycle
 /// API. It is cheap today, but it is part of the same blocking surface and is
 /// not guaranteed to stay that way.
@@ -90,11 +97,15 @@ pub fn start_light_client() -> Result<(), LightClientError> {
     lifecycle::start().map_err(Into::into)
 }
 
-/// Gracefully shut the light client down.
+/// Gracefully shut the light client down, for good.
 ///
-/// Blocking: broadcasts exit signals and then waits for every CKB service to
-/// exit, which can take a while when peers are connected. Do not call it on
-/// the main thread.
+/// The node cannot be started again in this process — the Rust globals live in
+/// `OnceLock`s that stop cannot clear — so [`start_light_client`] afterwards
+/// returns [`LightClientError::Stopped`] and the app has to be relaunched.
+///
+/// Blocking: broadcasts the exit signal and then gives the network up to two
+/// seconds to close its sessions. It always returns. Do not call it on the main
+/// thread.
 #[uniffi::export]
 pub fn stop_light_client() -> Result<(), LightClientError> {
     lifecycle::stop().map_err(Into::into)
