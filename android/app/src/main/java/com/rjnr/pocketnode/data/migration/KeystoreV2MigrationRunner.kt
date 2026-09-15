@@ -18,11 +18,16 @@ import javax.inject.Singleton
  *
  * ## Status
  *
- * Wired but **not yet invoked from app code**. Sub-PR 5 of #213 will
- * connect this from MainActivity post-PIN-unlock once every key-reading
- * call site (Send, mnemonic backup, sub-account derivation, DAO ops) is
- * V2-aware. Calling [runMigration] today would re-encrypt key material
- * under the V2 key and then break every call site that still uses V1.
+ * Invoked from [com.rjnr.pocketnode.ui.screens.auth.AuthViewModel.runMigrationIfNeeded],
+ * called by `AuthScreen` right after the user clears biometric or PIN
+ * unlock (#213 sub-PR 5). As of v1.7.2 (#289) [runMigration] no longer
+ * short-circuits on a `isMigrationComplete()` prefs flag — it re-derives
+ * the pending set from [KeystoreV2MigrationHelper.pendingWalletIds] on
+ * every call, accumulates per-wallet failures (user-cancel included,
+ * Policy A) instead of aborting on the first one, and only breaks early
+ * out of the per-wallet loop for a session-fatal biometric error
+ * (lockout or hardware-unavailable), leaving the remaining wallets
+ * untouched for a later retry.
  *
  * ## Why a separate class
  *
