@@ -265,6 +265,44 @@ class TransactionBuilderDaoTest {
             "withdraw fee $withdrawFee out of band vs deposit fee $depositFee",
             withdrawFee <= depositFee * 2 && withdrawFee * 2 >= depositFee
         )
+
+        // The band alone would pass if both were wrong in the same direction.
+        // At the standard 1000 shannons/KB relay rate a transaction must pay
+        // at least one shannon per serialized byte, so measure the real
+        // molecule size and require the fee to cover it. This is the
+        // assertion that fails if a future estimator undershoots a DAO shape
+        // the way the transfer formula undershot fragmented sends (#395).
+        assertFeeCoversSerializedSize(withdrawTx, withdrawFee)
+        assertFeeCoversSerializedSize(depositTx, depositFee)
+    }
+
+    @Test
+    fun `buildDaoUnlock fee covers the serialized transaction`() {
+        val maxWithdraw = 10_300_000_000L
+        val tx = builder.buildDaoUnlock(
+            withdrawingCell = makeWithdrawingCell(),
+            maxWithdraw = maxWithdraw,
+            sinceValue = "0x2000180000b0000a",
+            depositBlockHash = "0x" + "aa".repeat(32),
+            withdrawBlockHash = "0x" + "bb".repeat(32),
+            senderScript = testScript,
+            privateKey = testPrivateKey,
+            network = NetworkType.TESTNET
+        )
+        // The unlock pays out of the withdrawing cell's own capacity, so the
+        // fee is what the output gives up.
+        val fee = maxWithdraw - tx.cellOutputs[0].capacity.removePrefix("0x").toLong(16)
+        assertTrue("unlock fee $fee below the floor", fee >= TransactionBuilder.MIN_FEE)
+        assertFeeCoversSerializedSize(tx, fee)
+    }
+
+    /** At 1000 shannons/KB a transaction must pay at least one shannon per serialized byte. */
+    private fun assertFeeCoversSerializedSize(tx: Transaction, fee: Long) {
+        val size = builder.serializedSizeWithWitnesses(tx)
+        assertTrue(
+            "fee $fee does not cover $size serialized bytes at the minimum relay rate",
+            fee >= size
+        )
     }
 
     /** Fee actually paid: inputs consumed minus capacity returned to outputs. */

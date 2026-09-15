@@ -692,6 +692,24 @@ class TransactionBuilder(
         return signTransaction(unsignedTx, privateKey, 1, witnessInputType = depositHeaderIndex)
     }
 
+    /**
+     * Exact molecule size of [tx] as it goes on the wire: the serialized raw
+     * body plus the witnesses dynvec plus the Transaction wrapper.
+     *
+     * Unlike [estimateTransactionSize] this carries no safety fudge, so a test
+     * can assert that a fee estimate covers the real bytes. `internal` for the
+     * fee tests — same reason [selectCells] is (#490).
+     */
+    internal fun serializedSizeWithWitnesses(tx: Transaction): Int {
+        val rawSize = serializeRawTransaction(tx).size
+        // dynvec: total size (4) + one offset per item (4) + each item's
+        // length prefix (4) and payload.
+        val witnessesSize = 4 + tx.witnesses.size * 4 +
+            tx.witnesses.sumOf { 4 + it.removePrefix("0x").length / 2 }
+        // Transaction wrapper table hdr (12) + in-block serialization offset (4)
+        return rawSize + witnessesSize + 16
+    }
+
     private fun estimateTransactionSize(tx: Transaction): Int {
         return try {
             val rawSize = serializeRawTransaction(tx).size
