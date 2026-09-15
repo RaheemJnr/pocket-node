@@ -30,12 +30,26 @@ class MnemonicManager @Inject constructor() {
 
     /**
      * Derive a 512-bit (64-byte) seed from a mnemonic using PBKDF2-SHA512.
+     *
+     * Validates first. BIP-39 does not require that — a seed is defined for any
+     * string, and [Bip39.toSeed] deliberately derives one for anything so a
+     * wallet written by a tool with a broken checksum can still be recovered.
+     * This entry point is not that recovery path: every caller is importing or
+     * re-deriving a wallet the app itself produced, so a failing checksum here
+     * means a mistyped word, and deriving a valid-looking key for the wrong
+     * phrase would send the user to an empty address with no error. The
+     * kotlin-bip39 call this replaced validated by default; keeping the throw
+     * keeps that behaviour (#507).
+     *
      * @param words the mnemonic word list
      * @param passphrase optional BIP39 passphrase (default empty)
      * @return 64-byte seed
+     * @throws IllegalArgumentException if [words] is not a valid BIP-39 mnemonic
      */
-    fun mnemonicToSeed(words: List<String>, passphrase: String = ""): ByteArray =
-        Bip39.toSeed(words, passphrase)
+    fun mnemonicToSeed(words: List<String>, passphrase: String = ""): ByteArray {
+        require(Bip39.validate(words)) { "Invalid mnemonic" }
+        return Bip39.toSeed(words, passphrase)
+    }
 
     /**
      * Derive a 32-byte secp256k1 private key from a BIP39 seed using BIP32/BIP44.

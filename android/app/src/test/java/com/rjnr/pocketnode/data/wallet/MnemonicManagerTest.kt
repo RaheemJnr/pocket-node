@@ -98,6 +98,28 @@ class MnemonicManagerTest {
     }
 
     @Test
+    fun `mnemonicToSeed rejects a bad checksum`() {
+        // Every word is on the list and the count is legal, so only the checksum
+        // catches this. Deriving a seed anyway would hand the user a valid
+        // looking key for an empty address, with no error to explain it.
+        val invalid = testMnemonic.toMutableList()
+        invalid[11] = "abandon"
+        assertFalse(manager.validateMnemonic(invalid))
+        assertThrows(IllegalArgumentException::class.java) {
+            manager.mnemonicToSeed(invalid)
+        }
+    }
+
+    @Test
+    fun `mnemonicToSeed rejects a word that is not on the list`() {
+        val invalid = testMnemonic.toMutableList()
+        invalid[0] = "zzzznotaword"
+        assertThrows(IllegalArgumentException::class.java) {
+            manager.mnemonicToSeed(invalid)
+        }
+    }
+
+    @Test
     fun `mnemonicToSeed different passphrase produces different seed`() {
         val seed1 = manager.mnemonicToSeed(testMnemonic, "")
         val seed2 = manager.mnemonicToSeed(testMnemonic, "mypassphrase")
