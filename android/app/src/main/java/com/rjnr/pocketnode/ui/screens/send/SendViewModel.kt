@@ -52,6 +52,27 @@ private data class BulkParseResult(
     val duplicateCount: Int,
 )
 
+/**
+ * What the pre-broadcast review sheet renders (#490).
+ *
+ * Built from validated inputs, so every field is final: confirming it is the
+ * user's last decision point. It is a snapshot rather than a set of flags on
+ * [SendUiState] so the sheet can never disagree with the amount that is about
+ * to be signed — editing the form is only reachable after Cancel clears it.
+ */
+data class SendReview(
+    val isBulk: Boolean,
+    /** Empty in bulk mode — [recipientCount] carries the payload instead. */
+    val recipientAddress: String,
+    /** Address-book name for [recipientAddress], when the address is saved. */
+    val recipientName: String?,
+    val recipientCount: Int,
+    /** Total capacity leaving the wallet, excluding the fee. */
+    val amountShannons: Long,
+    val feeShannons: Long,
+    val totalShannons: Long,
+)
+
 data class SendUiState(
     /** Founder-only easter egg: the Single/Bulk toggle is hidden until unlocked. */
     val bulkUnlocked: Boolean = false,
@@ -107,6 +128,13 @@ data class SendUiState(
      * re-appears for the same recipient. (#197)
      */
     val saveContactPromptAddress: String? = null,
+    /**
+     * Non-null while the review sheet is up. Set by [SendViewModel.sendTransaction]
+     * after validation and cleared by confirm or cancel; nothing broadcasts
+     * while it is non-null, and nothing broadcasts without it having been set
+     * first. (#490)
+     */
+    val reviewRequest: SendReview? = null,
 )
 
 @HiltViewModel
@@ -407,18 +435,13 @@ class SendViewModel @Inject constructor(
     /**
      * Legacy entry point (V1 wallets). Kept so non-Compose callers and
      * tests that don't have a `FragmentActivity` still work. On a V2
-     * wallet this returns an error — Compose callers should use the
+     * wallet [confirmSend] returns an error — Compose callers should use the
      * [sendTransaction] overload that accepts an activity.
      */
     fun sendTransaction() {
         viewModelScope.launch {
-            if (peekActiveKdfVersion() == 2) {
-                _uiState.update {
-                    it.copy(error = com.rjnr.pocketnode.ui.util.UiMessage.Resource(com.rjnr.pocketnode.R.string.vm_error_send_v2_reopen))
-                }
-                return@launch
-            }
-            sendTransactionV1OrFallback()
+            if (!validateInputs()) return@launch
+            showReview()
         }
     }
 
@@ -428,13 +451,87 @@ class SendViewModel @Inject constructor(
      * BiometricPrompt CryptoObject dance. Otherwise falls back to the
      * V1 flow (which itself may show a non-CryptoObject biometric gate
      * via the existing `requiresAuth` state, unchanged from v1.6.x).
+     *
+     * Both entry points now stop at the review sheet (#490). Nothing is
+     * built, signed or broadcast until [confirmSend]; the auth gate — the
+     * V1 `requiresAuth` prompt or the V2 CryptoObject prompt — follows the
+     * confirmation rather than replacing it, so "Authenticate before
+     * sending = off" no longer means "no confirmation at all".
      */
     fun sendTransaction(activity: FragmentActivity) {
         viewModelScope.launch {
             if (!validateInputs()) return@launch
+            showReview()
+        }
+    }
 
+    /** Builds the review snapshot from already-validated inputs. */
+    private fun showReview() {
+        val state = _uiState.value
+        val review = buildReview(state) ?: return
+        _uiState.update { it.copy(reviewRequest = review, error = null) }
+    }
+
+    internal fun buildReview(state: SendUiState): SendReview? {
+        val amountShannons = parseAmountShannons(state.amountCkb) ?: return null
+        return if (state.sendMode == SendMode.BULK) {
+            val preview = state.refreshBulkPreview(amountShannonsOverride = amountShannons)
+            SendReview(
+                isBulk = true,
+                recipientAddress = "",
+                recipientName = null,
+                recipientCount = preview.bulkValidRecipients.size,
+                amountShannons = preview.bulkTotalAmountShannons,
+                feeShannons = preview.estimatedFee,
+                totalShannons = preview.bulkTotalAmountShannons + preview.estimatedFee,
+            )
+        } else {
+            // estimatedFee is written by updateAmount; the fallback only covers
+            // a prefilled amount that never went through the field.
+            val fee = if (state.estimatedFee > 0) {
+                state.estimatedFee
+            } else {
+                transactionBuilder.estimateTransferFee(inputCount = 1, outputCount = 2)
+            }
+            SendReview(
+                isBulk = false,
+                recipientAddress = state.recipientAddress,
+                recipientName = state.matchedContact
+                    ?.takeIf { it.address == state.recipientAddress }?.name,
+                recipientCount = 1,
+                amountShannons = amountShannons,
+                feeShannons = fee,
+                totalShannons = amountShannons + fee,
+            )
+        }
+    }
+
+    /** Review dismissed without sending: back to the form, nothing broadcast. */
+    fun cancelReview() {
+        _uiState.update { it.copy(reviewRequest = null) }
+    }
+
+    /** Confirm from the review sheet — V2-capable (Compose) caller. */
+    fun confirmSend(activity: FragmentActivity) = confirmSendInternal(activity)
+
+    /** Confirm from the review sheet — caller without a FragmentActivity. */
+    fun confirmSend() = confirmSendInternal(null)
+
+    private fun confirmSendInternal(activity: FragmentActivity?) {
+        // No review on screen means nothing was confirmed: refuse rather than
+        // broadcast. Also makes a double-tap on Confirm a no-op.
+        if (_uiState.value.reviewRequest == null) return
+        _uiState.update { it.copy(reviewRequest = null) }
+
+        viewModelScope.launch {
             val kdfVersion = peekActiveKdfVersion()
             if (kdfVersion == 2) {
+                if (activity == null) {
+                    _uiState.update {
+                        it.copy(error = com.rjnr.pocketnode.ui.util.UiMessage.Resource(com.rjnr.pocketnode.R.string.vm_error_send_v2_reopen))
+                    }
+                    return@launch
+                }
                 executeSendV2(activity)
             } else {
                 sendTransactionV1OrFallback()

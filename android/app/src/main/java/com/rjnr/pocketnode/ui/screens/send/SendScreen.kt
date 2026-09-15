@@ -231,6 +231,24 @@ fun SendScreen(
         )
     }
 
+    // #490: mandatory review before anything is signed or broadcast. The auth
+    // gate (if "Authenticate before sending" is on, or the wallet is on
+    // kdfVersion=2) runs after Confirm, so there is exactly one prompt.
+    uiState.reviewRequest?.let { review ->
+        SendReviewSheet(
+            review = review,
+            onConfirm = {
+                val activity = context as? FragmentActivity
+                if (activity != null) {
+                    viewModel.confirmSend(activity)
+                } else {
+                    viewModel.confirmSend()
+                }
+            },
+            onCancel = { viewModel.cancelReview() },
+        )
+    }
+
     // #197: prompt to save a brand-new recipient after broadcast.
     uiState.saveContactPromptAddress?.let { addr ->
         SaveContactDialog(
