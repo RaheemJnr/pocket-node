@@ -1,6 +1,7 @@
 package com.rjnr.pocketnode.core.crypto
 
 import fr.acinq.secp256k1.Secp256k1
+import fr.acinq.secp256k1.Secp256k1Exception
 
 /**
  * BIP-32 hierarchical deterministic private-key derivation for the shared KMP
@@ -23,10 +24,16 @@ import fr.acinq.secp256k1.Secp256k1
  * callers see identical failures. Proved byte-identical to the old
  * implementation over 2,000 random seeds by `Bip32DifferentialTest`.
  *
- * One deliberate difference: if the master key itself came out at or above the
- * curve order, or at zero, this throws where the old code silently reduced mod
- * n. BIP-32 calls such a seed invalid, so throwing is the spec behaviour, and
- * the odds of reaching it are about 2^-127.
+ * Two deliberate differences from the old code, neither reachable from the
+ * app's own call sites:
+ *
+ *  - if the master key itself comes out at or above the curve order, or at
+ *    zero, this throws where the old code silently reduced mod n. BIP-32 calls
+ *    such a seed invalid, so throwing is the spec behaviour, and the odds of
+ *    reaching it are about 2^-127;
+ *  - a negative child index is rejected with `IllegalArgumentException`. The
+ *    old code let one through and wrote its low 32 bits into the index field,
+ *    which silently derived some unrelated hardened path.
  *
  * Private keys are secret material. Every intermediate key and chain code this
  * object allocates is zeroed once it is no longer needed, and nothing is
@@ -36,6 +43,9 @@ object Bip32 {
 
     /** Length of a private key and of a chain code, in bytes. */
     private const val KEY_SIZE = 32
+
+    /** `serP()` of a point: the 33-byte compressed public key. */
+    private const val COMPRESSED_PUBLIC_KEY_SIZE = 33
 
     /** BIP-32 marks a hardened index by setting the high bit. */
     private const val HARDENED_OFFSET = 0x80000000L
@@ -94,12 +104,20 @@ object Bip32 {
         require(seed.size in 16..64) { "Seed must be 16..64 bytes, got ${seed.size}" }
 
         val i = HmacSha512.mac(MASTER_KEY_SALT.encodeToByteArray(), seed)
-        val master = ExtendedPrivateKey(
-            key = i.copyOfRange(0, KEY_SIZE),
-            chainCode = i.copyOfRange(KEY_SIZE, HmacSha512.MAC_LENGTH),
-        )
+        val key = i.copyOfRange(0, KEY_SIZE)
+        val chainCode = i.copyOfRange(KEY_SIZE, HmacSha512.MAC_LENGTH)
         i.fill(0)
-        return master
+
+        // BIP-32: "In case IL is 0 or >= n, the master key is invalid." The old
+        // code had no such check and reduced mod n instead; libsecp256k1 would
+        // reject the key at the first child anyway, so fail here where the
+        // message can say which key is at fault.
+        if (!isValidPrivateScalar(key)) {
+            key.fill(0)
+            chainCode.fill(0)
+            throw IllegalArgumentException("Invalid master key")
+        }
+        return ExtendedPrivateKey(key, chainCode)
     }
 
     /**
@@ -130,7 +148,11 @@ object Bip32 {
     fun deriveNormal(parent: ExtendedPrivateKey, index: Int): ExtendedPrivateKey {
         require(index >= 0) { "Child index must be non-negative, got $index" }
 
-        val compressedPublicKey = Secp256k1Signer.publicKey(parent.key) // 33 bytes
+        val compressedPublicKey = Secp256k1Signer.publicKey(parent.key)
+        require(compressedPublicKey.size == COMPRESSED_PUBLIC_KEY_SIZE) {
+            "Compressed public key must be $COMPRESSED_PUBLIC_KEY_SIZE bytes, " +
+                "got ${compressedPublicKey.size}"
+        }
         val data = ByteArray(compressedPublicKey.size + 4)
         compressedPublicKey.copyInto(data, 0)
         putBe32(data, compressedPublicKey.size, index.toLong())
@@ -209,28 +231,48 @@ object Bip32 {
      * child chain code `= IR`.
      */
     private fun childKey(parent: ExtendedPrivateKey, data: ByteArray): ExtendedPrivateKey {
-        val i = HmacSha512.mac(parent.chainCode, data)
-        data.fill(0) // holds k_par on the hardened path
+        val i = try {
+            HmacSha512.mac(parent.chainCode, data)
+        } finally {
+            data.fill(0) // holds k_par on the hardened path
+        }
 
         val il = i.copyOfRange(0, KEY_SIZE)
         val childChainCode = i.copyOfRange(KEY_SIZE, HmacSha512.MAC_LENGTH)
         i.fill(0)
 
+        var handedOff = false
         try {
             require(isBelowCurveOrder(il)) { "Invalid derived key (>= curve order)" }
 
-            // libsecp256k1 computes (k_par + IL) mod n and rejects a zero result,
-            // which is the other case BIP-32 declares invalid.
+            // libsecp256k1 computes (k_par + IL) mod n. It signals three things
+            // with one exception: a tweak at or above n (screened above, so the
+            // message there stays accurate), a zero child key, and a parent that
+            // is not itself a valid scalar. The last cannot happen through this
+            // object's own entry points, which validate the master key, but
+            // `ExtendedPrivateKey` is constructible by hand.
             val childKey = try {
                 Secp256k1.privKeyTweakAdd(parent.key, il)
-            } catch (e: Exception) {
-                throw IllegalArgumentException("Invalid derived key (zero)", e)
+            } catch (e: Secp256k1Exception) {
+                throw IllegalArgumentException("Invalid derived key (zero or invalid parent)", e)
             }
-            return ExtendedPrivateKey(childKey, childChainCode)
+            return ExtendedPrivateKey(childKey, childChainCode).also { handedOff = true }
         } finally {
             il.fill(0)
+            if (!handedOff) childChainCode.fill(0)
         }
     }
+
+    /**
+     * True when the 32-byte big-endian [value] is a usable secp256k1 scalar,
+     * i.e. non-zero and strictly below the group order.
+     *
+     * Internal so `Bip32Test` can exercise the boundary directly. Searching for
+     * a seed whose HMAC lands on 0 or on `n` is not feasible, so the guard in
+     * [masterKeyOfAnyLength] is tested through this instead.
+     */
+    internal fun isValidPrivateScalar(value: ByteArray): Boolean =
+        value.size == KEY_SIZE && isBelowCurveOrder(value) && value.any { it != 0.toByte() }
 
     /** True when the 32-byte big-endian [value] is strictly below the group order. */
     private fun isBelowCurveOrder(value: ByteArray): Boolean {

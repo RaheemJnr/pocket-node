@@ -66,9 +66,11 @@ class Bip32DifferentialTest {
             val actual = Bip32.deriveCkbPrivateKey(seed, account, chain, address)
 
             assertEquals(32, actual.size, "iteration $iteration: derived key is not 32 bytes")
-            assertEquals(
-                expected.toHexStringNoPrefix(),
-                actual.toHexStringNoPrefix(),
+            // contentEquals, not an assertEquals on hex: a mismatch here must
+            // not print either key into the CI log or the JUnit XML. The seeded
+            // iteration index reproduces the case locally.
+            assertTrue(
+                expected.contentEquals(actual),
                 "iteration $iteration (account=$account chain=$chain address=$address): " +
                     "shared Bip32 disagrees with the legacy implementation",
             )
@@ -93,6 +95,11 @@ class Bip32DifferentialTest {
      * That test claims its expectations came from the pre-change Android code.
      * This is where the claim is checked, so the two files cannot drift into
      * agreeing with each other but not with what shipped.
+     *
+     * The hex comparison is deliberate here, unlike in the randomised test
+     * above: the seed is the fixed, published, non-secret `00..3f` fixture and
+     * both expected values are already literals in this file, so a diff in the
+     * failure message leaks nothing and says immediately what moved.
      */
     @Test
     fun pinnedCkbConstantsComeFromTheLegacyImplementation() {

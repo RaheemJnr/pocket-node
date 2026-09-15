@@ -3,6 +3,8 @@ package com.rjnr.pocketnode.core.crypto
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFailsWith
+import kotlin.test.assertFalse
+import kotlin.test.assertTrue
 
 /**
  * [Bip32] against the official BIP-32 test vectors, plus the CKB BIP-44 path.
@@ -305,6 +307,61 @@ class Bip32Test {
         assertEquals(
             Bip32.masterKey(ckbSeed).key.toHexStringNoPrefix(),
             Bip32.derivePath(ckbSeed, "m").toHexStringNoPrefix(),
+        )
+    }
+
+    /**
+     * The master-key guard, exercised through the predicate it calls.
+     *
+     * A seed whose HMAC-SHA-512 lands on zero or at exactly the group order is
+     * not findable — that is the point of the ~2^-127 figure in [Bip32]'s
+     * KDoc — so the guard itself is unreachable in a test. Pin the boundary
+     * instead, which is the part that could be written wrong.
+     */
+    @Test
+    fun isValidPrivateScalar_pinsTheCurveOrderBoundary() {
+        val n = "FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFEBAAEDCE6AF48A03BBFD25E8CD0364141"
+        val nMinusOne = "FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFEBAAEDCE6AF48A03BBFD25E8CD0364140"
+        val nPlusOne = "FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFEBAAEDCE6AF48A03BBFD25E8CD0364142"
+        val zero = "00".repeat(32)
+        val one = "00".repeat(31) + "01"
+
+        assertFalse(Bip32.isValidPrivateScalar(zero.hexToByteArray()), "zero")
+        assertTrue(Bip32.isValidPrivateScalar(one.hexToByteArray()), "one")
+        assertTrue(Bip32.isValidPrivateScalar(nMinusOne.hexToByteArray()), "n - 1")
+        assertFalse(Bip32.isValidPrivateScalar(n.hexToByteArray()), "n")
+        assertFalse(Bip32.isValidPrivateScalar(nPlusOne.hexToByteArray()), "n + 1")
+        assertFalse(Bip32.isValidPrivateScalar(ByteArray(31)), "wrong length")
+    }
+
+    /**
+     * Derivation must not write through to the parent's arrays.
+     *
+     * `derivePath` zeroes each parent as it walks, so a child derivation that
+     * aliased or mutated its input would corrupt the very key it just used.
+     * Kotlin/Native runs this too, which is where an aliasing bug in the
+     * secp256k1 binding would show up first.
+     */
+    @Test
+    fun childDerivationLeavesTheParentUnchanged() {
+        val parent = Bip32.masterKey(ckbSeed)
+        val keyBefore = parent.key.copyOf().toHexStringNoPrefix()
+        val chainCodeBefore = parent.chainCode.copyOf().toHexStringNoPrefix()
+
+        Bip32.deriveHardened(parent, 44)
+        assertEquals(keyBefore, parent.key.toHexStringNoPrefix(), "key after deriveHardened")
+        assertEquals(
+            chainCodeBefore,
+            parent.chainCode.toHexStringNoPrefix(),
+            "chain code after deriveHardened",
+        )
+
+        Bip32.deriveNormal(parent, 0)
+        assertEquals(keyBefore, parent.key.toHexStringNoPrefix(), "key after deriveNormal")
+        assertEquals(
+            chainCodeBefore,
+            parent.chainCode.toHexStringNoPrefix(),
+            "chain code after deriveNormal",
         )
     }
 
