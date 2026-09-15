@@ -245,6 +245,136 @@ class MnemonicBackupViewModelTest {
         assertTrue(state.words.isEmpty())
     }
 
+    @Test
+    fun `onboarding route flag does not exempt once a PIN exists`() = runTest {
+        // The flag is a route argument, so it is not evidence on its own. The
+        // justification for the exemption is "no PIN yet"; once one exists the
+        // wallet is past onboarding and the gate applies regardless.
+        coEvery { walletRepository.getActive() } returns mnemonicEntity()
+        coEvery { keyMaterialDao.getKdfVersion("wallet-1") } returns 1
+        every { pinManager.hasPin() } returns true
+        coEvery { repository.getMnemonic() } returns words
+
+        val vm = createViewModel(onboarding = true)
+        advanceUntilIdle()
+
+        coVerify(exactly = 0) { repository.getMnemonic() }
+        val state = vm.uiState.value
+        assertTrue("A claimed onboarding run with a PIN must still be gated", state.pinRequiredForMnemonic)
+        assertTrue(state.mnemonicGateUsesPin)
+        assertTrue(state.words.isEmpty())
+    }
+
+    @Test
+    fun `a failed kdfVersion lookup fails closed instead of revealing`() = runTest {
+        coEvery { walletRepository.getActive() } returns mnemonicEntity()
+        coEvery { keyMaterialDao.getKdfVersion("wallet-1") } throws IllegalStateException("db closed")
+        every { pinManager.hasPin() } returns false  // no PIN to fall back on
+        coEvery { repository.getMnemonic() } returns words
+
+        val vm = createViewModel()
+        advanceUntilIdle()
+
+        coVerify(exactly = 0) { repository.getMnemonic() }
+        val state = vm.uiState.value
+        assertTrue("Unverifiable version must keep the gate up", state.pinRequiredForMnemonic)
+        assertFalse("Falls closed onto the biometric gate", state.mnemonicGateUsesPin)
+        assertTrue(state.words.isEmpty())
+    }
+
+    // -- Re-arming on background ----------------------------------------
+
+    @Test
+    fun `backgrounding clears the revealed words and re-arms the gate`() = runTest {
+        coEvery { walletRepository.getActive() } returns mnemonicEntity()
+        coEvery { keyMaterialDao.getKdfVersion("wallet-1") } returns 1
+        every { pinManager.hasPin() } returns true
+        coEvery { repository.getMnemonic() } returns words
+
+        val vm = createViewModel()
+        advanceUntilIdle()
+        vm.onPinVerified()
+        advanceUntilIdle()
+        assertEquals(words, vm.uiState.value.words)
+
+        vm.onBackgrounded()
+
+        val state = vm.uiState.value
+        assertTrue("Words must not survive backgrounding", state.words.isEmpty())
+        assertTrue(state.verifyPositions.isEmpty())
+        assertTrue(state.verifyOptions.isEmpty())
+        assertTrue("Gate must be back up", state.pinRequiredForMnemonic)
+        assertTrue("Same gate as before", state.mnemonicGateUsesPin)
+        assertEquals(1, state.currentStep)
+    }
+
+    @Test
+    fun `backgrounding re-arms the V2 biometric gate, not the PIN gate`() = runTest {
+        coEvery { walletRepository.getActive() } returns mnemonicEntity()
+        coEvery { keyMaterialDao.getKdfVersion("wallet-1") } returns 2
+        every { pinManager.hasPin() } returns true
+        coEvery {
+            seedPhraseAuthorizer.authorize(any(), any(), any(), any())
+        } returns SeedPhraseAuthorizer.SeedResult.Words(words)
+
+        val vm = createViewModel()
+        advanceUntilIdle()
+        vm.revealMnemonicWithBiometrics(mockk(relaxed = true))
+        advanceUntilIdle()
+        assertEquals(words, vm.uiState.value.words)
+
+        vm.onBackgrounded()
+
+        val state = vm.uiState.value
+        assertTrue(state.words.isEmpty())
+        assertTrue(state.pinRequiredForMnemonic)
+        assertFalse(state.mnemonicGateUsesPin)
+    }
+
+    @Test
+    fun `backgrounding an un-gated onboarding screen does not strand the user`() = runTest {
+        // No gate applied, so there is nothing to re-arm — re-arming would
+        // leave a pre-PIN user staring at a reveal button they cannot pass.
+        coEvery { walletRepository.getActive() } returns mnemonicEntity()
+        coEvery { keyMaterialDao.getKdfVersion("wallet-1") } returns 1
+        every { pinManager.hasPin() } returns false
+        coEvery { repository.getMnemonic() } returns words
+
+        val vm = createViewModel(onboarding = true)
+        advanceUntilIdle()
+        assertEquals(words, vm.uiState.value.words)
+
+        vm.onBackgrounded()
+
+        val state = vm.uiState.value
+        assertEquals("Words stay put on the un-gated path", words, state.words)
+        assertFalse(state.pinRequiredForMnemonic)
+    }
+
+    @Test
+    fun `backgrounding on the success step keeps the completed state`() = runTest {
+        coEvery { walletRepository.getActive() } returns mnemonicEntity()
+        coEvery { keyMaterialDao.getKdfVersion("wallet-1") } returns 1
+        every { pinManager.hasPin() } returns true
+        coEvery { repository.getMnemonic() } returns words
+
+        val vm = createViewModel()
+        advanceUntilIdle()
+        vm.onPinVerified()
+        advanceUntilIdle()
+        vm.uiState.value.verifyPositions.forEach { pos -> vm.selectWord(pos, words[pos]) }
+        vm.verify()
+        advanceUntilIdle()
+        assertEquals(3, vm.uiState.value.currentStep)
+
+        vm.onBackgrounded()
+
+        val state = vm.uiState.value
+        assertEquals("Confirmation the user already earned is kept", 3, state.currentStep)
+        assertTrue("But the words are still dropped", state.words.isEmpty())
+        assertFalse(state.pinRequiredForMnemonic)
+    }
+
     // -- Per-wallet entry point (Manage Wallets → "Backup wallet") -----
 
     @Test
@@ -378,7 +508,9 @@ class MnemonicBackupViewModelTest {
     fun `mnemonic wallet does not trigger the raw-key PIN gate`() = runTest {
         coEvery { walletRepository.getActive() } returns mnemonicEntity()
         coEvery { repository.getMnemonic() } returns words
-        every { pinManager.hasPin() } returns true
+        // Un-gated onboarding run, so the words load and only the raw-key
+        // gate is under test here.
+        every { pinManager.hasPin() } returns false
 
         val vm = createViewModel(onboarding = true)
         advanceUntilIdle()

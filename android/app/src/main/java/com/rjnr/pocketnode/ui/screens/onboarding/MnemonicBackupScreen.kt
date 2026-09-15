@@ -89,7 +89,7 @@ class MnemonicBackupViewModel @Inject constructor(
 ) : ViewModel() {
 
     /**
-     * True only on the first-run onboarding hop (Onboarding → backup, which
+     * Set by the first-run onboarding hop (Onboarding → backup, which
      * navigates with `onboarding=true`). That single edge runs *before*
      * `InitialPinSetup`, so there is no PIN to verify yet and nothing to
      * re-authenticate against — the wallet was created seconds ago in this
@@ -98,8 +98,22 @@ class MnemonicBackupViewModel @Inject constructor(
      * added from inside the app, Manage Wallets) reaches this screen on an
      * install that already has a mandatory PIN, so it must authenticate
      * before the words are decrypted (#488).
+     *
+     * This flag alone does NOT grant the exemption: it is a route argument
+     * and therefore attacker-influenceable (a crafted deep link, or any
+     * future caller that copies the wrong `createRoute` overload). It only
+     * says which flow we think we are in; [isOnboardingExempt] confirms the
+     * claim against real state before anything is decrypted.
      */
-    private val onboarding: Boolean = savedStateHandle.get<Boolean>("onboarding") ?: false
+    private val onboardingArg: Boolean = savedStateHandle.get<Boolean>("onboarding") ?: false
+
+    /**
+     * The exemption, verified. The justification for skipping the gate is
+     * "there is no PIN yet", so check exactly that rather than trusting the
+     * route to have told the truth. Once a PIN exists the wallet is past
+     * onboarding and the gate applies no matter what the route claims.
+     */
+    private fun isOnboardingExempt(): Boolean = onboardingArg && !pinManager.hasPin()
 
     /**
      * Wallet to back up when the caller named one — Manage Wallets → wallet →
@@ -113,11 +127,52 @@ class MnemonicBackupViewModel @Inject constructor(
     private val walletIdArg: String? =
         savedStateHandle.get<String>("walletId")?.takeIf { it.isNotBlank() }
 
+    /**
+     * Which gate this screen decided on, remembered across a reveal so
+     * [onBackgrounded] can put the same one back. Null means no gate applied
+     * (verified onboarding, a sub-account, or a V1 wallet with no PIN), and
+     * nothing is re-armed for those — there would be no way back in.
+     */
+    private var armedGateUsesPin: Boolean? = null
+
     private val _uiState = MutableStateFlow(MnemonicBackupUiState())
     val uiState: StateFlow<MnemonicBackupUiState> = _uiState.asStateFlow()
 
     init {
         loadMnemonic()
+    }
+
+    /**
+     * Called from the screen's lifecycle observer on `ON_STOP`. Revealed
+     * secrets must not survive the app going to the background: the words sit
+     * in the recents card's process memory and are one app-switch away from
+     * whoever picks the phone up next. Drop them and re-arm the gate so
+     * coming back costs another PIN or BiometricPrompt.
+     *
+     * No-op when no gate applied in the first place, and on the final
+     * confirmation step, which displays no secrets and whose "backed up"
+     * state the user has already earned.
+     */
+    fun onBackgrounded() {
+        val gateUsesPin = armedGateUsesPin ?: return
+        if (_uiState.value.currentStep >= 3) {
+            _uiState.update { it.copy(words = emptyList(), privateKeyHex = null) }
+            return
+        }
+        _uiState.update {
+            it.copy(
+                currentStep = 1,
+                words = emptyList(),
+                verifyPositions = emptyList(),
+                verifyOptions = emptyMap(),
+                userSelections = emptyMap(),
+                privateKeyHex = null,
+                privateKeyRevealed = false,
+                pinRequiredForMnemonic = it.walletType != "raw_key" && !it.isSubAccount,
+                pinRequiredForPrivateKey = it.walletType == "raw_key" && !it.isSubAccount,
+                mnemonicGateUsesPin = gateUsesPin,
+            )
+        }
     }
 
     private fun loadMnemonic() {
@@ -142,14 +197,23 @@ class MnemonicBackupViewModel @Inject constructor(
             // #290/#300: reveal-on-tap, nothing fetched until the user passes
             // the gate.
             //
-            // Skipped for [onboarding] (no PIN exists at that point in the
-            // flow), for sub-accounts (they render the "backed up with the
-            // parent" notice and never show words) and for raw_key wallets
-            // (handled by the pinRequiredForPrivateKey gate below).
-            if (!onboarding && !isSubAccount && walletType != "raw_key") {
-                val kdfVersion = targetWallet?.walletId?.let { keyMaterialDao.getKdfVersion(it) } ?: 1
+            // Skipped for a verified onboarding run ([isOnboardingExempt] —
+            // the route says onboarding AND no PIN exists yet), for
+            // sub-accounts (they render the "backed up with the parent"
+            // notice and never show words) and for raw_key wallets (handled
+            // by the pinRequiredForPrivateKey gate below).
+            if (!isOnboardingExempt() && !isSubAccount && walletType != "raw_key") {
+                // A DB error here must not kill the coroutine (which would
+                // leave the screen blank with no gate raised and no words).
+                // Null means "no key_material row" — an ESP-fallback V1
+                // wallet, not a failure.
+                val kdfLookup = targetWallet?.walletId?.let { id ->
+                    runCatching { keyMaterialDao.getKdfVersion(id) }
+                }
+                val kdfVersion = kdfLookup?.getOrNull() ?: 1
                 if (kdfVersion >= 2) {
                     // The BiometricPrompt CryptoObject *is* the decryption key.
+                    armedGateUsesPin = false
                     _uiState.update {
                         it.copy(pinRequiredForMnemonic = true, mnemonicGateUsesPin = false)
                     }
@@ -157,9 +221,24 @@ class MnemonicBackupViewModel @Inject constructor(
                 }
                 if (pinManager.hasPin()) {
                     // V1 key material decrypts silently, so the app PIN is the
-                    // gate — same route as the raw-key reveal (#290).
+                    // gate — same route as the raw-key reveal (#290). This is
+                    // also where a failed lookup lands when a PIN exists: the
+                    // PIN gate degrades safely either way, since a row that
+                    // turns out to be V2 throws on the post-PIN read and
+                    // [fetchMnemonicAfterPin] swaps to the biometric gate.
+                    armedGateUsesPin = true
                     _uiState.update {
                         it.copy(pinRequiredForMnemonic = true, mnemonicGateUsesPin = true)
+                    }
+                    return@launch
+                }
+                if (kdfLookup?.isFailure == true) {
+                    // Could not confirm the version and there is no PIN to
+                    // fall back on. Fail closed on the biometric gate rather
+                    // than revealing on the strength of a failed query.
+                    armedGateUsesPin = false
+                    _uiState.update {
+                        it.copy(pinRequiredForMnemonic = true, mnemonicGateUsesPin = false)
                     }
                     return@launch
                 }
@@ -181,6 +260,7 @@ class MnemonicBackupViewModel @Inject constructor(
             val words = try {
                 readMnemonic()
             } catch (e: com.rjnr.pocketnode.data.crypto.V2KeyMaterialRequiresAuthException) {
+                armedGateUsesPin = false
                 _uiState.update { it.copy(pinRequiredForMnemonic = true) }
                 return@launch
             }
@@ -194,6 +274,7 @@ class MnemonicBackupViewModel @Inject constructor(
                         // verification. The screen renders a "Reveal private key"
                         // button that routes through PinEntryScreen; on return
                         // [onPinVerified] is invoked and the key is fetched.
+                        armedGateUsesPin = true
                         _uiState.update { it.copy(pinRequiredForPrivateKey = true) }
                     } else {
                         // No PIN set yet (onboarding edge case for raw-key imports).
@@ -406,6 +487,23 @@ fun MnemonicBackupScreen(
             pinVerifiedFlow.remove<Boolean>("pin_verified")
             viewModel.onPinVerified()
         }
+    }
+
+    // Re-arm the reveal gate when the app leaves the foreground. FLAG_SECURE
+    // keeps the words out of the recents thumbnail, but without this they
+    // would still be sitting on screen for whoever resumes the app next
+    // (#488 review). ON_STOP rather than ON_PAUSE so the BiometricPrompt and
+    // the PinEntry hop, which only pause the activity, do not wipe the state
+    // they are in the middle of unlocking.
+    val lifecycleOwner = androidx.lifecycle.compose.LocalLifecycleOwner.current
+    DisposableEffect(lifecycleOwner) {
+        val observer = androidx.lifecycle.LifecycleEventObserver { _, event ->
+            if (event == androidx.lifecycle.Lifecycle.Event.ON_STOP) {
+                viewModel.onBackgrounded()
+            }
+        }
+        lifecycleOwner.lifecycle.addObserver(observer)
+        onDispose { lifecycleOwner.lifecycle.removeObserver(observer) }
     }
 
     // FLAG_SECURE to prevent screenshots of mnemonic
