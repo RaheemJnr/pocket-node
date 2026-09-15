@@ -486,6 +486,10 @@
     <string name="send_review_fee">Network fee</string>
     <string name="send_review_total">Total</string>
     <string name="send_review_ckb">%1$s CKB</string>
+    <!-- #447: shown when the send would leave the wallet with little or nothing behind. -->
+    <string name="send_review_sweep_warning">This sends nearly your whole balance. You will have %1$s CKB left, which is not enough for another transaction.</string>
+    <string name="send_review_sweep_warning_low">This sends nearly your whole balance. You will have %1$s CKB left.</string>
+    <string name="send_review_sweep_acknowledge">I understand</string>
     <string name="send_review_confirm">Confirm</string>
     <string name="send_review_cancel">Cancel</string>
     <string name="send_bulk_progress">Batch %1$d of %2$d · %3$d recipients submitted</string>
