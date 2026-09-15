@@ -50,14 +50,14 @@ final class PinServiceTests: XCTestCase {
         try await pin.setPin("123456")
 
         XCTAssertTrue(pin.hasPin)
-        let verified = await pin.verify("123456")
+        let verified = try await pin.verify("123456")
         XCTAssertTrue(verified)
     }
 
     func testAWrongPinDoesNotVerify() async throws {
         try await pin.setPin("123456")
 
-        let verified = await pin.verify("654321")
+        let verified = try await pin.verify("654321")
         XCTAssertFalse(verified)
     }
 
@@ -68,19 +68,19 @@ final class PinServiceTests: XCTestCase {
 
         let reopened = makeService()
         XCTAssertTrue(reopened.hasPin, "seeded synchronously, before any refresh")
-        let verified = await reopened.verify("112233")
+        let verified = try await reopened.verify("112233")
         XCTAssertTrue(verified)
     }
 
     func testRemovePinClearsEverything() async throws {
         try await pin.setPin("123456")
-        _ = await pin.verify("000000")
+        _ = try? await pin.verify("000000")
 
         await pin.removePin()
 
         XCTAssertFalse(pin.hasPin)
-        XCTAssertFalse(KeychainPinStore.hasStoredPin(keychain: keychain))
-        let verified = await pin.verify("123456")
+        XCTAssertEqual(KeychainPinStore.pinPresence(keychain: keychain), .absent)
+        let verified = try await pin.verify("123456")
         XCTAssertFalse(verified, "there is nothing left to verify against")
     }
 
@@ -121,7 +121,7 @@ final class PinServiceTests: XCTestCase {
     func testMalformedVerifyReturnsFalseWithoutCountingAnAttempt() async throws {
         try await pin.setPin("123456")
 
-        let verified = await pin.verify("12345")
+        let verified = try await pin.verify("12345")
 
         XCTAssertFalse(verified)
         XCTAssertEqual(pin.remainingAttempts, PinService.maxAttempts)
@@ -144,20 +144,20 @@ final class PinServiceTests: XCTestCase {
         try await pin.setPin("123456")
         XCTAssertEqual(pin.remainingAttempts, 5)
 
-        _ = await pin.verify("000000")
+        _ = try? await pin.verify("000000")
         XCTAssertEqual(pin.remainingAttempts, 4)
 
-        _ = await pin.verify("000000")
+        _ = try? await pin.verify("000000")
         XCTAssertEqual(pin.remainingAttempts, 3)
     }
 
     func testASuccessResetsTheCounter() async throws {
         try await pin.setPin("123456")
-        _ = await pin.verify("000000")
-        _ = await pin.verify("000000")
+        _ = try? await pin.verify("000000")
+        _ = try? await pin.verify("000000")
         XCTAssertEqual(pin.remainingAttempts, 3)
 
-        let verified = await pin.verify("123456")
+        let verified = try await pin.verify("123456")
 
         XCTAssertTrue(verified)
         XCTAssertEqual(pin.remainingAttempts, 5)
@@ -179,7 +179,7 @@ final class PinServiceTests: XCTestCase {
         XCTAssertFalse(pin.isPermanentlyLocked)
 
         // The correct PIN is refused while the lockout stands.
-        let duringLockout = await pin.verify("123456")
+        let duringLockout = try await pin.verify("123456")
         XCTAssertFalse(duringLockout)
     }
 
@@ -192,7 +192,7 @@ final class PinServiceTests: XCTestCase {
         await pin.refresh()
 
         XCTAssertFalse(pin.isLockedOut)
-        let verified = await pin.verify("123456")
+        let verified = try await pin.verify("123456")
         XCTAssertTrue(verified)
         XCTAssertEqual(pin.remainingAttempts, 5, "a success clears the counter as well")
     }
@@ -235,7 +235,7 @@ final class PinServiceTests: XCTestCase {
         clock.advance(seconds: 365 * 24 * 60 * 60)
         await pin.refresh()
         XCTAssertTrue(pin.isLockedOut)
-        let verified = await pin.verify("123456")
+        let verified = try await pin.verify("123456")
         XCTAssertFalse(verified)
     }
 
@@ -251,9 +251,122 @@ final class PinServiceTests: XCTestCase {
         XCTAssertEqual(reopened.remainingAttempts, 2)
     }
 
+    // MARK: - An unwritable store buys no guesses (S3)
+
+    /// Without the write probe this is the hole: reads work, so every
+    /// comparison runs, but every failure the policy tries to record is
+    /// dropped, so the counter never reaches a lockout and the attacker gets
+    /// unlimited tries.
+    func testVerifyRefusesToHashWhenTheStoreCannotRecordTheAttempt() async throws {
+        let scripted = ScriptedKeyValueStore(service: service)
+        let guarded = PinService(keychain: scripted, cost: .testing, clock: clock.source)
+        try await guarded.setPin("123456")
+        await guarded.refresh()
+        let before = guarded.remainingAttempts
+
+        // Every write now fails, including the probe.
+        scripted.failWrites(to: [
+            PinAccount.hash, PinAccount.salt, PinAccount.kdfVersion,
+            PinAccount.failedAttempts, PinAccount.lastFailedAt,
+            PinAccount.lockoutUntil, PinAccount.writeProbe,
+        ])
+
+        do {
+            _ = try await guarded.verify("000000")
+            XCTFail("a verify that cannot be recorded must not be answered")
+        } catch {
+            guard case .storeUnavailable = error as? PinServiceError else {
+                return XCTFail("expected storeUnavailable, got \(error)")
+            }
+        }
+
+        await guarded.refresh()
+        XCTAssertEqual(guarded.remainingAttempts, before, "no attempt was spent, and none was granted")
+    }
+
+    /// The same refusal applies to a correct PIN: an unrecordable success is
+    /// still an unrecordable attempt.
+    func testVerifyRefusesTheCorrectPinTooWhenTheStoreIsUnwritable() async throws {
+        let scripted = ScriptedKeyValueStore(service: service)
+        let guarded = PinService(keychain: scripted, cost: .testing, clock: clock.source)
+        try await guarded.setPin("123456")
+        scripted.failWrites(to: [PinAccount.writeProbe])
+
+        do {
+            _ = try await guarded.verify("123456")
+            XCTFail("expected a refusal")
+        } catch {
+            XCTAssertNotNil(error as? PinServiceError)
+        }
+    }
+
+    // MARK: - Partial setPin cleanup (S5)
+
+    /// The hash is written last, so a lost salt leaves a hash that can never
+    /// verify. Cleanup removes it rather than leaving the user with a PIN that
+    /// is guaranteed to fail five times and lock them out.
+    func testSetPinCleansUpWhenAFieldIsLost() async throws {
+        let scripted = ScriptedKeyValueStore(service: service)
+        let guarded = PinService(keychain: scripted, cost: .testing, clock: clock.source)
+        scripted.failWrites(to: [PinAccount.salt])
+
+        do {
+            try await guarded.setPin("123456")
+            XCTFail("a partial write must not report success")
+        } catch {
+            XCTAssertNotNil(error as? PinServiceError)
+        }
+
+        XCTAssertEqual(guarded.pinPresence, .absent, "the unusable hash was cleaned up")
+    }
+
+    /// When the cleanup is refused as well, the hash really is still there, and
+    /// the published presence has to say so: reporting `.absent` would drop the
+    /// lock in front of a stored PIN.
+    func testSetPinReportsThePinThatSurvivedAFailedCleanup() async throws {
+        let scripted = ScriptedKeyValueStore(service: service)
+        let guarded = PinService(keychain: scripted, cost: .testing, clock: clock.source)
+        scripted.failWrites(to: [PinAccount.salt])
+        scripted.failDeletes(true)
+
+        do {
+            try await guarded.setPin("123456")
+            XCTFail("a partial write must not report success")
+        } catch {
+            XCTAssertNotNil(error as? PinServiceError)
+        }
+
+        XCTAssertEqual(guarded.pinPresence, .present, "the hash is stored, so the app must lock")
+    }
+
+    // MARK: - Presence (B1)
+
+    func testAnUnreadableStoreReportsUnknownRatherThanAbsent() async throws {
+        try await pin.setPin("123456")
+
+        let unreadable = UnreadableKeyValueStore(service: service)
+        let blind = PinService(keychain: unreadable, cost: .testing, clock: clock.source)
+
+        XCTAssertEqual(blind.pinPresence, .unknown)
+        XCTAssertFalse(blind.hasPin, "hasPin is not the gate; presence is")
+    }
+
+    func testPresenceRecoversOnceTheStoreBecomesReadable() async throws {
+        try await pin.setPin("123456")
+
+        let unreadable = UnreadableKeyValueStore(service: service)
+        let blind = PinService(keychain: unreadable, cost: .testing, clock: clock.source)
+        XCTAssertEqual(blind.pinPresence, .unknown)
+
+        unreadable.failReads(nil)
+        await blind.refresh()
+
+        XCTAssertEqual(blind.pinPresence, .present)
+    }
+
     private func fail(times: Int) async {
         for _ in 0..<times {
-            _ = await pin.verify("000000")
+            _ = try? await pin.verify("000000")
         }
     }
 }

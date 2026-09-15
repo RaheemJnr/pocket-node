@@ -34,7 +34,8 @@ extension KotlinByteArray {
     }
 }
 
-/// Keychain account names for the six ``PocketNodeCore/PinStore`` fields.
+/// Keychain account names for the six ``PocketNodeCore/PinStore`` fields, plus
+/// the scratch account ``KeychainPinStore/probeWrite()`` uses.
 enum PinAccount {
     static let hash = "pin.hash"
     static let salt = "pin.salt"
@@ -42,6 +43,28 @@ enum PinAccount {
     static let failedAttempts = "pin.failedAttempts"
     static let lastFailedAt = "pin.lastFailedAt"
     static let lockoutUntil = "pin.lockoutUntil"
+    /// Never holds anything meaningful; written and deleted to find out whether
+    /// the store can record a failed attempt before one is risked.
+    static let writeProbe = "pin.writeProbe"
+}
+
+/// Whether a PIN is configured, with "the question could not be answered" kept
+/// apart from "no".
+///
+/// The distinction is the whole lock. A Keychain read can fail for reasons that
+/// have nothing to do with whether a PIN exists: the classic one is
+/// `errSecInteractionNotAllowed`, returned for a
+/// `WhenPasscodeSetThisDeviceOnly` item when the process is launched before the
+/// device has been unlocked since boot (a prewarm or a background launch).
+/// Collapsing that into "no PIN" would open the wallet to whoever picked the
+/// phone up, so it maps to ``unknown`` and the app stays locked.
+enum PinPresence: Equatable, Sendable {
+    /// A PIN hash is stored.
+    case present
+    /// The store was readable and holds no PIN hash.
+    case absent
+    /// The store could not be read. Treated as ``present`` by every gate.
+    case unknown
 }
 
 /// Keychain-backed implementation of the shared `PinStore`.
@@ -105,11 +128,50 @@ final class KeychainPinStore: NSObject, PocketNodeCore.PinStore {
 
     /// Whether a PIN hash is present, without reading it out.
     ///
-    /// `static` and synchronous so `PinService` can seed its published
-    /// `hasPin` at init and the lock gate does not flash unlocked content on
-    /// the first frame while an async read lands.
-    static func hasStoredPin(keychain: any KeyValueStoring = KeychainStore(service: KeychainPinStore.defaultService)) -> Bool {
-        (try? keychain.contains(account: PinAccount.hash)) ?? false
+    /// `static` and synchronous so `PinService` can seed its published presence
+    /// at init and the lock gate does not flash unlocked content on the first
+    /// frame while an async read lands.
+    ///
+    /// Note what this does **not** do: swallow a failure into `false`. Only
+    /// `errSecItemNotFound`, which `KeychainStore.contains` reports as a plain
+    /// `false`, means absent. Every other status throws and becomes
+    /// ``PinPresence/unknown``.
+    static func pinPresence(
+        keychain: any KeyValueStoring = KeychainStore(service: KeychainPinStore.defaultService)
+    ) -> PinPresence {
+        do {
+            return try keychain.contains(account: PinAccount.hash) ? .present : .absent
+        } catch {
+            return .unknown
+        }
+    }
+
+    /// Instance form of ``pinPresence(keychain:)``, for refreshes.
+    func presence() -> PinPresence {
+        Self.pinPresence(keychain: keychain)
+    }
+
+    /// Whether the store can be written to, discovered by writing and deleting
+    /// a scratch item.
+    ///
+    /// `verify` calls this before hashing. Without it, a store that accepts
+    /// reads but refuses writes gives an attacker unlimited guesses: every
+    /// comparison would run, and every failed attempt the policy tried to
+    /// record would be silently dropped, so the counter would never reach the
+    /// lockout. Probing costs two Keychain operations and turns that into a
+    /// refusal to check at all.
+    ///
+    /// - Returns: the failure, or nil when the store took both operations.
+    func probeWrite() -> KeychainError? {
+        do {
+            try keychain.set(Data([0]), account: PinAccount.writeProbe)
+            try keychain.delete(account: PinAccount.writeProbe)
+            return nil
+        } catch let error as KeychainError {
+            return error
+        } catch {
+            return KeychainError(status: errSecInternalError)
+        }
     }
 
     // MARK: - PinStore reads
@@ -185,6 +247,15 @@ final class KeychainPinStore: NSObject, PocketNodeCore.PinStore {
     /// 4. **A hash being set goes last.** The new credential is only activated
     ///    once its salt, KDF version and cleared counter are all in place, so a
     ///    fresh PIN can never inherit the previous one's lockout.
+    ///
+    /// Rule 4 also closes a KDF downgrade. The shared policy reads a missing
+    /// KDF version as "written before the version key existed", which means
+    /// legacy Blake2b, because that is true of an upgrading Android install.
+    /// iOS has no legacy hashes, so that branch must be unreachable here: since
+    /// the hash is never written before its KDF version and its salt, a stored
+    /// hash always has both alongside it, and a `nil` version can only mean no
+    /// hash either. No Kotlin change is needed to keep that true, only this
+    /// ordering.
     private func apply(_ edit: CollectingEditor) {
         let removingHash = edit.pendingPinHash.map { $0 == nil } ?? false
         let applyingLockout = edit.pendingLockoutUntil.map { $0 != nil } ?? false

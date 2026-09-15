@@ -79,6 +79,86 @@ final class AuthServiceTests: XCTestCase {
         XCTAssertFalse(auth.isBiometricEnabled)
     }
 
+    /// B1: a store that cannot be read is not a store with no PIN. Collapsing
+    /// the two would open the wallet on a launch before the first device
+    /// unlock.
+    func testAnUnreadableStoreStartsLockedNotOpen() async throws {
+        let first = makeAuth()
+        try await first.setPin("123456")
+
+        let unreadable = UnreadableKeyValueStore(service: keychainService)
+        let blind = AuthService(
+            pin: PinService(keychain: unreadable, cost: .testing, clock: clock.source),
+            biometrics: biometrics,
+            preferences: preferences
+        )
+
+        XCTAssertEqual(blind.pin.pinPresence, .unknown)
+        XCTAssertEqual(blind.state, .locked)
+        XCTAssertTrue(blind.isGated)
+    }
+
+    /// And it stays locked across a refresh, rather than falling open once the
+    /// read is retried and still fails.
+    func testAnUnreadableStoreStaysLockedAcrossARefresh() async throws {
+        let first = makeAuth()
+        try await first.setPin("123456")
+
+        let unreadable = UnreadableKeyValueStore(service: keychainService)
+        let blind = AuthService(
+            pin: PinService(keychain: unreadable, cost: .testing, clock: clock.source),
+            biometrics: biometrics,
+            preferences: preferences
+        )
+
+        await blind.refresh()
+        XCTAssertEqual(blind.state, .locked)
+
+        // Once the device is unlocked the read works, and it is still locked,
+        // because reading a hash is not authentication.
+        unreadable.failReads(nil)
+        await blind.refresh()
+        XCTAssertEqual(blind.state, .locked)
+        XCTAssertEqual(blind.pin.pinPresence, .present)
+    }
+
+    /// B2: nothing a refresh can read is proof of who is holding the phone, so
+    /// it must never be the thing that unlocks.
+    func testRefreshNeverUnlocks() async throws {
+        let auth = makeAuth()
+        XCTAssertEqual(auth.state, .noPin)
+
+        // A PIN appears from outside this session (another `PinService` over
+        // the same Keychain, as onboarding on a second screen would be).
+        let other = PinService(keychain: keychain, cost: .testing, clock: clock.source)
+        try await other.setPin("123456")
+
+        await auth.refresh()
+
+        XCTAssertEqual(auth.state, .locked, "a PIN appearing locks, it does not authenticate")
+    }
+
+    func testRefreshLeavesAnUnlockedSessionAlone() async throws {
+        let auth = makeAuth()
+        try await auth.setPin("123456")
+        XCTAssertEqual(auth.state, .unlocked)
+
+        await auth.refresh()
+
+        XCTAssertEqual(auth.state, .unlocked, "a refresh only ever tightens the gate")
+    }
+
+    func testIsGatedOnlyOpensForAConfirmedAbsenceOrAnUnlockedSession() async throws {
+        let auth = makeAuth()
+        XCTAssertFalse(auth.isGated, "no PIN, nothing to gate")
+
+        try await auth.setPin("123456")
+        XCTAssertFalse(auth.isGated, "unlocked")
+
+        auth.handleScenePhase(.background)
+        XCTAssertTrue(auth.isGated)
+    }
+
     // MARK: - Lock on background
 
     func testBackgroundLocks() async throws {
@@ -200,6 +280,104 @@ final class AuthServiceTests: XCTestCase {
         XCTAssertNil(auth.biometricMessage)
     }
 
+    // MARK: - The permanent lock is not biometric-bypassable (S2)
+
+    /// At 10 failures the wallet is recoverable only from the recovery phrase.
+    /// A face that still opened it would hand the entire escalation schedule
+    /// back to whoever is holding the phone.
+    func testBiometricsCannotUnlockAPermanentlyLockedPin() async throws {
+        let auth = makeAuth()
+        try await auth.setPin("123456")
+        auth.isBiometricEnabled = true
+        await exhaustAllAttempts(on: auth)
+        XCTAssertTrue(auth.pin.isPermanentlyLocked)
+        auth.handleScenePhase(.background)
+
+        let unlocked = await auth.unlockWithBiometrics()
+
+        XCTAssertFalse(unlocked)
+        XCTAssertEqual(auth.state, .locked)
+        XCTAssertEqual(biometrics.prompts, 0, "no prompt is even raised")
+        XCTAssertFalse(auth.canUseBiometrics, "and the button is hidden")
+    }
+
+    func testRequireAuthDoesNotPromptBiometricsWhilePermanentlyLocked() async throws {
+        let auth = makeAuth()
+        try await auth.setPin("123456")
+        auth.isBiometricEnabled = true
+        await exhaustAllAttempts(on: auth)
+
+        let request = Task { await auth.requireAuth(reason: "Reveal your recovery phrase") }
+        try await waitForChallenge(on: auth)
+        auth.resolveChallenge(granted: false)
+        _ = await request.value
+
+        XCTAssertEqual(biometrics.prompts, 0, "it went straight to the PIN, which cannot pass either")
+    }
+
+    /// A temporary lockout still allows biometrics, matching Android: that one
+    /// is about slowing PIN guessing, not about revoking the wallet.
+    func testBiometricsStillWorkDuringATemporaryLockout() async throws {
+        let auth = makeAuth()
+        try await auth.setPin("123456")
+        auth.isBiometricEnabled = true
+        for _ in 0..<5 { _ = await auth.unlock(pin: "000000") }
+        XCTAssertTrue(auth.pin.isLockedOut)
+        XCTAssertFalse(auth.pin.isPermanentlyLocked)
+        auth.handleScenePhase(.background)
+
+        let unlocked = await auth.unlockWithBiometrics()
+
+        XCTAssertTrue(unlocked)
+        XCTAssertEqual(auth.state, .unlocked)
+    }
+
+    // MARK: - A store that cannot record an attempt (S3)
+
+    func testAnUnrecordableAttemptIsReportedAndLeavesTheSessionLocked() async throws {
+        let scripted = ScriptedKeyValueStore(service: keychainService)
+        let auth = AuthService(
+            pin: PinService(keychain: scripted, cost: .testing, clock: clock.source),
+            biometrics: biometrics,
+            preferences: preferences
+        )
+        try await auth.setPin("123456")
+        auth.handleScenePhase(.background)
+        let before = auth.pin.remainingAttempts
+        scripted.failWrites(to: [PinAccount.writeProbe])
+
+        let unlocked = await auth.unlock(pin: "123456")
+
+        XCTAssertFalse(unlocked)
+        XCTAssertEqual(auth.state, .locked)
+        XCTAssertEqual(auth.storeMessage, AuthService.storeUnavailableMessage)
+        XCTAssertEqual(auth.pin.remainingAttempts, before, "the user lost no attempt")
+    }
+
+    // MARK: - setPin failure (S5)
+
+    func testAFailedSetPinLeavesTheStateMatchingWhatIsStored() async throws {
+        let scripted = ScriptedKeyValueStore(service: keychainService)
+        let auth = AuthService(
+            pin: PinService(keychain: scripted, cost: .testing, clock: clock.source),
+            biometrics: biometrics,
+            preferences: preferences
+        )
+        // The salt is lost, so the hash that lands is unverifiable, and the
+        // cleanup that would remove it is refused too.
+        scripted.failWrites(to: [PinAccount.salt])
+        scripted.failDeletes(true)
+
+        do {
+            try await auth.setPin("123456")
+            XCTFail("a partial write must not report success")
+        } catch {
+            XCTAssertNotNil(error as? PinServiceError)
+        }
+
+        XCTAssertEqual(auth.state, .locked, "a stored hash means the app locks, not that it opens")
+    }
+
     // MARK: - requireAuth
 
     func testRequireAuthPassesStraightThroughWithNoPin() async {
@@ -318,6 +496,20 @@ final class AuthServiceTests: XCTestCase {
         auth.isAuthBeforeSendEnabled = true
 
         XCTAssertTrue(defaults.bool(forKey: "auth_before_send"))
+    }
+
+    /// Drives the PIN to the permanent lock (10 cumulative failures), waiting
+    /// out each escalating lockout on the injected clock.
+    private func exhaustAllAttempts(on auth: AuthService) async {
+        let waits: [Int64] = [0, 30, 60, 300, 1800, 3600]
+        for wait in waits {
+            clock.advance(seconds: wait)
+            await auth.pin.refresh()
+            for _ in 0..<(wait == 0 ? 5 : 1) {
+                _ = await auth.unlock(pin: "000000")
+            }
+        }
+        await auth.pin.refresh()
     }
 
     /// `requireAuth` publishes the challenge from inside a suspended task, so

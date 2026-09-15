@@ -15,11 +15,15 @@ struct AuthChallenge: Identifiable, Equatable {
 /// Mirrors the Android rules:
 ///
 /// - A cold start is always locked when a PIN exists (`AuthScreen`).
-/// - Going to the background locks immediately, so the wallet is never
-///   readable from the app switcher or by whoever picks the phone up next.
-///   `.inactive` does not lock: it fires for a notification banner, a control
-///   centre pull and the app switcher preview itself, and locking on it would
-///   throw the user out several times a session for nothing.
+/// - Going to the background locks immediately, so whoever opens the app next
+///   meets the lock screen rather than the wallet. It does not scrub the app
+///   switcher thumbnail: iOS snapshots the window as the app is backgrounded,
+///   and this lock races that snapshot rather than beating it. Blurring the
+///   snapshot is a separate job (a cover window on `.inactive`) and is not
+///   done yet.
+/// - `.inactive` does not lock: it fires for a notification banner, a control
+///   centre pull and a half-swiped app switcher, and locking on it would throw
+///   the user out several times a session for nothing.
 /// - Biometrics are opt-in and fall back to the app PIN, never to the device
 ///   passcode (see ``BiometricService``).
 ///
@@ -48,6 +52,11 @@ final class AuthService {
     /// about. Cleared on the next attempt and on a successful unlock.
     private(set) var biometricMessage: String?
 
+    /// Set when the PIN store refused to record an attempt, so nothing was
+    /// checked. Distinct from a wrong PIN: the user did nothing wrong and has
+    /// lost no attempt. Cleared on the next try.
+    private(set) var storeMessage: String?
+
     let pin: PinService
     let biometrics: any BiometricAuthenticating
 
@@ -72,9 +81,16 @@ final class AuthService {
     var biometricAvailability: BiometricAvailability { biometrics.availability }
 
     /// True when the unlock screen should offer the biometric button: the user
-    /// opted in and the sensor can actually run right now.
+    /// opted in, the sensor can actually run right now, and the PIN is not
+    /// permanently locked.
+    ///
+    /// The permanent lock is the point: at 10 cumulative failures the wallet is
+    /// recoverable only from the recovery phrase, and a face that still unlocks
+    /// it would hand the whole escalation schedule back to anyone holding the
+    /// phone. A *temporary* lockout still allows biometrics, matching Android,
+    /// because that one is about slowing PIN guessing.
     var canUseBiometrics: Bool {
-        isBiometricEnabled && biometrics.availability.canPrompt
+        isBiometricEnabled && biometrics.availability.canPrompt && !pin.isPermanentlyLocked
     }
 
     init(
@@ -86,23 +102,36 @@ final class AuthService {
         self.biometrics = biometrics
         self.preferences = preferences
         // Synchronous so the very first frame is already gated; `PinService`
-        // seeds `hasPin` from a non-prompting Keychain lookup in its own init.
-        self.state = pin.hasPin ? .locked : .noPin
+        // seeds its presence from a non-prompting Keychain lookup in its own
+        // init. Anything but a confirmed absence starts locked, so a store that
+        // cannot be read yet (a prewarm launch before the first device unlock)
+        // does not open the wallet.
+        self.state = pin.pinPresence == .absent ? .noPin : .locked
     }
 
     // MARK: - Lock gate
 
-    /// Re-reads the PIN state and re-derives ``state``. Safe to call on every
-    /// appearance: it never unlocks a locked session.
+    /// Re-reads the PIN state and re-derives ``state``.
+    ///
+    /// This can only ever tighten the gate. Nothing it reads is proof of who is
+    /// holding the phone, so it never reaches ``State/unlocked``: only a
+    /// verified PIN, a successful biometric result, or setting the PIN in this
+    /// session does that. A PIN that appears from elsewhere (an unreadable
+    /// store becoming readable, or another session's write) locks.
     func refresh() async {
         await pin.refresh()
-        if !pin.hasPin {
+        switch pin.pinPresence {
+        case .absent:
             state = .noPin
-        } else if state == .noPin {
-            // A PIN appeared (onboarding just set one), so the session it was
-            // set in stays authenticated rather than being thrown out.
-            state = .unlocked
+        case .present, .unknown:
+            if state == .noPin { state = .locked }
         }
+    }
+
+    /// True while the wallet must stay behind ``LockView``. Anything that is
+    /// not a confirmed "no PIN" or an authenticated session gates.
+    var isGated: Bool {
+        state != .noPin && state != .unlocked
     }
 
     /// Locks the session. A no-op when there is no PIN to unlock with.
@@ -110,6 +139,7 @@ final class AuthService {
         guard state == .unlocked else { return }
         state = .locked
         biometricMessage = nil
+        storeMessage = nil
     }
 
     /// Marks the session authenticated. Only for callers that have already
@@ -118,6 +148,7 @@ final class AuthService {
         guard state != .noPin else { return }
         state = .unlocked
         biometricMessage = nil
+        storeMessage = nil
     }
 
     /// The background rule. Only `.background` locks.
@@ -156,9 +187,19 @@ final class AuthService {
     /// Verifies `pin` and unlocks on a match. The lockout schedule is applied
     /// by the shared policy, so a wrong PIN here escalates exactly as it does
     /// on Android.
+    ///
+    /// A store that cannot record the attempt leaves the session locked and
+    /// sets ``storeMessage`` rather than reporting a wrong PIN: nothing was
+    /// hashed, and the user has not used up a try.
     @discardableResult
     func unlock(pin entered: String) async -> Bool {
-        guard await pin.verify(entered) else { return false }
+        storeMessage = nil
+        do {
+            guard try await pin.verify(entered) else { return false }
+        } catch {
+            storeMessage = Self.storeUnavailableMessage
+            return false
+        }
         markUnlocked()
         return true
     }
@@ -167,8 +208,18 @@ final class AuthService {
 
     /// Sets the PIN and treats the session as authenticated, since the user
     /// just chose the secret.
+    ///
+    /// On failure the state is re-derived from what is actually stored rather
+    /// than left optimistic: if `PinService`'s cleanup could not remove a
+    /// partially written PIN, the app locks behind it instead of believing
+    /// there is none.
     func setPin(_ value: String) async throws {
-        try await pin.setPin(value)
+        do {
+            try await pin.setPin(value)
+        } catch {
+            state = pin.pinPresence == .absent ? .noPin : .locked
+            throw error
+        }
         state = .unlocked
     }
 
@@ -223,9 +274,20 @@ final class AuthService {
     }
 
     /// Verifies `entered` as the answer to the outstanding challenge.
+    ///
+    /// A store failure leaves the challenge open with ``storeMessage`` set, the
+    /// same as ``unlock(pin:)``: the user may retry, and the caller is not told
+    /// anything was approved.
     @discardableResult
     func answerChallenge(pin entered: String) async -> Bool {
-        let matched = await pin.verify(entered)
+        storeMessage = nil
+        let matched: Bool
+        do {
+            matched = try await pin.verify(entered)
+        } catch {
+            storeMessage = Self.storeUnavailableMessage
+            return false
+        }
         if matched { resolveChallenge(granted: true) }
         return matched
     }
@@ -233,6 +295,8 @@ final class AuthService {
     // MARK: - Copy
 
     static let unlockReason = "Unlock your Pocket Node wallet"
+
+    static let storeUnavailableMessage = "Could not record this attempt. Try again."
 
     private static func message(for error: BiometricError) -> String? {
         switch error {
@@ -246,6 +310,8 @@ final class AuthService {
             return "Not recognised. Try again or enter your PIN."
         case .unavailable, .other:
             return "Biometrics are unavailable. Enter your PIN."
+        case .systemError:
+            return "Biometrics could not run. Enter your PIN."
         }
     }
 }

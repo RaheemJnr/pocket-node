@@ -40,19 +40,17 @@ struct Argon2Cost: Equatable, Sendable {
 /// A snapshot of the policy's failure state, cheap to carry across the actor
 /// boundary in one hop rather than five.
 struct PinState: Equatable, Sendable {
-    var hasPin: Bool
+    /// Read from the store rather than from `PinPolicy.hasPin()`, which cannot
+    /// tell an unreadable store from an empty one: it reports both as no PIN.
+    var presence: PinPresence
     var remainingAttempts: Int32
     var isLockedOut: Bool
     var lockoutRemainingMs: Int64
     var isPermanentlyLocked: Bool
 
-    static let none = PinState(
-        hasPin: false,
-        remainingAttempts: 5,
-        isLockedOut: false,
-        lockoutRemainingMs: 0,
-        isPermanentlyLocked: false
-    )
+    /// True only when a PIN is known to be stored. An unreadable store is not
+    /// "no PIN", so callers deciding whether to gate must use ``presence``.
+    var hasPin: Bool { presence == .present }
 }
 
 /// Owns the Kotlin `PinPolicy` and every call into it.
@@ -114,10 +112,30 @@ actor PinPolicyActor {
         }
     }
 
-    func verify(digits: [UInt8]) -> Bool {
+    /// Verifies `digits`, refusing to even hash them if the store cannot record
+    /// the outcome.
+    ///
+    /// - Throws: ``PinServiceError/storeUnavailable(_:)`` when the write probe
+    ///   fails, so no comparison is made, or when the policy's own writes were
+    ///   refused after one was. Both are fail-closed: a check whose result
+    ///   cannot be recorded is not a check, it is a free guess.
+    func verify(digits: [UInt8]) throws -> Bool {
+        if let failure = store.probeWrite() {
+            throw PinServiceError.storeUnavailable(failure.status)
+        }
+
         let bytes = KotlinByteArray.from(digits)
         defer { bytes.zeroOut() }
-        return policy.verify(pinBytes: bytes)
+        store.clearFailure()
+        let matched = policy.verify(pinBytes: bytes)
+
+        if let failure = store.takeFailure() {
+            // The probe passed and a real write still failed, so the attempt
+            // may not have been counted. Refusing is the only safe answer,
+            // even for a PIN that matched.
+            throw PinServiceError.storeUnavailable(failure.status)
+        }
+        return matched
     }
 
     func removePin() {
@@ -126,7 +144,7 @@ actor PinPolicyActor {
 
     func snapshot() -> PinState {
         PinState(
-            hasPin: policy.hasPin(),
+            presence: store.presence(),
             remainingAttempts: policy.getRemainingAttempts(),
             isLockedOut: policy.isLockedOut(),
             lockoutRemainingMs: policy.getLockoutRemainingMs(),
@@ -161,6 +179,10 @@ final class PinService {
     private let policy: PinPolicyActor
 
     /// Convenience accessors so views do not reach through `state`.
+    ///
+    /// ``pinPresence`` is the one gates must use: ``hasPin`` is false for an
+    /// unreadable store as well as an empty one.
+    var pinPresence: PinPresence { state.presence }
     var hasPin: Bool { state.hasPin }
     var remainingAttempts: Int { Int(state.remainingAttempts) }
     var isLockedOut: Bool { state.isLockedOut }
@@ -183,7 +205,7 @@ final class PinService {
         // gate knows on the first frame whether to gate, instead of flashing
         // the wallet while an async read lands.
         self.state = PinState(
-            hasPin: KeychainPinStore.hasStoredPin(keychain: keychain),
+            presence: KeychainPinStore.pinPresence(keychain: keychain),
             remainingAttempts: PinPolicy.companion.MAX_ATTEMPTS,
             isLockedOut: false,
             lockoutRemainingMs: 0,
@@ -202,13 +224,21 @@ final class PinService {
     /// - Throws: ``PinServiceError/invalidFormat`` before any hashing if `pin`
     ///   is not exactly ``pinLength`` ASCII digits, or
     ///   ``PinServiceError/storeUnavailable(_:)`` if the Keychain refused.
+    ///
+    /// A refused write is not left half applied. The hash is the last field
+    /// written (see `KeychainPinStore.apply`), so a failure means either
+    /// nothing landed or a hash landed beside a field that did not, such as its
+    /// salt. Both are cleaned up by removing the PIN outright; if that cleanup
+    /// is refused too, the refreshed ``pinPresence`` still reports the hash
+    /// that is really there, so the app locks rather than believing it has no
+    /// PIN.
     func setPin(_ pin: String) async throws {
-        guard let digits = Self.asciiDigits(pin) else { throw PinServiceError.invalidFormat }
+        guard var digits = Self.asciiDigits(pin) else { throw PinServiceError.invalidFormat }
+        defer { Self.zero(&digits) }
         do {
             try await policy.setPin(digits: digits)
         } catch {
-            // A partial write still changed the stored state, so the published
-            // snapshot has to be brought back in step before the error escapes.
+            await policy.removePin()
             await refresh()
             throw error
         }
@@ -219,11 +249,21 @@ final class PinService {
     /// next lockout; a match clears the counter. Malformed input returns false
     /// without hashing and without counting as an attempt, so a UI bug cannot
     /// lock a user out.
-    func verify(_ pin: String) async -> Bool {
-        guard let digits = Self.asciiDigits(pin) else { return false }
-        let result = await policy.verify(digits: digits)
-        await refresh()
-        return result
+    ///
+    /// - Throws: ``PinServiceError/storeUnavailable(_:)`` when the store cannot
+    ///   record the attempt. Nothing is hashed in that case, so a broken store
+    ///   buys an attacker no guesses at all.
+    func verify(_ pin: String) async throws -> Bool {
+        guard var digits = Self.asciiDigits(pin) else { return false }
+        defer { Self.zero(&digits) }
+        do {
+            let result = try await policy.verify(digits: digits)
+            await refresh()
+            return result
+        } catch {
+            await refresh()
+            throw error
+        }
     }
 
     /// Clears the PIN, its salt, its KDF version and all failure state.
@@ -253,5 +293,20 @@ final class PinService {
         }
         guard digits.count == pinLength else { return nil }
         return digits
+    }
+
+    /// Overwrites a digit buffer in place.
+    ///
+    /// Scrubs what this code owns. It cannot scrub the `String` the view passed
+    /// in: Swift strings are immutable and may already have been copied by the
+    /// time they arrive, so the plaintext PIN can still sit in a released heap
+    /// buffer until it is reused. Six digits of entropy in a transient
+    /// allocation is a smaller exposure than the alternative, which would be
+    /// threading a mutable byte buffer through SwiftUI bindings.
+    static func zero(_ digits: inout [UInt8]) {
+        digits.withUnsafeMutableBytes { raw in
+            guard let base = raw.baseAddress else { return }
+            memset_s(base, raw.count, 0, raw.count)
+        }
     }
 }
