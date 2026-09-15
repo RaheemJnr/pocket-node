@@ -1,9 +1,9 @@
 package com.rjnr.pocketnode.data.wallet
 
 import android.security.keystore.KeyPermanentlyInvalidatedException
-import android.util.Log
 import androidx.fragment.app.FragmentActivity
 import com.rjnr.pocketnode.core.crypto.hexToByteArray
+import com.rjnr.pocketnode.core.log.Logger
 import com.rjnr.pocketnode.data.auth.AuthManager
 import com.rjnr.pocketnode.data.crypto.KeyBackupManager
 import com.rjnr.pocketnode.data.crypto.KeyMaterial
@@ -44,6 +44,7 @@ class WalletKeyReader @Inject constructor(
     private val encryptionManager: KeystoreEncryptionManager,
     private val authManager: AuthManager,
     private val keyBackupManager: KeyBackupManager,
+    private val logger: Logger,
 ) {
 
     sealed class Result {
@@ -149,7 +150,7 @@ class WalletKeyReader @Inject constructor(
         val cipher = try {
             encryptionManager.newDecryptCipherV2(entity.iv)
         } catch (e: KeyPermanentlyInvalidatedException) {
-            Log.w(TAG, "V2 key invalidated by biometric enrollment change for $walletId")
+            logger.w(TAG, "V2 key invalidated by biometric enrollment change for $walletId")
             return MaterialResult.KeyInvalidated
         } catch (e: IllegalStateException) {
             // Android Keystore throws this when getOrCreateKeystoreKeyV2 is
@@ -159,7 +160,7 @@ class WalletKeyReader @Inject constructor(
             // post-restore or post-keystore-wipe state degrades to
             // KeyInvalidated (re-import recovery) instead of crashing.
             if (e.message?.contains("Secure lock screen", ignoreCase = true) == true) {
-                Log.w(TAG, "V2 key missing and cannot be recreated (no secure lock) for $walletId", e)
+                logger.w(TAG, "V2 key missing and cannot be recreated (no secure lock) for $walletId", e)
                 return MaterialResult.KeyInvalidated
             }
             throw e
@@ -178,7 +179,7 @@ class WalletKeyReader @Inject constructor(
                 val data = try {
                     keyStoreMigrationHelper.readDecryptedKey(walletId, authResult.cipher)
                 } catch (e: Exception) {
-                    Log.e(TAG, "V2 material decrypt failed for $walletId", e)
+                    logger.e(TAG, "V2 material decrypt failed for $walletId", e)
                     null
                 } ?: return MaterialResult.NotAvailable("V2 decrypt failed for $walletId")
                 tryOpportunisticBackup(walletId, data)
@@ -213,13 +214,13 @@ class WalletKeyReader @Inject constructor(
             // Keystore (setInvalidatedByBiometricEnrollment=true). The
             // ciphertext on disk is unrecoverable; caller must surface a
             // re-import flow to the user.
-            Log.w(TAG, "V2 key invalidated by biometric enrollment change for $walletId")
+            logger.w(TAG, "V2 key invalidated by biometric enrollment change for $walletId")
             return Result.KeyInvalidated
         } catch (e: IllegalStateException) {
             // Defense in depth: V2 key missing AND no secure lock to
             // recreate it. Same degraded path as KPIE — re-import recovers.
             if (e.message?.contains("Secure lock screen", ignoreCase = true) == true) {
-                Log.w(TAG, "V2 key missing and cannot be recreated (no secure lock) for $walletId", e)
+                logger.w(TAG, "V2 key missing and cannot be recreated (no secure lock) for $walletId", e)
                 return Result.KeyInvalidated
             }
             throw e
@@ -238,7 +239,7 @@ class WalletKeyReader @Inject constructor(
                 val data = try {
                     keyStoreMigrationHelper.readDecryptedKey(walletId, authResult.cipher)
                 } catch (e: Exception) {
-                    Log.e(TAG, "V2 decrypt failed for $walletId", e)
+                    logger.e(TAG, "V2 decrypt failed for $walletId", e)
                     null
                 } ?: return Result.NotAvailable("V2 decrypt failed for $walletId")
                 tryOpportunisticBackup(walletId, data)
@@ -286,9 +287,9 @@ class WalletKeyReader @Inject constructor(
                     mnemonicBackedUp = data.mnemonicBackedUp,
                 )
                 keyBackupManager.writeBackup(walletId, material, sessionPin)
-                Log.i(TAG, "Opportunistic backup populated for $walletId after V2 read")
+                logger.i(TAG, "Opportunistic backup populated for $walletId after V2 read")
             } catch (e: Throwable) {
-                Log.w(TAG, "Opportunistic backup write failed for $walletId", e)
+                logger.w(TAG, "Opportunistic backup write failed for $walletId", e)
             } finally {
                 java.util.Arrays.fill(sessionPin, '\u0000')
             }
