@@ -5,8 +5,9 @@ import Security
 /// Why a wrap or unwrap failed. Separate from ``WalletKeyStoreError`` so the
 /// store can decide what each one means for the caller.
 enum KeyWrapperError: Error, Equatable {
-    /// No wrapping key exists yet (or it was invalidated, for instance by the
-    /// user enrolling a new finger or face, which `biometryCurrentSet` kills).
+    /// No wrapping key exists: none has been created yet, or one is gone from
+    /// the Keychain while a wallet envelope is still there (a Keychain restore
+    /// that dropped the Secure Enclave key, for example).
     case keyNotFound
     /// The user dismissed the biometric or passcode prompt.
     case authenticationCancelled
@@ -30,8 +31,7 @@ protocol KeyWrapping: Sendable {
     var isHardwareBacked: Bool { get }
 
     /// Whether a wrapping key exists at all. Never prompts: it only looks the
-    /// key up, it does not use it. False after the system invalidates the key
-    /// because the enrolled biometrics changed.
+    /// key up, it does not use it.
     var hasKey: Bool { get }
 
     /// Encrypts `dataKey` to the wrapping key's public half, creating the key
@@ -59,10 +59,13 @@ protocol KeyWrapping: Sendable {
 ///
 /// Access control is `[.privateKeyUsage, .biometryCurrentSet, .or, .devicePasscode]`
 /// over `kSecAttrAccessibleWhenPasscodeSetThisDeviceOnly`:
-/// - `biometryCurrentSet` invalidates the key if the enrolled biometrics change,
-///   so adding a face or finger cannot silently grant access to the wallet.
+/// - `biometryCurrentSet` binds the biometric branch to the enrolment set that
+///   existed when the key was made, so adding a face or finger cannot silently
+///   grant access through biometry alone.
 /// - `.or .devicePasscode` keeps the wallet reachable for users without biometry
-///   and after a biometric lockout.
+///   and after a biometric lockout. It also means the key most likely survives a
+///   re-enrolment, since the passcode branch is unaffected; the exact behaviour
+///   of the combination is unverified on hardware (see `WalletKeyStoreDeviceTests`).
 ///
 /// ### Simulator
 /// There is no Enclave in the simulator, so the same P-256 key is created in
@@ -174,7 +177,8 @@ final class SecureEnclaveKeyWrapper: KeyWrapping {
             guard let item, CFGetTypeID(item) == SecKeyGetTypeID() else {
                 throw KeyWrapperError.operationFailed("the stored wrapping key is not a key")
             }
-            return item as! SecKey
+            let key = item as! SecKey
+            return key
         case errSecItemNotFound:
             return nil
         case errSecUserCanceled:

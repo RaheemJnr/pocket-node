@@ -57,13 +57,14 @@ final class WalletKeyStoreFailureTests: XCTestCase {
 
     // MARK: - Invalidated wrapping key
 
-    /// `biometryCurrentSet` destroys the wrapping key when the enrolled
-    /// biometrics change. The wallet is then unreadable forever, which is a
-    /// different conversation with the user than "no wallet here" or "try
-    /// again", so it must not collapse into `.notFound`.
-    func testInvalidatedKeyOnLoadIsNotReportedAsMissingWallet() async throws {
+    /// If the wrapping key is ever absent while an envelope exists (a Keychain
+    /// restore that dropped the Secure Enclave key, say), the wallet is
+    /// unreadable forever. That is a different conversation with the user than
+    /// "no wallet here" or "try again", so it must not collapse into
+    /// `.notFound`.
+    func testMissingKeyOnLoadIsNotReportedAsMissingWallet() async throws {
         try await store.store(WalletKeyBundle(privateKeyHex: "aabb"))
-        wrapper.simulateInvalidatedKey(true)
+        wrapper.simulateMissingKey(true)
 
         await assertThrows(.keyInvalidated) {
             _ = try await self.store.load(reason: "Unlock your wallet")
@@ -75,7 +76,7 @@ final class WalletKeyStoreFailureTests: XCTestCase {
     /// their previous wallet is stranded. Refuse instead.
     func testStoreRefusesToMintAKeyOverAnExistingWallet() async throws {
         try await store.store(WalletKeyBundle(privateKeyHex: "aabb"))
-        wrapper.simulateInvalidatedKey(true)
+        wrapper.simulateMissingKey(true)
 
         await assertThrows(.keyInvalidated) {
             try await self.store.store(WalletKeyBundle(privateKeyHex: "ccdd"))

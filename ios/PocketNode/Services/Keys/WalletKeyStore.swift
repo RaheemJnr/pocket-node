@@ -13,11 +13,12 @@ enum WalletKeyStoreError: Error, Equatable {
     /// The user dismissed the prompt. Distinct from `.authenticationFailed` so
     /// callers can stay silent instead of showing an error.
     case authenticationCancelled
-    /// A wallet is stored but the key that protects it is gone, so it can never
-    /// be decrypted again. The usual cause is `biometryCurrentSet`: enrolling a
-    /// new face or finger invalidates the wrapping key by design. Recovery means
-    /// restoring from the mnemonic, so this must never be confused with
-    /// `.notFound` (nothing to restore) or `.authenticationFailed` (try again).
+    /// A wallet is stored but the wrapping key that protects it is absent, so it
+    /// can never be decrypted again. Seen if the key is ever lost while the
+    /// envelope survives, for example a Keychain restore that dropped the Secure
+    /// Enclave key. Recovery means restoring from the mnemonic, so this must
+    /// never be confused with `.notFound` (nothing to restore) or
+    /// `.authenticationFailed` (worth another attempt).
     case keyInvalidated
     /// The envelope is malformed, the ciphertext did not authenticate, or the
     /// decrypted bytes are not a bundle. Tampering and truncation both land here.
@@ -65,8 +66,8 @@ actor WalletKeyStore {
     /// the new envelope is in place or the old one still is.
     func store(_ bundle: WalletKeyBundle) throws {
         // Minting a fresh wrapping key while an envelope is still there would
-        // silently strand that wallet, turning an invalidated key into data
-        // loss. Only a device with no wallet may create a key.
+        // silently strand that wallet. Only a device with no wallet may create
+        // a key.
         if !wrapper.hasKey && hasWallet {
             throw WalletKeyStoreError.keyInvalidated
         }
@@ -107,16 +108,9 @@ actor WalletKeyStore {
 
         let envelope = try WalletKeyEnvelope.decode(stored)
 
-        // From here the wallet exists, so a missing wrapping key is an
-        // invalidated one, never an absent wallet.
-        var dataKey: Data
-        do {
-            dataKey = try wrapper.unwrap(envelope.wrappedDataKey, reason: reason)
-        } catch KeyWrapperError.keyNotFound {
-            throw WalletKeyStoreError.keyInvalidated
-        } catch {
-            throw Self.map(error)
-        }
+        // The wallet exists, so an absent wrapping key here is a stranded
+        // wallet: `map` turns that into `.keyInvalidated`, never `.notFound`.
+        var dataKey = try Self.mapWrapperErrors { try wrapper.unwrap(envelope.wrappedDataKey, reason: reason) }
         defer { dataKey.secureZero() }
 
         var plaintext: Data
@@ -136,10 +130,14 @@ actor WalletKeyStore {
     }
 
     /// Removes the wallet and the Enclave key that protects it.
+    ///
+    /// The key goes first. If that fails, the envelope is still there and still
+    /// loadable, which is a better place to stop than an orphaned key whose
+    /// wallet has already been deleted.
     func delete() throws {
         do {
-            try keychain.delete(account: WalletKeyAccount.envelope)
             try wrapper.deleteKey()
+            try keychain.delete(account: WalletKeyAccount.envelope)
         } catch {
             throw Self.map(error)
         }
@@ -206,7 +204,9 @@ actor WalletKeyStore {
         case let error as KeyWrapperError:
             switch error {
             case .keyNotFound:
-                return .notFound
+                // A wrapping key is only ever looked for because a wallet needs
+                // it, so its absence is a stranded wallet, not an absent one.
+                return .keyInvalidated
             case .authenticationCancelled:
                 return .authenticationCancelled
             case .authenticationFailed:

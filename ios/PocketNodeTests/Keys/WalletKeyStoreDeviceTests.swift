@@ -17,6 +17,12 @@ import XCTest
 /// shows the Face ID sheet with our reason text and the test waits for it. That
 /// prompt, plus the printed diagnostics line reading `hardwareBacked: true`, is
 /// the evidence the issue asks for.
+// TODO(device): confirm behaviour after biometric re-enrolment. The access
+// control is `biometryCurrentSet OR devicePasscode`, so the passcode branch
+// most likely keeps the key valid when a face or finger is added, which would
+// mean `.keyInvalidated` is reachable only when the key is lost some other way.
+// Enrol a new face on the test device, rerun this suite, and record whether
+// `hasKey` and `load` still succeed.
 final class WalletKeyStoreDeviceTests: XCTestCase {
     private let service = "com.rjnr.pocketnode.tests.device.keys"
     private let tag = "com.rjnr.pocketnode.tests.device.wrapper"

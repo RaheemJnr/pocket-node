@@ -36,6 +36,11 @@ struct InstallMarker {
 
     /// The marker this build writes. A stored value below it means the wipe has
     /// not run for this generation of the store.
+    ///
+    /// The key was renamed from `installMarker` to `installMarkerVersion` on
+    /// purpose while nothing had shipped: dev devices carrying the earlier
+    /// two-item layout read as unmarked and get wiped once, which is exactly
+    /// what should happen to a store whose format no longer exists.
     static let currentVersion = 1
 
     private let defaults: UserDefaults

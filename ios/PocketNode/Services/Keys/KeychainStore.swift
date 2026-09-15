@@ -7,7 +7,7 @@ struct KeychainError: Error, Equatable, CustomStringConvertible {
     let status: OSStatus
 
     var message: String {
-        SecCopyErrorMessageString(status, nil) as String? ?? "unknown Keychain error"
+        (SecCopyErrorMessageString(status, nil) as String?) ?? "unknown Keychain error"
     }
 
     var description: String { "KeychainError(\(status)): \(message)" }

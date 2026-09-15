@@ -28,7 +28,19 @@ enum WalletKeyEnvelope {
     /// An AES-GCM combined box is a 12-byte nonce plus a 16-byte tag at minimum.
     private static let minCiphertextSize = 28
 
+    /// Builds an envelope. The bounds are the ones ``decode`` enforces, checked
+    /// here too so this can never write a blob its own parser would reject:
+    /// violating them is a programming error, not bad input.
     static func encode(wrappedDataKey: Data, ciphertext: Data) -> Data {
+        precondition(
+            (1...maxWrappedKeySize).contains(wrappedDataKey.count),
+            "wrapped data key of \(wrappedDataKey.count) bytes is outside the envelope's bounds"
+        )
+        precondition(
+            ciphertext.count >= minCiphertextSize,
+            "ciphertext of \(ciphertext.count) bytes is shorter than an AES-GCM box"
+        )
+
         var envelope = Data(capacity: headerSize + wrappedDataKey.count + ciphertext.count)
         envelope.append(version)
         withUnsafeBytes(of: UInt32(wrappedDataKey.count).bigEndian) { envelope.append(contentsOf: $0) }

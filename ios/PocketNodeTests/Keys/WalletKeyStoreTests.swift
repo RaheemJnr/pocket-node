@@ -234,7 +234,10 @@ final class WalletKeyStoreTests: XCTestCase {
     /// the device and one that does not, so they are asserted on the real item
     /// rather than trusted from the write path.
     func testEnvelopeItemIsDeviceOnlyAndNotSynchronizable() async throws {
+        // Twice, so the attributes asserted are the ones left by SecItemUpdate
+        // (the path every store after the first takes) and not only by the add.
         try await store.store(WalletKeyBundle(privateKeyHex: "aabb"))
+        try await store.store(WalletKeyBundle(privateKeyHex: "ccdd"))
 
         let query: [String: Any] = [
             kSecClass as String: kSecClassGenericPassword,
@@ -251,7 +254,7 @@ final class WalletKeyStoreTests: XCTestCase {
             attributes[kSecAttrAccessible as String] as? String,
             kSecAttrAccessibleWhenPasscodeSetThisDeviceOnly as String
         )
-        let synchronizable = attributes[kSecAttrSynchronizable as String] as? Bool ?? false
+        let synchronizable = (attributes[kSecAttrSynchronizable as String] as? Bool) ?? false
         XCTAssertFalse(synchronizable)
     }
 

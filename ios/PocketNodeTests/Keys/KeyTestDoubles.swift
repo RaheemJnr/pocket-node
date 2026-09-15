@@ -23,13 +23,13 @@ final class StubKeyWrapper: KeyWrapping, @unchecked Sendable {
         failure = error
     }
 
-    /// Simulates the key the system invalidates when the enrolled biometrics
-    /// change: `hasKey` goes false and using it reports `keyNotFound`.
-    func simulateInvalidatedKey(_ invalidated: Bool) {
+    /// Simulates a wrapping key that has gone missing while a wallet envelope
+    /// is still stored: `hasKey` goes false and using it reports `keyNotFound`.
+    func simulateMissingKey(_ missing: Bool) {
         lock.lock()
         defer { lock.unlock() }
-        pretendKeyIsMissing = invalidated
-        failure = invalidated ? .keyNotFound : nil
+        pretendKeyIsMissing = missing
+        failure = missing ? .keyNotFound : nil
     }
 
     private var currentFailure: KeyWrapperError? {
