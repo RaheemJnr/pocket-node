@@ -87,7 +87,7 @@ final class WiringScreenshotTests: XCTestCase {
 
     func testReceiveRendersFromTheShell() throws {
         try saveWallet(backedUp: true)
-        let model = ReceiveViewModel(walletStore: walletStore, preferences: preferences, onBackUp: {})
+        let model = ReceiveViewModel(walletStore: walletStore, preferences: preferences, hasPin: { true }, onBackUp: {})
 
         let view = NavigationStack {
             ReceiveView(viewModel: model)
