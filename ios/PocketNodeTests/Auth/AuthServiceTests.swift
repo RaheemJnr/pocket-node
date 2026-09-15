@@ -16,8 +16,12 @@ final class AuthServiceTests: XCTestCase {
     private var biometrics: StubBiometrics!
     private var clock: TestClock!
 
-    override func setUp() {
-        super.setUp()
+    // `async` on purpose: the non-async `setUp()` override of a `nonisolated`
+    // superclass method runs task-isolated, so touching this class's
+    // `@MainActor` properties from it is a concurrency warning. The async form
+    // inherits the class's isolation.
+    override func setUp() async throws {
+        try await super.setUp()
         keychain = KeychainStore(service: keychainService)
         try? keychain.deleteAll()
         UserDefaults.standard.removePersistentDomain(forName: suiteName)
@@ -27,7 +31,7 @@ final class AuthServiceTests: XCTestCase {
         clock = TestClock()
     }
 
-    override func tearDown() {
+    override func tearDown() async throws {
         try? keychain.deleteAll()
         defaults.removePersistentDomain(forName: suiteName)
         keychain = nil
@@ -35,7 +39,7 @@ final class AuthServiceTests: XCTestCase {
         preferences = nil
         biometrics = nil
         clock = nil
-        super.tearDown()
+        try await super.tearDown()
     }
 
     private func makeAuth() -> AuthService {

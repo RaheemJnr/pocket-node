@@ -21,20 +21,23 @@ final class AuthScreenshotTests: XCTestCase {
     private var keychain: KeychainStore!
     private var defaults: UserDefaults!
 
-    override func setUp() {
-        super.setUp()
+    // `async` for the same reason as the other auth suites: the non-async
+    // override runs task-isolated and cannot touch this class's `@MainActor`
+    // properties.
+    override func setUp() async throws {
+        try await super.setUp()
         keychain = KeychainStore(service: keychainService)
         try? keychain.deleteAll()
         UserDefaults.standard.removePersistentDomain(forName: suiteName)
         defaults = UserDefaults(suiteName: suiteName)
     }
 
-    override func tearDown() {
+    override func tearDown() async throws {
         try? keychain.deleteAll()
         defaults.removePersistentDomain(forName: suiteName)
         keychain = nil
         defaults = nil
-        super.tearDown()
+        try await super.tearDown()
     }
 
     private func makeAuth(biometrics: StubBiometrics) -> AuthService {
