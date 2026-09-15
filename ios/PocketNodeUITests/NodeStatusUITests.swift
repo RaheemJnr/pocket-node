@@ -1,18 +1,19 @@
 import XCTest
 
-/// End-to-end M1 acceptance: launch the app, open Node Status, start the node
-/// and wait for the testnet tip to advance past genesis.
+/// End-to-end M1 acceptance: launch the app, open Node Status, start the node,
+/// wait for the testnet tip to advance past genesis, then stop it.
 ///
 /// The node has to reach real testnet bootnodes, so this test lives in its own
 /// `PocketNodeNetwork` scheme and is not part of the default test action.
 final class NodeStatusUITests: XCTestCase {
     private static let tipTimeout: TimeInterval = 120
+    private static let stopTimeout: TimeInterval = 10
 
     override func setUpWithError() throws {
         continueAfterFailure = false
     }
 
-    func testNodeStatusReachesTestnetTip() throws {
+    func testNodeStatusReachesTestnetTipAndStops() throws {
         let app = XCUIApplication()
         app.launch()
 
@@ -44,6 +45,29 @@ final class NodeStatusUITests: XCTestCase {
         add(shot)
 
         XCTAssertGreaterThan(observedTip, 0, "Tip block stayed at 0 after \(Int(elapsed))s")
+
+        // #487: Stop used to deadlock in the bridge, so the screen sat on
+        // "Running" forever. It now has to reach Stopped promptly, and stay
+        // there — a stopped node cannot be restarted in-process.
+        let status = app.staticTexts["nodeStatus.status"]
+        let stop = app.buttons["Stop"]
+        XCTAssertTrue(stop.isEnabled, "Stop should be enabled while running")
+        stop.tap()
+
+        let stopped = expectation(for: NSPredicate(format: "label ENDSWITH %@", "Stopped"),
+                                  evaluatedWith: status)
+        wait(for: [stopped], timeout: Self.stopTimeout)
+
+        print("NODESTATUS stopped statusLabel=\(status.label) startEnabled=\(start.isEnabled)")
+
+        let stoppedShot = XCTAttachment(screenshot: app.screenshot())
+        stoppedShot.name = "NodeStatusStopped"
+        stoppedShot.lifetime = .keepAlways
+        add(stoppedShot)
+
+        XCTAssertFalse(start.isEnabled, "Start must stay disabled after a stop")
+        XCTAssertTrue(app.staticTexts["nodeStatus.relaunchNotice"].exists,
+                      "The relaunch notice should explain why Start is disabled")
     }
 
     /// A `LabeledContent` row reads back as "Tip block, 1 234 567", so take the
