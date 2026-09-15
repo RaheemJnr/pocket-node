@@ -20,6 +20,7 @@ import com.rjnr.pocketnode.data.transaction.RecipientOutput
 import com.rjnr.pocketnode.data.database.entity.SubAccountCandidateEntity
 import com.rjnr.pocketnode.data.wallet.AddressUtils
 import com.rjnr.pocketnode.data.transaction.SweepInput
+import com.rjnr.pocketnode.data.transaction.TransferPlan
 import com.rjnr.pocketnode.data.wallet.GapLimitResolution
 import com.rjnr.pocketnode.data.wallet.GapLimitStatus
 import com.rjnr.pocketnode.data.wallet.GapLimitSweepPreview
@@ -1358,6 +1359,138 @@ class GatewayRepository @Inject constructor(
      * pre-inserted hash, so it skips the duplicate insert and just performs the
      * broadcast + post-broadcast CAS.
      */
+    /**
+     * The cells a send may spend right now: live regular cells minus the ones
+     * in-flight broadcasts have reserved, plus the change those broadcasts are
+     * about to create.
+     *
+     * Extracted from [buildReserveAndSend] so [previewTransfer] plans against
+     * exactly the same set the build will select from — a preview against a
+     * different cell set would quote a fee the send does not pay (#490).
+     * Callers hold [sendMutex].
+     */
+    private suspend fun resolveSpendableCells(
+        fromAddress: String,
+        senderNetwork: NetworkType,
+        walletId: String,
+        network: String,
+    ): List<Cell> {
+        // getCells(fromAddress) decodes the address to a script — honors the
+        // snapshot rather than reading _walletInfo.value live. It already
+        // excludes typed (DAO/token) cells, so this is regular spendable CKB.
+        val cellsResult = getCells(fromAddress).getOrThrow()
+        val pending = pendingBroadcastDao.getActive(walletId, network)
+        val reserved: Set<OutPoint> = pending
+            .flatMap { json.decodeFromString<List<OutPoint>>(it.reservedInputs) }
+            .toSet()
+        val liveFiltered = cellsResult.items.filter { it.outPoint !in reserved }
+
+        // Synthesize predicted change-output cells from in-flight broadcasts.
+        // Without this, rapid sequential sends exhaust live cells before the
+        // light client has synced the change outputs of prior sends — the
+        // observed "Not enough funds available" failure mode.
+        // We include each output of every active pending tx whose lock script
+        // matches the sender's lock (= change output going back to us).
+        // If a pending tx ultimately FAILs, downstream txs that consumed its
+        // synthetic change will also fail and the watchdog times them out.
+        //
+        // ONLY session-broadcast rows: a synthetic input resolves only if
+        // its creating tx is in the light client's in-memory pending pool,
+        // which is wiped on restart. Persisted rows from a prior session are
+        // not in the pool, so their change would be unresolvable and reject
+        // every send after a reboot (Alex report). The reservation filter
+        // above still uses ALL pending rows so reserved inputs are never
+        // double-spent.
+        val pendingChange: List<Cell> = pending
+            .filter { it.txHash in broadcastedThisSession }
+            .flatMap { row ->
+                val pendingTx = try {
+                    json.decodeFromString<Transaction>(row.signedTxJson)
+                } catch (e: Exception) {
+                    return@flatMap emptyList<Cell>()
+                }
+                pendingTx.cellOutputs.mapIndexedNotNull { idx, output ->
+                    val outAddr = try {
+                        AddressUtils.encode(output.lock, senderNetwork)
+                    } catch (e: Exception) {
+                        return@mapIndexedNotNull null
+                    }
+                    if (outAddr != fromAddress) return@mapIndexedNotNull null
+                    Cell(
+                        outPoint = OutPoint(row.txHash, "0x${idx.toString(16)}"),
+                        capacity = output.capacity,
+                        blockNumber = "0x0", // synthetic — not on chain yet
+                        lock = output.lock,
+                        type = output.type,
+                        data = "0x"
+                    )
+                }
+            }
+        // Dedup by outpoint, preferring the real (on-chain) cell: once a
+        // pending tx confirms, its change appears in both liveFiltered and
+        // pendingChange for the brief window before the watchdog clears the
+        // row. Selecting the same outpoint twice would build a tx with a
+        // duplicate input and fail. liveFiltered is first, so distinctBy
+        // keeps the real cell.
+        val filtered = (liveFiltered + pendingChange)
+            .distinctBy { "${it.outPoint.txHash}:${it.outPoint.index}" }
+        logger.d(
+            TAG,
+            "resolveSpendableCells: ${cellsResult.items.size} live, ${reserved.size} reserved, " +
+                "${pendingChange.size} synthetic-change, ${filtered.size} available"
+        )
+        return filtered
+    }
+
+    /**
+     * Fee and change for a transfer, computed from the cells the send would
+     * actually select, without signing, reserving or broadcasting anything.
+     *
+     * The Send review sheet quotes this (#490). Selection is smallest-first,
+     * so a fragmented wallet spends many inputs and pays materially more than
+     * a 1-input estimate; showing the estimate and then paying the plan is the
+     * bug this closes. [prepareAndSend] re-runs the same plan against the cell
+     * set it holds the mutex over and refuses to broadcast if the fee moved.
+     *
+     * Throws whatever the selection throws (no cells, insufficient balance);
+     * the caller surfaces it instead of opening the review sheet. Returns the
+     * plan rather than a `Result` so it stays stubbable in ViewModel tests —
+     * MockK cannot round-trip an inline-class return through a suspend resume.
+     */
+    suspend fun previewTransfer(
+        fromAddress: String,
+        recipients: List<RecipientOutput>,
+    ): TransferPlan {
+        val senderNetwork = currentNetwork
+        val walletId = activeWalletId
+        return sendMutex.withLock {
+            val cells = resolveSpendableCells(fromAddress, senderNetwork, walletId, senderNetwork.name)
+            transactionBuilder.planTransfer(recipients, cells)
+        }
+    }
+
+    /**
+     * Guards a confirmed send against a fee that moved between the review and
+     * the broadcast (a cell confirmed, a pending tx resolved). Refusing is the
+     * safe branch: the user re-opens the sheet and confirms the new number
+     * rather than silently paying a fee they never saw.
+     */
+    private fun verifyExpectedFee(
+        recipients: List<RecipientOutput>,
+        availableCells: List<Cell>,
+        expectedFeeShannons: Long?,
+    ) {
+        if (expectedFeeShannons == null) return
+        val actualFee = transactionBuilder.planTransfer(recipients, availableCells).feeShannons
+        if (actualFee != expectedFeeShannons) {
+            throw IllegalStateException(
+                "Fee changed since you reviewed this transaction " +
+                    "(${expectedFeeShannons} → ${actualFee} shannons). Nothing was sent — " +
+                    "please review and confirm again."
+            )
+        }
+    }
+
     private suspend fun buildReserveAndSend(
         fromAddress: String,
         // Pending activity-row overrides for DAO ops (#433). A plain transfer
@@ -1382,70 +1515,7 @@ class GatewayRepository @Inject constructor(
         publishTip(tipNumber)
 
         val signedTx = sendMutex.withLock {
-            // getCells(fromAddress) decodes the address to a script — honors the
-            // snapshot rather than reading _walletInfo.value live. It already
-            // excludes typed (DAO/token) cells, so this is regular spendable CKB.
-            val cellsResult = getCells(fromAddress).getOrThrow()
-            val pending = pendingBroadcastDao.getActive(walletId, network)
-            val reserved: Set<OutPoint> = pending
-                .flatMap { json.decodeFromString<List<OutPoint>>(it.reservedInputs) }
-                .toSet()
-            val liveFiltered = cellsResult.items.filter { it.outPoint !in reserved }
-
-            // Synthesize predicted change-output cells from in-flight broadcasts.
-            // Without this, rapid sequential sends exhaust live cells before the
-            // light client has synced the change outputs of prior sends — the
-            // observed "Not enough funds available" failure mode.
-            // We include each output of every active pending tx whose lock script
-            // matches the sender's lock (= change output going back to us).
-            // If a pending tx ultimately FAILs, downstream txs that consumed its
-            // synthetic change will also fail and the watchdog times them out.
-            //
-            // ONLY session-broadcast rows: a synthetic input resolves only if
-            // its creating tx is in the light client's in-memory pending pool,
-            // which is wiped on restart. Persisted rows from a prior session are
-            // not in the pool, so their change would be unresolvable and reject
-            // every send after a reboot (Alex report). The reservation filter
-            // above still uses ALL pending rows so reserved inputs are never
-            // double-spent.
-            val pendingChange: List<Cell> = pending
-                .filter { it.txHash in broadcastedThisSession }
-                .flatMap { row ->
-                val pendingTx = try {
-                    json.decodeFromString<Transaction>(row.signedTxJson)
-                } catch (e: Exception) {
-                    return@flatMap emptyList<Cell>()
-                }
-                pendingTx.cellOutputs.mapIndexedNotNull { idx, output ->
-                    val outAddr = try {
-                        AddressUtils.encode(output.lock, senderNetwork)
-                    } catch (e: Exception) {
-                        return@mapIndexedNotNull null
-                    }
-                    if (outAddr != fromAddress) return@mapIndexedNotNull null
-                    Cell(
-                        outPoint = OutPoint(row.txHash, "0x${idx.toString(16)}"),
-                        capacity = output.capacity,
-                        blockNumber = "0x0", // synthetic — not on chain yet
-                        lock = output.lock,
-                        type = output.type,
-                        data = "0x"
-                    )
-                }
-            }
-            // Dedup by outpoint, preferring the real (on-chain) cell: once a
-            // pending tx confirms, its change appears in both liveFiltered and
-            // pendingChange for the brief window before the watchdog clears the
-            // row. Selecting the same outpoint twice would build a tx with a
-            // duplicate input and fail. liveFiltered is first, so distinctBy
-            // keeps the real cell.
-            val filtered = (liveFiltered + pendingChange)
-                .distinctBy { "${it.outPoint.txHash}:${it.outPoint.index}" }
-            logger.d(
-                TAG,
-                "buildReserveAndSend: ${cellsResult.items.size} live, ${reserved.size} reserved, " +
-                    "${pendingChange.size} synthetic-change, ${filtered.size} available"
-            )
+            val filtered = resolveSpendableCells(fromAddress, senderNetwork, walletId, network)
 
             val signed = build(filtered, senderNetwork)
 
@@ -1522,9 +1592,16 @@ class GatewayRepository @Inject constructor(
         fromAddress: String,
         toAddress: String,
         amountShannons: Long,
-        privateKey: ByteArray
+        privateKey: ByteArray,
+        /** Fee the user confirmed on the review sheet; the send aborts if the build no longer matches it (#490). */
+        expectedFeeShannons: Long? = null,
     ): Result<String> = runCatching {
         buildReserveAndSend(fromAddress) { availableCells, net ->
+            verifyExpectedFee(
+                recipients = listOf(RecipientOutput(toAddress, amountShannons)),
+                availableCells = availableCells,
+                expectedFeeShannons = expectedFeeShannons,
+            )
             transactionBuilder.buildTransfer(
                 fromAddress = fromAddress,
                 toAddress = toAddress,

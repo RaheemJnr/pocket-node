@@ -1,5 +1,6 @@
 package com.rjnr.pocketnode.ui.screens.send
 
+import androidx.fragment.app.FragmentActivity
 import com.rjnr.pocketnode.core.log.NoopLogger
 import com.rjnr.pocketnode.data.auth.AuthManager
 import com.rjnr.pocketnode.data.auth.AuthMethod
@@ -10,7 +11,11 @@ import com.rjnr.pocketnode.data.diagnostics.ErrorJournal
 import com.rjnr.pocketnode.data.gateway.GatewayRepository
 import com.rjnr.pocketnode.data.gateway.models.BalanceResponse
 import com.rjnr.pocketnode.data.gateway.models.NetworkType
+import com.rjnr.pocketnode.data.gateway.models.Cell
+import com.rjnr.pocketnode.data.gateway.models.OutPoint
+import com.rjnr.pocketnode.data.gateway.models.Script
 import com.rjnr.pocketnode.data.transaction.TransactionBuilder
+import com.rjnr.pocketnode.data.transaction.TransferPlan
 import com.rjnr.pocketnode.data.wallet.KeyManager
 import com.rjnr.pocketnode.data.wallet.WalletKeyReader
 import com.rjnr.pocketnode.data.wallet.WalletRepository
@@ -63,6 +68,23 @@ class SendReviewStateMachineTest {
     private val recipient = "ckt1qzda0cr08m85hc8jlnfp3zer7xulejywt49kt2rr0vthywaa50xwsqrecipient"
     private val balanceShannons = 1_000_00000000L
 
+    /** What the repository's dry-run plan reports: a fragmented wallet, 4 inputs, 4,321 shannons. */
+    private val plannedFee = 4_321L
+    private val plannedTransfer = TransferPlan(
+        selectedCells = List(4) { index ->
+            Cell(
+                outPoint = OutPoint("0x" + "ab".repeat(32), "0x$index"),
+                capacity = "0x${(70_00000000L).toString(16)}",
+                blockNumber = "0x100",
+                lock = Script(Script.SECP256K1_CODE_HASH, "type", "0x" + "aa".repeat(20)),
+            )
+        },
+        totalInput = 280_00000000L,
+        totalRecipientAmount = 100_00000000L,
+        feeShannons = plannedFee,
+        changeShannons = 280_00000000L - 100_00000000L - plannedFee,
+    )
+
     @Before
     fun setUp() {
         Dispatchers.setMain(testDispatcher)
@@ -88,6 +110,10 @@ class SendReviewStateMachineTest {
         // sequencing contract #490 is about. The relaxed mock's return value
         // lands in the ViewModel's own catch block; the post-broadcast states
         // (txHash, polling) are covered elsewhere.
+
+        // The review sheet is priced by the real plan, not the form's
+        // 1-input estimate (#490 review item 1).
+        coEvery { repository.previewTransfer(any(), any()) } returns plannedTransfer
 
         keyManager = mockk(relaxed = true)
         transactionBuilder = mockk(relaxed = true)
@@ -156,9 +182,12 @@ class SendReviewStateMachineTest {
         assertNotNull("review sheet must be requested before broadcast", review)
         assertEquals(recipient, review!!.recipientAddress)
         assertEquals(100_00000000L, review.amountShannons)
+        // The plan's fee, not the form's 1-input estimate.
+        assertEquals(plannedFee, review.feeShannons)
         assertEquals(review.amountShannons + review.feeShannons, review.totalShannons)
+        assertEquals(plannedFee, vm.uiState.value.estimatedFee)
         assertFalse(vm.uiState.value.requiresAuth)
-        coVerify(exactly = 0) { repository.prepareAndSend(any(), any(), any(), any()) }
+        coVerify(exactly = 0) { repository.prepareAndSend(any(), any(), any(), any(), any()) }
     }
 
     @Test
@@ -174,8 +203,10 @@ class SendReviewStateMachineTest {
         advanceUntilIdle()
 
         assertNull(vm.uiState.value.reviewRequest)
+        // The fee the user confirmed travels with the broadcast so the
+        // repository can refuse if a re-plan disagrees.
         coVerify(exactly = 1) {
-            repository.prepareAndSend(senderAddress, recipient, 100_00000000L, any())
+            repository.prepareAndSend(senderAddress, recipient, 100_00000000L, any(), plannedFee)
         }
     }
 
@@ -193,7 +224,7 @@ class SendReviewStateMachineTest {
             // Review first — the auth prompt must not pre-empt it.
             assertNotNull(vm.uiState.value.reviewRequest)
             assertFalse(vm.uiState.value.requiresAuth)
-            coVerify(exactly = 0) { repository.prepareAndSend(any(), any(), any(), any()) }
+            coVerify(exactly = 0) { repository.prepareAndSend(any(), any(), any(), any(), any()) }
 
             vm.confirmSend()
             advanceUntilIdle()
@@ -202,7 +233,7 @@ class SendReviewStateMachineTest {
             assertNull(vm.uiState.value.reviewRequest)
             assertTrue(vm.uiState.value.requiresAuth)
             assertEquals(AuthMethod.PIN, vm.uiState.value.authMethod)
-            coVerify(exactly = 0) { repository.prepareAndSend(any(), any(), any(), any()) }
+            coVerify(exactly = 0) { repository.prepareAndSend(any(), any(), any(), any(), any()) }
 
             // The screen calls executeSend() once the PIN/biometric check passes.
             vm.executeSend()
@@ -210,7 +241,7 @@ class SendReviewStateMachineTest {
 
             assertFalse(vm.uiState.value.requiresAuth)
             coVerify(exactly = 1) {
-                repository.prepareAndSend(senderAddress, recipient, 100_00000000L, any())
+                repository.prepareAndSend(senderAddress, recipient, 100_00000000L, any(), plannedFee)
             }
         }
 
@@ -232,7 +263,7 @@ class SendReviewStateMachineTest {
         assertEquals(recipient, vm.uiState.value.recipientAddress)
         assertEquals("100", vm.uiState.value.amountCkb)
         assertEquals(TransactionState.IDLE, vm.uiState.value.transactionState)
-        coVerify(exactly = 0) { repository.prepareAndSend(any(), any(), any(), any()) }
+        coVerify(exactly = 0) { repository.prepareAndSend(any(), any(), any(), any(), any()) }
     }
 
     @Test
@@ -245,7 +276,7 @@ class SendReviewStateMachineTest {
         vm.confirmSend()
         advanceUntilIdle()
 
-        coVerify(exactly = 0) { repository.prepareAndSend(any(), any(), any(), any()) }
+        coVerify(exactly = 0) { repository.prepareAndSend(any(), any(), any(), any(), any()) }
     }
 
     @Test
@@ -262,6 +293,120 @@ class SendReviewStateMachineTest {
 
             assertNull(vm.uiState.value.reviewRequest)
             assertNotNull(vm.uiState.value.error)
-            coVerify(exactly = 0) { repository.prepareAndSend(any(), any(), any(), any()) }
+            coVerify(exactly = 0) { repository.prepareAndSend(any(), any(), any(), any(), any()) }
         }
+
+    @Test
+    fun `double tap on confirm broadcasts once`() = runTest(testDispatcher) {
+        every { authManager.isAuthBeforeSendEnabled() } returns false
+        val vm = newViewModel()
+        advanceUntilIdle()
+
+        vm.fillForm()
+        vm.sendTransaction()
+        advanceUntilIdle()
+
+        // Two taps land before the first send finishes; the second finds no
+        // pending review and must be a no-op.
+        vm.confirmSend()
+        vm.confirmSend()
+        advanceUntilIdle()
+
+        coVerify(exactly = 1) { repository.prepareAndSend(any(), any(), any(), any(), any()) }
+    }
+
+    @Test
+    fun `V2 wallet - review first, then the CryptoObject unlock, then the broadcast`() =
+        runTest(testDispatcher) {
+            // kdfVersion 2: the key is unlocked per signing operation, whatever
+            // the auth-before-send setting says.
+            every { authManager.isAuthBeforeSendEnabled() } returns false
+            coEvery { keyMaterialDao.getKdfVersion(any()) } returns 2
+            coEvery {
+                walletKeyReader.readPrivateKey(any(), any(), any(), any())
+            } returns WalletKeyReader.Result.Success(ByteArray(32) { 7 })
+            val activity = mockk<FragmentActivity>(relaxed = true)
+
+            val vm = newViewModel()
+            advanceUntilIdle()
+
+            vm.fillForm()
+            vm.sendTransaction(activity)
+            advanceUntilIdle()
+
+            assertNotNull(vm.uiState.value.reviewRequest)
+            coVerify(exactly = 0) { walletKeyReader.readPrivateKey(any(), any(), any(), any()) }
+            coVerify(exactly = 0) { repository.prepareAndSend(any(), any(), any(), any(), any()) }
+
+            vm.confirmSend(activity)
+            advanceUntilIdle()
+
+            assertNull(vm.uiState.value.reviewRequest)
+            coVerify(exactly = 1) { walletKeyReader.readPrivateKey(any(), any(), any(), any()) }
+            coVerify(exactly = 1) {
+                repository.prepareAndSend(senderAddress, recipient, 100_00000000L, any(), plannedFee)
+            }
+        }
+
+    @Test
+    fun `V2 wallet - a cancelled unlock broadcasts nothing`() = runTest(testDispatcher) {
+        every { authManager.isAuthBeforeSendEnabled() } returns false
+        coEvery { keyMaterialDao.getKdfVersion(any()) } returns 2
+        coEvery {
+            walletKeyReader.readPrivateKey(any(), any(), any(), any())
+        } returns WalletKeyReader.Result.Cancelled
+        val activity = mockk<FragmentActivity>(relaxed = true)
+
+        val vm = newViewModel()
+        advanceUntilIdle()
+
+        vm.fillForm()
+        vm.sendTransaction(activity)
+        advanceUntilIdle()
+        vm.confirmSend(activity)
+        advanceUntilIdle()
+
+        coVerify(exactly = 0) { repository.prepareAndSend(any(), any(), any(), any(), any()) }
+    }
+
+    @Test
+    fun `V2 wallet confirmed without an activity errors instead of broadcasting`() =
+        runTest(testDispatcher) {
+            every { authManager.isAuthBeforeSendEnabled() } returns false
+            coEvery { keyMaterialDao.getKdfVersion(any()) } returns 2
+
+            val vm = newViewModel()
+            advanceUntilIdle()
+
+            vm.fillForm()
+            vm.sendTransaction()
+            advanceUntilIdle()
+            // The no-activity overload cannot drive a CryptoObject prompt.
+            vm.confirmSend()
+            advanceUntilIdle()
+
+            assertNotNull(vm.uiState.value.error)
+            assertNull(vm.uiState.value.reviewRequest)
+            coVerify(exactly = 0) { repository.prepareAndSend(any(), any(), any(), any(), any()) }
+        }
+
+    @Test
+    fun `a failed preview shows the error instead of the review`() = runTest(testDispatcher) {
+        every { authManager.isAuthBeforeSendEnabled() } returns false
+        coEvery {
+            repository.previewTransfer(any(), any())
+        } throws IllegalStateException("Insufficient balance: have 1, need at least 2")
+
+        val vm = newViewModel()
+        advanceUntilIdle()
+
+        vm.fillForm()
+        vm.sendTransaction()
+        advanceUntilIdle()
+
+        assertNull(vm.uiState.value.reviewRequest)
+        assertNotNull(vm.uiState.value.error)
+        assertFalse(vm.uiState.value.isLoading)
+        coVerify(exactly = 0) { repository.prepareAndSend(any(), any(), any(), any(), any()) }
+    }
 }

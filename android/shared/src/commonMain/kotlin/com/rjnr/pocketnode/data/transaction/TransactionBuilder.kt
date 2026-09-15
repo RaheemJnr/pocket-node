@@ -37,6 +37,20 @@ data class RecipientOutput(
     val amountShannons: Long,
 )
 
+/**
+ * What a transfer will cost, decided before anything is signed: the cells
+ * [TransactionBuilder.buildMultiTransfer] will spend, the fee it will pay and
+ * the change it will return. Produced by [TransactionBuilder.planTransfer] so
+ * the review sheet and the transaction it confirms cannot disagree (#490).
+ */
+data class TransferPlan(
+    val selectedCells: List<Cell>,
+    val totalInput: Long,
+    val totalRecipientAmount: Long,
+    val feeShannons: Long,
+    val changeShannons: Long,
+)
+
 class TransactionBuilder(
     private val networkValidator: NetworkValidator,
     private val logger: Logger = NoopLogger
@@ -264,6 +278,61 @@ class TransactionBuilder(
         )
     }
 
+    /**
+     * Cell selection, fee and change for a transfer, with no signing and no
+     * side effects.
+     *
+     * [buildMultiTransfer] runs this and then serializes its result, so the
+     * pre-broadcast review sheet can quote the fee the send will actually pay
+     * instead of a 1-input guess: selection is smallest-first, so a fragmented
+     * wallet spends many inputs and costs materially more than
+     * `estimateTransferFee(1, n)` suggests (#490).
+     *
+     * Throws the same selection errors the build throws, so a preview fails
+     * where the send would fail.
+     */
+    fun planTransfer(
+        recipients: List<RecipientOutput>,
+        availableCells: List<Cell>,
+    ): TransferPlan {
+        require(recipients.isNotEmpty()) { "At least one recipient is required" }
+        val totalRecipientAmount = recipients.sumOf { it.amountShannons }
+
+        // Select cells with generous fee to ensure we gather enough inputs
+        val (selectedCells, totalInput) = selectCells(availableCells, totalRecipientAmount + DEFAULT_FEE)
+
+        if (selectedCells.isEmpty()) {
+            throw IllegalStateException("No cells available")
+        }
+
+        if (totalInput < totalRecipientAmount + MIN_FEE) {
+            throw IllegalStateException("Insufficient balance: have $totalInput, need at least ${totalRecipientAmount + MIN_FEE}")
+        }
+
+        // Compute dynamic fee based on actual tx structure
+        val changeWithDefaultFee = totalInput - totalRecipientAmount - DEFAULT_FEE
+        val initialOutputCount = recipients.size + if (changeWithDefaultFee >= MIN_CELL_CAPACITY) 1 else 0
+        var dynamicFee = estimateTransferFee(selectedCells.size, initialOutputCount)
+
+        // Recompute change with the (smaller) dynamic fee
+        var change = totalInput - totalRecipientAmount - dynamicFee
+        val finalOutputCount = recipients.size + if (change >= MIN_CELL_CAPACITY) 1 else 0
+
+        // Re-estimate if output count changed (edge case: lower fee creates a viable change output)
+        if (finalOutputCount != initialOutputCount) {
+            dynamicFee = estimateTransferFee(selectedCells.size, finalOutputCount)
+            change = totalInput - totalRecipientAmount - dynamicFee
+        }
+
+        return TransferPlan(
+            selectedCells = selectedCells,
+            totalInput = totalInput,
+            totalRecipientAmount = totalRecipientAmount,
+            feeShannons = dynamicFee,
+            changeShannons = change,
+        )
+    }
+
     fun buildMultiTransfer(
         fromAddress: String,
         recipients: List<RecipientOutput>,
@@ -298,42 +367,17 @@ class TransactionBuilder(
             script
         }
 
-        val totalRecipientAmount = recipients.sumOf { it.amountShannons }
-
         val isMainnet = network == NetworkType.MAINNET
         val secp256k1TxHash = if (isMainnet) MAINNET_SECP256K1_TX_HASH else TESTNET_SECP256K1_TX_HASH
         logger.d(TAG, "  Network: ${network.name}")
         logger.d(TAG, "  Using SECP256K1 cell dep: $secp256k1TxHash")
 
-        // Select cells with generous fee to ensure we gather enough inputs
-        val (selectedCells, totalInput) = selectCells(availableCells, totalRecipientAmount + DEFAULT_FEE)
+        val plan = planTransfer(recipients, availableCells)
+        val selectedCells = plan.selectedCells
+        val change = plan.changeShannons
 
-        logger.d(TAG, "  Selected ${selectedCells.size} cells with total: $totalInput shannons")
-
-        if (selectedCells.isEmpty()) {
-            throw IllegalStateException("No cells available")
-        }
-
-        if (totalInput < totalRecipientAmount + MIN_FEE) {
-            throw IllegalStateException("Insufficient balance: have $totalInput, need at least ${totalRecipientAmount + MIN_FEE}")
-        }
-
-        // Compute dynamic fee based on actual tx structure
-        val changeWithDefaultFee = totalInput - totalRecipientAmount - DEFAULT_FEE
-        val initialOutputCount = recipients.size + if (changeWithDefaultFee >= MIN_CELL_CAPACITY) 1 else 0
-        var dynamicFee = estimateTransferFee(selectedCells.size, initialOutputCount)
-
-        // Recompute change with the (smaller) dynamic fee
-        var change = totalInput - totalRecipientAmount - dynamicFee
-        val finalOutputCount = recipients.size + if (change >= MIN_CELL_CAPACITY) 1 else 0
-
-        // Re-estimate if output count changed (edge case: lower fee creates a viable change output)
-        if (finalOutputCount != initialOutputCount) {
-            dynamicFee = estimateTransferFee(selectedCells.size, finalOutputCount)
-            change = totalInput - totalRecipientAmount - dynamicFee
-        }
-
-        logger.d(TAG, "  Dynamic fee: $dynamicFee shannons (${dynamicFee / 100_000_000.0} CKB)")
+        logger.d(TAG, "  Selected ${selectedCells.size} cells with total: ${plan.totalInput} shannons")
+        logger.d(TAG, "  Dynamic fee: ${plan.feeShannons} shannons (${plan.feeShannons / 100_000_000.0} CKB)")
 
         val inputs = selectedCells.map { cell ->
             CellInput(

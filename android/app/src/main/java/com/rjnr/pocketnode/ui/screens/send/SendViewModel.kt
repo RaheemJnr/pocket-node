@@ -160,6 +160,15 @@ class SendViewModel @Inject constructor(
     private var sendJob: Job? = null
 
     /**
+     * Fee shown on the review sheet the user just confirmed, for a single
+     * send. Passed down to the broadcast so the repository can refuse if a
+     * re-plan under the send mutex no longer agrees (#490). Null for bulk
+     * (several transactions, no single fee) and whenever no review is in
+     * flight.
+     */
+    private var confirmedFeeShannons: Long? = null
+
+    /**
      * Addresses the user has explicitly dismissed the "Save to contacts?"
      * prompt for. Lives in the ViewModel (not in UI state) because it's
      * an interaction history, not a render input. Cleared on process
@@ -465,49 +474,91 @@ class SendViewModel @Inject constructor(
         }
     }
 
-    /** Builds the review snapshot from already-validated inputs. */
-    private fun showReview() {
+    /**
+     * Builds the review snapshot from already-validated inputs.
+     *
+     * A single send is priced by [GatewayRepository.previewTransfer], which
+     * runs the real cell selection and fee math against the cells the send
+     * will spend. `estimatedFee` in the form is a 1-input guess, and cell
+     * selection is smallest-first, so a fragmented wallet pays materially more
+     * than that guess — the sheet must not quote it (#490).
+     */
+    private suspend fun showReview() {
+        confirmedFeeShannons = null
         val state = _uiState.value
-        val review = buildReview(state) ?: return
-        _uiState.update { it.copy(reviewRequest = review, error = null) }
-    }
+        val amountShannons = parseAmountShannons(state.amountCkb) ?: return
 
-    internal fun buildReview(state: SendUiState): SendReview? {
-        val amountShannons = parseAmountShannons(state.amountCkb) ?: return null
-        return if (state.sendMode == SendMode.BULK) {
+        if (state.sendMode == SendMode.BULK) {
+            // A bulk send is several transactions (BULK_BATCH_SIZE recipients
+            // each), so there is no single transaction to price. The sheet
+            // quotes the per-batch estimate and the confirm path skips the
+            // fee re-check.
             val preview = state.refreshBulkPreview(amountShannonsOverride = amountShannons)
-            SendReview(
-                isBulk = true,
-                recipientAddress = "",
-                recipientName = null,
-                recipientCount = preview.bulkValidRecipients.size,
-                amountShannons = preview.bulkTotalAmountShannons,
-                feeShannons = preview.estimatedFee,
-                totalShannons = preview.bulkTotalAmountShannons + preview.estimatedFee,
-            )
-        } else {
-            // estimatedFee is written by updateAmount; the fallback only covers
-            // a prefilled amount that never went through the field.
-            val fee = if (state.estimatedFee > 0) {
-                state.estimatedFee
-            } else {
-                transactionBuilder.estimateTransferFee(inputCount = 1, outputCount = 2)
+            _uiState.update {
+                it.copy(
+                    reviewRequest = SendReview(
+                        isBulk = true,
+                        recipientAddress = "",
+                        recipientName = null,
+                        recipientCount = preview.bulkValidRecipients.size,
+                        amountShannons = preview.bulkTotalAmountShannons,
+                        feeShannons = preview.estimatedFee,
+                        totalShannons = preview.bulkTotalAmountShannons + preview.estimatedFee,
+                    ),
+                    error = null,
+                )
             }
-            SendReview(
-                isBulk = false,
-                recipientAddress = state.recipientAddress,
-                recipientName = state.matchedContact
-                    ?.takeIf { it.address == state.recipientAddress }?.name,
-                recipientCount = 1,
-                amountShannons = amountShannons,
-                feeShannons = fee,
-                totalShannons = amountShannons + fee,
+            return
+        }
+
+        val fromAddress = repository.getCurrentAddress()
+        if (fromAddress == null) {
+            _uiState.update { it.copy(error = com.rjnr.pocketnode.ui.util.UiMessage.Resource(com.rjnr.pocketnode.R.string.vm_error_wallet_not_initialized)) }
+            return
+        }
+
+        _uiState.update { it.copy(isLoading = true, statusMessage = "Preparing transaction...") }
+        val plan = runCatching {
+            repository.previewTransfer(
+                fromAddress = fromAddress,
+                recipients = listOf(RecipientOutput(state.recipientAddress, amountShannons)),
             )
+        }
+        _uiState.update { it.copy(isLoading = false, statusMessage = "") }
+
+        plan.onFailure { e ->
+            logger.e(TAG, "Send preview failed", e)
+            _uiState.update {
+                it.copy(
+                    error = com.rjnr.pocketnode.ui.util.UiMessage.Raw(mapSendErrorMessage(e.message)),
+                    errorDetail = e.message,
+                )
+            }
+        }.onSuccess { transferPlan ->
+            _uiState.update {
+                it.copy(
+                    reviewRequest = SendReview(
+                        isBulk = false,
+                        recipientAddress = state.recipientAddress,
+                        recipientName = state.matchedContact
+                            ?.takeIf { contact -> contact.address == state.recipientAddress }?.name,
+                        recipientCount = 1,
+                        amountShannons = amountShannons,
+                        feeShannons = transferPlan.feeShannons,
+                        totalShannons = amountShannons + transferPlan.feeShannons,
+                    ),
+                    // The form's fee line was the 1-input guess; replace it with
+                    // the planned fee so both surfaces agree.
+                    estimatedFee = transferPlan.feeShannons,
+                    error = null,
+                )
+            }
         }
     }
 
     /** Review dismissed without sending: back to the form, nothing broadcast. */
     fun cancelReview() {
+        confirmedFeeShannons = null
         _uiState.update { it.copy(reviewRequest = null) }
     }
 
@@ -520,7 +571,11 @@ class SendViewModel @Inject constructor(
     private fun confirmSendInternal(activity: FragmentActivity?) {
         // No review on screen means nothing was confirmed: refuse rather than
         // broadcast. Also makes a double-tap on Confirm a no-op.
-        if (_uiState.value.reviewRequest == null) return
+        val review = _uiState.value.reviewRequest ?: return
+        // The fee the user actually agreed to. The send re-plans under the
+        // send mutex and aborts if this no longer matches, so the broadcast
+        // can never pay a number the sheet did not show (#490).
+        confirmedFeeShannons = review.feeShannons.takeIf { !review.isBulk }
         _uiState.update { it.copy(reviewRequest = null) }
 
         viewModelScope.launch {
@@ -712,6 +767,7 @@ class SendViewModel @Inject constructor(
                 toAddress = recipient,
                 amountShannons = amountShannons,
                 privateKey = privateKey,
+                expectedFeeShannons = confirmedFeeShannons,
             ).getOrThrow()
             _uiState.update {
                 it.copy(
@@ -794,7 +850,8 @@ class SendViewModel @Inject constructor(
                         fromAddress = capturedAddress,
                         toAddress = recipient,
                         amountShannons = amountShannons,
-                        privateKey = capturedKey
+                        privateKey = capturedKey,
+                        expectedFeeShannons = confirmedFeeShannons,
                     ).getOrThrow()
                     logger.d(TAG, "✅ Transaction sent! Hash: $txHash")
 
