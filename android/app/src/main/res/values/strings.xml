@@ -292,6 +292,8 @@
     <string name="vm_error_delete_sub_accounts_first_other">This wallet has %1$d sub-accounts. Delete them first before removing the parent.</string>
     <string name="vm_error_delete_failed">Delete failed: %1$s</string>
     <string name="vm_error_delete_last_wallet">This is your only wallet. Use Forgot PIN from the lock screen if you want to erase everything and start over from your recovery phrase.</string>
+    <!-- #496: a key_material row that cannot be read and cannot be repaired from the legacy store. -->
+    <string name="vm_error_key_material_unreadable">Could not read this wallet\'s keys. Restore from your recovery phrase if this persists.</string>
     <string name="vm_error_reopen_for_biometric">Reopen this screen — biometric unlock required for V2 wallets</string>
     <string name="vm_error_auth_cancelled">Authentication cancelled</string>
     <string name="vm_error_cannot_read_wallet_key">Cannot read wallet key: %1$s</string>

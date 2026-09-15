@@ -222,10 +222,20 @@ class SecuritySettingsViewModel @Inject constructor(
                     // with V2KeyMaterialRequiresAuthException (#213 sub-PR 5).
                     val privateKey = try {
                         keyManager.getPrivateKeyForWallet(wallet.walletId) ?: continue
-                    } catch (e: Exception) {
+                    } catch (e: com.rjnr.pocketnode.data.crypto.V2KeyMaterialRequiresAuthException) {
                         logger.i(
                             "SecuritySettingsVM",
                             "Skipping V2-protected wallet ${wallet.walletId} during PIN backup",
+                        )
+                        continue
+                    } catch (e: Exception) {
+                        // Not a V2 wallet waiting for a prompt — the row is
+                        // genuinely unreadable (#496). Same skip, honest label:
+                        // calling it V2-protected hid a broken wallet.
+                        logger.e(
+                            "SecuritySettingsVM",
+                            "Skipping wallet ${wallet.walletId} during PIN backup: key material unreadable",
+                            e,
                         )
                         continue
                     }
