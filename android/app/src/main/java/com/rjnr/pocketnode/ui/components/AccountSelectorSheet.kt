@@ -42,6 +42,9 @@ import com.composables.icons.lucide.ChevronUp
 import com.composables.icons.lucide.Lucide
 import com.rjnr.pocketnode.R
 import com.rjnr.pocketnode.data.database.entity.WalletEntity
+import com.rjnr.pocketnode.data.gateway.models.NetworkType
+import com.rjnr.pocketnode.ui.util.addressFor
+import com.rjnr.pocketnode.ui.util.truncateAddress
 
 data class WalletGroup(
     val wallet: WalletEntity,
@@ -57,7 +60,9 @@ fun AccountSelectorSheet(
     onSelectAccount: (String) -> Unit,
     onManageWallets: () -> Unit,
     onDismiss: () -> Unit,
-    balances: Map<String, String> = emptyMap()
+    balances: Map<String, String> = emptyMap(),
+    /** Network the app is pointed at — picks the hrp each row is encoded with (#489). */
+    network: NetworkType = NetworkType.MAINNET
 ) {
     ModalBottomSheet(
         onDismissRequest = onDismiss,
@@ -102,7 +107,8 @@ fun AccountSelectorSheet(
                                 onDismiss()
                                 onSelectAccount(walletId)
                             },
-                            balances = balances
+                            balances = balances,
+                            network = network
                         )
                     }
                 }
@@ -116,7 +122,8 @@ private fun WalletGroupSection(
     group: WalletGroup,
     activeWalletId: String,
     onSelectAccount: (String) -> Unit,
-    balances: Map<String, String> = emptyMap()
+    balances: Map<String, String> = emptyMap(),
+    network: NetworkType = NetworkType.MAINNET
 ) {
     val hasSubAccounts = group.subAccounts.isNotEmpty()
     var isExpanded by remember { mutableStateOf(true) }
@@ -160,7 +167,8 @@ private fun WalletGroupSection(
             wallet = group.wallet,
             isActive = group.wallet.walletId == activeWalletId,
             onClick = { onSelectAccount(group.wallet.walletId) },
-            cachedBalance = balances[group.wallet.walletId]
+            cachedBalance = balances[group.wallet.walletId],
+            network = network
         )
 
         // Sub-account rows (collapsible)
@@ -172,7 +180,8 @@ private fun WalletGroupSection(
                         isActive = subAccount.walletId == activeWalletId,
                         isSubAccount = true,
                         onClick = { onSelectAccount(subAccount.walletId) },
-                        cachedBalance = balances[subAccount.walletId]
+                        cachedBalance = balances[subAccount.walletId],
+                        network = network
                     )
                 }
             }
@@ -191,7 +200,8 @@ private fun AccountRow(
     isActive: Boolean,
     isSubAccount: Boolean = false,
     onClick: () -> Unit,
-    cachedBalance: String? = null
+    cachedBalance: String? = null,
+    network: NetworkType = NetworkType.MAINNET
 ) {
     val startPadding = if (isSubAccount) 40.dp else 16.dp
     val borderColor = if (isActive) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.outlineVariant
@@ -231,11 +241,11 @@ private fun AccountRow(
                     style = MaterialTheme.typography.bodyMedium,
                     fontWeight = FontWeight.Medium
                 )
-                // Show truncated address
-                val address = wallet.mainnetAddress.ifEmpty { wallet.testnetAddress }
+                // Truncated address, encoded for the network the app is on (#489)
+                val address = wallet.addressFor(network)
                 if (address.isNotEmpty()) {
                     Text(
-                        text = "${address.take(10)}...${address.takeLast(6)}",
+                        text = address.truncateAddress(),
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                         maxLines = 1,

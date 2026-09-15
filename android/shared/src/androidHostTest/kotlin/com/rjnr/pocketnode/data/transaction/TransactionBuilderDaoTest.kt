@@ -224,6 +224,97 @@ class TransactionBuilderDaoTest {
         }
     }
 
+    /**
+     * #490: a phase-1 withdraw paid 100,000 shannons (the flat DEFAULT_FEE
+     * reservation) where a plain send and a DAO deposit of the same shape paid
+     * 1,000. The withdraw is now priced by the same size-based estimator, so
+     * its fee must sit in the same band as a comparable deposit rather than
+     * two orders of magnitude above it.
+     */
+    @Test
+    fun `buildDaoWithdraw fee is in the same band as a deposit of similar size`() {
+        val depositInputs = listOf(makeCell(20_000_00000000L, index = 3))
+        val depositTx = builder.buildDaoDeposit(
+            amountShannons = DaoConstants.MIN_DEPOSIT_SHANNONS,
+            availableCells = depositInputs,
+            senderScript = testScript,
+            privateKey = testPrivateKey,
+            network = NetworkType.TESTNET
+        )
+        val depositFee = paidFee(depositTx, depositInputs)
+
+        val feeCell = makeCell(200_00000000L, index = 1)
+        val depositCell = makeDepositCell()
+        val withdrawTx = builder.buildDaoWithdraw(
+            depositCell = depositCell,
+            depositBlockNumber = 100L,
+            depositBlockHash = "0x" + "ee".repeat(32),
+            senderScript = testScript,
+            privateKey = testPrivateKey,
+            network = NetworkType.TESTNET,
+            availableCells = listOf(feeCell)
+        )
+        val withdrawFee = paidFee(withdrawTx, listOf(depositCell, feeCell))
+
+        assertTrue("withdraw fee $withdrawFee below the floor", withdrawFee >= TransactionBuilder.MIN_FEE)
+        assertTrue(
+            "withdraw fee $withdrawFee must not be the flat reservation",
+            withdrawFee < TransactionBuilder.DEFAULT_FEE
+        )
+        assertTrue(
+            "withdraw fee $withdrawFee out of band vs deposit fee $depositFee",
+            withdrawFee <= depositFee * 2 && withdrawFee * 2 >= depositFee
+        )
+
+        // The band alone would pass if both were wrong in the same direction.
+        // At the standard 1000 shannons/KB relay rate a transaction must pay
+        // at least one shannon per serialized byte, so measure the real
+        // molecule size and require the fee to cover it. This is the
+        // assertion that fails if a future estimator undershoots a DAO shape
+        // the way the transfer formula undershot fragmented sends (#395).
+        assertFeeCoversSerializedSize(withdrawTx, withdrawFee)
+        assertFeeCoversSerializedSize(depositTx, depositFee)
+    }
+
+    @Test
+    fun `buildDaoUnlock fee covers the serialized transaction`() {
+        val maxWithdraw = 10_300_000_000L
+        val tx = builder.buildDaoUnlock(
+            withdrawingCell = makeWithdrawingCell(),
+            maxWithdraw = maxWithdraw,
+            sinceValue = "0x2000180000b0000a",
+            depositBlockHash = "0x" + "aa".repeat(32),
+            withdrawBlockHash = "0x" + "bb".repeat(32),
+            senderScript = testScript,
+            privateKey = testPrivateKey,
+            network = NetworkType.TESTNET
+        )
+        // The unlock pays out of the withdrawing cell's own capacity, so the
+        // fee is what the output gives up.
+        val fee = maxWithdraw - tx.cellOutputs[0].capacity.removePrefix("0x").toLong(16)
+        assertTrue("unlock fee $fee below the floor", fee >= TransactionBuilder.MIN_FEE)
+        assertFeeCoversSerializedSize(tx, fee)
+    }
+
+    /** At 1000 shannons/KB a transaction must pay at least one shannon per serialized byte. */
+    private fun assertFeeCoversSerializedSize(tx: Transaction, fee: Long) {
+        val size = builder.serializedSizeWithWitnesses(tx)
+        assertTrue(
+            "fee $fee does not cover $size serialized bytes at the minimum relay rate",
+            fee >= size
+        )
+    }
+
+    /** Fee actually paid: inputs consumed minus capacity returned to outputs. */
+    private fun paidFee(tx: Transaction, inputCells: List<Cell>): Long {
+        val totalIn = tx.cellInputs.sumOf { input ->
+            val cell = inputCells.first { it.outPoint == input.previousOutput }
+            cell.capacity.removePrefix("0x").toLong(16)
+        }
+        val totalOut = tx.cellOutputs.sumOf { it.capacity.removePrefix("0x").toLong(16) }
+        return totalIn - totalOut
+    }
+
     // --- buildDaoUnlock ---
 
     @Test
@@ -318,9 +409,15 @@ class TransactionBuilderDaoTest {
             privateKey = testPrivateKey,
             network = NetworkType.TESTNET
         )
-        val expected = maxWithdraw - TransactionBuilder.DEFAULT_FEE
+        // #490: the fee is the dynamic estimate for the 1-in/1-out unlock, not
+        // the flat DEFAULT_FEE reservation.
+        val expected = maxWithdraw - builder.estimateTransferFee(inputCount = 1, outputCount = 1)
         val actual = tx.cellOutputs[0].capacity.removePrefix("0x").toLong(16)
         assertEquals(expected, actual)
+        assertTrue(
+            "unlock must not pay the flat reservation",
+            maxWithdraw - actual < TransactionBuilder.DEFAULT_FEE
+        )
     }
 
     @Test
