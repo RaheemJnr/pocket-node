@@ -20,6 +20,7 @@ import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.res.pluralStringResource
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
@@ -77,7 +78,11 @@ fun SendReviewSheet(
             if (review.isBulk) {
                 ReviewRow(
                     label = stringResource(R.string.send_review_recipients),
-                    value = stringResource(R.string.send_review_recipient_count, review.recipientCount),
+                    value = pluralStringResource(
+                        R.plurals.send_review_recipient_count,
+                        review.recipientCount,
+                        review.recipientCount,
+                    ),
                 )
             } else {
                 ReviewRow(

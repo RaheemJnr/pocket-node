@@ -480,7 +480,6 @@
     <string name="send_review_subtitle">Check the details. This cannot be undone once confirmed.</string>
     <string name="send_review_recipient">Recipient</string>
     <string name="send_review_recipients">Recipients</string>
-    <string name="send_review_recipient_count">%1$d addresses</string>
     <string name="send_review_amount">Amount</string>
     <string name="send_review_fee">Network fee</string>
     <string name="send_review_total">Total</string>
@@ -525,6 +524,10 @@
     <string name="sweep_dialog_confirm">Move funds</string>
     <string name="sweep_broadcast">Your funds are on the way to your main address. The transaction will appear in Activity.</string>
     <string name="sweep_failed">Could not move the funds: %1$s</string>
+    <plurals name="send_review_recipient_count">
+        <item quantity="one">%d address</item>
+        <item quantity="other">%d addresses</item>
+    </plurals>
     <plurals name="found_funds_body">
         <item quantity="one">These funds sit on %d extra address created from your recovery phrase by another wallet app. They belong to you and are safe. You can move them to your main address in one transaction.</item>
         <item quantity="other">These funds sit on %d extra addresses created from your recovery phrase by another wallet app. They belong to you and are safe. You can move them to your main address in one transaction.</item>

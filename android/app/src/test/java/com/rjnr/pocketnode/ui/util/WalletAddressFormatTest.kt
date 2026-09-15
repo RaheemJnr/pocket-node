@@ -46,13 +46,15 @@ class WalletAddressFormatTest {
     }
 
     @Test
-    fun `testnet falls back to mainnet encoding when testnet address is missing`() {
-        assertEquals(mainnet, wallet(testnetAddress = "").addressFor(NetworkType.TESTNET))
+    fun `missing testnet encoding yields empty, never the mainnet one`() {
+        // Falling back to the other hrp would re-create the bug: callers skip
+        // an empty address instead of rendering or sending a ckb1 on testnet.
+        assertEquals("", wallet(testnetAddress = "").addressFor(NetworkType.TESTNET))
     }
 
     @Test
-    fun `mainnet falls back to testnet encoding when mainnet address is missing`() {
-        assertEquals(testnet, wallet(mainnetAddress = "").addressFor(NetworkType.MAINNET))
+    fun `missing mainnet encoding yields empty, never the testnet one`() {
+        assertEquals("", wallet(mainnetAddress = "").addressFor(NetworkType.MAINNET))
     }
 
     @Test

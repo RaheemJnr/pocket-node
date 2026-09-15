@@ -12,12 +12,16 @@ import com.rjnr.pocketnode.data.gateway.models.NetworkType
  * unconditionally and showed `ckb1...` rows while the app ran on testnet
  * (#489).
  *
- * Falls back to the other encoding when the preferred one is empty — rows
- * written by older versions can carry only one.
+ * Strict: a row that carries only the other network's encoding (possible for
+ * rows written by older versions) returns empty rather than the wrong hrp.
+ * Every caller already skips an empty address — a display row renders without
+ * one, the balance refresh skips the wallet, the "My Wallets" entry is
+ * disabled — and showing or sending a `ckb1` address on testnet is the bug
+ * this closes, not an acceptable fallback.
  */
 fun WalletEntity.addressFor(network: NetworkType): String = when (network) {
-    NetworkType.MAINNET -> mainnetAddress.ifEmpty { testnetAddress }
-    NetworkType.TESTNET -> testnetAddress.ifEmpty { mainnetAddress }
+    NetworkType.MAINNET -> mainnetAddress
+    NetworkType.TESTNET -> testnetAddress
 }
 
 /**
