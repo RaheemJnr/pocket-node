@@ -53,6 +53,33 @@ protocol; `isHardwareBacked` reports which one is in play. Keychain items
 survive app deletion, so `InstallMarker` wipes them on the first launch of a
 fresh install.
 
+## Preferences and wallet metadata
+
+`PocketNode/Services/Preferences/UserDefaultsPreferences.swift` implements
+the shared `core.prefs` interfaces (`SyncPreferences`, `UiPreferences`,
+`NetworkPreferences`, `AppStatePreferences` from `PocketNodeCore`) on
+`UserDefaults`, key-for-key with Android's
+`data/wallet/WalletPreferences.kt`: same key names, same defaults (network
+selection defaults to mainnet; sync mode defaults to `NEW_WALLET`), same
+per-network / per-wallet key suffixing. No Keychain access here; nothing
+secret goes into UserDefaults.
+
+`PocketNode/Services/Wallet/WalletStore.swift` persists the single active
+wallet's metadata (name, type, addresses, derivation path,
+`mnemonicBackedUp`, `createdAt`) as a JSON file in
+`Application Support/PocketNode/wallet.json`, complete-file-protected and
+written atomically. This is the M2 single-wallet store; M3 decides whether
+multi-wallet moves to Room via KMP or SQLDelight, and `WalletRecord`'s field
+names mirror Android's `WalletEntity` so that migration can read this file
+directly.
+
+`AppContainer` reads the selected network from `NetworkPreferences` once at
+launch and passes it to `LightClientService`. The `PocketNodeNetwork`
+acceptance test needs testnet specifically, so it sets
+`POCKETNODE_NETWORK=testnet` in `app.launchEnvironment` before launching
+rather than the app defaulting to testnet for everyone (`NodeStatusUITests`,
+`AppContainer.applyNetworkOverrideForTestingIfPresent`).
+
 ## CI
 
 `.github/workflows/ios-ci.yml` runs on macOS runners for every PR and push to
