@@ -39,6 +39,9 @@ struct BackupView: View {
                 viewModel.onBackgrounded()
             }
         }
+        // See `HomeView`: without this the identifier would be pushed down
+        // onto the reveal, verify and done buttons, replacing theirs.
+        .accessibilityElement(children: .contain)
         .accessibilityIdentifier("backup.root")
     }
 
@@ -78,6 +81,7 @@ struct BackupView: View {
             .disabled(viewModel.isRevealing)
             .accessibilityIdentifier("backup.reveal")
         }
+        .accessibilityElement(children: .contain)
         .accessibilityIdentifier("backup.gate")
     }
 
@@ -106,6 +110,7 @@ struct BackupView: View {
                 .frame(maxWidth: .infinity)
                 .accessibilityIdentifier("backup.noPhrase.done")
         }
+        .accessibilityElement(children: .contain)
         .accessibilityIdentifier("backup.noPhrase")
     }
 
@@ -134,6 +139,7 @@ struct BackupView: View {
             .accessibilityIdentifier("backup.wroteItDown")
         }
         .privacyShield()
+        .accessibilityElement(children: .contain)
         .accessibilityIdentifier("backup.display")
     }
 
@@ -189,6 +195,7 @@ struct BackupView: View {
             .accessibilityIdentifier("backup.verifyButton")
         }
         .privacyShield()
+        .accessibilityElement(children: .contain)
         .accessibilityIdentifier("backup.verify")
     }
 
@@ -239,6 +246,7 @@ struct BackupView: View {
                 .frame(maxWidth: .infinity)
                 .accessibilityIdentifier("backup.done")
         }
+        .accessibilityElement(children: .contain)
         .accessibilityIdentifier("backup.success")
     }
 }

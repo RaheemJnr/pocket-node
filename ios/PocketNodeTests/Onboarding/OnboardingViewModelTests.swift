@@ -49,7 +49,6 @@ final class OnboardingViewModelTests: XCTestCase {
 
     func testTheFlowStartsOnTheWelcomeStep() {
         XCTAssertEqual(model.step, .welcome)
-        XCTAssertTrue(model.pendingMnemonic.isEmpty)
         XCTAssertNil(model.errorMessage)
     }
 
@@ -74,43 +73,24 @@ final class OnboardingViewModelTests: XCTestCase {
 
         await model.createWallet(wordCount: 12, name: "Main")
         XCTAssertEqual(model.step, .backup)
-        XCTAssertEqual(model.pendingMnemonic.count, 12)
         XCTAssertNil(model.errorMessage)
         XCTAssertFalse(model.isBusy)
+        XCTAssertNotNil(walletStore.load(), "the wallet is stored before the backup step")
 
         model.finishBackup()
         XCTAssertEqual(model.step, .pinSetup)
-        XCTAssertTrue(
-            model.pendingMnemonic.isEmpty,
-            "the phrase must not outlive the step that shows it"
-        )
 
         model.finishPinSetup()
         XCTAssertEqual(model.step, .done)
     }
 
-    func testTwentyFourWordCreateKeepsAllOfThem() async {
+    func testATwentyFourWordCreateAlsoReachesTheBackupStep() async {
         await model.createWallet(wordCount: 24, name: "Main")
 
-        XCTAssertEqual(model.pendingMnemonic.count, 24)
-    }
-
-    func testBackingOutOfTheFlowDropsThePhrase() async {
-        await model.createWallet(wordCount: 12, name: "Main")
-        XCTAssertFalse(model.pendingMnemonic.isEmpty)
-
-        model.backToWelcome()
-
-        XCTAssertTrue(model.pendingMnemonic.isEmpty)
-        XCTAssertEqual(model.step, .welcome)
-    }
-
-    func testFinishingPinSetupAlsoDropsThePhrase() async {
-        await model.createWallet(wordCount: 12, name: "Main")
-
-        model.finishPinSetup()
-
-        XCTAssertTrue(model.pendingMnemonic.isEmpty)
+        XCTAssertEqual(model.step, .backup)
+        XCTAssertNil(model.errorMessage)
+        // The word count itself is `WalletCreatorTests`' subject; this view
+        // model never sees the phrase, by design.
     }
 
     // MARK: - Import path
@@ -121,7 +101,6 @@ final class OnboardingViewModelTests: XCTestCase {
         await model.importMnemonic(words: WalletCreatorTests.testPhrase, name: "Restored")
 
         XCTAssertEqual(model.step, .pinSetup, "the user already holds the phrase")
-        XCTAssertTrue(model.pendingMnemonic.isEmpty)
         XCTAssertNil(model.errorMessage)
     }
 
@@ -131,7 +110,6 @@ final class OnboardingViewModelTests: XCTestCase {
         await model.importPrivateKey(hex: WalletCreatorTests.testPrivateKeyHex, name: "Key")
 
         XCTAssertEqual(model.step, .pinSetup)
-        XCTAssertTrue(model.pendingMnemonic.isEmpty)
     }
 
     // MARK: - Failures

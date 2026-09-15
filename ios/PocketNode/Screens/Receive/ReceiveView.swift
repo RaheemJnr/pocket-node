@@ -69,6 +69,9 @@ struct ReceiveView: View {
         } message: {
             Text("You haven't backed up your recovery phrase yet. If you lose this device, your funds will be unrecoverable.")
         }
+        // See `HomeView`: without this the identifier would be pushed down
+        // onto the copy button, the address and the QR code, replacing theirs.
+        .accessibilityElement(children: .contain)
         .accessibilityIdentifier("receive.root")
     }
 

@@ -18,6 +18,7 @@ final class OnboardingScreenshotTests: XCTestCase {
     private var keychain: KeychainStore!
     private var wrapper: SecureEnclaveKeyWrapper!
     private var directory: URL!
+    private var walletStore: WalletStore!
     private var model: OnboardingViewModel!
 
     override func setUp() async throws {
@@ -28,10 +29,11 @@ final class OnboardingScreenshotTests: XCTestCase {
         try? wrapper.deleteKey()
         directory = FileManager.default.temporaryDirectory
             .appendingPathComponent("\(service)-\(UUID().uuidString)")
+        walletStore = WalletStore(directory: directory)
         model = OnboardingViewModel(
             creator: WalletCreator(
                 keyStore: WalletKeyStore(keychain: keychain, wrapper: wrapper),
-                walletStore: WalletStore(directory: directory)
+                walletStore: walletStore
             )
         )
     }
@@ -41,6 +43,7 @@ final class OnboardingScreenshotTests: XCTestCase {
         try? wrapper.deleteKey()
         try? FileManager.default.removeItem(at: directory)
         model = nil
+        walletStore = nil
         wrapper = nil
         keychain = nil
         directory = nil
@@ -72,7 +75,7 @@ final class OnboardingScreenshotTests: XCTestCase {
         save(render(view), named: "515-onboarding-import-key")
     }
 
-    func testBackupPlaceholderRenders() async {
+    func testBackupStepRenders() async {
         await model.createWallet(wordCount: 12, name: "Main")
         XCTAssertEqual(model.step, .backup)
 
@@ -89,6 +92,22 @@ final class OnboardingScreenshotTests: XCTestCase {
                 biometrics: StubBiometrics(availability: .faceID),
                 preferences: UserDefaultsPreferences(defaults: UserDefaults(suiteName: "\(service).prefs")!)
             ),
+            makeBackupViewModel: { [walletStore] in
+                BackupViewModel(
+                    walletKeyStore: StubWalletKeyReader(
+                        result: .success(
+                            WalletKeyBundle(
+                                privateKeyHex: "00",
+                                mnemonic: Array(repeating: "abandon", count: 12).joined(separator: " ")
+                            )
+                        )
+                    ),
+                    walletStore: walletStore!,
+                    auth: StubAuthGate(),
+                    isOnboarding: true,
+                    hasPin: { false }
+                )
+            },
             onFinished: {}
         )
     }
