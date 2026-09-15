@@ -72,9 +72,17 @@ import com.rjnr.pocketnode.data.gateway.models.TransactionRecord
 import androidx.compose.ui.res.stringResource
 import com.rjnr.pocketnode.R
 import com.rjnr.pocketnode.ui.util.resolveString
+import com.rjnr.pocketnode.ui.education.TransactionStatusExplainer
 import com.rjnr.pocketnode.ui.theme.ErrorRed
 import com.rjnr.pocketnode.ui.theme.PendingAmber
 import com.rjnr.pocketnode.ui.theme.SuccessGreen
+import com.rjnr.pocketnode.ui.transaction.BroadcastInfo
+import com.rjnr.pocketnode.ui.transaction.TransactionStatusChip
+import com.rjnr.pocketnode.ui.transaction.TransactionStatusUi
+import com.rjnr.pocketnode.ui.transaction.TxDisplayState
+import com.rjnr.pocketnode.ui.transaction.elapsedText
+import com.rjnr.pocketnode.ui.transaction.rememberTickingNow
+import com.rjnr.pocketnode.ui.transaction.statusColors
 import com.rjnr.pocketnode.util.formatBlockTimestamp
 import java.time.Instant
 import java.time.LocalDate
@@ -132,6 +140,15 @@ fun ActivityScreen(
     }
 
     val pagingItems = viewModel.transactionPagingFlow.collectAsLazyPagingItems()
+    val broadcastStates by viewModel.broadcastStates.collectAsState()
+
+    // "Pending · 2 min" has to age on screen. The ticker only runs while
+    // something is actually in flight, and it reads the device clock only:
+    // no extra queries, no JNI, no change to sync or broadcast polling.
+    val hasInFlight = broadcastStates.values.any {
+        it.state == "BROADCASTING" || it.state == "BROADCAST"
+    }
+    val now by rememberTickingNow(enabled = hasInFlight)
 
     LaunchedEffect(Unit) {
         viewModel.exportEvent.collect { csv ->
@@ -235,6 +252,8 @@ fun ActivityScreen(
 
                             ActivityTransactionItem(
                                 transaction = tx,
+                                broadcast = broadcastStates[tx.txHash],
+                                nowMillis = now,
                                 onClick = { selectedTransaction = tx },
                                 onRetry = if (tx.status == "FAILED" && tx.isOutgoing()) {
                                     { retryDialogTx = tx }
@@ -263,6 +282,8 @@ fun ActivityScreen(
             selectedTransaction?.let { tx ->
                 TransactionDetailSheet(
                     transaction = tx,
+                    broadcast = broadcastStates[tx.txHash],
+                    nowMillis = now,
                     network = uiState.currentNetwork,
                     onDismiss = { selectedTransaction = null },
                     onCopyTxHash = { hash ->
@@ -362,11 +383,19 @@ private fun DateGroupHeader(label: String) {
 @Composable
 private fun ActivityTransactionItem(
     transaction: TransactionRecord,
+    broadcast: BroadcastInfo?,
+    nowMillis: Long,
     onClick: () -> Unit,
     onRetry: (() -> Unit)? = null
 ) {
-    val isFailed = transaction.status == "FAILED"
-    val isPending = !isFailed && transaction.isPending()
+    val displayState = TransactionStatusUi.displayState(
+        status = transaction.status,
+        confirmations = transaction.confirmations,
+        broadcast = broadcast,
+    )
+    val isFailed = displayState == TxDisplayState.FAILED
+    val inFlight = TransactionStatusUi.showsElapsed(displayState)
+    val sinceMillis = TransactionStatusUi.pendingSince(transaction.timestamp, broadcast)
 
     val primaryColor = MaterialTheme.colorScheme.primary
     val onSurfaceVariantColor = MaterialTheme.colorScheme.onSurfaceVariant
@@ -389,13 +418,34 @@ private fun ActivityTransactionItem(
         else -> "Sent"
     }
 
+    // In-flight rows get a tinted ground and a left accent bar so they read as
+    // a distinct block at the top of the list rather than as ordinary history
+    // with a small chip on it (#432).
+    val rowBackground = when {
+        inFlight -> statusColors(displayState).background.copy(alpha = 0.10f)
+        isFailed -> ErrorRed.copy(alpha = 0.06f)
+        else -> Color.Transparent
+    }
+
     Row(
         modifier = Modifier
             .fillMaxWidth()
             .clickable(onClick = onClick)
+            .background(rowBackground)
             .padding(horizontal = 16.dp, vertical = 12.dp),
         verticalAlignment = Alignment.CenterVertically
     ) {
+        if (inFlight || isFailed) {
+            Box(
+                modifier = Modifier
+                    .width(3.dp)
+                    .height(36.dp)
+                    .clip(RoundedCornerShape(2.dp))
+                    .background(statusColors(displayState).foreground)
+            )
+            Spacer(modifier = Modifier.width(9.dp))
+        }
+
         // Direction icon
         Box(
             modifier = Modifier
@@ -422,37 +472,20 @@ private fun ActivityTransactionItem(
                     style = MaterialTheme.typography.bodyMedium,
                     fontWeight = FontWeight.Medium
                 )
-                if (isFailed) {
+                // Confirmed rows stay unbadged: the list is overwhelmingly
+                // confirmed history, and badging every row would drown the
+                // handful that actually need attention.
+                if (isFailed || inFlight) {
                     Spacer(modifier = Modifier.width(6.dp))
-                    Surface(
-                        color = ErrorRed.copy(alpha = 0.15f),
-                        shape = RoundedCornerShape(4.dp),
-                        modifier = if (onRetry != null) {
-                            Modifier.clickable { onRetry() }
-                        } else {
-                            Modifier
-                        }
-                    ) {
-                        Text(
-                            text = "Failed",
-                            style = MaterialTheme.typography.labelSmall,
-                            color = ErrorRed,
-                            modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp)
-                        )
-                    }
-                } else if (isPending) {
-                    Spacer(modifier = Modifier.width(6.dp))
-                    Surface(
-                        color = AmberPending.copy(alpha = 0.15f),
-                        shape = RoundedCornerShape(4.dp)
-                    ) {
-                        Text(
-                            text = "Pending",
-                            style = MaterialTheme.typography.labelSmall,
-                            color = AmberPending,
-                            modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp)
-                        )
-                    }
+                    TransactionStatusChip(
+                        state = displayState,
+                        sinceMillis = sinceMillis,
+                        nowMillis = nowMillis,
+                        onClick = if (isFailed) onRetry else null,
+                        textStyle = MaterialTheme.typography.labelSmall,
+                        horizontalPadding = 6.dp,
+                        verticalPadding = 2.dp,
+                    )
                 }
                 if (transaction.isBulk) {
                     Spacer(modifier = Modifier.width(6.dp))
@@ -470,6 +503,8 @@ private fun ActivityTransactionItem(
                 }
             }
             Spacer(modifier = Modifier.height(2.dp))
+            // The hash stays on the row from the moment of broadcast, so it is
+            // copyable from the detail sheet before the tx is anywhere on chain.
             Text(
                 text = transaction.shortTxHash(),
                 style = MaterialTheme.typography.bodySmall,
@@ -478,6 +513,16 @@ private fun ActivityTransactionItem(
                 maxLines = 1,
                 overflow = TextOverflow.Ellipsis
             )
+            if (isFailed) {
+                Spacer(modifier = Modifier.height(2.dp))
+                Text(
+                    text = stringResource(TransactionStatusUi.failureReasonRes(broadcast)),
+                    style = MaterialTheme.typography.labelSmall,
+                    color = ErrorRed,
+                    maxLines = 2,
+                    overflow = TextOverflow.Ellipsis
+                )
+            }
         }
 
         Spacer(modifier = Modifier.width(12.dp))
@@ -490,12 +535,16 @@ private fun ActivityTransactionItem(
                 fontWeight = FontWeight.SemiBold,
                 color = amountColor
             )
-            Spacer(modifier = Modifier.height(2.dp))
-            Text(
-                text = formatBlockTimestamp(transaction.blockTimestampHex),
-                style = MaterialTheme.typography.labelSmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant
-            )
+            // An in-flight tx has no block timestamp yet; the placeholder dash
+            // read as missing data. Its elapsed time is on the badge instead.
+            if (!inFlight) {
+                Spacer(modifier = Modifier.height(2.dp))
+                Text(
+                    text = formatBlockTimestamp(transaction.blockTimestampHex),
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+            }
         }
     }
 
@@ -572,6 +621,8 @@ private fun ErrorState(message: String?, onRetry: () -> Unit) {
 @Composable
 private fun TransactionDetailSheet(
     transaction: TransactionRecord,
+    broadcast: BroadcastInfo?,
+    nowMillis: Long,
     network: NetworkType,
     onDismiss: () -> Unit,
     onCopyTxHash: (String) -> Unit,
@@ -579,6 +630,11 @@ private fun TransactionDetailSheet(
     onRetry: ((TransactionRecord) -> Unit)? = null
 ) {
     val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
+    val displayState = TransactionStatusUi.displayState(
+        status = transaction.status,
+        confirmations = transaction.confirmations,
+        broadcast = broadcast,
+    )
     val amountColor = when {
         transaction.isDaoDeposit() -> MaterialTheme.colorScheme.primary
         transaction.isDaoWithdraw() -> AmberPending
@@ -613,8 +669,19 @@ private fun TransactionDetailSheet(
                     style = MaterialTheme.typography.titleLarge,
                     fontWeight = FontWeight.Bold
                 )
-                StatusBadge(transaction = transaction)
+                TransactionStatusChip(
+                    state = displayState,
+                    sinceMillis = TransactionStatusUi.pendingSince(transaction.timestamp, broadcast),
+                    nowMillis = nowMillis,
+                )
             }
+
+            Spacer(modifier = Modifier.height(16.dp))
+
+            // What this state means and what happens next (#432). Shown for
+            // every state, not just pending: "Confirmed" is the answer to the
+            // same question the user came in with.
+            TransactionStatusExplainer(state = displayState, broadcast = broadcast)
 
             Spacer(modifier = Modifier.height(20.dp))
 
@@ -701,10 +768,15 @@ private fun TransactionDetailSheet(
 
             HorizontalDivider(modifier = Modifier.padding(vertical = 12.dp))
 
-            // Block number
+            // Block number. An in-flight tx is in no block yet, so say that
+            // rather than rendering an empty value or a bare dash.
             DetailRow(
                 label = "Block Number",
-                value = formatBlockNumber(transaction.blockNumber)
+                value = if (TransactionStatusUi.showsElapsed(displayState)) {
+                    stringResource(R.string.tx_detail_not_in_block)
+                } else {
+                    formatBlockNumber(transaction.blockNumber)
+                }
             )
 
             // Block hash (hidden if "0x0")
@@ -718,10 +790,22 @@ private fun TransactionDetailSheet(
 
             HorizontalDivider(modifier = Modifier.padding(vertical = 12.dp))
 
-            // Time
+            // Time. Before the tx is in a block there is no block timestamp, so
+            // the row shows how long it has been in flight instead.
             DetailRow(
-                label = "Time",
-                value = formatBlockTimestamp(transaction.blockTimestampHex)
+                label = if (TransactionStatusUi.showsElapsed(displayState)) {
+                    stringResource(R.string.tx_detail_submitted)
+                } else {
+                    "Time"
+                },
+                value = if (TransactionStatusUi.showsElapsed(displayState)) {
+                    elapsedText(
+                        TransactionStatusUi.pendingSince(transaction.timestamp, broadcast),
+                        nowMillis,
+                    )
+                } else {
+                    formatBlockTimestamp(transaction.blockTimestampHex)
+                }
             )
 
             // Fee (if non-zero)
@@ -737,7 +821,7 @@ private fun TransactionDetailSheet(
             }
 
             // Retry CTA — only for FAILED plain transfers (see HomeScreen for why).
-            if (transaction.status == "FAILED" && transaction.isOutgoing() && onRetry != null) {
+            if (displayState == TxDisplayState.FAILED && transaction.isOutgoing() && onRetry != null) {
                 Spacer(modifier = Modifier.height(24.dp))
                 Button(
                     onClick = { onRetry(transaction) },
@@ -751,26 +835,6 @@ private fun TransactionDetailSheet(
                 }
             }
         }
-    }
-}
-
-@Composable
-private fun StatusBadge(transaction: TransactionRecord) {
-    val primaryColor = MaterialTheme.colorScheme.primary
-    val errorColor = MaterialTheme.colorScheme.error
-    val isFailed = transaction.status == "FAILED"
-    val (label, fg, bg) = when {
-        isFailed -> Triple("Failed", errorColor, errorColor.copy(alpha = 0.15f))
-        transaction.isConfirmed() -> Triple("Confirmed", primaryColor, primaryColor.copy(alpha = 0.15f))
-        else -> Triple("Pending", AmberPending, AmberPending.copy(alpha = 0.15f))
-    }
-    Surface(color = bg, shape = RoundedCornerShape(8.dp)) {
-        Text(
-            text = label,
-            style = MaterialTheme.typography.labelMedium,
-            color = fg,
-            modifier = Modifier.padding(horizontal = 12.dp, vertical = 6.dp)
-        )
     }
 }
 

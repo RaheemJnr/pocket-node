@@ -149,6 +149,8 @@ class FakePendingBroadcastDao(
         throw NotImplementedError("watchdog uses snapshot getActive only")
     override fun observeFailed(walletId: String, network: String) =
         throw NotImplementedError("not used by watchdog")
+    override fun observeAll(walletId: String, network: String) =
+        throw NotImplementedError("UI-only stream; not used by watchdog")
     override suspend fun getFailedRow(hash: String): PendingBroadcastEntity? =
         rows.firstOrNull { it.txHash == hash && it.state == "FAILED" }
 }

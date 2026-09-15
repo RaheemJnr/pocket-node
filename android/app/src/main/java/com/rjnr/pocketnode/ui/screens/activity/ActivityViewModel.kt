@@ -10,6 +10,7 @@ import androidx.paging.PagingConfig
 import androidx.paging.PagingData
 import androidx.paging.cachedIn
 import androidx.paging.map
+import com.rjnr.pocketnode.data.database.dao.PendingBroadcastDao
 import com.rjnr.pocketnode.data.database.dao.TransactionDao
 import com.rjnr.pocketnode.data.export.TransactionExporter
 import com.rjnr.pocketnode.data.gateway.GatewayRepository
@@ -26,9 +27,12 @@ import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.flatMapLatest
+import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.map
+import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
+import com.rjnr.pocketnode.ui.transaction.BroadcastInfo
 import javax.inject.Inject
 
 private const val TAG = "ActivityViewModel"
@@ -44,6 +48,7 @@ data class ActivityUiState(
 class ActivityViewModel @Inject constructor(
     private val repository: GatewayRepository,
     private val transactionDao: TransactionDao,
+    private val pendingBroadcastDao: PendingBroadcastDao,
     private val appStatePreferences: AppStatePreferences,
     private val uiPreferences: UiPreferences,
     private val logger: Logger,
@@ -78,6 +83,33 @@ class ActivityViewModel @Inject constructor(
             }
         }
     }.cachedIn(viewModelScope)
+
+    /**
+     * Broadcast state per tx hash for the active wallet+network (#432), keyed so
+     * a row can look itself up in O(1) while the list scrolls.
+     *
+     * Room-backed and reactive: the watchdog's CAS updates land here with no
+     * extra polling and no JNI call, which is what lets a row transition
+     * Broadcasting -> Pending -> Confirmed/Failed in place instead of
+     * disappearing and coming back as a new row.
+     */
+    @OptIn(kotlinx.coroutines.ExperimentalCoroutinesApi::class)
+    val broadcastStates: StateFlow<Map<String, BroadcastInfo>> =
+        _uiState.map { it.currentNetwork }
+            .distinctUntilChanged()
+            .flatMapLatest { network ->
+                val walletId = appStatePreferences.getActiveWalletId() ?: ""
+                pendingBroadcastDao.observeAll(walletId, network.name).map { rows ->
+                    rows.associate { row ->
+                        row.txHash to BroadcastInfo(
+                            state = row.state,
+                            nullCount = row.nullCount,
+                            createdAt = row.createdAt,
+                        )
+                    }
+                }
+            }
+            .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), emptyMap())
 
     init {
         viewModelScope.launch {
