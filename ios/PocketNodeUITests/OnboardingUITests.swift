@@ -45,6 +45,7 @@ final class OnboardingUITests: XCTestCase {
         app.launchEnvironment["POCKETNODE_NETWORK"] = "testnet"
         app.launchEnvironment["POCKETNODE_RESET_STATE"] = "1"
         app.launchEnvironment["POCKETNODE_UITEST_ALLOW_CAPTURE"] = "1"
+        app.launchEnvironment["POCKETNODE_UITEST_EXPOSE_WORDS"] = "1"
         app.launch()
 
         // Welcome -> Create wallet (defaults: 12 words, "My Wallet").
@@ -121,6 +122,7 @@ final class OnboardingUITests: XCTestCase {
         app.launchEnvironment["POCKETNODE_NETWORK"] = "testnet"
         app.launchEnvironment["POCKETNODE_RESET_STATE"] = "1"
         app.launchEnvironment["POCKETNODE_UITEST_ALLOW_CAPTURE"] = "1"
+        app.launchEnvironment["POCKETNODE_UITEST_EXPOSE_WORDS"] = "1"
         app.launch()
 
         XCTAssertTrue(app.buttons["onboarding.import"].waitForExistence(timeout: 20))

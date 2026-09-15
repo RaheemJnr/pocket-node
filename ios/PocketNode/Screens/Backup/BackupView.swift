@@ -147,7 +147,7 @@ struct BackupView: View {
             .accessibilityIdentifier("backup.wroteItDown")
         }
         .privacyShield()
-        .privacySensitive()
+        .privacySensitive(BackupView.exposeWordsForUITests == false)
         .accessibilityElement(children: .contain)
         .accessibilityIdentifier("backup.display")
     }
@@ -206,7 +206,7 @@ struct BackupView: View {
             .accessibilityIdentifier("backup.verifyButton")
         }
         .privacyShield()
-        .privacySensitive()
+        .privacySensitive(BackupView.exposeWordsForUITests == false)
         .accessibilityElement(children: .contain)
         .accessibilityIdentifier("backup.verify")
     }
@@ -262,5 +262,19 @@ struct BackupView: View {
         }
         .accessibilityElement(children: .contain)
         .accessibilityIdentifier("backup.success")
+    }
+}
+
+extension BackupView {
+    /// Debug-only escape hatch for the automated acceptance test: on iOS 26
+    /// hardware `.privacySensitive()` redacts the words in the accessibility
+    /// tree, so XCUITest cannot read them to answer the quiz. Never compiled
+    /// into release builds, where the words stay redacted.
+    static var exposeWordsForUITests: Bool {
+        #if DEBUG
+        return ProcessInfo.processInfo.environment["POCKETNODE_UITEST_EXPOSE_WORDS"] == "1"
+        #else
+        return false
+        #endif
     }
 }
