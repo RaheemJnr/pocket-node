@@ -51,6 +51,11 @@ import com.rjnr.pocketnode.data.gateway.models.TransactionRecord
 import com.rjnr.pocketnode.ui.theme.ErrorRed
 import com.rjnr.pocketnode.ui.theme.PendingAmber
 import com.rjnr.pocketnode.ui.theme.SuccessGreen
+import com.rjnr.pocketnode.ui.transaction.BroadcastInfo
+import com.rjnr.pocketnode.ui.transaction.TransactionStatusChip
+import com.rjnr.pocketnode.ui.transaction.TransactionStatusUi
+import com.rjnr.pocketnode.ui.transaction.TxDisplayState
+import com.rjnr.pocketnode.ui.transaction.statusColors
 import com.rjnr.pocketnode.ui.util.uaTestTag
 import com.rjnr.pocketnode.util.formatBlockTimestamp
 import java.util.Locale
@@ -300,17 +305,27 @@ fun ActionButton(
 fun TransactionItems(
     transaction: TransactionRecord,
     onClick: () -> Unit,
-    onRetry: (() -> Unit)? = null
+    onRetry: (() -> Unit)? = null,
+    broadcast: BroadcastInfo? = null,
+    nowMillis: Long = System.currentTimeMillis(),
 ) {
-    val isFailed = transaction.status == "FAILED"
-    val isPending = !isFailed && transaction.isPending()
+    val displayState = TransactionStatusUi.displayState(
+        status = transaction.status,
+        confirmations = transaction.confirmations,
+        broadcast = broadcast,
+    )
+    val isFailed = displayState == TxDisplayState.FAILED
+    val inFlight = TransactionStatusUi.showsElapsed(displayState)
+    val sinceMillis = TransactionStatusUi.pendingSince(transaction.timestamp, broadcast)
     val daoColor = MaterialTheme.colorScheme.primary
 
+    val statusColors = statusColors(displayState)
+    // In-flight and failed rows get a tinted ground in their own status colour,
+    // so the row itself reads as "needs attention" before the chip is read (#432).
     val backgroundColor by animateColorAsState(
-        targetValue = if (isPending) {
-            MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f)
-        } else {
-            MaterialTheme.colorScheme.surface
+        targetValue = when {
+            inFlight || isFailed -> statusColors.background.copy(alpha = 0.10f)
+            else -> MaterialTheme.colorScheme.surface
         },
         label = "bgColor"
     )
@@ -361,7 +376,14 @@ fun TransactionItems(
     Surface(
         color = backgroundColor,
         shape = RoundedCornerShape(24.dp),
-        border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant),
+        border = BorderStroke(
+            1.dp,
+            if (inFlight || isFailed) {
+                statusColors.foreground.copy(alpha = 0.45f)
+            } else {
+                MaterialTheme.colorScheme.outlineVariant
+            }
+        ),
         modifier = Modifier
             .clickable { onClick() }
             .fillMaxWidth()
@@ -405,18 +427,21 @@ fun TransactionItems(
                             fontFamily = FontFamily.Monospace,
                             color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.5f)
                         )
-                        Text(
-                            text = "•",
-                            style = MaterialTheme.typography.bodySmall,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.5f)
-                        )
-                        Text(
-                            text = formatBlockTimestamp(transaction.blockTimestampHex),
-                            style = MaterialTheme.typography.labelSmall,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant
-                        )
-
-
+                        // An in-flight tx has no block timestamp yet; the
+                        // placeholder dash read as missing data. Its elapsed
+                        // time is on the status chip instead.
+                        if (!inFlight) {
+                            Text(
+                                text = "•",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.5f)
+                            )
+                            Text(
+                                text = formatBlockTimestamp(transaction.blockTimestampHex),
+                                style = MaterialTheme.typography.labelSmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                        }
                     }
 
                 }
@@ -459,31 +484,19 @@ fun TransactionItems(
                         )
                     }
                 }
-                // Status chip — distinct visuals for Failed vs Pending vs
-                // Confirmed. Failed is tappable; the parent renders the
-                // confirm dialog and routes the retry through HomeViewModel.
-                val (chipText, chipFg, chipBg) = when {
-                    isFailed -> Triple("Failed", ErrorRed, ErrorRed.copy(alpha = 0.15f))
-                    transaction.isConfirmed() -> Triple("Confirmed", SuccessGreen, SuccessGreen.copy(alpha = 0.15f))
-                    else -> Triple("Pending", PendingAmber, PendingAmber.copy(alpha = 0.15f))
-                }
-                Surface(
-                    color = chipBg,
-                    shape = CircleShape,
-                    modifier = if (isFailed && onRetry != null) {
-                        Modifier.clickable { onRetry() }
-                    } else {
-                        Modifier
-                    }
-                ) {
-                    Text(
-                        chipText,
-                        color = chipFg,
-                        fontSize = 12.sp,
-                        fontWeight = FontWeight.Bold,
-                        modifier = Modifier.padding(horizontal = 12.dp, vertical = 4.dp)
-                    )
-                }
+                // Status chip — distinct visuals for Failed / Broadcasting /
+                // Pending / Confirmed, with the elapsed time while in flight.
+                // Failed is tappable; the parent renders the confirm dialog and
+                // routes the retry through HomeViewModel.
+                TransactionStatusChip(
+                    state = displayState,
+                    sinceMillis = sinceMillis,
+                    nowMillis = nowMillis,
+                    onClick = if (isFailed) onRetry else null,
+                    textStyle = MaterialTheme.typography.labelMedium,
+                    horizontalPadding = 12.dp,
+                    verticalPadding = 4.dp,
+                )
             }
         }
     }

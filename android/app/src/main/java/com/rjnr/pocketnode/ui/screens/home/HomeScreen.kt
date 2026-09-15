@@ -105,6 +105,13 @@ import com.rjnr.pocketnode.ui.components.WalletAvatar
 import androidx.compose.material3.rememberModalBottomSheetState
 import com.rjnr.pocketnode.ui.education.EducationSheet
 import com.rjnr.pocketnode.ui.education.EducationTopic
+import com.rjnr.pocketnode.ui.education.TransactionStatusExplainer
+import com.rjnr.pocketnode.ui.transaction.BroadcastInfo
+import com.rjnr.pocketnode.ui.transaction.TransactionStatusChip
+import com.rjnr.pocketnode.ui.transaction.TransactionStatusUi
+import com.rjnr.pocketnode.ui.transaction.TxDisplayState
+import com.rjnr.pocketnode.ui.transaction.elapsedText
+import com.rjnr.pocketnode.ui.transaction.rememberTickingNow
 import com.rjnr.pocketnode.ui.education.coachmark.CoachmarkRegistry
 import com.rjnr.pocketnode.ui.education.coachmark.LocalCoachmarkRegistry
 import com.rjnr.pocketnode.ui.education.coachmark.SyncCoachmark
@@ -338,6 +345,7 @@ fun HomeScreen(
     if (selectedTransaction != null) {
         TransactionDetailSheet(
             transaction = selectedTransaction!!,
+            broadcast = uiState.broadcastStates[selectedTransaction!!.txHash],
             network = uiState.currentNetwork,
             onDismiss = { selectedTransaction = null },
             onCopyTxHash = { txHash ->
@@ -610,6 +618,14 @@ fun HomeScreenUI(
     onGapLimitSweep: () -> Unit = {},
 ) {
     val homeContentHaptic = LocalHapticFeedback.current
+
+    // "Pending · 2 min" has to age on screen. Ticks only while something is
+    // actually in flight; reads the device clock only, no queries or JNI (#432).
+    val hasInFlight = uiState.broadcastStates.values.any {
+        it.state == "BROADCASTING" || it.state == "BROADCAST"
+    }
+    val nowMillis by rememberTickingNow(enabled = hasInFlight)
+
     PullToRefreshBox(
         isRefreshing = uiState.isRefreshing,
         onRefresh = { refresh() },
@@ -835,7 +851,9 @@ fun HomeScreenUI(
                         onClick = { selectedTransaction(tx) },
                         onRetry = if (tx.status == "FAILED" && tx.isOutgoing()) {
                             { onRetryFailed(tx) }
-                        } else null
+                        } else null,
+                        broadcast = uiState.broadcastStates[tx.txHash],
+                        nowMillis = nowMillis,
                     )
                 }
             }
@@ -1072,11 +1090,23 @@ private fun TransactionDetailSheet(
     onDismiss: () -> Unit,
     onCopyTxHash: (String) -> Unit,
     onOpenExplorer: (String) -> Unit,
-    onRetry: ((TransactionRecord) -> Unit)? = null
+    onRetry: ((TransactionRecord) -> Unit)? = null,
+    broadcast: BroadcastInfo? = null,
 ) {
     val isIncoming = transaction.isIncoming()
     val isOutgoing = transaction.isOutgoing()
     val explorerUrl = buildExplorerUrl(transaction.txHash, network)
+    val displayState = TransactionStatusUi.displayState(
+        status = transaction.status,
+        confirmations = transaction.confirmations,
+        broadcast = broadcast,
+    )
+    val sinceMillis = TransactionStatusUi.pendingSince(transaction.timestamp, broadcast)
+    // The sheet is a single transaction, so the ticker runs only while that one
+    // is in flight.
+    val nowMillis by rememberTickingNow(
+        enabled = TransactionStatusUi.showsElapsed(displayState)
+    )
 
     ModalBottomSheet(
         onDismissRequest = onDismiss,
@@ -1102,36 +1132,21 @@ private fun TransactionDetailSheet(
                     fontWeight = FontWeight.Bold
                 )
 
-                // Status badge — Confirmed / Pending / Failed (#115)
-                val isFailed = transaction.status == "FAILED"
-                val (badgeLabel, badgeFg, badgeBg) = when {
-                    isFailed -> Triple(
-                        "Failed",
-                        MaterialTheme.colorScheme.error,
-                        MaterialTheme.colorScheme.error.copy(alpha = 0.15f)
-                    )
-                    transaction.isConfirmed() -> Triple(
-                        "Confirmed",
-                        SuccessGreen,
-                        SuccessGreen.copy(alpha = 0.15f)
-                    )
-                    else -> Triple(
-                        "Pending",
-                        MaterialTheme.colorScheme.tertiary,
-                        MaterialTheme.colorScheme.tertiary.copy(alpha = 0.2f)
-                    )
-                }
-                Surface(color = badgeBg, shape = RoundedCornerShape(8.dp)) {
-                    Text(
-                        text = badgeLabel,
-                        style = MaterialTheme.typography.labelMedium,
-                        color = badgeFg,
-                        modifier = Modifier.padding(horizontal = 12.dp, vertical = 6.dp)
-                    )
-                }
+                // Status badge — Confirmed / Broadcasting / Pending / Failed,
+                // with elapsed time while in flight (#115, #432)
+                TransactionStatusChip(
+                    state = displayState,
+                    sinceMillis = sinceMillis,
+                    nowMillis = nowMillis,
+                )
             }
 
-            Spacer(modifier = Modifier.height(24.dp))
+            Spacer(modifier = Modifier.height(16.dp))
+
+            // What this state means and what happens next (#432).
+            TransactionStatusExplainer(state = displayState, broadcast = broadcast)
+
+            Spacer(modifier = Modifier.height(20.dp))
 
             // Amount card
             Card(
@@ -1217,17 +1232,29 @@ private fun TransactionDetailSheet(
 
             HorizontalDivider(modifier = Modifier.padding(vertical = 12.dp))
 
+            // An in-flight tx is in no block yet, so say that rather than
+            // rendering an empty value or a bare dash.
+            val inFlight = TransactionStatusUi.showsElapsed(displayState)
+
             DetailRow(
                 label = "Block Number",
-                value = transaction.blockNumber.removePrefix("0x").toLongOrNull(16)?.toString()
-                    ?: transaction.blockNumber
+                value = if (inFlight) {
+                    stringResource(R.string.tx_detail_not_in_block)
+                } else {
+                    transaction.blockNumber.removePrefix("0x").toLongOrNull(16)?.toString()
+                        ?: transaction.blockNumber
+                }
             )
 
             HorizontalDivider(modifier = Modifier.padding(vertical = 12.dp))
 
             DetailRow(
-                label = "Time",
-                value = formatBlockTimestamp(transaction.blockTimestampHex)
+                label = if (inFlight) stringResource(R.string.tx_detail_submitted) else "Time",
+                value = if (inFlight) {
+                    elapsedText(sinceMillis, nowMillis)
+                } else {
+                    formatBlockTimestamp(transaction.blockTimestampHex)
+                }
             )
 
             HorizontalDivider(modifier = Modifier.padding(vertical = 12.dp))
@@ -1267,7 +1294,7 @@ private fun TransactionDetailSheet(
             // the original signed bytes (#316), so it's safe regardless of tx type;
             // the gate stays conservative (plain outgoing transfers) to keep the
             // CTA off DAO/self-transfer rows until those flows are exercised.
-            if (transaction.status == "FAILED" && transaction.isOutgoing() && onRetry != null) {
+            if (displayState == TxDisplayState.FAILED && transaction.isOutgoing() && onRetry != null) {
                 Spacer(modifier = Modifier.height(24.dp))
                 Button(
                     onClick = { onRetry(transaction) },

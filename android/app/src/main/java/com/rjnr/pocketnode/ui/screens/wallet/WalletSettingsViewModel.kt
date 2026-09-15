@@ -297,7 +297,17 @@ class WalletSettingsViewModel @Inject constructor(
                 }
                 _uiState.update { it.copy(privateKeyHex = keyHex, mnemonicWords = words) }
             } catch (e: Exception) {
+                // Since #496 an unreadable key_material row throws instead of
+                // quietly handing back the legacy copy. Blank fields told the
+                // user nothing; name the failure and the way out.
                 logger.e(TAG, "Failed to load sensitive data", e)
+                _uiState.update {
+                    it.copy(
+                        error = com.rjnr.pocketnode.ui.util.UiMessage.Resource(
+                            com.rjnr.pocketnode.R.string.vm_error_key_material_unreadable
+                        )
+                    )
+                }
             }
         }
     }

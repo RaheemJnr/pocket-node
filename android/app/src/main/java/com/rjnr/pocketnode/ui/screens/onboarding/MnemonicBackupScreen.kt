@@ -77,6 +77,15 @@ data class MnemonicBackupUiState(
     val mnemonicGateUsesPin: Boolean = false,
 )
 
+/**
+ * Same copy as `R.string.vm_error_key_material_unreadable`. This ViewModel
+ * emits raw strings (its `error` field is a `String?`, predating `UiMessage`),
+ * so the resource cannot be resolved here without a Context — keep the two in
+ * step if either changes.
+ */
+private const val KEY_MATERIAL_UNREADABLE_MESSAGE =
+    "Could not read this wallet's keys. Restore from your recovery phrase if this persists."
+
 @HiltViewModel
 class MnemonicBackupViewModel @Inject constructor(
     savedStateHandle: androidx.lifecycle.SavedStateHandle,
@@ -263,6 +272,13 @@ class MnemonicBackupViewModel @Inject constructor(
                 armedGateUsesPin = false
                 _uiState.update { it.copy(pinRequiredForMnemonic = true) }
                 return@launch
+            } catch (e: Exception) {
+                // #496: an unreadable key_material row throws rather than
+                // serving the legacy plaintext copy. Show it — an escaping
+                // exception would take the whole coroutine (and the screen)
+                // down on a wallet that is already in trouble.
+                _uiState.update { it.copy(error = KEY_MATERIAL_UNREADABLE_MESSAGE) }
+                return@launch
             }
             if (words.isNullOrEmpty()) {
                 // For raw_key or sub-account wallets, this is expected — not an error.
@@ -399,6 +415,11 @@ class MnemonicBackupViewModel @Inject constructor(
             // biometric gate rather than failing the reveal.
             _uiState.update { it.copy(mnemonicGateUsesPin = false) }
             return
+        } catch (e: Exception) {
+            // Unreadable key material (#496) or any other read failure: the
+            // user passed the gate, so tell them why there is no phrase.
+            _uiState.update { it.copy(error = KEY_MATERIAL_UNREADABLE_MESSAGE) }
+            return
         }
         if (words.isNullOrEmpty()) {
             _uiState.update { it.copy(error = "Recovery phrase not available for this wallet.") }
@@ -420,6 +441,14 @@ class MnemonicBackupViewModel @Inject constructor(
             }
         } catch (_: Exception) {
             null
+        }
+        if (privateKeyHex == null) {
+            // Was a silent blank field before #496 made unreadable key
+            // material throw; say what happened instead.
+            _uiState.update {
+                it.copy(error = KEY_MATERIAL_UNREADABLE_MESSAGE, privateKeyRevealed = true)
+            }
+            return
         }
         _uiState.update { it.copy(privateKeyHex = privateKeyHex, privateKeyRevealed = true) }
     }

@@ -60,6 +60,18 @@ interface PendingBroadcastDao {
     )
     fun observeFailed(walletId: String, network: String): Flow<List<PendingBroadcastEntity>>
 
+    /**
+     * Every broadcast row for a wallet+network, terminal ones included.
+     *
+     * UI observation only (#432): the activity/home rows need BROADCASTING vs
+     * BROADCAST to tell "still sending" from "waiting in the pool", and the
+     * FAILED rows carry the `nullCount` the detail sheet turns into a reason.
+     * Distinct from [observeActive], which deliberately hides terminal rows
+     * because its callers reserve cells.
+     */
+    @Query("SELECT * FROM pending_broadcasts WHERE walletId = :walletId AND network = :network")
+    fun observeAll(walletId: String, network: String): Flow<List<PendingBroadcastEntity>>
+
     @Query("SELECT * FROM pending_broadcasts WHERE txHash = :hash AND state = 'FAILED'")
     suspend fun getFailedRow(hash: String): PendingBroadcastEntity?
 }
