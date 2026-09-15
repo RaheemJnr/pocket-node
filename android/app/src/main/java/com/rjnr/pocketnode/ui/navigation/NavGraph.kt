@@ -59,10 +59,29 @@ sealed class Screen(val route: String) {
     object Scanner : Screen("scanner")
     object NodeStatus : Screen("node_status")
     object Onboarding : Screen("onboarding")
-    object MnemonicBackup : Screen("mnemonic_backup?simplified={simplified}") {
+    object MnemonicBackup :
+        Screen("mnemonic_backup?simplified={simplified}&onboarding={onboarding}&walletId={walletId}") {
         const val BASE = "mnemonic_backup"
-        fun createRoute(simplified: Boolean = false) =
-            if (simplified) "mnemonic_backup?simplified=true" else "mnemonic_backup?simplified=false"
+
+        /**
+         * [onboarding] must be true ONLY for the first-run hop straight out of
+         * wallet creation, which runs before `InitialPinSetup` and therefore
+         * has no credential to re-authenticate against. Every other caller
+         * leaves it false so the recovery phrase stays behind the PIN /
+         * biometric gate (#488).
+         *
+         * [walletId] backs up that specific wallet instead of the active one,
+         * used by Manage Wallets → wallet → "Backup wallet". Null keeps the
+         * active-wallet behaviour every other caller relies on.
+         */
+        fun createRoute(
+            simplified: Boolean = false,
+            onboarding: Boolean = false,
+            walletId: String? = null,
+        ) = buildString {
+            append("mnemonic_backup?simplified=$simplified&onboarding=$onboarding")
+            if (!walletId.isNullOrBlank()) append("&walletId=${android.net.Uri.encode(walletId)}")
+        }
     }
     object MnemonicImport : Screen("mnemonic_import")
     object Auth : Screen("auth")
@@ -146,7 +165,9 @@ fun CkbNavGraph(
                     }
                 },
                 onNavigateToBackup = {
-                    navController.navigate(Screen.MnemonicBackup.createRoute()) {
+                    // The one exempt edge: straight out of first-run wallet
+                    // creation, before the mandatory PIN exists (#488).
+                    navController.navigate(Screen.MnemonicBackup.createRoute(onboarding = true)) {
                         popUpTo(Screen.Onboarding.route) { inclusive = true }
                     }
                 },
@@ -160,7 +181,15 @@ fun CkbNavGraph(
 
         composable(
             route = Screen.MnemonicBackup.route,
-            arguments = listOf(navArgument("simplified") { defaultValue = false; type = NavType.BoolType })
+            arguments = listOf(
+                navArgument("simplified") { defaultValue = false; type = NavType.BoolType },
+                navArgument("onboarding") { defaultValue = false; type = NavType.BoolType },
+                navArgument("walletId") {
+                    type = NavType.StringType
+                    nullable = true
+                    defaultValue = null
+                },
+            )
         ) { backStackEntry ->
             val simplified = backStackEntry.arguments?.getBoolean("simplified") ?: false
             MnemonicBackupScreen(
@@ -288,10 +317,12 @@ fun CkbNavGraph(
                                     (previousRoute == Screen.MnemonicBackup.route ||
                                         previousRoute.startsWith("${Screen.MnemonicBackup.BASE}?") ||
                                         previousRoute.startsWith("${Screen.MnemonicBackup.BASE}/")) -> {
-                                    // Raw-key backup PIN gate (#290). The screen
-                                    // consumes the flag in a LaunchedEffect and
-                                    // calls viewModel.onPinVerified() to fetch
-                                    // the key.
+                                    // Backup-screen PIN gates: the raw-key
+                                    // private key (#290) and the V1 recovery
+                                    // phrase (#488). The screen consumes the
+                                    // flag in a LaunchedEffect and calls
+                                    // viewModel.onPinVerified(), which reads
+                                    // whichever one is gated.
                                     navController.previousBackStackEntry
                                         ?.savedStateHandle
                                         ?.set("pin_verified", true)
@@ -403,7 +434,6 @@ fun CkbNavGraph(
                 onNavigateToNodeStatus = { navController.navigate(Screen.NodeStatus.route) },
                 onNavigateToBackup = { navController.navigate(Screen.MnemonicBackup.createRoute()) },
                 onNavigateToSecuritySettings = { navController.navigate(Screen.SecuritySettings.route) },
-                onNavigateToImport = { navController.navigate(Screen.MnemonicImport.route) },
                 onNavigateToPinVerify = {
                     navController.navigate(Screen.PinEntry.createRoute("verify"))
                 },
@@ -583,6 +613,11 @@ fun CkbNavGraph(
                 onNavigateBack = { navController.popBackStack() },
                 onNavigateToPinVerify = {
                     navController.navigate(Screen.PinEntry.createRoute("verify"))
+                },
+                onNavigateToBackup = {
+                    // Scoped to THIS wallet, which need not be the active one.
+                    val walletId = backStackEntry.arguments?.getString("walletId")
+                    navController.navigate(Screen.MnemonicBackup.createRoute(walletId = walletId))
                 },
                 viewModel = viewModel
             )
