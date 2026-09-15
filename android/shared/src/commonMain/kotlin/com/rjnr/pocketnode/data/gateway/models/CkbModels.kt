@@ -1,6 +1,7 @@
 package com.rjnr.pocketnode.data.gateway.models
 
 import com.rjnr.pocketnode.core.format.formatFixedPoint
+import com.rjnr.pocketnode.core.format.shannonsToCkbString
 import kotlinx.serialization.SerialName
 import kotlinx.serialization.Serializable
 
@@ -97,6 +98,9 @@ data class TransactionRecord(
     val timestamp: Long,
     @SerialName("balance_change") val balanceChange: String,
     val direction: String,
+    // Legacy fee field: a hex shannon string that has only ever been populated
+    // on DAO pending rows and is "0x0" everywhere else. Kept because the CSV
+    // exporter reads it. [feeShannons] below is the authoritative value.
     val fee: String,
     val confirmations: Int,
     // Raw hex timestamp from CKB block header (e.g. "0x18c8d0a7a00"), null if not yet fetched
@@ -108,7 +112,14 @@ data class TransactionRecord(
     @SerialName("is_bulk") val isBulk: Boolean = false,
     // "PENDING", "CONFIRMED", "FAILED" — defaults to CONFIRMED so historical
     // rows that never had an explicit status (pre-#115) render as confirmed.
-    @SerialName("status") val status: String = "CONFIRMED"
+    @SerialName("status") val status: String = "CONFIRMED",
+    // Network fee in shannons: Σ(inputs) − Σ(outputs) (#497). Null means
+    // "not known yet", NOT "zero" — the light client only resolves input
+    // capacities for cells it has indexed, so a tx whose inputs predate the
+    // sync window cannot be scored and the detail sheet says "Pending"
+    // instead of showing a wrong number. Incoming transactions leave this
+    // null because the sender paid the fee, not us.
+    @SerialName("fee_shannons") val feeShannons: Long? = null
 ) {
     /**
      * Get balance change as CKB amount (from shannons)
@@ -149,6 +160,35 @@ data class TransactionRecord(
             else -> confirmations.toString()
         }
     }
+
+    /**
+     * Whether a network-fee row belongs on this transaction's detail sheet.
+     *
+     * Every direction we can originate — "out", "self", and the three DAO
+     * ops — pays a fee. A plain "in" was paid for by the sender, so showing
+     * a fee row there would be wrong at any value.
+     *
+     * "dao_unlock" is the one case that can be hidden despite paying a fee.
+     * An unlock's output is worth deposit + compensation − fee while its
+     * input declares only the deposit, so Σ(inputs) − Σ(outputs) is negative
+     * and [feeShannons] can only ever come from the planned value recorded
+     * when this device sent it. When that is absent (the unlock was made on
+     * another device, or predates #497) the row is dropped: "Pending" here
+     * would be a promise that never resolves.
+     */
+    fun paysNetworkFee(): Boolean = when (direction) {
+        "in" -> false
+        "dao_unlock" -> feeShannons != null
+        else -> true
+    }
+
+    /**
+     * The network fee as a CKB string (8 decimals, trailing zeros trimmed),
+     * or null when [feeShannons] is not known yet. Callers render null as
+     * "Pending" for the rows [paysNetworkFee] keeps — which already excludes
+     * the one direction ("dao_unlock") whose fee can never arrive later.
+     */
+    fun formattedFee(): String? = feeShannons?.let { "${shannonsToCkbString(it)} CKB" }
 
     fun isIncoming(): Boolean = direction == "in"
     fun isOutgoing(): Boolean = direction == "out"

@@ -46,6 +46,16 @@ internal fun formatFixedPoint(value: Long, scaleDigits: Int, decimals: Int): Str
 }
 
 /**
+ * Public entry point to [shannonsToCkbString] for platform UI outside this module.
+ *
+ * The send review sheet's fee and the transaction detail sheet's fee are the
+ * same number shown twice, and #497 exists so a user can cross-check one
+ * against the other — they must not differ by formatting ("1" vs "1.00").
+ * Amounts and totals keep their own formatter; only the fee is unified.
+ */
+fun formatCkbTrimmed(shannons: Long): String = shannonsToCkbString(shannons)
+
+/**
  * Exact shannons -> CKB string with trailing fraction zeros stripped, i.e. the
  * `BigDecimal(shannons).divide(BigDecimal(100_000_000)).stripTrailingZeros().toPlainString()`
  * this replaces.

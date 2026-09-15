@@ -547,3 +547,19 @@ val MIGRATION_14_15 = object : Migration(14, 15) {
         db.execSQL("ALTER TABLE `sub_account_candidates_new` RENAME TO `sub_account_candidates`")
     }
 }
+
+/**
+ * v16 (#497): `transactions.fee_shannons` — the network fee (Σ inputs − Σ
+ * outputs) so the detail sheet can show it without refetching the tx.
+ *
+ * Nullable with no default, unlike the non-null `fee` hex column it
+ * supersedes: null must mean "not known yet" (inputs unresolved) so the
+ * sheet can say "Pending" instead of claiming a 0 fee, which no real
+ * transaction has. Every pre-v16 row therefore backfills to null and is
+ * repopulated the next time the activity walk scores it.
+ */
+val MIGRATION_15_16 = object : Migration(15, 16) {
+    override fun migrate(db: SupportSQLiteDatabase) {
+        db.execSQL("ALTER TABLE `transactions` ADD COLUMN `fee_shannons` INTEGER")
+    }
+}

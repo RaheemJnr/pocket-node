@@ -71,7 +71,13 @@ import com.rjnr.pocketnode.data.database.entity.WalletEntity
     // on (parentWalletId, derivationPath) so chain-axis gap-limit slots can
     // coexist with account-axis slots. MIGRATION_14_15 recreates the table
     // and backfills derivationPath from accountIndex.
-    version = 15,
+    //
+    // Bumped from 15 to 16 for #497: `transactions` gains the nullable
+    // `fee_shannons` column so the detail sheet can render the network fee
+    // from cache. MIGRATION_15_16 is a single ALTER TABLE; existing rows
+    // backfill to null ("fee not known yet") and are repopulated by the next
+    // activity walk.
+    version = 16,
     // Schema export re-enabled (#149). It was OFF because Room 2.8.4's
     // bundled kotlinx-serialization-core crashed KSP with an AbstractMethodError
     // against the project's kotlinx-serialization-json:1.8.0. Verified clean

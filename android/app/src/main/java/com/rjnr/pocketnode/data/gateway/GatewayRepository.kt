@@ -1552,6 +1552,23 @@ class GatewayRepository @Inject constructor(
             val outgoingAmount = computeOutgoingShannons(inputCapacities, outgoingOutputs)
             val balanceChangeHex = "0x${outgoingAmount.toString(16)}"
 
+            // Planned fee for the pending activity row (#497). DAO ops pass
+            // theirs in; a plain transfer derives it from the same inputs and
+            // outputs already resolved above — Σ(inputs) − Σ(all outputs),
+            // change included. `mapNotNull` above drops any input not in the
+            // reserved set, and computeFeeShannons refuses to score a partial
+            // set, so a dropped input yields null ("Pending") not a wrong fee.
+            val plannedFeeShannons = pendingFeeShannons ?: computeFeeShannons(
+                resolvedInputs = inputCapacities,
+                declaredInputCount = signed.cellInputs.size,
+                // Parsed strictly, not through outgoingOutputs' display-oriented
+                // `?: 0L`: an unparseable output would otherwise inflate the fee
+                // by that output's whole capacity.
+                outputCapacities = signed.cellOutputs.map {
+                    it.capacity.removePrefix("0x").toLongOrNull(16)
+                },
+            )
+
             pendingBroadcastDao.insert(
                 PendingBroadcastEntity(
                     txHash = txHash,
@@ -1572,7 +1589,8 @@ class GatewayRepository @Inject constructor(
                 walletId = walletId,
                 balanceChange = pendingAmountShannons?.let { "0x${it.toString(16)}" } ?: balanceChangeHex,
                 direction = pendingDirection,
-                fee = pendingFeeShannons?.let { "0x${it.toString(16)}" } ?: "0x0"
+                fee = pendingFeeShannons?.let { "0x${it.toString(16)}" } ?: "0x0",
+                feeShannons = plannedFeeShannons
             )
             signed
         }
@@ -1672,6 +1690,14 @@ class GatewayRepository @Inject constructor(
          * row under wallet B's id/network (#382 Tier 3 review).
          */
         expectedWalletId: String? = null,
+        /**
+         * Fee this send is known to pay, recorded on the pending activity row
+         * so the detail sheet's "Network fee" has a value from the moment of
+         * broadcast (#497). Callers that reach this path directly (DAO unlock)
+         * must pass it: unlike a transfer, their fee cannot be recovered from
+         * the confirmed transaction — see [unlockDao].
+         */
+        pendingFeeShannons: Long? = null,
     ): Result<String> = runCatching {
         logger.d(TAG, "📤 sendTransaction: building JSON")
         logger.d(TAG, "  Inputs: ${transaction.cellInputs.size}, Outputs: ${transaction.cellOutputs.size}")
@@ -1752,7 +1778,8 @@ class GatewayRepository @Inject constructor(
                     walletId = walletId,
                     balanceChange = balanceChangeHex,
                     direction = "out",
-                    fee = "0x0"
+                    fee = "0x0",
+                    feeShannons = pendingFeeShannons
                 )
             } else {
                 logger.d(TAG, "sendTransaction: row exists (state=${existing.state}) — skipping insert")
@@ -1820,7 +1847,8 @@ class GatewayRepository @Inject constructor(
                 walletId = walletId,
                 balanceChange = balanceChangeHex,
                 direction = "out",
-                fee = "0x0"
+                fee = "0x0",
+                feeShannons = pendingFeeShannons
             )
         } else {
             val ok = pendingBroadcastDao.compareAndUpdateState(
@@ -2038,6 +2066,25 @@ class GatewayRepository @Inject constructor(
                 output.type?.codeHash == DaoConstants.DAO_CODE_HASH
             }
 
+            // Network fee (#497): Σ(inputs) − Σ(outputs). The interaction walk
+            // already carries a capacity for every input cell the wallet owns,
+            // so no second fetch is needed — but it carries NO capacity for a
+            // foreign input, which is why the count is checked. An incoming tx
+            // resolves none of its inputs and lands on null, and the detail
+            // sheet hides the row for it anyway.
+            // Parsed strictly (no `?: 0L`): a capacity read as 0 because the
+            // node sent something malformed would move the fee by that whole
+            // cell. computeFeeShannons poisons the result to null instead.
+            val feeShannons = computeFeeShannons(
+                resolvedInputs = cellInteractions
+                    .filter { it.ioType == "input" }
+                    .map { it.ioCapacity.removePrefix("0x").toLongOrNull(16) },
+                declaredInputCount = tx.inputs.size,
+                outputCapacities = tx.outputs.map {
+                    it.capacity.removePrefix("0x").toLongOrNull(16)
+                },
+            )
+
             val (finalDirection, finalAmount) = if (hasDaoOutput) {
                 val daoOutputCapacity = tx.outputs
                     .first { it.type?.codeHash == DaoConstants.DAO_CODE_HASH }
@@ -2067,7 +2114,8 @@ class GatewayRepository @Inject constructor(
                 fee = "0x0",
                 confirmations = confirmations,
                 blockTimestampHex = headerInfo.timestampHex,
-                isDaoRelated = hasDaoOutput || tx.headerDeps.size >= 2
+                isDaoRelated = hasDaoOutput || tx.headerDeps.size >= 2,
+                feeShannons = feeShannons
             )
         }
 
@@ -2648,12 +2696,33 @@ class GatewayRepository @Inject constructor(
             network = net
         )
 
+        // The unlock's fee is knowable exactly here and NOWHERE ELSE (#497).
+        // On-chain the tx reads: one input whose declared capacity is the
+        // original deposit, one output worth maxWithdraw − fee. Since
+        // maxWithdraw = deposit + compensation, inputs − outputs comes out as
+        // fee − compensation, i.e. negative, and the confirmed-path formula
+        // can never score it. Recovering the compensation from the confirmed
+        // transaction would take two header fetches plus a JNI
+        // calculateMaxWithdraw per row, and would first have to decode the
+        // witness input_type to learn WHICH header dep is the deposit (the
+        // order is not load-bearing — see TransactionBuilder.buildDaoUnlock),
+        // which we cannot rely on for a tx we did not build. So the planned
+        // fee is persisted on the pending row and carried forward by
+        // CacheManager; an unlock with no recorded fee hides the row rather
+        // than promising a "Pending" that would never resolve.
+        val plannedFeeShannons = daoUnlockFeeShannons(
+            maxWithdraw = maxWithdraw,
+            outputCapacities = tx.cellOutputs.map {
+                it.capacity.removePrefix("0x").toLongOrNull(16)
+            },
+        )
+
         // Unlock consumes only the withdrawing DAO cell (typed; never returned by
         // getCells, so no transfer can select it) and pays the fee from that
         // cell's own capacity — it selects no regular cells, so the
         // reservation filter doesn't apply. sendTransaction still reserves this
         // input and serializes the pre-broadcast insert under sendMutex (#320).
-        val txHash = sendTransaction(tx).getOrThrow()
+        val txHash = sendTransaction(tx, pendingFeeShannons = plannedFeeShannons).getOrThrow()
         logger.d(TAG, "DAO unlock (phase 2) sent: $txHash")
         txHash
     }

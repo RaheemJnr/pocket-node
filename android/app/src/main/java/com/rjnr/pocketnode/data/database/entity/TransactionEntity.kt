@@ -46,7 +46,11 @@ data class TransactionEntity(
     // MIGRATION_2_3 added this column with `DEFAULT ''`. Without the
     // matching @ColumnInfo annotation, Room expects no default and crashes
     // schema validation after migration. (v1.5.1 hotfix)
-    @ColumnInfo(defaultValue = "''") val walletId: String = ""
+    @ColumnInfo(defaultValue = "''") val walletId: String = "",
+    // MIGRATION_15_16 (#497). Nullable on purpose: null is "fee not known
+    // yet" (the light client has not resolved every input capacity), which
+    // the detail sheet renders as "Pending". Every pre-v16 row starts null.
+    @ColumnInfo(name = "fee_shannons") val feeShannons: Long? = null
 ) {
     fun toTransactionRecord(): TransactionRecord = TransactionRecord(
         txHash = txHash,
@@ -59,7 +63,8 @@ data class TransactionEntity(
         confirmations = confirmations,
         blockTimestampHex = blockTimestampHex,
         isDaoRelated = direction.startsWith("dao_"),
-        status = status
+        status = status,
+        feeShannons = feeShannons
     )
 
     companion object {
@@ -74,7 +79,8 @@ data class TransactionEntity(
             confirmations: Int,
             blockTimestampHex: String?,
             network: String,
-            walletId: String = ""
+            walletId: String = "",
+            feeShannons: Long? = null
         ): TransactionEntity = TransactionEntity(
             txHash = txHash,
             blockNumber = blockNumber,
@@ -89,7 +95,8 @@ data class TransactionEntity(
             status = if (confirmations > 0) "CONFIRMED" else "PENDING",
             isLocal = false,
             cachedAt = System.currentTimeMillis(),
-            walletId = walletId
+            walletId = walletId,
+            feeShannons = feeShannons
         )
     }
 }

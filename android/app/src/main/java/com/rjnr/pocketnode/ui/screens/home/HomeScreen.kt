@@ -1264,6 +1264,19 @@ private fun TransactionDetailSheet(
                 value = "${transaction.confirmations}"
             )
 
+            // Network fee (#497). Shown for everything we can originate;
+            // hidden for a plain receive, where the sender paid it. "Pending"
+            // when the fee is not resolvable yet — never a silent 0, which no
+            // real transaction pays.
+            if (transaction.paysNetworkFee()) {
+                HorizontalDivider(modifier = Modifier.padding(vertical = 12.dp))
+
+                DetailRow(
+                    label = "Network fee",
+                    value = transaction.formattedFee() ?: "Pending"
+                )
+            }
+
             val displayBlockHash = transaction.blockHash
                 .takeIf { it.isNotBlank() && it != "0x0" }
                 ?.let { "${it.take(10)}...${it.takeLast(8)}" }

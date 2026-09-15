@@ -52,6 +52,14 @@ class CacheManager @Inject constructor(
 
     suspend fun cacheTransactions(records: List<TransactionRecord>, network: String, walletId: String = "") {
         try {
+            // A confirmed row that could not resolve its own fee must not
+            // erase the planned fee we wrote when the user sent it — the
+            // insert below is REPLACE, so carry the cached value forward.
+            val knownFees = if (records.any { it.feeShannons == null }) {
+                knownFeesFor(records.map { it.txHash })
+            } else {
+                emptyMap()
+            }
             val entities = records.map { record ->
                 TransactionEntity.fromTransactionRecord(
                     txHash = record.txHash,
@@ -64,7 +72,8 @@ class CacheManager @Inject constructor(
                     confirmations = record.confirmations,
                     blockTimestampHex = record.blockTimestampHex,
                     network = network,
-                    walletId = walletId
+                    walletId = walletId,
+                    feeShannons = record.feeShannons ?: knownFees[record.txHash]
                 )
             }
             transactionDao.insertAll(entities)
@@ -81,7 +90,8 @@ class CacheManager @Inject constructor(
         walletId: String = "",
         balanceChange: String = "0x0",
         direction: String = "out",
-        fee: String = "0x0"
+        fee: String = "0x0",
+        feeShannons: Long? = null
     ) {
         try {
             transactionDao.insert(
@@ -99,7 +109,8 @@ class CacheManager @Inject constructor(
                     status = "PENDING",
                     isLocal = true,
                     cachedAt = System.currentTimeMillis(),
-                    walletId = walletId
+                    walletId = walletId,
+                    feeShannons = feeShannons
                 )
             )
             logger.d(TAG, "Pending transaction cached in Room: $txHash")
@@ -109,6 +120,19 @@ class CacheManager @Inject constructor(
             logger.w(TAG, "Failed to cache pending tx", e)
         }
     }
+
+    /**
+     * Fees already cached for [hashes], chunked under SQLite's limit on bound
+     * variables (999 by default). A complete history walk hands
+     * [cacheTransactions] every transaction the wallet has ever made, so an
+     * unchunked `IN (:hashes)` throws on any wallet past ~1,000 transactions —
+     * and the catch around the caller would swallow that and skip `insertAll`,
+     * silently stopping history caching altogether.
+     */
+    private suspend fun knownFeesFor(hashes: List<String>): Map<String, Long> =
+        hashes.chunked(SQLITE_VARIABLE_CHUNK)
+            .flatMap { transactionDao.getKnownFees(it) }
+            .associate { it.txHash to it.feeShannons }
 
     override suspend fun updateTransactionStatus(hash: String, status: String) {
         // Propagate failures — BroadcastWatchdog runs this BEFORE the terminal
@@ -165,6 +189,9 @@ class CacheManager @Inject constructor(
     }
 
     companion object {
+        /** SQLite binds at most 999 variables per statement; stay clear of it. */
+        private const val SQLITE_VARIABLE_CHUNK = 900
+
         private const val TAG = "CacheManager"
     }
 }
