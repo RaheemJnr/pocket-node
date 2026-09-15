@@ -67,6 +67,7 @@ import kotlinx.coroutines.launch
 fun WalletSettingsScreen(
     onNavigateBack: () -> Unit = {},
     onNavigateToPinVerify: () -> Unit = {},
+    onNavigateToBackup: () -> Unit = {},
     viewModel: WalletSettingsViewModel = hiltViewModel()
 ) {
     val uiState by viewModel.uiState.collectAsState()
@@ -325,6 +326,15 @@ fun WalletSettingsScreen(
                 Column(modifier = Modifier.padding(horizontal = 16.dp)) {
                     Spacer(Modifier.height(8.dp))
 
+                    // Opens the guided 3-step backup for THIS wallet (display →
+                    // verify → confirm), which is what flips the status below
+                    // from Pending to Completed. Distinct from "View seed
+                    // phrase", which only reveals the words read-only and
+                    // never records a backup. The row used to be inert while
+                    // Settings carried a whole-app "Backup Wallet" entry; that
+                    // entry is gone, so this is now the way in. The words stay
+                    // behind the PIN / biometric gate on the destination
+                    // screen (#488).
                     SettingsActionRow(
                         label = "Backup wallet",
                         value = if (uiState.isBackedUp) "Completed" else "Pending",
@@ -332,7 +342,7 @@ fun WalletSettingsScreen(
                             MaterialTheme.colorScheme.primary
                         else
                             MaterialTheme.colorScheme.error,
-                        onClick = { /* Backup flow handled elsewhere */ }
+                        onClick = onNavigateToBackup
                     )
 
                     // View seed phrase (requires PIN verification if PIN is set)

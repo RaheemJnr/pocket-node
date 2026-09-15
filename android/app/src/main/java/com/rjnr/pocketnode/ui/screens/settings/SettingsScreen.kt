@@ -63,7 +63,6 @@ import androidx.core.content.ContextCompat
 import androidx.hilt.lifecycle.viewmodel.compose.hiltViewModel
 import com.composables.icons.lucide.ChevronRight
 import com.composables.icons.lucide.CircleHelp
-import com.composables.icons.lucide.Download
 import com.composables.icons.lucide.Github
 import com.composables.icons.lucide.Info
 import com.composables.icons.lucide.Lucide
@@ -104,9 +103,7 @@ private val ColorAmber = PendingAmber
 @Composable
 fun SettingsScreen(
     onNavigateToNodeStatus: () -> Unit = {},
-    onNavigateToBackup: () -> Unit = {},
     onNavigateToSecuritySettings: () -> Unit = {},
-    onNavigateToImport: () -> Unit = {},
     onNavigateToWalletManager: () -> Unit = {},
     onNavigateToContacts: () -> Unit = {},
     onNavigateToFaq: (anchor: String?) -> Unit = {},
@@ -350,8 +347,6 @@ fun SettingsScreen(
     SettingsScreenUI(
         snackbarHostState,
         onNavigateToSecuritySettings,
-        onNavigateToBackup,
-        onNavigateToImport,
         uiState,
         onNavigateToNodeStatus,
         context,
@@ -387,8 +382,6 @@ fun SettingsScreen(
 private fun SettingsScreenUI(
     snackbarHostState: SnackbarHostState,
     onNavigateToSecuritySettings: () -> Unit,
-    onNavigateToBackup: () -> Unit,
-    onNavigateToImport: () -> Unit,
     uiState: SettingsViewModel.UiState,
     onNavigateToNodeStatus: () -> Unit,
     context: Context,
@@ -454,22 +447,12 @@ private fun SettingsScreenUI(
                 )
             }
 
-            item {
-                SettingsLinkRow(
-                    icon = Lucide.ShieldCheck,
-                    title = "Backup Wallet",
-                    onClick = { onNavigateToBackup() }
-                )
-            }
-
-            item {
-                SettingsLinkRow(
-                    icon = Lucide.Download,
-                    title = "Import Wallet",
-                    onClick = onNavigateToImport
-                )
-            }
-
+            // "Backup Wallet" and "Import Wallet" used to sit here. Both are
+            // duplicates of Manage Wallets, which backs up a chosen wallet
+            // (WalletSettingsScreen → "Backup wallet") and imports into a new
+            // one (AddWalletScreen → "Import Wallet"). The Settings rows acted
+            // on the *active* wallet only, which read as a whole-app action
+            // and had no wallet picker.
             item {
                 SettingsLinkRow(
                     icon = Lucide.RefreshCw,
@@ -963,8 +946,6 @@ private fun SettingsScreenUIPreview() {
         SettingsScreenUI(
             snackbarHostState = remember { SnackbarHostState() },
             onNavigateToSecuritySettings = {},
-            onNavigateToBackup = {},
-            onNavigateToImport = {},
             uiState = SettingsViewModel.UiState(
                 isPinEnabled = true,
                 syncMode = SyncMode.RECENT,
