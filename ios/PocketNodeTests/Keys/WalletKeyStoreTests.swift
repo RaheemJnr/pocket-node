@@ -1,3 +1,4 @@
+import Security
 import XCTest
 
 @testable import PocketNode
@@ -106,49 +107,90 @@ final class WalletKeyStoreTests: XCTestCase {
 
         try await store.delete()
 
-        XCTAssertNil(try keychain.get(account: WalletKeyAccount.bundleCiphertext))
-        XCTAssertNil(try keychain.get(account: WalletKeyAccount.wrappedDataKey))
+        XCTAssertNil(try keychain.get(account: WalletKeyAccount.envelope))
+        XCTAssertFalse(wrapper.hasKey)
     }
 
     func testLoadWithoutAStoredWalletFailsClosed() async {
-        await assertThrows(.notFound) { try await self.store.load(reason: "Unlock your wallet") }
-    }
-
-    /// Half a wallet is no wallet: a ciphertext whose wrapped key is gone can
-    /// never be decrypted, so it must not look loadable.
-    func testLoadWithOnlyTheCiphertextFailsClosed() async throws {
-        try await store.store(WalletKeyBundle(privateKeyHex: "aabb"))
-        try keychain.delete(account: WalletKeyAccount.wrappedDataKey)
-
-        await assertThrows(.notFound) { try await self.store.load(reason: "Unlock your wallet") }
+        await assertThrows(.notFound) { _ = try await self.store.load(reason: "Unlock your wallet") }
     }
 
     // MARK: - Integrity
 
+    /// A single flipped byte anywhere in the envelope has to fail: in the
+    /// ciphertext the GCM tag catches it, in the header the parser does.
     func testTamperedCiphertextFailsAsCorrupt() async throws {
         try await store.store(WalletKeyBundle(privateKeyHex: "aabb", mnemonic: "one two"))
 
-        var ciphertext = try XCTUnwrap(try keychain.get(account: WalletKeyAccount.bundleCiphertext))
-        let index = ciphertext.count / 2
-        ciphertext[index] ^= 0x01
-        try keychain.set(ciphertext, account: WalletKeyAccount.bundleCiphertext)
+        var envelope = try XCTUnwrap(try keychain.get(account: WalletKeyAccount.envelope))
+        envelope[envelope.count - 1] ^= 0x01
+        try keychain.set(envelope, account: WalletKeyAccount.envelope)
 
-        await assertThrows(.corrupt) { try await self.store.load(reason: "Unlock your wallet") }
+        await assertThrows(.corrupt) { _ = try await self.store.load(reason: "Unlock your wallet") }
+    }
+
+    func testTruncatedEnvelopeFailsAsCorrupt() async throws {
+        try await store.store(WalletKeyBundle(privateKeyHex: "aabb"))
+
+        let envelope = try XCTUnwrap(try keychain.get(account: WalletKeyAccount.envelope))
+        try keychain.set(envelope.prefix(envelope.count / 2), account: WalletKeyAccount.envelope)
+
+        await assertThrows(.corrupt) { _ = try await self.store.load(reason: "Unlock your wallet") }
+    }
+
+    /// A length field pointing past the end of the buffer must be rejected
+    /// before it is used to slice it.
+    func testOversizedWrappedKeyLengthFailsAsCorrupt() async throws {
+        try await store.store(WalletKeyBundle(privateKeyHex: "aabb"))
+
+        var envelope = try XCTUnwrap(try keychain.get(account: WalletKeyAccount.envelope))
+        envelope.replaceSubrange(1..<5, with: [0x00, 0x00, 0xFF, 0xFF])
+        try keychain.set(envelope, account: WalletKeyAccount.envelope)
+
+        await assertThrows(.corrupt) { _ = try await self.store.load(reason: "Unlock your wallet") }
+    }
+
+    func testZeroWrappedKeyLengthFailsAsCorrupt() async throws {
+        try await store.store(WalletKeyBundle(privateKeyHex: "aabb"))
+
+        var envelope = try XCTUnwrap(try keychain.get(account: WalletKeyAccount.envelope))
+        envelope.replaceSubrange(1..<5, with: [0x00, 0x00, 0x00, 0x00])
+        try keychain.set(envelope, account: WalletKeyAccount.envelope)
+
+        await assertThrows(.corrupt) { _ = try await self.store.load(reason: "Unlock your wallet") }
+    }
+
+    /// An envelope from a future layout must be refused, not guessed at.
+    func testUnknownEnvelopeVersionFailsAsCorrupt() async throws {
+        try await store.store(WalletKeyBundle(privateKeyHex: "aabb"))
+
+        var envelope = try XCTUnwrap(try keychain.get(account: WalletKeyAccount.envelope))
+        envelope[0] = 0x02
+        try keychain.set(envelope, account: WalletKeyAccount.envelope)
+
+        await assertThrows(.corrupt) { _ = try await self.store.load(reason: "Unlock your wallet") }
     }
 
     /// A data key from a different wrapping key must not open the bundle: the
     /// GCM tag check is what fails closed here, not a length or format check.
-    func testCiphertextFromAnotherWalletFailsAsCorrupt() async throws {
+    func testEnvelopeFromAnotherWalletFailsClosed() async throws {
         try await store.store(WalletKeyBundle(privateKeyHex: "aabb"))
-        let foreignCiphertext = try XCTUnwrap(
-            try keychain.get(account: WalletKeyAccount.bundleCiphertext)
-        )
+        let foreign = try XCTUnwrap(try keychain.get(account: WalletKeyAccount.envelope))
 
         try await store.delete()
         try await store.store(WalletKeyBundle(privateKeyHex: "ccdd"))
-        try keychain.set(foreignCiphertext, account: WalletKeyAccount.bundleCiphertext)
+        try keychain.set(foreign, account: WalletKeyAccount.envelope)
 
-        await assertThrows(.corrupt) { try await self.store.load(reason: "Unlock your wallet") }
+        do {
+            _ = try await store.load(reason: "Unlock your wallet")
+            XCTFail("a foreign envelope must not open")
+        } catch let error as WalletKeyStoreError {
+            // Which way it fails depends on the Enclave: the wrapped key belongs
+            // to a key pair that no longer exists, so decryption is refused, and
+            // were it somehow unwrapped the GCM tag would still reject it. The
+            // point is that it is a typed failure and never a bundle.
+            XCTAssertNotEqual(error, .notFound)
+        }
     }
 
     func testSecondStoreReplacesTheFirst() async throws {
@@ -168,24 +210,49 @@ final class WalletKeyStoreTests: XCTestCase {
         let bundle = WalletKeyBundle(privateKeyHex: "aabb")
 
         try await store.store(bundle)
-        let firstCiphertext = try keychain.get(account: WalletKeyAccount.bundleCiphertext)
-        let firstWrappedKey = try keychain.get(account: WalletKeyAccount.wrappedDataKey)
+        let first = try keychain.get(account: WalletKeyAccount.envelope)
 
         try await store.store(bundle)
 
-        XCTAssertNotEqual(try keychain.get(account: WalletKeyAccount.bundleCiphertext), firstCiphertext)
-        XCTAssertNotEqual(try keychain.get(account: WalletKeyAccount.wrappedDataKey), firstWrappedKey)
+        XCTAssertNotEqual(try keychain.get(account: WalletKeyAccount.envelope), first)
     }
 
     /// Nothing recognisable may sit in the Keychain in the clear.
-    func testStoredCiphertextDoesNotContainThePlaintext() async throws {
+    func testStoredEnvelopeDoesNotContainThePlaintext() async throws {
         let bundle = WalletKeyBundle(privateKeyHex: "deadbeef", mnemonic: "one two")
 
         try await store.store(bundle)
 
-        let ciphertext = try XCTUnwrap(try keychain.get(account: WalletKeyAccount.bundleCiphertext))
-        XCTAssertNil(String(data: ciphertext, encoding: .utf8)?.range(of: "privateKeyHex"))
-        XCTAssertFalse(ciphertext.range(of: Data("deadbeef".utf8)) != nil)
+        let envelope = try XCTUnwrap(try keychain.get(account: WalletKeyAccount.envelope))
+        XCTAssertNil(envelope.range(of: Data("deadbeef".utf8)))
+        XCTAssertNil(envelope.range(of: Data("privateKeyHex".utf8)))
+    }
+
+    // MARK: - Keychain protection class
+
+    /// The protection attributes are the difference between an item that leaves
+    /// the device and one that does not, so they are asserted on the real item
+    /// rather than trusted from the write path.
+    func testEnvelopeItemIsDeviceOnlyAndNotSynchronizable() async throws {
+        try await store.store(WalletKeyBundle(privateKeyHex: "aabb"))
+
+        let query: [String: Any] = [
+            kSecClass as String: kSecClassGenericPassword,
+            kSecAttrService as String: service,
+            kSecAttrAccount as String: WalletKeyAccount.envelope,
+            kSecReturnAttributes as String: true,
+            kSecMatchLimit as String: kSecMatchLimitOne,
+        ]
+        var result: CFTypeRef?
+        XCTAssertEqual(SecItemCopyMatching(query as CFDictionary, &result), errSecSuccess)
+        let attributes = try XCTUnwrap(result as? [String: Any])
+
+        XCTAssertEqual(
+            attributes[kSecAttrAccessible as String] as? String,
+            kSecAttrAccessibleWhenPasscodeSetThisDeviceOnly as String
+        )
+        let synchronizable = attributes[kSecAttrSynchronizable as String] as? Bool ?? false
+        XCTAssertFalse(synchronizable)
     }
 
     // MARK: - Hardware backing
@@ -206,8 +273,8 @@ final class WalletKeyStoreTests: XCTestCase {
 
         let report = await store.diagnostics()
 
-        XCTAssertTrue(report.contains("bundleCiphertext present: true"))
-        XCTAssertTrue(report.contains("wrappedDataKey present: true"))
+        XCTAssertTrue(report.contains("envelope present: true"))
+        XCTAssertTrue(report.contains("wrappingKey present: true"))
         XCTAssertFalse(report.contains("deadbeef"))
     }
 

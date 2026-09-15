@@ -3,60 +3,18 @@ import XCTest
 
 @testable import PocketNode
 
-/// A wrapping key that can be told to fail, so the store's fail-closed paths can
-/// be exercised without a real biometric prompt.
-private final class StubKeyWrapper: KeyWrapping, @unchecked Sendable {
-    /// Guards `failure`: `KeyWrapping` is `Sendable` and the store calls this
-    /// from its actor's executor.
-    private let lock = NSLock()
-    private var failure: KeyWrapperError?
-    private let real: SecureEnclaveKeyWrapper
-
-    init(tag: String) {
-        self.real = SecureEnclaveKeyWrapper(tag: tag)
-    }
-
-    func fail(with error: KeyWrapperError?) {
-        lock.lock()
-        defer { lock.unlock() }
-        failure = error
-    }
-
-    private var currentFailure: KeyWrapperError? {
-        lock.lock()
-        defer { lock.unlock() }
-        return failure
-    }
-
-    var isHardwareBacked: Bool { real.isHardwareBacked }
-
-    func wrap(_ dataKey: Data) throws -> Data {
-        if let currentFailure { throw currentFailure }
-        return try real.wrap(dataKey)
-    }
-
-    func unwrap(_ wrapped: Data, reason: String) throws -> Data {
-        if let currentFailure { throw currentFailure }
-        return try real.unwrap(wrapped, reason: reason)
-    }
-
-    func deleteKey() throws {
-        try real.deleteKey()
-    }
-}
-
-/// What happens when the Enclave says no.
+/// What happens when the Enclave or the Keychain says no.
 final class WalletKeyStoreFailureTests: XCTestCase {
     private let service = "com.rjnr.pocketnode.tests.failure.keys"
     private let tag = "com.rjnr.pocketnode.tests.failure.wrapper"
 
-    private var keychain: KeychainStore!
+    private var keychain: FailingKeyValueStore!
     private var wrapper: StubKeyWrapper!
     private var store: WalletKeyStore!
 
     override func setUp() {
         super.setUp()
-        keychain = KeychainStore(service: service)
+        keychain = FailingKeyValueStore(service: service)
         wrapper = StubKeyWrapper(tag: tag)
         store = WalletKeyStore(keychain: keychain, wrapper: wrapper)
         try? keychain.deleteAll()
@@ -64,6 +22,9 @@ final class WalletKeyStoreFailureTests: XCTestCase {
     }
 
     override func tearDown() {
+        keychain.failWrites(false)
+        keychain.failDeletes(false)
+        wrapper.fail(with: nil)
         try? keychain.deleteAll()
         try? wrapper.deleteKey()
         store = nil
@@ -71,6 +32,8 @@ final class WalletKeyStoreFailureTests: XCTestCase {
         keychain = nil
         super.tearDown()
     }
+
+    // MARK: - Authentication
 
     /// A cancelled prompt is not an error to shout about, so it has to stay
     /// distinguishable from a failed one.
@@ -92,36 +55,83 @@ final class WalletKeyStoreFailureTests: XCTestCase {
         }
     }
 
-    /// `biometryCurrentSet` invalidates the wrapping key when the enrolled
-    /// biometrics change; the wallet is then unreadable and must say so rather
-    /// than look like a transient error.
-    func testMissingWrappingKeySurfacesAsNotFound() async throws {
-        try await store.store(WalletKeyBundle(privateKeyHex: "aabb"))
-        wrapper.fail(with: .keyNotFound)
+    // MARK: - Invalidated wrapping key
 
-        await assertThrows(.notFound) {
+    /// `biometryCurrentSet` destroys the wrapping key when the enrolled
+    /// biometrics change. The wallet is then unreadable forever, which is a
+    /// different conversation with the user than "no wallet here" or "try
+    /// again", so it must not collapse into `.notFound`.
+    func testInvalidatedKeyOnLoadIsNotReportedAsMissingWallet() async throws {
+        try await store.store(WalletKeyBundle(privateKeyHex: "aabb"))
+        wrapper.simulateInvalidatedKey(true)
+
+        await assertThrows(.keyInvalidated) {
             _ = try await self.store.load(reason: "Unlock your wallet")
         }
     }
 
-    /// The critical one: a write that cannot complete must leave the wallet
-    /// that was already there intact and loadable. Replacing it with half a new
-    /// one would lose the user's keys.
-    func testFailedStoreLeavesThePreviousWalletIntact() async throws {
+    /// Storing over a wallet whose key is gone would mint a fresh key and leave
+    /// the old envelope permanently unreadable, with nothing to tell the user
+    /// their previous wallet is stranded. Refuse instead.
+    func testStoreRefusesToMintAKeyOverAnExistingWallet() async throws {
+        try await store.store(WalletKeyBundle(privateKeyHex: "aabb"))
+        wrapper.simulateInvalidatedKey(true)
+
+        await assertThrows(.keyInvalidated) {
+            try await self.store.store(WalletKeyBundle(privateKeyHex: "ccdd"))
+        }
+    }
+
+    /// With no wallet stored there is nothing to strand, so the first store on a
+    /// clean device creates the key as usual.
+    func testStoreCreatesTheKeyWhenThereIsNoWallet() async throws {
+        let hasWallet = await store.hasWallet
+        XCTAssertFalse(hasWallet)
+
+        try await store.store(WalletKeyBundle(privateKeyHex: "aabb"))
+
+        let loaded = try await store.load(reason: "Unlock your wallet")
+        XCTAssertEqual(loaded.privateKeyHex, "aabb")
+    }
+
+    // MARK: - Keychain failures
+
+    /// The critical one: a write that cannot complete must leave the wallet that
+    /// was already there intact and loadable.
+    func testFailedKeychainWriteLeavesThePreviousWalletIntact() async throws {
+        let original = WalletKeyBundle(privateKeyHex: "aabb", mnemonic: "one two")
+        try await store.store(original)
+        keychain.failWrites(true)
+
+        await assertThrows(.keychain(errSecIO)) {
+            try await self.store.store(WalletKeyBundle(privateKeyHex: "ccdd"))
+        }
+
+        keychain.failWrites(false)
+        let loaded = try await store.load(reason: "Unlock your wallet")
+        XCTAssertEqual(loaded, original)
+    }
+
+    /// Same for a wrap that fails before anything is written.
+    func testFailedWrapLeavesThePreviousWalletIntact() async throws {
         let original = WalletKeyBundle(privateKeyHex: "aabb", mnemonic: "one two")
         try await store.store(original)
         wrapper.fail(with: .authenticationFailed)
 
-        do {
-            try await store.store(WalletKeyBundle(privateKeyHex: "ccdd"))
-            XCTFail("the store should have failed")
-        } catch {
-            // expected
+        await assertThrows(.authenticationFailed) {
+            try await self.store.store(WalletKeyBundle(privateKeyHex: "ccdd"))
         }
 
         wrapper.fail(with: nil)
         let loaded = try await store.load(reason: "Unlock your wallet")
         XCTAssertEqual(loaded, original)
+    }
+
+    func testFailedDeleteSurfacesTheKeychainStatus() async throws {
+        try await store.store(WalletKeyBundle(privateKeyHex: "aabb"))
+        keychain.failDeletes(true)
+
+        await assertThrows(.keychain(errSecIO)) { try await self.store.delete() }
     }
 
     private func assertThrows(

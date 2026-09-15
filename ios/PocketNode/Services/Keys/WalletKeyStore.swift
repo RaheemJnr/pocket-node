@@ -5,17 +5,22 @@ import Security
 /// Why reading or writing the wallet failed. Every case is terminal for the
 /// operation: the store never falls back to a weaker path.
 enum WalletKeyStoreError: Error, Equatable {
-    /// No wallet is stored, or only half of one is (which is treated the same:
-    /// an unusable wallet is an absent wallet).
+    /// No wallet is stored.
     case notFound
-    /// The user failed authentication, or biometry is locked out, or the
-    /// wrapping key was invalidated by a biometric enrolment change.
+    /// The user failed to authenticate, or biometry is locked out. The wallet is
+    /// intact; another attempt can succeed.
     case authenticationFailed
     /// The user dismissed the prompt. Distinct from `.authenticationFailed` so
     /// callers can stay silent instead of showing an error.
     case authenticationCancelled
-    /// The ciphertext did not authenticate, or the decrypted bytes are not a
-    /// bundle. Tampering and truncation both land here.
+    /// A wallet is stored but the key that protects it is gone, so it can never
+    /// be decrypted again. The usual cause is `biometryCurrentSet`: enrolling a
+    /// new face or finger invalidates the wrapping key by design. Recovery means
+    /// restoring from the mnemonic, so this must never be confused with
+    /// `.notFound` (nothing to restore) or `.authenticationFailed` (try again).
+    case keyInvalidated
+    /// The envelope is malformed, the ciphertext did not authenticate, or the
+    /// decrypted bytes are not a bundle. Tampering and truncation both land here.
     case corrupt
     /// The Keychain refused an operation.
     case keychain(OSStatus)
@@ -28,43 +33,43 @@ enum WalletKeyStoreError: Error, Equatable {
 ///
 /// Layout, mirroring the Android Keystore V2 design:
 /// 1. The bundle JSON is encrypted with AES-256-GCM under a random 32-byte data
-///    key, with a fresh 12-byte nonce per write. The combined representation
-///    (nonce ‖ ciphertext ‖ tag) is one Keychain item.
-/// 2. The data key is wrapped by a Secure Enclave P-256 key and stored as a
-///    second Keychain item. Unwrapping it is what asks for Face ID, Touch ID or
-///    the device passcode.
+///    key, with a fresh 12-byte nonce per write.
+/// 2. The data key is wrapped by a Secure Enclave P-256 key. Unwrapping it is
+///    what asks for Face ID, Touch ID or the device passcode.
+/// 3. Both halves go into one ``WalletKeyEnvelope`` written as a single Keychain
+///    item, so a write either lands whole or not at all.
 ///
 /// Nothing in the Keychain is usable without the Enclave, and the Enclave key
-/// cannot be exported, so a Keychain dump off the device yields nothing. The
-/// data key and the plaintext bundle bytes are zeroed as soon as they have been
-/// used.
+/// cannot be exported, so a Keychain dump off the device yields nothing.
 ///
 /// An actor because two callers must not interleave a write with a read, and the
 /// Keychain and Enclave calls block; they have no business on the main actor.
 actor WalletKeyStore {
-    private let keychain: KeychainStore
+    private let keychain: any KeyValueStoring
     private let wrapper: any KeyWrapping
 
-    init(keychain: KeychainStore = KeychainStore(), wrapper: any KeyWrapping = SecureEnclaveKeyWrapper()) {
+    init(keychain: any KeyValueStoring = KeychainStore(), wrapper: any KeyWrapping = SecureEnclaveKeyWrapper()) {
         self.keychain = keychain
         self.wrapper = wrapper
     }
 
-    /// Whether a wallet is stored. Reads only the ciphertext item's presence, so
+    /// Whether a wallet is stored. Checks only that the envelope item exists, so
     /// it never prompts.
     var hasWallet: Bool {
-        (try? keychain.contains(account: WalletKeyAccount.bundleCiphertext)) ?? false
+        (try? keychain.contains(account: WalletKeyAccount.envelope)) ?? false
     }
 
     /// Encrypts and stores `bundle`, replacing any wallet already there.
     ///
-    /// The wrap happens before anything is written, so a failed or cancelled
-    /// wrap leaves the previous wallet untouched. If the second Keychain write
-    /// fails, both items are rolled back to their previous values, because a
-    /// ciphertext paired with the wrong wrapped key is unrecoverable.
+    /// One Keychain write, so there is no half-stored state to roll back: either
+    /// the new envelope is in place or the old one still is.
     func store(_ bundle: WalletKeyBundle) throws {
-        let previousCiphertext = try read(WalletKeyAccount.bundleCiphertext)
-        let previousWrappedKey = try read(WalletKeyAccount.wrappedDataKey)
+        // Minting a fresh wrapping key while an envelope is still there would
+        // silently strand that wallet, turning an invalidated key into data
+        // loss. Only a device with no wallet may create a key.
+        if !wrapper.hasKey && hasWallet {
+            throw WalletKeyStoreError.keyInvalidated
+        }
 
         var dataKey = try Self.randomDataKey()
         defer { dataKey.secureZero() }
@@ -72,24 +77,23 @@ actor WalletKeyStore {
         var plaintext = try Self.encode(bundle)
         defer { plaintext.secureZero() }
 
-        let sealed: Data
+        let ciphertext: Data
         do {
             let box = try AES.GCM.seal(plaintext, using: SymmetricKey(data: dataKey), nonce: AES.GCM.Nonce())
             guard let combined = box.combined else { throw WalletKeyStoreError.corrupt }
-            sealed = combined
+            ciphertext = combined
         } catch let error as WalletKeyStoreError {
             throw error
         } catch {
             throw WalletKeyStoreError.corrupt
         }
 
-        let wrappedKey = try Self.mapWrapperErrors { try wrapper.wrap(dataKey) }
+        let wrappedDataKey = try Self.mapWrapperErrors { try wrapper.wrap(dataKey) }
+        let envelope = WalletKeyEnvelope.encode(wrappedDataKey: wrappedDataKey, ciphertext: ciphertext)
 
         do {
-            try keychain.set(sealed, account: WalletKeyAccount.bundleCiphertext)
-            try keychain.set(wrappedKey, account: WalletKeyAccount.wrappedDataKey)
+            try keychain.set(envelope, account: WalletKeyAccount.envelope)
         } catch {
-            rollBack(ciphertext: previousCiphertext, wrappedKey: previousWrappedKey)
             throw Self.map(error)
         }
     }
@@ -97,18 +101,27 @@ actor WalletKeyStore {
     /// Decrypts and returns the stored wallet, prompting for biometrics or the
     /// device passcode with `reason` as the system prompt's text.
     func load(reason: String) throws -> WalletKeyBundle {
-        guard let ciphertext = try read(WalletKeyAccount.bundleCiphertext),
-              let wrappedKey = try read(WalletKeyAccount.wrappedDataKey)
-        else {
+        guard let stored = try read(WalletKeyAccount.envelope) else {
             throw WalletKeyStoreError.notFound
         }
 
-        var dataKey = try Self.mapWrapperErrors { try wrapper.unwrap(wrappedKey, reason: reason) }
+        let envelope = try WalletKeyEnvelope.decode(stored)
+
+        // From here the wallet exists, so a missing wrapping key is an
+        // invalidated one, never an absent wallet.
+        var dataKey: Data
+        do {
+            dataKey = try wrapper.unwrap(envelope.wrappedDataKey, reason: reason)
+        } catch KeyWrapperError.keyNotFound {
+            throw WalletKeyStoreError.keyInvalidated
+        } catch {
+            throw Self.map(error)
+        }
         defer { dataKey.secureZero() }
 
         var plaintext: Data
         do {
-            let box = try AES.GCM.SealedBox(combined: ciphertext)
+            let box = try AES.GCM.SealedBox(combined: envelope.ciphertext)
             plaintext = try AES.GCM.open(box, using: SymmetricKey(data: dataKey))
         } catch {
             throw WalletKeyStoreError.corrupt
@@ -125,8 +138,7 @@ actor WalletKeyStore {
     /// Removes the wallet and the Enclave key that protects it.
     func delete() throws {
         do {
-            try keychain.delete(account: WalletKeyAccount.bundleCiphertext)
-            try keychain.delete(account: WalletKeyAccount.wrappedDataKey)
+            try keychain.delete(account: WalletKeyAccount.envelope)
             try wrapper.deleteKey()
         } catch {
             throw Self.map(error)
@@ -135,16 +147,15 @@ actor WalletKeyStore {
 
     #if DEBUG
     /// Debug-only summary for the maintainer's on-device check. Reports whether
-    /// the wrapping key is really in the Enclave and whether both items are
+    /// the wrapping key is really in the Enclave and whether the envelope is
     /// present. Never returns key material, and is not wired to any UI.
     func diagnostics() -> String {
-        let ciphertext = (try? keychain.contains(account: WalletKeyAccount.bundleCiphertext)) ?? false
-        let wrappedKey = (try? keychain.contains(account: WalletKeyAccount.wrappedDataKey)) ?? false
+        let envelope = (try? keychain.contains(account: WalletKeyAccount.envelope)) ?? false
         return """
             WalletKeyStore diagnostics
             hardwareBacked: \(wrapper.isHardwareBacked)
-            bundleCiphertext present: \(ciphertext)
-            wrappedDataKey present: \(wrappedKey)
+            wrappingKey present: \(wrapper.hasKey)
+            envelope present: \(envelope)
             """
     }
     #endif
@@ -156,21 +167,6 @@ actor WalletKeyStore {
             return try keychain.get(account: account)
         } catch {
             throw Self.map(error)
-        }
-    }
-
-    /// Best effort restore after a half-finished write. Nothing useful is left
-    /// to do if this itself fails, and throwing here would mask the real error.
-    private func rollBack(ciphertext: Data?, wrappedKey: Data?) {
-        restore(ciphertext, to: WalletKeyAccount.bundleCiphertext)
-        restore(wrappedKey, to: WalletKeyAccount.wrappedDataKey)
-    }
-
-    private func restore(_ value: Data?, to account: String) {
-        if let value {
-            try? keychain.set(value, account: account)
-        } else {
-            try? keychain.delete(account: account)
         }
     }
 
@@ -215,7 +211,7 @@ actor WalletKeyStore {
                 return .authenticationCancelled
             case .authenticationFailed:
                 return .authenticationFailed
-            case .keyCreationFailed(let status):
+            case .keyCreationFailed(let status), .deleteFailed(let status):
                 return .keychain(status)
             case .operationFailed(let message):
                 return .wrapping(message)
@@ -227,10 +223,14 @@ actor WalletKeyStore {
 }
 
 extension Data {
-    /// Overwrites the buffer in place. Only reaches the bytes this `Data` owns:
-    /// anything Swift already copied elsewhere (a `String`, a value passed by
-    /// copy) is beyond reach, which is why the plaintext never becomes a
-    /// `String` on the way through.
+    /// Overwrites this buffer in place.
+    ///
+    /// It reaches only the bytes this `Data` owns. The decrypted bundle is
+    /// zeroed here, but the `String` fields of the ``WalletKeyBundle`` decoded
+    /// out of it are not: Swift `String` storage is copy-on-write and owned by
+    /// the standard library, with no supported way to wipe it. Those copies live
+    /// until they are released and the memory is reused, which is why the
+    /// plaintext bundle is handed to callers and never cached.
     mutating func secureZero() {
         withUnsafeMutableBytes { raw in
             guard let base = raw.baseAddress, raw.count > 0 else { return }

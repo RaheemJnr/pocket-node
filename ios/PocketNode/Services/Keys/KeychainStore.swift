@@ -13,17 +13,30 @@ struct KeychainError: Error, Equatable, CustomStringConvertible {
     var description: String { "KeychainError(\(status)): \(message)" }
 }
 
-/// The two generic-password items that make up a stored wallet.
+/// Byte storage addressed by account name.
 ///
-/// Split in two so the wrapped data key (which the Secure Enclave has to unwrap,
-/// with a biometric prompt) and the bundle ciphertext (which is readable without
-/// a prompt) can be handled independently: `hasWallet` only touches the latter.
-enum WalletKeyAccount {
-    static let wrappedDataKey = "wallet.wrappedDataKey"
-    static let bundleCiphertext = "wallet.bundleCiphertext"
+/// `WalletKeyStore` depends on this rather than on `KeychainStore` directly, so
+/// its fail-closed paths can be tested against a store that refuses to write.
+/// The only production conformer is ``KeychainStore``.
+protocol KeyValueStoring: Sendable {
+    func set(_ data: Data, account: String) throws
+    func get(account: String) throws -> Data?
+    func contains(account: String) throws -> Bool
+    func delete(account: String) throws
+    func deleteAll() throws
 }
 
-/// Generic-password storage for the wallet's encrypted blobs.
+/// The single generic-password item that holds a wallet.
+///
+/// One item, not two: the Keychain gives no transaction across items, so a
+/// wrapped data key and its ciphertext stored separately can be left mismatched
+/// by a crash or a partial failure, and a mismatch is unrecoverable. Both halves
+/// therefore travel in one envelope written by one `SecItemAdd`/`SecItemUpdate`.
+enum WalletKeyAccount {
+    static let envelope = "wallet.envelope"
+}
+
+/// Generic-password storage for the wallet's encrypted envelope.
 ///
 /// Every item is `kSecAttrAccessibleWhenPasscodeSetThisDeviceOnly`: it never
 /// leaves the device, is never part of an iTunes/iCloud backup, and is
@@ -33,7 +46,7 @@ enum WalletKeyAccount {
 /// Nothing stored here is plaintext key material: the bundle is AES-256-GCM
 /// ciphertext and the data key is wrapped by the Secure Enclave. The Keychain
 /// attributes are defence in depth, not the only protection.
-struct KeychainStore: Sendable {
+struct KeychainStore: KeyValueStoring {
     static let defaultService = "com.rjnr.pocketnode.keys"
 
     let service: String
@@ -45,6 +58,9 @@ struct KeychainStore: Sendable {
     }
 
     /// Writes `data` for `account`, replacing any existing item.
+    ///
+    /// Update first, then add: both are single Keychain operations, so an item
+    /// is never left partially written.
     func set(_ data: Data, account: String) throws {
         let update: [String: Any] = [
             kSecValueData as String: data,
@@ -103,12 +119,13 @@ struct KeychainStore: Sendable {
         }
     }
 
-    /// Removes every item for this service. Used by the reinstall wipe.
+    /// Removes every item for this service, synchronizable or not, so the
+    /// reinstall wipe cannot leave an item from an older build behind.
     func deleteAll() throws {
         let all: [String: Any] = [
             kSecClass as String: kSecClassGenericPassword,
             kSecAttrService as String: service,
-            kSecAttrSynchronizable as String: false,
+            kSecAttrSynchronizable as String: kSecAttrSynchronizableAny,
         ]
         let status = SecItemDelete(all as CFDictionary)
         guard status == errSecSuccess || status == errSecItemNotFound else {

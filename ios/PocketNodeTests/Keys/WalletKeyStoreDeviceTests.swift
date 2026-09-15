@@ -62,6 +62,7 @@ final class WalletKeyStoreDeviceTests: XCTestCase {
         let report = await store.diagnostics()
         print(report)
         XCTAssertTrue(report.contains("hardwareBacked: true"))
+        XCTAssertTrue(report.contains("envelope present: true"))
 
         let loaded = try await store.load(reason: "Unlock your Pocket Node wallet")
         XCTAssertEqual(loaded, bundle)

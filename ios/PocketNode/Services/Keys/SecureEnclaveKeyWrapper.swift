@@ -14,6 +14,8 @@ enum KeyWrapperError: Error, Equatable {
     case authenticationFailed
     /// Creating the key pair failed.
     case keyCreationFailed(OSStatus)
+    /// Removing the key pair failed, so key material may still be on the device.
+    case deleteFailed(OSStatus)
     /// Anything else the Security framework reported.
     case operationFailed(String)
 }
@@ -26,6 +28,11 @@ protocol KeyWrapping: Sendable {
     /// Whether the wrapping key actually lives in the Secure Enclave. False on
     /// the simulator, and false if no key exists yet.
     var isHardwareBacked: Bool { get }
+
+    /// Whether a wrapping key exists at all. Never prompts: it only looks the
+    /// key up, it does not use it. False after the system invalidates the key
+    /// because the enrolled biometrics changed.
+    var hasKey: Bool { get }
 
     /// Encrypts `dataKey` to the wrapping key's public half, creating the key
     /// pair on first use. Never prompts: the public key is not access
@@ -80,6 +87,10 @@ final class SecureEnclaveKeyWrapper: KeyWrapping {
         return token == (kSecAttrTokenIDSecureEnclave as String)
     }
 
+    var hasKey: Bool {
+        (try? loadKey(context: nil)) != nil
+    }
+
     func wrap(_ dataKey: Data) throws -> Data {
         let privateKey = try loadKey(context: nil) ?? createKey()
         guard let publicKey = SecKeyCopyPublicKey(privateKey) else {
@@ -124,7 +135,7 @@ final class SecureEnclaveKeyWrapper: KeyWrapping {
     func deleteKey() throws {
         let status = SecItemDelete(baseQuery() as CFDictionary)
         guard status == errSecSuccess || status == errSecItemNotFound else {
-            throw KeyWrapperError.keyCreationFailed(status)
+            throw KeyWrapperError.deleteFailed(status)
         }
     }
 
@@ -157,8 +168,13 @@ final class SecureEnclaveKeyWrapper: KeyWrapping {
         let status = SecItemCopyMatching(query as CFDictionary, &item)
         switch status {
         case errSecSuccess:
-            // swiftlint:disable:next force_cast
-            return (item as! SecKey)
+            // Swift rejects `as?` to a CoreFoundation type as always succeeding,
+            // so the type is checked explicitly and only then cast. A Keychain
+            // item of the wrong class is a corrupt store, not a usable key.
+            guard let item, CFGetTypeID(item) == SecKeyGetTypeID() else {
+                throw KeyWrapperError.operationFailed("the stored wrapping key is not a key")
+            }
+            return item as! SecKey
         case errSecItemNotFound:
             return nil
         case errSecUserCanceled:
