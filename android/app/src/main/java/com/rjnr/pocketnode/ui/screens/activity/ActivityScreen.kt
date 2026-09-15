@@ -724,15 +724,15 @@ private fun TransactionDetailSheet(
                 value = formatBlockTimestamp(transaction.blockTimestampHex)
             )
 
-            // Fee (if non-zero)
-            val feeShannons = transaction.fee.removePrefix("0x").toLongOrNull(16) ?: 0L
-            if (feeShannons > 0L) {
+            // Network fee (#497). Shown for everything we can originate;
+            // hidden for a plain receive, where the sender paid it. "Pending"
+            // when the fee is not resolvable yet — never a silent 0, which no
+            // real transaction pays.
+            if (transaction.paysNetworkFee()) {
                 HorizontalDivider(modifier = Modifier.padding(vertical = 12.dp))
-                val feeCkb = feeShannons / 100_000_000.0
-                val feeFormatted = "%.8f".format(feeCkb).trimEnd('0').trimEnd('.')
                 DetailRow(
-                    label = "Fee",
-                    value = "$feeFormatted CKB"
+                    label = "Network fee",
+                    value = transaction.formattedFee() ?: "Pending"
                 )
             }
 

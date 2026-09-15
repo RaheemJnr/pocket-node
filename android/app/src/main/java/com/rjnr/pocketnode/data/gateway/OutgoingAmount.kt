@@ -39,3 +39,30 @@ fun computeOutgoingShannons(
  */
 fun recipientOutgoingShannons(outputs: List<OutgoingOutput>): Long =
     outputs.filter { !it.isOurs }.sumOf { it.capacityShannons }
+
+/**
+ * Network fee in shannons: Σ(input capacities) − Σ(output capacities) (#497).
+ *
+ * Returns null — meaning "not known yet", never "zero" — when the fee cannot
+ * be computed honestly:
+ *
+ *  - [resolvedInputs] does not cover every input. Both callers resolve input
+ *    capacities from data they already hold (the reserved cells on the send
+ *    path, the light-client interaction walk on the confirmed path), and
+ *    neither resolves a cell the wallet does not own. An incoming transaction
+ *    resolves none of its inputs; an outgoing one whose input cells predate
+ *    the sync window resolves only some. Deliberately no second fetch path is
+ *    added for those — the detail sheet shows "Pending" instead.
+ *  - The arithmetic comes out negative, which can only mean the resolved set
+ *    is inconsistent with the declared one. A negative fee is never a real
+ *    answer, so it is reported as unknown rather than rendered.
+ */
+fun computeFeeShannons(
+    resolvedInputs: List<Long>,
+    declaredInputCount: Int,
+    outputCapacities: List<Long>,
+): Long? {
+    if (declaredInputCount <= 0) return null
+    if (resolvedInputs.size != declaredInputCount) return null
+    return (resolvedInputs.sum() - outputCapacities.sum()).takeIf { it >= 0L }
+}

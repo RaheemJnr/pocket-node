@@ -171,6 +171,41 @@ class WalkingMigrationTest {
     }
 
     /**
+     * #497: a v15 file walked to v16 must gain `transactions.fee_shannons`,
+     * and every pre-existing row must read NULL through it — "fee not known
+     * yet", which the detail sheet renders as "Pending". A DEFAULT 0 here
+     * would make every historical transaction claim it was free.
+     */
+    @Test
+    fun `v15 walks to v16 adding a nullable fee_shannons column`() {
+        bootstrapV15WithTransaction()
+        openViaRoomAndValidate()
+        val db = openedRoomDb!!.openHelper.readableDatabase
+        db.query("PRAGMA table_info(`transactions`)").use { c ->
+            val names = mutableListOf<String>()
+            var notNull = -1
+            var dflt: String? = "unset"
+            while (c.moveToNext()) {
+                val name = c.getString(c.getColumnIndexOrThrow("name"))
+                names.add(name)
+                if (name == "fee_shannons") {
+                    notNull = c.getInt(c.getColumnIndexOrThrow("notnull"))
+                    dflt = c.getString(c.getColumnIndexOrThrow("dflt_value"))
+                }
+            }
+            assertTrue("fee_shannons column missing after MIGRATION_15_16: $names", names.contains("fee_shannons"))
+            org.junit.Assert.assertEquals("fee_shannons must be nullable", 0, notNull)
+            org.junit.Assert.assertNull("fee_shannons must have no default", dflt)
+        }
+        db.query("SELECT fee_shannons, balanceChange, direction FROM transactions WHERE txHash = '0xfee1'").use { c ->
+            assertTrue("pre-v16 transaction row lost by MIGRATION_15_16", c.moveToNext())
+            assertTrue("pre-v16 row must read NULL, not 0", c.isNull(0))
+            org.junit.Assert.assertEquals("0x2540be400", c.getString(1))
+            org.junit.Assert.assertEquals("out", c.getString(2))
+        }
+    }
+
+    /**
      * v1.6.x → v1.7.0 path: bootstrap a v9 SQLite file (no `kdfVersion`
      * column on `key_material`) and confirm MIGRATION_9_10 adds the
      * column with default 1, then Room schema validation passes.
@@ -215,7 +250,7 @@ class WalkingMigrationTest {
                 .addMigrations(
                     MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4, MIGRATION_4_5,
                     MIGRATION_5_6, MIGRATION_6_7, MIGRATION_7_8, noOpMigration8To9,
-                    MIGRATION_9_10, MIGRATION_10_11, MIGRATION_11_12, MIGRATION_12_13, MIGRATION_13_14, MIGRATION_14_15,
+                    MIGRATION_9_10, MIGRATION_10_11, MIGRATION_11_12, MIGRATION_12_13, MIGRATION_13_14, MIGRATION_14_15, MIGRATION_15_16,
                 )
                 .build()
             openedRoomDb = db
@@ -245,7 +280,7 @@ class WalkingMigrationTest {
             .addMigrations(
                 MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4, MIGRATION_4_5,
                 MIGRATION_5_6, MIGRATION_6_7, MIGRATION_7_8, MIGRATION_8_9,
-                MIGRATION_9_10, MIGRATION_10_11, MIGRATION_11_12, MIGRATION_12_13, MIGRATION_13_14, MIGRATION_14_15,
+                MIGRATION_9_10, MIGRATION_10_11, MIGRATION_11_12, MIGRATION_12_13, MIGRATION_13_14, MIGRATION_14_15, MIGRATION_15_16,
             )
             .build()
         openedRoomDb = db
@@ -338,6 +373,44 @@ class WalkingMigrationTest {
                 )
                 db.execSQL("CREATE TABLE IF NOT EXISTS room_master_table (id INTEGER PRIMARY KEY,identity_hash TEXT)")
                 db.execSQL("INSERT OR REPLACE INTO room_master_table VALUES(42, 'bootstrap-v14')")
+            }
+            override fun onUpgrade(db: SupportSQLiteDatabase, oldV: Int, newV: Int) = Unit
+        }
+        val config = SupportSQLiteOpenHelper.Configuration.builder(ctx)
+            .name(dbName)
+            .callback(callback)
+            .build()
+        val helper = factory.create(config)
+        helper.writableDatabase.close()
+        helper.close()
+    }
+
+    /**
+     * Bootstrap a v15 SQLite file (full migration chain over the v8 shape)
+     * holding one outgoing `transactions` row, so MIGRATION_15_16's added
+     * column has a real pre-existing row to backfill as NULL.
+     */
+    private fun bootstrapV15WithTransaction() {
+        val factory = FrameworkSQLiteOpenHelperFactory()
+        val callback = object : SupportSQLiteOpenHelper.Callback(15) {
+            override fun onCreate(db: SupportSQLiteDatabase) {
+                createV8Tables(db, pathA = true)
+                MIGRATION_8_9.migrate(db)
+                MIGRATION_9_10.migrate(db)
+                MIGRATION_10_11.migrate(db)
+                MIGRATION_11_12.migrate(db)
+                MIGRATION_12_13.migrate(db)
+                MIGRATION_13_14.migrate(db)
+                MIGRATION_14_15.migrate(db)
+                db.execSQL(
+                    "INSERT INTO transactions " +
+                        "(txHash, blockNumber, blockHash, timestamp, balanceChange, direction, " +
+                        "fee, confirmations, blockTimestampHex, network, status, isLocal, cachedAt, walletId) " +
+                        "VALUES ('0xfee1', '0x100', '0xbeef', 1000, '0x2540be400', 'out', " +
+                        "'0x0', 12, NULL, 'TESTNET', 'CONFIRMED', 0, 1000, 'wallet-1')"
+                )
+                db.execSQL("CREATE TABLE IF NOT EXISTS room_master_table (id INTEGER PRIMARY KEY,identity_hash TEXT)")
+                db.execSQL("INSERT OR REPLACE INTO room_master_table VALUES(42, 'bootstrap-v15')")
             }
             override fun onUpgrade(db: SupportSQLiteDatabase, oldV: Int, newV: Int) = Unit
         }

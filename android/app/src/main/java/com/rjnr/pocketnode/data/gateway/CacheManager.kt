@@ -52,6 +52,15 @@ class CacheManager @Inject constructor(
 
     suspend fun cacheTransactions(records: List<TransactionRecord>, network: String, walletId: String = "") {
         try {
+            // A confirmed row that could not resolve its own fee must not
+            // erase the planned fee we wrote when the user sent it — the
+            // insert below is REPLACE, so carry the cached value forward.
+            val knownFees = if (records.any { it.feeShannons == null }) {
+                transactionDao.getKnownFees(records.map { it.txHash })
+                    .associate { it.txHash to it.feeShannons }
+            } else {
+                emptyMap()
+            }
             val entities = records.map { record ->
                 TransactionEntity.fromTransactionRecord(
                     txHash = record.txHash,
@@ -64,7 +73,8 @@ class CacheManager @Inject constructor(
                     confirmations = record.confirmations,
                     blockTimestampHex = record.blockTimestampHex,
                     network = network,
-                    walletId = walletId
+                    walletId = walletId,
+                    feeShannons = record.feeShannons ?: knownFees[record.txHash]
                 )
             }
             transactionDao.insertAll(entities)
@@ -81,7 +91,8 @@ class CacheManager @Inject constructor(
         walletId: String = "",
         balanceChange: String = "0x0",
         direction: String = "out",
-        fee: String = "0x0"
+        fee: String = "0x0",
+        feeShannons: Long? = null
     ) {
         try {
             transactionDao.insert(
@@ -99,7 +110,8 @@ class CacheManager @Inject constructor(
                     status = "PENDING",
                     isLocal = true,
                     cachedAt = System.currentTimeMillis(),
-                    walletId = walletId
+                    walletId = walletId,
+                    feeShannons = feeShannons
                 )
             )
             logger.d(TAG, "Pending transaction cached in Room: $txHash")

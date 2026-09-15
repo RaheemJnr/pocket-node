@@ -1552,6 +1552,18 @@ class GatewayRepository @Inject constructor(
             val outgoingAmount = computeOutgoingShannons(inputCapacities, outgoingOutputs)
             val balanceChangeHex = "0x${outgoingAmount.toString(16)}"
 
+            // Planned fee for the pending activity row (#497). DAO ops pass
+            // theirs in; a plain transfer derives it from the same inputs and
+            // outputs already resolved above — Σ(inputs) − Σ(all outputs),
+            // change included. `mapNotNull` above drops any input not in the
+            // reserved set, and computeFeeShannons refuses to score a partial
+            // set, so a dropped input yields null ("Pending") not a wrong fee.
+            val plannedFeeShannons = pendingFeeShannons ?: computeFeeShannons(
+                resolvedInputs = inputCapacities,
+                declaredInputCount = signed.cellInputs.size,
+                outputCapacities = outgoingOutputs.map { it.capacityShannons },
+            )
+
             pendingBroadcastDao.insert(
                 PendingBroadcastEntity(
                     txHash = txHash,
@@ -1572,7 +1584,8 @@ class GatewayRepository @Inject constructor(
                 walletId = walletId,
                 balanceChange = pendingAmountShannons?.let { "0x${it.toString(16)}" } ?: balanceChangeHex,
                 direction = pendingDirection,
-                fee = pendingFeeShannons?.let { "0x${it.toString(16)}" } ?: "0x0"
+                fee = pendingFeeShannons?.let { "0x${it.toString(16)}" } ?: "0x0",
+                feeShannons = plannedFeeShannons
             )
             signed
         }
@@ -2038,6 +2051,22 @@ class GatewayRepository @Inject constructor(
                 output.type?.codeHash == DaoConstants.DAO_CODE_HASH
             }
 
+            // Network fee (#497): Σ(inputs) − Σ(outputs). The interaction walk
+            // already carries a capacity for every input cell the wallet owns,
+            // so no second fetch is needed — but it carries NO capacity for a
+            // foreign input, which is why the count is checked. An incoming tx
+            // resolves none of its inputs and lands on null, and the detail
+            // sheet hides the row for it anyway.
+            val feeShannons = computeFeeShannons(
+                resolvedInputs = cellInteractions
+                    .filter { it.ioType == "input" }
+                    .map { it.ioCapacity.removePrefix("0x").toLongOrNull(16) ?: 0L },
+                declaredInputCount = tx.inputs.size,
+                outputCapacities = tx.outputs.map {
+                    it.capacity.removePrefix("0x").toLongOrNull(16) ?: 0L
+                },
+            )
+
             val (finalDirection, finalAmount) = if (hasDaoOutput) {
                 val daoOutputCapacity = tx.outputs
                     .first { it.type?.codeHash == DaoConstants.DAO_CODE_HASH }
@@ -2067,7 +2096,8 @@ class GatewayRepository @Inject constructor(
                 fee = "0x0",
                 confirmations = confirmations,
                 blockTimestampHex = headerInfo.timestampHex,
-                isDaoRelated = hasDaoOutput || tx.headerDeps.size >= 2
+                isDaoRelated = hasDaoOutput || tx.headerDeps.size >= 2,
+                feeShannons = feeShannons
             )
         }
 

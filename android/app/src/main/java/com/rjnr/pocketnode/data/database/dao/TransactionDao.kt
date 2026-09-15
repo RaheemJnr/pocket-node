@@ -4,8 +4,23 @@ import androidx.paging.PagingSource
 import androidx.room.*
 import com.rjnr.pocketnode.data.database.entity.TransactionEntity
 
+/** One row of [TransactionDao.getKnownFees]. */
+data class TxFeeRow(val txHash: String, val feeShannons: Long)
+
 @Dao
 interface TransactionDao {
+
+    /**
+     * Fees already known for the given hashes (#497). `cacheTransactions`
+     * inserts with REPLACE, so a confirmed row that could not resolve its
+     * own fee would otherwise wipe the planned fee written when the user
+     * sent it. One query, not one per row.
+     */
+    @Query(
+        "SELECT txHash, fee_shannons AS feeShannons FROM transactions " +
+            "WHERE txHash IN (:hashes) AND fee_shannons IS NOT NULL"
+    )
+    suspend fun getKnownFees(hashes: List<String>): List<TxFeeRow>
 
     @Query("SELECT * FROM transactions WHERE network = :network ORDER BY CASE WHEN status = 'PENDING' THEN 0 ELSE 1 END, timestamp DESC LIMIT :limit")
     suspend fun getByNetwork(network: String, limit: Int = 50): List<TransactionEntity>

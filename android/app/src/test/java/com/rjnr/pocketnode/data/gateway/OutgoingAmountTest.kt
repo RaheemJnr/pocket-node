@@ -1,6 +1,7 @@
 package com.rjnr.pocketnode.data.gateway
 
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertNull
 import org.junit.Test
 
 /**
@@ -92,5 +93,96 @@ class OutgoingAmountTest {
             outputs = listOf(OutgoingOutput(50 * ckb, isOurs = true, isTyped = false)),
         )
         assertEquals(0L, out)
+    }
+
+    // ---------------------------------------------------------------------
+    // computeFeeShannons (#497): the "Network fee" row on the transaction
+    // detail sheet. Shapes below mirror the two real call sites -- the send
+    // path's reserved cells, and the confirmed path's light-client
+    // interaction walk.
+    // ---------------------------------------------------------------------
+
+    /** Pending row, planned fee: one input, recipient + change, 0.00001 CKB. */
+    @Test
+    fun `pending send computes the planned fee from reserved inputs`() {
+        val fee = computeFeeShannons(
+            resolvedInputs = listOf(1_000 * ckb),
+            declaredInputCount = 1,
+            outputCapacities = listOf(100 * ckb, 900 * ckb - 1_000L),
+        )
+        assertEquals(1_000L, fee)
+    }
+
+    @Test
+    fun `confirmed outgoing computes the fee across every resolved input`() {
+        // A fragmented wallet spends several cells; all of them are ours, so
+        // the walk resolves all of them and the fee is exact.
+        val fee = computeFeeShannons(
+            resolvedInputs = listOf(61 * ckb, 61 * ckb, 61 * ckb),
+            declaredInputCount = 3,
+            outputCapacities = listOf(150 * ckb, 33 * ckb - 12_345L),
+        )
+        assertEquals(12_345L, fee)
+    }
+
+    @Test
+    fun `incoming resolves no inputs so the fee is unknown`() {
+        // Every input belongs to the sender: the walk yields no input
+        // interaction, so there is nothing to subtract from. Null, not 0 --
+        // the sheet hides the row for an incoming tx anyway, and a 0 here
+        // would read as "this transaction was free".
+        val fee = computeFeeShannons(
+            resolvedInputs = emptyList(),
+            declaredInputCount = 2,
+            outputCapacities = listOf(100 * ckb),
+        )
+        assertNull(fee)
+    }
+
+    @Test
+    fun `partially resolved inputs are unknown rather than under-counted`() {
+        // Checkpoint-synced wallet: one input cell predates the sync window,
+        // so the light client never indexed it. Scoring the two we do have
+        // would report a fee short by the whole missing input.
+        val fee = computeFeeShannons(
+            resolvedInputs = listOf(61 * ckb, 61 * ckb),
+            declaredInputCount = 3,
+            outputCapacities = listOf(150 * ckb),
+        )
+        assertNull(fee)
+    }
+
+    @Test
+    fun `a tx with no declared inputs is unknown`() {
+        assertNull(
+            computeFeeShannons(
+                resolvedInputs = emptyList(),
+                declaredInputCount = 0,
+                outputCapacities = listOf(100 * ckb),
+            )
+        )
+    }
+
+    @Test
+    fun `an inconsistent set that nets negative is unknown, never a negative fee`() {
+        assertNull(
+            computeFeeShannons(
+                resolvedInputs = listOf(10 * ckb),
+                declaredInputCount = 1,
+                outputCapacities = listOf(50 * ckb),
+            )
+        )
+    }
+
+    @Test
+    fun `a genuinely zero fee is zero, distinct from unknown`() {
+        assertEquals(
+            0L,
+            computeFeeShannons(
+                resolvedInputs = listOf(100 * ckb),
+                declaredInputCount = 1,
+                outputCapacities = listOf(100 * ckb),
+            )
+        )
     }
 }
