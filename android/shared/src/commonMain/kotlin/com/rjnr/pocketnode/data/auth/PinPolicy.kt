@@ -2,6 +2,7 @@ package com.rjnr.pocketnode.data.auth
 
 import com.rjnr.pocketnode.core.crypto.Argon2id
 import com.rjnr.pocketnode.core.crypto.Blake2b
+import com.rjnr.pocketnode.core.crypto.constantTimeEquals
 import com.rjnr.pocketnode.core.crypto.EntropySource
 import com.rjnr.pocketnode.core.crypto.toHexStringNoPrefix
 import com.rjnr.pocketnode.core.log.Logger
@@ -44,6 +45,7 @@ class PinPolicy(
 ) {
 
     var argon2Params: Argon2id.Params = argon2Params
+        internal set
 
     /**
      * Stores a fresh PIN and clears every trace of the previous failure state.
@@ -78,8 +80,8 @@ class PinPolicy(
         val kdfVersion = store.getKdfVersion() ?: KDF_VERSION_LEGACY_BLAKE2B
 
         val matches = when (kdfVersion) {
-            KDF_VERSION_ARGON2ID -> hashPinArgon2id(pinBytes) == storedHash
-            KDF_VERSION_LEGACY_BLAKE2B -> hashPinBlake2b(pinBytes) == storedHash
+            KDF_VERSION_ARGON2ID -> hashesMatch(hashPinArgon2id(pinBytes), storedHash)
+            KDF_VERSION_LEGACY_BLAKE2B -> hashesMatch(hashPinBlake2b(pinBytes), storedHash)
             else -> {
                 logger.e(TAG, "Unknown KDF version $kdfVersion, refusing to verify")
                 return false
@@ -116,6 +118,11 @@ class PinPolicy(
     /**
      * Clears the PIN, its salt, its KDF version and all failure state.
      *
+     * Every field is removed rather than zeroed, including the attempt counter:
+     * "no PIN configured" and "a PIN with zero failures against it" must not
+     * look the same in storage. `clearFailureState`, used by the success and
+     * `setPin` paths, writes 0 instead because the PIN is still there.
+     *
      * Platform guards (Android refuses while encrypted backup files exist)
      * belong in the adapter, not here.
      */
@@ -124,7 +131,9 @@ class PinPolicy(
             pinHash(null)
             kdfVersion(null)
             salt(null)
-            clearFailureState()
+            failedAttempts(null)
+            lastFailedAt(null)
+            lockoutUntil(null)
         }
     }
 
@@ -133,9 +142,17 @@ class PinPolicy(
      * Called once after an overwrite install / version upgrade so a user who
      * fumbled their PIN before upgrading is not still staring at "out of
      * attempts" on the freshly upgraded build.
+     *
+     * @param durable `true` when the caller cannot continue until the reset has
+     *   reached storage, as the cold-start path cannot: the PIN gate reads the
+     *   lockout state immediately afterwards.
      */
-    fun resetFailedAttempts() {
-        store.update { clearFailureState() }
+    fun resetFailedAttempts(durable: Boolean = false) {
+        if (durable) {
+            store.updateDurable { clearFailureState() }
+        } else {
+            store.update { clearFailureState() }
+        }
     }
 
     fun getRemainingAttempts(): Int =
@@ -182,8 +199,22 @@ class PinPolicy(
         // for a day after fumbling their PIN (device-test report, 2026-07).
         // Escalating lockouts (30s at 5 failures -> permanent at 10) still
         // bound brute force between successes.
-        store.update { clearFailureState() }
+        //
+        // A storage failure here must not turn a correct PIN into a rejected
+        // one: the user would be locked out of their own wallet by a full disk.
+        // The counter simply stays where it was and the next success retries.
+        runCatching { store.update { clearFailureState() } }.onFailure {
+            logger.w(TAG, "Failed to reset the PIN attempt counter after a correct PIN", it)
+        }
     }
+
+    /**
+     * Compares two hex hashes without leaking, through timing, how many leading
+     * characters matched. `String.equals` stops at the first difference, which
+     * an attacker who can also write the stored hash could grind against.
+     */
+    private fun hashesMatch(computed: String, stored: String): Boolean =
+        constantTimeEquals(computed.encodeToByteArray(), stored.encodeToByteArray())
 
     private fun hashPinArgon2id(pinBytes: ByteArray): String {
         val salt = getOrCreateSalt()
@@ -192,7 +223,9 @@ class PinPolicy(
             salt = salt,
             params = argon2Params,
         )
-        return output.toHexStringNoPrefix()
+        // Only what this function allocated. `pinBytes` belongs to the caller,
+        // which still needs it (the migration path hashes twice).
+        return output.toHexStringNoPrefix().also { output.fill(0) }
     }
 
     private fun hashPinBlake2b(pinBytes: ByteArray): String {
@@ -201,7 +234,8 @@ class PinPolicy(
         // second copy of the PIN on the heap. BLAKE2b's incremental update is
         // bit-identical to the one-shot digest of the concatenation, so hashes
         // written by v1.6.x still verify.
-        return Blake2b().update(salt).update(pinBytes).doFinal().toHexStringNoPrefix()
+        val digest = Blake2b().update(salt).update(pinBytes).doFinal()
+        return digest.toHexStringNoPrefix().also { digest.fill(0) }
     }
 
     private fun getOrCreateSalt(): ByteArray {
