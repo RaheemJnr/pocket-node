@@ -146,7 +146,7 @@ class KeyStoreMigrationHelper(
      * [v2DecryptCipher] via `AuthManager.authenticateForCipher` — Keystore
      * releases the key for exactly one `doFinal` call, which is exhausted
      * here. The bundled JSON format is established by
-     * [KeystoreV2MigrationHelper.WalletKeyBundle].
+     * [com.rjnr.pocketnode.data.crypto.WalletKeyBundle].
      *
      * V1 rows are still readable through this overload (falls through to
      * the V1 path; the V2 cipher is ignored) so that a caller that doesn't

@@ -7,11 +7,9 @@ import androidx.security.crypto.MasterKey
 import com.rjnr.pocketnode.core.log.Logger
 import com.rjnr.pocketnode.core.crypto.Secp256k1Signer
 import com.rjnr.pocketnode.core.crypto.hexToByteArray
-import com.rjnr.pocketnode.core.crypto.toHexString
 import com.rjnr.pocketnode.data.auth.AuthManager
 import com.rjnr.pocketnode.data.crypto.KeyBackupManager
 import com.rjnr.pocketnode.data.crypto.KeyMaterial
-import com.rjnr.pocketnode.data.gateway.models.NetworkType
 import com.rjnr.pocketnode.data.gateway.models.Script
 import com.rjnr.pocketnode.data.crypto.DecryptedKeyData
 import com.rjnr.pocketnode.data.crypto.KeyMaterialUnreadableException
@@ -339,19 +337,7 @@ class KeyManager @Inject constructor(
 
     // -- Shared methods --
 
-    suspend fun getWalletInfo(): WalletInfo {
-        val publicKey = Secp256k1Signer.publicKey(getPrivateKey()) // compressed
-        val script = deriveLockScript(publicKey)
-        val testnetAddress = AddressUtils.encode(script, NetworkType.TESTNET)
-        val mainnetAddress = AddressUtils.encode(script, NetworkType.MAINNET)
-
-        return WalletInfo(
-            publicKey = publicKey.toHexString(),
-            script = script,
-            testnetAddress = testnetAddress,
-            mainnetAddress = mainnetAddress
-        )
-    }
+    suspend fun getWalletInfo(): WalletInfo = WalletDerivation.walletInfo(getPrivateKey())
 
     suspend fun getPrivateKey(): ByteArray {
         // Try Room first
