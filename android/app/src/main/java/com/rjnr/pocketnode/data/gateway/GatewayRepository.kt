@@ -2386,7 +2386,15 @@ class GatewayRepository @Inject constructor(
             // confirmed row) rather than a generic "Sent" carrying amount + fee.
             pendingDirection = "dao_deposit",
             pendingAmountShannons = amountShannons,
-            pendingFeeShannons = TransactionBuilder.DEFAULT_FEE,
+            // The builder prices the deposit from the tx it actually builds, so
+            // the pending row quotes the same estimator for the common
+            // one-input shape instead of the DEFAULT_FEE reservation, which
+            // over-reported the fee 100x until the confirmed row replaced it
+            // (#490). Corrected by the confirmed record either way.
+            pendingFeeShannons = transactionBuilder.estimateTransferFee(
+                inputCount = 1,
+                outputCount = 2,
+            ),
         ) { availableCells, net ->
             transactionBuilder.buildDaoDeposit(
                 amountShannons = amountShannons,
@@ -2450,10 +2458,15 @@ class GatewayRepository @Inject constructor(
             address,
             // #433: show the pending withdraw as "Dao Withdraw <deposit> CKB"
             // with the fee on its own line, not as a "-0.001 Sent". Phase-1
-            // preserves the deposit capacity exactly, so the fee is DEFAULT_FEE.
+            // preserves the deposit capacity exactly, so the fee is whatever
+            // the fee cell pays: the same dynamic estimate the builder uses,
+            // for the common deposit-plus-one-fee-cell shape (#490).
             pendingDirection = "dao_withdraw",
             pendingAmountShannons = deposit.capacity,
-            pendingFeeShannons = TransactionBuilder.DEFAULT_FEE,
+            pendingFeeShannons = transactionBuilder.estimateTransferFee(
+                inputCount = 2,
+                outputCount = 2,
+            ),
         ) { availableCells, net ->
             transactionBuilder.buildDaoWithdraw(
                 depositCell = depositCell,

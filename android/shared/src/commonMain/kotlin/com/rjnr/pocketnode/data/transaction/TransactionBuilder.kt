@@ -521,9 +521,20 @@ class TransactionBuilder(
         // making `inputs == outputs`, so the network rejected the tx and the
         // JNI bridge returned null ("send failed - native returned null", #119).
         val (feeCells, feeTotal) = selectCells(availableCells, DEFAULT_FEE + MIN_CELL_CAPACITY)
-        if (feeTotal < DEFAULT_FEE) {
+
+        // DEFAULT_FEE above is the selection reservation (a generous upper
+        // bound), not the fee. Paying it flat charged 100,000 shannons for a
+        // phase-1 withdraw while a plain send and a DAO deposit of the same
+        // shape paid 1,000 (#490). Price it the way buildDaoDeposit and
+        // buildMultiTransfer do: from the real input/output count at the
+        // standard fee rate, floored at MIN_FEE. Two outputs, matching the
+        // deposit's assumption (withdrawing cell + change); the estimator's
+        // flat 200-byte margin absorbs the extra DAO cell_dep, the header_dep
+        // and the output's type script.
+        val fee = estimateTransferFee(inputCount = 1 + feeCells.size, outputCount = 2)
+        if (feeTotal < fee) {
             throw Exception(
-                "Insufficient balance to cover withdraw fee. Need ${DEFAULT_FEE} shannons, have $feeTotal"
+                "Insufficient balance to cover withdraw fee. Need $fee shannons, have $feeTotal"
             )
         }
 
@@ -545,9 +556,9 @@ class TransactionBuilder(
             type = DaoConstants.DAO_TYPE_SCRIPT
         )
 
-        // Change output (if any). feeTotal - DEFAULT_FEE goes back to the user.
+        // Change output (if any). feeTotal - fee goes back to the user.
         // Refuse dust change rather than silently absorbing it as fee (#287).
-        val change = feeTotal - DEFAULT_FEE
+        val change = feeTotal - fee
         val outputs = mutableListOf(withdrawingOutput)
         val outputsData = mutableListOf(blockNumberHex)
         when {
@@ -593,7 +604,11 @@ class TransactionBuilder(
         privateKey: ByteArray,
         network: NetworkType
     ): Transaction {
-        val fee = DEFAULT_FEE
+        // Same dynamic pricing as the withdraw above (#490). The unlock spends
+        // one withdrawing cell into one plain output and pays the fee out of
+        // that cell's own capacity, so a flat DEFAULT_FEE was ~100x the
+        // standard-fee-rate price of the transaction it actually builds.
+        val fee = estimateTransferFee(inputCount = 1, outputCount = 1)
 
         val inputs = listOf(
             CellInput(
