@@ -85,6 +85,7 @@ class MnemonicBackupViewModel @Inject constructor(
     private val pinManager: com.rjnr.pocketnode.data.auth.PinManager,
     private val seedPhraseAuthorizer: com.rjnr.pocketnode.data.wallet.SeedPhraseAuthorizer,
     private val keyMaterialDao: com.rjnr.pocketnode.data.database.dao.KeyMaterialDao,
+    private val keyManager: com.rjnr.pocketnode.data.wallet.KeyManager,
 ) : ViewModel() {
 
     /**
@@ -100,6 +101,18 @@ class MnemonicBackupViewModel @Inject constructor(
      */
     private val onboarding: Boolean = savedStateHandle.get<Boolean>("onboarding") ?: false
 
+    /**
+     * Wallet to back up when the caller named one — Manage Wallets → wallet →
+     * "Backup wallet", where the chosen wallet need not be the active one.
+     * Null means "the active wallet", which is what every other entry point
+     * wants and what this screen did exclusively before. Reads and the
+     * backed-up write are scoped to it so opening a non-active wallet's backup
+     * neither shows the active wallet's phrase nor marks the wrong wallet
+     * backed up.
+     */
+    private val walletIdArg: String? =
+        savedStateHandle.get<String>("walletId")?.takeIf { it.isNotBlank() }
+
     private val _uiState = MutableStateFlow(MnemonicBackupUiState())
     val uiState: StateFlow<MnemonicBackupUiState> = _uiState.asStateFlow()
 
@@ -109,10 +122,12 @@ class MnemonicBackupViewModel @Inject constructor(
 
     private fun loadMnemonic() {
         viewModelScope.launch {
-            // Detect wallet type for the active wallet
-            val activeWallet = walletRepository.getActive()
-            val walletType = activeWallet?.type ?: ""
-            val isSubAccount = activeWallet?.parentWalletId != null
+            // Detect wallet type for the wallet being backed up: the one named
+            // on the route if there is one, else the active wallet.
+            val targetWallet = walletIdArg?.let { walletRepository.getById(it) }
+                ?: walletRepository.getActive()
+            val walletType = targetWallet?.type ?: ""
+            val isSubAccount = targetWallet?.parentWalletId != null
             _uiState.update { it.copy(walletType = walletType, isSubAccount = isSubAccount) }
 
             // #488 — authenticate BEFORE the phrase is decrypted.
@@ -132,7 +147,7 @@ class MnemonicBackupViewModel @Inject constructor(
             // parent" notice and never show words) and for raw_key wallets
             // (handled by the pinRequiredForPrivateKey gate below).
             if (!onboarding && !isSubAccount && walletType != "raw_key") {
-                val kdfVersion = activeWallet?.walletId?.let { keyMaterialDao.getKdfVersion(it) } ?: 1
+                val kdfVersion = targetWallet?.walletId?.let { keyMaterialDao.getKdfVersion(it) } ?: 1
                 if (kdfVersion >= 2) {
                     // The BiometricPrompt CryptoObject *is* the decryption key.
                     _uiState.update {
@@ -164,7 +179,7 @@ class MnemonicBackupViewModel @Inject constructor(
             // phrase" button that routes through PinEntryScreen, and on PIN
             // verify we fetch the words via WalletKeyReader (#289 follow-up).
             val words = try {
-                repository.getMnemonic()
+                readMnemonic()
             } catch (e: com.rjnr.pocketnode.data.crypto.V2KeyMaterialRequiresAuthException) {
                 _uiState.update { it.copy(pinRequiredForMnemonic = true) }
                 return@launch
@@ -190,6 +205,21 @@ class MnemonicBackupViewModel @Inject constructor(
             }
             showWords(words)
         }
+    }
+
+    /**
+     * Read the phrase for the wallet this screen is backing up. With no
+     * [walletIdArg] this is the repository's active-wallet read, unchanged
+     * from before the per-wallet entry point existed (it carries a legacy
+     * no-active-wallet fallback this scoped call does not).
+     */
+    private suspend fun readMnemonic(): List<String>? =
+        walletIdArg?.let { keyManager.getMnemonicForWallet(it) } ?: repository.getMnemonic()
+
+    /** Record the backup against the wallet actually being backed up. */
+    private suspend fun markBackedUp() {
+        walletIdArg?.let { keyManager.setMnemonicBackedUpForWallet(it, true) }
+            ?: repository.setMnemonicBackedUp(true)
     }
 
     /**
@@ -231,10 +261,12 @@ class MnemonicBackupViewModel @Inject constructor(
     fun revealMnemonicWithBiometrics(activity: androidx.fragment.app.FragmentActivity) {
         if (!_uiState.value.pinRequiredForMnemonic) return
         viewModelScope.launch {
-            val active = walletRepository.getActive() ?: return@launch
+            val targetWalletId = walletIdArg
+                ?: walletRepository.getActive()?.walletId
+                ?: return@launch
             val result = seedPhraseAuthorizer.authorize(
                 activity = activity,
-                walletId = active.walletId,
+                walletId = targetWalletId,
                 promptTitle = "Reveal recovery phrase",
                 promptSubtitle = "Authenticate to view your wallet's seed phrase.",
             )
@@ -279,7 +311,7 @@ class MnemonicBackupViewModel @Inject constructor(
      */
     private suspend fun fetchMnemonicAfterPin() {
         val words = try {
-            repository.getMnemonic()
+            readMnemonic()
         } catch (_: com.rjnr.pocketnode.data.crypto.V2KeyMaterialRequiresAuthException) {
             // The row was migrated to V2 between the gate decision and the PIN
             // return (AuthScreen's migration runner can do this). Swap to the
@@ -296,7 +328,15 @@ class MnemonicBackupViewModel @Inject constructor(
 
     private suspend fun fetchPrivateKey() {
         val privateKeyHex = try {
-            repository.getPrivateKey().toHex()
+            // Scoped like the phrase read: a named wallet must never surface
+            // the active wallet's key, so no elvis fallback here. (Manage
+            // Wallets only offers "Backup wallet" on mnemonic wallets, so this
+            // arm is defensive.)
+            if (walletIdArg != null) {
+                keyManager.getPrivateKeyForWallet(walletIdArg)?.toHex()
+            } else {
+                repository.getPrivateKey().toHex()
+            }
         } catch (_: Exception) {
             null
         }
@@ -320,7 +360,7 @@ class MnemonicBackupViewModel @Inject constructor(
         }
         if (allCorrect) {
             viewModelScope.launch {
-                repository.setMnemonicBackedUp(true)
+                markBackedUp()
                 _uiState.update { it.copy(currentStep = 3) }
             }
         } else {
@@ -332,7 +372,7 @@ class MnemonicBackupViewModel @Inject constructor(
 
     fun markBackedUpAndComplete() {
         viewModelScope.launch {
-            repository.setMnemonicBackedUp(true)
+            markBackedUp()
         }
     }
 

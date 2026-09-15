@@ -5,6 +5,7 @@ import com.rjnr.pocketnode.data.auth.PinManager
 import com.rjnr.pocketnode.data.database.dao.KeyMaterialDao
 import com.rjnr.pocketnode.data.database.entity.WalletEntity
 import com.rjnr.pocketnode.data.gateway.GatewayRepository
+import com.rjnr.pocketnode.data.wallet.KeyManager
 import com.rjnr.pocketnode.data.wallet.SeedPhraseAuthorizer
 import com.rjnr.pocketnode.data.wallet.WalletRepository
 import io.mockk.coEvery
@@ -55,6 +56,7 @@ class MnemonicBackupViewModelTest {
     private lateinit var pinManager: PinManager
     private lateinit var seedPhraseAuthorizer: SeedPhraseAuthorizer
     private lateinit var keyMaterialDao: KeyMaterialDao
+    private lateinit var keyManager: KeyManager
 
     private val words = listOf(
         "abandon", "ability", "able", "about", "above", "absent",
@@ -69,6 +71,7 @@ class MnemonicBackupViewModelTest {
         pinManager = mockk(relaxed = true)
         seedPhraseAuthorizer = mockk(relaxed = true)
         keyMaterialDao = mockk(relaxed = true)
+        keyManager = mockk(relaxed = true)
         // Default: V1 key material unless a test says otherwise.
         coEvery { keyMaterialDao.getKdfVersion(any()) } returns 1
     }
@@ -76,13 +79,19 @@ class MnemonicBackupViewModelTest {
     @After
     fun tearDown() { Dispatchers.resetMain() }
 
-    private fun createViewModel(onboarding: Boolean = false) = MnemonicBackupViewModel(
-        savedStateHandle = SavedStateHandle(mapOf("onboarding" to onboarding)),
+    private fun createViewModel(
+        onboarding: Boolean = false,
+        walletId: String? = null,
+    ) = MnemonicBackupViewModel(
+        savedStateHandle = SavedStateHandle(
+            mapOf("onboarding" to onboarding, "walletId" to walletId)
+        ),
         repository = repository,
         walletRepository = walletRepository,
         pinManager = pinManager,
         seedPhraseAuthorizer = seedPhraseAuthorizer,
         keyMaterialDao = keyMaterialDao,
+        keyManager = keyManager,
     )
 
     private fun rawKeyEntity() = mockk<WalletEntity>(relaxed = true).also {
@@ -234,6 +243,87 @@ class MnemonicBackupViewModelTest {
         val state = vm.uiState.value
         assertTrue("Gate stays up so the user can retry", state.pinRequiredForMnemonic)
         assertTrue(state.words.isEmpty())
+    }
+
+    // -- Per-wallet entry point (Manage Wallets → "Backup wallet") -----
+
+    @Test
+    fun `walletId argument gates and then reads that wallet, not the active one`() = runTest {
+        // Manage Wallets can open the backup flow for a wallet that is not the
+        // active one. Reading the active wallet's phrase there would show the
+        // wrong words and mark the wrong wallet backed up.
+        val other = mockk<WalletEntity>(relaxed = true).also {
+            every { it.type } returns "mnemonic"
+            every { it.parentWalletId } returns null
+            every { it.walletId } returns "wallet-other"
+        }
+        coEvery { walletRepository.getById("wallet-other") } returns other
+        coEvery { keyMaterialDao.getKdfVersion("wallet-other") } returns 1
+        every { pinManager.hasPin() } returns true
+        coEvery { keyManager.getMnemonicForWallet("wallet-other") } returns words
+
+        val vm = createViewModel(walletId = "wallet-other")
+        advanceUntilIdle()
+
+        // Gate first: the named wallet is resolved without reading its phrase,
+        // and the active wallet is never consulted.
+        coVerify(exactly = 0) { walletRepository.getActive() }
+        coVerify(exactly = 0) { keyManager.getMnemonicForWallet(any()) }
+        coVerify(exactly = 0) { repository.getMnemonic() }
+        assertTrue(vm.uiState.value.pinRequiredForMnemonic)
+        assertTrue(vm.uiState.value.mnemonicGateUsesPin)
+
+        vm.onPinVerified()
+        advanceUntilIdle()
+
+        coVerify(exactly = 1) { keyManager.getMnemonicForWallet("wallet-other") }
+        coVerify(exactly = 0) { repository.getMnemonic() }
+        assertEquals(words, vm.uiState.value.words)
+    }
+
+    @Test
+    fun `completing the flow marks the named wallet backed up, not the active one`() = runTest {
+        val other = mockk<WalletEntity>(relaxed = true).also {
+            every { it.type } returns "mnemonic"
+            every { it.parentWalletId } returns null
+            every { it.walletId } returns "wallet-other"
+        }
+        coEvery { walletRepository.getById("wallet-other") } returns other
+        coEvery { keyMaterialDao.getKdfVersion("wallet-other") } returns 1
+        every { pinManager.hasPin() } returns true
+        coEvery { keyManager.getMnemonicForWallet("wallet-other") } returns words
+
+        val vm = createViewModel(walletId = "wallet-other")
+        advanceUntilIdle()
+        vm.onPinVerified()
+        advanceUntilIdle()
+
+        // Answer the three verification slots correctly.
+        val state = vm.uiState.value
+        state.verifyPositions.forEach { pos -> vm.selectWord(pos, words[pos]) }
+        vm.verify()
+        advanceUntilIdle()
+
+        coVerify(exactly = 1) { keyManager.setMnemonicBackedUpForWallet("wallet-other", true) }
+        coVerify(exactly = 0) { repository.setMnemonicBackedUp(any()) }
+        assertEquals(3, vm.uiState.value.currentStep)
+    }
+
+    @Test
+    fun `no walletId argument keeps the active-wallet read path`() = runTest {
+        coEvery { walletRepository.getActive() } returns mnemonicEntity()
+        coEvery { keyMaterialDao.getKdfVersion("wallet-1") } returns 1
+        every { pinManager.hasPin() } returns true
+        coEvery { repository.getMnemonic() } returns words
+
+        val vm = createViewModel()
+        advanceUntilIdle()
+        vm.onPinVerified()
+        advanceUntilIdle()
+
+        coVerify(exactly = 1) { repository.getMnemonic() }
+        coVerify(exactly = 0) { keyManager.getMnemonicForWallet(any()) }
+        assertEquals(words, vm.uiState.value.words)
     }
 
     // -- #290: raw-key private-key gate --------------------------------

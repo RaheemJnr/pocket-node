@@ -59,7 +59,8 @@ sealed class Screen(val route: String) {
     object Scanner : Screen("scanner")
     object NodeStatus : Screen("node_status")
     object Onboarding : Screen("onboarding")
-    object MnemonicBackup : Screen("mnemonic_backup?simplified={simplified}&onboarding={onboarding}") {
+    object MnemonicBackup :
+        Screen("mnemonic_backup?simplified={simplified}&onboarding={onboarding}&walletId={walletId}") {
         const val BASE = "mnemonic_backup"
 
         /**
@@ -68,9 +69,19 @@ sealed class Screen(val route: String) {
          * has no credential to re-authenticate against. Every other caller
          * leaves it false so the recovery phrase stays behind the PIN /
          * biometric gate (#488).
+         *
+         * [walletId] backs up that specific wallet instead of the active one,
+         * used by Manage Wallets → wallet → "Backup wallet". Null keeps the
+         * active-wallet behaviour every other caller relies on.
          */
-        fun createRoute(simplified: Boolean = false, onboarding: Boolean = false) =
-            "mnemonic_backup?simplified=$simplified&onboarding=$onboarding"
+        fun createRoute(
+            simplified: Boolean = false,
+            onboarding: Boolean = false,
+            walletId: String? = null,
+        ) = buildString {
+            append("mnemonic_backup?simplified=$simplified&onboarding=$onboarding")
+            if (!walletId.isNullOrBlank()) append("&walletId=${android.net.Uri.encode(walletId)}")
+        }
     }
     object MnemonicImport : Screen("mnemonic_import")
     object Auth : Screen("auth")
@@ -173,6 +184,11 @@ fun CkbNavGraph(
             arguments = listOf(
                 navArgument("simplified") { defaultValue = false; type = NavType.BoolType },
                 navArgument("onboarding") { defaultValue = false; type = NavType.BoolType },
+                navArgument("walletId") {
+                    type = NavType.StringType
+                    nullable = true
+                    defaultValue = null
+                },
             )
         ) { backStackEntry ->
             val simplified = backStackEntry.arguments?.getBoolean("simplified") ?: false
@@ -597,6 +613,11 @@ fun CkbNavGraph(
                 onNavigateBack = { navController.popBackStack() },
                 onNavigateToPinVerify = {
                     navController.navigate(Screen.PinEntry.createRoute("verify"))
+                },
+                onNavigateToBackup = {
+                    // Scoped to THIS wallet, which need not be the active one.
+                    val walletId = backStackEntry.arguments?.getString("walletId")
+                    navController.navigate(Screen.MnemonicBackup.createRoute(walletId = walletId))
                 },
                 viewModel = viewModel
             )
