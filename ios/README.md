@@ -28,6 +28,30 @@ project. A pre-build script phase runs
 - `xcodebuild -scheme PocketNode ... test` runs the offline unit tests.
 - `xcodebuild -scheme PocketNodeNetwork ... test` runs the Node Status
   acceptance test, which starts the node and waits for a real testnet tip.
+- `WalletKeyStoreDeviceTests` is skipped on the simulator and needs a physical
+  iPhone with a passcode and enrolled biometrics:
+
+  ```bash
+  xcodebuild -project PocketNode.xcodeproj -scheme PocketNode \
+    -destination 'platform=iOS,id=<device-udid>' \
+    -only-testing:PocketNodeTests/WalletKeyStoreDeviceTests test
+  ```
+
+  It prompts for Face ID or Touch ID and prints the store's diagnostics, which
+  report `hardwareBacked: true` only on real hardware.
+
+## Wallet keys
+
+`PocketNode/Services/Keys/` holds the key material at rest, mirroring the
+Android Keystore V2 threat model: the wallet bundle is AES-256-GCM ciphertext
+under a random data key, and that data key is wrapped by a P-256 key generated
+inside the Secure Enclave and guarded by the current biometric set or the device
+passcode. Both blobs live in the Keychain as
+`kSecAttrAccessibleWhenPasscodeSetThisDeviceOnly`, non-synchronizable items. The
+simulator has no Enclave, so it uses a software P-256 key behind the same
+protocol; `isHardwareBacked` reports which one is in play. Keychain items
+survive app deletion, so `InstallMarker` wipes them on the first launch of a
+fresh install.
 
 ## CI
 
