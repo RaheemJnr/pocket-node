@@ -15,6 +15,7 @@ import com.rjnr.pocketnode.data.crypto.KeyMaterial
 import com.rjnr.pocketnode.data.gateway.models.NetworkType
 import com.rjnr.pocketnode.data.gateway.models.Script
 import com.rjnr.pocketnode.data.crypto.DecryptedKeyData
+import com.rjnr.pocketnode.data.crypto.KeyMaterialUnreadableException
 import com.rjnr.pocketnode.data.crypto.KeyStoreMigrationHelper
 import com.rjnr.pocketnode.data.crypto.WalletKeyBundle
 import androidx.annotation.VisibleForTesting
@@ -65,9 +66,13 @@ class KeyManager @Inject constructor(
      * KeyStore, so unit tests covering the legacy fallback path substitute
      * plain SharedPreferences here (same role as [testPrefs] for the
      * "default" bucket).
+     *
+     * Synchronized because [getWalletPrefs] is reached from whatever
+     * dispatcher a suspend read happens to be on; always empty in production.
      */
-    @VisibleForTesting
-    internal val testWalletPrefs: MutableMap<String, SharedPreferences> = mutableMapOf()
+    @VisibleForTesting(otherwise = VisibleForTesting.PRIVATE)
+    internal val testWalletPrefs: MutableMap<String, SharedPreferences> =
+        java.util.Collections.synchronizedMap(mutableMapOf())
 
     @VisibleForTesting
     internal var keyStoreMigrationHelper: KeyStoreMigrationHelper? = null
@@ -230,12 +235,59 @@ class KeyManager @Inject constructor(
         val helper = keyStoreMigrationHelper ?: return null
         helper.readDecryptedKey(walletId)?.let { return it }
         if (helper.hasKeyMaterialRow(walletId)) {
+            // One repair attempt before giving up. ESP-to-Room migration runs
+            // once and is then marked complete, so a row that goes bad
+            // afterwards would otherwise be a permanent hard failure even
+            // though a readable legacy copy is sitting right there. Repairing
+            // re-encrypts that copy into Room, which both serves the read and
+            // removes the inconsistency -- unlike the silent fallback this
+            // replaces, which left the broken row in place forever (#496).
+            repairFromLegacyStore(walletId, helper)?.let { return it }
             // Never log key material -- walletId and the failure mode only.
-            logger.e(TAG, "key_material row for walletId=$walletId is unreadable; refusing legacy prefs fallback")
-            throw IllegalStateException("key material missing for wallet")
+            logger.e(TAG, "key_material row for walletId=$walletId is unreadable and has no legacy copy to repair from")
+            throw KeyMaterialUnreadableException(walletId)
         }
         logger.w(TAG, "No key_material row for walletId=$walletId; reading legacy prefs (migration pending)")
         return null
+    }
+
+    /**
+     * The deprecated EncryptedSharedPreferences file backing [walletId]:
+     * the global one for the legacy "default" bucket, the per-wallet file
+     * otherwise.
+     */
+    @Suppress("DEPRECATION")
+    private fun legacyPrefsFor(walletId: String): SharedPreferences =
+        if (walletId == DEFAULT_WALLET_ID) prefs else getWalletPrefs(walletId)
+
+    /**
+     * Rebuild an unreadable `key_material` row from the legacy prefs copy,
+     * returning the re-read material on success and null when there is
+     * nothing to repair from (or the repair itself fails).
+     *
+     * Deliberately NOT a silent fallback: the row is rewritten, so the next
+     * read comes from Room like every other wallet's, and the repair is
+     * logged. Never logs key material.
+     */
+    private suspend fun repairFromLegacyStore(
+        walletId: String,
+        helper: KeyStoreMigrationHelper,
+    ): DecryptedKeyData? {
+        return try {
+            val legacy = legacyPrefsFor(walletId)
+            val privateKeyHex = legacy.getString(KEY_PRIVATE_KEY, null) ?: return null
+            val mnemonic = legacy.getString(KEY_MNEMONIC, null)
+            val walletType = legacy.getString(KEY_WALLET_TYPE, null)
+                ?: if (mnemonic != null) WALLET_TYPE_MNEMONIC else WALLET_TYPE_RAW_KEY
+            val backedUp = legacy.getBoolean(KEY_MNEMONIC_BACKED_UP, false)
+            helper.migrateWallet(walletId, privateKeyHex, mnemonic, walletType, backedUp)
+            val repaired = helper.readDecryptedKey(walletId) ?: return null
+            logger.w(TAG, "repaired key material for wallet $walletId from legacy store")
+            repaired
+        } catch (e: Exception) {
+            logger.e(TAG, "Repair from legacy store failed for walletId=$walletId", e)
+            null
+        }
     }
 
     suspend fun getMnemonic(): List<String>? {
@@ -544,19 +596,26 @@ class KeyManager @Inject constructor(
                 // precisely the path that repairs such a row from the legacy copy.
                 // Room has already been shown to hold nothing readable (the
                 // `continue` above) and the ESP file is known to exist.
-                val espPrefs = getWalletPrefs(wallet.walletId)
-                val privKeyHex = try {
-                    espPrefs.getString(KEY_PRIVATE_KEY, null)
+                //
+                // Opening the ESP file is itself inside the try: one wallet with
+                // an unreadable prefs file must skip that wallet, not abort the
+                // migration for every wallet after it.
+                val espRead = try {
+                    val espPrefs = getWalletPrefs(wallet.walletId)
+                    val hex = espPrefs.getString(KEY_PRIVATE_KEY, null)
+                    val words = espPrefs.getString(KEY_MNEMONIC, null)
+                    // ESP stored the authoritative walletType via savePrivateKey/storeKeysForWallet.
+                    // Fall back to the mnemonic-presence inference only when the pref is absent
+                    // (e.g. corrupted prefs), so future wallet types round-trip unchanged.
+                    val type = espPrefs.getString(KEY_WALLET_TYPE, null)
+                    Triple(hex, words, type)
                 } catch (e: Exception) {
                     logger.w(TAG, "Cannot read ESP key for ${wallet.walletId}, skipping", e)
                     continue
-                } ?: continue
-
-                val mnemonic = espPrefs.getString(KEY_MNEMONIC, null)
-                // ESP stored the authoritative walletType via savePrivateKey/storeKeysForWallet.
-                // Fall back to the mnemonic-presence inference only when the pref is absent
-                // (e.g. corrupted prefs), so future wallet types round-trip unchanged.
-                val walletType = espPrefs.getString(KEY_WALLET_TYPE, null)
+                }
+                val privKeyHex = espRead.first ?: continue
+                val mnemonic = espRead.second
+                val walletType = espRead.third
                     ?: if (mnemonic != null) WALLET_TYPE_MNEMONIC else WALLET_TYPE_RAW_KEY
                 val backed = hasMnemonicBackupForWallet(wallet.walletId)
 
@@ -618,6 +677,9 @@ class KeyManager @Inject constructor(
 
     companion object {
         private const val TAG = "KeyManager"
+
+        /** The legacy single-wallet bucket, before multi-wallet ids existed. */
+        private const val DEFAULT_WALLET_ID = "default"
         private const val KEY_PRIVATE_KEY = "private_key"
         private const val KEY_MNEMONIC = "mnemonic_words"
         private const val KEY_MNEMONIC_BACKED_UP = "mnemonic_backed_up"

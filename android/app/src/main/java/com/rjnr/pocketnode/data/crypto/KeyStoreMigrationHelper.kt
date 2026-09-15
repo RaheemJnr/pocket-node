@@ -28,6 +28,18 @@ data class DecryptedKeyData(
 class V2KeyMaterialRequiresAuthException(walletId: String) :
     IllegalStateException("walletId=$walletId is on V2 (kdfVersion=2); caller must supply an authenticated Cipher")
 
+/**
+ * Thrown when a wallet has a `key_material` row that cannot be read and no
+ * legacy copy to repair it from (#496).
+ *
+ * Distinct from [V2KeyMaterialRequiresAuthException], which is recoverable by
+ * re-reading with an authenticated Cipher: this one is not recoverable in-app,
+ * so call sites surface it to the user rather than retrying. Still an
+ * [IllegalStateException] so existing broad catches keep working.
+ */
+class KeyMaterialUnreadableException(val walletId: String) :
+    IllegalStateException("key material present but unreadable for wallet")
+
 class KeyStoreMigrationHelper(
     private val keyMaterialDao: KeyMaterialDao,
     private val encryptionManager: KeystoreEncryptionManager,
