@@ -6,24 +6,8 @@ import com.rjnr.pocketnode.core.log.Logger
 import com.rjnr.pocketnode.data.database.dao.KeyMaterialDao
 import com.rjnr.pocketnode.data.database.entity.KeyMaterialEntity
 import javax.crypto.Cipher
-import kotlinx.serialization.Serializable
 import kotlinx.serialization.encodeToString
 import kotlinx.serialization.json.Json
-
-/**
- * The plaintext bundle written under the V2 (auth-bound) Keystore key.
- *
- * V1 stored `privateKey` and `mnemonic` as two separate AES-GCM ciphertexts
- * with two separate IVs. V2 stores them as a single JSON blob inside one
- * AES-GCM ciphertext, so each wallet's migration is exactly one
- * BiometricPrompt + one `Cipher.doFinal` per direction. Reduces the prompt
- * count from 2N → N during migration (where N = number of wallets).
- */
-@Serializable
-data class WalletKeyBundle(
-    val privateKeyHex: String,
-    val mnemonic: String? = null,
-)
 
 /**
  * Orchestrates the v1.6.x → v1.7.0 migration that re-encrypts every wallet's

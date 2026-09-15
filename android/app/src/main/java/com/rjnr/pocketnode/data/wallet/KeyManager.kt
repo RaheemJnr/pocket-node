@@ -5,7 +5,6 @@ import android.content.SharedPreferences
 import androidx.security.crypto.EncryptedSharedPreferences
 import androidx.security.crypto.MasterKey
 import com.rjnr.pocketnode.core.log.Logger
-import com.rjnr.pocketnode.core.crypto.Blake2b
 import com.rjnr.pocketnode.core.crypto.Secp256k1Signer
 import com.rjnr.pocketnode.core.crypto.hexToByteArray
 import com.rjnr.pocketnode.core.crypto.toHexString
@@ -105,12 +104,7 @@ class KeyManager @Inject constructor(
     fun encodePlaintextBundle(
         privateKey: ByteArray,
         mnemonic: List<String>?,
-    ): WalletKeyBundle {
-        return WalletKeyBundle(
-            privateKeyHex = privateKey.joinToString("") { "%02x".format(it) },
-            mnemonic = mnemonic?.joinToString(" "),
-        )
-    }
+    ): WalletKeyBundle = WalletDerivation.encodePlaintextBundle(privateKey, mnemonic)
 
     @Inject
     fun setBackupManager(backupManager: KeyBackupManager) {
@@ -368,9 +362,8 @@ class KeyManager @Inject constructor(
         return hex.hexToByteArray()
     }
 
-    fun derivePublicKey(privateKey: ByteArray): ByteArray {
-        return Secp256k1Signer.publicKey(privateKey)
-    }
+    fun derivePublicKey(privateKey: ByteArray): ByteArray =
+        WalletDerivation.publicKey(privateKey)
 
     // --- #382 Tier 3: thin pass-throughs so the sweep can re-derive
     // chain-axis keys without a second MnemonicManager injection point.
@@ -384,16 +377,8 @@ class KeyManager @Inject constructor(
             seed, accountIndex = 0, chainIndex = chainIndex, addressIndex = addressIndex
         )
 
-    fun deriveLockScript(publicKey: ByteArray): Script {
-        val pubKeyHash = Blake2b.digest(publicKey)
-        val args = pubKeyHash.copyOfRange(0, 20)
-
-        return Script(
-            codeHash = Script.SECP256K1_CODE_HASH,
-            hashType = "type",
-            args = args.toHexString()
-        )
-    }
+    fun deriveLockScript(publicKey: ByteArray): Script =
+        WalletDerivation.lockScript(publicKey)
 
     /**
      * Recover a wallet's lock script from a cached CKB address without
@@ -404,9 +389,8 @@ class KeyManager @Inject constructor(
      * The bech32 address encodes the same args+codeHash+hashType triple
      * that [deriveLockScript] would produce, so the round-trip is exact.
      */
-    fun deriveLockScriptFromAddress(address: String): Script {
-        return AddressUtils.decode(address)
-    }
+    fun deriveLockScriptFromAddress(address: String): Script =
+        WalletDerivation.lockScriptFromAddress(address)
 
     /**
      * Derive [WalletInfo] from a Room [com.rjnr.pocketnode.data.database.entity.WalletEntity]'s
@@ -420,16 +404,10 @@ class KeyManager @Inject constructor(
      */
     fun deriveWalletInfoFromEntity(
         wallet: com.rjnr.pocketnode.data.database.entity.WalletEntity
-    ): WalletInfo {
-        val address = wallet.testnetAddress.ifBlank { wallet.mainnetAddress }
-        val script = deriveLockScriptFromAddress(address)
-        return WalletInfo(
-            publicKey = "",
-            script = script,
-            testnetAddress = wallet.testnetAddress,
-            mainnetAddress = wallet.mainnetAddress,
-        )
-    }
+    ): WalletInfo = WalletDerivation.walletInfoFromAddresses(
+        testnetAddress = wallet.testnetAddress,
+        mainnetAddress = wallet.mainnetAddress,
+    )
 
     suspend fun sign(message: ByteArray): ByteArray {
         return Secp256k1Signer.signRecoverable(message, getPrivateKey())
@@ -504,19 +482,8 @@ class KeyManager @Inject constructor(
      * its per-wallet EncryptedSharedPreferences and info is derived without touching
      * the legacy "default" prefs.
      */
-    fun deriveWalletInfo(privateKey: ByteArray): WalletInfo {
-        val publicKey = Secp256k1Signer.publicKey(privateKey)
-        val script = deriveLockScript(publicKey)
-        val testnetAddress = AddressUtils.encode(script, NetworkType.TESTNET)
-        val mainnetAddress = AddressUtils.encode(script, NetworkType.MAINNET)
-
-        return WalletInfo(
-            publicKey = publicKey.toHexString(),
-            script = script,
-            testnetAddress = testnetAddress,
-            mainnetAddress = mainnetAddress
-        )
-    }
+    fun deriveWalletInfo(privateKey: ByteArray): WalletInfo =
+        WalletDerivation.walletInfo(privateKey)
 
     suspend fun setMnemonicBackedUpForWallet(walletId: String, backedUp: Boolean) {
         // See [setMnemonicBackedUp] for the V2 flag-only rationale.
@@ -688,10 +655,3 @@ class KeyManager @Inject constructor(
         const val WALLET_TYPE_RAW_KEY = "raw_key"
     }
 }
-
-data class WalletInfo(
-    val publicKey: String,
-    val script: Script,
-    val testnetAddress: String,
-    val mainnetAddress: String
-)
