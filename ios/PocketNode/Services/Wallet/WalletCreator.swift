@@ -144,7 +144,8 @@ final class WalletCreator {
     // MARK: - Storage
 
     private func refuseIfWalletExists() async throws {
-        if await keyStore.hasWallet || walletStore.hasWallet {
+        let keysPresent = await keyStore.hasWallet
+        if keysPresent || walletStore.hasWallet {
             throw WalletCreationError.walletAlreadyExists
         }
     }

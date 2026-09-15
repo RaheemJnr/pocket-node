@@ -57,7 +57,8 @@ struct RootView: View {
         // the wallet before they have set a PIN.
         .task {
             guard phase == .undecided else { return }
-            if await container.hasWallet {
+            let hasWallet = await container.hasWallet
+            if hasWallet {
                 phase = .wallet
             } else {
                 onboarding = OnboardingViewModel(creator: container.walletCreator)

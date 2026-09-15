@@ -133,7 +133,7 @@ struct BackupView: View {
             .frame(maxWidth: .infinity)
             .accessibilityIdentifier("backup.wroteItDown")
         }
-        .privacyShielded()
+        .privacyShield()
         .accessibilityIdentifier("backup.display")
     }
 
@@ -188,7 +188,7 @@ struct BackupView: View {
             .disabled(!viewModel.canSubmitVerify)
             .accessibilityIdentifier("backup.verifyButton")
         }
-        .privacyShielded()
+        .privacyShield()
         .accessibilityIdentifier("backup.verify")
     }
 
