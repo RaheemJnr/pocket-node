@@ -258,6 +258,32 @@ final class UserDefaultsPreferences: SyncPreferences, UiPreferences, NetworkPref
         defaults.set(timestampMs, forKey: Keys.lastVacuumAt)
     }
 
+    // MARK: - Auth settings (iOS-only members, global)
+    //
+    // Android keeps these two in a separate `ckb_auth_settings` prefs file
+    // owned by `data/auth/AuthManager.kt`, not in `WalletPreferences`, so
+    // there is no shared `core.prefs` interface to implement here. The key
+    // names are Android's all the same, so a future shared `AuthPreferences`
+    // can adopt both sides without a migration.
+    //
+    // Both default off: a user who has never opted in is not silently signed
+    // up to unlock with their face, and `auth_before_send` is an extra
+    // confirmation step that has to be asked for.
+
+    /// Whether Face ID / Touch ID may unlock the app. Android key:
+    /// "biometric_enabled".
+    var isBiometricEnabled: Bool {
+        get { defaults.bool(forKey: Keys.biometricEnabled) }
+        set { defaults.set(newValue, forKey: Keys.biometricEnabled) }
+    }
+
+    /// Whether a send has to be re-authenticated. Android key:
+    /// "auth_before_send".
+    var isAuthBeforeSendEnabled: Bool {
+        get { defaults.bool(forKey: Keys.authBeforeSend) }
+        set { defaults.set(newValue, forKey: Keys.authBeforeSend) }
+    }
+
     // MARK: - Per-network / per-wallet key helpers
 
     private func key(_ base: String, network: NetworkType?, walletId: String?) -> String {
@@ -319,5 +345,8 @@ final class UserDefaultsPreferences: SyncPreferences, UiPreferences, NetworkPref
         static let gapLimitBannerDismissed = "gap_limit_banner_dismissed"
         static let lastVacuumAt = "last_vacuum_at"
         static let syncCoachmarkSeen = "sync_coachmark_seen"
+        // Android's `AuthManager` keys, kept verbatim.
+        static let biometricEnabled = "biometric_enabled"
+        static let authBeforeSend = "auth_before_send"
     }
 }
