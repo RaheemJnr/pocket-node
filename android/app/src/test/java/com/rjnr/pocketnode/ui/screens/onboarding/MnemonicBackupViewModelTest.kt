@@ -1,8 +1,11 @@
 package com.rjnr.pocketnode.ui.screens.onboarding
 
+import androidx.lifecycle.SavedStateHandle
 import com.rjnr.pocketnode.data.auth.PinManager
+import com.rjnr.pocketnode.data.database.dao.KeyMaterialDao
 import com.rjnr.pocketnode.data.database.entity.WalletEntity
 import com.rjnr.pocketnode.data.gateway.GatewayRepository
+import com.rjnr.pocketnode.data.wallet.SeedPhraseAuthorizer
 import com.rjnr.pocketnode.data.wallet.WalletRepository
 import io.mockk.coEvery
 import io.mockk.coVerify
@@ -24,17 +27,24 @@ import org.junit.Before
 import org.junit.Test
 
 /**
- * Tests for [MnemonicBackupViewModel] PIN gate on the raw-key backup path
- * (#290). Pre-#290, `loadMnemonic` fetched the private key directly in
- * the VM's `init` block — anyone navigating to MnemonicBackupScreen for a
+ * Tests for the [MnemonicBackupViewModel] reveal gates.
+ *
+ * Raw key (#290): pre-#290, `loadMnemonic` fetched the private key directly
+ * in the VM's `init` block — anyone navigating to MnemonicBackupScreen for a
  * raw_key wallet from Settings could see the key with no re-auth. The fix
  * defers the fetch behind a `pinRequiredForPrivateKey` UI flag that the
- * screen surfaces as a "Reveal private key" button gated by
- * [PinEntryScreen] verification.
+ * screen surfaces as a "Reveal private key" button gated by PinEntryScreen.
  *
- * The onboarding path (raw_key import before PIN setup) is unchanged: when
- * `PinManager.hasPin() == false`, the key is fetched directly so the user
- * can complete the simplified backup flow.
+ * Recovery phrase (#488): the same hole existed for mnemonic wallets, but
+ * only V2 key material happened to be covered — it threw
+ * `V2KeyMaterialRequiresAuthException` on the un-authenticated read path. A
+ * kdfVersion=1 wallet decrypts silently, so Settings → Backup Wallet rendered
+ * all 12 words with no PIN or biometric step. The gate is now raised before
+ * `getMnemonic()` for every key-material version.
+ *
+ * The onboarding path is exempt in both cases: the first-run hop out of
+ * wallet creation (`onboarding=true` on the nav route) runs before
+ * `InitialPinSetup`, so there is no credential to check.
  */
 @OptIn(ExperimentalCoroutinesApi::class)
 class MnemonicBackupViewModelTest {
@@ -43,7 +53,13 @@ class MnemonicBackupViewModelTest {
     private lateinit var repository: GatewayRepository
     private lateinit var walletRepository: WalletRepository
     private lateinit var pinManager: PinManager
-    private lateinit var walletKeyReader: com.rjnr.pocketnode.data.wallet.WalletKeyReader
+    private lateinit var seedPhraseAuthorizer: SeedPhraseAuthorizer
+    private lateinit var keyMaterialDao: KeyMaterialDao
+
+    private val words = listOf(
+        "abandon", "ability", "able", "about", "above", "absent",
+        "absorb", "abstract", "absurd", "abuse", "access", "accident"
+    )
 
     @Before
     fun setUp() {
@@ -51,16 +67,176 @@ class MnemonicBackupViewModelTest {
         repository = mockk(relaxed = true)
         walletRepository = mockk(relaxed = true)
         pinManager = mockk(relaxed = true)
-        walletKeyReader = mockk(relaxed = true)
+        seedPhraseAuthorizer = mockk(relaxed = true)
+        keyMaterialDao = mockk(relaxed = true)
+        // Default: V1 key material unless a test says otherwise.
+        coEvery { keyMaterialDao.getKdfVersion(any()) } returns 1
     }
 
     @After
     fun tearDown() { Dispatchers.resetMain() }
 
+    private fun createViewModel(onboarding: Boolean = false) = MnemonicBackupViewModel(
+        savedStateHandle = SavedStateHandle(mapOf("onboarding" to onboarding)),
+        repository = repository,
+        walletRepository = walletRepository,
+        pinManager = pinManager,
+        seedPhraseAuthorizer = seedPhraseAuthorizer,
+        keyMaterialDao = keyMaterialDao,
+    )
+
     private fun rawKeyEntity() = mockk<WalletEntity>(relaxed = true).also {
         every { it.type } returns "raw_key"
         every { it.parentWalletId } returns null
+        every { it.walletId } returns "wallet-raw"
     }
+
+    private fun mnemonicEntity() = mockk<WalletEntity>(relaxed = true).also {
+        every { it.type } returns "mnemonic"
+        every { it.parentWalletId } returns null
+        every { it.walletId } returns "wallet-1"
+    }
+
+    // -- #488: recovery-phrase gate ------------------------------------
+
+    @Test
+    fun `V1 mnemonic wallet is gated behind the PIN before the phrase is read`() = runTest {
+        coEvery { walletRepository.getActive() } returns mnemonicEntity()
+        coEvery { keyMaterialDao.getKdfVersion("wallet-1") } returns 1
+        every { pinManager.hasPin() } returns true
+        coEvery { repository.getMnemonic() } returns words
+
+        val vm = createViewModel()
+        advanceUntilIdle()
+
+        // The regression in #488: this read used to happen eagerly in init.
+        coVerify(exactly = 0) { repository.getMnemonic() }
+        val state = vm.uiState.value
+        assertTrue("V1 wallet must be gated", state.pinRequiredForMnemonic)
+        assertTrue("V1 gate is the app PIN", state.mnemonicGateUsesPin)
+        assertTrue(state.words.isEmpty())
+    }
+
+    @Test
+    fun `V1 mnemonic wallet loads the phrase after the PIN is verified`() = runTest {
+        coEvery { walletRepository.getActive() } returns mnemonicEntity()
+        coEvery { keyMaterialDao.getKdfVersion("wallet-1") } returns 1
+        every { pinManager.hasPin() } returns true
+        coEvery { repository.getMnemonic() } returns words
+
+        val vm = createViewModel()
+        advanceUntilIdle()
+        assertTrue(vm.uiState.value.pinRequiredForMnemonic)
+
+        vm.onPinVerified()
+        advanceUntilIdle()
+
+        coVerify(exactly = 1) { repository.getMnemonic() }
+        val state = vm.uiState.value
+        assertFalse("Gate clears once the words are loaded", state.pinRequiredForMnemonic)
+        assertEquals(words, state.words)
+        assertEquals("Three verification slots are picked", 3, state.verifyPositions.size)
+        state.verifyPositions.forEach { pos ->
+            assertTrue(
+                "Correct word must be among the choices",
+                state.verifyOptions.getValue(pos).contains(words[pos])
+            )
+        }
+    }
+
+    @Test
+    fun `V2 mnemonic wallet is gated behind biometrics, not the PIN screen`() = runTest {
+        coEvery { walletRepository.getActive() } returns mnemonicEntity()
+        coEvery { keyMaterialDao.getKdfVersion("wallet-1") } returns 2
+        every { pinManager.hasPin() } returns true
+
+        val vm = createViewModel()
+        advanceUntilIdle()
+
+        coVerify(exactly = 0) { repository.getMnemonic() }
+        val state = vm.uiState.value
+        assertTrue(state.pinRequiredForMnemonic)
+        assertFalse("V2 gate is the BiometricPrompt", state.mnemonicGateUsesPin)
+    }
+
+    @Test
+    fun `onboarding path is not gated and shows the phrase directly`() = runTest {
+        // First-run hop out of wallet creation: no PIN exists yet, so there is
+        // nothing to authenticate against.
+        coEvery { walletRepository.getActive() } returns mnemonicEntity()
+        coEvery { keyMaterialDao.getKdfVersion("wallet-1") } returns 1
+        every { pinManager.hasPin() } returns false
+        coEvery { repository.getMnemonic() } returns words
+
+        val vm = createViewModel(onboarding = true)
+        advanceUntilIdle()
+
+        coVerify(exactly = 1) { repository.getMnemonic() }
+        val state = vm.uiState.value
+        assertFalse("Onboarding must not be gated", state.pinRequiredForMnemonic)
+        assertEquals(words, state.words)
+    }
+
+    @Test
+    fun `V1 mnemonic wallet with no PIN falls through to the direct read`() = runTest {
+        // Legacy/interrupted install: no PIN means no credential to check, so
+        // gating would only lock the user out of their own backup.
+        coEvery { walletRepository.getActive() } returns mnemonicEntity()
+        coEvery { keyMaterialDao.getKdfVersion("wallet-1") } returns 1
+        every { pinManager.hasPin() } returns false
+        coEvery { repository.getMnemonic() } returns words
+
+        val vm = createViewModel()
+        advanceUntilIdle()
+
+        coVerify(exactly = 1) { repository.getMnemonic() }
+        assertFalse(vm.uiState.value.pinRequiredForMnemonic)
+        assertEquals(words, vm.uiState.value.words)
+    }
+
+    @Test
+    fun `V2 reveal populates the words after a successful biometric authorize`() = runTest {
+        coEvery { walletRepository.getActive() } returns mnemonicEntity()
+        coEvery { keyMaterialDao.getKdfVersion("wallet-1") } returns 2
+        every { pinManager.hasPin() } returns true
+        coEvery {
+            seedPhraseAuthorizer.authorize(any(), any(), any(), any())
+        } returns SeedPhraseAuthorizer.SeedResult.Words(words)
+
+        val vm = createViewModel()
+        advanceUntilIdle()
+        assertTrue(vm.uiState.value.pinRequiredForMnemonic)
+
+        vm.revealMnemonicWithBiometrics(mockk(relaxed = true))
+        advanceUntilIdle()
+
+        val state = vm.uiState.value
+        assertFalse(state.pinRequiredForMnemonic)
+        assertEquals(words, state.words)
+        assertEquals(3, state.verifyPositions.size)
+    }
+
+    @Test
+    fun `cancelled biometric keeps the gate up and reveals nothing`() = runTest {
+        coEvery { walletRepository.getActive() } returns mnemonicEntity()
+        coEvery { keyMaterialDao.getKdfVersion("wallet-1") } returns 2
+        every { pinManager.hasPin() } returns true
+        coEvery {
+            seedPhraseAuthorizer.authorize(any(), any(), any(), any())
+        } returns SeedPhraseAuthorizer.SeedResult.Cancelled
+
+        val vm = createViewModel()
+        advanceUntilIdle()
+
+        vm.revealMnemonicWithBiometrics(mockk(relaxed = true))
+        advanceUntilIdle()
+
+        val state = vm.uiState.value
+        assertTrue("Gate stays up so the user can retry", state.pinRequiredForMnemonic)
+        assertTrue(state.words.isEmpty())
+    }
+
+    // -- #290: raw-key private-key gate --------------------------------
 
     @Test
     fun `raw_key wallet with PIN does not fetch private key until onPinVerified`() = runTest {
@@ -68,7 +244,7 @@ class MnemonicBackupViewModelTest {
         coEvery { repository.getMnemonic() } returns null  // raw_key has no mnemonic
         every { pinManager.hasPin() } returns true
 
-        val vm = MnemonicBackupViewModel(repository, walletRepository, pinManager, walletKeyReader)
+        val vm = createViewModel()
         advanceUntilIdle()
 
         // Pre-PIN: gate is set, private key NOT fetched.
@@ -98,7 +274,7 @@ class MnemonicBackupViewModelTest {
         every { pinManager.hasPin() } returns false
         coEvery { repository.getPrivateKey() } returns byteArrayOf(0xcc.toByte(), 0xdd.toByte())
 
-        val vm = MnemonicBackupViewModel(repository, walletRepository, pinManager, walletKeyReader)
+        val vm = createViewModel()
         advanceUntilIdle()
 
         coVerify(exactly = 1) { repository.getPrivateKey() }
@@ -110,18 +286,11 @@ class MnemonicBackupViewModelTest {
 
     @Test
     fun `mnemonic wallet does not trigger the raw-key PIN gate`() = runTest {
-        val mnemonicEntity = mockk<WalletEntity>(relaxed = true).also {
-            every { it.type } returns "mnemonic"
-            every { it.parentWalletId } returns null
-        }
-        coEvery { walletRepository.getActive() } returns mnemonicEntity
-        coEvery { repository.getMnemonic() } returns listOf(
-            "abandon", "abandon", "abandon", "abandon", "abandon", "abandon",
-            "abandon", "abandon", "abandon", "abandon", "abandon", "about"
-        )
+        coEvery { walletRepository.getActive() } returns mnemonicEntity()
+        coEvery { repository.getMnemonic() } returns words
         every { pinManager.hasPin() } returns true
 
-        val vm = MnemonicBackupViewModel(repository, walletRepository, pinManager, walletKeyReader)
+        val vm = createViewModel(onboarding = true)
         advanceUntilIdle()
 
         coVerify(exactly = 0) { repository.getPrivateKey() }
@@ -135,28 +304,30 @@ class MnemonicBackupViewModelTest {
         val sub = mockk<WalletEntity>(relaxed = true).also {
             every { it.type } returns "raw_key"
             every { it.parentWalletId } returns "parent-id"
+            every { it.walletId } returns "wallet-sub"
         }
         coEvery { walletRepository.getActive() } returns sub
         coEvery { repository.getMnemonic() } returns null
         every { pinManager.hasPin() } returns true
 
-        val vm = MnemonicBackupViewModel(repository, walletRepository, pinManager, walletKeyReader)
+        val vm = createViewModel()
         advanceUntilIdle()
 
         coVerify(exactly = 0) { repository.getPrivateKey() }
         val state = vm.uiState.value
         assertFalse(state.pinRequiredForPrivateKey)
+        assertFalse("Sub-accounts render the parent notice, not a gate", state.pinRequiredForMnemonic)
         assertTrue(state.isSubAccount)
     }
 
     @Test
-    fun `onPinVerified is a no-op when PIN gate is not active`() = runTest {
+    fun `onPinVerified is a no-op when no PIN gate is active`() = runTest {
         coEvery { walletRepository.getActive() } returns rawKeyEntity()
         coEvery { repository.getMnemonic() } returns null
         every { pinManager.hasPin() } returns false  // no gate
         coEvery { repository.getPrivateKey() } returns byteArrayOf(0x01)
 
-        val vm = MnemonicBackupViewModel(repository, walletRepository, pinManager, walletKeyReader)
+        val vm = createViewModel()
         advanceUntilIdle()
         // One fetch from init (no-PIN path).
         coVerify(exactly = 1) { repository.getPrivateKey() }

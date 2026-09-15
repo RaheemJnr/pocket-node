@@ -56,23 +56,49 @@ data class MnemonicBackupUiState(
     /** True once the user has revealed the private key in this session. */
     val privateKeyRevealed: Boolean = false,
     /**
-     * True when a V2 mnemonic wallet's recovery phrase is gated behind
-     * PIN entry. The screen renders a "Reveal recovery phrase" button
-     * that routes through [PinEntryScreen]; on return we fetch via
-     * `WalletKeyReader` and populate [words]. False when the wallet is
-     * V1 (legacy/no-device-lock fallback) and `repository.getMnemonic()`
-     * succeeded directly.
+     * True when the recovery phrase is gated behind authentication and has
+     * not been revealed yet. The screen renders a "Reveal recovery phrase"
+     * button instead of the words; passing the gate populates [words] and
+     * clears this flag.
+     *
+     * Set for every key-material version on every non-onboarding entry
+     * point (#488). Before #488 it was set only when the V1-only read path
+     * threw `V2KeyMaterialRequiresAuthException`, so a kdfVersion=1 wallet
+     * rendered all 12 words with no re-authentication at all.
      */
     val pinRequiredForMnemonic: Boolean = false,
+    /**
+     * Which gate [pinRequiredForMnemonic] is waiting on: true = the app PIN
+     * via `PinEntryScreen` (V1 key material, which decrypts without a
+     * CryptoObject), false = a BiometricPrompt driven by
+     * `SeedPhraseAuthorizer` (V2 key material, where the prompt *is* the
+     * decryption key).
+     */
+    val mnemonicGateUsesPin: Boolean = false,
 )
 
 @HiltViewModel
 class MnemonicBackupViewModel @Inject constructor(
+    savedStateHandle: androidx.lifecycle.SavedStateHandle,
     private val repository: GatewayRepository,
     private val walletRepository: com.rjnr.pocketnode.data.wallet.WalletRepository,
     private val pinManager: com.rjnr.pocketnode.data.auth.PinManager,
-    private val walletKeyReader: com.rjnr.pocketnode.data.wallet.WalletKeyReader,
+    private val seedPhraseAuthorizer: com.rjnr.pocketnode.data.wallet.SeedPhraseAuthorizer,
+    private val keyMaterialDao: com.rjnr.pocketnode.data.database.dao.KeyMaterialDao,
 ) : ViewModel() {
+
+    /**
+     * True only on the first-run onboarding hop (Onboarding → backup, which
+     * navigates with `onboarding=true`). That single edge runs *before*
+     * `InitialPinSetup`, so there is no PIN to verify yet and nothing to
+     * re-authenticate against — the wallet was created seconds ago in this
+     * same uninterrupted session. Every other entry point (the post-auth
+     * `needsMnemonicBackup` enforcement, the security checklist, a wallet
+     * added from inside the app, Manage Wallets) reaches this screen on an
+     * install that already has a mandatory PIN, so it must authenticate
+     * before the words are decrypted (#488).
+     */
+    private val onboarding: Boolean = savedStateHandle.get<Boolean>("onboarding") ?: false
 
     private val _uiState = MutableStateFlow(MnemonicBackupUiState())
     val uiState: StateFlow<MnemonicBackupUiState> = _uiState.asStateFlow()
@@ -88,6 +114,46 @@ class MnemonicBackupViewModel @Inject constructor(
             val walletType = activeWallet?.type ?: ""
             val isSubAccount = activeWallet?.parentWalletId != null
             _uiState.update { it.copy(walletType = walletType, isSubAccount = isSubAccount) }
+
+            // #488 — authenticate BEFORE the phrase is decrypted.
+            //
+            // The old flow called repository.getMnemonic() eagerly and only
+            // raised a gate when the V1-only read path threw
+            // V2KeyMaterialRequiresAuthException. A kdfVersion=1 wallet
+            // decrypts without an authenticated Cipher, so it never threw and
+            // Settings → Backup Wallet rendered all 12 words with no PIN or
+            // biometric step at all. The gate now comes first, independent of
+            // key-material version, and mirrors the raw-key reveal added in
+            // #290/#300: reveal-on-tap, nothing fetched until the user passes
+            // the gate.
+            //
+            // Skipped for [onboarding] (no PIN exists at that point in the
+            // flow), for sub-accounts (they render the "backed up with the
+            // parent" notice and never show words) and for raw_key wallets
+            // (handled by the pinRequiredForPrivateKey gate below).
+            if (!onboarding && !isSubAccount && walletType != "raw_key") {
+                val kdfVersion = activeWallet?.walletId?.let { keyMaterialDao.getKdfVersion(it) } ?: 1
+                if (kdfVersion >= 2) {
+                    // The BiometricPrompt CryptoObject *is* the decryption key.
+                    _uiState.update {
+                        it.copy(pinRequiredForMnemonic = true, mnemonicGateUsesPin = false)
+                    }
+                    return@launch
+                }
+                if (pinManager.hasPin()) {
+                    // V1 key material decrypts silently, so the app PIN is the
+                    // gate — same route as the raw-key reveal (#290).
+                    _uiState.update {
+                        it.copy(pinRequiredForMnemonic = true, mnemonicGateUsesPin = true)
+                    }
+                    return@launch
+                }
+                // V1 wallet on an install with no PIN: there is no credential
+                // to check, so gating would only lock the user out of their own
+                // backup. Falls through to the direct read, as before #488.
+                // PIN setup is mandatory after onboarding, so this is reachable
+                // only on a legacy/interrupted install.
+            }
 
             // V2 wallets (kdfVersion=2) cannot decrypt without an authenticated
             // Cipher. repository.getMnemonic() routes through the V1-only read
@@ -122,81 +188,68 @@ class MnemonicBackupViewModel @Inject constructor(
                 }
                 return@launch
             }
-            val random = java.util.Random(System.nanoTime())
-            val positions = words.indices.toList().shuffled(random).take(3).sorted()
-            val options = positions.associateWith { pos ->
-                val correct = words[pos]
-                val decoys = words.filterIndexed { i, _ -> i != pos }
-                    .distinct()
-                    .filter { it != correct }
-                    .shuffled(random)
-                    .take(3)
-                val choices = mutableListOf(correct).apply { addAll(decoys) }
-                choices.apply { shuffle(random) }.toList()
-            }
-            _uiState.update {
-                it.copy(words = words, verifyPositions = positions, verifyOptions = options)
-            }
+            showWords(words)
         }
     }
 
     /**
-     * Called from [MnemonicBackupScreen] when the user taps the
-     * "Reveal recovery phrase" button on a V2 mnemonic wallet. Drives a
-     * BiometricPrompt via [WalletKeyReader] (no PinEntryScreen detour —
-     * the V2 key is the gate). On success the words are populated and
-     * the standard verify+confirm flow continues.
+     * Populate [words] plus the three randomly-chosen verification slots and
+     * clear the reveal gate. Shared by the three ways the phrase can arrive:
+     * the un-gated onboarding read, the V2 biometric reveal and the V1
+     * post-PIN reveal.
      */
-    fun revealMnemonicForV2(activity: androidx.fragment.app.FragmentActivity) {
+    private fun showWords(words: List<String>) {
+        val random = java.util.Random(System.nanoTime())
+        val positions = words.indices.toList().shuffled(random).take(3).sorted()
+        val options = positions.associateWith { pos ->
+            val correct = words[pos]
+            val decoys = words.filterIndexed { i, _ -> i != pos }
+                .distinct()
+                .filter { it != correct }
+                .shuffled(random)
+                .take(3)
+            val choices = mutableListOf(correct).apply { addAll(decoys) }
+            choices.apply { shuffle(random) }.toList()
+        }
+        _uiState.update {
+            it.copy(
+                words = words,
+                verifyPositions = positions,
+                verifyOptions = options,
+                pinRequiredForMnemonic = false,
+            )
+        }
+    }
+
+    /**
+     * Called from [MnemonicBackupScreen] when the user taps "Reveal recovery
+     * phrase" on a wallet whose key material is V2. Drives a BiometricPrompt
+     * via [SeedPhraseAuthorizer] (no PinEntryScreen detour — the V2 key is the
+     * gate). On success the words are populated and the standard
+     * verify+confirm flow continues.
+     */
+    fun revealMnemonicWithBiometrics(activity: androidx.fragment.app.FragmentActivity) {
         if (!_uiState.value.pinRequiredForMnemonic) return
         viewModelScope.launch {
             val active = walletRepository.getActive() ?: return@launch
-            val result = walletKeyReader.readKeyMaterial(
+            val result = seedPhraseAuthorizer.authorize(
                 activity = activity,
                 walletId = active.walletId,
                 promptTitle = "Reveal recovery phrase",
                 promptSubtitle = "Authenticate to view your wallet's seed phrase.",
             )
             when (result) {
-                is com.rjnr.pocketnode.data.wallet.WalletKeyReader.MaterialResult.Success -> {
-                    val mnemonic = result.mnemonic
-                    if (mnemonic.isNullOrBlank()) {
-                        _uiState.update { it.copy(error = "Recovery phrase not available for this wallet.") }
-                        return@launch
-                    }
-                    val words = mnemonic.split(" ")
-                    val random = java.util.Random(System.nanoTime())
-                    val positions = words.indices.toList().shuffled(random).take(3).sorted()
-                    val options = positions.associateWith { pos ->
-                        val correct = words[pos]
-                        val decoys = words.filterIndexed { i, _ -> i != pos }
-                            .distinct()
-                            .filter { it != correct }
-                            .shuffled(random)
-                            .take(3)
-                        val choices = mutableListOf(correct).apply { addAll(decoys) }
-                        choices.apply { shuffle(random) }.toList()
-                    }
-                    _uiState.update {
-                        it.copy(
-                            words = words,
-                            verifyPositions = positions,
-                            verifyOptions = options,
-                            pinRequiredForMnemonic = false,
-                        )
-                    }
+                is com.rjnr.pocketnode.data.wallet.SeedPhraseAuthorizer.SeedResult.Words -> {
+                    showWords(result.words)
                 }
-                is com.rjnr.pocketnode.data.wallet.WalletKeyReader.MaterialResult.Cancelled -> {
+                is com.rjnr.pocketnode.data.wallet.SeedPhraseAuthorizer.SeedResult.Cancelled -> {
                     // Silent — user dismissed the prompt; the reveal button
                     // stays visible so they can retry.
                 }
-                is com.rjnr.pocketnode.data.wallet.WalletKeyReader.MaterialResult.AuthError -> {
-                    _uiState.update { it.copy(error = "Authentication error: ${result.message}") }
-                }
-                is com.rjnr.pocketnode.data.wallet.WalletKeyReader.MaterialResult.KeyInvalidated -> {
+                is com.rjnr.pocketnode.data.wallet.SeedPhraseAuthorizer.SeedResult.KeyInvalidated -> {
                     _uiState.update { it.copy(error = "Your device's biometric enrollment changed and your wallet key was wiped. Re-import from your recovery phrase to recover.") }
                 }
-                is com.rjnr.pocketnode.data.wallet.WalletKeyReader.MaterialResult.NotAvailable -> {
+                is com.rjnr.pocketnode.data.wallet.SeedPhraseAuthorizer.SeedResult.Failed -> {
                     _uiState.update { it.copy(error = "Recovery phrase not available: ${result.reason}") }
                 }
             }
@@ -205,12 +258,40 @@ class MnemonicBackupViewModel @Inject constructor(
 
     /**
      * Called from [MnemonicBackupScreen] after the user returns from
-     * [PinEntryScreen] with a `pin_verified=true` savedStateHandle flag
-     * (#290). Fetches the private key and unmasks the reveal UI.
+     * `PinEntryScreen` with a `pin_verified=true` savedStateHandle flag.
+     * Serves both PIN gates: the raw-key private-key reveal (#290) and the
+     * V1 recovery-phrase reveal (#488).
      */
     fun onPinVerified() {
-        if (!_uiState.value.pinRequiredForPrivateKey) return
+        val state = _uiState.value
+        if (state.pinRequiredForMnemonic && state.mnemonicGateUsesPin) {
+            viewModelScope.launch { fetchMnemonicAfterPin() }
+            return
+        }
+        if (!state.pinRequiredForPrivateKey) return
         viewModelScope.launch { fetchPrivateKey() }
+    }
+
+    /**
+     * V1 post-PIN read. The key material decrypts without a CryptoObject, so
+     * once [PinEntryScreen] has confirmed the app PIN the repository read is
+     * the same one that used to run un-gated in `init` before #488.
+     */
+    private suspend fun fetchMnemonicAfterPin() {
+        val words = try {
+            repository.getMnemonic()
+        } catch (_: com.rjnr.pocketnode.data.crypto.V2KeyMaterialRequiresAuthException) {
+            // The row was migrated to V2 between the gate decision and the PIN
+            // return (AuthScreen's migration runner can do this). Swap to the
+            // biometric gate rather than failing the reveal.
+            _uiState.update { it.copy(mnemonicGateUsesPin = false) }
+            return
+        }
+        if (words.isNullOrEmpty()) {
+            _uiState.update { it.copy(error = "Recovery phrase not available for this wallet.") }
+            return
+        }
+        showWords(words)
     }
 
     private suspend fun fetchPrivateKey() {
@@ -354,10 +435,20 @@ fun MnemonicBackupScreen(
                     modifier = Modifier.padding(padding)
                 )
             }
-            // V2 wallet whose mnemonic needs a BiometricPrompt before reveal (#289 follow-up).
+            // Recovery phrase gated behind re-authentication (#488). V2 key
+            // material authenticates with a BiometricPrompt CryptoObject; V1
+            // key material routes through PinEntryScreen and comes back via
+            // [MnemonicBackupViewModel.onPinVerified].
             uiState.pinRequiredForMnemonic -> {
                 MnemonicRevealGate(
-                    onReveal = { viewModel.revealMnemonicForV2(activity) },
+                    usesPin = uiState.mnemonicGateUsesPin,
+                    onReveal = {
+                        if (uiState.mnemonicGateUsesPin) {
+                            onNavigateToPinVerify()
+                        } else {
+                            viewModel.revealMnemonicWithBiometrics(activity)
+                        }
+                    },
                     error = uiState.error,
                     modifier = Modifier.padding(padding)
                 )
@@ -401,14 +492,15 @@ fun MnemonicBackupScreen(
 }
 
 /**
- * Pre-reveal gate shown for V2 mnemonic wallets: the wallet's recovery
- * phrase lives behind an authenticated Cipher and cannot be decrypted
- * silently in the VM's `init` like a V1 wallet's can. The user taps the
- * button, BiometricPrompt fires (managed by `WalletKeyReader`), and on
- * success the standard verify+confirm flow renders (#289 follow-up).
+ * Pre-reveal gate for the recovery phrase. Nothing is decrypted until the
+ * user taps the button and passes authentication: a BiometricPrompt for V2
+ * key material (the authenticated Cipher *is* the decryption key) or the app
+ * PIN via `PinEntryScreen` for V1, which would otherwise decrypt silently
+ * (#488).
  */
 @Composable
 private fun MnemonicRevealGate(
+    usesPin: Boolean,
     onReveal: () -> Unit,
     error: String?,
     modifier: Modifier = Modifier
@@ -431,7 +523,11 @@ private fun MnemonicRevealGate(
                 )
                 Spacer(Modifier.height(8.dp))
                 Text(
-                    text = "Tap below and authenticate to view the 12 words. Write them down somewhere safe — we cannot recover them for you.",
+                    text = if (usesPin) {
+                        "Tap below and enter your PIN to view the 12 words. Write them down somewhere safe — we cannot recover them for you."
+                    } else {
+                        "Tap below and authenticate to view the 12 words. Write them down somewhere safe — we cannot recover them for you."
+                    },
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant
                 )
