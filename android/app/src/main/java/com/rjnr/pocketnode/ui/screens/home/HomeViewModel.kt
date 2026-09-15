@@ -61,6 +61,7 @@ class HomeViewModel @Inject constructor(
     private val walletPreferences: com.rjnr.pocketnode.data.wallet.WalletPreferences,
     private val seedPhraseAuthorizer: com.rjnr.pocketnode.data.wallet.SeedPhraseAuthorizer,
     private val keyMaterialDao: com.rjnr.pocketnode.data.database.dao.KeyMaterialDao,
+    private val pendingBroadcastDao: com.rjnr.pocketnode.data.database.dao.PendingBroadcastDao,
     private val savedStateHandle: androidx.lifecycle.SavedStateHandle,
     private val logger: Logger,
 ) : ViewModel() {
@@ -113,6 +114,35 @@ class HomeViewModel @Inject constructor(
     // Tracks the last successful CKB/USD fetch so we can throttle
     // refresh-on-foreground and the 5-min ticker (#117 deferred items).
     private var lastPriceFetchAt: Long = 0L
+
+    /**
+     * Broadcast lifecycle for the home rows (#432). Re-subscribes on network
+     * switch; the watchdog's CAS updates arrive through Room, so a row moves
+     * Broadcasting -> Pending -> Confirmed/Failed in place with no extra polling
+     * and no JNI round-trip of our own.
+     */
+    @OptIn(kotlinx.coroutines.ExperimentalCoroutinesApi::class)
+    private fun observeBroadcastStates() {
+        viewModelScope.launch {
+            _uiState.map { it.currentNetwork }
+                .distinctUntilChanged()
+                .flatMapLatest { network ->
+                    val walletId = walletPreferences.getActiveWalletId() ?: ""
+                    pendingBroadcastDao.observeAll(walletId, network.name)
+                }
+                .catch { e -> logger.w(TAG, "broadcast state stream failed: ${e.message}") }
+                .collect { rows ->
+                    val states = rows.associate { row ->
+                        row.txHash to com.rjnr.pocketnode.ui.transaction.BroadcastInfo(
+                            state = row.state,
+                            nullCount = row.nullCount,
+                            createdAt = row.createdAt,
+                        )
+                    }
+                    _uiState.update { it.copy(broadcastStates = states) }
+                }
+        }
+    }
 
     private fun formatFiat(ckb: Double, price: Double): String =
         String.format(Locale.US, "≈ $%.2f USD", ckb * price)
@@ -186,6 +216,8 @@ class HomeViewModel @Inject constructor(
                 _uiState.update { it.copy(currentNetwork = network) }
             }
         }
+
+        observeBroadcastStates()
 
         viewModelScope.launch {
             repository.isSwitchingNetwork.collect { switching ->
@@ -1156,6 +1188,12 @@ data class HomeUiState(
     val ckbUsdPrice: Double? = null,
     val peerCount: Int = 0,
     val transactions: List<TransactionRecord> = emptyList(),
+    /**
+     * Broadcast state per tx hash for the active wallet+network (#432), so a
+     * home row can show Broadcasting vs Pending and the detail sheet can
+     * explain a failure. Room-backed; no extra polling or network calls.
+     */
+    val broadcastStates: Map<String, com.rjnr.pocketnode.ui.transaction.BroadcastInfo> = emptyMap(),
     val error: com.rjnr.pocketnode.ui.util.UiMessage? = null,
     val currentSyncMode: SyncMode = SyncMode.RECENT,
     val showSyncOptionsDialog: Boolean = false,
