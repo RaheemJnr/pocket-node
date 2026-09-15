@@ -72,15 +72,16 @@ import com.rjnr.pocketnode.data.database.entity.WalletEntity
     // coexist with account-axis slots. MIGRATION_14_15 recreates the table
     // and backfills derivationPath from accountIndex.
     version = 15,
-    // Schema export deliberately OFF until the Room 2.8.4 / kotlinx-serialization
-    // 1.8.0 binary incompatibility is resolved (tracked in #149). Enabling it
-    // crashes KSP with AbstractMethodError in Room's bundled
-    // SchemaBundle$$serializer on a clean CI classpath.
+    // Schema export re-enabled (#149). It was OFF because Room 2.8.4's
+    // bundled kotlinx-serialization-core crashed KSP with an AbstractMethodError
+    // against the project's kotlinx-serialization-json:1.8.0. Verified clean
+    // on Kotlin 2.3.10 / KSP 2.3.10 / Room 2.8.4 — JSON schemas land under
+    // app/schemas/, reviewable in PR diffs alongside migrations.
     //
-    // The walking-migration test under src/test/ does the schema-validation
-    // work that exportSchema was meant to enable, so #142's regression-guard
-    // value is preserved. We just lose the JSON diff in PR review.
-    exportSchema = false
+    // The walking-migration test under src/test/ still does the runtime
+    // schema-validation work (#142's regression-guard); this restores the
+    // JSON diff in PR review on top of that.
+    exportSchema = true
 )
 abstract class AppDatabase : RoomDatabase() {
     abstract fun transactionDao(): TransactionDao
