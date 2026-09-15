@@ -49,15 +49,15 @@ final class OnboardingUITests: XCTestCase {
 
         // Welcome -> Create wallet (defaults: 12 words, "My Wallet").
         XCTAssertTrue(app.buttons["onboarding.create"].waitForExistence(timeout: 20))
-        app.buttons["onboarding.create"].tap()
+        app.buttons["onboarding.create"].firstMatch.tap()
 
         XCTAssertTrue(app.buttons["create.submit"].waitForExistence(timeout: 10))
-        app.buttons["create.submit"].tap()
+        app.buttons["create.submit"].firstMatch.tap()
 
         // Backup: reveal is exempt from the PIN gate this once, but the tap
         // is still required to move past it.
         XCTAssertTrue(app.buttons["backup.reveal"].waitForExistence(timeout: 10))
-        app.buttons["backup.reveal"].tap()
+        app.buttons["backup.reveal"].firstMatch.tap()
 
         // Read the 12 generated words back off the grid before writing
         // anything down: this is the only copy this test ever sees them.
@@ -66,7 +66,7 @@ final class OnboardingUITests: XCTestCase {
         XCTAssertEqual(words.count, 12)
         XCTAssertTrue(words.allSatisfy { !$0.isEmpty }, "\(words)")
 
-        app.buttons["backup.wroteItDown"].tap()
+        app.buttons["backup.wroteItDown"].firstMatch.tap()
 
         // Verify: answer each of the 3 prompts with the word this test just
         // read at that position, rather than guessing.
@@ -82,7 +82,7 @@ final class OnboardingUITests: XCTestCase {
         verifyButton.tap()
 
         XCTAssertTrue(app.buttons["backup.done"].waitForExistence(timeout: 10))
-        app.buttons["backup.done"].tap()
+        app.buttons["backup.done"].firstMatch.tap()
 
         // PIN setup: create, then confirm with the same 6 digits.
         XCTAssertTrue(app.staticTexts["Create PIN"].waitForExistence(timeout: 10))
@@ -104,7 +104,7 @@ final class OnboardingUITests: XCTestCase {
         capture(app: app, named: "517-home")
 
         // Receive: the testnet address and heading.
-        app.buttons["home.receive"].tap()
+        app.buttons["home.receive"].firstMatch.tap()
         let address = app.staticTexts["receive.address"]
         XCTAssertTrue(address.waitForExistence(timeout: 10))
         XCTAssertTrue(address.label.hasPrefix("ckt1"), "expected a ckt1 address, got \(address.label)")
@@ -124,7 +124,7 @@ final class OnboardingUITests: XCTestCase {
         app.launch()
 
         XCTAssertTrue(app.buttons["onboarding.import"].waitForExistence(timeout: 20))
-        app.buttons["onboarding.import"].tap()
+        app.buttons["onboarding.import"].firstMatch.tap()
 
         // Recovery phrase, 12 words, is the default mode and length; paste is
         // a system control this test cannot drive, so each word goes in by
@@ -153,7 +153,7 @@ final class OnboardingUITests: XCTestCase {
         }
 
         XCTAssertTrue(app.buttons["home.receive"].waitForExistence(timeout: 10))
-        app.buttons["home.receive"].tap()
+        app.buttons["home.receive"].firstMatch.tap()
 
         let address = app.staticTexts["receive.address"]
         XCTAssertTrue(address.waitForExistence(timeout: 10))
@@ -181,7 +181,7 @@ final class OnboardingUITests: XCTestCase {
     /// Taps `pin.key.<digit>` once per character.
     private static func enterPin(_ pin: String, in app: XCUIApplication) {
         for digit in pin {
-            app.buttons["pin.key.\(digit)"].tap()
+            app.buttons["pin.key.\(digit)"].firstMatch.tap()
         }
     }
 
