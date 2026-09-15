@@ -90,6 +90,11 @@ targets:
         TEST_TARGET_NAME: PocketNode
 
 schemes:
+  # The default, offline scheme: unit tests plus the offline UI tests
+  # (`WalletShellUITests`, `OnboardingUITests`). `NodeStatusUITests` also builds
+  # here (it lives in the same `PocketNodeUITests` target) but skips itself
+  # with `XCTSkip` unless `POCKETNODE_NETWORK_TESTS=1`, which only the
+  # `PocketNodeNetwork` scheme below sets. `ios-ci.yml` runs this scheme.
   PocketNode:
     build:
       targets:
@@ -100,9 +105,12 @@ schemes:
       config: Debug
       targets:
         - PocketNodeTests
+        - PocketNodeUITests
 
-  # Networked acceptance run; kept out of the default scheme so CI and everyday
-  # test runs stay offline.
+  # Networked acceptance run: the one test in `PocketNodeUITests` that needs
+  # real testnet bootnodes (`NodeStatusUITests`), gated on this variable so it
+  # cannot silently no-op under the offline scheme above. Kept out of the
+  # default scheme so CI and everyday test runs stay offline.
   PocketNodeNetwork:
     build:
       targets:
@@ -111,3 +119,5 @@ schemes:
       config: Debug
       targets:
         - PocketNodeUITests
+      environmentVariables:
+        POCKETNODE_NETWORK_TESTS: "1"

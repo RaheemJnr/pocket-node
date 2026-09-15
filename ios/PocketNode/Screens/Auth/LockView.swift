@@ -64,6 +64,9 @@ struct LockView: View {
         .padding(.horizontal, 32)
         .padding(.top, 48)
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
+        // See `HomeView`: without this the identifier would be pushed down
+        // onto every key of the pin pad, replacing `pin.key.*`.
+        .accessibilityElement(children: .contain)
         .accessibilityIdentifier("lock.root")
         .task {
             await auth.refresh()

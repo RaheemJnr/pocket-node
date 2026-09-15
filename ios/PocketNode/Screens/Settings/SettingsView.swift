@@ -45,6 +45,9 @@ struct SettingsView: View {
         }
         .navigationTitle("Settings")
         .navigationBarTitleDisplayMode(.inline)
+        // See `HomeView`: without this the identifier would be pushed down
+        // onto every row, replacing `settings.backup` / `settings.biometrics`.
+        .accessibilityElement(children: .contain)
         .accessibilityIdentifier("settings.root")
     }
 

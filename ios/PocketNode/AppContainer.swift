@@ -36,6 +36,8 @@ final class AppContainer {
     var theme: Theme = .light
 
     init() {
+        Self.resetStateForTestingIfRequested()
+
         self.preferences = UserDefaultsPreferences()
         Self.applyNetworkOverrideForTestingIfPresent(preferences: preferences)
         self.walletStore = WalletStore()
@@ -173,6 +175,27 @@ final class AppContainer {
         case "mainnet": preferences.setSelectedNetwork(network: .mainnet)
         default: break
         }
+        #endif
+    }
+
+    /// `OnboardingUITests` drives the real onboarding flow, which
+    /// `POCKETNODE_SKIP_ONBOARDING` cannot help with, that flag only opens the
+    /// gate in front of an already-seeded wallet. Onboarding itself needs a
+    /// device with no wallet, no PIN and no install marker, on every launch, not
+    /// only the first one a simulator ever sees. This is the reset: it runs
+    /// before anything else in `init()` touches the Keychain or `UserDefaults`,
+    /// so `InstallMarker`'s own reinstall wipe (below) finds nothing left to do.
+    ///
+    /// Debug-only, and a no-op on every other launch since the variable is
+    /// never set outside this one UI test target.
+    private static func resetStateForTestingIfRequested() {
+        #if DEBUG
+        guard ProcessInfo.processInfo.environment["POCKETNODE_RESET_STATE"] == "1" else { return }
+        try? KeychainStore().deleteAll()
+        try? SecureEnclaveKeyWrapper().deleteKey()
+        try? KeychainStore(service: KeychainPinStore.defaultService).deleteAll()
+        try? WalletStore().delete()
+        UserDefaults.standard.removeObject(forKey: InstallMarker.defaultsKey)
         #endif
     }
 }

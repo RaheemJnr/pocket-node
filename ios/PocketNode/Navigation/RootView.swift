@@ -271,6 +271,9 @@ private struct AuthChallengeSheet: View {
                 }
             }
         }
+        // See `HomeView`: without this the identifier would be pushed down
+        // onto every key of the pin pad, replacing `pin.key.*`.
+        .accessibilityElement(children: .contain)
         .accessibilityIdentifier("authChallenge.root")
         .task {
             await pin.refresh()

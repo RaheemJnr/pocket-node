@@ -25,11 +25,22 @@ project. A pre-build script phase runs
 
 ## Tests
 
-- `xcodebuild -scheme PocketNode ... test` runs the offline unit tests.
-- `xcodebuild -scheme PocketNodeNetwork ... test` runs the Node Status
-  acceptance test, which starts the node and waits for a real testnet tip.
-- `WalletKeyStoreDeviceTests` is skipped on the simulator and needs a physical
-  iPhone with a passcode and enrolled biometrics:
+Two schemes split the UI tests by whether they need a network, both built from
+the one `PocketNodeUITests` target (`project.yml`):
+
+- `xcodebuild -scheme PocketNode ... test` runs the offline unit tests
+  (`PocketNodeTests`) plus the offline UI tests (`PocketNodeUITests`):
+  `OnboardingUITests` (#517) and `WalletShellUITests`. `NodeStatusUITests`
+  also builds here, since it lives in the same target, but skips itself with
+  `XCTSkip` unless `POCKETNODE_NETWORK_TESTS=1` is set — this scheme's test
+  action does not set it. `.github/workflows/ios-ci.yml` runs this scheme.
+- `xcodebuild -scheme PocketNodeNetwork ... test` sets
+  `POCKETNODE_NETWORK_TESTS=1` in its test action and runs the same
+  `PocketNodeUITests` target, so `NodeStatusUITests` actually starts the node
+  and waits for a real testnet tip this time. Not run in CI.
+- `WalletKeyStoreDeviceTests` and `PinServiceDeviceTests` are skipped on the
+  simulator and need a physical iPhone with a passcode and enrolled
+  biometrics:
 
   ```bash
   xcodebuild -project PocketNode.xcodeproj -scheme PocketNode \
@@ -39,6 +50,18 @@ project. A pre-build script phase runs
 
   It prompts for Face ID or Touch ID and prints the store's diagnostics, which
   report `hardwareBacked: true` only on real hardware.
+
+### Debug-only launch environment flags
+
+`AppContainer` reads these from `ProcessInfo.processInfo.environment` inside
+`#if DEBUG`; none of them compile into a release build.
+
+| Flag | Effect |
+|------|--------|
+| `POCKETNODE_NETWORK` | `testnet` or `mainnet`, seeds `NetworkPreferences.setSelectedNetwork` before anything else reads it. Overrides the default (mainnet, #514). |
+| `POCKETNODE_SKIP_ONBOARDING` | `1` writes a throwaway `WalletRecord` (the pinned test vector's addresses, no key material) so `RootView` opens straight to the wallet shell instead of onboarding. Only takes effect when no wallet is already stored. Used by `WalletShellUITests` and `NodeStatusUITests`, neither of which cares about onboarding. |
+| `POCKETNODE_RESET_STATE` | `1` deletes the wallet envelope, the Secure Enclave wrapping key, every PIN Keychain item, `wallet.json` and the install marker, before anything else in `init()` runs. Used by `OnboardingUITests` (#517) so the real onboarding flow gets a clean device on every launch, not only a simulator's first one. It also relaunches with this flag in its own `tearDown`, so it leaves the device the way `WalletShellUITests`/`NodeStatusUITests` expect to find it (see `POCKETNODE_SKIP_ONBOARDING` above). |
+| `POCKETNODE_UITEST_ALLOW_CAPTURE` | `1` makes `PrivacyShield` ignore `UIScreen.isCaptured` for this one signal. XCUITest itself records the screen on a physical iPhone, which the shield otherwise (correctly) treats as a capture and hides the whole app behind it — every UI test sets this. |
 
 ## Wallet keys
 
@@ -111,6 +134,38 @@ acceptance test needs testnet specifically, so it sets
 rather than the app defaulting to testnet for everyone (`NodeStatusUITests`,
 `AppContainer.applyNetworkOverrideForTestingIfPresent`).
 
+## Onboarding
+
+`Screens/Onboarding/OnboardingViewModel.swift` (#515) drives the first-run flow
+as a step machine — `welcome -> create|importWallet -> backup -> pinSetup ->
+done` — mirroring Android's `OnboardingScreen` through
+`InitialPinSetupScreen`. A wallet created fresh goes through `backup` because
+nobody has written the phrase down yet; a wallet imported from a phrase or a
+raw key skips straight to `pinSetup`, because the user already holds it (or
+there is no phrase at all). `OnboardingView.swift` renders whichever step the
+model is on and owns nothing itself.
+
+`Services/Wallet/WalletCreator.swift` is the one place that creates or imports
+the wallet: `createWallet` (`Bip39.shared.generate` then
+`Bip32.shared.deriveCkbPrivateKey`), `importMnemonic` (validates, then the same
+derivation) and `importPrivateKey` (validates the scalar range directly in
+Swift, since a Kotlin `IllegalArgumentException` would terminate the process
+rather than reach a `catch`). Key material is stored before metadata; a failed
+metadata write rolls the key material back rather than leaving an orphaned
+wallet `AppContainer.hasWallet` would send straight to the wallet shell with no
+way back into onboarding. `CreateWalletView.swift` and `ImportWalletView.swift`
+are the two entry screens; `PinSetupView` (see Authentication above) is what
+`Step/pinSetup` shows.
+
+The pinned cross-platform vector — the standard all-"abandon" BIP-39 phrase,
+its `m/44'/309'/0'/0/0` private key and both addresses — is asserted three
+times: `WalletCreatorTests` (iOS unit), the shared module's
+`CrossPlatformAddressParityTest` (`:shared:testAndroidHostTest` and
+`:shared:iosSimulatorArm64Test`, `android/shared/src/commonTest/kotlin/com/rjnr/pocketnode/data/wallet/`),
+and `OnboardingUITests.testImportingTheTestPhraseShowsThePinnedTestnetAddress`
+through the real UI (#517). A derivation drift on either platform fails at
+least one of the three.
+
 ## Backup and Receive
 
 `Screens/Backup/BackupViewModel.swift` drives the recovery-phrase backup flow:
@@ -154,5 +209,7 @@ independently of who owns the surrounding flow.
 (`:shared:iosSimulatorArm64Test`, `:shared:testAndroidHostTest`), builds the
 `CkbLightClientFFI.xcframework` via `build-ios.sh`, regenerates the Xcode
 project with `xcodegen`, then builds and tests the offline `PocketNode`
-scheme on a simulator resolved at run time. The networked `PocketNodeNetwork`
-scheme talks to real testnet peers and is intentionally not run in CI.
+scheme on a simulator resolved at run time — unit tests and the offline UI
+tests (`OnboardingUITests`, `WalletShellUITests`) together. The networked
+`PocketNodeNetwork` scheme talks to real testnet peers and is intentionally
+not run in CI.
