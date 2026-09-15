@@ -14,7 +14,10 @@ securityCrypto = "1.1.0"
 secp256k1 = "0.21.0"
 room = "2.8.4"
 ksp = "2.3.10"
-kotlincryptoBlake2 = "0.8.0"
+# KotlinCrypto: BLAKE2b for CKB hashing, SHA-256 + HMAC-SHA-512 for BIP-39 (#507).
+# `hash` and `macs` are separate release trains that share a version number; keep them in step.
+kotlincryptoHash = "0.8.0"
+kotlincryptoMacs = "0.8.0"
 # Java SDK, kept ONLY as a differential-test dependency for the shared crypto
 # primitives (:shared androidHostTest). Never on any production classpath.
 ckbSdkDiffTest = "4.0.0"
@@ -67,7 +70,9 @@ androidx-security-crypto = { group = "androidx.security", name = "security-crypt
 secp256k1-kmp = { group = "fr.acinq.secp256k1", name = "secp256k1-kmp", version.ref = "secp256k1" }
 secp256k1-kmp-jni-android = { group = "fr.acinq.secp256k1", name = "secp256k1-kmp-jni-android", version.ref = "secp256k1" }
 secp256k1-kmp-jni-jvm = { group = "fr.acinq.secp256k1", name = "secp256k1-kmp-jni-jvm", version.ref = "secp256k1" }
-kotlincrypto-blake2 = { group = "org.kotlincrypto.hash", name = "blake2", version.ref = "kotlincryptoBlake2" }
+kotlincrypto-blake2 = { group = "org.kotlincrypto.hash", name = "blake2", version.ref = "kotlincryptoHash" }
+kotlincrypto-sha2 = { group = "org.kotlincrypto.hash", name = "sha2", version.ref = "kotlincryptoHash" }
+kotlincrypto-hmac-sha2 = { group = "org.kotlincrypto.macs", name = "hmac-sha2", version.ref = "kotlincryptoMacs" }
 kotlin-bip39 = { group = "cash.z.ecc.android", name = "kotlin-bip39", version.ref = "bip39" }
 
 # CKB SDK (differential tests only — see ckbSdkDiffTest)

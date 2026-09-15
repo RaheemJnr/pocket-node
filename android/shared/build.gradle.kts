@@ -30,6 +30,9 @@ kotlin {
         commonMain.dependencies {
             implementation(libs.secp256k1.kmp)
             implementation(libs.kotlincrypto.blake2)
+            // SHA-256 for the BIP-39 checksum, HMAC-SHA-512 for PBKDF2 (#507).
+            implementation(libs.kotlincrypto.sha2)
+            implementation(libs.kotlincrypto.hmac.sha2)
             implementation(libs.kotlinx.serialization.json)
         }
         commonTest.dependencies {
