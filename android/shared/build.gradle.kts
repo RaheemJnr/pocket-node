@@ -2,6 +2,8 @@ plugins {
     alias(libs.plugins.kotlin.multiplatform)
     alias(libs.plugins.android.kotlin.multiplatform.library)
     alias(libs.plugins.kotlin.serialization)
+    alias(libs.plugins.ksp)
+    alias(libs.plugins.androidx.room)
 }
 
 kotlin {
@@ -26,8 +28,21 @@ kotlin {
         }
     }
 
+    // Room generates the `actual object` for @ConstructedBy, so the module unavoidably has an
+    // expect/actual class. Kotlin still flags those as Beta (KT-61573); this is the suppression
+    // Room's own KMP setup guide prescribes.
+    compilerOptions {
+        freeCompilerArgs.add("-Xexpect-actual-classes")
+    }
+
     sourceSets {
         commonMain.dependencies {
+            // Room KMP: one database compiled for Android, iOS device and iOS simulator.
+            // This brings the common `androidx.sqlite` API, including SQLiteDriver, but
+            // deliberately no driver implementation: each platform supplies its own.
+            implementation(libs.room.runtime)
+            // Room needs a CoroutineContext for its query dispatcher.
+            implementation(libs.kotlinx.coroutines.core)
             implementation(libs.secp256k1.kmp)
             implementation(libs.kotlincrypto.blake2)
             // SHA-256 for the BIP-39 checksum, HMAC-SHA-512 for PBKDF2 (#507).
@@ -37,10 +52,19 @@ kotlin {
         }
         commonTest.dependencies {
             implementation(kotlin("test"))
+            // runTest, for the suspending Room DAO round trip in iosTest.
+            implementation(libs.kotlinx.coroutines.test)
         }
         androidMain.dependencies {
             // JNI bindings + .so payload for the Android ABIs.
             implementation(libs.secp256k1.kmp.jni.android)
+        }
+        iosMain.dependencies {
+            // The bundled SQLite driver is iOS-only on purpose. Kotlin/Native has no
+            // framework SQLite to fall back on, whereas Android does, and putting this in
+            // commonMain pushed ~2.5 MB of libsqliteJni.so into the APK for a database the
+            // Android app does not open. Android will pass AndroidSQLiteDriver instead.
+            implementation(libs.androidx.sqlite.bundled)
         }
         getByName("androidHostTest").dependencies {
             // JVM JNI payload so host-side unit tests can call libsecp256k1.
@@ -68,6 +92,22 @@ kotlin {
             implementation(libs.bouncycastle.difftest)
         }
     }
+}
+
+/**
+ * Room's annotation processor has to run once per compilation target: the generated
+ * `RoomDatabaseConstructor` actual and the DAO implementations are platform artifacts,
+ * not common ones. `kspAndroid` is the configuration the `androidLibrary` target of the
+ * `com.android.kotlin.multiplatform.library` plugin creates.
+ */
+dependencies {
+    add("kspAndroid", libs.room.compiler)
+    add("kspIosArm64", libs.room.compiler)
+    add("kspIosSimulatorArm64", libs.room.compiler)
+}
+
+room {
+    schemaDirectory("$projectDir/schemas")
 }
 
 // MockK uses ByteBuddy. On JDK 21+ self-attach is restricted (JEP 451), so the agent is
