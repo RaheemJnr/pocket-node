@@ -150,12 +150,16 @@ final class WalletCreator {
         }
     }
 
-    /// Key material first, then metadata.
+    /// Key material first, then metadata, and all or nothing.
     ///
-    /// That order matters on failure: an envelope with no `wallet.json` is a
-    /// wallet the next launch re-offers onboarding for while the keys are still
-    /// recoverable, whereas metadata with no envelope would be a wallet the app
-    /// believes in and can never spend from.
+    /// Key material goes first because metadata with no envelope would be a
+    /// wallet the app believes in and can never spend from. But a half-written
+    /// wallet is not something to leave behind either: an orphan envelope makes
+    /// ``refuseIfWalletExists`` refuse every retry, and `AppContainer.hasWallet`
+    /// sends the next launch to the wallet shell, so the user is stuck outside
+    /// onboarding with no wallet and no way back in. So a failed metadata write
+    /// deletes the envelope it just wrote and reports the failure, leaving the
+    /// device exactly as it was before the attempt.
     private func persist(
         _ derived: Derived,
         name: String,
@@ -182,6 +186,11 @@ final class WalletCreator {
         do {
             try walletStore.save(record)
         } catch {
+            // Best effort: if the rollback itself fails there is nothing more
+            // this can do, and reporting the original failure is still right.
+            // The key material is a phrase the user has not seen yet (create)
+            // or one they already hold (import), so dropping it loses nothing.
+            try? await keyStore.delete()
             throw WalletCreationError.metadataStorageFailed
         }
         return record
@@ -200,8 +209,13 @@ final class WalletCreator {
 
     /// Phrase to seed to key to addresses, off the main actor.
     ///
-    /// The seed and the private key are zeroed before this returns; the hex
-    /// string that survives is what ``WalletKeyStore`` immediately encrypts.
+    /// The seed and the private-key buffers are zeroed before this returns.
+    /// What survives is the hex string and the phrase, and those are Swift
+    /// `String`s: their storage is owned by the standard library, copy-on-write,
+    /// and has no supported way to be wiped, so they live until they are
+    /// released and the memory is reused. The same limitation `WalletKeyStore`
+    /// documents. They are handed straight to the store, which encrypts them,
+    /// and are never cached.
     private nonisolated static func derive(words: [String]) async -> Derived {
         let seed = Bip39.shared.toSeed(words: words, passphrase: "")
         defer { seed.zeroOut() }
@@ -248,6 +262,18 @@ final class WalletCreator {
         wordlist.contains(word)
     }
 
+    /// The first entry in `words` that is filled in but not a BIP-39 word.
+    ///
+    /// The import screen points at it and refuses to submit while it is there.
+    /// A word the list does not contain and a phrase whose checksum does not
+    /// add up are different mistakes with different fixes, and only the first
+    /// can be attributed to a particular word, so it is worth saying which.
+    /// Empty entries are not reported: the user has simply not finished.
+    @MainActor
+    static func offListWordIndex(in words: [String]) -> Int? {
+        normalise(words).firstIndex { !$0.isEmpty && !isWord($0) }
+    }
+
     /// Trim and lowercase every word, matching Android's `AddWalletViewModel`.
     static func normalise(_ words: [String]) -> [String] {
         words.map { $0.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() }
@@ -291,15 +317,27 @@ final class WalletCreator {
         }
         guard digits.count == 64 else { return nil }
 
+        // Every character is checked before any of it is decoded. Swift's
+        // `UInt8(_:radix:)` is an integer parser, not a hex-pair reader: it
+        // accepts a leading sign, so a pasted "+f" repeated 32 times would
+        // otherwise pass the length check and silently import as 0x0f0f…,
+        // which is a different wallet from the one the user meant.
         var bytes = [UInt8]()
         bytes.reserveCapacity(32)
-        var index = digits.startIndex
-        while index < digits.endIndex {
-            let next = digits.index(index, offsetBy: 2)
-            guard let byte = UInt8(digits[index..<next], radix: 16) else { return nil }
-            bytes.append(byte)
-            index = next
+        var high: UInt8?
+        for character in digits {
+            // ASCII as well as hex: `hexDigitValue` also answers for fullwidth
+            // and other Unicode digit forms, and a private key is written in
+            // 0-9 a-f A-F or it is not a private key.
+            guard character.isASCII, let nibble = character.hexDigitValue else { return nil }
+            if let first = high {
+                bytes.append(first << 4 | UInt8(nibble))
+                high = nil
+            } else {
+                high = UInt8(nibble)
+            }
         }
+        guard high == nil, bytes.count == 32 else { return nil }
 
         guard bytes.contains(where: { $0 != 0 }) else { return nil }
         for (value, limit) in zip(bytes, curveOrder) where value != limit {

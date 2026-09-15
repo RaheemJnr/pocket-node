@@ -1,13 +1,14 @@
 import SwiftUI
-import UIKit
 
 /// Restoring a wallet from a recovery phrase or from a raw private key.
 ///
-/// Both entry modes are secret material, so every field here has autocorrect,
-/// autocapitalisation and the content-type hints turned off. Those are not
-/// cosmetic: a `textContentType` is what invites iOS to offer AutoFill and to
-/// learn the text, and the keyboard's predictive bar is what puts a seed word
-/// in front of the next app the user types in.
+/// Both entry modes are secret material, so autocorrect, autocapitalisation
+/// and the predictive bar are off on every field. That is not cosmetic: the
+/// keyboard's suggestion strip is what puts a seed word in front of whatever
+/// the user types in next, and the ASCII keyboard keeps a phrase out of the
+/// emoji and dictation paths. The private key goes in a `SecureField`, which
+/// iOS excludes from the keyboard's learning and from screenshots of the
+/// field's own text.
 struct ImportWalletView: View {
     /// Which half of the screen is showing. Not private so a screenshot test
     /// can render the private-key half without driving the segmented control.
@@ -91,11 +92,13 @@ struct ImportWalletView: View {
             .pickerStyle(.segmented)
             .accessibilityIdentifier("import.wordCount")
 
-            Button {
-                paste()
-            } label: {
-                Label("Paste from clipboard", systemImage: "doc.on.clipboard")
+            // A `PasteButton` hands over the clipboard contents on the
+            // user's own tap, with no system "pasted from" banner and without
+            // this view ever reading `UIPasteboard` itself.
+            PasteButton(payloadType: String.self) { strings in
+                fill(from: strings.first ?? "")
             }
+            .labelStyle(.titleAndIcon)
             .accessibilityIdentifier("import.paste")
 
             if pasteFailed {
@@ -129,7 +132,6 @@ struct ImportWalletView: View {
                 .textFieldStyle(.roundedBorder)
                 .autocorrectionDisabled()
                 .textInputAutocapitalization(.never)
-                .textContentType(nil)
                 .keyboardType(.asciiCapable)
                 .submitLabel(index == wordCount - 1 ? .done : .next)
                 .focused($focusedWord, equals: index)
@@ -160,14 +162,14 @@ struct ImportWalletView: View {
     }
 
     private var firstBadWord: Int? {
-        (0..<wordCount).first(where: isBad)
+        WalletCreator.offListWordIndex(in: enteredWords)
     }
 
-    /// Fills the grid from the clipboard, splitting on any whitespace the way
-    /// Android's `pasteMnemonic` does, and switches the length picker to match
+    /// Fills the grid from pasted text, splitting on any whitespace the way
+    /// Android's `pasteMnemonic` does, and switching the length picker to match
     /// a 24 word phrase so the extra words are not silently dropped.
-    private func paste() {
-        let parts = WalletCreator.splitPhrase(UIPasteboard.general.string ?? "")
+    private func fill(from text: String) {
+        let parts = WalletCreator.splitPhrase(text)
         guard !parts.isEmpty else {
             pasteFailed = true
             return
@@ -188,7 +190,6 @@ struct ImportWalletView: View {
                 .textFieldStyle(.roundedBorder)
                 .autocorrectionDisabled()
                 .textInputAutocapitalization(.never)
-                .textContentType(nil)
                 .keyboardType(.asciiCapable)
                 .accessibilityIdentifier("import.privateKey")
             Text("64 hexadecimal characters, with or without the 0x prefix. A wallet imported this way has no recovery phrase.")
@@ -202,7 +203,10 @@ struct ImportWalletView: View {
     private var canSubmit: Bool {
         switch mode {
         case .phrase:
-            return enteredWords.allSatisfy { !$0.isEmpty }
+            // An off-list word is reported at the word that is wrong, so the
+            // button stays disabled rather than letting the attempt come back
+            // as the vaguer "invalid recovery phrase" a bad checksum earns.
+            return firstBadWord == nil && enteredWords.allSatisfy { !$0.isEmpty }
         case .privateKey:
             return !privateKey.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
         }

@@ -283,6 +283,93 @@ final class WalletCreatorTests: XCTestCase {
         XCTAssertNotNil(WalletCreator.decodePrivateKey("01" + String(repeating: "0", count: 62)))
     }
 
+    /// `UInt8(_:radix:)` is an integer parser and accepts a leading sign, so
+    /// "+f" repeated 32 times is 64 characters that it would happily read as
+    /// 0x0f0f… . Decoding a key the user did not type is worse than refusing
+    /// one they did, so every character has to be a plain ASCII hex digit.
+    func testSignedAndNonAsciiHexIsNotAPrivateKey() async throws {
+        let signed = String(repeating: "+f", count: 32)
+        XCTAssertEqual(signed.count, 64, "the fixture has to survive the length check to be a test")
+        let negative = String(Self.testPrivateKeyHex.prefix(30)) + "-f" + String(Self.testPrivateKeyHex.suffix(32))
+        XCTAssertEqual(negative.count, 64)
+        // Fullwidth "ＦＦ…", which `Character.hexDigitValue` also answers for.
+        let fullwidth = String(repeating: "\u{FF26}", count: 64)
+        XCTAssertEqual(fullwidth.count, 64)
+        let spaced = String(repeating: " f", count: 32)
+
+        for hex in [signed, negative, fullwidth, spaced] {
+            XCTAssertNil(WalletCreator.decodePrivateKey(hex), hex)
+            await assertFails(.invalidPrivateKey, hex) {
+                _ = try await self.creator.importPrivateKey(hex: hex, name: "Key")
+            }
+        }
+        let nothingStored = await keyStore.hasWallet
+        XCTAssertFalse(nothingStored)
+    }
+
+    func testUppercaseHexIsStillAPrivateKey() async throws {
+        let created = try await creator.importPrivateKey(
+            hex: Self.testPrivateKeyHex.uppercased(),
+            name: "Key"
+        )
+
+        XCTAssertEqual(created.record.testnetAddress, Self.testTestnetAddress)
+    }
+
+    // MARK: - Rolling back a half-written wallet
+
+    /// A metadata write that fails must not leave the key envelope behind.
+    ///
+    /// An orphan envelope is not a cosmetic leak: `refuseIfWalletExists` would
+    /// refuse every retry and `AppContainer.hasWallet` would route the next
+    /// launch to the wallet shell, leaving the user outside onboarding with no
+    /// wallet and no way back in.
+    ///
+    /// The failure is staged by putting a regular file where the metadata
+    /// directory belongs, which is what `WalletStore.save` fails on.
+    func testAFailedMetadataWriteLeavesNothingBehindAndTheRetrySucceeds() async throws {
+        let blocked = FileManager.default.temporaryDirectory
+            .appendingPathComponent("com.rjnr.pocketnode.tests.blocked-\(UUID().uuidString)")
+        try Data("not a directory".utf8).write(to: blocked)
+        defer { try? FileManager.default.removeItem(at: blocked) }
+
+        let creator = WalletCreator(keyStore: keyStore, walletStore: WalletStore(directory: blocked))
+        await assertFails(.metadataStorageFailed) {
+            _ = try await creator.createWallet(wordCount: 12, name: "Main")
+        }
+
+        let orphan = await keyStore.hasWallet
+        XCTAssertFalse(orphan, "the envelope must be rolled back, or onboarding is bricked")
+
+        // Repair the directory and try again: nothing from the failed attempt
+        // is in the way.
+        try FileManager.default.removeItem(at: blocked)
+        try FileManager.default.createDirectory(at: blocked, withIntermediateDirectories: true)
+        let repaired = WalletCreator(keyStore: keyStore, walletStore: WalletStore(directory: blocked))
+
+        let created = try await repaired.createWallet(wordCount: 12, name: "Main")
+
+        XCTAssertTrue(created.record.testnetAddress.hasPrefix("ckt1"))
+        let stored = await keyStore.hasWallet
+        XCTAssertTrue(stored)
+    }
+
+    func testAFailedMetadataWriteOnAnImportAlsoRollsBack() async throws {
+        let blocked = FileManager.default.temporaryDirectory
+            .appendingPathComponent("com.rjnr.pocketnode.tests.blocked-\(UUID().uuidString)")
+        try Data("not a directory".utf8).write(to: blocked)
+        defer { try? FileManager.default.removeItem(at: blocked) }
+
+        let creator = WalletCreator(keyStore: keyStore, walletStore: WalletStore(directory: blocked))
+
+        await assertFails(.metadataStorageFailed) {
+            _ = try await creator.importPrivateKey(hex: Self.testPrivateKeyHex, name: "Key")
+        }
+
+        let orphan = await keyStore.hasWallet
+        XCTAssertFalse(orphan)
+    }
+
     // MARK: - Input helpers
 
     func testSplitPhraseHandlesTheShapesAClipboardActuallyCarries() {
@@ -291,6 +378,31 @@ final class WalletCreatorTests: XCTestCase {
             ["abandon", "abandon", "about"]
         )
         XCTAssertEqual(WalletCreator.splitPhrase("   "), [])
+    }
+
+    /// Backs the import screen's rule that an off-list word disables the button
+    /// and is reported at the word it is, rather than coming back as the
+    /// vaguer "invalid recovery phrase" that a bad checksum earns.
+    func testOffListWordIndexPointsAtTheFirstWordThatIsWrong() {
+        var words = Self.testPhrase
+        XCTAssertNil(WalletCreator.offListWordIndex(in: words))
+
+        words[4] = "zzzz"
+        words[7] = "qqqq"
+        XCTAssertEqual(WalletCreator.offListWordIndex(in: words), 4)
+
+        XCTAssertNil(
+            WalletCreator.offListWordIndex(in: ["abandon", "", "about"]),
+            "an empty box means unfinished, not wrong"
+        )
+        XCTAssertNil(
+            WalletCreator.offListWordIndex(in: ["  ABANDON  "]),
+            "the check normalises first, like the import itself"
+        )
+        XCTAssertNil(
+            WalletCreator.offListWordIndex(in: Array(repeating: "abandon", count: 12)),
+            "every word is real; the checksum is what is wrong, and that is not this check's job"
+        )
     }
 
     func testWordlistRecognisesOnlyRealWords() {
