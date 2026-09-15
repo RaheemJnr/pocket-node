@@ -15,7 +15,7 @@ export const metadata = {
 }
 
 /**
- * Renders the canonical user guide from docs/USER_GUIDE.md (synced
+ * Renders the canonical user guide (maintained locally in docs/USER_GUIDE.md, synced
  * into content/user-guide.md by the prebuild script).
  *
  * Three-column layout on desktop: left sidebar TOC with scroll-spy,
@@ -68,27 +68,7 @@ export default function GuidePage() {
               {markdown}
             </ReactMarkdown>
 
-            <hr className="my-12 border-green/20" />
-            <p className="font-doto text-sm uppercase tracking-wide text-white/60">
-              Source:{' '}
-              <Link
-                href="https://github.com/RaheemJnr/pocket-node/blob/main/docs/USER_GUIDE.md"
-                target="_blank"
-                rel="noopener noreferrer"
-                className="text-green hover:underline"
-              >
-                docs/USER_GUIDE.md
-              </Link>
-              {' · '}
-              <Link
-                href="https://github.com/RaheemJnr/pocket-node/edit/main/docs/USER_GUIDE.md"
-                target="_blank"
-                rel="noopener noreferrer"
-                className="text-green hover:underline"
-              >
-                Edit on GitHub
-              </Link>
-            </p>
+            
           </article>
         </div>
       </div>

@@ -33,12 +33,6 @@ export function Footer() {
           <FooterColumn title="Documentation">
             <FooterLink href="/guide">User Guide</FooterLink>
             <FooterLink
-              href="https://github.com/RaheemJnr/pocket-node/blob/main/docs/GRANT_COMPLETION_REPORT.md"
-              external
-            >
-              Grant Report
-            </FooterLink>
-            <FooterLink
               href="https://github.com/RaheemJnr/pocket-node/blob/main/SECURITY.md"
               external
             >

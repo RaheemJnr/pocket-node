@@ -14,11 +14,10 @@ A sovereign Android wallet for [Nervos CKB](https://www.nervos.org/) that runs a
 
 ## Quick links
 
-- **End users:** read the [User Guide](docs/USER_GUIDE.md) for install, backup, sync, send/receive, DAO, troubleshooting, and FAQ
+- **End users:** read the [User Guide](https://pocket-node.com/guide) for install, backup, sync, send/receive, DAO, troubleshooting, and FAQ
 - **Download the app:** [Google Play](https://play.google.com/store/apps/details?id=com.rjnr.pocketnode), or the [latest GitHub Release](https://github.com/RaheemJnr/pocket-node/releases/latest)
 - **Contributors:** read [CONTRIBUTING.md](CONTRIBUTING.md) for development setup, code style, and the manual sync-stall smoke procedure
 - **Security:** see [SECURITY.md](SECURITY.md) for the security model and the vulnerability disclosure process
-- **Grant deliverable:** the [M4 Completion Report](docs/GRANT_COMPLETION_REPORT.md) summarises what shipped under the CKB Community DAO grant
 
 ## Features
 
@@ -67,7 +66,7 @@ Data flows unidirectionally: UI observes `StateFlow` from ViewModels. ViewModels
 | **From a specific date** (CUSTOM) | Scans from a user-chosen block height with an explorer-deeplink helper | Minutes to hours depending on depth |
 | **All history** (FULL_HISTORY) | Scans from genesis (block 0) | Overnight on mainnet |
 
-See the [User Guide](docs/USER_GUIDE.md#sync-modes) for picking the right mode.
+See the [User Guide](https://pocket-node.com/guide) for picking the right mode.
 
 ## Security model
 
@@ -153,9 +152,6 @@ pocket-node/
 ├── external/
 │   └── ckb-light-client/            Vendored Rust light client + JNI exports
 ├── website/                         Static site at pocket-node.com (Vercel)
-├── docs/
-│   ├── USER_GUIDE.md                Public end-user guide
-│   └── GRANT_COMPLETION_REPORT.md   M4 / DAO grant completion report
 ├── CONTRIBUTING.md                  Contributor setup + smoke procedures
 ├── SECURITY.md                      Threat model + disclosure process
 └── .github/workflows/               CI + release pipelines
@@ -208,7 +204,7 @@ pocket-node/
 
 ## CKB Community DAO grant
 
-This project is funded by a [CKB Community DAO grant](https://talk.nervos.org/t/dis-mobile-ready-ckb-light-client-pocket-node-for-android/9879). The full deliverables and evidence are in [GRANT_COMPLETION_REPORT.md](docs/GRANT_COMPLETION_REPORT.md).
+This project is funded by a [CKB Community DAO grant](https://talk.nervos.org/t/dis-mobile-ready-ckb-light-client-pocket-node-for-android/9879). The full deliverables and evidence are summarised in the grant thread.
 
 | Milestone | Scope | Status |
 |-----------|-------|--------|
