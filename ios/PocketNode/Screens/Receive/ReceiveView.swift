@@ -23,6 +23,11 @@ struct ReceiveView: View {
 
             qrCard
 
+            Text(viewModel.networkHeading)
+                .font(.subheadline.weight(.semibold))
+                .foregroundStyle(.secondary)
+                .accessibilityIdentifier("receive.networkHeading")
+
             Text(viewModel.address.isEmpty ? "Loading..." : viewModel.address)
                 .font(.footnote.monospaced())
                 .multilineTextAlignment(.center)
@@ -67,7 +72,7 @@ struct ReceiveView: View {
             Button("Back up now") { viewModel.backUpNow() }
             Button("Not now", role: .cancel) { viewModel.dismissBackupPrompt() }
         } message: {
-            Text("You haven't backed up your recovery phrase yet. If you lose this device, your funds will be unrecoverable.")
+            Text(viewModel.backupPromptMessage)
         }
         .accessibilityIdentifier("receive.root")
     }
@@ -81,6 +86,15 @@ struct ReceiveView: View {
                     .scaledToFit()
                     .frame(width: 220, height: 220)
                     .accessibilityLabel("QR code")
+            } else if viewModel.address.isEmpty {
+                // No wallet record yet: there is nothing to generate a code
+                // for, so say that rather than spinning forever waiting on a
+                // QR image that will never arrive.
+                Text("No wallet yet")
+                    .font(.subheadline)
+                    .foregroundStyle(.secondary)
+                    .frame(width: 220, height: 220)
+                    .accessibilityIdentifier("receive.noWallet")
             } else {
                 ProgressView()
                     .frame(width: 220, height: 220)

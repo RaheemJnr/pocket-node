@@ -61,3 +61,28 @@ final class StubAuthGate: AuthGating {
         return granted
     }
 }
+
+/// A `WalletRecordStoring` double whose `load()`/`save(_:)` behavior the test
+/// controls, so `BackupViewModel`'s save-failure paths (H1: a missing record,
+/// a throwing save) can be exercised without a real file on disk.
+final class StubWalletRecordStore: WalletRecordStoring {
+    var recordToLoad: WalletRecord?
+    var saveError: Error?
+    private(set) var savedRecords: [WalletRecord] = []
+
+    func load() -> WalletRecord? {
+        recordToLoad
+    }
+
+    func save(_ record: WalletRecord) throws {
+        if let saveError {
+            throw saveError
+        }
+        savedRecords.append(record)
+        recordToLoad = record
+    }
+}
+
+enum StubWalletRecordStoreError: Error {
+    case saveFailed
+}

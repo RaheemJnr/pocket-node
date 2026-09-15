@@ -1,4 +1,5 @@
 import SwiftUI
+import UIKit
 
 /// The recovery-phrase backup flow: reveal gate, a numbered word grid, a
 /// 3-question verify quiz, and a success step (plus an explanatory step for a
@@ -38,6 +39,9 @@ struct BackupView: View {
             if phase == .background {
                 viewModel.onBackgrounded()
             }
+        }
+        .onReceive(NotificationCenter.default.publisher(for: UIApplication.userDidTakeScreenshotNotification)) { _ in
+            viewModel.onScreenshotTaken()
         }
         .accessibilityIdentifier("backup.root")
     }
@@ -101,10 +105,12 @@ struct BackupView: View {
 
             Spacer(minLength: 0)
 
-            Button("Done", action: onFinished)
-                .buttonStyle(.borderedProminent)
-                .frame(maxWidth: .infinity)
-                .accessibilityIdentifier("backup.noPhrase.done")
+            Button(action: onFinished) {
+                Text("Done")
+                    .frame(maxWidth: .infinity)
+            }
+            .buttonStyle(.borderedProminent)
+            .accessibilityIdentifier("backup.noPhrase.done")
         }
         .accessibilityIdentifier("backup.noPhrase")
     }
@@ -126,14 +132,17 @@ struct BackupView: View {
                 wordGrid
             }
 
-            Button("I have written it down") {
+            Button {
                 viewModel.advanceToVerify()
+            } label: {
+                Text("I have written it down")
+                    .frame(maxWidth: .infinity)
             }
             .buttonStyle(.borderedProminent)
-            .frame(maxWidth: .infinity)
             .accessibilityIdentifier("backup.wroteItDown")
         }
         .privacyShield()
+        .privacySensitive()
         .accessibilityIdentifier("backup.display")
     }
 
@@ -180,15 +189,18 @@ struct BackupView: View {
                     .accessibilityIdentifier("backup.verify.error")
             }
 
-            Button("Verify") {
+            Button {
                 viewModel.submitVerify()
+            } label: {
+                Text("Verify")
+                    .frame(maxWidth: .infinity)
             }
             .buttonStyle(.borderedProminent)
-            .frame(maxWidth: .infinity)
             .disabled(!viewModel.canSubmitVerify)
             .accessibilityIdentifier("backup.verifyButton")
         }
         .privacyShield()
+        .privacySensitive()
         .accessibilityIdentifier("backup.verify")
     }
 
@@ -234,10 +246,12 @@ struct BackupView: View {
 
             Spacer(minLength: 0)
 
-            Button("Done", action: onFinished)
-                .buttonStyle(.borderedProminent)
-                .frame(maxWidth: .infinity)
-                .accessibilityIdentifier("backup.done")
+            Button(action: onFinished) {
+                Text("Done")
+                    .frame(maxWidth: .infinity)
+            }
+            .buttonStyle(.borderedProminent)
+            .accessibilityIdentifier("backup.done")
         }
         .accessibilityIdentifier("backup.success")
     }
