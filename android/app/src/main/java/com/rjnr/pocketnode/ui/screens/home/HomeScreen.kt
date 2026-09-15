@@ -369,7 +369,8 @@ fun HomeScreen(
             onSelectAccount = { viewModel.switchWallet(it) },
             onManageWallets = onNavigateToWalletManager,
             onDismiss = { showAccountSelector = false },
-            balances = uiState.walletBalances
+            balances = uiState.walletBalances,
+            network = uiState.currentNetwork
         )
     }
 
