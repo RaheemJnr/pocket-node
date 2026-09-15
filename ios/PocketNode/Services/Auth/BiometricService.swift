@@ -117,7 +117,7 @@ struct BiometricService: BiometricAuthenticating {
                 // Mapped inside the callback so only the `Sendable` result
                 // crosses back; the `NSError` never leaves this closure.
                 if success {
-                    continuation.resume(returning: .success(()))
+                    continuation.resume(returning: .success(Void()))
                 } else {
                     continuation.resume(returning: .failure(Self.map(error)))
                 }
