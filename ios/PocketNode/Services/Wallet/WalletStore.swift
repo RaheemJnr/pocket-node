@@ -77,6 +77,13 @@ final class WalletStore {
     /// wallet metadata (it is not secret, but it is identifying).
     func save(_ record: WalletRecord) throws {
         let data = try JSONEncoder().encode(record)
+        // The directory is created in init under try?, so a failure there (for
+        // example a full disk) would otherwise surface here as ENOENT on the
+        // atomic write. Ensuring it on every save keeps the first writer honest.
+        try fileManager.createDirectory(
+            at: fileURL.deletingLastPathComponent(),
+            withIntermediateDirectories: true
+        )
         try data.write(to: fileURL, options: [.atomic, .completeFileProtection])
     }
 

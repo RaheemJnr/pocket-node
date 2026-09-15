@@ -19,6 +19,10 @@ final class AppContainer {
     /// Single active wallet's metadata (M2; M3 brings multi-wallet).
     let walletStore: WalletStore
 
+    /// Creates and imports that one wallet. Onboarding (#515) is its only
+    /// caller today.
+    let walletCreator: WalletCreator
+
     /// Face ID / Touch ID availability and prompting.
     let biometrics: any BiometricAuthenticating
 
@@ -66,6 +70,53 @@ final class AppContainer {
             biometrics: self.biometrics,
             preferences: self.preferences
         )
+        self.walletCreator = WalletCreator(keyStore: self.walletKeyStore, walletStore: self.walletStore)
+
+        Self.seedWalletForTestingIfRequested(walletStore: self.walletStore)
+    }
+
+    /// Whether onboarding has already been completed.
+    ///
+    /// Both halves are consulted: the Keychain envelope is the wallet, and
+    /// `wallet.json` is what the UI reads. A device with only one of them is
+    /// mid-failure rather than fresh, and sending it back through onboarding
+    /// would refuse at ``WalletCreator/createWallet(wordCount:name:)`` anyway,
+    /// so the honest answer is that a wallet is there.
+    var hasWallet: Bool {
+        get async {
+            // Spelled out rather than written with `||`: the short-circuit
+            // operator takes its right side as an autoclosure, which cannot
+            // carry the `await` the actor hop needs.
+            if walletStore.hasWallet { return true }
+            return await walletKeyStore.hasWallet
+        }
+    }
+
+    /// `PocketNodeNetwork`'s `NodeStatusUITests` exercises the light client,
+    /// not onboarding, and #515 put an onboarding gate in front of the wallet
+    /// shell it drives. Rather than have that test type a wallet in, it sets
+    /// `POCKETNODE_SKIP_ONBOARDING=1` and this writes a throwaway metadata
+    /// record so the gate opens. No key material is created: nothing on the
+    /// Node Status path reads a key, and minting one here would put a real
+    /// Secure Enclave wallet on the simulator for a test that has no use for
+    /// it. Debug-only, and a no-op on every other launch.
+    private static func seedWalletForTestingIfRequested(walletStore: WalletStore) {
+        #if DEBUG
+        guard ProcessInfo.processInfo.environment["POCKETNODE_SKIP_ONBOARDING"] == "1",
+              !walletStore.hasWallet else { return }
+        try? walletStore.save(
+            WalletRecord(
+                id: "ui-test-wallet",
+                name: "UI Test Wallet",
+                type: WalletCreator.typeMnemonic,
+                derivationPath: WalletCreator.derivationPath,
+                mainnetAddress: "ckb1qzda0cr08m85hc8jlnfp3zer7xulejywt49kt2rr0vthywaa50xwsqjmpk4",
+                testnetAddress: "ckt1qzda0cr08m85hc8jlnfp3zer7xulejywt49kt2rr0vthywaa50xwsqjmpk4",
+                mnemonicBackedUp: false,
+                createdAt: 0
+            )
+        )
+        #endif
     }
 
     /// `NetworkPreferences.getSelectedNetwork()` defaults to mainnet (#514,

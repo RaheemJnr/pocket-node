@@ -19,6 +19,11 @@ final class NodeStatusUITests: XCTestCase {
         // testnet, so it asks `AppContainer` to select it at launch rather
         // than the app defaulting to it for everyone.
         app.launchEnvironment["POCKETNODE_NETWORK"] = "testnet"
+        // #515 put onboarding in front of the wallet shell this test drives.
+        // Nothing on the Node Status path reads key material, so `AppContainer`
+        // answers this by writing a throwaway metadata record rather than by
+        // minting a real wallet.
+        app.launchEnvironment["POCKETNODE_SKIP_ONBOARDING"] = "1"
         app.launch()
 
         app.buttons["root.nodeStatus"].tap()

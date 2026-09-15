@@ -13,18 +13,55 @@ struct RootView: View {
 
     @State private var path = NavigationPath()
 
+    /// What the root is showing. ``Phase/undecided`` lasts for one actor hop,
+    /// the time it takes to ask the Keychain whether a wallet is there. It is a
+    /// state rather than an assumption on purpose: guessing "no wallet" would
+    /// flash onboarding at every returning user, and guessing "wallet" would
+    /// flash the lock screen at every new one.
+    private enum Phase: Equatable {
+        case undecided
+        case onboarding
+        case wallet
+    }
+
+    @State private var phase: Phase = .undecided
+    @State private var onboarding: OnboardingViewModel?
+
     private var auth: AuthService { container.auth }
 
     var body: some View {
         Group {
-            // Only a confirmed absence of a PIN opens the gate. Before
-            // onboarding (#515) sets one there is no secret to check, so the
-            // wallet shell is shown as it was in M1; a store that cannot be
-            // read is not that case and stays locked (`AuthService.isGated`).
-            if auth.isGated {
-                LockView(auth: auth)
+            switch phase {
+            case .undecided:
+                Color(uiColor: .systemBackground)
+                    .ignoresSafeArea()
+            case .onboarding:
+                if let onboarding {
+                    OnboardingView(model: onboarding, auth: auth) { phase = .wallet }
+                }
+            case .wallet:
+                // Only a confirmed absence of a PIN opens the gate: a PIN store
+                // that cannot be read stays locked (`AuthService.isGated`,
+                // #513). A wallet whose owner removed the PIN has no secret to
+                // check and goes straight to the wallet shell.
+                if auth.isGated {
+                    LockView(auth: auth)
+                } else {
+                    wallet
+                }
+            }
+        }
+        // Decided once per launch. Onboarding stays on screen for the whole
+        // flow after that, including the steps that run after the wallet has
+        // been stored, so finishing the first one does not evict the user into
+        // the wallet before they have set a PIN.
+        .task {
+            guard phase == .undecided else { return }
+            if await container.hasWallet {
+                phase = .wallet
             } else {
-                wallet
+                onboarding = OnboardingViewModel(creator: container.walletCreator)
+                phase = .onboarding
             }
         }
         .onChange(of: colorScheme, initial: true) {
@@ -33,8 +70,8 @@ struct RootView: View {
         // The lock-on-background rule. `.background` only: `.inactive` also
         // fires for a notification banner or a control centre pull, and the app
         // switcher preview itself, none of which should throw the user out.
-        .onChange(of: scenePhase) { _, phase in
-            auth.handleScenePhase(phase)
+        .onChange(of: scenePhase) { _, newScenePhase in
+            auth.handleScenePhase(newScenePhase)
         }
         // Step-up auth for a single action (`AuthService.requireAuth`), used by
         // the recovery phrase reveal and later by send confirmation. Dismissing
@@ -43,6 +80,10 @@ struct RootView: View {
         .sheet(item: Binding(get: { auth.challenge }, set: { if $0 == nil { auth.resolveChallenge(granted: false) } })) { challenge in
             AuthChallengeSheet(auth: auth, challenge: challenge)
         }
+        // Last, so it covers everything drawn inside the root. A sheet is
+        // presented outside the root's own hierarchy and so is not covered;
+        // the only one today is the PIN challenge above, which shows dots.
+        .privacyShield()
     }
 
     private var wallet: some View {
