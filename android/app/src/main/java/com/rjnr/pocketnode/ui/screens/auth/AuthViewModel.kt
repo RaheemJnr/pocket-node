@@ -131,8 +131,10 @@ class AuthViewModel @Inject constructor(
             try {
                 val outcome = migrationRunner.runMigration(activity)
                 when (outcome) {
-                    is KeystoreV2MigrationRunner.Outcome.Completed,
+                    is KeystoreV2MigrationRunner.Outcome.Completed -> Unit
+                    // dead post-#289: see Outcome KDoc
                     is KeystoreV2MigrationRunner.Outcome.NothingToDo -> Unit
+                    // dead post-#289: see Outcome KDoc
                     is KeystoreV2MigrationRunner.Outcome.Cancelled -> {
                         _uiState.update {
                             it.copy(error = UiMessage.Resource(R.string.vm_error_migration_incomplete))
