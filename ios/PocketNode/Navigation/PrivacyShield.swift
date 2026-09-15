@@ -65,7 +65,16 @@ struct PrivacyShield: ViewModifier {
     /// deprecated: a scene knows the screen it is actually on.
     @MainActor
     private static var screenIsCaptured: Bool {
-        UIApplication.shared.connectedScenes
+        #if DEBUG
+        // XCUITest records the screen on a physical device, which counts as
+        // capture and would hide the whole app from the UI tests. Debug builds
+        // let the UI tests opt out of that one signal; the scene-phase shield
+        // stays in force. Not compiled into release.
+        if ProcessInfo.processInfo.environment["POCKETNODE_UITEST_ALLOW_CAPTURE"] == "1" {
+            return false
+        }
+        #endif
+        return UIApplication.shared.connectedScenes
             .compactMap { $0 as? UIWindowScene }
             .contains { $0.screen.isCaptured }
     }

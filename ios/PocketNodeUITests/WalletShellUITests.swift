@@ -20,6 +20,7 @@ final class WalletShellUITests: XCTestCase {
     func testHomeReachesReceiveAndSettingsAndTheBackupFlow() throws {
         let app = XCUIApplication()
         app.launchEnvironment["POCKETNODE_SKIP_ONBOARDING"] = "1"
+        app.launchEnvironment["POCKETNODE_UITEST_ALLOW_CAPTURE"] = "1"
         app.launch()
 
         // Home: the wallet card, the nag, and the way to Receive.
