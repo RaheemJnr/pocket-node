@@ -45,10 +45,12 @@ final class AppContainer {
     /// and seeds the preference before anything else touches it. A no-op on
     /// every other launch, since the variable is never set outside that test.
     private static func applyNetworkOverrideForTestingIfPresent(preferences: NetworkPreferences) {
+        #if DEBUG
         switch ProcessInfo.processInfo.environment["POCKETNODE_NETWORK"] {
         case "testnet": preferences.setSelectedNetwork(network: .testnet)
         case "mainnet": preferences.setSelectedNetwork(network: .mainnet)
         default: break
         }
+        #endif
     }
 }
