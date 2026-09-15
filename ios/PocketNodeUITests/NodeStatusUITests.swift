@@ -15,6 +15,10 @@ final class NodeStatusUITests: XCTestCase {
 
     func testNodeStatusReachesTestnetTipAndStops() throws {
         let app = XCUIApplication()
+        // `NetworkPreferences` defaults to mainnet (#514); this test needs
+        // testnet, so it asks `AppContainer` to select it at launch rather
+        // than the app defaulting to it for everyone.
+        app.launchEnvironment["POCKETNODE_NETWORK"] = "testnet"
         app.launch()
 
         app.buttons["root.nodeStatus"].tap()
