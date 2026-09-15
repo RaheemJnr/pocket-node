@@ -17,10 +17,65 @@ enum NodeStatus: UInt8 {
     }
 }
 
-/// Serializes every UniFFI call onto a background executor. `initLightClient`
-/// and `startLightClient` block while the P2P service comes up, so none of them
-/// may run on the main actor.
+/// Enable/disable rules for the Node Status lifecycle buttons.
+///
+/// A plain value rather than logic inside the view, so the rules can be
+/// exercised offline — in particular the one that is easy to get wrong:
+/// stopping is terminal, so Start must stay disabled afterwards (#487).
+struct NodeControls: Equatable {
+    let status: NodeStatus
+    let isInitialized: Bool
+
+    /// Startable only from the resting INIT state. `.stopped` is a dead end:
+    /// the Rust globals live in `OnceLock`s that stop cannot clear, so the
+    /// bridge would answer `Stopped` and the node would never come back.
+    var canStart: Bool {
+        isInitialized && status == .initializing
+    }
+
+    /// Only a running node has anything to shut down.
+    var canStop: Bool {
+        status == .running
+    }
+
+    /// Whether to tell the user that Start is not coming back this launch.
+    var showsRelaunchNotice: Bool {
+        status == .stopped
+    }
+}
+
+/// Runs an actor's jobs on a dedicated serial `DispatchQueue`.
+///
+/// A plain actor runs on the cooperative thread pool, which is sized to the
+/// core count and assumes its jobs never block. The UniFFI lifecycle calls do
+/// block - `initLightClient` opens the store and brings the P2P service up,
+/// `stopLightClient` drains the network for up to two seconds - so leaving them
+/// on the pool takes a core away from every other task in the process for the
+/// duration. A private queue gives them a thread of their own to block.
+private final class SerialQueueExecutor: SerialExecutor {
+    private let queue = DispatchQueue(label: "com.rjnr.pocketnode.lightclient")
+
+    func enqueue(_ job: consuming ExecutorJob) {
+        let job = UnownedJob(job)
+        let executor = asUnownedSerialExecutor()
+        queue.async { job.runSynchronously(on: executor) }
+    }
+
+    func asUnownedSerialExecutor() -> UnownedSerialExecutor {
+        UnownedSerialExecutor(ordinary: self)
+    }
+}
+
+/// Serializes every UniFFI call off the main actor, onto the private queue
+/// above: `initLightClient` and `startLightClient` block while the P2P service
+/// comes up, so none of them may run on the main actor.
 private actor LightClientRunner {
+    private let executor = SerialQueueExecutor()
+
+    nonisolated var unownedExecutor: UnownedSerialExecutor {
+        executor.asUnownedSerialExecutor()
+    }
+
     func initialize(configPath: String, dataDir: String, listener: StatusListener?) throws {
         try initLightClient(configPath: configPath, dataDir: dataDir, listener: listener)
     }
@@ -95,6 +150,11 @@ final class LightClientService {
         await refresh()
     }
 
+    /// Lifecycle button state for the Node Status screen.
+    var controls: NodeControls {
+        NodeControls(status: status, isInitialized: isInitialized)
+    }
+
     /// Re-runs init after a failed bootstrap. The Rust side publishes its globals
     /// only once init fully succeeds, so retrying after a failure is clean.
     func retryInit() async {
@@ -114,11 +174,14 @@ final class LightClientService {
         await refresh()
     }
 
+    /// Shuts the node down for the rest of this launch. The bridge cannot
+    /// restart it in-process, so `controls.canStart` stays false afterwards and
+    /// the screen says so.
     func stop() async {
         do {
             try await runner.stop()
             lastError = nil
-            logger.info("light client stopped")
+            logger.info("light client stopped; it stays stopped until relaunch")
         } catch {
             report(error)
         }
@@ -126,9 +189,11 @@ final class LightClientService {
     }
 
     /// Pulls status, tip header and peer count. The chain queries reject
-    /// anything but the running state, so they are skipped until the node is
-    /// started; individual failures after that are transient and leave the
-    /// affected field at its last value.
+    /// anything but the running state, so they are skipped before the node is
+    /// started and again once it is stopped — otherwise the 5s poll on Node
+    /// Status would log a `NotInitialized` failure every tick after a stop.
+    /// Individual failures while running are transient and leave the affected
+    /// field at its last value.
     func refresh() async {
         apply(rawStatus: await runner.status())
         isInitialized = await runner.isInitialized()
@@ -178,6 +243,7 @@ final class LightClientService {
         switch error {
         case .NotInitialized: return "The node is not initialized yet."
         case .AlreadyInitialized: return "The node is already initialized."
+        case .Stopped: return "The node was stopped. Relaunch the app to start it again."
         case let .Config(reason): return "Configuration error: \(reason)"
         case let .Storage(reason): return "Storage error: \(reason)"
         case let .Network(reason): return "Network error: \(reason)"

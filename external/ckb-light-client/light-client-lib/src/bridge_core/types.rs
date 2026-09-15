@@ -60,6 +60,24 @@ pub fn get_state() -> u8 {
     STATE.load(Ordering::SeqCst)
 }
 
+/// Atomically move `state` from `from` to `to`, reporting whether *this* caller
+/// performed the transition.
+///
+/// The state machine is process-global and the bridges are called from whatever
+/// thread the platform picks, so a check-then-set (`is_running()` followed by
+/// `set_state(STOPPED)`) lets two concurrent callers both pass the check. For
+/// `stop` that means broadcasting and notifying twice. This makes the
+/// transition a single atomic step so exactly one caller wins and the rest can
+/// be told they lost.
+///
+/// Takes the atomic by reference rather than reading [`STATE`] directly so the
+/// behaviour can be tested without touching the global.
+pub fn try_transition(state: &AtomicU8, from: u8, to: u8) -> bool {
+    state
+        .compare_exchange(from, to, Ordering::SeqCst, Ordering::SeqCst)
+        .is_ok()
+}
+
 /// Helper to check if initialized (any state except 0)
 pub fn is_initialized() -> bool {
     get_state() != STATE_INIT || STORAGE_WITH_DATA.get().is_some()

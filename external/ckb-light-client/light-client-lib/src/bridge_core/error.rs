@@ -16,6 +16,12 @@ pub enum BridgeError {
     /// be reset, so the process must be restarted first.
     #[error("light client is already initialized")]
     AlreadyInitialized,
+    /// The client has been stopped. `stop` is terminal for the life of the
+    /// process: the runtime, storage and network globals live in `OnceLock`s
+    /// that cannot be reset, so `start` can never bring the node back up. The
+    /// app has to be relaunched.
+    #[error("light client has been stopped; relaunch the app to start it again")]
+    Stopped,
     /// The thing asked for is legitimately absent, as opposed to the lookup
     /// having failed. A light client only stores the blocks it matched, so an
     /// unknown header is an ordinary answer rather than an error condition.

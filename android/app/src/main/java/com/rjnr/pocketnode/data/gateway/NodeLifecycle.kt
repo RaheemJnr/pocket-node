@@ -218,8 +218,8 @@ class NodeLifecycle @Inject constructor(
     /**
      * Switches to a different network by persisting the selection and restarting the process.
      *
-     * The JNI light client does not support in-process re-initialization: nativeStop() blocks
-     * indefinitely while peers are connected, and nativeInit() rejects calls when already
+     * The JNI light client does not support in-process re-initialization: the Rust globals live
+     * in OnceLocks that nativeStop() cannot clear, so nativeInit() rejects calls when already
      * initialized. Restarting the process gives a clean JNI state at zero engineering cost.
      *
      * Process death safety: setSelectedNetwork() uses commit() (synchronous) so the preference
@@ -235,10 +235,10 @@ class NodeLifecycle @Inject constructor(
             logger.d(TAG, "Switching network: ${currentNetwork.name} -> ${target.name}")
 
             // The JNI light client does not support re-initialization in the same process lifetime:
-            // nativeStop() blocks indefinitely (peer disconnection loop) and nativeInit() rejects
-            // calls while already initialized ("Already initialized!"). The only reliable path is
-            // to persist the selection and restart the process — Android will relaunch the app and
-            // initializeNode() will pick up the new network from NetworkPreferences.
+            // nativeStop() is terminal (it cannot reset the Rust OnceLocks) and nativeInit()
+            // rejects calls while already initialized ("Already initialized!"). The only reliable
+            // path is to persist the selection and restart the process — Android will relaunch the
+            // app and initializeNode() will pick up the new network from NetworkPreferences.
 
             // Clear Room caches before process restart
             cacheManager.clearAll()

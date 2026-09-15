@@ -36,9 +36,17 @@ struct NodeStatusView: View {
 
             Section {
                 Button("Start") { Task { await service.start() } }
-                    .disabled(service.status == .running || !service.isInitialized)
+                    .disabled(!service.controls.canStart)
                 Button("Stop") { Task { await service.stop() } }
-                    .disabled(service.status == .stopped || service.status == .initializing)
+                    .disabled(!service.controls.canStop)
+            } footer: {
+                // Stopping is terminal: the Rust bridge keeps its runtime,
+                // storage and network handles in globals it cannot clear, so
+                // Start never comes back this launch (#487).
+                if service.controls.showsRelaunchNotice {
+                    Text("The node stays stopped until you relaunch the app.")
+                        .accessibilityIdentifier("nodeStatus.relaunchNotice")
+                }
             }
         }
         .navigationTitle("Node Status")

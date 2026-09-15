@@ -20,9 +20,13 @@
 //!   status callback) are dropped automatically on the early-return paths, so
 //!   failure cannot leak them.
 //!
-//! Note: `stop` cannot reset any `OnceLock` (the type has no API to do so), so
-//! in-process network switching is not supported. See #218 for the app-side
-//! mitigation (force process restart on network switch).
+//! ## Stop is one-way
+//!
+//! `stop` cannot reset any `OnceLock` (the type has no API to do so), so a
+//! stopped client cannot be started again and in-process network switching is
+//! not supported. `start` reports [`BridgeError::Stopped`] afterwards, and the
+//! app relaunches instead — see #218 for the app-side mitigation on network
+//! switch, and [`stop`] for why it no longer waits on `ckb-stop-handler` (#487).
 
 use super::error::BridgeError;
 use super::types::*;
@@ -40,10 +44,11 @@ use ckb_network::{
     SupportProtocols,
 };
 use ckb_resource::Resource;
-use ckb_stop_handler::{broadcast_exit_signals, wait_all_ckb_services_exit};
+use ckb_stop_handler::broadcast_exit_signals;
 use log::{error, info, warn};
 use std::fs;
 use std::sync::{Arc, RwLock};
+use std::time::Duration;
 
 /// Initialize the platform logger exactly once.
 ///
@@ -95,6 +100,13 @@ pub fn init(
     data_dir: &str,
     listener: Option<Box<dyn Fn(u8) + Send + Sync>>,
 ) -> Result<(), BridgeError> {
+    // A stopped client is not merely "already initialized": nothing can bring
+    // it back this process, so report that the same way `start` does.
+    if is_stopped() {
+        error!("Cannot re-initialize: the light client was stopped; the app must be relaunched");
+        return Err(BridgeError::Stopped);
+    }
+
     // Check if already initialized
     if is_initialized() {
         error!("Already initialized!");
@@ -330,6 +342,15 @@ fn load_config(path: &str) -> Result<RunEnv, Box<dyn std::error::Error>> {
 /// This transitions from INIT to RUNNING state.
 /// The network service is already running (started in [`init`]).
 pub fn start() -> Result<(), BridgeError> {
+    // A stopped client can never be restarted in-process: the runtime, storage
+    // and network globals are `OnceLock`s that `stop` cannot clear, so there is
+    // nothing to start again. Report that distinctly instead of pretending the
+    // client was merely never initialized.
+    if is_stopped() {
+        error!("Cannot start: the light client was stopped; the app must be relaunched");
+        return Err(BridgeError::Stopped);
+    }
+
     // Check if initialized
     if !is_state(STATE_INIT) {
         error!("Not in INIT state! Current state: {}", get_state());
@@ -349,30 +370,143 @@ pub fn start() -> Result<(), BridgeError> {
     Ok(())
 }
 
+/// How long [`stop`] gives the network service to wind down before returning.
+///
+/// Cancelling the tokio exit token makes `NetworkService` call
+/// `p2p_control.shutdown()`, which closes the live sessions asynchronously on
+/// the runtime. Two seconds is long enough for a handful of testnet sessions to
+/// drop on a phone, and short enough that the caller (a Swift `Task` awaiting
+/// `stopLightClient`) never feels stuck if a session hangs.
+const SHUTDOWN_GRACE: Duration = Duration::from_secs(2);
+
+/// Poll interval for the wind-down wait. Peers disappear from the registry as
+/// their sessions close, so a short poll usually returns well inside the grace.
+const SHUTDOWN_POLL_INTERVAL: Duration = Duration::from_millis(100);
+
+/// Result of the bounded wind-down performed by [`shutdown_sequence`].
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum ShutdownOutcome {
+    /// Every peer session closed inside the grace period.
+    Quiesced { waited: Duration },
+    /// The grace period expired with peers still attached. Harmless: the
+    /// process is going away anyway, the sessions die with it.
+    GraceExpired { peers_left: usize },
+}
+
+/// Broadcast the exit signal, then wait a bounded moment for the network to
+/// wind down.
+///
+/// Split out of [`stop`] so the ordering and the bound are unit-testable
+/// without a node: the broadcast has to happen *before* the first poll, and the
+/// wait has to terminate whether or not the peers ever go away.
+///
+/// The dependencies are injected rather than called directly so a test can
+/// drive it with a fake peer count and a fake clock.
+pub(crate) fn shutdown_sequence(
+    broadcast: impl FnOnce(),
+    connected_peers: impl Fn() -> usize,
+    sleep: impl Fn(Duration),
+    grace: Duration,
+    interval: Duration,
+) -> ShutdownOutcome {
+    broadcast();
+
+    let mut waited = Duration::ZERO;
+    loop {
+        let peers_left = connected_peers();
+        if peers_left == 0 {
+            return ShutdownOutcome::Quiesced { waited };
+        }
+        // Decide *before* sleeping whether the next step still fits inside the
+        // grace: sleeping first and re-checking afterwards overshoots by up to
+        // one interval, which is the whole budget when the interval is the
+        // coarser of the two. A zero interval would spin instead of waiting.
+        let next = waited.saturating_add(interval);
+        if next > grace || interval.is_zero() {
+            return ShutdownOutcome::GraceExpired { peers_left };
+        }
+        sleep(interval);
+        waited = next;
+    }
+}
+
+/// Number of peers still in the network registry, or 0 when there is no
+/// network controller to ask.
+fn connected_peer_count() -> usize {
+    NET_CONTROL
+        .get()
+        .map_or(0, |controller| controller.connected_peers().len())
+}
+
 /// Stop the light client.
 ///
-/// This gracefully shuts down the light client:
-/// - Broadcast exit signals
-/// - Wait for services to stop
-/// - Transition to STOPPED state
+/// Cancels the exit token every service and protocol observes, gives the
+/// network a bounded moment to close its sessions, then moves to STOPPED and
+/// notifies the status listener.
+///
+/// ## Stop is terminal
+///
+/// This does *not* tear the node down: `RUNTIME`, `STORAGE_WITH_DATA`,
+/// `NET_CONTROL` and friends are `OnceLock`s, and `OnceLock` has no `reset`, so
+/// the globals survive. [`start`] therefore refuses to run again and returns
+/// [`BridgeError::Stopped`] — the app has to be relaunched, exactly as it does
+/// for a network switch (#218). Stop means "shut down until relaunch".
+///
+/// ## Why not `wait_all_ckb_services_exit`
+///
+/// It was called here and it deadlocked (#487). `wait_all_ckb_services_exit`
+/// calls `new_crossbeam_exit_rx()`, which *registers a fresh receiver*, and
+/// then blocks on `recv()`. `broadcast_exit_signals` has already run by then and
+/// only ever sends once, to the receivers that existed at broadcast time, so
+/// nothing is ever delivered to that new receiver and `recv()` never returns.
+/// Upstream ckb gets away with the same two calls because it waits first and
+/// broadcasts later from a signal handler. On top of that the bridge registers
+/// no thread handles with `ckb_stop_handler::register_thread`, so the join loop
+/// on the far side of that `recv()` has nothing to join. Bounded polling of the
+/// peer registry gives us the useful half of that wait with a guaranteed
+/// return.
 pub fn stop() -> Result<(), BridgeError> {
-    // Check if running
-    if !is_running() {
+    // Claim the transition in one atomic step. A check-then-set would let two
+    // concurrent stops both pass the check and then both broadcast and notify;
+    // here exactly one caller wins and every other one is told it lost.
+    //
+    // The state therefore reads STOPPED for the duration of the drain below,
+    // while the network is still closing its sessions. That is deliberate: the
+    // alternative is a window in which the state still says RUNNING but the
+    // exit signal has gone out, which is what the UI must never see — a caller
+    // polling `status()` would show a running node that is on its way down.
+    // Nothing in the drain needs the RUNNING state.
+    if !try_transition(&STATE, STATE_RUNNING, STATE_STOPPED) {
+        // A second stop is not an error the caller can act on, but it is worth
+        // distinguishing from "never initialized" in the logs and on the UI.
+        if is_stopped() {
+            warn!("Already stopped");
+            return Err(BridgeError::Stopped);
+        }
         warn!("Not in RUNNING state! Current state: {}", get_state());
         return Err(BridgeError::NotInitialized);
     }
 
     info!("Stopping CKB Light Client...");
 
-    // Broadcast exit signals to all services
-    broadcast_exit_signals();
-
-    // Wait for all CKB services to exit
-    info!("Waiting for services to exit...");
-    wait_all_ckb_services_exit();
-
-    // Transition to STOPPED
-    set_state(STATE_STOPPED);
+    match shutdown_sequence(
+        broadcast_exit_signals,
+        connected_peer_count,
+        std::thread::sleep,
+        SHUTDOWN_GRACE,
+        SHUTDOWN_POLL_INTERVAL,
+    ) {
+        ShutdownOutcome::Quiesced { waited } => {
+            info!("Network wound down after {} ms", waited.as_millis());
+        }
+        ShutdownOutcome::GraceExpired { peers_left } => {
+            warn!(
+                "Network still had {} peer(s) after {} ms; stopping anyway",
+                peers_left,
+                SHUTDOWN_GRACE.as_millis()
+            );
+        }
+    }
 
     info!("CKB Light Client stopped successfully!");
 
@@ -390,4 +524,253 @@ pub fn stop() -> Result<(), BridgeError> {
 /// - 2 (STOPPED): Stopped
 pub fn status() -> u8 {
     get_state()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::cell::RefCell;
+    use std::sync::atomic::{AtomicU8, AtomicUsize};
+
+    /// `shutdown_sequence` must broadcast first and only then start polling:
+    /// that ordering is the whole bug in #487, where the wait ran against a
+    /// receiver registered after the broadcast had already fired.
+    #[test]
+    fn shutdown_sequence_broadcasts_before_polling() {
+        let log = RefCell::new(Vec::new());
+
+        let outcome = shutdown_sequence(
+            || log.borrow_mut().push("broadcast"),
+            || {
+                log.borrow_mut().push("poll");
+                0
+            },
+            |_| log.borrow_mut().push("sleep"),
+            SHUTDOWN_GRACE,
+            SHUTDOWN_POLL_INTERVAL,
+        );
+
+        assert_eq!(*log.borrow(), vec!["broadcast", "poll"]);
+        assert_eq!(
+            outcome,
+            ShutdownOutcome::Quiesced {
+                waited: Duration::ZERO
+            }
+        );
+    }
+
+    /// The wait ends as soon as the last session is gone, without burning the
+    /// rest of the grace period.
+    #[test]
+    fn shutdown_sequence_returns_once_the_peers_are_gone() {
+        let remaining = RefCell::new(2usize);
+        let slept = RefCell::new(Vec::new());
+
+        let outcome = shutdown_sequence(
+            || {},
+            || *remaining.borrow(),
+            |interval| {
+                slept.borrow_mut().push(interval);
+                *remaining.borrow_mut() -= 1;
+            },
+            Duration::from_secs(2),
+            Duration::from_millis(100),
+        );
+
+        assert_eq!(
+            outcome,
+            ShutdownOutcome::Quiesced {
+                waited: Duration::from_millis(200)
+            }
+        );
+        assert_eq!(slept.borrow().len(), 2);
+    }
+
+    /// A peer that never closes must not hold the caller hostage: the wait is
+    /// bounded by the grace period and then gives up.
+    #[test]
+    fn shutdown_sequence_gives_up_after_the_grace_period() {
+        let slept = RefCell::new(0usize);
+
+        let outcome = shutdown_sequence(
+            || {},
+            || 3,
+            |_| *slept.borrow_mut() += 1,
+            Duration::from_secs(2),
+            Duration::from_millis(100),
+        );
+
+        assert_eq!(outcome, ShutdownOutcome::GraceExpired { peers_left: 3 });
+        assert_eq!(*slept.borrow(), 20, "2s of grace in 100ms steps");
+    }
+
+    /// A zero interval would spin forever against a peer that never leaves.
+    #[test]
+    fn shutdown_sequence_does_not_spin_on_a_zero_interval() {
+        let outcome =
+            shutdown_sequence(|| {}, || 1, |_| {}, Duration::from_secs(2), Duration::ZERO);
+
+        assert_eq!(outcome, ShutdownOutcome::GraceExpired { peers_left: 1 });
+    }
+
+    /// A grace period shorter than one poll interval must not buy itself a full
+    /// interval of sleep: the wait is a bound, not a floor.
+    #[test]
+    fn shutdown_sequence_never_overshoots_the_grace_period() {
+        let slept = RefCell::new(Vec::new());
+
+        let outcome = shutdown_sequence(
+            || {},
+            || 1,
+            |interval| slept.borrow_mut().push(interval),
+            Duration::from_millis(50),
+            Duration::from_millis(500),
+        );
+
+        assert_eq!(outcome, ShutdownOutcome::GraceExpired { peers_left: 1 });
+        assert!(
+            slept.borrow().is_empty(),
+            "slept {:?} for a 50ms grace",
+            slept.borrow()
+        );
+    }
+
+    /// Only one of a crowd of concurrent stops may claim the transition, so only
+    /// one broadcasts and notifies.
+    #[test]
+    fn only_one_caller_wins_the_transition_to_stopped() {
+        let state = Arc::new(AtomicU8::new(STATE_RUNNING));
+        let winners = Arc::new(AtomicUsize::new(0));
+
+        let threads: Vec<_> = (0..8)
+            .map(|_| {
+                let state = Arc::clone(&state);
+                let winners = Arc::clone(&winners);
+                std::thread::spawn(move || {
+                    if try_transition(&state, STATE_RUNNING, STATE_STOPPED) {
+                        winners.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                    }
+                })
+            })
+            .collect();
+
+        for thread in threads {
+            thread.join().expect("thread");
+        }
+
+        assert_eq!(winners.load(std::sync::atomic::Ordering::SeqCst), 1);
+        assert_eq!(state.load(std::sync::atomic::Ordering::SeqCst), STATE_STOPPED);
+    }
+
+    /// A transition from the wrong state changes nothing.
+    #[test]
+    fn transition_from_the_wrong_state_is_refused() {
+        let state = AtomicU8::new(STATE_INIT);
+
+        assert!(!try_transition(&state, STATE_RUNNING, STATE_STOPPED));
+        assert_eq!(state.load(std::sync::atomic::Ordering::SeqCst), STATE_INIT);
+    }
+
+    /// Nothing in this test binary ever calls `init`, so the process-global
+    /// `STATE` is still INIT: `stop` has to reject that, and it has to reject it
+    /// straight away rather than blocking (#487).
+    #[test]
+    fn stop_without_a_started_client_reports_not_initialized() {
+        let began = std::time::Instant::now();
+        let result = stop();
+
+        assert!(
+            matches!(result, Err(BridgeError::NotInitialized)),
+            "expected NotInitialized, got {result:?}"
+        );
+        assert!(
+            began.elapsed() < Duration::from_secs(1),
+            "stop blocked for {:?}",
+            began.elapsed()
+        );
+    }
+
+    /// End-to-end cover for the deadlock: init a node against a bootnode-less
+    /// testnet config, start it, and require `stop` to return.
+    ///
+    /// `#[ignore]`d because it is not safe to run alongside the rest of this
+    /// binary: `init` publishes the process-global `OnceLock`s and moves `STATE`
+    /// for good, which would race
+    /// `stop_without_a_started_client_reports_not_initialized` above, and
+    /// nothing can put those globals back. It also opens a RocksDB store and
+    /// binds a TCP listener. Run it on its own — it passes offline in well
+    /// under a second, since there is no peer to wait for:
+    ///
+    /// ```text
+    /// cargo test -p ckb-light-client-lib --lib -- --ignored --exact \
+    ///     bridge_core::lifecycle::tests::stop_returns_after_init_and_start
+    /// ```
+    #[test]
+    #[ignore = "mutates process-global state shared with the other tests; run it alone"]
+    fn stop_returns_after_init_and_start() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let config_path = dir.path().join("testnet.toml");
+        // No bootnodes and an ephemeral port: the node comes up, finds nobody,
+        // and stop has no live session to wind down.
+        fs::write(
+            &config_path,
+            r#"
+chain = "testnet"
+
+[store]
+path = "store.db"
+
+[network]
+path = "network"
+listen_addresses = ["/ip4/127.0.0.1/tcp/0"]
+bootnodes = []
+max_peers = 8
+max_outbound_peers = 1
+ping_interval_secs = 120
+ping_timeout_secs = 1200
+connect_outbound_interval_secs = 15
+upnp = false
+discovery_local_address = false
+bootnode_mode = false
+
+[rpc]
+listen_address = "127.0.0.1:0"
+"#,
+        )
+        .expect("write config");
+
+        init(
+            config_path.to_str().expect("utf-8 path"),
+            dir.path().to_str().expect("utf-8 path"),
+            None,
+        )
+        .expect("init");
+        start().expect("start");
+
+        let began = std::time::Instant::now();
+        stop().expect("stop");
+        let elapsed = began.elapsed();
+
+        assert!(elapsed < Duration::from_secs(10), "stop took {elapsed:?}");
+        assert!(is_stopped());
+        assert!(
+            matches!(start(), Err(BridgeError::Stopped)),
+            "start after stop must report Stopped"
+        );
+        assert!(
+            matches!(
+                init(
+                    config_path.to_str().expect("utf-8 path"),
+                    dir.path().to_str().expect("utf-8 path"),
+                    None
+                ),
+                Err(BridgeError::Stopped)
+            ),
+            "init after stop must report Stopped, not AlreadyInitialized"
+        );
+        assert!(
+            matches!(stop(), Err(BridgeError::Stopped)),
+            "a second stop must report Stopped"
+        );
+    }
 }
