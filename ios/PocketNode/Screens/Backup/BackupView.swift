@@ -43,6 +43,9 @@ struct BackupView: View {
         .onReceive(NotificationCenter.default.publisher(for: UIApplication.userDidTakeScreenshotNotification)) { _ in
             viewModel.onScreenshotTaken()
         }
+        // See `HomeView`: without this the identifier would be pushed down
+        // onto the reveal, verify and done buttons, replacing theirs.
+        .accessibilityElement(children: .contain)
         .accessibilityIdentifier("backup.root")
     }
 
@@ -82,6 +85,7 @@ struct BackupView: View {
             .disabled(viewModel.isRevealing)
             .accessibilityIdentifier("backup.reveal")
         }
+        .accessibilityElement(children: .contain)
         .accessibilityIdentifier("backup.gate")
     }
 
@@ -112,6 +116,7 @@ struct BackupView: View {
             .buttonStyle(.borderedProminent)
             .accessibilityIdentifier("backup.noPhrase.done")
         }
+        .accessibilityElement(children: .contain)
         .accessibilityIdentifier("backup.noPhrase")
     }
 
@@ -143,6 +148,7 @@ struct BackupView: View {
         }
         .privacyShield()
         .privacySensitive()
+        .accessibilityElement(children: .contain)
         .accessibilityIdentifier("backup.display")
     }
 
@@ -201,6 +207,7 @@ struct BackupView: View {
         }
         .privacyShield()
         .privacySensitive()
+        .accessibilityElement(children: .contain)
         .accessibilityIdentifier("backup.verify")
     }
 
@@ -253,6 +260,7 @@ struct BackupView: View {
             .buttonStyle(.borderedProminent)
             .accessibilityIdentifier("backup.done")
         }
+        .accessibilityElement(children: .contain)
         .accessibilityIdentifier("backup.success")
     }
 }

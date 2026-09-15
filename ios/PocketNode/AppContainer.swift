@@ -75,6 +75,43 @@ final class AppContainer {
         Self.seedWalletForTestingIfRequested(walletStore: self.walletStore)
     }
 
+    // MARK: - Screen graphs
+
+    /// The only place `BackupViewModel` is built. Kept to one call site on
+    /// purpose: its dependencies are the wallet's most sensitive ones, and a
+    /// second construction elsewhere is how a gate quietly stops matching.
+    ///
+    /// - Parameter isOnboarding: true only on the first-run hop straight out
+    ///   of wallet creation. `hasPin` is re-read on every reveal, so that flag
+    ///   cannot skip the gate once a PIN exists.
+    func makeBackupViewModel(isOnboarding: Bool) -> BackupViewModel {
+        BackupViewModel(
+            walletKeyStore: walletKeyStore,
+            walletStore: walletStore,
+            auth: auth,
+            isOnboarding: isOnboarding,
+            hasPin: { [pinService] in pinService.pinPresence == .present }
+        )
+    }
+
+    /// The only place `ReceiveViewModel` is built, for the same reason.
+    ///
+    /// - Parameter onBackUp: navigation to `BackupView`, supplied by whatever
+    ///   owns the navigation stack.
+    func makeReceiveViewModel(onBackUp: @escaping () -> Void) -> ReceiveViewModel {
+        ReceiveViewModel(
+            walletStore: walletStore,
+            preferences: preferences,
+            hasPin: { [pinService] in pinService.pinPresence == .present },
+            onBackUp: onBackUp
+        )
+    }
+
+    /// Backs the wallet shell's first screen.
+    func makeHomeViewModel() -> HomeViewModel {
+        HomeViewModel(walletStore: walletStore, preferences: preferences)
+    }
+
     /// Whether onboarding has already been completed.
     ///
     /// Both halves are consulted: the Keychain envelope is the wallet, and
@@ -99,7 +136,9 @@ final class AppContainer {
     /// record so the gate opens. No key material is created: nothing on the
     /// Node Status path reads a key, and minting one here would put a real
     /// Secure Enclave wallet on the simulator for a test that has no use for
-    /// it. Debug-only, and a no-op on every other launch.
+    /// it. The addresses are the pinned pair from `WalletCreatorTests`, so
+    /// what the shell renders is a real, well-formed address on both networks.
+    /// Debug-only, and a no-op on every other launch.
     private static func seedWalletForTestingIfRequested(walletStore: WalletStore) {
         #if DEBUG
         guard ProcessInfo.processInfo.environment["POCKETNODE_SKIP_ONBOARDING"] == "1",
@@ -110,8 +149,8 @@ final class AppContainer {
                 name: "UI Test Wallet",
                 type: WalletCreator.typeMnemonic,
                 derivationPath: WalletCreator.derivationPath,
-                mainnetAddress: "ckb1qzda0cr08m85hc8jlnfp3zer7xulejywt49kt2rr0vthywaa50xwsqjmpk4",
-                testnetAddress: "ckt1qzda0cr08m85hc8jlnfp3zer7xulejywt49kt2rr0vthywaa50xwsqjmpk4",
+                mainnetAddress: "ckb1qzda0cr08m85hc8jlnfp3zer7xulejywt49kt2rr0vthywaa50xwsqgedakp7g0hm0cdlq298xuyqpvl4ja0cfqhp5jft",
+                testnetAddress: "ckt1qzda0cr08m85hc8jlnfp3zer7xulejywt49kt2rr0vthywaa50xwsqgedakp7g0hm0cdlq298xuyqpvl4ja0cfqenlarn",
                 mnemonicBackedUp: false,
                 createdAt: 0
             )

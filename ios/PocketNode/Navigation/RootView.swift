@@ -1,9 +1,14 @@
 import SwiftUI
 
 /// Routes mirror the Android `NavGraph.kt` names so the two apps stay readable
-/// side by side. M1 ships Home and NodeStatus only.
+/// side by side. Send, activity and DAO arrive with M3 and M4.
 enum Route: Hashable {
     case nodeStatus
+    case receive
+    /// The recovery-phrase backup flow outside onboarding, so behind the
+    /// re-auth gate. Onboarding shows the same screen inside its own flow.
+    case backup
+    case settings
 }
 
 struct RootView: View {
@@ -26,6 +31,7 @@ struct RootView: View {
 
     @State private var phase: Phase = .undecided
     @State private var onboarding: OnboardingViewModel?
+    @State private var home: HomeViewModel?
 
     private var auth: AuthService { container.auth }
 
@@ -37,7 +43,13 @@ struct RootView: View {
                     .ignoresSafeArea()
             case .onboarding:
                 if let onboarding {
-                    OnboardingView(model: onboarding, auth: auth) { phase = .wallet }
+                    OnboardingView(
+                        model: onboarding,
+                        auth: auth,
+                        makeBackupViewModel: { container.makeBackupViewModel(isOnboarding: true) }
+                    ) {
+                        phase = .wallet
+                    }
                 }
             case .wallet:
                 // Only a confirmed absence of a PIN opens the gate: a PIN store
@@ -57,6 +69,11 @@ struct RootView: View {
         // the wallet before they have set a PIN.
         .task {
             guard phase == .undecided else { return }
+            // Built before the phase is decided, so the wallet shell has it on
+            // its first frame whichever way this goes. It reads an empty
+            // wallet as empty state and re-reads on every appearance, so
+            // building it ahead of onboarding costs nothing.
+            home = container.makeHomeViewModel()
             let hasWallet = await container.hasWallet
             if hasWallet {
                 phase = .wallet
@@ -89,9 +106,20 @@ struct RootView: View {
 
     private var wallet: some View {
         NavigationStack(path: $path) {
-            HomeView()
+            walletHome
                 .navigationTitle("Pocket Node")
                 .toolbar {
+                    ToolbarItem(placement: .topBarTrailing) {
+                        Button {
+                            path.append(Route.settings)
+                        } label: {
+                            Label("Settings", systemImage: "gearshape")
+                        }
+                        .accessibilityIdentifier("root.settings")
+                    }
+                    // Kept on the toolbar rather than folded into Settings:
+                    // `NodeStatusUITests` taps this identifier from Home, and
+                    // two items is still a plain toolbar.
                     ToolbarItem(placement: .topBarTrailing) {
                         Button {
                             path.append(Route.nodeStatus)
@@ -102,11 +130,96 @@ struct RootView: View {
                     }
                 }
                 .navigationDestination(for: Route.self) { route in
-                    switch route {
-                    case .nodeStatus:
-                        NodeStatusView()
-                    }
+                    destination(for: route)
                 }
+        }
+    }
+
+    @ViewBuilder
+    private var walletHome: some View {
+        if let home {
+            HomeView(
+                model: home,
+                theme: container.theme,
+                onReceive: { path.append(Route.receive) },
+                onBackUp: { path.append(Route.backup) }
+            )
+        } else {
+            // One frame at most: the root's `task` builds it before the phase
+            // that shows this is ever reached.
+            Color(uiColor: .systemBackground).ignoresSafeArea()
+        }
+    }
+
+    @ViewBuilder
+    private func destination(for route: Route) -> some View {
+        switch route {
+        case .nodeStatus:
+            NodeStatusView()
+        case .receive:
+            ReceiveRoute(onBackUp: { path.append(Route.backup) })
+        case .backup:
+            BackupRoute()
+        case .settings:
+            SettingsView(auth: auth, onBackUp: { path.append(Route.backup) })
+        }
+    }
+}
+
+/// Holds the Receive screen's view model for as long as the screen is pushed.
+///
+/// A `navigationDestination` closure runs again on every re-render, so
+/// building the view model inline would hand `ReceiveView` a new one each
+/// time. The `@State` here is what keeps it to one.
+private struct ReceiveRoute: View {
+    @Environment(AppContainer.self) private var container
+
+    /// Navigation to the backup flow, for the "Back up now" prompt.
+    let onBackUp: () -> Void
+
+    @State private var viewModel: ReceiveViewModel?
+
+    var body: some View {
+        Group {
+            if let viewModel {
+                ReceiveView(viewModel: viewModel)
+            } else {
+                Color(uiColor: .systemBackground)
+            }
+        }
+        .navigationTitle("Receive")
+        .navigationBarTitleDisplayMode(.inline)
+        .onAppear {
+            guard viewModel == nil else { return }
+            viewModel = container.makeReceiveViewModel(onBackUp: onBackUp)
+        }
+    }
+}
+
+/// The backup flow outside onboarding: `isOnboarding: false`, so
+/// `BackupViewModel` runs the re-auth gate before it decrypts anything.
+///
+/// Reached from the Home banner, the Receive prompt and Settings. "Done" pops
+/// back to whichever of those pushed it.
+private struct BackupRoute: View {
+    @Environment(AppContainer.self) private var container
+    @Environment(\.dismiss) private var dismiss
+
+    @State private var viewModel: BackupViewModel?
+
+    var body: some View {
+        Group {
+            if let viewModel {
+                BackupView(viewModel: viewModel) { dismiss() }
+            } else {
+                Color(uiColor: .systemBackground)
+            }
+        }
+        .navigationTitle("Recovery phrase")
+        .navigationBarTitleDisplayMode(.inline)
+        .onAppear {
+            guard viewModel == nil else { return }
+            viewModel = container.makeBackupViewModel(isOnboarding: false)
         }
     }
 }

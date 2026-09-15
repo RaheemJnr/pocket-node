@@ -10,8 +10,12 @@ import Observation
 /// the user already holds the phrase or has no phrase at all. That is the same
 /// distinction Android draws with `mnemonicBackedUp`.
 ///
-/// The generated phrase lives in ``pendingMnemonic`` and nowhere else, only
-/// while ``step`` is ``Step/backup``. Leaving that step clears it.
+/// This view model never holds the generated phrase. `WalletCreator` has
+/// already stored the wallet by the time ``Step/backup`` is reached, so the
+/// backup screen reads the words back out of the key store through
+/// `BackupViewModel.reveal()`, the same path it uses outside onboarding. That
+/// leaves exactly one copy of the phrase in memory, owned by the screen that
+/// shows it and wiped when the app is backgrounded.
 @MainActor
 @Observable
 final class OnboardingViewModel {
@@ -22,8 +26,8 @@ final class OnboardingViewModel {
         case create
         /// Entering a phrase or a private key.
         case importWallet
-        /// Showing the freshly generated phrase. #516 replaces the placeholder
-        /// here with the real backup and verification screen.
+        /// Showing and verifying the freshly generated phrase, through
+        /// ``BackupView`` in onboarding mode.
         case backup
         /// Choosing the app PIN and opting into biometrics.
         case pinSetup
@@ -39,9 +43,6 @@ final class OnboardingViewModel {
 
     /// The last failure, already turned into something a user can read.
     private(set) var errorMessage: String?
-
-    /// The freshly generated phrase, non-empty only during ``Step/backup``.
-    private(set) var pendingMnemonic: [String] = []
 
     private let creator: WalletCreator
 
@@ -65,7 +66,6 @@ final class OnboardingViewModel {
     /// has been stored, so there is nothing to undo.
     func backToWelcome() {
         errorMessage = nil
-        pendingMnemonic = []
         step = .welcome
     }
 
@@ -73,13 +73,12 @@ final class OnboardingViewModel {
         errorMessage = nil
     }
 
-    /// Leaves the backup step. The phrase is dropped here: the wallet is
-    /// already stored, and the view model is not a second copy of it.
+    /// Leaves the backup step, called from ``BackupView``'s "Done".
     ///
-    /// `mnemonicBackedUp` stays false, which is what the placeholder means. The
-    /// real verification in #516 is what will be allowed to set it.
+    /// `mnemonicBackedUp` is not written here: passing the verify quiz is what
+    /// sets it, and `BackupViewModel` has already done so by the time the
+    /// backup step calls this.
     func finishBackup() {
-        pendingMnemonic = []
         errorMessage = nil
         step = .pinSetup
     }
@@ -87,7 +86,6 @@ final class OnboardingViewModel {
     /// Called by ``PinSetupView`` once the PIN is stored and the biometric
     /// question has been answered.
     func finishPinSetup() {
-        pendingMnemonic = []
         step = .done
     }
 
@@ -95,8 +93,10 @@ final class OnboardingViewModel {
 
     func createWallet(wordCount: Int, name: String) async {
         await run {
-            let created = try await self.creator.createWallet(wordCount: wordCount, name: name)
-            self.pendingMnemonic = created.mnemonic
+            // The returned phrase is deliberately dropped: the wallet is
+            // stored by now, and the backup step reads the words back from
+            // the key store rather than from a second copy kept here.
+            _ = try await self.creator.createWallet(wordCount: wordCount, name: name)
             self.step = .backup
         }
     }

@@ -8,8 +8,16 @@ import SwiftUI
 struct OnboardingView: View {
     @Bindable var model: OnboardingViewModel
     let auth: AuthService
+    /// Builds the backup step's view model, in onboarding mode. A closure
+    /// rather than the container itself, so this view keeps knowing nothing
+    /// about the object graph (`AppContainer.makeBackupViewModel`).
+    let makeBackupViewModel: () -> BackupViewModel
     /// Called once, when the flow reaches ``OnboardingViewModel/Step/done``.
     let onFinished: () -> Void
+
+    /// Built when the backup step appears and dropped when it is left, so the
+    /// revealed phrase does not outlive the screen that shows it.
+    @State private var backup: BackupViewModel?
 
     var body: some View {
         NavigationStack {
@@ -20,6 +28,9 @@ struct OnboardingView: View {
         .onChange(of: model.step) { _, new in
             if new == .done { onFinished() }
         }
+        // See `HomeView`: a bare identifier on the flow would be pushed down
+        // onto every button inside it, including the backup step's.
+        .accessibilityElement(children: .contain)
         .accessibilityIdentifier("onboarding.root")
     }
 
@@ -33,9 +44,7 @@ struct OnboardingView: View {
         case .importWallet:
             ImportWalletView(model: model)
         case .backup:
-            BackupPlaceholderView(wordCount: model.pendingMnemonic.count) {
-                model.finishBackup()
-            }
+            backupStep
         case .pinSetup:
             PinSetupView(auth: auth) { model.finishPinSetup() }
                 .navigationTitle("Secure your wallet")
@@ -43,6 +52,31 @@ struct OnboardingView: View {
         case .done:
             // One frame at most: `onChange` above hands over to the wallet.
             Color.clear
+        }
+    }
+
+    /// The real backup and verification screen, in onboarding mode: the reveal
+    /// gate is exempt while no PIN exists yet (`BackupViewModel` re-checks that
+    /// on every reveal), and the verify quiz is what sets `mnemonicBackedUp`.
+    ///
+    /// There is no way past it but through, matching Android, whose onboarding
+    /// `MnemonicBackupScreen` offers no skip either.
+    private var backupStep: some View {
+        Group {
+            if let backup {
+                BackupView(viewModel: backup) {
+                    model.finishBackup()
+                    self.backup = nil
+                }
+            } else {
+                Color.clear
+            }
+        }
+        .navigationTitle("Recovery phrase")
+        .navigationBarTitleDisplayMode(.inline)
+        .onAppear {
+            guard backup == nil else { return }
+            backup = makeBackupViewModel()
         }
     }
 
@@ -143,45 +177,6 @@ private struct OnboardingOption: View {
         }
         .buttonStyle(.bordered)
         .accessibilityIdentifier(identifier)
-    }
-}
-
-/// Stands in for the real backup and verification screen, which is #516.
-///
-/// It deliberately does not show the phrase: revealing it is the other issue's
-/// job, and half of it here would leave secret material on screen with none of
-/// the verification that is supposed to follow. Continuing leaves the wallet
-/// recorded as not backed up, which is what the nag in a later build reads.
-private struct BackupPlaceholderView: View {
-    let wordCount: Int
-    let onContinue: () -> Void
-
-    var body: some View {
-        VStack(spacing: 20) {
-            Image(systemName: "doc.text.magnifyingglass")
-                .font(.system(size: 44))
-                .foregroundStyle(.secondary)
-
-            Text("Back up your recovery phrase")
-                .font(.title2.weight(.semibold))
-                .multilineTextAlignment(.center)
-
-            Text("Your wallet is ready and its \(wordCount) word recovery phrase is stored on this device. Writing it down comes in the next build.")
-                .font(.subheadline)
-                .foregroundStyle(.secondary)
-                .multilineTextAlignment(.center)
-
-            Button("Continue", action: onContinue)
-                .buttonStyle(.borderedProminent)
-                .accessibilityIdentifier("onboarding.backupContinue")
-
-            Spacer(minLength: 0)
-        }
-        .padding(.horizontal, 32)
-        .padding(.top, 48)
-        .privacySensitive()
-        .navigationTitle("Recovery phrase")
-        .navigationBarTitleDisplayMode(.inline)
     }
 }
 

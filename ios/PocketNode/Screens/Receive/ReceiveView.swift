@@ -74,6 +74,9 @@ struct ReceiveView: View {
         } message: {
             Text(viewModel.backupPromptMessage)
         }
+        // See `HomeView`: without this the identifier would be pushed down
+        // onto the copy button, the address and the QR code, replacing theirs.
+        .accessibilityElement(children: .contain)
         .accessibilityIdentifier("receive.root")
     }
 
