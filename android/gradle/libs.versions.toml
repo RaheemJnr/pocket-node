@@ -23,6 +23,7 @@ kotlincryptoMacs = "0.8.0"
 ckbSdkDiffTest = "4.0.0"
 bouncycastle = "1.70"
 biometric = "1.1.0"
+# kotlin-bip39: differential tests only, see kotlin-bip39-difftest.
 bip39 = "1.0.8"
 cameraX = "1.4.2"
 accompanistPermissions = "0.34.0"
@@ -73,7 +74,10 @@ secp256k1-kmp-jni-jvm = { group = "fr.acinq.secp256k1", name = "secp256k1-kmp-jn
 kotlincrypto-blake2 = { group = "org.kotlincrypto.hash", name = "blake2", version.ref = "kotlincryptoHash" }
 kotlincrypto-sha2 = { group = "org.kotlincrypto.hash", name = "sha2", version.ref = "kotlincryptoHash" }
 kotlincrypto-hmac-sha2 = { group = "org.kotlincrypto.macs", name = "hmac-sha2", version.ref = "kotlincryptoMacs" }
-kotlin-bip39 = { group = "cash.z.ecc.android", name = "kotlin-bip39", version.ref = "bip39" }
+# kotlin-bip39 is JVM-only, so it cannot ship to iOS. Kept ONLY as a differential-test
+# dependency for the shared BIP-39 implementation (:shared androidHostTest), same
+# arrangement as the CKB SDK above (#507).
+kotlin-bip39-difftest = { group = "cash.z.ecc.android", name = "kotlin-bip39", version.ref = "bip39" }
 
 # CKB SDK (differential tests only — see ckbSdkDiffTest)
 ckb-sdk-core-difftest = { group = "org.nervos.ckb", name = "core", version.ref = "ckbSdkDiffTest" }

@@ -1,12 +1,13 @@
 package com.rjnr.pocketnode.data.wallet
 
-import cash.z.ecc.android.bip39.Mnemonics
-import cash.z.ecc.android.bip39.toSeed
+import com.rjnr.pocketnode.core.crypto.Bip39
+import com.rjnr.pocketnode.core.crypto.EntropySource
 import com.rjnr.pocketnode.core.crypto.Secp256k1Signer
 import org.bouncycastle.crypto.digests.SHA512Digest
 import org.bouncycastle.crypto.macs.HMac
 import org.bouncycastle.crypto.params.KeyParameter
 import java.math.BigInteger
+import java.security.SecureRandom
 import javax.inject.Inject
 import javax.inject.Singleton
 
@@ -22,33 +23,14 @@ class MnemonicManager @Inject constructor() {
      * Generate a new BIP39 mnemonic phrase.
      * @return list of English words (12 or 24)
      */
-    fun generateMnemonic(wordCount: WordCount = WordCount.TWELVE): List<String> {
-        val libWordCount = when (wordCount) {
-            WordCount.TWELVE -> Mnemonics.WordCount.COUNT_12
-            WordCount.TWENTY_FOUR -> Mnemonics.WordCount.COUNT_24
-        }
-        return Mnemonics.MnemonicCode(libWordCount).use { code ->
-            code.map { it }
-        }
-    }
+    fun generateMnemonic(wordCount: WordCount = WordCount.TWELVE): List<String> =
+        Bip39.generate(wordCount.count, SecureRandomEntropySource)
 
     /**
      * Validate a BIP39 mnemonic phrase.
      * Checks word count, word list membership, and checksum.
      */
-    fun validateMnemonic(words: List<String>): Boolean {
-        if (words.isEmpty()) return false
-        return try {
-            Mnemonics.MnemonicCode(words.joinToString(" ")).use { it.validate() }
-            true
-        } catch (_: Mnemonics.ChecksumException) {
-            false
-        } catch (_: Mnemonics.WordCountException) {
-            false
-        } catch (_: Mnemonics.InvalidWordException) {
-            false
-        }
-    }
+    fun validateMnemonic(words: List<String>): Boolean = Bip39.validate(words)
 
     /**
      * Derive a 512-bit (64-byte) seed from a mnemonic using PBKDF2-SHA512.
@@ -56,11 +38,8 @@ class MnemonicManager @Inject constructor() {
      * @param passphrase optional BIP39 passphrase (default empty)
      * @return 64-byte seed
      */
-    fun mnemonicToSeed(words: List<String>, passphrase: String = ""): ByteArray {
-        return Mnemonics.MnemonicCode(words.joinToString(" ")).use { code ->
-            code.toSeed(passphrase.toCharArray())
-        }
-    }
+    fun mnemonicToSeed(words: List<String>, passphrase: String = ""): ByteArray =
+        Bip39.toSeed(words, passphrase)
 
     /**
      * Derive a 32-byte secp256k1 private key from a BIP39 seed using BIP32/BIP44.
@@ -169,6 +148,16 @@ class MnemonicManager @Inject constructor() {
         buf[offset + 1] = (value shr 16 and 0xFF).toByte()
         buf[offset + 2] = (value shr 8 and 0xFF).toByte()
         buf[offset + 3] = (value and 0xFF).toByte()
+    }
+
+    /**
+     * `commonMain` has no `SecureRandom`, so [Bip39.generate] takes its entropy from
+     * the platform. This is Android's: one `SecureRandom` instance, reused.
+     */
+    private object SecureRandomEntropySource : EntropySource {
+        private val random = SecureRandom()
+
+        override fun nextBytes(n: Int): ByteArray = ByteArray(n).also(random::nextBytes)
     }
 
     companion object {

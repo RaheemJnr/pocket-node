@@ -314,7 +314,6 @@ dependencies {
     implementation(libs.androidx.biometric)
     implementation(libs.androidx.security.crypto)
     implementation(libs.secp256k1.kmp.jni.android)
-    implementation(libs.kotlin.bip39)
 
     // BouncyCastle: PIN KDF and the BIP32 HMAC-SHA512 ladder. The CKB Java SDK
     // it used to sit next to is gone — blake2b, secp256k1, hex and the address

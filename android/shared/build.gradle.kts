@@ -58,6 +58,9 @@ kotlin {
             // `utils` (Blake2b, ECKeyPair, Sign, Numeric) is only a runtime dep of
             // `core`, so the differential tests have to ask for it by name.
             implementation(libs.ckb.sdk.utils.difftest)
+            // Same arrangement for BIP-39: kotlin-bip39 is JVM-only, so it is the
+            // reference `Bip39` is proved against here and ships nowhere (#507).
+            implementation(libs.kotlin.bip39.difftest)
         }
     }
 }
