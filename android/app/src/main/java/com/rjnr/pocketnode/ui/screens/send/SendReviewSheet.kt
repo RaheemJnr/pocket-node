@@ -1,5 +1,6 @@
 package com.rjnr.pocketnode.ui.screens.send
 
+import androidx.compose.foundation.selection.toggleable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
@@ -8,6 +9,7 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.widthIn
+import androidx.compose.material3.Checkbox
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.MaterialTheme
@@ -15,11 +17,13 @@ import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.SheetState
 import androidx.compose.material3.Button
+import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.res.pluralStringResource
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.font.FontFamily
@@ -49,6 +53,8 @@ fun SendReviewSheet(
     review: SendReview,
     onConfirm: () -> Unit,
     onCancel: () -> Unit,
+    sweepWarningAcknowledged: Boolean = false,
+    onSweepWarningAcknowledgedChange: (Boolean) -> Unit = {},
     sheetState: SheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true),
 ) {
     ModalBottomSheet(
@@ -122,6 +128,16 @@ fun SendReviewSheet(
                 emphasised = true,
             )
 
+            if (review.isNearlyFullBalance) {
+                Spacer(Modifier.height(16.dp))
+                SweepWarning(
+                    remainingShannons = review.remainingShannons,
+                    belowMinCell = review.remainingBelowMinCell,
+                    acknowledged = sweepWarningAcknowledged,
+                    onAcknowledgedChange = onSweepWarningAcknowledgedChange,
+                )
+            }
+
             Spacer(Modifier.height(24.dp))
 
             Row(
@@ -138,12 +154,71 @@ fun SendReviewSheet(
                 }
                 Button(
                     onClick = onConfirm,
+                    // The warning is advisory, not a block: ticking the box is
+                    // the only thing standing between the user and the sweep.
+                    enabled = !review.isNearlyFullBalance || sweepWarningAcknowledged,
                     modifier = Modifier
                         .weight(1f)
                         .height(52.dp),
                 ) {
                     Text(stringResource(R.string.send_review_confirm))
                 }
+            }
+        }
+    }
+}
+
+/**
+ * #447: a send that leaves the wallet empty, or with less than a usable cell,
+ * is almost always a surprise rather than an intent. The line states the real
+ * leftover and Confirm stays disabled until the user acknowledges it.
+ */
+@Composable
+private fun SweepWarning(
+    remainingShannons: Long,
+    belowMinCell: Boolean,
+    acknowledged: Boolean,
+    onAcknowledgedChange: (Boolean) -> Unit,
+) {
+    Surface(
+        color = MaterialTheme.colorScheme.errorContainer,
+        contentColor = MaterialTheme.colorScheme.onErrorContainer,
+        shape = MaterialTheme.shapes.medium,
+        modifier = Modifier.fillMaxWidth(),
+    ) {
+        Column(modifier = Modifier.padding(16.dp)) {
+            Text(
+                text = stringResource(
+                    if (belowMinCell) {
+                        R.string.send_review_sweep_warning
+                    } else {
+                        R.string.send_review_sweep_warning_low
+                    },
+                    formatReviewCkb(remainingShannons),
+                ),
+                style = MaterialTheme.typography.bodyMedium,
+            )
+            Spacer(Modifier.height(8.dp))
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                // One tap target over the box and its label, rather than a
+                // checkbox-sized one.
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .toggleable(
+                        value = acknowledged,
+                        role = Role.Checkbox,
+                        onValueChange = onAcknowledgedChange,
+                    ),
+            ) {
+                // Null handler: the whole row owns the toggle, so TalkBack sees
+                // one target instead of two.
+                Checkbox(checked = acknowledged, onCheckedChange = null)
+                Text(
+                    text = stringResource(R.string.send_review_sweep_acknowledge),
+                    style = MaterialTheme.typography.bodyMedium,
+                    fontWeight = FontWeight.Medium,
+                )
             }
         }
     }

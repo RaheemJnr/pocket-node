@@ -71,7 +71,50 @@ data class SendReview(
     val amountShannons: Long,
     val feeShannons: Long,
     val totalShannons: Long,
-)
+    /**
+     * Spendable capacity left in the wallet once [totalShannons] has gone,
+     * clamped at zero. Integer shannons throughout — the displayed balance
+     * is rounded and must never drive this (#447).
+     */
+    val remainingShannons: Long = 0L,
+    /** True when [remainingShannons] is under [sweepThresholdShannons]. */
+    val isNearlyFullBalance: Boolean = false,
+    /** The threshold [remainingShannons] was measured against, for the copy. */
+    val sweepThresholdShannons: Long = MIN_CELL_SHANNONS,
+) {
+    /**
+     * Below one minimal cell the wallet genuinely cannot fund another
+     * transaction; between that and the 1%-of-balance line it still can,
+     * so the sheet softens the wording (see `send_review_sweep_warning_*`).
+     */
+    val remainingBelowMinCell: Boolean get() = remainingShannons < MIN_CELL_SHANNONS
+
+    companion object {
+        /** A secp256k1-blake160 cell cannot hold less than 61 CKB. */
+        const val MIN_CELL_SHANNONS = TransactionBuilder.MIN_CELL_CAPACITY
+
+        /**
+         * How much the wallet should keep back: one minimal cell, or 1% of the
+         * balance when that is larger. The percentage catches the "swept a big
+         * wallet" case, where 61 CKB left out of 50,000 is still effectively
+         * everything gone.
+         */
+        fun sweepThreshold(balanceShannons: Long): Long =
+            maxOf(MIN_CELL_SHANNONS, balanceShannons / 100)
+
+        /** Spendable capacity after the send, clamped at zero. */
+        fun remainingAfter(balanceShannons: Long, totalShannons: Long): Long =
+            (balanceShannons - totalShannons).coerceAtLeast(0L)
+
+        /**
+         * A zero balance means "not loaded yet" rather than "swept": warning on
+         * it would fire on every send made before the first balance tick.
+         */
+        fun shouldWarn(balanceShannons: Long, totalShannons: Long): Boolean =
+            balanceShannons > 0L &&
+                remainingAfter(balanceShannons, totalShannons) < sweepThreshold(balanceShannons)
+    }
+}
 
 data class SendUiState(
     /** Founder-only easter egg: the Single/Bulk toggle is hidden until unlocked. */
@@ -135,6 +178,12 @@ data class SendUiState(
      * first. (#490)
      */
     val reviewRequest: SendReview? = null,
+    /**
+     * Whether the user has ticked "I understand" on the review sheet's
+     * leave-something-behind warning (#447). Reset with every new review, so
+     * an acknowledgement never carries over to a different draft.
+     */
+    val sweepWarningAcknowledged: Boolean = false,
 )
 
 @HiltViewModel
@@ -485,6 +534,7 @@ class SendViewModel @Inject constructor(
      */
     private suspend fun showReview() {
         confirmedFeeShannons = null
+        _uiState.update { it.copy(sweepWarningAcknowledged = false) }
         val state = _uiState.value
         val amountShannons = parseAmountShannons(state.amountCkb) ?: return
 
@@ -496,14 +546,17 @@ class SendViewModel @Inject constructor(
             val preview = state.refreshBulkPreview(amountShannonsOverride = amountShannons)
             _uiState.update {
                 it.copy(
-                    reviewRequest = SendReview(
-                        isBulk = true,
-                        recipientAddress = "",
-                        recipientName = null,
-                        recipientCount = preview.bulkValidRecipients.size,
-                        amountShannons = preview.bulkTotalAmountShannons,
-                        feeShannons = preview.estimatedFee,
-                        totalShannons = preview.bulkTotalAmountShannons + preview.estimatedFee,
+                    reviewRequest = withSweepWarning(
+                        SendReview(
+                            isBulk = true,
+                            recipientAddress = "",
+                            recipientName = null,
+                            recipientCount = preview.bulkValidRecipients.size,
+                            amountShannons = preview.bulkTotalAmountShannons,
+                            feeShannons = preview.estimatedFee,
+                            totalShannons = preview.bulkTotalAmountShannons + preview.estimatedFee,
+                        ),
+                        balanceShannons = preview.availableBalance,
                     ),
                     error = null,
                 )
@@ -537,15 +590,20 @@ class SendViewModel @Inject constructor(
         }.onSuccess { transferPlan ->
             _uiState.update {
                 it.copy(
-                    reviewRequest = SendReview(
-                        isBulk = false,
-                        recipientAddress = state.recipientAddress,
-                        recipientName = state.matchedContact
-                            ?.takeIf { contact -> contact.address == state.recipientAddress }?.name,
-                        recipientCount = 1,
-                        amountShannons = amountShannons,
-                        feeShannons = transferPlan.feeShannons,
-                        totalShannons = amountShannons + transferPlan.feeShannons,
+                    reviewRequest = withSweepWarning(
+                        SendReview(
+                            isBulk = false,
+                            recipientAddress = state.recipientAddress,
+                            recipientName = state.matchedContact
+                                ?.takeIf { contact -> contact.address == state.recipientAddress }?.name,
+                            recipientCount = 1,
+                            amountShannons = amountShannons,
+                            feeShannons = transferPlan.feeShannons,
+                            totalShannons = amountShannons + transferPlan.feeShannons,
+                        ),
+                        // `it` is the state being copied, so the balance is the
+                        // freshest one the repository has pushed.
+                        balanceShannons = it.availableBalance,
                     ),
                     // The form's fee line was the 1-input guess; replace it with
                     // the planned fee so both surfaces agree.
@@ -556,10 +614,30 @@ class SendViewModel @Inject constructor(
         }
     }
 
+    /**
+     * Fill in the leave-something-behind fields of a review snapshot (#447).
+     *
+     * Priced off [SendReview.totalShannons] — the amount plus the planned fee,
+     * both integer shannons — against the spendable balance, so the sheet's
+     * "you will have X left" is the same number the chain will end up with,
+     * not a subtraction of rounded display values.
+     */
+    private fun withSweepWarning(review: SendReview, balanceShannons: Long): SendReview =
+        review.copy(
+            remainingShannons = SendReview.remainingAfter(balanceShannons, review.totalShannons),
+            isNearlyFullBalance = SendReview.shouldWarn(balanceShannons, review.totalShannons),
+            sweepThresholdShannons = SendReview.sweepThreshold(balanceShannons),
+        )
+
+    /** "I understand" on the review sheet's sweep warning (#447). */
+    fun setSweepWarningAcknowledged(acknowledged: Boolean) {
+        _uiState.update { it.copy(sweepWarningAcknowledged = acknowledged) }
+    }
+
     /** Review dismissed without sending: back to the form, nothing broadcast. */
     fun cancelReview() {
         confirmedFeeShannons = null
-        _uiState.update { it.copy(reviewRequest = null) }
+        _uiState.update { it.copy(reviewRequest = null, sweepWarningAcknowledged = false) }
     }
 
     /** Confirm from the review sheet — V2-capable (Compose) caller. */
@@ -572,11 +650,14 @@ class SendViewModel @Inject constructor(
         // No review on screen means nothing was confirmed: refuse rather than
         // broadcast. Also makes a double-tap on Confirm a no-op.
         val review = _uiState.value.reviewRequest ?: return
+        // The sheet disables Confirm until the box is ticked; enforce it here
+        // too so the warning cannot be skipped by a caller that doesn't (#447).
+        if (review.isNearlyFullBalance && !_uiState.value.sweepWarningAcknowledged) return
         // The fee the user actually agreed to. The send re-plans under the
         // send mutex and aborts if this no longer matches, so the broadcast
         // can never pay a number the sheet did not show (#490).
         confirmedFeeShannons = review.feeShannons.takeIf { !review.isBulk }
-        _uiState.update { it.copy(reviewRequest = null) }
+        _uiState.update { it.copy(reviewRequest = null, sweepWarningAcknowledged = false) }
 
         viewModelScope.launch {
             val kdfVersion = peekActiveKdfVersion()
