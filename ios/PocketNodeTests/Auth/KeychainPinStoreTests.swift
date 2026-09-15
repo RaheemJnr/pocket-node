@@ -151,14 +151,172 @@ final class KeychainPinStoreTests: XCTestCase {
         XCTAssertEqual(store.getFailedAttempts(), 9)
     }
 
-    func testHasStoredPinTracksTheHash() {
-        XCTAssertFalse(KeychainPinStore.hasStoredPin(keychain: keychain))
+    func testPresenceTracksTheHash() {
+        XCTAssertEqual(KeychainPinStore.pinPresence(keychain: keychain), .absent)
 
         store.update { $0.pinHash(v: "abc") }
-        XCTAssertTrue(KeychainPinStore.hasStoredPin(keychain: keychain))
+        XCTAssertEqual(KeychainPinStore.pinPresence(keychain: keychain), .present)
 
         store.update { $0.pinHash(v: nil) }
-        XCTAssertFalse(KeychainPinStore.hasStoredPin(keychain: keychain))
+        XCTAssertEqual(KeychainPinStore.pinPresence(keychain: keychain), .absent)
+    }
+
+    /// The blocker the tri-state exists for: a read that fails is not a PIN
+    /// that is missing.
+    func testAnUnreadableStoreIsUnknownNotAbsent() {
+        store.update { $0.pinHash(v: "abc") }
+        let unreadable = UnreadableKeyValueStore(service: service)
+
+        XCTAssertEqual(KeychainPinStore.pinPresence(keychain: unreadable), .unknown)
+
+        unreadable.failReads(nil)
+        XCTAssertEqual(KeychainPinStore.pinPresence(keychain: unreadable), .present)
+    }
+
+    func testNegativeIntegersRoundTrip() {
+        store.update { editor in
+            editor.kdfVersion(v: KotlinInt(int: -7))
+            editor.failedAttempts(v: KotlinInt(int: Int32.min))
+            editor.lastFailedAt(v: KotlinLong(longLong: -1))
+            editor.lockoutUntil(v: KotlinLong(longLong: Int64.min))
+        }
+
+        XCTAssertEqual(store.getKdfVersion()?.int32Value, -7)
+        XCTAssertEqual(store.getFailedAttempts(), Int32.min)
+        XCTAssertEqual(store.getLastFailedAt()?.int64Value, -1)
+        XCTAssertEqual(store.getLockoutUntil()?.int64Value, Int64.min)
+    }
+
+    // MARK: - Write probe
+
+    func testTheWriteProbeSucceedsAndLeavesNothingBehind() throws {
+        XCTAssertNil(store.probeWrite())
+        XCTAssertNil(try keychain.get(account: PinAccount.writeProbe), "the probe cleans up after itself")
+    }
+
+    func testTheWriteProbeReportsARefusedWrite() {
+        let failing = FailingKeyValueStore(service: service)
+        failing.failWrites(true)
+
+        XCTAssertNotNil(KeychainPinStore(keychain: failing).probeWrite())
+    }
+
+    // MARK: - Keychain attributes
+    //
+    // Mirrors the wallet envelope's attribute test. The PIN state is what the
+    // failure counter's durability rests on, so it has to be device-only and
+    // out of iCloud for the same reasons the envelope is.
+
+    func testPinItemsAreDeviceOnlyAndNotSynchronizable() throws {
+        store.update { $0.pinHash(v: "abc") }
+
+        let query: [String: Any] = [
+            kSecClass as String: kSecClassGenericPassword,
+            kSecAttrService as String: service,
+            kSecAttrAccount as String: PinAccount.hash,
+            kSecReturnAttributes as String: true,
+            kSecMatchLimit as String: kSecMatchLimitOne,
+        ]
+        var result: CFTypeRef?
+        XCTAssertEqual(SecItemCopyMatching(query as CFDictionary, &result), errSecSuccess)
+
+        let attributes = try XCTUnwrap(result as? [String: Any])
+        XCTAssertEqual(
+            attributes[kSecAttrAccessible as String] as? String,
+            kSecAttrAccessibleWhenPasscodeSetThisDeviceOnly as String
+        )
+        XCTAssertNotEqual(attributes[kSecAttrSynchronizable as String] as? Bool, true)
+    }
+
+    // MARK: - Write ordering
+    //
+    // The four rules in `KeychainPinStore.apply`, asserted on the order the
+    // accounts are written. The Keychain gives no transaction, so that ordering
+    // is the only thing between an interrupted write and a state that is either
+    // exploitable or unrecoverable.
+
+    func testAHashBeingRemovedIsWrittenFirst() throws {
+        let recording = RecordingKeyValueStore(service: service)
+        let store = KeychainPinStore(keychain: recording)
+        store.update { editor in
+            editor.pinHash(v: "abc")
+            editor.salt(v: KotlinByteArray.from([1]))
+            editor.kdfVersion(v: KotlinInt(int: 2))
+        }
+        recording.reset()
+
+        // `removePin`'s edit.
+        store.update { editor in
+            editor.pinHash(v: nil)
+            editor.kdfVersion(v: nil)
+            editor.salt(v: nil)
+            PinStoreKt.clearFailureState(editor)
+        }
+
+        XCTAssertEqual(
+            recording.writes.first,
+            PinAccount.hash,
+            "the credential has to die before its salt, or it is left unverifiable"
+        )
+    }
+
+    func testAHashBeingSetIsWrittenLastAndAfterItsSaltAndKdfVersion() throws {
+        let recording = RecordingKeyValueStore(service: service)
+        let store = KeychainPinStore(keychain: recording)
+
+        // `setPin`'s edit.
+        store.update { editor in
+            editor.pinHash(v: "abc")
+            editor.kdfVersion(v: KotlinInt(int: 2))
+            editor.salt(v: KotlinByteArray.from([1]))
+            PinStoreKt.clearFailureState(editor)
+        }
+
+        let writes = recording.writes
+        XCTAssertEqual(writes.last, PinAccount.hash)
+        // Also what keeps the Kotlin "missing KDF version means legacy Blake2b"
+        // branch unreachable on iOS: a stored hash always has both beside it.
+        XCTAssertLessThan(try index(of: PinAccount.salt, in: writes), try index(of: PinAccount.hash, in: writes))
+        XCTAssertLessThan(try index(of: PinAccount.kdfVersion, in: writes), try index(of: PinAccount.hash, in: writes))
+    }
+
+    func testALockoutBeingAppliedIsWrittenBeforeTheCounter() throws {
+        let recording = RecordingKeyValueStore(service: service)
+        let store = KeychainPinStore(keychain: recording)
+
+        // `recordFailedAttempt`'s edit.
+        store.update { editor in
+            editor.failedAttempts(v: KotlinInt(int: 5))
+            editor.lastFailedAt(v: KotlinLong(longLong: 1))
+            editor.lockoutUntil(v: KotlinLong(longLong: 30_000))
+        }
+
+        let writes = recording.writes
+        XCTAssertLessThan(
+            try index(of: PinAccount.lockoutUntil, in: writes),
+            try index(of: PinAccount.failedAttempts, in: writes),
+            "an interrupted failure record must still stop the guessing"
+        )
+    }
+
+    func testALockoutBeingClearedIsWrittenAfterTheCounter() throws {
+        let recording = RecordingKeyValueStore(service: service)
+        let store = KeychainPinStore(keychain: recording)
+
+        store.update { editor in
+            PinStoreKt.clearFailureState(editor)
+        }
+
+        let writes = recording.writes
+        XCTAssertGreaterThan(
+            try index(of: PinAccount.lockoutUntil, in: writes),
+            try index(of: PinAccount.failedAttempts, in: writes),
+            "the loosening write lands last, so an interruption strands nobody but an attacker"
+        )
+    }
+
+    private func index(of account: String, in writes: [String]) throws -> Int {
+        try XCTUnwrap(writes.firstIndex(of: account), "\(account) was never written")
     }
 
     // MARK: - Write failures

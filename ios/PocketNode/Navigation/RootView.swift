@@ -17,10 +17,11 @@ struct RootView: View {
 
     var body: some View {
         Group {
-            // Only a configured PIN gates anything. Before onboarding (#515)
-            // sets one there is no secret to check, so the wallet shell is
-            // shown as it was in M1 rather than behind an unusable lock.
-            if auth.state == .locked {
+            // Only a confirmed absence of a PIN opens the gate. Before
+            // onboarding (#515) sets one there is no secret to check, so the
+            // wallet shell is shown as it was in M1; a store that cannot be
+            // read is not that case and stays locked (`AuthService.isGated`).
+            if auth.isGated {
                 LockView(auth: auth)
             } else {
                 wallet
@@ -82,20 +83,29 @@ private struct AuthChallengeSheet: View {
     @State private var errorMessage: String?
     @State private var errorToken = 0
     @State private var isVerifying = false
+    @State private var ticker: Task<Void, Never>?
+
+    private var pin: PinService { auth.pin }
 
     var body: some View {
         NavigationStack {
-            PinEntryView(
-                title: "Enter PIN",
-                subtitle: challenge.reason,
-                footnote: nil,
-                error: errorMessage,
-                errorToken: errorToken,
-                isBusy: isVerifying,
-                isEnabled: !auth.pin.isLockedOut,
-                digits: $digits,
-                onComplete: { entered in Task { await submit(entered) } }
-            )
+            Group {
+                if pin.isPermanentlyLocked {
+                    permanentLock
+                } else {
+                    PinEntryView(
+                        title: "Enter PIN",
+                        subtitle: challenge.reason,
+                        footnote: pin.isLockedOut ? AuthCopy.countdown(pin.lockoutRemainingSeconds) : nil,
+                        error: errorMessage,
+                        errorToken: errorToken,
+                        isBusy: isVerifying,
+                        isEnabled: !pin.isLockedOut,
+                        digits: $digits,
+                        onComplete: { entered in Task { await submit(entered) } }
+                    )
+                }
+            }
             .padding(.horizontal, 32)
             .padding(.top, 24)
             .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
@@ -107,6 +117,20 @@ private struct AuthChallengeSheet: View {
             }
         }
         .accessibilityIdentifier("authChallenge.root")
+        .task {
+            await pin.refresh()
+            startTickerIfNeeded()
+        }
+        .onDisappear { stopTicker() }
+    }
+
+    private var permanentLock: some View {
+        Text(AuthCopy.permanentLockBody)
+            .font(.subheadline)
+            .foregroundStyle(.secondary)
+            .multilineTextAlignment(.center)
+            .padding(.top, 24)
+            .accessibilityIdentifier("authChallenge.permanent")
     }
 
     private func submit(_ entered: String) async {
@@ -117,8 +141,30 @@ private struct AuthChallengeSheet: View {
         digits = ""
         guard !granted else { return }
         errorToken += 1
-        errorMessage = auth.pin.isLockedOut
-            ? "Too many attempts. Try again in \(auth.pin.lockoutRemainingSeconds)s"
-            : "Wrong PIN. \(auth.pin.remainingAttempts) attempts remaining."
+        errorMessage = AuthCopy.pinFailure(auth: auth)
+        startTickerIfNeeded()
+    }
+
+    /// The same one-second refresh `LockView` runs, so a lockout counts down
+    /// and the pad comes back without the user cancelling out of the sheet.
+    private func startTickerIfNeeded() {
+        guard pin.isLockedOut, ticker == nil else { return }
+        ticker = Task {
+            while !Task.isCancelled {
+                try? await Task.sleep(for: .seconds(1))
+                if Task.isCancelled { return }
+                await pin.refresh()
+                if !pin.isLockedOut {
+                    errorMessage = nil
+                    stopTicker()
+                    return
+                }
+            }
+        }
+    }
+
+    private func stopTicker() {
+        ticker?.cancel()
+        ticker = nil
     }
 }

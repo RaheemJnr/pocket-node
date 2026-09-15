@@ -59,8 +59,13 @@ enum BiometricError: Error, Equatable, Sendable {
     case failed
     /// Biometry is not available on this device or is disabled by policy.
     case unavailable
-    /// Any other `LAError`, carried as its raw code for diagnostics.
+    /// An `LAError` code this app does not name, carried for diagnostics.
     case other(Int)
+    /// A failure from outside `LocalAuthentication` altogether: an error in
+    /// another domain, or none at all. Kept apart from ``failed`` because it is
+    /// not the sensor rejecting the user, it is the framework not answering, so
+    /// it should never read as "not recognised".
+    case systemError(Int)
 }
 
 /// The seam `AuthService` depends on, so its state machine can be tested
@@ -126,7 +131,10 @@ struct BiometricService: BiometricAuthenticating {
     }
 
     private static func map(_ error: Error?) -> BiometricError {
-        guard let nsError = error as NSError? else { return .failed }
+        guard let nsError = error as NSError? else { return .systemError(0) }
+        guard nsError.domain == LAError.errorDomain else {
+            return .systemError(nsError.code)
+        }
         switch LAError.Code(rawValue: nsError.code) {
         case .userCancel, .appCancel, .systemCancel: return .cancelled
         case .userFallback: return .fallbackRequested
@@ -134,7 +142,7 @@ struct BiometricService: BiometricAuthenticating {
         case .biometryNotEnrolled: return .notEnrolled
         case .authenticationFailed: return .failed
         case .biometryNotAvailable, .passcodeNotSet: return .unavailable
-        case .none: return .failed
+        case .none: return .systemError(nsError.code)
         case .some(let code): return .other(code.rawValue)
         }
     }

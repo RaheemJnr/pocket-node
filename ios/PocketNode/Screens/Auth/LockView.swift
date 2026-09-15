@@ -17,6 +17,8 @@ struct LockView: View {
     /// properties this view actually reads.
     private var pin: PinService { auth.pin }
 
+    @Environment(\.scenePhase) private var scenePhase
+
     @State private var digits = ""
     @State private var errorMessage: String?
     @State private var errorToken = 0
@@ -64,13 +66,23 @@ struct LockView: View {
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
         .accessibilityIdentifier("lock.root")
         .task {
-            await pin.refresh()
+            await auth.refresh()
             startTickerIfNeeded()
             // Offer the sensor straight away, as Android does on `AuthScreen`,
-            // so the common case is one glance rather than six taps.
+            // so the common case is one glance rather than six taps. Skipped
+            // once the PIN is permanently locked, which `canUseBiometrics`
+            // already accounts for.
             if auth.canUseBiometrics {
                 await auth.unlockWithBiometrics()
             }
+        }
+        // A store that could not be read at launch (a prewarm before the first
+        // device unlock) becomes readable once the user unlocks the phone, and
+        // the app is brought forward right after. Re-reading here is what turns
+        // an `unknown` presence into a real answer without a relaunch.
+        .onChange(of: scenePhase) { _, phase in
+            guard phase == .active else { return }
+            Task { await auth.refresh() }
         }
         .onDisappear { stopTicker() }
     }
@@ -103,10 +115,10 @@ struct LockView: View {
     /// recovery phrase, which onboarding (#515) owns.
     private var permanentLock: some View {
         VStack(spacing: 16) {
-            Text("Wallet locked")
+            Text(AuthCopy.permanentLockTitle)
                 .font(.title3.weight(.semibold))
 
-            Text("Too many incorrect PIN attempts. To regain access, reset this wallet and restore it from your recovery phrase. Your funds are safe as long as you have your recovery phrase.")
+            Text(AuthCopy.permanentLockBody)
                 .font(.subheadline)
                 .foregroundStyle(.secondary)
                 .multilineTextAlignment(.center)
@@ -118,13 +130,11 @@ struct LockView: View {
     /// The neutral status line under the dots: the countdown while locked out,
     /// otherwise how many tries are left.
     private var footnote: String? {
-        if pin.isLockedOut {
-            return "Too many attempts. Try again in \(pin.lockoutRemainingSeconds)s"
-        }
+        if pin.isLockedOut { return AuthCopy.countdown(pin.lockoutRemainingSeconds) }
         if errorMessage != nil { return nil }
         let remaining = pin.remainingAttempts
         guard remaining < PinService.maxAttempts else { return nil }
-        return remaining == 1 ? "1 attempt remaining" : "\(remaining) attempts remaining"
+        return AuthCopy.attemptsRemaining(remaining)
     }
 
     private func submit(_ entered: String) async {
@@ -141,24 +151,8 @@ struct LockView: View {
         }
 
         errorToken += 1
-        errorMessage = failureMessage()
+        errorMessage = AuthCopy.pinFailure(auth: auth)
         startTickerIfNeeded()
-    }
-
-    private func failureMessage() -> String {
-        if pin.isPermanentlyLocked {
-            return "Too many attempts. Reset and restore from your recovery phrase to regain access."
-        }
-        if pin.isLockedOut {
-            return "Too many attempts. Try again in \(pin.lockoutRemainingSeconds)s"
-        }
-        let remaining = pin.remainingAttempts
-        if remaining == 0 {
-            return "No attempts left right now. Wait for the timer, or reset and restore from your recovery phrase."
-        }
-        return remaining == 1
-            ? "Wrong PIN. 1 attempt remaining."
-            : "Wrong PIN. \(remaining) attempts remaining."
     }
 
     /// Re-reads the policy once a second so the countdown ticks down and the
