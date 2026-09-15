@@ -144,6 +144,62 @@ final class UnreadableKeyValueStore: KeyValueStoring, @unchecked Sendable {
     }
 }
 
+/// A store where reads fail for some accounts and work for others.
+///
+/// One field of the PIN state going unreadable while the rest is fine is not a
+/// contrived case: Keychain items are independent, and a partial failure is
+/// what a transient error looks like. The salt is the one that matters, because
+/// the shared policy silently replaces a `nil` one.
+final class SelectiveReadKeyValueStore: KeyValueStoring, @unchecked Sendable {
+    private let lock = NSLock()
+    private var failingAccounts: Set<String> = []
+    private let real: KeychainStore
+
+    init(service: String) {
+        self.real = KeychainStore(service: service)
+    }
+
+    func failReads(to accounts: Set<String>) {
+        lock.lock()
+        defer { lock.unlock() }
+        failingAccounts = accounts
+    }
+
+    /// Reads straight through, ignoring the failure script, so a test can check
+    /// what is really stored while reads are still being refused.
+    func rawGet(account: String) throws -> Data? {
+        try real.get(account: account)
+    }
+
+    private func shouldFail(_ account: String) -> Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        return failingAccounts.contains(account)
+    }
+
+    func set(_ data: Data, account: String) throws {
+        try real.set(data, account: account)
+    }
+
+    func get(account: String) throws -> Data? {
+        if shouldFail(account) { throw KeychainError(status: errSecInteractionNotAllowed) }
+        return try real.get(account: account)
+    }
+
+    func contains(account: String) throws -> Bool {
+        if shouldFail(account) { throw KeychainError(status: errSecInteractionNotAllowed) }
+        return try real.contains(account: account)
+    }
+
+    func delete(account: String) throws {
+        try real.delete(account: account)
+    }
+
+    func deleteAll() throws {
+        try real.deleteAll()
+    }
+}
+
 /// A store that records the order in which accounts are written, so the
 /// ordering rules in `KeychainPinStore.apply` can be asserted directly instead
 /// of inferred from fault injection.

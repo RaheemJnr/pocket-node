@@ -77,7 +77,7 @@ final class AuthServiceTests: XCTestCase {
         try await auth.setPin("123456")
         auth.isBiometricEnabled = true
 
-        await auth.removePin()
+        try await auth.removePin()
 
         XCTAssertEqual(auth.state, .noPin)
         XCTAssertFalse(auth.isBiometricEnabled)
@@ -480,6 +480,79 @@ final class AuthServiceTests: XCTestCase {
 
         XCTAssertTrue(granted)
         XCTAssertEqual(biometrics.prompts, 1)
+    }
+
+    /// F1: an unreadable store is not "no PIN is configured". Granting a
+    /// recovery phrase reveal on it would be the same hole as opening the
+    /// wallet on it.
+    func testRequireAuthDoesNotGrantOnAnUnreadableStore() async throws {
+        let first = makeAuth()
+        try await first.setPin("123456")
+
+        let unreadable = UnreadableKeyValueStore(service: keychainService)
+        let blind = AuthService(
+            pin: PinService(keychain: unreadable, cost: .testing, clock: clock.source),
+            biometrics: biometrics,
+            preferences: preferences
+        )
+        XCTAssertEqual(blind.pin.pinPresence, .unknown)
+
+        let request = Task { await blind.requireAuth(reason: "Reveal your recovery phrase") }
+        try await waitForChallenge(on: blind)
+
+        // It fell through to the PIN challenge rather than returning true. The
+        // challenge itself cannot pass either, because `verify` refuses an
+        // unreadable store.
+        let answered = await blind.answerChallenge(pin: "123456")
+        XCTAssertFalse(answered)
+        XCTAssertEqual(blind.storeMessage, AuthService.storeUnavailableMessage)
+
+        blind.resolveChallenge(granted: false)
+        let granted = await request.value
+        XCTAssertFalse(granted)
+    }
+
+    /// F2: a delete the Keychain refused leaves the PIN in place, so the app
+    /// must keep gating on it.
+    func testAFailedRemovePinLeavesTheAppLocked() async throws {
+        let scripted = ScriptedKeyValueStore(service: keychainService)
+        let auth = AuthService(
+            pin: PinService(keychain: scripted, cost: .testing, clock: clock.source),
+            biometrics: biometrics,
+            preferences: preferences
+        )
+        try await auth.setPin("123456")
+        auth.isBiometricEnabled = true
+        scripted.failDeletes(true)
+
+        do {
+            try await auth.removePin()
+            XCTFail("a refused delete must not report the PIN as removed")
+        } catch {
+            XCTAssertNotNil(error as? PinServiceError)
+        }
+
+        XCTAssertEqual(auth.pin.pinPresence, .present)
+        XCTAssertEqual(auth.state, .locked)
+        XCTAssertTrue(auth.isGated)
+        XCTAssertTrue(auth.isBiometricEnabled, "the opt-in still has a PIN to stand in for")
+    }
+
+    /// F9: the sheet is torn down with the rest of the UI when the app locks,
+    /// so a suspended request would hang with nothing left to answer it.
+    func testLockingResolvesAnOutstandingChallenge() async throws {
+        let auth = makeAuth()
+        try await auth.setPin("123456")
+
+        let request = Task { await auth.requireAuth(reason: "Reveal your recovery phrase") }
+        try await waitForChallenge(on: auth)
+
+        auth.handleScenePhase(.background)
+
+        let granted = await request.value
+        XCTAssertFalse(granted)
+        XCTAssertNil(auth.challenge, "the sheet is cleared with it")
+        XCTAssertEqual(auth.state, .locked)
     }
 
     // MARK: - Preferences

@@ -76,7 +76,7 @@ final class PinServiceTests: XCTestCase {
         try await pin.setPin("123456")
         _ = try? await pin.verify("000000")
 
-        await pin.removePin()
+        try await pin.removePin()
 
         XCTAssertFalse(pin.hasPin)
         XCTAssertEqual(KeychainPinStore.pinPresence(keychain: keychain), .absent)
@@ -337,6 +337,75 @@ final class PinServiceTests: XCTestCase {
         }
 
         XCTAssertEqual(guarded.pinPresence, .present, "the hash is stored, so the app must lock")
+    }
+
+    // MARK: - A lost salt must not destroy the PIN (F3)
+
+    /// The nastiest of the read failures. The shared policy reads a `nil` salt
+    /// as "none generated yet" and mints a replacement, which is right for a
+    /// first use and permanent data loss for a transient read error: the hash
+    /// it overwrote the salt for can never match again.
+    func testATransientSaltReadFailureDoesNotDestroyTheStoredSalt() async throws {
+        let selective = SelectiveReadKeyValueStore(service: service)
+        let guarded = PinService(keychain: selective, cost: .testing, clock: clock.source)
+        try await guarded.setPin("123456")
+        let saltBefore = try XCTUnwrap(try selective.rawGet(account: PinAccount.salt))
+
+        // The hash still reads; only the salt does not.
+        selective.failReads(to: [PinAccount.salt])
+
+        do {
+            _ = try await guarded.verify("123456")
+            XCTFail("a verify with an unreadable salt must not proceed")
+        } catch {
+            guard case .storeUnavailable = error as? PinServiceError else {
+                return XCTFail("expected storeUnavailable, got \(error)")
+            }
+        }
+
+        XCTAssertEqual(
+            try selective.rawGet(account: PinAccount.salt),
+            saltBefore,
+            "the stored salt must be exactly as it was; a replacement would be unrecoverable"
+        )
+
+        // And once reads recover, the real PIN still works.
+        selective.failReads(to: [])
+        let verified = try await guarded.verify("123456")
+        XCTAssertTrue(verified)
+    }
+
+    func testAnUnreadableHashRefusesTheVerifyRatherThanAnsweringFalse() async throws {
+        let selective = SelectiveReadKeyValueStore(service: service)
+        let guarded = PinService(keychain: selective, cost: .testing, clock: clock.source)
+        try await guarded.setPin("123456")
+        selective.failReads(to: [PinAccount.hash])
+
+        do {
+            _ = try await guarded.verify("123456")
+            XCTFail("expected a refusal, not a false")
+        } catch {
+            XCTAssertNotNil(error as? PinServiceError)
+        }
+    }
+
+    // MARK: - removePin (F2)
+
+    /// A PIN that is still stored must never be reported as gone.
+    func testRemovePinThrowsWhenADeleteIsRefused() async throws {
+        let scripted = ScriptedKeyValueStore(service: service)
+        let guarded = PinService(keychain: scripted, cost: .testing, clock: clock.source)
+        try await guarded.setPin("123456")
+        scripted.failDeletes(true)
+
+        do {
+            try await guarded.removePin()
+            XCTFail("a refused delete must not report the PIN as removed")
+        } catch {
+            XCTAssertNotNil(error as? PinServiceError)
+        }
+
+        XCTAssertEqual(guarded.pinPresence, .present)
     }
 
     // MARK: - Presence (B1)
