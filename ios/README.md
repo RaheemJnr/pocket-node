@@ -111,6 +111,41 @@ acceptance test needs testnet specifically, so it sets
 rather than the app defaulting to testnet for everyone (`NodeStatusUITests`,
 `AppContainer.applyNetworkOverrideForTestingIfPresent`).
 
+## Backup and Receive
+
+`Screens/Backup/BackupViewModel.swift` drives the recovery-phrase backup flow:
+a `gate -> display -> verify -> success` step machine mirroring Android's
+`MnemonicBackupViewModel`, simplified to iOS's one key-material shape. The
+gate calls `AuthService.requireAuth(reason:)` unless this is the verified
+onboarding hop (`isOnboarding && !hasPin()`, re-checked on every reveal so a
+stale flag can never skip the gate once a PIN exists); `WalletKeyStore.load`
+then decrypts the bundle. A raw-key wallet (no mnemonic) goes to a `.noPhrase`
+step instead of `.display`. `BackupQuiz.swift` is the pure quiz generator: 3
+distinct word positions, 4 shuffled choices each (the correct word plus 3
+distinct decoys, topped up from `Bip39.shared.WORDLIST` if the phrase itself
+cannot supply enough), driven entirely through an injectable
+`RandomNumberGenerator` so tests are deterministic. The words live in memory
+only for `.display`/`.verify`; `onBackgrounded()` (wired to `scenePhase`) wipes
+them and returns to `.gate`, the same ON_STOP re-arm Android does.
+`Screens/Backup/PrivacyShield.swift` additionally covers the phrase whenever
+the scene is not active or the screen is being captured/mirrored — a
+supplement to the wipe, not a replacement for it. `BackupView` takes the view
+model and an `onFinished` closure; it does not know how it got there or where
+it goes next.
+
+`Screens/Receive/ReceiveViewModel.swift` reads the active wallet's address for
+`NetworkPreferences.getSelectedNetwork()` and shows the Android-parity protect
+dialog ("Protect your wallet") when the wallet is an unbacked-up mnemonic
+wallet; "Back up now" calls an injected `onBackUp` closure. `Services/Qr/QrCodeGenerator.swift`
+renders the bare address (no scheme prefix, matching Android's ZXing writer)
+through CoreImage's `CIQRCodeGenerator` at correction level "M", scaling the
+vector image before rasterising so modules stay crisp with no interpolation.
+
+Both `BackupView` and `ReceiveView` are self-contained: every dependency comes
+through their view model's initializer, with no reference to `RootView` or
+`AppContainer`, so they can be previewed, tested and wired into navigation
+independently of who owns the surrounding flow.
+
 ## CI
 
 `.github/workflows/ios-ci.yml` runs on macOS runners for every PR and push to
