@@ -5,6 +5,10 @@ import com.rjnr.pocketnode.core.prefs.AppStatePreferences
 import com.rjnr.pocketnode.core.prefs.NetworkPreferences
 import com.rjnr.pocketnode.core.prefs.SyncPreferences
 import com.rjnr.pocketnode.core.prefs.UiPreferences
+import com.rjnr.pocketnode.data.gateway.AndroidLightClientApi
+import com.rjnr.pocketnode.data.gateway.JniLightClient
+import com.rjnr.pocketnode.data.gateway.LightClientApi
+import com.rjnr.pocketnode.data.gateway.NativeLightClient
 import com.rjnr.pocketnode.data.transaction.TransactionBuilder
 import com.rjnr.pocketnode.data.validation.NetworkValidator
 import com.rjnr.pocketnode.data.wallet.WalletPreferences
@@ -37,6 +41,20 @@ object SharedModule {
         networkValidator: NetworkValidator,
         logger: Logger,
     ): TransactionBuilder = TransactionBuilder(networkValidator, logger)
+
+    /**
+     * The shared light-client seam. `AndroidLightClientApi` is a pure
+     * passthrough to the JNI object, so injecting this changes nothing about
+     * how the app talks to the node; it just lets shared code do the same.
+     */
+    @Provides
+    @Singleton
+    fun provideLightClientApi(impl: AndroidLightClientApi): LightClientApi = impl
+
+    /** The raw JNI surface behind that seam; see [NativeLightClient]. */
+    @Provides
+    @Singleton
+    fun provideNativeLightClient(impl: JniLightClient): NativeLightClient = impl
 
     // --- Preference domains (#461) ---
     // One SharedPreferences-backed object behind four narrow interfaces, so a

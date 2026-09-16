@@ -41,6 +41,7 @@ byteBuddy = "1.14.17"
 # needs a query dispatcher), `test` supplies runTest. One release train, keep in step.
 coroutines = "1.10.1"
 coroutinesTest = "1.10.1"
+skie = "0.10.14"
 paging = "3.3.6"
 androidxBrowser = "1.8.0"
 
@@ -140,3 +141,4 @@ ksp = { id = "com.google.devtools.ksp", version.ref = "ksp" }
 androidx-room = { id = "androidx.room", version.ref = "room" }
 kotlin-multiplatform = { id = "org.jetbrains.kotlin.multiplatform", version.ref = "kotlin" }
 android-kotlin-multiplatform-library = { id = "com.android.kotlin.multiplatform.library", version.ref = "agp" }
+skie = { id = "co.touchlab.skie", version.ref = "skie" }

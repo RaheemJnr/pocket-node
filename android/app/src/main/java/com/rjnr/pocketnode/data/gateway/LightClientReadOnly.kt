@@ -1,6 +1,5 @@
 package com.rjnr.pocketnode.data.gateway
 
-import com.nervosnetwork.ckblightclient.LightClientNative
 import com.rjnr.pocketnode.core.log.Logger
 import com.rjnr.pocketnode.data.gateway.models.EpochInfo
 import com.rjnr.pocketnode.data.gateway.models.JniHeaderView
@@ -11,7 +10,7 @@ import javax.inject.Inject
 import javax.inject.Singleton
 
 /**
- * Read-only JNI passthroughs (#106 phase 4).
+ * Read-only light-client passthroughs (#106 phase 4).
  *
  * The NodeStatus / diagnostic surfaces and the DAO + sync paths all
  * read a small set of values straight off the light client: peers,
@@ -24,30 +23,36 @@ import javax.inject.Singleton
  * (and friends) can take this directly instead of the full
  * GatewayRepository to exercise diagnostic flows.
  *
- * All methods are `suspend` and force `Dispatchers.IO` because JNI
- * calls can block the caller's thread; the original code wrapped
+ * Reads go through [LightClientApi] rather than the JNI object
+ * directly, so the same values are reachable from shared code on
+ * iOS. The Android binding of that interface is a pure passthrough
+ * to `LightClientNative`, so behaviour here is unchanged.
+ *
+ * All methods are `suspend` and force `Dispatchers.IO` because the
+ * bridge calls block the caller's thread; the original code wrapped
  * each call in `withContext(Dispatchers.IO)` for the same reason.
  */
 @Singleton
 class LightClientReadOnly @Inject constructor(
+    private val lightClient: LightClientApi,
     private val json: Json,
     private val logger: Logger,
 ) {
 
     suspend fun getPeers(): String? = withContext(Dispatchers.IO) {
-        LightClientNative.nativeGetPeers()
+        lightClient.getPeers()
     }
 
     suspend fun getTipHeader(): String? = withContext(Dispatchers.IO) {
-        LightClientNative.nativeGetTipHeader()
+        lightClient.getTipHeader()
     }
 
     suspend fun getScripts(): String? = withContext(Dispatchers.IO) {
-        LightClientNative.nativeGetScripts()
+        lightClient.getScripts()
     }
 
     suspend fun callRpc(method: String): String? = withContext(Dispatchers.IO) {
-        LightClientNative.callRpc(method)
+        lightClient.callRpc(method)
     }
 
     /**
@@ -57,7 +62,7 @@ class LightClientReadOnly @Inject constructor(
      */
     suspend fun currentTipNumberOrZero(): Long = withContext(Dispatchers.IO) {
         try {
-            val tipStr = LightClientNative.nativeGetTipHeader() ?: return@withContext 0L
+            val tipStr = lightClient.getTipHeader() ?: return@withContext 0L
             val tip = json.decodeFromString<JniHeaderView>(tipStr)
             tip.number.removePrefix("0x").toLong(16)
         } catch (e: Exception) {
@@ -74,7 +79,7 @@ class LightClientReadOnly @Inject constructor(
      */
     suspend fun getCurrentEpoch(): Result<EpochInfo> = withContext(Dispatchers.IO) {
         runCatching {
-            val headerJson = LightClientNative.nativeGetTipHeader()
+            val headerJson = lightClient.getTipHeader()
                 ?: throw Exception("Failed to get tip header")
             val header = json.decodeFromString<JniHeaderView>(headerJson)
             EpochInfo.fromHex(header.epoch)

@@ -4,6 +4,7 @@ plugins {
     alias(libs.plugins.kotlin.serialization)
     alias(libs.plugins.ksp)
     alias(libs.plugins.androidx.room)
+    alias(libs.plugins.skie)
 }
 
 kotlin {
@@ -108,6 +109,39 @@ dependencies {
 
 room {
     schemaDirectory("$projectDir/schemas")
+}
+
+/**
+ * SKIE's Flow bridging is what the M3 engines want; its enum rewriting and its
+ * telemetry are not.
+ *
+ * Analytics are off. SKIE collects and uploads a build profile by default:
+ * `build/skie/**/analytics/` was found holding the machine and chip model, the
+ * repository's commit and contributor counts, and the Gradle and compiler
+ * environment. None of that leaves a contributor's machine for this project.
+ *
+ * `EnumInterop` republishes Kotlin enums as Swift enums, which drops `entries`
+ * and renames every case, breaking the M2 preferences code that reads
+ * `SyncMode.entries` and `.theNewWallet`. Turned off so the existing Swift keeps
+ * compiling; sealed-class interop is off for the same reason, since nothing on
+ * the Swift side asks for it yet.
+ */
+skie {
+    analytics {
+        enabled.set(false)
+    }
+
+    features {
+        group {
+            co.touchlab.skie.configuration.EnumInterop.Enabled(false)
+            // Inert while enum interop is disabled above, and kept only so that
+            // turning it back on cannot silently rename every case: it is what
+            // holds `SyncMode.theNewWallet` to its Kotlin/Native spelling
+            // instead of SKIE's `.newWallet`.
+            co.touchlab.skie.configuration.EnumInterop.LegacyCaseName(true)
+            co.touchlab.skie.configuration.SealedInterop.Enabled(false)
+        }
+    }
 }
 
 // MockK uses ByteBuddy. On JDK 21+ self-attach is restricted (JEP 451), so the agent is

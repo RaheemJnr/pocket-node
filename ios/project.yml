@@ -74,6 +74,10 @@ targets:
       base:
         SWIFT_VERSION: "6.0"
         GENERATE_INFOPLIST_FILE: YES
+        # The tests import PocketNodeCore for the shared protocols. Only the
+        # module map is needed here: the framework is static and already linked
+        # into the host app, which the bundle loads its symbols from.
+        FRAMEWORK_SEARCH_PATHS: $(inherited) $(SRCROOT)/../android/shared/build/xcode-frameworks/$(CONFIGURATION)/$(SDK_NAME)
 
   PocketNodeUITests:
     type: bundle.ui-testing

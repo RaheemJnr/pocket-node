@@ -1,7 +1,6 @@
 package com.rjnr.pocketnode.data.gateway
 
 import android.content.Context
-import com.nervosnetwork.ckblightclient.LightClientNative
 import com.rjnr.pocketnode.core.log.Logger
 import com.rjnr.pocketnode.core.prefs.NetworkPreferences
 import com.rjnr.pocketnode.data.gateway.models.NetworkType
@@ -24,8 +23,8 @@ import javax.inject.Singleton
  *
  *  1. the on-disk layout: the one-time `data/` to `data/mainnet/` migration
  *     and the per-network TOML config copied out of `assets` into `filesDir`;
- *  2. the JNI bring-up: `nativeInit` / `nativeStart` with retry, plus the
- *     status callback that feeds [nodeStatus];
+ *  2. the node bring-up: [LightClientApi.init] / [LightClientApi.start] with
+ *     retry, plus the status listener that feeds [nodeStatus];
  *  3. the selected network ([network], [currentNetwork]) and the
  *     restart-based [switchNetwork].
  *
@@ -40,6 +39,7 @@ import javax.inject.Singleton
 @Singleton
 class NodeLifecycle @Inject constructor(
     @ApplicationContext private val context: Context,
+    private val lightClient: LightClientApi,
     private val networkPreferences: NetworkPreferences,
     private val cacheManager: CacheManager,
     private val daoSyncManager: DaoSyncManager,
@@ -172,10 +172,13 @@ class NodeLifecycle @Inject constructor(
             for (attempt in 1..maxRetries) {
                 logger.d(TAG, "JNI init attempt $attempt/$maxRetries...")
 
-                val initResult = LightClientNative.nativeInit(
+                // dataDir is empty because Android bakes the store and network
+                // paths into the TOML above; only iOS needs the override.
+                val initResult = lightClient.init(
                     configFile.absolutePath,
-                    object : LightClientNative.StatusCallback {
-                        override fun onStatusChange(status: String, data: String) {
+                    "",
+                    object : LightClientStatusListener {
+                        override fun onStatusChanged(status: String, data: String) {
                             logger.d(TAG, "Native Status Change: $status")
                             _nodeStatus.value = status
                         }
@@ -192,7 +195,7 @@ class NodeLifecycle @Inject constructor(
                     return
                 }
 
-                val startResult = LightClientNative.nativeStart()
+                val startResult = lightClient.start()
                 if (startResult) {
                     logger.d(TAG, "Node started successfully on ${targetNetwork.name} (attempt $attempt)")
                     _nodeReady.value = true

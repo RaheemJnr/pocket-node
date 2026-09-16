@@ -32,6 +32,20 @@ final class AppContainer {
     /// Session state and the lock gate. `RootView` reads it.
     let auth: AuthService
 
+    /// The shared `LightClientApi` seam, bound to the UniFFI bridge. Nothing
+    /// consumes it yet; the M3 sync and send engines in `shared` take it as a
+    /// constructor parameter, the way `di/SharedModule.kt` hands them the
+    /// Android binding.
+    ///
+    /// This container is `@MainActor`, so the property is main-actor isolated
+    /// even though the object it holds is not. Every call on it blocks, some
+    /// for seconds, and none of them may run on the main actor: read the
+    /// property once on the main actor and hand the reference to whatever
+    /// background context will use it. That is safe because
+    /// `UniffiLightClientApi` is `@unchecked Sendable` - it owns nothing but a
+    /// logger, and the Rust side is internally synchronised.
+    let lightClientApi: UniffiLightClientApi
+
     /// Kept in sync with the system color scheme by `RootView`.
     var theme: Theme = .light
 
@@ -42,6 +56,7 @@ final class AppContainer {
         Self.applyNetworkOverrideForTestingIfPresent(preferences: preferences)
         self.walletStore = WalletStore()
         self.lightClient = LightClientService(network: preferences.getSelectedNetwork())
+        self.lightClientApi = UniffiLightClientApi()
 
         let keychain = KeychainStore()
         let wrapper = SecureEnclaveKeyWrapper()
