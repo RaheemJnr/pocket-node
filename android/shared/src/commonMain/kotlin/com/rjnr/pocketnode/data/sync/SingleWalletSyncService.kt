@@ -265,35 +265,21 @@ class SingleWalletSyncService(
 
     /**
      * The start block for [mode], with the two safety clamps
-     * `GatewayRepository.registerAccount` applies after `toFromBlock`.
-     *
-     * A height above the tip would register a filter that can never match, and
-     * is reachable from the sheet's custom-height field. A height of zero on a
-     * mode that did not ask for genesis means the tip was still unknown, and
-     * the network's checkpoint is a far better guess than block 0.
+     * `GatewayRepository.registerAccount` applies after `toFromBlock`. The rule
+     * itself is [clampStartBlock]; only the logging is here.
      */
     private fun startBlockFor(mode: SyncMode, customBlockHeight: Long?, tipHeight: Long): Long {
         val calculated = engine
             .startBlockFor(mode, network, tipHeight, customBlockHeight)
             .toLongOrNull() ?: 0L
-        val checkpoint = getCheckpoint(network)
-        return when {
-            tipHeight > 0 && calculated > tipHeight -> {
-                val recent = (tipHeight - 200_000L).coerceAtLeast(0L)
-                logger.w(
-                    TAG,
-                    "start block $calculated is past the tip $tipHeight; using $recent instead"
-                )
-                recent
-            }
-
-            calculated == 0L && mode != SyncMode.FULL_HISTORY && checkpoint > 0L -> {
-                logger.d(TAG, "start block resolved to 0 for $mode; using checkpoint $checkpoint")
-                checkpoint
-            }
-
-            else -> calculated
+        val clamped = clampStartBlock(calculated, mode, tipHeight, network)
+        if (clamped != calculated) {
+            logger.w(
+                TAG,
+                "start block $calculated adjusted to $clamped for $mode (tip=$tipHeight)"
+            )
         }
+        return clamped
     }
 
     /**
@@ -455,5 +441,36 @@ class SingleWalletSyncService(
 
     companion object {
         private const val TAG = "SingleWalletSyncService"
+    }
+}
+
+/**
+ * The two safety clamps [SingleWalletSyncService.registerWallet] applies to the
+ * block [toFromBlock][com.rjnr.pocketnode.data.gateway.models.toFromBlock]
+ * calculated, the same pair `GatewayRepository.registerAccount` applies on
+ * Android.
+ *
+ * A height above the tip would register a filter that can never match, and is
+ * reachable from the sync sheet's custom-height field; it falls back to the
+ * last 200,000 blocks. A height of zero on a mode that did not ask for genesis
+ * means the tip was still unknown, and the network's checkpoint is a far better
+ * guess than block 0.
+ *
+ * Top-level and public so both platforms can assert the rule directly rather
+ * than through a registration: the iOS parity suite
+ * (`ios/PocketNodeTests/Parity/M3ParityTests.swift`) calls this, and
+ * `M3ParityFixtures` records the table both sides check.
+ */
+fun clampStartBlock(
+    calculated: Long,
+    mode: SyncMode,
+    tipHeight: Long,
+    network: NetworkType,
+): Long {
+    val checkpoint = getCheckpoint(network)
+    return when {
+        tipHeight > 0 && calculated > tipHeight -> (tipHeight - 200_000L).coerceAtLeast(0L)
+        calculated == 0L && mode != SyncMode.FULL_HISTORY && checkpoint > 0L -> checkpoint
+        else -> calculated
     }
 }

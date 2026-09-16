@@ -25,6 +25,18 @@ struct SendView: View {
     /// ``prefillForTestingIfRequested()``.
     var isSeededTestWallet = false
 
+    /// What the amount field is showing, as opposed to what the model kept.
+    ///
+    /// The field is bound to this rather than straight to the view model
+    /// because a `Binding` whose setter sanitises cannot correct the field it
+    /// is bound to: SwiftUI pushes a new string down only when the binding's
+    /// value differs from the one it last rendered, and dropping a ninth
+    /// decimal gives back exactly the string the previous keystroke already
+    /// rendered. The extra character the user typed would then stay on screen
+    /// while the amount behind it was already truncated, which is a screen
+    /// saying one number and a send meaning another. See ``syncAmount(_:)``.
+    @State private var amountText = ""
+
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 16) {
@@ -167,7 +179,7 @@ struct SendView: View {
                 .font(.footnote.weight(.medium))
 
             HStack(spacing: 8) {
-                TextField("Enter Amount", text: amountBinding)
+                TextField("Enter Amount", text: $amountText)
                     .keyboardType(.decimalPad)
                     .disabled(model.isBusy)
                     .accessibilityIdentifier("send.amount")
@@ -193,6 +205,38 @@ struct SendView: View {
             Text("Min: 61 CKB · Max 8 decimal places")
                 .font(.caption)
                 .foregroundStyle(.tertiary)
+        }
+        // Typing: the model sanitises, and the field is corrected when it
+        // disagrees.
+        .onChange(of: amountText) { _, typed in syncAmount(typed) }
+        // Everything that sets the amount without a keystroke: MAX, the debug
+        // drive hooks, and the clear a confirmed send does. `initial: true`
+        // also seeds the mirror, so a view rebuilt with a new identity over a
+        // view model that already holds an amount does not blank the field.
+        .onChange(of: model.amount, initial: true) { _, kept in
+            if amountText != kept { amountText = kept }
+        }
+    }
+
+    /// Hands a keystroke to the model and corrects the field if the model kept
+    /// something else.
+    ///
+    /// The correction is deferred by one main-actor turn rather than applied
+    /// inline. SwiftUI is in the middle of processing the change that brought
+    /// us here, and writing the state it is already reading would either be
+    /// coalesced away or be an "modifying state during view update" warning;
+    /// a turn later it is an ordinary state change and the field redraws.
+    ///
+    /// It cannot loop: the deferred write puts `amountText` at exactly the
+    /// value the model kept, so the `onChange` it triggers hands the model a
+    /// string it answers with unchanged, and this returns early.
+    @MainActor
+    private func syncAmount(_ typed: String) {
+        model.updateAmount(typed)
+        let kept = model.amount
+        guard kept != typed else { return }
+        Task { @MainActor in
+            if amountText != kept { amountText = kept }
         }
     }
 
@@ -331,14 +375,14 @@ struct SendView: View {
     // MARK: - Bindings
 
     /// Routed through the view model rather than bound straight to its
-    /// properties, so the sanitiser and the fee recalculation run on every
-    /// keystroke exactly as Android's `updateAmount` does.
+    /// property, so the address indicator is recomputed on every keystroke
+    /// exactly as Android's `updateRecipient` does.
+    ///
+    /// A plain setter binding is enough here where the amount needs a mirror
+    /// (see ``amountText``): nothing rewrites what was typed into this field,
+    /// so the field and the model can never end up holding different strings.
     private var recipientBinding: Binding<String> {
         Binding(get: { model.recipient }, set: { model.updateRecipient($0) })
-    }
-
-    private var amountBinding: Binding<String> {
-        Binding(get: { model.amount }, set: { model.updateAmount($0) })
     }
 
     private var reviewBinding: Binding<Bool> {
