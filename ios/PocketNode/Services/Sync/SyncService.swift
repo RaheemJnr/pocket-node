@@ -48,6 +48,31 @@ struct SyncStatus: Equatable {
     var fraction: Double { min(max(percentage / 100, 0), 1) }
 }
 
+/// The wallet's spendable balance, as the UI draws it.
+///
+/// `shannons` rather than a `Double` of CKB all the way to the text: 21 billion
+/// CKB is 2.1e18 shannons, far past where a `Double` stops representing a
+/// shannon exactly, and a balance that is off by a shannon is a balance a user
+/// cannot reconcile. The string comes from the shared `formatCkbBalance`.
+///
+/// `isCached` marks the value the balance cache answered with before the cell
+/// walk finished. It is a real balance, only possibly a few blocks old, so the
+/// screen shows it rather than a spinner and says where it came from.
+struct BalanceStatus: Equatable {
+    var shannons: Int64 = 0
+    var isCached: Bool = false
+
+    /// False until the first read of any kind lands, which is what lets Home
+    /// tell "nothing yet" from "zero".
+    var hasValue: Bool = false
+
+    /// `"12,345.60"`, formatted by the shared core. No `CKB` suffix: the view
+    /// decides how the unit is set.
+    var formatted: String {
+        formatCkbBalance(shannons: shannons, groupSeparator: ",", decimalSeparator: ".")
+    }
+}
+
 /// What a Home view model needs from the sync layer.
 ///
 /// `SyncService` owns Kotlin objects and a live database, so a test that only
@@ -60,11 +85,18 @@ protocol SyncStatusProviding: AnyObject {
     var isRegistered: Bool { get }
     var lastError: String? { get }
 
+    /// The wallet's spendable balance, cached-first.
+    var balance: BalanceStatus { get }
+
     func choose(mode: SyncMode, customBlockHeight: Int64?) async -> Bool
 
     /// Run activation again for the wallet already handed over. What the sync
     /// card's Retry does after the node failed to start.
     func retry()
+
+    /// Re-read the balance. Home calls it on appear; the poll loop calls it
+    /// after every reading that moved.
+    func refreshBalance()
 }
 
 /// Owns the shared chain-sync stack and the database behind it.
@@ -84,6 +116,7 @@ final class SyncService: SyncStatusProviding {
     private(set) var isRegistered = false
     private(set) var mode: SyncMode?
     private(set) var lastError: String?
+    private(set) var balance = BalanceStatus()
 
     private let lightClient: LightClientService
     private let preferences: UserDefaultsPreferences
@@ -94,6 +127,11 @@ final class SyncService: SyncStatusProviding {
     /// the DAO, and letting the database go would close the file under it.
     private let database: PocketNodeCoreDatabase
     private let service: SingleWalletSyncService
+
+    /// The activity list's and the balance's read path. Owned here because it
+    /// shares this object's database, coordinator and engine: a second copy
+    /// would open a second connection and run a second rescue-rescan ledger.
+    let activity: ActivityFeed
 
     /// The wallet handed to ``activate(wallet:force:)``. Kept so a second call
     /// for the same wallet is a no-op rather than a second registration, and so
@@ -110,6 +148,18 @@ final class SyncService: SyncStatusProviding {
     @ObservationIgnored private nonisolated(unsafe) var observation: Task<Void, Never>?
     @ObservationIgnored private nonisolated(unsafe) var registrationObservation: Task<Void, Never>?
     @ObservationIgnored private nonisolated(unsafe) var activation: Task<Void, Never>?
+    @ObservationIgnored private nonisolated(unsafe) var cachedBalanceObservation: Task<Void, Never>?
+
+    /// The one balance read in flight, if any. One at a time: the read walks
+    /// every cell page and takes seconds on a wallet with history, and a
+    /// second concurrent walk would duplicate that work for the same answer.
+    @ObservationIgnored private nonisolated(unsafe) var balanceRead: Task<Void, Never>?
+
+    /// The active wallet's address and lock script on the selected network,
+    /// resolved once in ``activate(wallet:force:)``. The balance read needs
+    /// both, and `ActiveWallet` carries only the script args.
+    @ObservationIgnored private var activeAddress: String?
+    @ObservationIgnored private var activeScript: Script?
 
     /// - Parameter api: the shared `LightClientApi` seam, taken separately from
     ///   `lightClient` because that one publishes UI state on the main actor
@@ -136,12 +186,26 @@ final class SyncService: SyncStatusProviding {
         )
         let progressStore = RoomKmpSyncProgressStore(dao: database.syncProgress())
         let registry = InMemoryWalletRegistry()
+        // The three tables #9 added. `transactionStore` is what used to be
+        // `EmptyTransactionStore`: the coordinator reads cached block numbers
+        // from it to anchor a candidate scan, and now there are some.
+        let transactionStore = RoomKmpTransactionStore(
+            dao: database.transactions(),
+            logger: log,
+            clock: SystemClock.shared
+        )
+        let broadcastStore = RoomKmpPendingBroadcastStore(dao: database.pendingBroadcasts())
+        let balanceStore = RoomKmpBalanceCache(
+            dao: database.balanceCache(),
+            logger: log,
+            clock: SystemClock.shared
+        )
 
         let coordinator = SyncCoordinator(
             walletRegistry: registry,
             syncProgressStore: progressStore,
             subAccountCandidateStore: EmptySubAccountCandidateStore.shared,
-            transactionStore: EmptyTransactionStore.shared,
+            transactionStore: transactionStore,
             lightClient: api,
             syncPreferences: preferences,
             json: runtime.json,
@@ -168,13 +232,44 @@ final class SyncService: SyncStatusProviding {
             scopeContext: runtime.defaultContext
         )
 
+        // The read path. `InMemoryHeaderCache` rather than a fourth table: a
+        // block header never changes, so losing the map at launch costs one
+        // extra walk. `EmptySubAccountCandidateStore` for the same reason it
+        // is passed to the coordinator, this profile derives one address.
+        let ledger = LedgerReader(
+            lightClient: api,
+            balanceCache: balanceStore,
+            transactionStore: transactionStore,
+            headerCache: InMemoryHeaderCache(maxEntries: InMemoryHeaderCache.companion.MAX_ENTRIES),
+            walletRegistry: registry,
+            candidates: EmptySubAccountCandidateStore.shared,
+            syncPreferences: preferences,
+            uiPreferences: preferences,
+            json: runtime.json,
+            logger: log,
+            queryContext: runtime.defaultContext
+        )
+        self.activity = ActivityFeed(
+            ledger: ledger,
+            transactions: transactionStore,
+            pendingBroadcasts: broadcastStore,
+            balanceCache: balanceStore,
+            coordinator: coordinator,
+            engine: engine,
+            uiPreferences: preferences,
+            clock: SystemClock.shared,
+            scopeContext: runtime.defaultContext
+        )
+
         observe()
     }
 
     deinit {
         observation?.cancel()
         registrationObservation?.cancel()
+        cachedBalanceObservation?.cancel()
         activation?.cancel()
+        balanceRead?.cancel()
     }
 
     // MARK: - Observation
@@ -197,13 +292,37 @@ final class SyncService: SyncStatusProviding {
         observation = Task { @MainActor [weak self] in
             for await progress in progressFlow {
                 guard self != nil else { return }
-                self?.status = SyncStatus(progress)
+                let next = SyncStatus(progress)
+                let previous = self?.status ?? SyncStatus()
+                self?.status = next
+                // A poll tick that moved the chain is the cheapest trigger
+                // there is for a re-read: the balance can only have changed if
+                // a block the wallet is registered for was processed. A tick
+                // that reports the same numbers reads nothing, which is what
+                // keeps an idle wallet from walking its cells every 5 seconds.
+                if next.syncedToBlock != previous.syncedToBlock
+                    || next.tipBlockNumber != previous.tipBlockNumber {
+                    self?.refreshBalance()
+                }
             }
         }
         registrationObservation = Task { @MainActor [weak self] in
             for await registered in registrationFlow {
                 guard self != nil else { return }
                 self?.isRegistered = registered.boolValue
+            }
+        }
+        // The cache-first half of the balance read. The shared feed publishes
+        // here before it walks a single cell, which is the whole point: the
+        // number on screen is the last one computed, not a spinner.
+        let cachedFlow = activity.cachedBalance
+        cachedBalanceObservation = Task { @MainActor [weak self] in
+            for await cached in cachedFlow {
+                guard let self, let cached else { continue }
+                // A live read that has already landed wins. The cached value is
+                // by definition the older of the two.
+                guard !self.balance.hasValue || self.balance.isCached else { continue }
+                self.publish(cached, isCached: true)
             }
         }
     }
@@ -220,7 +339,10 @@ final class SyncService: SyncStatusProviding {
     func shutdown() {
         observation?.cancel()
         registrationObservation?.cancel()
+        cachedBalanceObservation?.cancel()
         activation?.cancel()
+        balanceRead?.cancel()
+        activity.close()
         service.close()
         database.close()
     }
@@ -253,6 +375,14 @@ final class SyncService: SyncStatusProviding {
         guard force || activeWalletId != wallet.id else { return }
         activeWalletId = wallet.id
         activeWallet = wallet
+        activeAddress = address
+        activeScript = script
+        // Points the feed's broadcast flow at this wallet. Safe before the node
+        // is up: it is a database subscription, not a bridge call.
+        activity.observeBroadcasts(walletId: wallet.id, network: network)
+        // The cached balance is a real number that is already on disk, so it
+        // goes up before the node has started rather than after the first poll.
+        loadCachedBalance(walletId: wallet.id)
 
         service.setWallet(
             wallet: ActiveWallet(address: address, scriptArgs: script.args),
@@ -319,6 +449,68 @@ final class SyncService: SyncStatusProviding {
     func retry() {
         guard let activeWallet else { return }
         activate(wallet: activeWallet, force: true)
+    }
+
+    // MARK: - Balance
+
+    /// Re-read the wallet's spendable balance.
+    ///
+    /// The shared `ActivityFeed.refreshBalance` is Android's `refreshBalance`
+    /// with the repository's own two side effects moved out to the caller: the
+    /// cached value arrives through the `onCached` closure and is published
+    /// here, and the freshly computed one is published here too. The feed does
+    /// the caching write, the rescue-rescan bookkeeping and the partial
+    /// re-registration itself.
+    ///
+    /// A failure is deliberately quiet. The balance is a read that the next
+    /// poll tick will run again in seconds, and a wallet whose node has not
+    /// found peers yet would otherwise put an error under the sync card that
+    /// says nothing the card is not already saying.
+    func refreshBalance() {
+        guard let walletId = activeWalletId, let address = activeAddress else { return }
+        // One at a time: a cell walk takes seconds, and the poll ticks faster
+        // than that on a catching-up wallet.
+        guard balanceRead == nil else { return }
+        let feed = activity
+        let script = activeScript
+        let net = network
+        balanceRead = Task { @MainActor [weak self] in
+            defer { self?.balanceRead = nil }
+            do {
+                let response = try await feed.refreshBalance(
+                    address: address,
+                    script: script,
+                    network: net,
+                    walletId: walletId
+                )
+                guard !Task.isCancelled else { return }
+                self?.publish(response, isCached: false)
+            } catch {
+                self?.logger.error(
+                    "balance read failed: \(error.localizedDescription, privacy: .public)"
+                )
+            }
+        }
+    }
+
+    /// The last balance written to the cache, published without touching the
+    /// node. What Home draws between launch and the first live read.
+    ///
+    /// It only publishes through the `cachedBalance` flow observed in
+    /// ``observe()``, so a live read that has already landed is not overwritten
+    /// by an older cached one: the flow's mirror checks for that.
+    private func loadCachedBalance(walletId: String) {
+        let feed = activity
+        let net = network
+        Task { _ = try? await feed.primeCachedBalance(walletId: walletId, network: net) }
+    }
+
+    private func publish(_ response: BalanceResponse, isCached: Bool) {
+        balance = BalanceStatus(
+            shannons: response.capacityAsLong(),
+            isCached: isCached,
+            hasValue: true
+        )
     }
 
     private func reregister() async {

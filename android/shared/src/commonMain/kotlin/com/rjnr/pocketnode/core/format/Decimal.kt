@@ -65,6 +65,39 @@ internal fun shannonsToCkbString(shannons: Long): String =
         .trimEnd('0')
         .trimEnd('.')
 
+/**
+ * A wallet balance as the home screen shows it: exactly two fraction digits and
+ * grouped thousands, e.g. `1_234_560_000_000` -> `"12,345.60"`.
+ *
+ * The same output as the Android home card's
+ * `String.format(Locale.US, "%,.2f CKB", balanceCkb)`, minus its trip through a
+ * `Double`. 21 billion CKB is 2.1e18 shannons, comfortably inside `Long` but
+ * well past the 2^53 where a `Double` stops representing shannons exactly, so
+ * the balance is formatted from the integer all the way down.
+ *
+ * [groupSeparator] and [decimalSeparator] are parameters rather than a locale
+ * lookup: `commonMain` has no locale API, and the wallet renders one canonical
+ * form today. A platform that wants its own can pass them.
+ */
+fun formatCkbBalance(
+    shannons: Long,
+    groupSeparator: String = ",",
+    decimalSeparator: String = ".",
+): String {
+    val fixed = formatFixedPoint(shannons, scaleDigits = 8, decimals = 2)
+    val negative = fixed.startsWith("-")
+    val unsigned = if (negative) fixed.substring(1) else fixed
+    val whole = unsigned.substringBefore('.')
+    val fraction = unsigned.substringAfter('.')
+    val grouped = buildString {
+        whole.forEachIndexed { index, digit ->
+            if (index > 0 && (whole.length - index) % 3 == 0) append(groupSeparator)
+            append(digit)
+        }
+    }
+    return (if (negative) "-" else "") + grouped + decimalSeparator + fraction
+}
+
 /** Adds one to a decimal digit string, growing it on overflow ("99" -> "100"). */
 private fun incrementDigits(digits: String): String {
     val chars = digits.toCharArray()

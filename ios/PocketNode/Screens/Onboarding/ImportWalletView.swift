@@ -157,6 +157,13 @@ struct ImportWalletView: View {
     }
 
     private func isBad(_ index: Int) -> Bool {
+        // Bounds-checked rather than subscripted directly. `enteredWords`
+        // tracks the word-count picker, so switching 24 to 12 shortens it
+        // while SwiftUI can still evaluate the bodies of rows 12 to 23 with
+        // the indices they were built with. Indexing there traps
+        // (`Array._checkSubscript`), which is exactly how the activity list
+        // crashed. An index that is gone is not a bad word, it is no word.
+        guard enteredWords.indices.contains(index) else { return false }
         let word = enteredWords[index]
         return !word.isEmpty && !WalletCreator.isWord(word)
     }

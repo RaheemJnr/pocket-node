@@ -42,6 +42,7 @@ final class HomeViewModel {
     /// view's `onAppear`, which covers both the first draw and coming back
     /// from a pushed screen.
     func refresh() {
+        refreshBalance()
         guard let record = walletStore.load() else {
             walletName = ""
             address = ""
@@ -86,6 +87,32 @@ final class HomeViewModel {
 
     /// The last sync failure worth telling the user about.
     var syncError: String? { sync?.lastError }
+
+    // MARK: - Balance
+
+    /// The wallet's spendable balance, cached-first.
+    var balance: BalanceStatus { sync?.balance ?? BalanceStatus() }
+
+    /// The balance as the card draws it, e.g. `"12,345.60 CKB"`.
+    ///
+    /// Formatted by the shared core from shannons, never through a Swift
+    /// `Double`: a balance the user cannot reconcile against an explorer is
+    /// worse than no balance.
+    var balanceText: String { "\(balance.formatted) CKB" }
+
+    /// True while the number on screen came out of the cache and the live read
+    /// has not answered yet. The card puts a quiet line under the number.
+    var isBalanceCached: Bool { balance.hasValue && balance.isCached }
+
+    /// False until any balance read lands, which is what lets the card tell
+    /// "nothing yet" from a real zero.
+    var hasBalance: Bool { balance.hasValue }
+
+    /// Re-read the balance. The view calls it on appear; the sync poll calls it
+    /// itself after every reading that moved.
+    func refreshBalance() {
+        sync?.refreshBalance()
+    }
 
     /// Run sync activation again. What the card's Retry does after the light
     /// client failed to start.

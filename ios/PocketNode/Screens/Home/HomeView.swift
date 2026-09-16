@@ -10,6 +10,7 @@ struct HomeView: View {
     let model: HomeViewModel
     let theme: Theme
     let onReceive: () -> Void
+    let onActivity: () -> Void
     let onBackUp: () -> Void
 
     /// Whether the sync-mode sheet is up. Both the "choose" button on a wallet
@@ -28,7 +29,7 @@ struct HomeView: View {
                 backupBanner
             }
 
-            receiveButton
+            actionButtons
 
             Spacer(minLength: 0)
         }
@@ -68,10 +69,8 @@ struct HomeView: View {
                 .foregroundStyle(.secondary)
                 .accessibilityIdentifier("home.address")
 
-            Text("Balance and activity arrive in the next milestone. The embedded light client is already running underneath.")
-                .font(.footnote)
-                .foregroundStyle(.secondary)
-                .padding(.top, 4)
+            balance
+                .padding(.top, 8)
         }
         .frame(maxWidth: .infinity, alignment: .leading)
         .padding()
@@ -80,6 +79,35 @@ struct HomeView: View {
             RoundedRectangle(cornerRadius: 16)
                 .stroke(theme.primary.opacity(0.35), lineWidth: 1)
         )
+    }
+
+    /// The spendable balance, or a placeholder until the first read lands.
+    ///
+    /// The cached hint is deliberately quiet. A cached balance is a real
+    /// balance that is at most a few blocks old, so it is the number to show;
+    /// what the line adds is that a fresher one is on its way, which matters
+    /// right after a transaction confirms.
+    @ViewBuilder
+    private var balance: some View {
+        VStack(alignment: .leading, spacing: 2) {
+            if model.hasBalance {
+                Text(model.balanceText)
+                    .font(.largeTitle.weight(.bold).monospacedDigit())
+                    .accessibilityIdentifier("home.balance")
+            } else {
+                Text("Reading your balance")
+                    .font(.subheadline)
+                    .foregroundStyle(.secondary)
+                    .accessibilityIdentifier("home.balance")
+            }
+
+            if model.isBalanceCached {
+                Text("Last known balance, checking for a newer one")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .accessibilityIdentifier("home.balanceCached")
+            }
+        }
     }
 
     // MARK: - Sync
@@ -259,14 +287,25 @@ struct HomeView: View {
         .accessibilityIdentifier("home.backupBanner")
     }
 
-    // MARK: - Receive
+    // MARK: - Actions
 
-    private var receiveButton: some View {
-        Button(action: onReceive) {
-            Label("Receive", systemImage: "qrcode")
-                .frame(maxWidth: .infinity)
+    /// Receive and Activity side by side. Android reaches both from its home
+    /// screen too; send and DAO join them in M4.
+    private var actionButtons: some View {
+        HStack(spacing: 12) {
+            Button(action: onReceive) {
+                Label("Receive", systemImage: "qrcode")
+                    .frame(maxWidth: .infinity)
+            }
+            .buttonStyle(.borderedProminent)
+            .accessibilityIdentifier("home.receive")
+
+            Button(action: onActivity) {
+                Label("Activity", systemImage: "list.bullet")
+                    .frame(maxWidth: .infinity)
+            }
+            .buttonStyle(.bordered)
+            .accessibilityIdentifier("home.activity")
         }
-        .buttonStyle(.borderedProminent)
-        .accessibilityIdentifier("home.receive")
     }
 }

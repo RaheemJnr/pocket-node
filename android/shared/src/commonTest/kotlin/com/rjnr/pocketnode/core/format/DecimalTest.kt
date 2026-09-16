@@ -93,4 +93,45 @@ class DecimalTest {
         assertEquals("0.5", shannonsToCkbString(50_000_000L))
         assertEquals("-92233720368.54775808", shannonsToCkbString(Long.MIN_VALUE))
     }
+
+    // --- formatCkbBalance ---
+
+    @Test
+    fun formatsAWalletBalanceWithTwoDecimalsAndGroupedThousands() {
+        // The same output as the Android home card's "%,.2f CKB", minus the
+        // trip through a Double.
+        assertEquals("0.00", formatCkbBalance(0L))
+        assertEquals("61.00", formatCkbBalance(6_100_000_000L))
+        assertEquals("1,234.56", formatCkbBalance(123_456_000_000L))
+        assertEquals("12,345.60", formatCkbBalance(1_234_560_000_000L))
+        assertEquals("100.00", formatCkbBalance(10_000_000_000L))
+    }
+
+    @Test
+    fun roundsHalfAwayFromZeroLikeTheAndroidFormatter() {
+        assertEquals("0.01", formatCkbBalance(500_000L))
+        assertEquals("0.00", formatCkbBalance(499_999L))
+    }
+
+    @Test
+    fun formatsBalancesPastTheDoublePrecisionLimit() {
+        // 21 billion CKB, more than the whole supply, is 2.1e18 shannons: well
+        // inside Long and well past 2^53, where a Double stops representing a
+        // shannon exactly.
+        assertEquals("21,000,000,000.00", formatCkbBalance(2_100_000_000_000_000_000L))
+        assertEquals("92,233,720,368.55", formatCkbBalance(Long.MAX_VALUE))
+    }
+
+    @Test
+    fun keepsTheSignOnANegativeBalance() {
+        assertEquals("-61.00", formatCkbBalance(-6_100_000_000L))
+    }
+
+    @Test
+    fun takesItsSeparatorsFromTheCaller() {
+        assertEquals(
+            "12.345,60",
+            formatCkbBalance(1_234_560_000_000L, groupSeparator = ".", decimalSeparator = ","),
+        )
+    }
 }

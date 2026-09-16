@@ -5,6 +5,8 @@ import SwiftUI
 enum Route: Hashable {
     case nodeStatus
     case receive
+    /// The wallet's transaction history (#9). Send and DAO arrive with M4.
+    case activity
     /// The recovery-phrase backup flow outside onboarding, so behind the
     /// re-auth gate. Onboarding shows the same screen inside its own flow.
     case backup
@@ -141,7 +143,31 @@ struct RootView: View {
                 .navigationDestination(for: Route.self) { route in
                     destination(for: route)
                 }
+                .onAppear(perform: pushStartRouteForTestingIfRequested)
         }
+    }
+
+    /// Pushes the screen named by `POCKETNODE_START_ROUTE` on the first
+    /// appearance of the wallet shell.
+    ///
+    /// Debug-only, and a no-op on every other launch. It exists because a
+    /// screenshot or acceptance run on a simulator cannot tap: driving the UI
+    /// from outside the app needs assistive access, which a CI machine and a
+    /// headless local run do not have. The same reason
+    /// `POCKETNODE_SKIP_ONBOARDING` exists in `AppContainer`.
+    private func pushStartRouteForTestingIfRequested() {
+        #if DEBUG
+        guard path.isEmpty,
+              let name = ProcessInfo.processInfo.environment["POCKETNODE_START_ROUTE"]
+        else { return }
+        switch name {
+        case "activity": path.append(Route.activity)
+        case "receive": path.append(Route.receive)
+        case "nodeStatus": path.append(Route.nodeStatus)
+        case "settings": path.append(Route.settings)
+        default: break
+        }
+        #endif
     }
 
     @ViewBuilder
@@ -151,6 +177,7 @@ struct RootView: View {
                 model: home,
                 theme: container.theme,
                 onReceive: { path.append(Route.receive) },
+                onActivity: { path.append(Route.activity) },
                 onBackUp: { path.append(Route.backup) }
             )
         } else {
@@ -167,6 +194,8 @@ struct RootView: View {
             NodeStatusView()
         case .receive:
             ReceiveRoute(onBackUp: { path.append(Route.backup) })
+        case .activity:
+            ActivityRoute()
         case .backup:
             BackupRoute()
         case .settings:
@@ -201,6 +230,32 @@ private struct ReceiveRoute: View {
         .onAppear {
             guard viewModel == nil else { return }
             viewModel = container.makeReceiveViewModel(onBackUp: onBackUp)
+        }
+    }
+}
+
+/// Holds the activity list's view model for as long as the screen is pushed,
+/// for the same reason `ReceiveRoute` does: a `navigationDestination` closure
+/// runs again on every re-render, and a view model rebuilt each time would
+/// throw the list back to page 0 and lose the scroll position.
+private struct ActivityRoute: View {
+    @Environment(AppContainer.self) private var container
+
+    @State private var viewModel: ActivityViewModel?
+
+    var body: some View {
+        Group {
+            if let viewModel {
+                ActivityView(model: viewModel, theme: container.theme)
+            } else {
+                // Nil only when no wallet is loaded, which the wallet shell
+                // cannot be reached without.
+                Color(uiColor: .systemBackground)
+            }
+        }
+        .onAppear {
+            guard viewModel == nil else { return }
+            viewModel = container.makeActivityViewModel()
         }
     }
 }

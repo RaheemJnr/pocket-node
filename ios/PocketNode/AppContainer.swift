@@ -139,6 +139,29 @@ final class AppContainer {
         HomeViewModel(walletStore: walletStore, preferences: preferences, sync: sync)
     }
 
+    /// Backs the activity list.
+    ///
+    /// Nil with no wallet stored, which the wallet shell cannot be reached
+    /// without. The feed comes off `SyncService` rather than being built here:
+    /// it shares that object's database, coordinator and sync engine, and a
+    /// second one would open a second connection to the same file.
+    ///
+    /// `onRetry` is nil until the send path lands (#5). The detail sheet shows
+    /// the button disabled with a line saying why, rather than hiding the state
+    /// a user is looking for.
+    func makeActivityViewModel() -> ActivityViewModel? {
+        guard let record = walletStore.load() else { return nil }
+        let network = preferences.getSelectedNetwork()
+        let address = network == .mainnet ? record.mainnetAddress : record.testnetAddress
+        let service = ActivityService(
+            feed: sync.activity,
+            walletId: record.id,
+            script: AddressUtils.shared.parseAddress(address: address),
+            network: network
+        )
+        return ActivityViewModel(source: service, onRetry: nil)
+    }
+
     /// Hands the sync layer this device's wallet, if there is one.
     ///
     /// Called by `RootView` when the wallet shell appears, and again after

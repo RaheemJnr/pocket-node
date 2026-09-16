@@ -14,6 +14,10 @@ final class FakeSyncStatusProvider: SyncStatusProviding {
     var mode: SyncMode?
     var isRegistered: Bool
     var lastError: String?
+    var balance: BalanceStatus
+
+    /// How many times ``refreshBalance()`` was called.
+    private(set) var balanceRefreshCount = 0
 
     /// Every `(mode, height)` pair handed to ``choose(mode:customBlockHeight:)``.
     private(set) var chosen: [(SyncMode, Int64?)] = []
@@ -26,12 +30,14 @@ final class FakeSyncStatusProvider: SyncStatusProviding {
         status: SyncStatus = SyncStatus(),
         mode: SyncMode? = nil,
         isRegistered: Bool = false,
-        lastError: String? = nil
+        lastError: String? = nil,
+        balance: BalanceStatus = BalanceStatus()
     ) {
         self.status = status
         self.mode = mode
         self.isRegistered = isRegistered
         self.lastError = lastError
+        self.balance = balance
     }
 
     func choose(mode: SyncMode, customBlockHeight: Int64?) async -> Bool {
@@ -44,5 +50,9 @@ final class FakeSyncStatusProvider: SyncStatusProviding {
     func retry() {
         retryCount += 1
         lastError = nil
+    }
+
+    func refreshBalance() {
+        balanceRefreshCount += 1
     }
 }

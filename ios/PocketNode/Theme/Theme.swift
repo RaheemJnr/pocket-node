@@ -35,6 +35,15 @@ struct Theme {
     static func forScheme(_ scheme: ColorScheme) -> Theme {
         scheme == .dark ? .dark : .light
     }
+
+    /// Transaction-status colors, the same three the Android theme declares
+    /// outside its two schemes (`SuccessGreen`, `ErrorRed`, `PendingAmber` in
+    /// `Theme.kt`). Scheme-independent there and here: a failed transaction has
+    /// to read as failed in both, and a status color that flipped with the
+    /// scheme would stop meaning one thing.
+    static let successGreen = Color(hex: 0x22C55E)
+    static let errorRed = Color(hex: 0xFF4444)
+    static let pendingAmber = Color(hex: 0xF59E0B)
 }
 
 extension Color {
