@@ -41,6 +41,7 @@ targets:
         # Unwrapping the wallet's data key raises a Face ID prompt; without this
         # string iOS kills the app instead of showing it.
         NSFaceIDUsageDescription: Pocket Node uses Face ID to unlock your wallet keys.
+        NSCameraUsageDescription: Pocket Node uses the camera to scan CKB addresses.
         UILaunchScreen: {}
         UIApplicationSceneManifest:
           UIApplicationSupportsMultipleScenes: false
