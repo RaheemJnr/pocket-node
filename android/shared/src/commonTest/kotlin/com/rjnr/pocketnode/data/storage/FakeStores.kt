@@ -39,6 +39,18 @@ class FakeSyncProgressStore(
         rows[key] = existing.copy(lightStartBlockNumber = lightStart, updatedAt = ts)
         return 1
     }
+
+    override suspend fun updateLocalSaved(
+        walletId: String,
+        network: String,
+        block: Long,
+        ts: Long,
+    ): Int {
+        val key = walletId to network
+        val existing = rows[key] ?: return 0
+        rows[key] = existing.copy(localSavedBlockNumber = block, updatedAt = ts)
+        return 1
+    }
 }
 
 class FakeWalletRegistry(

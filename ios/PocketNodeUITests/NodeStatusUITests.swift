@@ -1,7 +1,14 @@
 import XCTest
 
-/// End-to-end M1 acceptance: launch the app, open Node Status, start the node,
-/// wait for the testnet tip to advance past genesis, then stop it.
+/// End-to-end acceptance: launch the app with a wallet, open Node Status, find
+/// the node already running, wait for the testnet tip to advance past genesis,
+/// then stop it.
+///
+/// It used to tap Start to get there. From M3 it does not have to: a wallet
+/// brings its own node up, because `SyncService.activate` cannot ask a user to
+/// go and find that button before their balance will sync. So Start is already
+/// disabled by the time this test arrives, and that is now the assertion rather
+/// than the step.
 ///
 /// The node has to reach real testnet bootnodes, so this test lives in its own
 /// `PocketNodeNetwork` scheme, which sets `POCKETNODE_NETWORK_TESTS=1` in its
@@ -12,6 +19,9 @@ import XCTest
 final class NodeStatusUITests: XCTestCase {
     private static let tipTimeout: TimeInterval = 120
     private static let stopTimeout: TimeInterval = 10
+    /// Sync activation waits for the node itself before starting it, so the
+    /// running state can take a few seconds longer to arrive than the screen.
+    private static let runningTimeout: TimeInterval = 60
 
     override func setUpWithError() throws {
         continueAfterFailure = false
@@ -30,16 +40,27 @@ final class NodeStatusUITests: XCTestCase {
         // #515 put onboarding in front of the wallet shell this test drives.
         // Nothing on the Node Status path reads key material, so `AppContainer`
         // answers this by writing a throwaway metadata record rather than by
-        // minting a real wallet.
+        // minting a real wallet. That record is also what makes the wallet
+        // shell activate sync, which is what starts the node.
         app.launchEnvironment["POCKETNODE_SKIP_ONBOARDING"] = "1"
         app.launch()
 
         app.buttons["root.nodeStatus"].tap()
         XCTAssertTrue(app.navigationBars["Node Status"].waitForExistence(timeout: 10))
 
+        let status = app.staticTexts["nodeStatus.status"]
         let start = app.buttons["Start"]
+        let stop = app.buttons["Stop"]
         XCTAssertTrue(start.waitForExistence(timeout: 10))
-        start.tap()
+
+        // The node was started by sync activation, not by this test. Waiting
+        // rather than reading: the screen redraws from a status that arrives
+        // asynchronously (the Rust listener callback, then the 5s refresh).
+        let running = expectation(for: NSPredicate(format: "label ENDSWITH %@", "Running"),
+                                  evaluatedWith: status)
+        wait(for: [running], timeout: Self.runningTimeout)
+        wait(for: [disabled(start)], timeout: Self.stopTimeout)
+        wait(for: [enabled(stop)], timeout: Self.stopTimeout)
 
         let tip = app.staticTexts["nodeStatus.tipBlock"]
         let peers = app.staticTexts["nodeStatus.peers"]
@@ -62,17 +83,15 @@ final class NodeStatusUITests: XCTestCase {
         add(shot)
 
         XCTAssertGreaterThan(observedTip, 0, "Tip block stayed at 0 after \(Int(elapsed))s")
+        XCTAssertGreaterThan(
+            Self.trailingNumber(in: peers.label),
+            0,
+            "No peers after \(Int(elapsed))s; the tip cannot have come from nowhere"
+        )
 
         // #487: Stop used to deadlock in the bridge, so the screen sat on
         // "Running" forever. It now has to reach Stopped promptly, and stay
         // there — a stopped node cannot be restarted in-process.
-        // Every assertion here waits: the button states and the footer are
-        // redrawn from a status that arrives asynchronously (the Rust listener
-        // callback, then the 5s refresh), so reading them the instant after the
-        // tap races the render.
-        let status = app.staticTexts["nodeStatus.status"]
-        let stop = app.buttons["Stop"]
-        wait(for: [enabled(stop)], timeout: Self.stopTimeout)
         stop.tap()
 
         let stopped = expectation(for: NSPredicate(format: "label ENDSWITH %@", "Stopped"),

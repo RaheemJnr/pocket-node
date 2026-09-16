@@ -46,6 +46,11 @@ final class AppContainer {
     /// logger, and the Rust side is internally synchronised.
     let lightClientApi: UniffiLightClientApi
 
+    /// Chain sync for the one wallet: the shared `SingleWalletSyncService`, the
+    /// Room KMP database behind its checkpoints, and the state Home draws.
+    /// `RootView` activates it once the wallet shell has a wallet.
+    let sync: SyncService
+
     /// Kept in sync with the system color scheme by `RootView`.
     var theme: Theme = .light
 
@@ -57,6 +62,11 @@ final class AppContainer {
         self.walletStore = WalletStore()
         self.lightClient = LightClientService(network: preferences.getSelectedNetwork())
         self.lightClientApi = UniffiLightClientApi()
+        self.sync = SyncService(
+            lightClient: self.lightClient,
+            api: self.lightClientApi,
+            preferences: self.preferences
+        )
 
         let keychain = KeychainStore()
         let wrapper = SecureEnclaveKeyWrapper()
@@ -126,7 +136,17 @@ final class AppContainer {
 
     /// Backs the wallet shell's first screen.
     func makeHomeViewModel() -> HomeViewModel {
-        HomeViewModel(walletStore: walletStore, preferences: preferences)
+        HomeViewModel(walletStore: walletStore, preferences: preferences, sync: sync)
+    }
+
+    /// Hands the sync layer this device's wallet, if there is one.
+    ///
+    /// Called by `RootView` when the wallet shell appears, and again after
+    /// onboarding stores a wallet. `SyncService.activate` ignores a repeat for
+    /// the same wallet, so both call sites can fire freely.
+    func activateSync() {
+        guard let record = walletStore.load() else { return }
+        sync.activate(wallet: record)
     }
 
     /// Whether onboarding has already been completed.

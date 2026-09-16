@@ -22,6 +22,13 @@ class RoomSyncProgressStore @Inject constructor(
         lightStart: Long,
         ts: Long,
     ): Int = dao.updateLightStart(walletId, network, lightStart, ts)
+
+    override suspend fun updateLocalSaved(
+        walletId: String,
+        network: String,
+        block: Long,
+        ts: Long,
+    ): Int = dao.updateLocalSaved(walletId, network, block, ts)
 }
 
 private fun SyncProgressEntity.toRecord() = SyncProgressRecord(

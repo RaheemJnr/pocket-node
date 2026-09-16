@@ -49,6 +49,9 @@ struct RootView: View {
                         makeBackupViewModel: { container.makeBackupViewModel(isOnboarding: true) }
                     ) {
                         phase = .wallet
+                        // The wallet exists only now, so this is the first
+                        // moment the sync layer can be pointed at it.
+                        container.activateSync()
                     }
                 }
             case .wallet:
@@ -77,6 +80,12 @@ struct RootView: View {
             let hasWallet = await container.hasWallet
             if hasWallet {
                 phase = .wallet
+                // Sync starts behind the lock screen on purpose: catching the
+                // chain up does not read key material, and making the user
+                // unlock before the node starts would waste the first minute of
+                // every launch. Android starts its poll from the repository for
+                // the same reason.
+                container.activateSync()
             } else {
                 onboarding = OnboardingViewModel(creator: container.walletCreator)
                 phase = .onboarding

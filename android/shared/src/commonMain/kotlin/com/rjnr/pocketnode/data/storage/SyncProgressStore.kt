@@ -45,4 +45,21 @@ interface SyncProgressStore {
         lightStart: Long,
         ts: Long,
     ): Int
+
+    /**
+     * The mirror of [updateLightStart]: an atomic update of the progress only,
+     * preserving `lightStartBlockNumber`. Returns rows affected, 0 meaning no
+     * row exists yet and the caller falls back to [upsert].
+     *
+     * This is the write the sync poll makes on every tick, so it has to be the
+     * one that cannot clobber a registration landing beside it. Android's
+     * `GatewayRepository.setWalletSyncBlock` has always used the same statement
+     * for the same reason.
+     */
+    suspend fun updateLocalSaved(
+        walletId: String,
+        network: String,
+        block: Long,
+        ts: Long,
+    ): Int
 }

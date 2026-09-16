@@ -133,6 +133,12 @@ final class LightClientService {
 
     /// Refreshes `<network>.toml` from the bundle and hands its directory to
     /// the light client as the data directory.
+    ///
+    /// Initialises only. What moves the node on to running is sync activation:
+    /// `SyncService.waitForNode` starts it, because a wallet cannot ask its
+    /// owner to go and find the Start button on Node Status before their
+    /// balance will sync. `NodeControls.canStart` still gates it, so a node
+    /// that has been stopped stays stopped for the rest of the launch.
     private func bootstrap() async {
         do {
             let dataDir = try Self.prepareDataDirectory(network: network.configName)
