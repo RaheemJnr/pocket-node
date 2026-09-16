@@ -1,32 +1,32 @@
 package com.rjnr.pocketnode.data.gateway
 
-import com.rjnr.pocketnode.data.database.entity.WalletEntity
-import org.junit.Assert.*
-import org.junit.Test
+import com.rjnr.pocketnode.data.storage.WalletRecord
+import kotlin.test.Test
+import kotlin.test.assertEquals
 
 /**
  * Unit tests for the production BALANCED filter algorithm.
  *
  * Calls the top-level `balancedFilterAlgorithm` directly — exercises
  * production code, not a duplicate. The DAO read + logging wrapper
- * (GatewayRepository.applyBalancedFilter) is covered by manual smoke
- * since it requires a full GatewayRepository to construct.
+ * (SyncCoordinator.applyBalancedFilter) is covered by manual smoke
+ * since it requires a full set of storage seams to construct.
  */
 class GatewayRepositoryBalancedTest {
 
-    private fun wallet(id: String) = WalletEntity(
-        walletId = id, name = id, type = "mnemonic",
-        derivationPath = "m/44'/309'/0'/0/0", parentWalletId = null,
-        accountIndex = 0, mainnetAddress = "ckb1$id", testnetAddress = "ckt1$id",
-        isActive = false, createdAt = 0L, lastActiveAt = 0L
+    private fun wallet(id: String) = WalletRecord(
+        walletId = id,
+        mainnetAddress = "ckb1$id",
+        testnetAddress = "ckt1$id",
+        lastActiveAt = 0L,
     )
 
     private fun filterKept(
-        wallets: List<WalletEntity>,
+        wallets: List<WalletRecord>,
         progress: Map<String, Long>,
         activeId: String,
         threshold: Long = 100_000L
-    ): List<WalletEntity> = balancedFilterAlgorithm(wallets, progress, activeId, threshold).first
+    ): List<WalletRecord> = balancedFilterAlgorithm(wallets, progress, activeId, threshold).first
 
     @Test
     fun `single wallet returns input unchanged`() {
@@ -106,7 +106,7 @@ class GatewayRepositoryBalancedTest {
     }
 
     @Test
-    fun `algorithm is pure - calling twice with same state returns same set`() {
+    fun `algorithm is pure so calling twice with same state returns same set`() {
         val wallets = listOf(wallet("a"), wallet("b"))
         val progress = mapOf("a" to 1_000_000L, "b" to 950_000L)
 

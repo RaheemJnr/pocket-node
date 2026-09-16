@@ -2707,8 +2707,8 @@ class GatewayRepository @Inject constructor(
     }
 
     private suspend fun registerAllWalletScripts(
-        preFetchedWallets: List<WalletEntity>? = null,
-        preFilteredCandidates: List<WalletEntity>? = null,
+        preFetchedWallets: List<com.rjnr.pocketnode.data.storage.WalletRecord>? = null,
+        preFilteredCandidates: List<com.rjnr.pocketnode.data.storage.WalletRecord>? = null,
     ) {
         syncCoordinator.registerAllWalletScripts(
             ctx = makeSyncContext(),

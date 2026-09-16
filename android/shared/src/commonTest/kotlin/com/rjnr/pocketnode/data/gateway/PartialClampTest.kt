@@ -2,8 +2,8 @@ package com.rjnr.pocketnode.data.gateway
 
 import com.rjnr.pocketnode.data.gateway.models.JniScriptStatus
 import com.rjnr.pocketnode.data.gateway.models.Script
-import org.junit.Assert.assertEquals
-import org.junit.Test
+import kotlin.test.Test
+import kotlin.test.assertEquals
 
 /**
  * #332 follow-up: PARTIAL setScripts with a block number BEHIND the script's
@@ -49,7 +49,7 @@ class PartialClampTest {
     }
 
     @Test
-    fun `unknown script args pass through - nothing to clamp against`() {
+    fun `unknown script args pass through with nothing to clamp against`() {
         val (clamped, count) = clampPartialRewinds(
             requested = listOf(status("0xnew", 1_000L)),
             currentBlockByArgs = mapOf("0xaa" to 18_000_000L),

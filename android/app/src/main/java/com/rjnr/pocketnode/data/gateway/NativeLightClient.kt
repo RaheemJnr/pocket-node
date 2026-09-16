@@ -10,9 +10,9 @@ import javax.inject.Singleton
  *
  * It exists for one reason: `external` methods have no bytecode, so MockK
  * cannot intercept them and a JVM unit test that touches [LightClientNative]
- * dies with `UnsatisfiedLinkError`. [SyncCoordinator] already carries a
- * two-method version of this seam ([LightClientBridge]); this is the same idea
- * widened to the whole bridge so [AndroidLightClientApi] can be tested.
+ * dies with `UnsatisfiedLinkError`. [SyncCoordinator] used to carry a
+ * three-method version of this seam of its own; this is the same idea widened
+ * to the whole bridge so [AndroidLightClientApi] can be tested.
  *
  * Nothing but [AndroidLightClientApi] should depend on this. Application code
  * takes [LightClientApi].

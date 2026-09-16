@@ -9,6 +9,15 @@ import com.rjnr.pocketnode.data.gateway.AndroidLightClientApi
 import com.rjnr.pocketnode.data.gateway.JniLightClient
 import com.rjnr.pocketnode.data.gateway.LightClientApi
 import com.rjnr.pocketnode.data.gateway.NativeLightClient
+import com.rjnr.pocketnode.data.gateway.SyncCoordinator
+import com.rjnr.pocketnode.data.storage.RoomSubAccountCandidateStore
+import com.rjnr.pocketnode.data.storage.RoomSyncProgressStore
+import com.rjnr.pocketnode.data.storage.RoomTransactionStore
+import com.rjnr.pocketnode.data.storage.RoomWalletRegistry
+import com.rjnr.pocketnode.data.storage.SubAccountCandidateStore
+import com.rjnr.pocketnode.data.storage.SyncProgressStore
+import com.rjnr.pocketnode.data.storage.TransactionStore
+import com.rjnr.pocketnode.data.storage.WalletRegistry
 import com.rjnr.pocketnode.data.sync.SyncEngine
 import com.rjnr.pocketnode.data.transaction.TransactionBuilder
 import com.rjnr.pocketnode.data.validation.NetworkValidator
@@ -79,6 +88,62 @@ object SharedModule {
         json: Json,
         logger: Logger,
     ): SyncEngine = SyncEngine(
+        lightClient,
+        syncPreferences,
+        json,
+        logger,
+        queryContext = Dispatchers.IO,
+    )
+
+    // --- Storage seams (M3 #3) ---
+    // Four narrow interfaces over the app's Room DAOs, so the shared sync code
+    // can read and write the same tables without a Room dependency of its own.
+    // iOS binds them in a later M3 issue; nothing in AppContainer.swift
+    // implements them yet.
+
+    @Provides
+    @Singleton
+    fun provideSyncProgressStore(impl: RoomSyncProgressStore): SyncProgressStore = impl
+
+    @Provides
+    @Singleton
+    fun provideWalletRegistry(impl: RoomWalletRegistry): WalletRegistry = impl
+
+    @Provides
+    @Singleton
+    fun provideSubAccountCandidateStore(
+        impl: RoomSubAccountCandidateStore,
+    ): SubAccountCandidateStore = impl
+
+    @Provides
+    @Singleton
+    fun provideTransactionStore(impl: RoomTransactionStore): TransactionStore = impl
+
+    /**
+     * The shared multi-wallet script registration (M3 #3): the BALANCED
+     * filter, the per-wallet start blocks and the gap-limit candidate
+     * registration, all in `commonMain` over the four storage seams above.
+     *
+     * `queryContext` is passed explicitly for the same reason [provideSyncEngine]
+     * passes it: `commonMain` cannot name `Dispatchers.IO`, and every blocking
+     * light-client call this coordinator makes ran on IO before the extraction.
+     */
+    @Provides
+    @Singleton
+    fun provideSyncCoordinator(
+        walletRegistry: WalletRegistry,
+        syncProgressStore: SyncProgressStore,
+        subAccountCandidateStore: SubAccountCandidateStore,
+        transactionStore: TransactionStore,
+        lightClient: LightClientApi,
+        syncPreferences: SyncPreferences,
+        json: Json,
+        logger: Logger,
+    ): SyncCoordinator = SyncCoordinator(
+        walletRegistry,
+        syncProgressStore,
+        subAccountCandidateStore,
+        transactionStore,
         lightClient,
         syncPreferences,
         json,

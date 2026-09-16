@@ -1,20 +1,24 @@
 package com.rjnr.pocketnode.data.gateway
 
-import com.nervosnetwork.ckblightclient.LightClientNative
 import com.rjnr.pocketnode.core.log.Logger
 import com.rjnr.pocketnode.core.prefs.SyncPreferences
 import com.rjnr.pocketnode.core.prefs.SyncStrategy
-import com.rjnr.pocketnode.data.database.dao.SyncProgressDao
-import com.rjnr.pocketnode.data.database.dao.WalletDao
-import com.rjnr.pocketnode.data.database.entity.SyncProgressEntity
-import com.rjnr.pocketnode.data.database.entity.WalletEntity
+import com.rjnr.pocketnode.core.time.Clock
+import com.rjnr.pocketnode.core.time.SystemClock
 import com.rjnr.pocketnode.data.gateway.models.JniHeaderView
 import com.rjnr.pocketnode.data.gateway.models.JniScriptStatus
 import com.rjnr.pocketnode.data.gateway.models.NetworkType
 import com.rjnr.pocketnode.data.gateway.models.SyncMode
 import com.rjnr.pocketnode.data.gateway.models.getCheckpoint
 import com.rjnr.pocketnode.data.gateway.models.toFromBlock
-import com.rjnr.pocketnode.data.wallet.KeyManager
+import com.rjnr.pocketnode.data.storage.SubAccountCandidateRecord
+import com.rjnr.pocketnode.data.storage.SubAccountCandidateStore
+import com.rjnr.pocketnode.data.storage.SyncProgressRecord
+import com.rjnr.pocketnode.data.storage.SyncProgressStore
+import com.rjnr.pocketnode.data.storage.TransactionStore
+import com.rjnr.pocketnode.data.storage.WalletRecord
+import com.rjnr.pocketnode.data.storage.WalletRegistry
+import com.rjnr.pocketnode.data.wallet.WalletDerivation
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
@@ -23,8 +27,8 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.withContext
 import kotlinx.serialization.encodeToString
 import kotlinx.serialization.json.Json
-import javax.inject.Inject
-import javax.inject.Singleton
+import kotlin.concurrent.Volatile
+import kotlin.coroutines.CoroutineContext
 
 /**
  * Pure BALANCED filter algorithm — no I/O. Lives next to [SyncCoordinator]
@@ -34,11 +38,11 @@ import javax.inject.Singleton
  * Returns `Pair(kept, dropped)`. The active wallet always lands in `kept`.
  */
 internal fun balancedFilterAlgorithm(
-    wallets: List<WalletEntity>,
+    wallets: List<WalletRecord>,
     progressByWalletId: Map<String, Long>,
     activeId: String,
     threshold: Long,
-): Pair<List<WalletEntity>, List<WalletEntity>> {
+): Pair<List<WalletRecord>, List<WalletRecord>> {
     if (wallets.size <= 1) return wallets to emptyList()
     val maxProgress = progressByWalletId.values.maxOrNull() ?: 0L
     return wallets.partition { wallet ->
@@ -161,11 +165,11 @@ fun candidateScanStart(
  * capped pipe would rewind-and-rescan the window once per batch.
  */
 fun selectCandidatesForRegistration(
-    candidates: List<com.rjnr.pocketnode.data.database.entity.SubAccountCandidateEntity>,
+    candidates: List<SubAccountCandidateRecord>,
     accountAxisCap: Int,
-): List<com.rjnr.pocketnode.data.database.entity.SubAccountCandidateEntity> {
+): List<SubAccountCandidateRecord> {
     val pendingStates = setOf(
-        com.rjnr.pocketnode.data.database.entity.SubAccountCandidateEntity.STATE_PENDING,
+        SubAccountCandidateRecord.STATE_PENDING,
     )
     val (chainAxisAll, accountAxis) = candidates.partition { it.accountIndex == 0 }
     // Chain-axis FOUND slots stay registered PERSISTENTLY: dropping a found
@@ -176,7 +180,7 @@ fun selectCandidatesForRegistration(
     // into wallets that register on their own.
     val chainAxis = chainAxisAll.filter {
         it.state in pendingStates ||
-            it.state == com.rjnr.pocketnode.data.database.entity.SubAccountCandidateEntity.STATE_FOUND
+            it.state == SubAccountCandidateRecord.STATE_FOUND
     }
     return accountAxis
         .filter { it.state in pendingStates }
@@ -184,41 +188,38 @@ fun selectCandidatesForRegistration(
         .take(accountAxisCap) + chainAxis
 }
 
-/**
- * Thin indirection over the two static JNI methods [SyncCoordinator]
- * touches. Exists so unit tests can fake the JNI surface without
- * forcing `System.loadLibrary` on the JVM — `external` methods can't
- * be intercepted by mockk directly. Production: [LightClientNativeBridge].
- */
-interface LightClientBridge {
-    suspend fun setScripts(scriptsJson: String, command: Int): Boolean
-    suspend fun getTipHeaderRaw(): String?
-    suspend fun getScriptsRaw(): String?
-}
-
-/** Production bridge — delegates straight to the JNI `external fun`s. */
-@Singleton
-class LightClientNativeBridge @Inject constructor() : LightClientBridge {
-    override suspend fun setScripts(scriptsJson: String, command: Int): Boolean =
-        com.nervosnetwork.ckblightclient.LightClientNative.nativeSetScripts(scriptsJson, command)
-    override suspend fun getTipHeaderRaw(): String? =
-        com.nervosnetwork.ckblightclient.LightClientNative.nativeGetTipHeader()
-    override suspend fun getScriptsRaw(): String? =
-        com.nervosnetwork.ckblightclient.LightClientNative.nativeGetScripts()
-}
-
-@Singleton
-class SyncCoordinator @Inject constructor(
-    private val walletDao: WalletDao,
-    private val syncProgressDao: SyncProgressDao,
+class SyncCoordinator(
+    private val walletRegistry: WalletRegistry,
+    private val syncProgressStore: SyncProgressStore,
+    private val subAccountCandidateStore: SubAccountCandidateStore,
+    private val transactionStore: TransactionStore,
+    private val lightClient: LightClientApi,
     private val syncPreferences: SyncPreferences,
-    private val keyManager: KeyManager,
     private val json: Json,
-    private val lightClient: LightClientBridge,
-    private val subAccountCandidateDao: com.rjnr.pocketnode.data.database.dao.SubAccountCandidateDao,
-    private val transactionDao: com.rjnr.pocketnode.data.database.dao.TransactionDao,
     private val logger: Logger,
+    private val clock: Clock = SystemClock,
+    private val queryContext: CoroutineContext = Dispatchers.Default,
 ) {
+
+    // The three light-client calls this class makes. [LightClientApi] is
+    // blocking, so each one hops to [queryContext], which SharedModule sets to
+    // `Dispatchers.IO` on Android.
+    //
+    // Most callers were already on IO before the extraction (the repository
+    // scope is `SupervisorJob() + Dispatchers.IO`, and registerAllWalletScripts
+    // wraps its own body), so for them this is a same-dispatcher hop that
+    // re-dispatches nothing. Two were not: the zero-live-cells rescue rescan in
+    // `GatewayRepository.refreshBalance` and `rescanForOlderDaoDeposits` reach
+    // `setScriptsAndRecord` from Main. Those now hop to [queryContext] on
+    // purpose, which takes a blocking `nativeSetScripts` off the main thread.
+    private suspend fun setScripts(scriptsJson: String, command: Int): Boolean =
+        withContext(queryContext) { lightClient.setScripts(scriptsJson, command) }
+
+    private suspend fun getTipHeaderRaw(): String? =
+        withContext(queryContext) { lightClient.getTipHeader() }
+
+    private suspend fun getScriptsRaw(): String? =
+        withContext(queryContext) { lightClient.getScripts() }
 
     /**
      * Per-call state the [GatewayRepository] owns and threads through.
@@ -267,10 +268,17 @@ class SyncCoordinator @Inject constructor(
         // hours. Clamp to the currently-registered block per script unless the
         // caller is an intentional rewind (rescue rescan, find-older-deposits).
         val effectiveStatuses = if (
-            cmd == LightClientNative.CMD_SET_SCRIPTS_PARTIAL && !allowRewind
+            cmd == CMD_SET_SCRIPTS_PARTIAL && !allowRewind
         ) {
+            // The read stays OUTSIDE runCatching on purpose: it suspends
+            // through withContext, which calls ensureActive, so a cancelled
+            // caller throws CancellationException here. Catching that would
+            // swallow the cancellation and let a dead coroutine go on to
+            // register scripts. Only the decode of whatever came back is
+            // guarded, which is the failure this ever meant to tolerate.
+            val currentScriptsRaw = getScriptsRaw()
             val currentByArgs = runCatching {
-                lightClient.getScriptsRaw()?.let { raw ->
+                currentScriptsRaw?.let { raw ->
                     json.decodeFromString<List<JniScriptStatus>>(raw).associate { st ->
                         st.script.args to (st.blockNumber.removePrefix("0x").toLongOrNull(16) ?: 0L)
                     }
@@ -288,10 +296,12 @@ class SyncCoordinator @Inject constructor(
         // Diagnostic for the production sync-stall reports (#150). Logs every
         // (walletId, startBlock) pair just before the JNI handoff. If a user
         // reports "stayed at 0", this line tells us deterministically what
-        // block they were actually scanning from. NB: release builds strip
-        // ALL android.util.Log calls via proguard -assumenosideeffects, so
-        // this diagnostic only exists in debug builds — use a debug APK when
-        // chasing #150-class sync stalls.
+        // block they were actually scanning from. NB: the Android release
+        // build's proguard -assumenosideeffects strips direct android.util.Log
+        // calls, not calls through the Logger interface, so whether this line
+        // survives R8 depends on whether the AndroidLogger forwarder is
+        // inlined. Do not rely on it being stripped, and do not log anything
+        // here that would be unsafe in a release build.
         effectiveStatuses.zip(walletIds).forEach { (status, walletId) ->
             val startBlock = status.blockNumber.removePrefix("0x").toLongOrNull(16) ?: -1L
             logger.i(
@@ -300,13 +310,13 @@ class SyncCoordinator @Inject constructor(
                     "startBlock=$startBlock (hex=${status.blockNumber})"
             )
         }
-        val ok = lightClient.setScripts(jsonStr, cmd)
+        val ok = setScripts(jsonStr, cmd)
         if (!ok) {
             logger.w(TAG, "setScripts cmd=$cmd returned false — light client refused registration")
             return false
         }
 
-        val now = System.currentTimeMillis()
+        val now = clock.nowMs()
         val newMapping = mutableMapOf<String, String>()
         effectiveStatuses.zip(walletIds).forEach { (status, walletId) ->
             if (walletId.isEmpty()) return@forEach
@@ -317,12 +327,12 @@ class SyncCoordinator @Inject constructor(
             // Atomic UPDATE preserves localSavedBlockNumber under concurrent writes
             // from the sync poll's setWalletSyncBlock. Falls through to upsert only
             // when no row exists yet (no race possible — nothing to overwrite).
-            val rowsUpdated = syncProgressDao.updateLightStart(
+            val rowsUpdated = syncProgressStore.updateLightStart(
                 walletId, network.name, startBlock, now
             )
             if (rowsUpdated == 0) {
-                syncProgressDao.upsert(
-                    SyncProgressEntity(
+                syncProgressStore.upsert(
+                    SyncProgressRecord(
                         walletId = walletId,
                         network = network.name,
                         lightStartBlockNumber = startBlock,
@@ -333,7 +343,7 @@ class SyncCoordinator @Inject constructor(
             }
         }
         // ALL replaces the entire registered set; PARTIAL adds to it.
-        scriptArgsToWalletId = if (cmd == LightClientNative.CMD_SET_SCRIPTS_ALL) {
+        scriptArgsToWalletId = if (cmd == CMD_SET_SCRIPTS_ALL) {
             newMapping
         } else {
             scriptArgsToWalletId + newMapping
@@ -363,7 +373,7 @@ class SyncCoordinator @Inject constructor(
         blockNumberHex: String,
     ): List<CandidateRegistration> = runCatching {
         selectCandidatesForRegistration(
-            subAccountCandidateDao.getForParent(walletId),
+            subAccountCandidateStore.getForParent(walletId),
             accountAxisCap = MAX_CANDIDATE_SCRIPTS_PER_PARENT,
         ).map { candidate ->
             CandidateRegistration(
@@ -383,7 +393,7 @@ class SyncCoordinator @Inject constructor(
      */
     suspend fun earliestCachedTxBlock(walletId: String, network: String): Long? =
         runCatching {
-            transactionDao.getBlockNumbers(walletId, network)
+            transactionStore.getBlockNumbers(walletId, network)
                 .mapNotNull { it.removePrefix("0x").toLongOrNull(16) }
                 .filter { it > 0L }
                 .minOrNull()
@@ -396,7 +406,7 @@ class SyncCoordinator @Inject constructor(
      * while that column stays 0).
      */
     data class CandidateRegistration(
-        val candidate: com.rjnr.pocketnode.data.database.entity.SubAccountCandidateEntity,
+        val candidate: SubAccountCandidateRecord,
         val status: JniScriptStatus,
     )
 
@@ -409,7 +419,7 @@ class SyncCoordinator @Inject constructor(
         registrations.forEach { reg ->
             val fromBlock = reg.status.blockNumber.removePrefix("0x").toLongOrNull(16) ?: return@forEach
             runCatching {
-                subAccountCandidateDao.updateRegisteredFrom(
+                subAccountCandidateStore.updateRegisteredFrom(
                     reg.candidate.parentWalletId,
                     reg.candidate.derivationPath,
                     fromBlock,
@@ -432,13 +442,13 @@ class SyncCoordinator @Inject constructor(
      * logic lives in [balancedFilterAlgorithm] for unit-test directness.
      */
     suspend fun applyBalancedFilter(
-        wallets: List<WalletEntity>,
+        wallets: List<WalletRecord>,
         activeWalletId: String,
         network: NetworkType,
-    ): List<WalletEntity> {
+    ): List<WalletRecord> {
         if (wallets.size <= 1) return wallets
 
-        val rows = syncProgressDao.getAllForNetwork(network.name)
+        val rows = syncProgressStore.getAllForNetwork(network.name)
             .associateBy { it.walletId }
         val progress = wallets.associate { wallet ->
             wallet.walletId to (rows[wallet.walletId]?.localSavedBlockNumber ?: 0L)
@@ -465,7 +475,7 @@ class SyncCoordinator @Inject constructor(
      * Caller must already be on a coroutine context.
      */
     suspend fun maybeReregisterBalanced(ctx: SyncContext) {
-        val allWallets = walletDao.getAll().sortedByDescending { it.lastActiveAt }
+        val allWallets = walletRegistry.allWallets().sortedByDescending { it.lastActiveAt }
         val filtered = applyBalancedFilter(allWallets, ctx.activeWalletId, ctx.network)
         val newSet = filtered.map { it.walletId }.toSet()
 
@@ -491,9 +501,9 @@ class SyncCoordinator @Inject constructor(
      */
     suspend fun registerAllWalletScripts(
         ctx: SyncContext,
-        preFetchedWallets: List<WalletEntity>? = null,
-        preFilteredCandidates: List<WalletEntity>? = null,
-    ) = withContext(Dispatchers.IO) {
+        preFetchedWallets: List<WalletRecord>? = null,
+        preFilteredCandidates: List<WalletRecord>? = null,
+    ) = withContext(queryContext) {
         // Force IO dispatcher for the whole body — JNI calls (nativeGetTipHeader,
         // nativeSetScripts via setScriptsAndRecord) block the UI thread otherwise.
         // Symptom #109: adding the 3rd wallet (which triggers a re-registration
@@ -505,7 +515,7 @@ class SyncCoordinator @Inject constructor(
         }
 
         val allWallets = preFetchedWallets
-            ?: walletDao.getAll().sortedByDescending { it.lastActiveAt }
+            ?: walletRegistry.allWallets().sortedByDescending { it.lastActiveAt }
         val strategy = syncPreferences.getSyncStrategy()
 
         // Step 1: BALANCED filter runs BEFORE the cap (Q2=A in design).
@@ -542,11 +552,11 @@ class SyncCoordinator @Inject constructor(
         // fromBlock; if the budget expires we still fall through to the
         // checkpoint path so the wallet doesn't hang waiting for peers.
         // matt (Telegram, 2026-05-28) reported the symptom.
-        val tipDeadline = System.currentTimeMillis() + TIP_WAIT_BUDGET_MS
+        val tipDeadline = clock.nowMs() + TIP_WAIT_BUDGET_MS
         var tipHeight = 0L
         var tipPolls = 0
-        while (System.currentTimeMillis() < tipDeadline) {
-            val tipStr = lightClient.getTipHeaderRaw()
+        while (clock.nowMs() < tipDeadline) {
+            val tipStr = getTipHeaderRaw()
             if (tipStr != null) {
                 val parsed = runCatching {
                     json.decodeFromString<JniHeaderView>(tipStr)
@@ -576,9 +586,9 @@ class SyncCoordinator @Inject constructor(
         // round-trips to the exact same Script.
         val perWallet = coroutineScope {
             wallets.map { wallet ->
-                async(Dispatchers.IO) {
+                async(queryContext) {
                     val lockScript = try {
-                        keyManager.deriveLockScriptFromAddress(
+                        WalletDerivation.lockScriptFromAddress(
                             wallet.testnetAddress.ifBlank { wallet.mainnetAddress }
                         )
                     } catch (e: Exception) {
@@ -649,7 +659,7 @@ class SyncCoordinator @Inject constructor(
         val scriptStatuses = pairs.map { it.second }
         val walletIds = pairs.map { it.first }
         logger.d(TAG, "Registering ${scriptStatuses.size} wallet scripts with light client")
-        val result = setScriptsAndRecord(scriptStatuses, walletIds, LightClientNative.CMD_SET_SCRIPTS_ALL, ctx.network)
+        val result = setScriptsAndRecord(scriptStatuses, walletIds, CMD_SET_SCRIPTS_ALL, ctx.network)
         if (!result) throw Exception("Failed to set scripts for all wallets")
 
         // #382: persist each candidate's scan-from block so the reconciler's
@@ -661,6 +671,16 @@ class SyncCoordinator @Inject constructor(
 
     companion object {
         private const val TAG = "SyncCoordinator"
+
+        /**
+         * The `setScripts` command codes, as documented on
+         * [LightClientApi.setScripts]: ALL replaces the registered set,
+         * PARTIAL merges into it. Same values as the Android JNI object's
+         * `LightClientNative.CMD_SET_SCRIPTS_*`, which `commonMain` cannot
+         * see; the app still uses its own copies at its own call sites.
+         */
+        const val CMD_SET_SCRIPTS_ALL = 0
+        const val CMD_SET_SCRIPTS_PARTIAL = 1
 
         /**
          * Upper bound for wallets synced simultaneously under ALL_WALLETS.

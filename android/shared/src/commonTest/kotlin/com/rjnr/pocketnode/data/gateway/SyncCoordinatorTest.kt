@@ -1,9 +1,9 @@
 package com.rjnr.pocketnode.data.gateway
 
-import com.rjnr.pocketnode.data.database.entity.WalletEntity
-import org.junit.Assert.assertEquals
-import org.junit.Assert.assertTrue
-import org.junit.Test
+import com.rjnr.pocketnode.data.storage.WalletRecord
+import kotlin.test.Test
+import kotlin.test.assertEquals
+import kotlin.test.assertTrue
 
 /**
  * Unit tests for the pure pieces of [SyncCoordinator] — the
@@ -17,11 +17,11 @@ import org.junit.Test
  */
 class SyncCoordinatorTest {
 
-    private fun wallet(id: String) = WalletEntity(
-        walletId = id, name = id, type = "mnemonic",
-        derivationPath = "m/44'/309'/0'/0/0", parentWalletId = null,
-        accountIndex = 0, mainnetAddress = "ckb1$id", testnetAddress = "ckt1$id",
-        isActive = false, createdAt = 0L, lastActiveAt = 0L,
+    private fun wallet(id: String) = WalletRecord(
+        walletId = id,
+        mainnetAddress = "ckb1$id",
+        testnetAddress = "ckt1$id",
+        lastActiveAt = 0L,
     )
 
     @Test
@@ -29,11 +29,11 @@ class SyncCoordinatorTest {
         val wallets = listOf(wallet("a"), wallet("b"))
         val progress = mapOf("a" to 0L, "b" to 1_000_000L)
         val (kept, _) = balancedFilterAlgorithm(wallets, progress, activeId = "a", threshold = 100_000L)
-        assertTrue("active wallet must always be kept", kept.any { it.walletId == "a" })
+        assertTrue(kept.any { it.walletId == "a" }, "active wallet must always be kept")
     }
 
     @Test
-    fun `balancedFilterAlgorithm drops non-active laggards`() {
+    fun `balancedFilterAlgorithm drops non active laggards`() {
         val wallets = listOf(wallet("a"), wallet("b"), wallet("c"))
         val progress = mapOf("a" to 1_000_000L, "b" to 1_000_000L, "c" to 100L)
         val (kept, dropped) = balancedFilterAlgorithm(
@@ -59,8 +59,8 @@ class SyncCoordinatorTest {
         val wallets = listOf(wallet("a"), wallet("b"), wallet("c"))
         val progress = mapOf("a" to 1_000_000L, "b" to 1_000_000L) // c missing
         val (kept, _) = balancedFilterAlgorithm(wallets, progress, "a", 100_000L)
-        assertTrue("active a still kept", kept.any { it.walletId == "a" })
+        assertTrue(kept.any { it.walletId == "a" }, "active a still kept")
         // c with implicit progress 0 lags by 1_000_000 → dropped
-        assertTrue("c dropped as laggard", kept.none { it.walletId == "c" })
+        assertTrue(kept.none { it.walletId == "c" }, "c dropped as laggard")
     }
 }
