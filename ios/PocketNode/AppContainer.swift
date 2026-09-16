@@ -51,6 +51,11 @@ final class AppContainer {
     /// `RootView` activates it once the wallet shell has a wallet.
     let sync: SyncService
 
+    /// The send path: the shared `SendPipeline`, the Face ID step-up in front
+    /// of it and the status poll behind it (#8). Built last, because it needs
+    /// the sync stack, the key store and the auth gate.
+    let send: SendService
+
     /// Kept in sync with the system color scheme by `RootView`.
     var theme: Theme = .light
 
@@ -98,6 +103,13 @@ final class AppContainer {
             preferences: self.preferences
         )
         self.walletCreator = WalletCreator(keyStore: self.walletKeyStore, walletStore: self.walletStore)
+        self.send = SendService(
+            sync: self.sync,
+            walletStore: self.walletStore,
+            walletKeyStore: self.walletKeyStore,
+            auth: self.auth,
+            preferences: self.preferences
+        )
 
         Self.seedWalletForTestingIfRequested(walletStore: self.walletStore)
     }
@@ -139,6 +151,22 @@ final class AppContainer {
         HomeViewModel(walletStore: walletStore, preferences: preferences, sync: sync)
     }
 
+    /// Backs the Send screen.
+    func makeSendViewModel() -> SendViewModel {
+        SendViewModel(service: send)
+    }
+
+    /// The QR scanner, wherever it is presented from. `onScanned` is what
+    /// decides where the address goes; the scanner itself knows nothing about
+    /// the screen that raised it.
+    func makeQrScannerViewModel(onScanned: @escaping (String) -> Void) -> QrScannerViewModel {
+        QrScannerViewModel(
+            scanner: AVFoundationQrScanner(),
+            preferences: preferences,
+            onScanned: onScanned
+        )
+    }
+
     /// Backs the activity list.
     ///
     /// Nil with no wallet stored, which the wallet shell cannot be reached
@@ -146,9 +174,11 @@ final class AppContainer {
     /// it shares that object's database, coordinator and sync engine, and a
     /// second one would open a second connection to the same file.
     ///
-    /// `onRetry` is nil until the send path lands (#5). The detail sheet shows
-    /// the button disabled with a line saying why, rather than hiding the state
-    /// a user is looking for.
+    /// `onRetry` re-broadcasts the failed transaction's ORIGINAL signed bytes
+    /// through `SendPipeline.retryBroadcast` (#8). It deliberately does not
+    /// prefill a fresh send: a FAILED state is a heuristic, the original could
+    /// still be alive in a remote mempool, and a retry that selected different
+    /// inputs could pay the recipient twice.
     func makeActivityViewModel() -> ActivityViewModel? {
         guard let record = walletStore.load() else { return nil }
         let network = preferences.getSelectedNetwork()
@@ -159,7 +189,9 @@ final class AppContainer {
             script: AddressUtils.shared.parseAddress(address: address),
             network: network
         )
-        return ActivityViewModel(source: service, onRetry: nil)
+        return ActivityViewModel(source: service, onRetry: { [send] hash in
+            Task { _ = await send.retry(txHash: hash) }
+        })
     }
 
     /// Hands the sync layer this device's wallet, if there is one.
@@ -170,7 +202,24 @@ final class AppContainer {
     func activateSync() {
         guard let record = walletStore.load() else { return }
         sync.activate(wallet: record)
+        // Idempotent, and the second of the two call sites the watchdog's own
+        // doc names. The scene-phase handler is the first; this one covers the
+        // wallet arriving after the phase did, which is what onboarding does.
+        sync.startWatchdog()
     }
+
+    /// True only when the wallet on this device is the throwaway one
+    /// ``seedWalletForTestingIfRequested(walletStore:)`` writes.
+    ///
+    /// The Send screen's debug drive hooks require it. `POCKETNODE_SKIP_ONBOARDING`
+    /// on its own is not enough: the seed is a no-op when a wallet already
+    /// exists, so the flag says nothing about whose wallet is open.
+    var isSeededTestWallet: Bool {
+        walletStore.load()?.id == Self.seededTestWalletId
+    }
+
+    /// The id ``seedWalletForTestingIfRequested(walletStore:)`` writes.
+    static let seededTestWalletId = "ui-test-wallet"
 
     /// Whether onboarding has already been completed.
     ///
@@ -205,7 +254,7 @@ final class AppContainer {
               !walletStore.hasWallet else { return }
         try? walletStore.save(
             WalletRecord(
-                id: "ui-test-wallet",
+                id: Self.seededTestWalletId,
                 name: "UI Test Wallet",
                 type: WalletCreator.typeMnemonic,
                 derivationPath: WalletCreator.derivationPath,

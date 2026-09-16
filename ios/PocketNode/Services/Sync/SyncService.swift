@@ -119,6 +119,12 @@ final class SyncService: SyncStatusProviding {
     private(set) var balance = BalanceStatus()
 
     private let lightClient: LightClientService
+
+    /// The blocking bridge, shared with the send path for the same reason the
+    /// stores are: one `LightClientApi` per process, held by whichever object
+    /// was handed it.
+    let api: any LightClientApi
+
     private let preferences: UserDefaultsPreferences
     private let network: NetworkType
     private let logger = Logger(subsystem: "com.rjnr.pocketnode", category: "SyncService")
@@ -127,6 +133,22 @@ final class SyncService: SyncStatusProviding {
     /// the DAO, and letting the database go would close the file under it.
     private let database: PocketNodeCoreDatabase
     private let service: SingleWalletSyncService
+
+    /// The pieces of the shared stack the send path has to share rather than
+    /// rebuild (#8).
+    ///
+    /// `SendPipeline` takes all five, and every one of them has to be the
+    /// instance this object already owns. A second `LedgerReader` would open a
+    /// second read path over the same file; a second `SyncCoordinator` would
+    /// keep its own idea of which scripts are registered, so the post-send
+    /// partial re-register would race this one's; a second `SyncEngine` would
+    /// publish tips nothing reads. `SyncService` owns the database, so it owns
+    /// these.
+    let ledger: LedgerReader
+    let transactions: RoomKmpTransactionStore
+    let pendingBroadcasts: RoomKmpPendingBroadcastStore
+    let coordinator: SyncCoordinator
+    let engine: SyncEngine
 
     /// The activity list's and the balance's read path. Owned here because it
     /// shares this object's database, coordinator and engine: a second copy
@@ -155,6 +177,35 @@ final class SyncService: SyncStatusProviding {
     /// second concurrent walk would duplicate that work for the same answer.
     @ObservationIgnored private nonisolated(unsafe) var balanceRead: Task<Void, Never>?
 
+    /// Drives `pending_broadcasts` rows to a terminal state (#8).
+    ///
+    /// Built here rather than in `SendService` because it needs the same
+    /// stores and the same tip stream, and because it has to run whether or
+    /// not the Send screen has ever been opened: its whole job is finishing
+    /// transactions the user has already walked away from.
+    @ObservationIgnored private let watchdog: BroadcastWatchdog
+
+    /// Whether the watchdog is running, so ``startWatchdog()`` is idempotent
+    /// and a stop before a start is a no-op.
+    @ObservationIgnored private var isWatchdogRunning = false
+
+    /// The live `isSyncing` reading, in a box a Kotlin thread may read.
+    ///
+    /// `SendContext.isSyncing` is deliberately a supplier rather than a value:
+    /// the post-broadcast re-register consults it five seconds after the
+    /// broadcast and has to see the flag as it is then, because a re-register
+    /// on a still-catching-up wallet jumps its filter script forward over
+    /// unscanned history (#332). A Swift closure capturing `self.status` would
+    /// be a main-actor read from a Kotlin thread, which Swift 6 refuses and
+    /// which would be a real race anyway, so the flag is mirrored into this
+    /// lock-guarded box on every progress tick.
+    @ObservationIgnored let syncingFlag = SyncingFlag(false)
+
+    /// The last published balance, in the same kind of box and for the same
+    /// reason: the send status poller asks whether it has moved, from a Kotlin
+    /// thread, once every three seconds.
+    @ObservationIgnored let balanceBox = BalanceBox(0)
+
     /// The active wallet's address and lock script on the selected network,
     /// resolved once in ``activate(wallet:force:)``. The balance read needs
     /// both, and `ActiveWallet` carries only the script args.
@@ -170,6 +221,7 @@ final class SyncService: SyncStatusProviding {
         preferences: UserDefaultsPreferences
     ) {
         self.lightClient = lightClient
+        self.api = api
         self.preferences = preferences
         self.network = preferences.getSelectedNetwork()
 
@@ -221,6 +273,10 @@ final class SyncService: SyncStatusProviding {
             clock: SystemClock.shared,
             queryContext: runtime.defaultContext
         )
+        self.coordinator = coordinator
+        self.engine = engine
+        self.transactions = transactionStore
+        self.pendingBroadcasts = broadcastStore
         self.service = SingleWalletSyncService(
             coordinator: coordinator,
             engine: engine,
@@ -249,6 +305,7 @@ final class SyncService: SyncStatusProviding {
             logger: log,
             queryContext: runtime.defaultContext
         )
+        self.ledger = ledger
         self.activity = ActivityFeed(
             ledger: ledger,
             transactions: transactionStore,
@@ -261,7 +318,45 @@ final class SyncService: SyncStatusProviding {
             scopeContext: runtime.defaultContext
         )
 
+        // `AlwaysStartedLifecycleProvider` because the gate here is start/stop
+        // from the scene phase rather than a per-check predicate: Android's
+        // watchdog runs for the life of the process and asks
+        // `ProcessLifecycleOwner` on every check, iOS stops the whole thing on
+        // background. Two gates would mean the stop path had to agree with a
+        // predicate as well, which is one more thing to get out of step.
+        self.watchdog = BroadcastWatchdog(
+            pendingBroadcasts: broadcastStore,
+            statusGateway: LedgerTransactionStatusGateway(ledger: ledger),
+            transactions: transactionStore,
+            tipSource: SingleWalletTipSource(service: self.service),
+            lifecycleProvider: AlwaysStartedLifecycleProvider.shared,
+            dispatcher: runtime.defaultDispatcher,
+            logger: log,
+            clock: SystemClock.shared
+        )
+
         observe()
+    }
+
+    // MARK: - Broadcast watchdog
+
+    /// Start sweeping `pending_broadcasts` rows. Idempotent.
+    ///
+    /// Called when the scene becomes active and again once a wallet has been
+    /// activated, so a launch that sits behind the lock screen still finishes
+    /// whatever the last session left in flight.
+    func startWatchdog() {
+        guard !isWatchdogRunning else { return }
+        isWatchdogRunning = true
+        watchdog.start()
+    }
+
+    /// Stop sweeping. Called when the scene goes to the background, where the
+    /// 15-second fallback timer would be suspended by the system anyway.
+    func stopWatchdog() {
+        guard isWatchdogRunning else { return }
+        isWatchdogRunning = false
+        watchdog.stop()
     }
 
     deinit {
@@ -295,6 +390,9 @@ final class SyncService: SyncStatusProviding {
                 let next = SyncStatus(progress)
                 let previous = self?.status ?? SyncStatus()
                 self?.status = next
+                // The send path's `isSyncing` supplier reads this from a
+                // Kotlin thread; see `syncingFlag`.
+                self?.syncingFlag.set(next.isSyncing)
                 // A poll tick that moved the chain is the cheapest trigger
                 // there is for a re-read: the balance can only have changed if
                 // a block the wallet is registered for was processed. A tick
@@ -337,6 +435,7 @@ final class SyncService: SyncStatusProviding {
     /// M4 network switch, which has to close one network's database before
     /// opening the other's) has one call to make rather than three.
     func shutdown() {
+        stopWatchdog()
         observation?.cancel()
         registrationObservation?.cancel()
         cachedBalanceObservation?.cancel()
@@ -511,6 +610,9 @@ final class SyncService: SyncStatusProviding {
             isCached: isCached,
             hasValue: true
         )
+        // The send status poller reads this from a Kotlin thread; see
+        // `balanceBox`.
+        balanceBox.set(balance.shannons)
     }
 
     private func reregister() async {

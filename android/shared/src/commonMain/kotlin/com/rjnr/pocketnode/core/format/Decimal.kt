@@ -83,19 +83,98 @@ fun formatCkbBalance(
     shannons: Long,
     groupSeparator: String = ",",
     decimalSeparator: String = ".",
+): String = grouped(
+    formatFixedPoint(shannons, scaleDigits = 8, decimals = 2),
+    groupSeparator,
+    decimalSeparator,
+)
+
+/**
+ * An amount as the send review sheet shows it: grouped thousands and between
+ * two and eight fraction digits, e.g. `6_100_000_000` -> `"61.00"` and
+ * `1_000` -> `"0.00001"`.
+ *
+ * The Android `SendReviewSheet.formatReviewCkb`, integer-exact and shared.
+ * Two digits minimum so a whole-number amount reads as money rather than as a
+ * count; eight maximum so a fee of a thousand shannons is still visible rather
+ * than rounded to `0.00`. Trailing zeros past the second digit are dropped,
+ * which is why a fee and a round amount can show different widths on the same
+ * sheet: each is shown to the precision it actually has.
+ */
+fun formatCkbAmount(
+    shannons: Long,
+    groupSeparator: String = ",",
+    decimalSeparator: String = ".",
 ): String {
-    val fixed = formatFixedPoint(shannons, scaleDigits = 8, decimals = 2)
+    val full = formatFixedPoint(shannons, scaleDigits = 8, decimals = 8)
+    val whole = full.substringBefore('.')
+    // Never below two digits, so "61" is "61.00" rather than "61".
+    val fraction = full.substringAfter('.').trimEnd('0').padEnd(2, '0')
+    return grouped("$whole.$fraction", groupSeparator, decimalSeparator)
+}
+
+/**
+ * [shannons] as CKB with exactly [decimals] fraction digits and no grouping,
+ * i.e. `String.format("%.${decimals}f", shannons / 1e8)` without the `Double`.
+ *
+ * The send form's estimated-fee line uses six.
+ */
+fun formatCkbFixed(shannons: Long, decimals: Int): String =
+    formatFixedPoint(shannons, scaleDigits = 8, decimals = decimals)
+
+/**
+ * A CKB amount as the user typed it, in shannons, or null if it is not a CKB
+ * amount at all.
+ *
+ * The money path's only string-to-integer step, so it never goes near a
+ * floating-point type: the digits are concatenated and parsed once as a
+ * `Long`. `0.1 + 0.2` is the reason, and so is the fact that a `Double`
+ * stops representing shannons exactly somewhere around 90 million CKB (#321).
+ *
+ * Truncates rather than rounds past the eighth decimal, matching Android's
+ * `BigDecimal(amount).setScale(8, RoundingMode.DOWN)`: a user who typed nine
+ * decimals cannot be charged for a shannon they did not type. An amount too
+ * large for a `Long` answers null rather than wrapping, the same outcome
+ * `longValueExact` produces by throwing.
+ *
+ * Accepts only ASCII `0`-`9` and a single `.`, so no sign, no exponent and no
+ * grouping. `Char.isDigit` is deliberately not used: it also answers true for
+ * Arabic-Indic, Devanagari and fullwidth digits, which `toLongOrNull` would
+ * then refuse anyway, but the refusal should come from the rule rather than
+ * from an accident of the parser.
+ * [com.rjnr.pocketnode.util.sanitizeAmount] has already held the field to that
+ * shape; this is the second, independent check.
+ */
+fun ckbToShannons(text: String): Long? {
+    val trimmed = text.trim()
+    if (trimmed.isEmpty()) return null
+    if (trimmed.count { it == '.' } > 1) return null
+    if (!trimmed.all { it in '0'..'9' || it == '.' }) return null
+
+    val whole = trimmed.substringBefore('.')
+    val rawFraction = if (trimmed.contains('.')) trimmed.substringAfter('.') else ""
+    // "." alone, and "", neither is a number.
+    if (whole.isEmpty() && rawFraction.isEmpty()) return null
+
+    val fraction = rawFraction.take(8).padEnd(8, '0')
+    // Leading zeros are harmless to `toLongOrNull`, and overflow answers null.
+    return (whole + fraction).toLongOrNull()
+}
+
+/** Groups the whole part of an already-formatted fixed-point string. */
+private fun grouped(fixed: String, groupSeparator: String, decimalSeparator: String): String {
     val negative = fixed.startsWith("-")
     val unsigned = if (negative) fixed.substring(1) else fixed
     val whole = unsigned.substringBefore('.')
-    val fraction = unsigned.substringAfter('.')
-    val grouped = buildString {
+    val fraction = unsigned.substringAfter('.', missingDelimiterValue = "")
+    val group = buildString {
         whole.forEachIndexed { index, digit ->
             if (index > 0 && (whole.length - index) % 3 == 0) append(groupSeparator)
             append(digit)
         }
     }
-    return (if (negative) "-" else "") + grouped + decimalSeparator + fraction
+    return (if (negative) "-" else "") + group +
+        if (fraction.isEmpty()) "" else decimalSeparator + fraction
 }
 
 /** Adds one to a decimal digit string, growing it on overflow ("99" -> "100"). */

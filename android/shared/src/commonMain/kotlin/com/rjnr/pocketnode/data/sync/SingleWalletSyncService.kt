@@ -330,6 +330,34 @@ class SingleWalletSyncService(
         )
     }
 
+    /**
+     * Read the node's tip and publish it to [tipFlow], answering what was read.
+     *
+     * The fallback half of [com.rjnr.pocketnode.data.gateway.TipSource], which
+     * [SingleWalletTipSource] delegates here: the watchdog's 15-second timer
+     * has to be able to move the tip itself when poll events have stalled.
+     * Degrades to 0 the way every other bridge read does rather than throwing.
+     */
+    suspend fun fetchAndPublishTip(): Long {
+        val tip = runCatching { engine.readChainSyncState().tipNumber }
+            .onFailure { logger.w(TAG, "fetchAndPublishTip: ${it.message}") }
+            .getOrDefault(0L)
+        engine.publishTip(tip)
+        return tip
+    }
+
+    /**
+     * The active wallet's id and network name, or null before one is set.
+     *
+     * The other half of [com.rjnr.pocketnode.data.gateway.TipSource]: the
+     * watchdog needs to know whose `pending_broadcasts` rows to sweep, and
+     * that is exactly what [setWallet] already recorded.
+     */
+    fun activeWalletAndNetworkOrNull(): Pair<String, String>? {
+        if (activeWallet == null || walletId.isEmpty()) return null
+        return walletId to network.name
+    }
+
     /** The last block fully processed for [id], or 0 when nothing is recorded. */
     private suspend fun savedBlockFor(id: String): Long =
         syncProgressStore.getAllForNetwork(network.name)

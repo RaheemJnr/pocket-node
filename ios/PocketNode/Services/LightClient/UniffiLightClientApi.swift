@@ -21,6 +21,19 @@ import os
 /// shared engines have nowhere to put it, and a screen that wants it (Node
 /// Status does) calls `LightClientService` directly and gets the real error.
 ///
+/// ### The one deliberate exception
+///
+/// ``sendTransaction(txJson:)`` does propagate its reason, because a broadcast
+/// is the one call where the reason IS the answer. A node that refuses a
+/// transaction says why - an input it cannot resolve, a script that did not
+/// verify - and a `nil` turns all of that into "Send failed - native returned
+/// null", which blames the network for what is usually a local, actionable
+/// fault. So a thrown `LightClientError` comes back as
+/// `"__SEND_ERROR__:<reason>"`, the sentinel `SendPipeline` already strips off
+/// the Android JNI's answers (`SendPipeline.BROADCAST_ERROR_PREFIX`, mirroring
+/// `SEND_ERROR_PREFIX` in `bridge_core/query.rs`). `nil` is kept for the case
+/// it was always meant for: the bridge genuinely answering nothing.
+///
 /// ## Threading
 ///
 /// Every call blocks, some of them for seconds (`doInit` opens the store and
@@ -167,8 +180,24 @@ final class UniffiLightClientApi: NSObject, LightClientApi, @unchecked Sendable 
 
     // MARK: - Transactions
 
+    /// Broadcast a signed transaction.
+    ///
+    /// The exception to this type's null-on-failure contract: a rejection is
+    /// returned in band as `"__SEND_ERROR__:<reason>"` so the shared send path
+    /// can surface why, instead of reporting a bare null. See the type's error
+    /// contract above.
     func sendTransaction(txJson: String) -> String? {
-        query("sendTransaction") { try CkbLightClient.sendTransaction(txJson: txJson) }
+        do {
+            return try CkbLightClient.sendTransaction(txJson: txJson)
+        } catch let error as LightClientError {
+            log("sendTransaction", error)
+            return SendPipeline.companion.BROADCAST_ERROR_PREFIX + Self.reason(for: error)
+        } catch {
+            // Not a bridge error at all, so there is no reason worth handing a
+            // user. Falls back to the contract every other call follows.
+            log("sendTransaction", error)
+            return nil
+        }
     }
 
     func getTransaction(hash: String) -> String? {

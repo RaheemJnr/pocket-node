@@ -1,11 +1,13 @@
 import SwiftUI
 
 /// Routes mirror the Android `NavGraph.kt` names so the two apps stay readable
-/// side by side. Send, activity and DAO arrive with M3 and M4.
+/// side by side. DAO and multi-wallet arrive with M4.
 enum Route: Hashable {
     case nodeStatus
     case receive
-    /// The wallet's transaction history (#9). Send and DAO arrive with M4.
+    /// The send form, its review sheet and its status sheet (#8).
+    case send
+    /// The wallet's transaction history (#9).
     case activity
     /// The recovery-phrase backup flow outside onboarding, so behind the
     /// re-auth gate. Onboarding shows the same screen inside its own flow.
@@ -99,8 +101,19 @@ struct RootView: View {
         // The lock-on-background rule. `.background` only: `.inactive` also
         // fires for a notification banner or a control centre pull, and the app
         // switcher preview itself, none of which should throw the user out.
-        .onChange(of: scenePhase) { _, newScenePhase in
+        // `initial: true` because a cold launch begins in `.active` and never
+        // changes phase: without it the watchdog would not start until the
+        // user backgrounded the app and came back.
+        .onChange(of: scenePhase, initial: true) { _, newScenePhase in
             auth.handleScenePhase(newScenePhase)
+            // The broadcast watchdog is foreground-only: its fallback timer
+            // would be suspended in the background anyway, and Android gates
+            // its own on `ProcessLifecycleOwner` for the same reason.
+            if newScenePhase == .active {
+                container.sync.startWatchdog()
+            } else if newScenePhase == .background {
+                container.sync.stopWatchdog()
+            }
         }
         // Step-up auth for a single action (`AuthService.requireAuth`), used by
         // the recovery phrase reveal and later by send confirmation. Dismissing
@@ -163,6 +176,7 @@ struct RootView: View {
         switch name {
         case "activity": path.append(Route.activity)
         case "receive": path.append(Route.receive)
+        case "send": path.append(Route.send)
         case "nodeStatus": path.append(Route.nodeStatus)
         case "settings": path.append(Route.settings)
         default: break
@@ -177,6 +191,7 @@ struct RootView: View {
                 model: home,
                 theme: container.theme,
                 onReceive: { path.append(Route.receive) },
+                onSend: { path.append(Route.send) },
                 onActivity: { path.append(Route.activity) },
                 onBackUp: { path.append(Route.backup) }
             )
@@ -194,6 +209,8 @@ struct RootView: View {
             NodeStatusView()
         case .receive:
             ReceiveRoute(onBackUp: { path.append(Route.backup) })
+        case .send:
+            SendRoute(onFinished: { path.removeLast(path.count) })
         case .activity:
             ActivityRoute()
         case .backup:
@@ -230,6 +247,43 @@ private struct ReceiveRoute: View {
         .onAppear {
             guard viewModel == nil else { return }
             viewModel = container.makeReceiveViewModel(onBackUp: onBackUp)
+        }
+    }
+}
+
+/// Holds the Send screen's view model for as long as the screen is pushed.
+///
+/// The same `@State` arrangement `ReceiveRoute` uses, and for a sharper
+/// reason here: a `navigationDestination` closure runs again on every
+/// re-render, and a view model rebuilt mid-send would throw away the typed
+/// amount and the review the user was looking at.
+private struct SendRoute: View {
+    @Environment(AppContainer.self) private var container
+
+    /// Pops back to Home once a confirmed send has been dismissed.
+    let onFinished: () -> Void
+
+    @State private var viewModel: SendViewModel?
+
+    var body: some View {
+        Group {
+            if let viewModel {
+                SendView(
+                    model: viewModel,
+                    theme: container.theme,
+                    makeScanner: { onScanned in
+                        container.makeQrScannerViewModel(onScanned: onScanned)
+                    },
+                    onFinished: onFinished,
+                    isSeededTestWallet: container.isSeededTestWallet
+                )
+            } else {
+                Color(uiColor: .systemBackground)
+            }
+        }
+        .onAppear {
+            guard viewModel == nil else { return }
+            viewModel = container.makeSendViewModel()
         }
     }
 }

@@ -83,13 +83,38 @@ final class UniffiLightClientApiTests: XCTestCase {
     /// Malformed input must be absorbed the same way. A non-throwing Kotlin
     /// function aborts the process if an exception escapes, so the adapter has
     /// to be the one that catches.
+    ///
+    /// `sendTransaction` is absent: it is the second in-band exception to the
+    /// contract. See `testSendTransactionReportsTheRejectionReasonInBand`.
     func testGetCellsWithMalformedSearchKeyReturnsNil() {
         XCTAssertNil(api.getCells(searchKeyJson: "not json", order: "asc", limit: 10, cursor: nil))
         XCTAssertNil(
             api.getTransactions(searchKeyJson: "{", order: "desc", limit: 10, cursor: "0xbad")
         )
         XCTAssertNil(api.getCellsCapacity(searchKeyJson: "]"))
-        XCTAssertNil(api.sendTransaction(txJson: "not json"))
+    }
+
+    /// #27: a rejected broadcast used to collapse to nil, which reached the
+    /// user as "Send failed - native returned null" with no reason at all. The
+    /// binding now answers the shared sentinel plus the bridge's own words, so
+    /// `SendPipeline` can strip the prefix and surface what actually happened.
+    ///
+    /// The node is not initialised in this process, so the reason here is the
+    /// `NotInitialized` one. What is pinned is the shape: the exact prefix the
+    /// shared code strips, and a reason that is not empty.
+    func testSendTransactionReportsTheRejectionReasonInBand() throws {
+        let prefix = SendPipeline.companion.BROADCAST_ERROR_PREFIX
+
+        let answer = try XCTUnwrap(
+            api.sendTransaction(txJson: "not json"),
+            "a rejected broadcast must carry its reason, not nil"
+        )
+
+        XCTAssertTrue(answer.hasPrefix(prefix), "expected the shared sentinel prefix")
+        XCTAssertFalse(
+            String(answer.dropFirst(prefix.count)).isEmpty,
+            "the sentinel must be followed by a reason"
+        )
     }
 
     func testDaoHelpersReturnTheFailureSentinelsOnBadInput() {

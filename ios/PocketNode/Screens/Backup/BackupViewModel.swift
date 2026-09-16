@@ -11,17 +11,6 @@ protocol WalletKeyReading: Sendable {
 
 extension WalletKeyStore: WalletKeyReading {}
 
-/// The re-authentication gate `BackupViewModel` asks before decrypting the
-/// phrase. `AuthService` conforms directly (its `requireAuth(reason:)` has
-/// this exact shape); tests substitute a stub so the gate can be exercised
-/// without a PIN pad or a biometric prompt.
-@MainActor
-protocol AuthGating: AnyObject {
-    func requireAuth(reason: String) async -> Bool
-}
-
-extension AuthService: AuthGating {}
-
 /// Drives the recovery-phrase backup and verification flow.
 ///
 /// Mirrors Android's `MnemonicBackupViewModel` step machine (`gate -> display

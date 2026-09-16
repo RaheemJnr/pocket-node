@@ -55,3 +55,41 @@ extension ActivityItem: @retroactive @unchecked Sendable {}
 extension SyncMode: @retroactive @unchecked Sendable {}
 extension KotlinLong: @retroactive @unchecked Sendable {}
 extension KotlinBoolean: @retroactive @unchecked Sendable {}
+/// The send path (#8), on the same terms as the rest of this file.
+///
+/// - `SendPipeline` is the money path and is the most carefully guarded type
+///   in the shared core: everything that can race is behind its `sendMutex`
+///   or its `sessionMutex`, and the two plain fields it holds
+///   (`broadcastedThisSession` and the session set's mutex) are only ever
+///   touched under the latter. It is designed to be called concurrently.
+/// - `SendStatusPoller` holds one `MutableStateFlow`, thread-safe by
+///   construction, and one `Job` reference written only from `start`/`stop`,
+///   both of which `SendService` calls on the main actor.
+/// - `SendContext`, `SendProgress`, `RecipientOutput`, `TransferPlan` and
+///   `SweepWarning` are Kotlin `data class`es with `val` properties only, so
+///   they are immutable values in every sense but the compiler's. The two
+///   reference members `SendContext` carries (a `CoroutineScope` and a plain
+///   function) are themselves thread-safe.
+/// - `SendState` is an enum constant: process-wide singletons with no state.
+/// - `SharedScope` wraps one `CoroutineScope`, which is immutable.
+/// - `LedgerReader` and `TransactionBuilder` hold no mutable state of their
+///   own; `LedgerReader`'s caches are the injected stores, each with its own
+///   guarantees, and `TransactionBuilder` is pure.
+/// - `PrivateKeySigner` owns a `ByteArray` written only by `close()`. It is
+///   created, used and closed inside one function on the main actor, and is
+///   never shared.
+/// - `KotlinByteArray` is the buffer that key lives in, with the same
+///   argument.
+extension SendPipeline: @retroactive @unchecked Sendable {}
+extension SendStatusPoller: @retroactive @unchecked Sendable {}
+extension SendContext: @retroactive @unchecked Sendable {}
+extension SendProgress: @retroactive @unchecked Sendable {}
+extension SendState: @retroactive @unchecked Sendable {}
+extension SweepWarning: @retroactive @unchecked Sendable {}
+extension RecipientOutput: @retroactive @unchecked Sendable {}
+extension TransferPlan: @retroactive @unchecked Sendable {}
+extension SharedScope: @retroactive @unchecked Sendable {}
+extension LedgerReader: @retroactive @unchecked Sendable {}
+extension TransactionBuilder: @retroactive @unchecked Sendable {}
+extension PrivateKeySigner: @retroactive @unchecked Sendable {}
+extension KotlinByteArray: @retroactive @unchecked Sendable {}

@@ -1,6 +1,10 @@
 package com.rjnr.pocketnode.core
 
+import kotlinx.coroutines.CoroutineDispatcher
+import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.cancel
 import kotlinx.serialization.json.Json
 import kotlin.coroutines.CoroutineContext
 
@@ -44,4 +48,38 @@ object SharedRuntime {
      * [com.rjnr.pocketnode.data.storage.createPocketNodeCoreDatabase] documents.
      */
     val defaultContext: CoroutineContext = Dispatchers.Default
+
+    /**
+     * The same dispatcher, typed as one.
+     *
+     * [com.rjnr.pocketnode.data.sync.BroadcastWatchdog] takes a
+     * `CoroutineDispatcher` rather than a `CoroutineContext`, and
+     * `Dispatchers.Default` is as unspellable from Swift as `Json` is, for the
+     * same reason: the Objective-C header exposes it as an opaque type with no
+     * constructor.
+     */
+    val defaultDispatcher: CoroutineDispatcher = Dispatchers.Default
+}
+
+/**
+ * A long-lived [CoroutineScope] for a platform that cannot write one.
+ *
+ * `CoroutineScope(SupervisorJob() + Dispatchers.Default)` has no Swift
+ * spelling for the same reason `Json { }` does not, and
+ * [com.rjnr.pocketnode.data.send.SendContext] needs one: the send path's
+ * post-broadcast re-register waits five seconds and so has to outlive the send
+ * call itself.
+ *
+ * One per owner, not one per call. The owner ([close]s it when it goes away)
+ * is `SendService` on iOS, which lives for the whole launch; a scope minted
+ * per send would leave one behind for every transaction.
+ */
+class SharedScope(context: CoroutineContext = Dispatchers.Default) {
+
+    val scope: CoroutineScope = CoroutineScope(SupervisorJob() + context)
+
+    /** Cancel everything launched in [scope]. */
+    fun close() {
+        scope.cancel()
+    }
 }

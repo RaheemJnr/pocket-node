@@ -338,7 +338,7 @@ class SendPipelineTest {
             .feeShannons
         assertEquals(
             "Fee changed since you reviewed this transaction " +
-                "(1 → $actualFee shannons). Nothing was sent — please review and confirm again.",
+                "(expected 1, actual $actualFee shannons). Nothing was sent, please review and confirm again.",
             result.exceptionOrNull()?.message,
         )
         assertTrue(broadcasts.byHash.isEmpty(), "nothing may be reserved when the fee moved")

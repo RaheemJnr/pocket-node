@@ -53,8 +53,9 @@ the one `PocketNodeUITests` target (`project.yml`):
 
 ### Debug-only launch environment flags
 
-`AppContainer` reads these from `ProcessInfo.processInfo.environment` inside
-`#if DEBUG`; none of them compile into a release build.
+`AppContainer`, `RootView` and `SendView` read these from
+`ProcessInfo.processInfo.environment` inside `#if DEBUG`; none of them compile
+into a release build.
 
 | Flag | Effect |
 |------|--------|
@@ -62,6 +63,11 @@ the one `PocketNodeUITests` target (`project.yml`):
 | `POCKETNODE_SKIP_ONBOARDING` | `1` writes a throwaway `WalletRecord` (the pinned test vector's addresses, no key material) so `RootView` opens straight to the wallet shell instead of onboarding. Only takes effect when no wallet is already stored. Used by `WalletShellUITests` and `NodeStatusUITests`, neither of which cares about onboarding. |
 | `POCKETNODE_RESET_STATE` | `1` deletes the wallet envelope, the Secure Enclave wrapping key, every PIN Keychain item, `wallet.json` and the install marker, before anything else in `init()` runs. Used by `OnboardingUITests` (#517) so the real onboarding flow gets a clean device on every launch, not only a simulator's first one. It also relaunches with this flag in its own `tearDown`, so it leaves the device the way `WalletShellUITests`/`NodeStatusUITests` expect to find it (see `POCKETNODE_SKIP_ONBOARDING` above). |
 | `POCKETNODE_UITEST_ALLOW_CAPTURE` | `1` makes `PrivacyShield` ignore `UIScreen.isCaptured` for this one signal. XCUITest itself records the screen on a physical iPhone, which the shield otherwise (correctly) treats as a capture and hides the whole app behind it — every UI test sets this. |
+| `POCKETNODE_START_ROUTE` | `send`, `receive`, `activity`, `nodeStatus` or `settings`, pushed onto the wallet shell's first appearance. A screenshot or acceptance run on a simulator cannot tap: driving the UI from outside the app needs assistive access a headless run does not have. |
+| `POCKETNODE_SEND_RECIPIENT` | An address to fill the Send form's recipient field with, on that screen's first appearance. The whole `POCKETNODE_SEND_*` family additionally requires the stored wallet's id to be the seeded `ui-test-wallet`, so these can only ever drive a wallet with no key material; on any other wallet they do nothing. |
+| `POCKETNODE_SEND_AMOUNT` | A CKB amount for the Send form, run through the same sanitiser a keystroke is. |
+| `POCKETNODE_SEND_REVIEW` | `1` waits for the balance to land and then submits, so the run reaches the review sheet. Retries the submit if the node has not reported a tip yet, which is what a user does about "the wallet is still starting up". |
+| `POCKETNODE_SEND_CONFIRM` | `1` also ticks the sweep acknowledgement and confirms. On the seeded wallet this always stops at the key step with "Could not read this wallet's keys", which is the state it exists to photograph; it cannot broadcast, because that wallet has nothing to sign with. |
 
 ## Wallet keys
 

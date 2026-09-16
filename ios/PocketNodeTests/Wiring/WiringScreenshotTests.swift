@@ -65,7 +65,7 @@ final class WiringScreenshotTests: XCTestCase {
         XCTAssertTrue(model.needsBackup)
 
         let view = NavigationStack {
-            HomeView(model: model, theme: .light, onReceive: {}, onActivity: {}, onBackUp: {})
+            HomeView(model: model, theme: .light, onReceive: {}, onSend: {}, onActivity: {}, onBackUp: {})
                 .navigationTitle("Pocket Node")
         }
 
@@ -78,7 +78,7 @@ final class WiringScreenshotTests: XCTestCase {
         XCTAssertFalse(model.needsBackup)
 
         let view = NavigationStack {
-            HomeView(model: model, theme: .light, onReceive: {}, onActivity: {}, onBackUp: {})
+            HomeView(model: model, theme: .light, onReceive: {}, onSend: {}, onActivity: {}, onBackUp: {})
                 .navigationTitle("Pocket Node")
         }
 

@@ -133,6 +133,7 @@ class SendPipeline(
      * plan rather than a `Result` so it stays stubbable in ViewModel tests —
      * MockK cannot round-trip an inline-class return through a suspend resume.
      */
+    @Throws(Throwable::class)
     suspend fun previewTransfer(
         ctx: SendContext,
         fromAddress: String,
@@ -143,6 +144,29 @@ class SendPipeline(
         return sendMutex.withLock {
             val cells = resolveSpendableCells(fromAddress, senderNetwork, walletId, senderNetwork.name)
             transactionBuilder.planTransfer(recipients, cells)
+        }
+    }
+
+    /**
+     * The largest single transfer this wallet can fund right now: the "MAX"
+     * pill on the send form.
+     *
+     * Priced over [resolveSpendableCells], the SAME set [prepareAndSend] will
+     * select from, rather than over the raw live cells Android's
+     * `setMaxAmount` reads. That is deliberate and is the one behavioural
+     * difference between the platforms here: cells reserved by an in-flight
+     * broadcast are not spendable, and a MAX computed over them quotes a
+     * number the send then refuses. It also means the fee is estimated over
+     * the real input count, which on a fragmented wallet is the difference
+     * between a MAX that sends and one that fails (#321).
+     */
+    @Throws(Throwable::class)
+    suspend fun maxSendable(ctx: SendContext, fromAddress: String): Long {
+        val senderNetwork = ctx.network
+        val walletId = ctx.walletId
+        return sendMutex.withLock {
+            val cells = resolveSpendableCells(fromAddress, senderNetwork, walletId, senderNetwork.name)
+            transactionBuilder.calculateMaxSendable(cells)
         }
     }
 
@@ -180,6 +204,37 @@ class SendPipeline(
             )
         }
     }
+
+    /**
+     * [prepareAndSend] for a caller that cannot read a Kotlin `Result`.
+     *
+     * Kotlin/Native exports `Result<T>` as an opaque `Any?` with no way to
+     * unwrap it, so every Swift entry point on this class answers a plain
+     * value and throws instead. The same arrangement `ActivityFeed` uses for
+     * the read path (#9). Nothing else differs: the work, the ordering and the
+     * mutex are [prepareAndSend]'s.
+     */
+    @Throws(Throwable::class)
+    suspend fun prepareAndSendOrThrow(
+        ctx: SendContext,
+        fromAddress: String,
+        toAddress: String,
+        amountShannons: Long,
+        signer: Signer,
+        expectedFeeShannons: Long?,
+    ): String = prepareAndSend(
+        ctx = ctx,
+        fromAddress = fromAddress,
+        toAddress = toAddress,
+        amountShannons = amountShannons,
+        signer = signer,
+        expectedFeeShannons = expectedFeeShannons,
+    ).getOrThrow()
+
+    /** [retryBroadcast] for a caller that cannot read a Kotlin `Result`. */
+    @Throws(Throwable::class)
+    suspend fun retryBroadcastOrThrow(ctx: SendContext, txHash: String): String =
+        retryBroadcast(ctx, txHash).getOrThrow()
 
     suspend fun prepareAndSendBulk(
         ctx: SendContext,
@@ -706,8 +761,8 @@ class SendPipeline(
         if (actualFee != expectedFeeShannons) {
             throw IllegalStateException(
                 "Fee changed since you reviewed this transaction " +
-                    "(${expectedFeeShannons} → ${actualFee} shannons). Nothing was sent — " +
-                    "please review and confirm again."
+                    "(expected $expectedFeeShannons, actual $actualFee shannons). " +
+                    "Nothing was sent, please review and confirm again."
             )
         }
     }

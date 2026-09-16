@@ -2,6 +2,7 @@ package com.rjnr.pocketnode.core.format
 
 import kotlin.test.Test
 import kotlin.test.assertEquals
+import kotlin.test.assertNull
 
 /**
  * The expected strings here are the output of the JVM `String.format("%.Nf", shannons / 1e8)`
@@ -133,5 +134,100 @@ class DecimalTest {
             "12.345,60",
             formatCkbBalance(1_234_560_000_000L, groupSeparator = ".", decimalSeparator = ","),
         )
+    }
+
+    // ---- formatCkbAmount ----
+
+    @Test
+    fun anAmountKeepsTwoDecimalsAndGroupsThousands() {
+        assertEquals("61.00", formatCkbAmount(6_100_000_000L))
+        assertEquals("12,345.60", formatCkbAmount(1_234_560_000_000L))
+    }
+
+    /**
+     * The point of the 2-to-8 window: a thousand-shannon fee has to stay
+     * visible on the same sheet as a round amount, so neither is padded to the
+     * other's width.
+     */
+    @Test
+    fun anAmountShowsAsManyDecimalsAsItActuallyHas() {
+        assertEquals("0.00001", formatCkbAmount(1_000L))
+        assertEquals("60.999995", formatCkbAmount(6_099_999_500L))
+        assertEquals("0.00000001", formatCkbAmount(1L))
+    }
+
+    @Test
+    fun anAmountIsExactPastTheDoublePrecisionLimit() {
+        assertEquals("21,000,000,000.00", formatCkbAmount(2_100_000_000_000_000_000L))
+    }
+
+    // ---- formatCkbFixed ----
+
+    @Test
+    fun aFixedWidthAmountPadsToTheRequestedDecimals() {
+        assertEquals("0.001000", formatCkbFixed(100_000L, decimals = 6))
+        assertEquals("0.000000", formatCkbFixed(0L, decimals = 6))
+        assertEquals("61", formatCkbFixed(6_100_000_000L, decimals = 0))
+    }
+
+    // ---- ckbToShannons ----
+
+    @Test
+    fun aTypedAmountBecomesShannons() {
+        assertEquals(6_100_000_000L, ckbToShannons("61"))
+        assertEquals(6_150_000_000L, ckbToShannons("61.5"))
+        assertEquals(1L, ckbToShannons("0.00000001"))
+        assertEquals(50_000_000L, ckbToShannons(".5"))
+        assertEquals(6_100_000_000L, ckbToShannons("61."))
+        assertEquals(0L, ckbToShannons("0"))
+    }
+
+    /**
+     * Truncation, not rounding: a user who typed a ninth decimal must not be
+     * charged for a shannon they did not type.
+     */
+    @Test
+    fun aNinthDecimalIsDroppedRatherThanRounded() {
+        assertEquals(100_000_000L, ckbToShannons("1.000000009"))
+        assertEquals(199_999_999L, ckbToShannons("1.9999999999"))
+    }
+
+    @Test
+    fun surroundingSpaceIsIgnored() {
+        assertEquals(6_100_000_000L, ckbToShannons("  61  "))
+    }
+
+    @Test
+    fun anythingThatIsNotAnAmountAnswersNull() {
+        assertNull(ckbToShannons(""))
+        assertNull(ckbToShannons("."))
+        assertNull(ckbToShannons("61.5.5"))
+        assertNull(ckbToShannons("-61"))
+        assertNull(ckbToShannons("6e1"))
+        assertNull(ckbToShannons("1,000"))
+        assertNull(ckbToShannons("abc"))
+    }
+
+    /**
+     * ASCII `0`-`9` only. `Char.isDigit` also answers true for these, and the
+     * refusal should come from the rule rather than from `toLongOrNull`
+     * happening to choke on them.
+     */
+    @Test
+    fun digitsOutsideAsciiAreNotAmounts() {
+        assertNull(ckbToShannons("\u0666\u0661"))   // Arabic-Indic 61
+        assertNull(ckbToShannons("\uFF16\uFF11"))   // fullwidth 61
+        assertNull(ckbToShannons("\u0967\u0966"))   // Devanagari 10
+    }
+
+    /**
+     * Past `Long.MAX_VALUE` shannons there is no answer, and a wrapped one
+     * would be a send for a completely different amount.
+     */
+    @Test
+    fun anAmountTooLargeForALongAnswersNull() {
+        assertEquals(Long.MAX_VALUE, ckbToShannons("92233720368.54775807"))
+        assertNull(ckbToShannons("92233720368.54775808"))
+        assertNull(ckbToShannons("100000000000000000000"))
     }
 }

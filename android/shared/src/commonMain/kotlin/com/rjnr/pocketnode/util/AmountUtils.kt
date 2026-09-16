@@ -5,6 +5,14 @@ package com.rjnr.pocketnode.util
  * - Returns "" for empty input (valid mid-entry state)
  * - Truncates to 8 decimal places (shannon precision: 1 CKB = 100,000,000 shannons)
  * - Returns null for clearly invalid input (letters, multiple dots)
+ *
+ * `isDigit()` here also accepts Arabic-Indic, Devanagari and fullwidth digits,
+ * which no amount parser downstream can read. It is left as it is because
+ * Android has shipped this behaviour since v1.x and narrowing it is a change
+ * to a live input field rather than a bug fix;
+ * [com.rjnr.pocketnode.core.format.ckbToShannons] is ASCII-only and refuses
+ * them, so nothing can reach a transaction. Worth converging in its own
+ * change.
  */
 fun sanitizeAmount(input: String): String? {
     if (input.isEmpty()) return ""

@@ -10,6 +10,7 @@ struct HomeView: View {
     let model: HomeViewModel
     let theme: Theme
     let onReceive: () -> Void
+    let onSend: () -> Void
     let onActivity: () -> Void
     let onBackUp: () -> Void
 
@@ -292,13 +293,22 @@ struct HomeView: View {
     /// Receive and Activity side by side. Android reaches both from its home
     /// screen too; send and DAO join them in M4.
     private var actionButtons: some View {
-        HStack(spacing: 12) {
-            Button(action: onReceive) {
-                Label("Receive", systemImage: "qrcode")
-                    .frame(maxWidth: .infinity)
+        VStack(spacing: 12) {
+            HStack(spacing: 12) {
+                Button(action: onSend) {
+                    Label("Send", systemImage: "arrow.up.right")
+                        .frame(maxWidth: .infinity)
+                }
+                .buttonStyle(.borderedProminent)
+                .accessibilityIdentifier("home.send")
+
+                Button(action: onReceive) {
+                    Label("Receive", systemImage: "qrcode")
+                        .frame(maxWidth: .infinity)
+                }
+                .buttonStyle(.borderedProminent)
+                .accessibilityIdentifier("home.receive")
             }
-            .buttonStyle(.borderedProminent)
-            .accessibilityIdentifier("home.receive")
 
             Button(action: onActivity) {
                 Label("Activity", systemImage: "list.bullet")
