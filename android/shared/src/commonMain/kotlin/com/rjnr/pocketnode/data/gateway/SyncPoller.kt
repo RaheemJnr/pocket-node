@@ -2,6 +2,8 @@ package com.rjnr.pocketnode.data.gateway
 
 import com.rjnr.pocketnode.core.log.Logger
 import com.rjnr.pocketnode.core.prefs.SyncPreferences
+import com.rjnr.pocketnode.core.time.Clock
+import com.rjnr.pocketnode.core.time.SystemClock
 import com.rjnr.pocketnode.data.gateway.models.AccountStatusResponse
 import com.rjnr.pocketnode.data.sync.contract.SyncProgressTracker
 import kotlinx.coroutines.CoroutineScope
@@ -11,8 +13,7 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
-import javax.inject.Inject
-import javax.inject.Singleton
+import kotlin.concurrent.Volatile
 
 data class SyncProgress(
     val isSyncing: Boolean = false,
@@ -69,14 +70,20 @@ interface SyncPollSource {
  * CoroutineExceptionHandler` scope and dies with it. Nothing here creates a
  * scope of its own.
  *
- * Plain `@Singleton` with no dependency back on [GatewayRepository]; the
- * repository forwards its public sync API here so ViewModels and tests are
- * unchanged.
+ * No dependency back on [GatewayRepository]; the repository forwards its
+ * public sync API here so ViewModels and tests are unchanged. Lives in
+ * `commonMain` (no Hilt annotations, per D0 in docs/IOS_M1_DESIGN.md): Android
+ * gets it as a `@Singleton` from `SyncEngine`, which `SharedModule` provides,
+ * and iOS constructs the same engine by hand.
+ *
+ * [clock] is the wall clock behind the `lastSyncedAt` throttle and the
+ * `firstCatchingUpAtMs` edge; it was `System.currentTimeMillis()` before the
+ * move and [SystemClock] answers the same value.
  */
-@Singleton
-class SyncPoller @Inject constructor(
+class SyncPoller(
     private val syncPreferences: SyncPreferences,
     private val logger: Logger,
+    private val clock: Clock = SystemClock,
 ) {
 
     private val _tipFlow = MutableStateFlow(0L)
@@ -213,13 +220,13 @@ class SyncPoller @Inject constructor(
                                 "delta=${tipBlock - syncedBlock} progress=${status.syncProgress}"
                         )
 
-                        syncProgressTracker.recordSample(syncedBlock, System.currentTimeMillis())
+                        syncProgressTracker.recordSample(syncedBlock, clock.nowMs())
                         val info = syncProgressTracker.calculate(tipBlock)
 
                         // Staleness pill input (#286): persist "last time we
                         // observed sync progress", throttled to ~1 write/min
                         // (the poll runs every 5-30s; pref churn is pointless).
-                        val nowMs = System.currentTimeMillis()
+                        val nowMs = clock.nowMs()
                         if (syncedBlock > 0 && nowMs - lastSyncedAtWrittenMs > 60_000L) {
                             lastSyncedAtWrittenMs = nowMs
                             syncPreferences.setLastSyncedAt(nowMs)
@@ -235,7 +242,7 @@ class SyncPoller @Inject constructor(
                         firstCatchingUpAtMs = computeFirstCatchingUpAtMs(
                             firstCatchingUpAtMs,
                             catching,
-                            System.currentTimeMillis()
+                            clock.nowMs()
                         )
 
                         _syncProgress.value = SyncProgress(

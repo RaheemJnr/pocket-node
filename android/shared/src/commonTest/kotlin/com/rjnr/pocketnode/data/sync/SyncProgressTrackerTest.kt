@@ -1,15 +1,18 @@
 package com.rjnr.pocketnode.data.sync
 
 import com.rjnr.pocketnode.data.sync.contract.SyncProgressTracker
-import org.junit.Assert.*
-import org.junit.Before
-import org.junit.Test
+import kotlin.test.BeforeTest
+import kotlin.test.Test
+import kotlin.test.assertEquals
+import kotlin.test.assertNotNull
+import kotlin.test.assertNull
+import kotlin.test.assertTrue
 
 class SyncProgressTrackerTest {
 
     private lateinit var tracker: SyncProgressTracker
 
-    @Before
+    @BeforeTest
     fun setUp() {
         tracker = SyncProgressTracker()
     }
@@ -125,7 +128,7 @@ class SyncProgressTrackerTest {
     }
 
     @Test
-    fun `seedStartHeight anchors percentage to registered start block (#150)`() {
+    fun `seedStartHeight anchors percentage to the registered start block issue 150`() {
         // Pre-#150 the first sample's blockHeight became the baseline.
         // For a 2021 wallet whose light client reports syncedToBlock=0
         // on the first poll cycle, that anchored to 0 and the percentage
@@ -136,8 +139,8 @@ class SyncProgressTrackerTest {
         // Tip = 18M, baseline = 5M, current = 5_000_100. Range = 13M,
         // progress = 100 blocks → ~0.0008%.
         val info = tracker.calculate(tipHeight = 18_000_000L)
-        assertTrue("expected positive but tiny progress, got ${info.percentage}", info.percentage > 0.0)
-        assertTrue("expected < 1%, got ${info.percentage}", info.percentage < 1.0)
+        assertTrue(info.percentage > 0.0, "expected positive but tiny progress, got ${info.percentage}")
+        assertTrue(info.percentage < 1.0, "expected < 1%, got ${info.percentage}")
     }
 
     @Test
@@ -154,7 +157,7 @@ class SyncProgressTrackerTest {
     }
 
     @Test
-    fun `seedStartHeight tolerates no-sample state`() {
+    fun `seedStartHeight tolerates no sample state`() {
         // Edge case: seed then ask immediately. No crash; percentage clamps
         // to 0 because currentHeight is 0 < startHeight.
         tracker.seedStartHeight(startBlock = 5_000_000L)

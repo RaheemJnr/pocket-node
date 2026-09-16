@@ -13,6 +13,7 @@ import com.rjnr.pocketnode.data.database.entity.PendingBroadcastEntity
 import com.rjnr.pocketnode.data.database.entity.SyncProgressEntity
 import com.rjnr.pocketnode.data.database.entity.WalletEntity
 import com.rjnr.pocketnode.data.gateway.models.*
+import com.rjnr.pocketnode.data.sync.SyncEngine
 import com.rjnr.pocketnode.data.sync.contract.SyncServiceCommands
 import com.rjnr.pocketnode.data.migration.WalletMigrationHelper
 import com.rjnr.pocketnode.data.transaction.TransactionBuilder
@@ -93,7 +94,7 @@ class GatewayRepository @Inject constructor(
     private val subAccountDiscovery: com.rjnr.pocketnode.data.wallet.SubAccountDiscovery,
     private val syncServiceCommands: SyncServiceCommands,
     private val nodeLifecycle: NodeLifecycle,
-    private val syncPoller: SyncPoller,
+    private val syncEngine: SyncEngine,
     private val startupReconciler: StartupReconciler,
     private val logger: Logger,
 ) : TipSource, SyncPollSource {
@@ -103,12 +104,13 @@ class GatewayRepository @Inject constructor(
     // Settings both trigger it).
     private val gapLimitScanMutex = Mutex()
 
-    // The tip stream and the whole sync-progress poll live on [SyncPoller]
-    // (#460). These forward so the repository's public surface is unchanged.
-    override val tipFlow: StateFlow<Long> get() = syncPoller.tipFlow
+    // The tip stream and the whole sync-progress poll live on [SyncEngine]
+    // (#460, moved to the shared module in M3). These forward so the
+    // repository's public surface is unchanged.
+    override val tipFlow: StateFlow<Long> get() = syncEngine.tipFlow
 
-    /** @see SyncPoller.publishTip */
-    internal fun publishTip(n: Long) = syncPoller.publishTip(n)
+    /** @see SyncEngine.publishTip */
+    internal fun publishTip(n: Long) = syncEngine.publishTip(n)
 
     override suspend fun fetchAndPublishTip(): Long {
         val n = currentTipNumberOrZero()
@@ -164,8 +166,8 @@ class GatewayRepository @Inject constructor(
     // BALANCED filter cache + `scriptArgsToWalletId` mapping live on
     // [SyncCoordinator] now (#106). Read through `syncCoordinator.getWalletIdForScript`.
 
-    /** @see SyncPoller.syncProgress */
-    val syncProgress: StateFlow<SyncProgress> get() = syncPoller.syncProgress
+    /** @see SyncEngine.syncProgress */
+    val syncProgress: StateFlow<SyncProgress> get() = syncEngine.syncProgress
 
     init {
         // Migrate old flat data/ directory to data/mainnet/ on first run
@@ -255,16 +257,16 @@ class GatewayRepository @Inject constructor(
         // Drop the previous wallet's sync samples so the new wallet's progress
         // starts from its own baseline. Otherwise ACTIVE_ONLY switches can spuriously
         // report progress / ETA / justReachedTip from the old wallet's syncing window.
-        syncPoller.resetTracker()
+        syncEngine.resetTracker()
         // Seed the percentage baseline with the registered light-client start
         // block so the first sample doesn't anchor the math to a transient
         // syncedToBlock=0 reading during peer warm-up (#150).
         val lightStart = syncProgressDao.get(wallet.walletId, currentNetwork.name)
             ?.lightStartBlockNumber ?: 0L
         if (lightStart > 0) {
-            syncPoller.seedStartHeight(lightStart)
+            syncEngine.seedStartHeight(lightStart)
         }
-        syncPoller.resetProgressState()
+        syncEngine.resetProgressState()
 
         val walletSyncMode = walletPreferences.getSyncMode(walletId = wallet.walletId)
         val walletCustomHeight = if (walletSyncMode == SyncMode.CUSTOM) {
@@ -1136,22 +1138,12 @@ class GatewayRepository @Inject constructor(
     override suspend fun getAccountStatus(): Result<AccountStatusResponse> = runCatching {
         val addr = getCurrentAddress() ?: throw Exception("No wallet")
         
-        // Fetch tip header
-        val tipJson = LightClientNative.nativeGetTipHeader()
-        val tipNumber = if (tipJson != null) {
-            val tip = json.decodeFromString<JniHeaderView>(tipJson)
-            tip.number.removePrefix("0x").toLongOrNull(16) ?: 0L
-        } else {
-            0L
-        }
-
-        // Fetch script status for ALL registered scripts.
-        val scriptsJson = LightClientNative.nativeGetScripts()
-        val scripts = if (scriptsJson != null) {
-            json.decodeFromString<List<JniScriptStatus>>(scriptsJson)
-        } else {
-            emptyList()
-        }
+        // Tip header plus the status of ALL registered scripts, read and
+        // decoded by the shared engine (M3 #2). Same two bridge calls,
+        // same hex parsing, same null-degrades-to-empty contract.
+        val state = syncEngine.readChainSyncState()
+        val tipNumber = state.tipNumber
+        val scripts = state.scripts
 
         // Persist progress for EVERY registered wallet, not just the active one.
         // Under BALANCED with 3 wallets registered, the light client advances all
@@ -1189,46 +1181,13 @@ class GatewayRepository @Inject constructor(
             )
         }.onFailure { logger.w(TAG, "Sub-account candidate reconcile failed (non-fatal)", it) }
 
-        // Active wallet's block for the sync-progress display below.
-        val activeArgs = _walletInfo.value?.script?.args
-        val scriptBlockNumber = if (activeArgs != null) {
-            scripts.find { it.script.args == activeArgs }
-                ?.blockNumber?.removePrefix("0x")?.toLongOrNull(16) ?: 0L
-        } else {
-            scripts.firstOrNull()?.blockNumber?.removePrefix("0x")?.toLongOrNull(16) ?: 0L
-        }
-
-        // Log sync progress for debugging
-        logger.d(TAG, "📈 SYNC STATUS: tip=$tipNumber, scriptBlock=$scriptBlockNumber, " +
-                "behind=${tipNumber - scriptBlockNumber} blocks")
-
-        // Calculate progress relative to sync start (not absolute tip ratio).
-        // This gives meaningful feedback for small block ranges (e.g. 50-100 blocks).
-        val trackerInfo = syncPoller.calculate(tipNumber)
-        val progress = if (tipNumber > 0) {
-            (trackerInfo.percentage / 100.0).coerceIn(0.0, 1.0)
-        } else {
-            0.0
-        }
-        
-        // isSynced tracks the ACTIVE WALLET'S PRIMARY script only — deliberately
-        // NOT a MIN across its #382 gap-limit candidate scripts. This looks like
-        // Neuron's #2992 ("light client sync miss some tx"), but that was a real
-        // miss: Neuron advanced a SHARED fetch cursor past lagging scripts, so
-        // their range never got refetched. Our embedded light client scans each
-        // registered script INDEPENDENTLY to tip, and candidates re-register from
-        // their own historical start (candidateScanStart), so a lagging candidate
-        // is never abandoned — it keeps catching up and its cells get indexed.
-        // Gating isSynced on candidates would instead show "syncing" for the
-        // entire background discovery deep-scan while the user's own funds are
-        // already synced and spendable — strictly worse UX. The candidate
-        // lifecycle (FOUND/EMPTY/found-funds) is gated separately and correctly
-        // by SubAccountReconciler's coverage rule. Do not "fix" this into a MIN.
-        val isSynced = tipNumber > 0 &&
-                scriptBlockNumber >= tipNumber - 10 &&
-                scriptBlockNumber <= tipNumber + 10 // Handle slight mismatches safely
-        
-        logger.d(TAG, "📊 SYNC PROGRESS: ${(progress * 100).toInt()}% synced, isSynced=$isSynced")
+        // Active wallet's block, its progress percentage and the +-10-block
+        // isSynced window, all derived by the shared engine (M3 #2). The
+        // per-wallet bookkeeping above stays here: it is Android-only.
+        val snapshot = syncEngine.computeStatus(state, _walletInfo.value?.script?.args)
+        val scriptBlockNumber = snapshot.scriptBlockNumber
+        val progress = snapshot.progress
+        val isSynced = snapshot.isSynced
 
         AccountStatusResponse(
             address = addr,
@@ -2777,11 +2736,11 @@ class GatewayRepository @Inject constructor(
     private val broadcastedThisSession =
         java.util.Collections.synchronizedSet(mutableSetOf<String>())
 
-    /** @see SyncPoller.start */
-    fun startSyncPolling() = syncPoller.start(scope, this)
+    /** @see SyncEngine.start */
+    fun startSyncPolling() = syncEngine.start(scope, this)
 
-    /** @see SyncPoller.stop */
-    fun stopSyncPolling() = syncPoller.stop()
+    /** @see SyncEngine.stop */
+    fun stopSyncPolling() = syncEngine.stop()
 
     // ========================================
     // Background Sync Service

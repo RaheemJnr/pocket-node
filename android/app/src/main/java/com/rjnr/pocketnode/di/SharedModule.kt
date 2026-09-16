@@ -9,6 +9,7 @@ import com.rjnr.pocketnode.data.gateway.AndroidLightClientApi
 import com.rjnr.pocketnode.data.gateway.JniLightClient
 import com.rjnr.pocketnode.data.gateway.LightClientApi
 import com.rjnr.pocketnode.data.gateway.NativeLightClient
+import com.rjnr.pocketnode.data.sync.SyncEngine
 import com.rjnr.pocketnode.data.transaction.TransactionBuilder
 import com.rjnr.pocketnode.data.validation.NetworkValidator
 import com.rjnr.pocketnode.data.wallet.WalletPreferences
@@ -18,6 +19,8 @@ import dagger.Provides
 import dagger.hilt.InstallIn
 import dagger.hilt.components.SingletonComponent
 import javax.inject.Singleton
+import kotlinx.coroutines.Dispatchers
+import kotlinx.serialization.json.Json
 
 /**
  * Providers for classes that live in the shared KMP module (D0 in docs/IOS_M1_DESIGN.md):
@@ -55,6 +58,33 @@ object SharedModule {
     @Provides
     @Singleton
     fun provideNativeLightClient(impl: JniLightClient): NativeLightClient = impl
+
+    /**
+     * The shared sync engine (M3 #2): the poll loop, the progress tracker and
+     * the account-status derivation, all in `commonMain`. It constructs its own
+     * [com.rjnr.pocketnode.data.gateway.SyncPoller], so nothing else provides
+     * one. The clock is left at its `SystemClock` default; only tests inject.
+     *
+     * `queryContext` is passed explicitly because the engine cannot name
+     * `Dispatchers.IO` from `commonMain`. Without it the blocking JNI reads in
+     * `readChainSyncState` would land on `Dispatchers.Default`, where they
+     * would occupy a CPU-sized pool; every caller on this side (the repository
+     * scope and `SyncCatchUpWorker`) ran them on IO before the extraction.
+     */
+    @Provides
+    @Singleton
+    fun provideSyncEngine(
+        lightClient: LightClientApi,
+        syncPreferences: SyncPreferences,
+        json: Json,
+        logger: Logger,
+    ): SyncEngine = SyncEngine(
+        lightClient,
+        syncPreferences,
+        json,
+        logger,
+        queryContext = Dispatchers.IO,
+    )
 
     // --- Preference domains (#461) ---
     // One SharedPreferences-backed object behind four narrow interfaces, so a
