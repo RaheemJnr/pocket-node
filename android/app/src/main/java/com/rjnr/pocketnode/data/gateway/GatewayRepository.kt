@@ -15,6 +15,9 @@ import com.rjnr.pocketnode.data.sync.SyncEngine
 import com.rjnr.pocketnode.data.sync.contract.SyncServiceCommands
 import com.rjnr.pocketnode.data.migration.WalletMigrationHelper
 import com.rjnr.pocketnode.data.transaction.TransactionBuilder
+import com.rjnr.pocketnode.data.transaction.PrivateKeySigner
+import com.rjnr.pocketnode.data.send.SendContext
+import com.rjnr.pocketnode.data.send.SendPipeline
 import com.rjnr.pocketnode.data.transaction.RecipientOutput
 import com.rjnr.pocketnode.data.database.entity.SubAccountCandidateEntity
 import com.rjnr.pocketnode.data.wallet.AddressUtils
@@ -42,7 +45,6 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
-import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 import kotlinx.serialization.encodeToString
 import kotlinx.serialization.json.Json
@@ -50,23 +52,6 @@ import kotlinx.serialization.json.decodeFromJsonElement
 import javax.inject.Inject
 import javax.inject.Singleton
 import com.rjnr.pocketnode.util.redactAddress
-
-/**
- * Narrow seam over [GatewayRepository] so [com.rjnr.pocketnode.data.sync.BroadcastWatchdog]
- * can be unit-tested without instantiating a full Repository (whose
- * constructor surface is wide). [GatewayRepository] implements this; tests
- * use a small fake.
- */
-interface TipSource {
-    /** Monotonic light-client tip stream. Initial value 0L until first publish. */
-    val tipFlow: kotlinx.coroutines.flow.StateFlow<Long>
-
-    /** Pull a fresh tip via JNI and publish to [tipFlow] if higher. Returns the tip read (or 0L). */
-    suspend fun fetchAndPublishTip(): Long
-
-    /** (walletId, networkName) of the active wallet, or null if no active wallet. */
-    fun activeWalletAndNetworkOrNull(): Pair<String, String>?
-}
 
 @Singleton
 class GatewayRepository @Inject constructor(
@@ -82,7 +67,8 @@ class GatewayRepository @Inject constructor(
     private val appDatabase: AppDatabase,
     private val syncProgressDao: SyncProgressDao,
     private val pendingBroadcastDao: PendingBroadcastDao,
-    private val broadcastClient: BroadcastClient,
+    // The shared send path (M3 #5): preview, build, reserve, broadcast, retry.
+    private val sendPipeline: SendPipeline,
     private val syncCoordinator: SyncCoordinator,
     private val daoHeaderResolver: DaoHeaderResolver,
     private val daoDepositReader: DaoDepositReader,
@@ -97,7 +83,19 @@ class GatewayRepository @Inject constructor(
     private val startupReconciler: StartupReconciler,
     private val logger: Logger,
 ) : TipSource, SyncPollSource {
-    private val sendMutex = Mutex()
+
+    /**
+     * Sender identity for one send, snapshotted here and handed to
+     * [SendPipeline] so nothing inside the send mutex re-reads a field a
+     * wallet switch could move underneath it (M3 #5).
+     */
+    private fun sendContext(): SendContext = SendContext(
+        network = currentNetwork,
+        walletId = activeWalletId,
+        activeScript = _walletInfo.value?.script,
+        isSyncing = { syncProgress.value.isSyncing },
+        scope = scope,
+    )
 
     // #382: single-flight for the explicit gap-limit scan (Home banner and
     // Settings both trigger it).
@@ -1054,270 +1052,28 @@ class GatewayRepository @Inject constructor(
     private suspend fun fetchAllSpentOutpoints(searchKeyJson: String): MutableSet<String> =
         ledgerReader.fetchAllSpentOutpoints(searchKeyJson)
 
-    /**
-     * Single mutex-guarded prepare-and-send shared by plain transfers and DAO
-     * operations (#115, #320). Runs cell-fetch, reservation filter, build,
-     * sign, and pre-broadcast persistence all inside [sendMutex] — closing the
-     * read-filter-insert race that would otherwise let two concurrent sends
-     * (e.g. a transfer and a DAO deposit) pick the same input cells and produce
-     * conflicting transactions.
-     *
-     * [build] receives the reservation-filtered spendable cells (live cells
-     * minus inputs reserved by in-flight broadcasts, plus synthesized
-     * change-outputs of pending sends) and the snapshot network, and returns
-     * the signed transaction.
-     *
-     * The JNI broadcast happens AFTER the mutex is released — locking that would
-     * needlessly serialize all sends. [sendTransaction] is idempotent on the
-     * pre-inserted hash, so it skips the duplicate insert and just performs the
-     * broadcast + post-broadcast CAS.
-     */
-    /**
-     * The cells a send may spend right now: live regular cells minus the ones
-     * in-flight broadcasts have reserved, plus the change those broadcasts are
-     * about to create.
-     *
-     * Extracted from [buildReserveAndSend] so [previewTransfer] plans against
-     * exactly the same set the build will select from — a preview against a
-     * different cell set would quote a fee the send does not pay (#490).
-     * Callers hold [sendMutex].
-     */
-    private suspend fun resolveSpendableCells(
-        fromAddress: String,
-        senderNetwork: NetworkType,
-        walletId: String,
-        network: String,
-    ): List<Cell> {
-        // getCells(fromAddress) decodes the address to a script — honors the
-        // snapshot rather than reading _walletInfo.value live. It already
-        // excludes typed (DAO/token) cells, so this is regular spendable CKB.
-        val cellsResult = getCells(fromAddress).getOrThrow()
-        val pending = pendingBroadcastDao.getActive(walletId, network)
-        val reserved: Set<OutPoint> = pending
-            .flatMap { json.decodeFromString<List<OutPoint>>(it.reservedInputs) }
-            .toSet()
-        val liveFiltered = cellsResult.items.filter { it.outPoint !in reserved }
+    // ========================================
+    // Send (delegated to the shared [SendPipeline], M3 #5)
+    // ========================================
+    //
+    // The pipeline owns the send mutex, the session-broadcast set, cell
+    // reservation, the pre-broadcast rows and the broadcast itself. What stays
+    // here is the sender snapshot: the network, the active wallet's id and lock
+    // script, the sync flag and the repository scope, bundled by [sendContext].
 
-        // Synthesize predicted change-output cells from in-flight broadcasts.
-        // Without this, rapid sequential sends exhaust live cells before the
-        // light client has synced the change outputs of prior sends — the
-        // observed "Not enough funds available" failure mode.
-        // We include each output of every active pending tx whose lock script
-        // matches the sender's lock (= change output going back to us).
-        // If a pending tx ultimately FAILs, downstream txs that consumed its
-        // synthetic change will also fail and the watchdog times them out.
-        //
-        // ONLY session-broadcast rows: a synthetic input resolves only if
-        // its creating tx is in the light client's in-memory pending pool,
-        // which is wiped on restart. Persisted rows from a prior session are
-        // not in the pool, so their change would be unresolvable and reject
-        // every send after a reboot (Alex report). The reservation filter
-        // above still uses ALL pending rows so reserved inputs are never
-        // double-spent.
-        val pendingChange: List<Cell> = pending
-            .filter { it.txHash in broadcastedThisSession }
-            .flatMap { row ->
-                val pendingTx = try {
-                    json.decodeFromString<Transaction>(row.signedTxJson)
-                } catch (e: Exception) {
-                    return@flatMap emptyList<Cell>()
-                }
-                pendingTx.cellOutputs.mapIndexedNotNull { idx, output ->
-                    val outAddr = try {
-                        AddressUtils.encode(output.lock, senderNetwork)
-                    } catch (e: Exception) {
-                        return@mapIndexedNotNull null
-                    }
-                    if (outAddr != fromAddress) return@mapIndexedNotNull null
-                    Cell(
-                        outPoint = OutPoint(row.txHash, "0x${idx.toString(16)}"),
-                        capacity = output.capacity,
-                        blockNumber = "0x0", // synthetic — not on chain yet
-                        lock = output.lock,
-                        type = output.type,
-                        data = "0x"
-                    )
-                }
-            }
-        // Dedup by outpoint, preferring the real (on-chain) cell: once a
-        // pending tx confirms, its change appears in both liveFiltered and
-        // pendingChange for the brief window before the watchdog clears the
-        // row. Selecting the same outpoint twice would build a tx with a
-        // duplicate input and fail. liveFiltered is first, so distinctBy
-        // keeps the real cell.
-        val filtered = (liveFiltered + pendingChange)
-            .distinctBy { "${it.outPoint.txHash}:${it.outPoint.index}" }
-        logger.d(
-            TAG,
-            "resolveSpendableCells: ${cellsResult.items.size} live, ${reserved.size} reserved, " +
-                "${pendingChange.size} synthetic-change, ${filtered.size} available"
-        )
-        return filtered
-    }
-
-    /**
-     * Fee and change for a transfer, computed from the cells the send would
-     * actually select, without signing, reserving or broadcasting anything.
-     *
-     * The Send review sheet quotes this (#490). Selection is smallest-first,
-     * so a fragmented wallet spends many inputs and pays materially more than
-     * a 1-input estimate; showing the estimate and then paying the plan is the
-     * bug this closes. [prepareAndSend] re-runs the same plan against the cell
-     * set it holds the mutex over and refuses to broadcast if the fee moved.
-     *
-     * Throws whatever the selection throws (no cells, insufficient balance);
-     * the caller surfaces it instead of opening the review sheet. Returns the
-     * plan rather than a `Result` so it stays stubbable in ViewModel tests —
-     * MockK cannot round-trip an inline-class return through a suspend resume.
-     */
+    /** @see SendPipeline.previewTransfer */
     suspend fun previewTransfer(
         fromAddress: String,
         recipients: List<RecipientOutput>,
-    ): TransferPlan {
-        val senderNetwork = currentNetwork
-        val walletId = activeWalletId
-        return sendMutex.withLock {
-            val cells = resolveSpendableCells(fromAddress, senderNetwork, walletId, senderNetwork.name)
-            transactionBuilder.planTransfer(recipients, cells)
-        }
-    }
-
-    /**
-     * Guards a confirmed send against a fee that moved between the review and
-     * the broadcast (a cell confirmed, a pending tx resolved). Refusing is the
-     * safe branch: the user re-opens the sheet and confirms the new number
-     * rather than silently paying a fee they never saw.
-     */
-    private fun verifyExpectedFee(
-        recipients: List<RecipientOutput>,
-        availableCells: List<Cell>,
-        expectedFeeShannons: Long?,
-    ) {
-        if (expectedFeeShannons == null) return
-        val actualFee = transactionBuilder.planTransfer(recipients, availableCells).feeShannons
-        if (actualFee != expectedFeeShannons) {
-            throw IllegalStateException(
-                "Fee changed since you reviewed this transaction " +
-                    "(${expectedFeeShannons} → ${actualFee} shannons). Nothing was sent — " +
-                    "please review and confirm again."
-            )
-        }
-    }
-
-    private suspend fun buildReserveAndSend(
-        fromAddress: String,
-        // Pending activity-row overrides for DAO ops (#433). A plain transfer
-        // leaves these null and the row is a generic "out" whose balanceChange
-        // is the computed net debit. A DAO withdraw/deposit passes its true
-        // direction + amount so the pending row reads "Dao Withdraw 250 CKB"
-        // instead of surfacing the tiny fee as a "-0.001 Sent". Fee is stored
-        // separately so the detail view's fee line is populated.
-        pendingDirection: String = "out",
-        pendingAmountShannons: Long? = null,
-        pendingFeeShannons: Long? = null,
-        build: (availableCells: List<Cell>, network: NetworkType) -> Transaction
-    ): String {
-        // Snapshot every piece of sender state at function entry. The user can
-        // switch wallet/network mid-send (rare, but possible — Settings is one
-        // tap away); we must not let live reads inside the mutex retarget the
-        // send to the new wallet while we persist rows under the old walletId.
-        val senderNetwork = currentNetwork
-        val walletId = activeWalletId
-        val network = senderNetwork.name
-        val tipNumber = currentTipNumberOrZero()
-        publishTip(tipNumber)
-
-        val signedTx = sendMutex.withLock {
-            val filtered = resolveSpendableCells(fromAddress, senderNetwork, walletId, network)
-
-            val signed = build(filtered, senderNetwork)
-
-            val txHash = transactionBuilder.computeTxHash(signed)
-            val txJson = json.encodeToString(signed)
-            val reservedJson = json.encodeToString(signed.cellInputs.map { it.previousOutput })
-            val now = System.currentTimeMillis()
-
-            // Outgoing amount for activity-row balanceChange. Stored as POSITIVE
-            // hex per existing convention; `direction = "out"` carries the sign
-            // for the UI.
-            //
-            // Net debit = Σ(our input capacities) − Σ(our plain-change outputs),
-            // matching the confirmed-row formula. The old code used
-            // min(all outputs), which returned the CHANGE output whenever
-            // change < amount sent — a 150,000 CKB send displayed as
-            // "-17,950.29" until the light client synced and corrected it
-            // (Alex, Telegram). A typed self-output (DAO deposit cell) is
-            // capacity leaving spendable, so it is not counted as change.
-            val inputCapacities = signed.cellInputs.mapNotNull { input ->
-                filtered.find { it.outPoint == input.previousOutput }
-                    ?.capacity?.removePrefix("0x")?.toLongOrNull(16)
-            }
-            val outgoingOutputs = signed.cellOutputs.map { output ->
-                val isOurs = runCatching {
-                    AddressUtils.encode(output.lock, senderNetwork)
-                }.getOrNull() == fromAddress
-                OutgoingOutput(
-                    capacityShannons = output.capacity.removePrefix("0x").toLongOrNull(16) ?: 0L,
-                    isOurs = isOurs,
-                    isTyped = output.type != null,
-                )
-            }
-            val outgoingAmount = computeOutgoingShannons(inputCapacities, outgoingOutputs)
-            val balanceChangeHex = "0x${outgoingAmount.toString(16)}"
-
-            // Planned fee for the pending activity row (#497). DAO ops pass
-            // theirs in; a plain transfer derives it from the same inputs and
-            // outputs already resolved above — Σ(inputs) − Σ(all outputs),
-            // change included. `mapNotNull` above drops any input not in the
-            // reserved set, and computeFeeShannons refuses to score a partial
-            // set, so a dropped input yields null ("Pending") not a wrong fee.
-            val plannedFeeShannons = pendingFeeShannons ?: computeFeeShannons(
-                resolvedInputs = inputCapacities,
-                declaredInputCount = signed.cellInputs.size,
-                // Parsed strictly, not through outgoingOutputs' display-oriented
-                // `?: 0L`: an unparseable output would otherwise inflate the fee
-                // by that output's whole capacity.
-                outputCapacities = signed.cellOutputs.map {
-                    it.capacity.removePrefix("0x").toLongOrNull(16)
-                },
-            )
-
-            pendingBroadcastDao.insert(
-                PendingBroadcastEntity(
-                    txHash = txHash,
-                    walletId = walletId,
-                    network = network,
-                    signedTxJson = txJson,
-                    reservedInputs = reservedJson,
-                    state = "BROADCASTING",
-                    submittedAtTipBlock = tipNumber,
-                    nullCount = 0,
-                    createdAt = now,
-                    lastCheckedAt = now
-                )
-            )
-            cacheManager.insertPendingTransaction(
-                txHash = txHash,
-                network = network,
-                walletId = walletId,
-                balanceChange = pendingAmountShannons?.let { "0x${it.toString(16)}" } ?: balanceChangeHex,
-                direction = pendingDirection,
-                fee = pendingFeeShannons?.let { "0x${it.toString(16)}" } ?: "0x0",
-                feeShannons = plannedFeeShannons
-            )
-            signed
-        }
-
-        // sendTransaction owns the JNI call + post-broadcast CAS.
-        // Its insert path is idempotent: it sees the row we just inserted
-        // and skips re-insertion, then performs broadcast + state CAS.
-        return sendTransaction(signedTx).getOrThrow()
-    }
+    ): TransferPlan = sendPipeline.previewTransfer(sendContext(), fromAddress, recipients)
 
     /**
      * Plain secp256k1 transfer. fromAddress is the authoritative sender
      * identity (captured by SendViewModel before this call) and is trusted
      * over live repository globals.
+     *
+     * The key is wrapped in a [PrivateKeySigner] and NOT wiped here: the
+     * caller still owns it (SendViewModel zeroes it in a `finally`).
      */
     suspend fun prepareAndSend(
         fromAddress: String,
@@ -1326,299 +1082,58 @@ class GatewayRepository @Inject constructor(
         privateKey: ByteArray,
         /** Fee the user confirmed on the review sheet; the send aborts if the build no longer matches it (#490). */
         expectedFeeShannons: Long? = null,
-    ): Result<String> = runCatching {
-        buildReserveAndSend(fromAddress) { availableCells, net ->
-            verifyExpectedFee(
-                recipients = listOf(RecipientOutput(toAddress, amountShannons)),
-                availableCells = availableCells,
-                expectedFeeShannons = expectedFeeShannons,
-            )
-            transactionBuilder.buildTransfer(
-                fromAddress = fromAddress,
-                toAddress = toAddress,
-                amountShannons = amountShannons,
-                availableCells = availableCells,
-                privateKey = privateKey,
-                network = net
-            )
-        }
-    }
+    ): Result<String> = sendPipeline.prepareAndSend(
+        ctx = sendContext(),
+        fromAddress = fromAddress,
+        toAddress = toAddress,
+        amountShannons = amountShannons,
+        signer = PrivateKeySigner(privateKey),
+        expectedFeeShannons = expectedFeeShannons,
+    )
 
+    /** @see SendPipeline.prepareAndSendBulk */
     suspend fun prepareAndSendBulk(
         fromAddress: String,
         recipients: List<RecipientOutput>,
         privateKey: ByteArray
-    ): Result<String> = runCatching {
-        val txHash = buildReserveAndSend(fromAddress) { availableCells, net ->
-            transactionBuilder.buildMultiTransfer(
-                fromAddress = fromAddress,
-                recipients = recipients,
-                availableCells = availableCells,
-                privateKey = privateKey,
-                network = net
-            )
-        }
-        // Remember this batch's hash so the activity list can badge it "Bulk".
-        walletPreferences.addBulkTxHash(txHash)
-        txHash
-    }
+    ): Result<String> = sendPipeline.prepareAndSendBulk(
+        ctx = sendContext(),
+        fromAddress = fromAddress,
+        recipients = recipients,
+        signer = PrivateKeySigner(privateKey),
+    )
 
-    /**
-     * Retries a FAILED `pending_broadcasts` row by re-broadcasting its
-     * ORIGINAL signed bytes (#316).
-     *
-     * The previous flow decoded a recipient/amount and prefilled a fresh
-     * send, which re-ran cell selection. Two ways that lost funds:
-     *
-     *  1. Double-pay. A FAILED state is a *heuristic* (still in-pool past the
-     *     commit window, or fetch returned unknown N times) — not proof the
-     *     network rejected the tx. The original could still be alive in a
-     *     remote mempool. If the prefilled retry selected *different* inputs
-     *     and the original later committed, the recipient was paid twice.
-     *  2. Wrong recipient. The prefill guessed the recipient via a
-     *     "smallest-capacity output" heuristic, which is the sender's own
-     *     change whenever change < amount — the retry then paid the sender.
-     *
-     * Re-broadcasting the identical signed tx reuses the exact same inputs, so
-     * the original and the retry conflict and at most one can ever commit — no
-     * double-pay possible — and the recipient is whatever the original tx
-     * already encodes, with no heuristic. We drop the FAILED row first so
-     * [sendTransaction] re-inserts a fresh BROADCASTING row for the same hash
-     * and the watchdog re-tracks it.
-     */
-    suspend fun retryBroadcast(txHash: String): Result<String> = runCatching {
-        val row = pendingBroadcastDao.getFailedRow(txHash)
-            ?: error("This transaction is too old to retry automatically. Please send a new one.")
-        val tx = json.decodeFromString<Transaction>(row.signedTxJson)
-        pendingBroadcastDao.delete(txHash)
-        cacheManager.deleteTransaction(txHash)
-        sendTransaction(tx).getOrThrow()
-    }
+    /** @see SendPipeline.retryBroadcast */
+    suspend fun retryBroadcast(txHash: String): Result<String> =
+        sendPipeline.retryBroadcast(sendContext(), txHash)
 
+    /** @see SendPipeline.sendTransaction */
     suspend fun sendTransaction(
         transaction: Transaction,
-        /**
-         * When non-null, abort if the active wallet is no longer this one —
-         * a transaction signed for wallet A must never persist its pending
-         * row under wallet B's id/network (#382 Tier 3 review).
-         */
         expectedWalletId: String? = null,
-        /**
-         * Fee this send is known to pay, recorded on the pending activity row
-         * so the detail sheet's "Network fee" has a value from the moment of
-         * broadcast (#497). Callers that reach this path directly (DAO unlock)
-         * must pass it: unlike a transfer, their fee cannot be recovered from
-         * the confirmed transaction — see [unlockDao].
-         */
         pendingFeeShannons: Long? = null,
-    ): Result<String> = runCatching {
-        logger.d(TAG, "📤 sendTransaction: building JSON")
-        logger.d(TAG, "  Inputs: ${transaction.cellInputs.size}, Outputs: ${transaction.cellOutputs.size}")
+    ): Result<String> = sendPipeline.sendTransaction(
+        ctx = sendContext(),
+        transaction = transaction,
+        expectedWalletId = expectedWalletId,
+        pendingFeeShannons = pendingFeeShannons,
+    )
 
-        // Pre-flight checks (defense-in-depth, TransactionBuilder also validates)
-        require(transaction.cellInputs.isNotEmpty()) { "Transaction has no inputs" }
-        require(transaction.cellOutputs.isNotEmpty()) { "Transaction has no outputs" }
-        for (output in transaction.cellOutputs) {
-            val capacity = requireNotNull(output.capacity.removePrefix("0x").toLongOrNull(16)) {
-                "Malformed output capacity '${output.capacity}' in transaction"
-            }
-            require(capacity >= TransactionBuilder.MIN_CELL_CAPACITY) {
-                "Output capacity ${capacity / 100_000_000.0} CKB is below minimum 61 CKB"
-            }
-        }
-
-        // Snapshot at entry — pin to whichever wallet/network the user was on.
-        val walletId = activeWalletId
-        if (expectedWalletId != null && walletId != expectedWalletId) {
-            throw Exception("Wallet changed before broadcast; transaction not sent")
-        }
-        val network = currentNetwork.name
-        val tipNumber = currentTipNumberOrZero()
-        publishTip(tipNumber)
-        val txJson = json.encodeToString(transaction)
-        val txHash = transactionBuilder.computeTxHash(transaction)
-        val reservedJson = json.encodeToString(
-            transaction.cellInputs.map { it.previousOutput }
-        )
-
-        // Outgoing amount for the activity row. This path (DAO unlock,
-        // failed-send retry) has no input capacities, so it sums the outputs
-        // NOT locked to us — the recipient amount. The old code used
-        // min(all outputs), which returned the CHANGE output whenever
-        // change < amount sent (same bug as buildReserveAndSend; see #350).
-        // Transfers via buildReserveAndSend insert their own (more precise)
-        // net-debit row first and skip the insert below, so this only drives
-        // standalone sends. A self-only tx (DAO unlock) sums to 0 and is
-        // reclassified by the synced row.
-        val ourLock = _walletInfo.value?.script
-        val outgoingOutputs = transaction.cellOutputs.map { output ->
-            OutgoingOutput(
-                capacityShannons = output.capacity.removePrefix("0x").toLongOrNull(16) ?: 0L,
-                isOurs = ourLock != null && output.lock == ourLock,
-                isTyped = output.type != null,
-            )
-        }
-        // Positive hex per existing convention; `direction = "out"` carries sign.
-        val balanceChangeHex = "0x${recipientOutgoingShannons(outgoingOutputs).toString(16)}"
-        val now = System.currentTimeMillis()
-
-        logger.d(TAG, "📤 sendTransaction: JSON length=${txJson.length}, preHash=$txHash")
-
-        // Critical section: pre-broadcast inserts under sendMutex.
-        // Idempotent: skip insert if a row already exists for this hash
-        // (Task 3's prepareAndSend pre-inserts under its own mutex hold).
-        sendMutex.withLock {
-            val existing = pendingBroadcastDao.getActive(walletId, network)
-                .firstOrNull { it.txHash == txHash }
-            if (existing == null) {
-                pendingBroadcastDao.insert(
-                    PendingBroadcastEntity(
-                        txHash = txHash,
-                        walletId = walletId,
-                        network = network,
-                        signedTxJson = txJson,
-                        reservedInputs = reservedJson,
-                        state = "BROADCASTING",
-                        submittedAtTipBlock = tipNumber,
-                        nullCount = 0,
-                        createdAt = now,
-                        lastCheckedAt = now
-                    )
-                )
-                cacheManager.insertPendingTransaction(
-                    txHash = txHash,
-                    network = network,
-                    walletId = walletId,
-                    balanceChange = balanceChangeHex,
-                    direction = "out",
-                    fee = "0x0",
-                    feeShannons = pendingFeeShannons
-                )
-            } else {
-                logger.d(TAG, "sendTransaction: row exists (state=${existing.state}) — skipping insert")
-            }
-        }
-
-        // JNI broadcast — outside the mutex (long-running, no need to serialize).
-        val rawResult = try {
-            broadcastClient.sendRaw(txJson)
-        } catch (e: Exception) {
-            pendingBroadcastDao.delete(txHash)
-            cacheManager.deleteTransaction(txHash)
-            throw e
-        }
-
-        if (rawResult == null) {
-            pendingBroadcastDao.delete(txHash)
-            cacheManager.deleteTransaction(txHash)
-            throw Exception("Send failed - native returned null")
-        }
-
-        // The JNI now returns the real rejection reason with a sentinel prefix
-        // instead of null, so we can surface WHY a broadcast was rejected (e.g.
-        // an unresolvable input from a stale pending tx) rather than blaming the
-        // network. Clean up the row we inserted, same as the null path.
-        if (rawResult.startsWith(BROADCAST_ERROR_PREFIX)) {
-            val reason = rawResult.removePrefix(BROADCAST_ERROR_PREFIX)
-            pendingBroadcastDao.delete(txHash)
-            cacheManager.deleteTransaction(txHash)
-            throw Exception("Broadcast rejected: $reason")
-        }
-
-        val returnedHash = rawResult.trim('"')
-        // Broadcast accepted → the tx is now in the light client's in-memory
-        // pending pool this session, so its change is safe to spend as synthetic
-        // change until it confirms. Record both key variants (pre-hash and the
-        // returned hash) since the pending_broadcasts row may be keyed by either.
-        broadcastedThisSession.add(txHash)
-        broadcastedThisSession.add(returnedHash)
-        if (returnedHash.lowercase() != txHash.lowercase()) {
-            // Step 0 verified equality on testnet; this branch should be unreachable.
-            // If it fires in production, the tx WAS broadcast under returnedHash but
-            // our pre-broadcast hash derivation disagrees. Re-key both rows so cleanup
-            // paths align with what the network sees.
-            logger.e(TAG, "❌ Hash mismatch! pre=$txHash returned=$returnedHash — re-keying rows")
-            pendingBroadcastDao.delete(txHash)
-            cacheManager.deleteTransaction(txHash)
-            pendingBroadcastDao.insert(
-                PendingBroadcastEntity(
-                    txHash = returnedHash,
-                    walletId = walletId,
-                    network = network,
-                    signedTxJson = txJson,
-                    reservedInputs = reservedJson,
-                    state = "BROADCAST",
-                    submittedAtTipBlock = tipNumber,
-                    nullCount = 0,
-                    createdAt = now,
-                    lastCheckedAt = System.currentTimeMillis()
-                )
-            )
-            cacheManager.insertPendingTransaction(
-                txHash = returnedHash,
-                network = network,
-                walletId = walletId,
-                balanceChange = balanceChangeHex,
-                direction = "out",
-                fee = "0x0",
-                feeShannons = pendingFeeShannons
-            )
-        } else {
-            val ok = pendingBroadcastDao.compareAndUpdateState(
-                hash = txHash,
-                expected = "BROADCASTING",
-                next = "BROADCAST",
-                now = System.currentTimeMillis()
-            )
-            if (ok != 1) {
-                logger.w(TAG, "compareAndUpdateState saw row not in BROADCASTING (race?); proceeding")
-            }
-        }
-
-        logger.d(TAG, "✅ sendTransaction: returnedHash=$returnedHash")
-
-        // After sending, nudge the light client to rescan from a few blocks back
-        // so it picks up the new change output when the tx confirms. Capture the
-        // sender's wallet info up front — if the user switches wallets during the
-        // 5s delay, we must still re-register the script that actually sent.
-        val senderInfo = _walletInfo.value
-        val senderWalletId = activeWalletId
-        scope.launch {
-            try {
-                delay(5000) // Wait a bit for tx to propagate
-                // #332: on a still-catching-up wallet, re-registering at
-                // tip-10 JUMPS the script forward over unscanned history —
-                // silent balance/history loss. The ongoing scan will find the
-                // change output anyway; only fast-path when already synced.
-                if (syncProgress.value.isSyncing) {
-                    logger.d(TAG, "Skipping post-send partial re-register: wallet still catching up")
-                    return@launch
-                }
-                val tipStr = LightClientNative.nativeGetTipHeader()
-                if (tipStr != null && senderInfo != null) {
-                    val tip = json.decodeFromString<JniHeaderView>(tipStr)
-                    val tipNumber = tip.number.removePrefix("0x").toLongOrNull(16) ?: 0L
-                    val rescanFrom = (tipNumber - 10).coerceAtLeast(0L)
-                    logger.d(TAG, "🔄 Partial re-register from block $rescanFrom to catch change output")
-
-                    val blockNumberHex = "0x${rescanFrom.toString(16)}"
-                    // Only register lock script (not DAO type) with PARTIAL mode
-                    val scriptStatuses = listOf(
-                        JniScriptStatus(
-                            script = senderInfo.script,
-                            scriptType = "lock",
-                            blockNumber = blockNumberHex
-                        )
-                    )
-                    setScriptsAndRecord(scriptStatuses, listOf(senderWalletId), LightClientNative.CMD_SET_SCRIPTS_PARTIAL)
-                }
-            } catch (e: Exception) {
-                logger.e(TAG, "Failed to re-register script after send: ${e.message}")
-            }
-        }
-
-        returnedHash
-    }
+    /** @see SendPipeline.buildReserveAndSend */
+    private suspend fun buildReserveAndSend(
+        fromAddress: String,
+        pendingDirection: String = "out",
+        pendingAmountShannons: Long? = null,
+        pendingFeeShannons: Long? = null,
+        build: (availableCells: List<Cell>, network: NetworkType) -> Transaction
+    ): String = sendPipeline.buildReserveAndSend(
+        ctx = sendContext(),
+        fromAddress = fromAddress,
+        pendingDirection = pendingDirection,
+        pendingAmountShannons = pendingAmountShannons,
+        pendingFeeShannons = pendingFeeShannons,
+        build = build,
+    )
 
     suspend fun getTransactions(limit: Int = 50, cursor: String? = null): Result<TransactionsResponse> =
         ledgerReader.getTransactions(
@@ -2173,15 +1688,7 @@ class GatewayRepository @Inject constructor(
     private val balanceRescanAttempted =
         java.util.Collections.synchronizedSet(mutableSetOf<String>())
 
-    // Tx hashes broadcast in THIS process session. Only these are safe to spend
-    // as synthetic change: a synthetic change cell resolves only if its creating
-    // tx is in the light client's IN-MEMORY pending pool, which is wiped on every
-    // app restart. A PERSISTED pending_broadcasts row from a prior session is not
-    // in the pool, so feeding its change into a new send makes the light client
-    // fail to resolve the input and reject the tx locally — surfacing as the
-    // misleading "Could not broadcast" error that survived reboots (Alex report).
-    private val broadcastedThisSession =
-        java.util.Collections.synchronizedSet(mutableSetOf<String>())
+    // The session-broadcast set moved to SendPipeline with the send path (M3 #5).
 
     /** @see SyncEngine.start */
     fun startSyncPolling() = syncEngine.start(scope, this)
@@ -2232,9 +1739,7 @@ class GatewayRepository @Inject constructor(
          */
         private const val MAX_CELL_PAGES = 50
 
-        // Matches SEND_ERROR_PREFIX in the Rust JNI (query.rs): nativeSendTransaction
-        // returns "__SEND_ERROR__:<reason>" on a rejected broadcast instead of null.
-        private const val BROADCAST_ERROR_PREFIX = "__SEND_ERROR__:"
+        // BROADCAST_ERROR_PREFIX moved to SendPipeline with the send path (M3 #5).
 
         // MAX_CONCURRENT_WALLET_SCRIPTS + BALANCED_LAG_THRESHOLD moved to
         // SyncCoordinator (#106). Tests now import SyncCoordinator.BALANCED_LAG_THRESHOLD

@@ -11,20 +11,12 @@ import kotlinx.coroutines.CancellationException
 import javax.inject.Inject
 import javax.inject.Singleton
 
-/**
- * Narrow surface used by BroadcastWatchdog. Lets tests fake without
- * mocking the full CacheManager.
- */
-interface TransactionStatusUpdater {
-    suspend fun updateTransactionStatus(hash: String, status: String)
-}
-
 @Singleton
 class CacheManager @Inject constructor(
     private val transactionDao: TransactionDao,
     private val balanceCacheDao: BalanceCacheDao,
     private val logger: Logger,
-) : TransactionStatusUpdater {
+) {
     // --- Balance cache ---
 
     suspend fun getCachedBalance(network: String, walletId: String = ""): BalanceResponse? {
@@ -134,7 +126,7 @@ class CacheManager @Inject constructor(
             .flatMap { transactionDao.getKnownFees(it) }
             .associate { it.txHash to it.feeShannons }
 
-    override suspend fun updateTransactionStatus(hash: String, status: String) {
+    suspend fun updateTransactionStatus(hash: String, status: String) {
         // Propagate failures — BroadcastWatchdog runs this BEFORE the terminal
         // CAS specifically so a DB hiccup leaves the pending row recoverable.
         // Swallowing here would silently break that contract.

@@ -87,12 +87,18 @@ class StartupReconcilerTest {
 
     @Test
     fun `no orphans means the light client is never asked`() = runTest {
-        broadcasts.rows[WALLET to NETWORK] = listOf(
+        broadcasts.seed(
             PendingBroadcastRecord(
                 txHash = HASH,
                 state = PendingBroadcastRecord.STATE_BROADCASTING,
                 reservedInputs = "[]",
                 signedTxJson = "{}",
+                walletId = WALLET,
+                network = NETWORK,
+                submittedAtTipBlock = 0L,
+                nullCount = 0,
+                createdAt = 0L,
+                lastCheckedAt = 0L,
             )
         )
         var asked = 0

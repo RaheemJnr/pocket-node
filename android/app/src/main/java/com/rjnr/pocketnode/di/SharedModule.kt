@@ -12,6 +12,8 @@ import com.rjnr.pocketnode.data.gateway.LightClientApi
 import com.rjnr.pocketnode.data.gateway.NativeLightClient
 import com.rjnr.pocketnode.data.gateway.StartupReconciler
 import com.rjnr.pocketnode.data.gateway.SyncCoordinator
+import com.rjnr.pocketnode.data.gateway.TipSource
+import com.rjnr.pocketnode.data.send.SendPipeline
 import com.rjnr.pocketnode.data.storage.BalanceCache
 import com.rjnr.pocketnode.data.storage.HeaderCache
 import com.rjnr.pocketnode.data.storage.PendingBroadcastStore
@@ -26,7 +28,10 @@ import com.rjnr.pocketnode.data.storage.SubAccountCandidateStore
 import com.rjnr.pocketnode.data.storage.SyncProgressStore
 import com.rjnr.pocketnode.data.storage.TransactionStore
 import com.rjnr.pocketnode.data.storage.WalletRegistry
+import com.rjnr.pocketnode.data.sync.BroadcastWatchdog
+import com.rjnr.pocketnode.data.sync.LifecycleProvider
 import com.rjnr.pocketnode.data.sync.SyncEngine
+import com.rjnr.pocketnode.data.sync.TransactionStatusGateway
 import com.rjnr.pocketnode.data.transaction.TransactionBuilder
 import com.rjnr.pocketnode.data.validation.NetworkValidator
 import com.rjnr.pocketnode.data.wallet.WalletPreferences
@@ -193,6 +198,68 @@ object SharedModule {
         transactions: TransactionStore,
         logger: Logger,
     ): StartupReconciler = StartupReconciler(pendingBroadcasts, transactions, logger)
+
+    /**
+     * The shared send path (M3 #5): preview, build, reserve, broadcast, retry.
+     *
+     * It owns the send mutex and the session-broadcast set, so there must be
+     * exactly one of these per process — a second instance would reintroduce
+     * the concurrent-selection race the mutex exists to close.
+     *
+     * `queryContext` is passed explicitly for the same reason
+     * [provideSyncEngine] passes it: the one dispatcher hop in the pipeline is
+     * the tip read, which went through `LightClientReadOnly` and forced IO.
+     */
+    @Provides
+    @Singleton
+    fun provideSendPipeline(
+        lightClient: LightClientApi,
+        transactionBuilder: TransactionBuilder,
+        ledger: LedgerReader,
+        pendingBroadcasts: PendingBroadcastStore,
+        transactions: TransactionStore,
+        syncEngine: SyncEngine,
+        syncCoordinator: SyncCoordinator,
+        uiPreferences: UiPreferences,
+        json: Json,
+        logger: Logger,
+    ): SendPipeline = SendPipeline(
+        lightClient,
+        transactionBuilder,
+        ledger,
+        pendingBroadcasts,
+        transactions,
+        syncEngine,
+        syncCoordinator,
+        uiPreferences,
+        json,
+        logger,
+        queryContext = Dispatchers.IO,
+    )
+
+    /**
+     * The shared broadcast watchdog (M3 #5). It used to carry `@Singleton` and
+     * a second `@Inject` constructor that filled in `Dispatchers.IO`; in
+     * `commonMain` it carries neither, so both move here.
+     */
+    @Provides
+    @Singleton
+    fun provideBroadcastWatchdog(
+        pendingBroadcasts: PendingBroadcastStore,
+        statusGateway: TransactionStatusGateway,
+        transactions: TransactionStore,
+        tipSource: TipSource,
+        lifecycleProvider: LifecycleProvider,
+        logger: Logger,
+    ): BroadcastWatchdog = BroadcastWatchdog(
+        pendingBroadcasts,
+        statusGateway,
+        transactions,
+        tipSource,
+        lifecycleProvider,
+        Dispatchers.IO,
+        logger,
+    )
 
     /**
      * The shared multi-wallet script registration (M3 #3): the BALANCED

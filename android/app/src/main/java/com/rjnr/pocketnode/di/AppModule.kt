@@ -34,16 +34,13 @@ import com.rjnr.pocketnode.data.database.dao.SyncProgressDao
 import com.rjnr.pocketnode.data.database.dao.TransactionDao
 import com.rjnr.pocketnode.data.database.dao.WalletDao
 import com.rjnr.pocketnode.data.migration.WalletMigrationHelper
-import com.rjnr.pocketnode.data.gateway.BroadcastClient
 import com.rjnr.pocketnode.data.gateway.CacheManager
 import com.rjnr.pocketnode.data.gateway.DaoSyncManager
 import com.rjnr.pocketnode.data.gateway.GatewayRepository
-import com.rjnr.pocketnode.data.gateway.LightClientBroadcastClient
 import com.rjnr.pocketnode.data.gateway.TipSource
-import com.rjnr.pocketnode.data.gateway.TransactionStatusUpdater
 import com.rjnr.pocketnode.data.sync.LifecycleProvider
 import com.rjnr.pocketnode.data.sync.ProcessLifecycleProvider
-import com.rjnr.pocketnode.data.sync.RepositoryTransactionStatusGateway
+import com.rjnr.pocketnode.data.sync.LedgerTransactionStatusGateway
 import com.rjnr.pocketnode.data.sync.TransactionStatusGateway
 import com.rjnr.pocketnode.data.transaction.TransactionBuilder
 import com.rjnr.pocketnode.data.wallet.KeyManager
@@ -228,19 +225,13 @@ object AppModule {
 
     @Provides
     @Singleton
-    fun provideBroadcastClient(impl: LightClientBroadcastClient): BroadcastClient = impl
-
-    @Provides
-    @Singleton
     fun provideTipSource(impl: GatewayRepository): TipSource = impl
 
     @Provides
     @Singleton
-    fun provideTransactionStatusUpdater(impl: CacheManager): TransactionStatusUpdater = impl
-
-    @Provides
-    @Singleton
-    fun provideTransactionStatusGateway(impl: RepositoryTransactionStatusGateway): TransactionStatusGateway = impl
+    fun provideTransactionStatusGateway(
+        ledgerReader: com.rjnr.pocketnode.data.gateway.LedgerReader,
+    ): TransactionStatusGateway = LedgerTransactionStatusGateway(ledgerReader)
 
     @Provides
     @Singleton
@@ -260,7 +251,7 @@ object AppModule {
         appDatabase: AppDatabase,
         syncProgressDao: SyncProgressDao,
         pendingBroadcastDao: PendingBroadcastDao,
-        broadcastClient: BroadcastClient,
+        sendPipeline: com.rjnr.pocketnode.data.send.SendPipeline,
         syncCoordinator: com.rjnr.pocketnode.data.gateway.SyncCoordinator,
         daoHeaderResolver: com.rjnr.pocketnode.data.gateway.DaoHeaderResolver,
         daoDepositReader: com.rjnr.pocketnode.data.gateway.DaoDepositReader,
@@ -273,7 +264,7 @@ object AppModule {
         syncEngine: com.rjnr.pocketnode.data.sync.SyncEngine,
         startupReconciler: com.rjnr.pocketnode.data.gateway.StartupReconciler,
         logger: Logger,
-    ): GatewayRepository = GatewayRepository(keyManager, walletPreferences, json, transactionBuilder, cacheManager, daoSyncManager, walletMigrationHelper, walletDao, appDatabase, syncProgressDao, pendingBroadcastDao, broadcastClient, syncCoordinator, daoHeaderResolver, daoDepositReader, lightClient, ledgerReader, subAccountReconciler, subAccountDiscovery, syncServiceCommands, nodeLifecycle, syncEngine, startupReconciler, logger)
+    ): GatewayRepository = GatewayRepository(keyManager, walletPreferences, json, transactionBuilder, cacheManager, daoSyncManager, walletMigrationHelper, walletDao, appDatabase, syncProgressDao, pendingBroadcastDao, sendPipeline, syncCoordinator, daoHeaderResolver, daoDepositReader, lightClient, ledgerReader, subAccountReconciler, subAccountDiscovery, syncServiceCommands, nodeLifecycle, syncEngine, startupReconciler, logger)
 
     /**
      * Production activity probe for sub-account discovery (#82 phase 2):

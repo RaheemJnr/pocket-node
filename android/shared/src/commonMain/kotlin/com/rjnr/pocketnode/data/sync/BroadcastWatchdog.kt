@@ -1,19 +1,19 @@
 package com.rjnr.pocketnode.data.sync
 
 import com.rjnr.pocketnode.core.log.Logger
-import com.rjnr.pocketnode.data.database.dao.PendingBroadcastDao
-import com.rjnr.pocketnode.data.gateway.GatewayRepository
+import com.rjnr.pocketnode.core.time.Clock
+import com.rjnr.pocketnode.core.time.SystemClock
+import com.rjnr.pocketnode.data.gateway.LedgerReader
 import com.rjnr.pocketnode.data.gateway.TipSource
-import com.rjnr.pocketnode.data.gateway.TransactionStatusUpdater
+import com.rjnr.pocketnode.data.storage.PendingBroadcastRecord
+import com.rjnr.pocketnode.data.storage.PendingBroadcastStore
+import com.rjnr.pocketnode.data.storage.TransactionStore
 import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.CoroutineScope
-import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
-import javax.inject.Inject
-import javax.inject.Singleton
 
 /**
  * Drives `pending_broadcasts` rows to terminal states via the
@@ -26,28 +26,23 @@ import javax.inject.Singleton
  *     guard against tip-event vs fallback-timer races).
  *
  * Foreground-gated: skips checkAll when not at least STARTED.
- * Phase A is foreground-only by design; cold-start recovery (Task 5)
- * handles process death.
+ * Phase A is foreground-only by design; cold-start recovery
+ * (`StartupReconciler`) handles process death.
+ *
+ * Moved to `commonMain` in M3 #5. The only Android piece left behind is
+ * [LifecycleProvider]'s real implementation, which reads
+ * `ProcessLifecycleOwner`; iOS supplies its own from the scene phase.
  */
-@Singleton
 class BroadcastWatchdog(
-    private val dao: PendingBroadcastDao,
+    private val pendingBroadcasts: PendingBroadcastStore,
     private val statusGateway: TransactionStatusGateway,
-    private val cache: TransactionStatusUpdater,
+    private val transactions: TransactionStore,
     private val tipSource: TipSource,
     private val lifecycleProvider: LifecycleProvider,
     dispatcher: CoroutineDispatcher,
-    private val logger: Logger
+    private val logger: Logger,
+    private val clock: Clock = SystemClock,
 ) {
-    /** Hilt entry point — uses [Dispatchers.IO]. Tests construct via the primary ctor. */
-    @Inject constructor(
-        dao: PendingBroadcastDao,
-        statusGateway: TransactionStatusGateway,
-        cache: TransactionStatusUpdater,
-        tipSource: TipSource,
-        lifecycleProvider: LifecycleProvider,
-        logger: Logger
-    ) : this(dao, statusGateway, cache, tipSource, lifecycleProvider, Dispatchers.IO, logger)
 
     private val scope = CoroutineScope(SupervisorJob() + dispatcher)
     private var tipJob: Job? = null
@@ -83,8 +78,8 @@ class BroadcastWatchdog(
 
     /** Public for testability; not called directly by app code. */
     suspend fun checkAll(currentTip: Long, walletId: String, network: String) {
-        val rows = dao.getActive(walletId, network)
-        val now = System.currentTimeMillis()
+        val rows = pendingBroadcasts.getActive(walletId, network)
+        val now = clock.nowMs()
         for (row in rows) {
             // Per-row runCatching: cache-update-before-CAS can throw on a DB
             // hiccup; we want the row to stay non-terminal AND we want sibling
@@ -95,7 +90,7 @@ class BroadcastWatchdog(
     }
 
     private suspend fun processRow(
-        row: com.rjnr.pocketnode.data.database.entity.PendingBroadcastEntity,
+        row: PendingBroadcastRecord,
         currentTip: Long,
         now: Long
     ) {
@@ -105,13 +100,13 @@ class BroadcastWatchdog(
                 // the pending row stays in non-terminal state and the watchdog
                 // retries on the next tick. Reverse order would drop the row from
                 // getActive() with a stale PENDING transactions row.
-                cache.updateTransactionStatus(row.txHash, "CONFIRMED")
-                val ok = dao.compareAndUpdateState(
+                transactions.updateTransactionStatus(row.txHash, "CONFIRMED")
+                val ok = pendingBroadcasts.compareAndUpdateState(
                     hash = row.txHash, expected = row.state,
                     next = "CONFIRMED", now = now
                 )
                 if (ok == 1) {
-                    dao.delete(row.txHash)
+                    pendingBroadcasts.delete(row.txHash)
                 }
             }
             TxFetchResult.InPool -> {
@@ -123,29 +118,29 @@ class BroadcastWatchdog(
                 // sees a terminal state and the retry CTA, instead of stuck-pending.
                 if (currentTip >= row.submittedAtTipBlock + BLOCK_TIMEOUT) {
                     logger.w(TAG, "in-pool past +$BLOCK_TIMEOUT blocks for ${row.txHash} (submitted at ${row.submittedAtTipBlock}, tip $currentTip) — network rejected; marking FAILED")
-                    cache.updateTransactionStatus(row.txHash, "FAILED")
-                    dao.compareAndUpdateState(
+                    transactions.updateTransactionStatus(row.txHash, "FAILED")
+                    pendingBroadcasts.compareAndUpdateState(
                         hash = row.txHash, expected = row.state,
                         next = "FAILED", now = now
                     )
                 } else {
                     // Healthy in-pool — waiting for commit.
                     if (row.state == "BROADCASTING") {
-                        dao.compareAndUpdateState(row.txHash, "BROADCASTING", "BROADCAST", now)
+                        pendingBroadcasts.compareAndUpdateState(row.txHash, "BROADCASTING", "BROADCAST", now)
                     }
                     if (row.nullCount != 0) {
-                        dao.updateNullCount(row.txHash, 0, now)
+                        pendingBroadcasts.updateNullCount(row.txHash, 0, now)
                     }
                 }
             }
             TxFetchResult.NotFound -> {
                 val newCount = row.nullCount + 1
-                dao.updateNullCount(row.txHash, newCount, now)
+                pendingBroadcasts.updateNullCount(row.txHash, newCount, now)
                 if (newCount >= NULL_THRESHOLD &&
                     currentTip >= row.submittedAtTipBlock + BLOCK_TIMEOUT
                 ) {
-                    cache.updateTransactionStatus(row.txHash, "FAILED")
-                    dao.compareAndUpdateState(
+                    transactions.updateTransactionStatus(row.txHash, "FAILED")
+                    pendingBroadcasts.compareAndUpdateState(
                         hash = row.txHash, expected = row.state,
                         next = "FAILED", now = now
                     )
@@ -172,26 +167,26 @@ sealed class TxFetchResult {
     data object Exception : TxFetchResult()
 }
 
-/** Indirection over `GatewayRepository.getTransactionStatus` for testability. */
+/** Indirection over the transaction-status read for testability. */
 fun interface TransactionStatusGateway {
     suspend fun fetch(hash: String): TxFetchResult
 }
 
-/** Lifecycle-state indirection. Real impl reads ProcessLifecycleOwner. */
+/** Lifecycle-state indirection. The Android impl reads ProcessLifecycleOwner. */
 fun interface LifecycleProvider {
     fun isAtLeastStarted(): Boolean
 }
 
 /**
- * Real adapter wrapping [GatewayRepository.getTransactionStatus]. Maps
+ * Real adapter wrapping [LedgerReader.getTransactionStatus]. Maps
  * `TransactionStatusResponse` to the watchdog's narrower [TxFetchResult]
- * vocabulary so the watchdog never has to re-parse JNI JSON.
+ * vocabulary so the watchdog never has to re-parse bridge JSON.
  */
-class RepositoryTransactionStatusGateway @Inject constructor(
-    private val gateway: GatewayRepository
+class LedgerTransactionStatusGateway(
+    private val ledger: LedgerReader,
 ) : TransactionStatusGateway {
     override suspend fun fetch(hash: String): TxFetchResult = runCatching {
-        val resp = gateway.getTransactionStatus(hash).getOrNull()
+        val resp = ledger.getTransactionStatus(hash).getOrNull()
             ?: return TxFetchResult.NotFound
         when {
             resp.status == "unknown" -> TxFetchResult.NotFound
@@ -199,11 +194,4 @@ class RepositoryTransactionStatusGateway @Inject constructor(
             else -> TxFetchResult.InPool
         }
     }.getOrElse { TxFetchResult.Exception }
-}
-
-/** Real lifecycle provider reading [androidx.lifecycle.ProcessLifecycleOwner]. */
-class ProcessLifecycleProvider @Inject constructor() : LifecycleProvider {
-    override fun isAtLeastStarted(): Boolean =
-        androidx.lifecycle.ProcessLifecycleOwner.get()
-            .lifecycle.currentState.isAtLeast(androidx.lifecycle.Lifecycle.State.STARTED)
 }

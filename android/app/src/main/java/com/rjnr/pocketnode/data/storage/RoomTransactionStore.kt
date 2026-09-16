@@ -41,4 +41,25 @@ class RoomTransactionStore @Inject constructor(
 
     override suspend fun updateTransactionStatus(hash: String, status: String) =
         cacheManager.updateTransactionStatus(hash, status)
+
+    override suspend fun insertPendingTransaction(
+        txHash: String,
+        network: String,
+        walletId: String,
+        balanceChange: String,
+        direction: String,
+        fee: String,
+        feeShannons: Long?,
+    ) = cacheManager.insertPendingTransaction(
+        txHash = txHash,
+        network = network,
+        walletId = walletId,
+        balanceChange = balanceChange,
+        direction = direction,
+        fee = fee,
+        feeShannons = feeShannons,
+    )
+
+    override suspend fun deleteTransaction(txHash: String) =
+        cacheManager.deleteTransaction(txHash)
 }

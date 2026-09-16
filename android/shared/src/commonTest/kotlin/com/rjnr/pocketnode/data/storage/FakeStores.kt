@@ -105,6 +105,23 @@ class FakeTransactionStore(
     /** Every [updateTransactionStatus] call, oldest first. */
     val statusWrites: MutableList<Pair<String, String>> = mutableListOf()
 
+    /** One optimistic activity row, as [insertPendingTransaction] was handed it. */
+    data class PendingInsert(
+        val txHash: String,
+        val network: String,
+        val walletId: String,
+        val balanceChange: String,
+        val direction: String,
+        val fee: String,
+        val feeShannons: Long?,
+    )
+
+    /** Every [insertPendingTransaction] call, oldest first. */
+    val pendingInserts: MutableList<PendingInsert> = mutableListOf()
+
+    /** Every hash handed to [deleteTransaction], oldest first. */
+    val deletedHashes: MutableList<String> = mutableListOf()
+
     override suspend fun getBlockNumbers(walletId: String, network: String): List<String> =
         blockNumbers[walletId to network] ?: emptyList()
 
@@ -128,6 +145,31 @@ class FakeTransactionStore(
 
     override suspend fun updateTransactionStatus(hash: String, status: String) {
         statusWrites += hash to status
+    }
+
+    override suspend fun insertPendingTransaction(
+        txHash: String,
+        network: String,
+        walletId: String,
+        balanceChange: String,
+        direction: String,
+        fee: String,
+        feeShannons: Long?,
+    ) {
+        pendingInserts += PendingInsert(
+            txHash = txHash,
+            network = network,
+            walletId = walletId,
+            balanceChange = balanceChange,
+            direction = direction,
+            fee = fee,
+            feeShannons = feeShannons,
+        )
+    }
+
+    override suspend fun deleteTransaction(txHash: String) {
+        deletedHashes += txHash
+        pendingInserts.removeAll { it.txHash == txHash }
     }
 }
 
@@ -164,13 +206,65 @@ class FakeHeaderCache(
     }
 }
 
+/**
+ * In-memory `pending_broadcasts`.
+ *
+ * Keyed by `txHash` the way the primary key keys it, so [insert] REPLACEs and
+ * [compareAndUpdateState] answers the DAO's rows-affected count (1 when the
+ * row was in the expected state, 0 otherwise). [rows] is kept as a view over
+ * the same store for the suites written before the widening.
+ */
 class FakePendingBroadcastStore : PendingBroadcastStore {
 
-    /** Active rows per (walletId, network), exactly what the DAO snapshot returns. */
-    val rows: MutableMap<Pair<String, String>, List<PendingBroadcastRecord>> = mutableMapOf()
+    /** Every row, keyed by hash. */
+    val byHash: MutableMap<String, PendingBroadcastRecord> = mutableMapOf()
+
+    /**
+     * Put [records] in the store as given.
+     *
+     * It does NOT stamp `walletId`/`network` onto them: those decide what
+     * [getActive] returns, so a test that means to seed an active row has to
+     * say which wallet and network it is active for, exactly as production
+     * code does.
+     */
+    fun seed(vararg records: PendingBroadcastRecord) {
+        records.forEach { byHash[it.txHash] = it }
+    }
 
     override suspend fun getActive(
         walletId: String,
         network: String,
-    ): List<PendingBroadcastRecord> = rows[walletId to network] ?: emptyList()
+    ): List<PendingBroadcastRecord> = byHash.values.filter {
+        it.walletId == walletId && it.network == network &&
+            (it.state == PendingBroadcastRecord.STATE_BROADCASTING ||
+                it.state == PendingBroadcastRecord.STATE_BROADCAST)
+    }
+
+    override suspend fun insert(record: PendingBroadcastRecord) {
+        byHash[record.txHash] = record
+    }
+
+    override suspend fun compareAndUpdateState(
+        hash: String,
+        expected: String,
+        next: String,
+        now: Long,
+    ): Int {
+        val existing = byHash[hash] ?: return 0
+        if (existing.state != expected) return 0
+        byHash[hash] = existing.copy(state = next, lastCheckedAt = now)
+        return 1
+    }
+
+    override suspend fun updateNullCount(hash: String, count: Int, now: Long) {
+        val existing = byHash[hash] ?: return
+        byHash[hash] = existing.copy(nullCount = count, lastCheckedAt = now)
+    }
+
+    override suspend fun delete(hash: String) {
+        byHash.remove(hash)
+    }
+
+    override suspend fun getFailedRow(hash: String): PendingBroadcastRecord? =
+        byHash[hash]?.takeIf { it.state == PendingBroadcastRecord.STATE_FAILED }
 }

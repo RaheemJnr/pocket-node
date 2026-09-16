@@ -60,4 +60,34 @@ interface TransactionStore {
      * swallowing it: see the class KDoc for why the watchdog depends on that.
      */
     suspend fun updateTransactionStatus(hash: String, status: String)
+
+    /**
+     * Write the optimistic activity row for a broadcast that has just been
+     * (or is about to be) submitted (M3 #5).
+     *
+     * [balanceChange] and [fee] are POSITIVE `0x`-prefixed hex; [direction]
+     * ("in" / "out") carries the sign for the UI. [feeShannons] is the planned
+     * fee as a number, null when it could not be resolved, in which case the
+     * detail sheet reads "Pending" rather than a wrong figure (#497).
+     *
+     * Swallows a store failure, exactly as `CacheManager` does: a missing
+     * activity row degrades the UI until the next history walk, while throwing
+     * here would abort a send whose transaction is otherwise ready.
+     */
+    suspend fun insertPendingTransaction(
+        txHash: String,
+        network: String,
+        walletId: String,
+        balanceChange: String,
+        direction: String,
+        fee: String,
+        feeShannons: Long?,
+    )
+
+    /**
+     * Drop the activity row for [txHash]. Swallows a store failure for the
+     * same reason [insertPendingTransaction] does: every caller is already on
+     * a failure path and has a more useful error to report.
+     */
+    suspend fun deleteTransaction(txHash: String)
 }

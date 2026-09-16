@@ -70,4 +70,23 @@ object EmptyTransactionStore : TransactionStore {
     ): List<String> = emptyList()
 
     override suspend fun updateTransactionStatus(hash: String, status: String) = Unit
+
+    /**
+     * The send path's optimistic activity row (M3 #5). Dropped for the same
+     * reason the other writes are: there is no table to write it to, and
+     * `CacheManager`, which Android binds here, swallows its own failures
+     * anyway, so a caller never depended on this landing.
+     */
+    override suspend fun insertPendingTransaction(
+        txHash: String,
+        network: String,
+        walletId: String,
+        balanceChange: String,
+        direction: String,
+        fee: String,
+        feeShannons: Long?,
+    ) = Unit
+
+    /** Nothing was ever inserted, so there is nothing to delete. */
+    override suspend fun deleteTransaction(txHash: String) = Unit
 }
