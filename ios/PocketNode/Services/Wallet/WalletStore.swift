@@ -1,4 +1,5 @@
 import Foundation
+import os
 
 /// Metadata for the single wallet iOS supports before M3 multi-wallet.
 ///
@@ -49,8 +50,11 @@ struct WalletRecord: Codable, Equatable {
 /// `WalletRecord` shape is the migration seed, which is why its field names
 /// mirror Android's `WalletEntity` rather than being iOS-idiomatic.
 final class WalletStore {
-    private let fileURL: URL
+    /// Exposed so the tests can assert it resolves to the same folder the light
+    /// client uses; nothing in the app reads it.
+    let fileURL: URL
     private let fileManager: FileManager
+    private static let logger = Logger(subsystem: "com.rjnr.pocketnode", category: "WalletStore")
 
     /// `directory` defaults to `Application Support/PocketNode`; tests pass a
     /// throwaway directory (e.g. under `NSTemporaryDirectory()`) so nothing
@@ -92,16 +96,21 @@ final class WalletStore {
         try fileManager.removeItem(at: fileURL)
     }
 
+    /// `Application Support/PocketNode`, the folder `AppDirectories` names for
+    /// the whole app; the light client's per-network stores sit inside it.
+    ///
+    /// `init` cannot throw, so a failure here is logged rather than raised, and
+    /// the intended path is returned uncreated. It is deliberately not swapped
+    /// for a writable one: this used to fall back to `temporaryDirectory`, which
+    /// put `wallet.json` where the system may delete it and said nothing. The
+    /// path stays right, `save()` retries the directory and throws the real
+    /// error, and `hasWallet` reports false rather than pointing at a stray file.
     private static func applicationSupportDirectory(fileManager: FileManager) -> URL {
-        let base = (try? fileManager.url(
-            for: .applicationSupportDirectory,
-            in: .userDomainMask,
-            appropriateFor: nil,
-            create: true
-        )) ?? fileManager.temporaryDirectory
-
-        let directory = base.appendingPathComponent("PocketNode", isDirectory: true)
-        try? fileManager.createDirectory(at: directory, withIntermediateDirectories: true)
-        return directory
+        do {
+            return try AppDirectories.ensure(fileManager: fileManager)
+        } catch {
+            logger.error("could not create the wallet directory: \(error.localizedDescription, privacy: .public)")
+            return AppDirectories.url(fileManager: fileManager)
+        }
     }
 }
