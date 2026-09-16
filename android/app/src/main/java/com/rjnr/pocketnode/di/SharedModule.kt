@@ -7,9 +7,17 @@ import com.rjnr.pocketnode.core.prefs.SyncPreferences
 import com.rjnr.pocketnode.core.prefs.UiPreferences
 import com.rjnr.pocketnode.data.gateway.AndroidLightClientApi
 import com.rjnr.pocketnode.data.gateway.JniLightClient
+import com.rjnr.pocketnode.data.gateway.LedgerReader
 import com.rjnr.pocketnode.data.gateway.LightClientApi
 import com.rjnr.pocketnode.data.gateway.NativeLightClient
+import com.rjnr.pocketnode.data.gateway.StartupReconciler
 import com.rjnr.pocketnode.data.gateway.SyncCoordinator
+import com.rjnr.pocketnode.data.storage.BalanceCache
+import com.rjnr.pocketnode.data.storage.HeaderCache
+import com.rjnr.pocketnode.data.storage.PendingBroadcastStore
+import com.rjnr.pocketnode.data.storage.RoomBalanceCache
+import com.rjnr.pocketnode.data.storage.RoomHeaderCache
+import com.rjnr.pocketnode.data.storage.RoomPendingBroadcastStore
 import com.rjnr.pocketnode.data.storage.RoomSubAccountCandidateStore
 import com.rjnr.pocketnode.data.storage.RoomSyncProgressStore
 import com.rjnr.pocketnode.data.storage.RoomTransactionStore
@@ -118,6 +126,73 @@ object SharedModule {
     @Provides
     @Singleton
     fun provideTransactionStore(impl: RoomTransactionStore): TransactionStore = impl
+
+    // --- Storage seams (M3 #4) ---
+    // Three more, for the balance cache, the header cache and the broadcast
+    // state the read path and the cold-start reconcile consult.
+
+    @Provides
+    @Singleton
+    fun provideBalanceCache(impl: RoomBalanceCache): BalanceCache = impl
+
+    @Provides
+    @Singleton
+    fun provideHeaderCache(impl: RoomHeaderCache): HeaderCache = impl
+
+    @Provides
+    @Singleton
+    fun providePendingBroadcastStore(
+        impl: RoomPendingBroadcastStore,
+    ): PendingBroadcastStore = impl
+
+    /**
+     * The shared read path (M3 #4): balance, live cells, history and the
+     * status of one transaction, all in `commonMain` over the seams above.
+     *
+     * `queryContext` is passed explicitly for the same reason
+     * [provideSyncEngine] passes it: `commonMain` cannot name `Dispatchers.IO`,
+     * and the one read that hops dispatchers here (the readiness probe) went
+     * through `LightClientReadOnly`, which forces IO.
+     */
+    @Provides
+    @Singleton
+    fun provideLedgerReader(
+        lightClient: LightClientApi,
+        balanceCache: BalanceCache,
+        transactionStore: TransactionStore,
+        headerCache: HeaderCache,
+        walletRegistry: WalletRegistry,
+        candidates: SubAccountCandidateStore,
+        syncPreferences: SyncPreferences,
+        uiPreferences: UiPreferences,
+        json: Json,
+        logger: Logger,
+    ): LedgerReader = LedgerReader(
+        lightClient,
+        balanceCache,
+        transactionStore,
+        headerCache,
+        walletRegistry,
+        candidates,
+        syncPreferences,
+        uiPreferences,
+        json,
+        logger,
+        queryContext = Dispatchers.IO,
+    )
+
+    /**
+     * The shared cold-start reconcile (M3 #4). It used to carry `@Singleton`
+     * and `@Inject` itself; in `commonMain` it carries neither, so the binding
+     * moves here.
+     */
+    @Provides
+    @Singleton
+    fun provideStartupReconciler(
+        pendingBroadcasts: PendingBroadcastStore,
+        transactions: TransactionStore,
+        logger: Logger,
+    ): StartupReconciler = StartupReconciler(pendingBroadcasts, transactions, logger)
 
     /**
      * The shared multi-wallet script registration (M3 #3): the BALANCED

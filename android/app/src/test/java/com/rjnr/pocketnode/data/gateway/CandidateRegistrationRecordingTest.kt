@@ -52,7 +52,10 @@ class CandidateRegistrationRecordingTest {
             RoomWalletRegistry(db.walletDao()),
             RoomSyncProgressStore(db.syncProgressDao()),
             RoomSubAccountCandidateStore(db.subAccountCandidateDao()),
-            RoomTransactionStore(db.transactionDao()),
+            RoomTransactionStore(
+                db.transactionDao(),
+                CacheManager(db.transactionDao(), db.balanceCacheDao(), NoopLogger),
+            ),
             mockk(relaxed = true),
             WalletPreferences(context, NoopLogger),
             Json { ignoreUnknownKeys = true },

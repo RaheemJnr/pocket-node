@@ -22,7 +22,7 @@ package com.rjnr.pocketnode.data.gateway
  * Pure so it's unit-testable without JNI; the readiness probe stays at the
  * call site.
  */
-internal fun readPathNullMessage(operation: String, lightClientReady: Boolean): String =
+fun readPathNullMessage(operation: String, lightClientReady: Boolean): String =
     if (!lightClientReady) {
         "light client not ready (no tip yet) while trying to $operation"
     } else {

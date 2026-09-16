@@ -1,13 +1,13 @@
 package com.rjnr.pocketnode.data.gateway
 
 import com.rjnr.pocketnode.core.log.Logger
-import com.rjnr.pocketnode.data.database.dao.PendingBroadcastDao
 import com.rjnr.pocketnode.data.gateway.models.TransactionStatusResponse
+import com.rjnr.pocketnode.data.storage.PendingBroadcastRecord
+import com.rjnr.pocketnode.data.storage.PendingBroadcastStore
+import com.rjnr.pocketnode.data.storage.TransactionStore
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
-import javax.inject.Inject
-import javax.inject.Singleton
 
 /**
  * Light-client transaction lookup, narrowed to the one call the legacy
@@ -22,7 +22,7 @@ fun interface TransactionStatusSource {
 
 /**
  * Cold-start pending-transaction reconciliation extracted from
- * [GatewayRepository] (#460 part 2).
+ * [GatewayRepository] (#460 part 2), moved to the shared core in M3 #4.
  *
  * Runs once per process, immediately after the embedded node starts, and
  * does two things:
@@ -36,15 +36,15 @@ fun interface TransactionStatusSource {
  * Both steps are `runCatching`-wrapped: a failure here must never stop the
  * sync poll or the background sync service from starting.
  *
- * Plain `@Singleton` with no dependency back on [GatewayRepository]; the
- * light-client lookup arrives through the [TransactionStatusSource] seam and
- * the deferred pass is launched in the caller's scope (the repository's), so
- * coroutine semantics are unchanged.
+ * No dependency back on [GatewayRepository]: the light-client lookup arrives
+ * through the [TransactionStatusSource] seam, the two tables through the
+ * [PendingBroadcastStore] and [TransactionStore] seams, and the deferred pass
+ * is launched in the caller's scope (the repository's), so coroutine semantics
+ * are unchanged.
  */
-@Singleton
-class StartupReconciler @Inject constructor(
-    private val pendingBroadcastDao: PendingBroadcastDao,
-    private val cacheManager: CacheManager,
+class StartupReconciler(
+    private val pendingBroadcasts: PendingBroadcastStore,
+    private val transactions: TransactionStore,
     private val logger: Logger,
 ) {
 
@@ -60,12 +60,14 @@ class StartupReconciler @Inject constructor(
     ) {
         // Cold-start recovery: surface any BROADCASTING orphan rows for the
         // active network so the watchdog can resolve them on the next tip.
-        // Network-scoped — LightClientNative is per-network; querying for a
+        // Network-scoped — the light client is per-network; querying for a
         // hash on a network whose light client isn't running would return null
         // spuriously and drive valid orphans to a false FAILED. (#115 §5)
         runCatching {
-            val orphans = pendingBroadcastDao.getActive(walletId, networkName)
-            val broadcasting = orphans.count { it.state == "BROADCASTING" }
+            val orphans = pendingBroadcasts.getActive(walletId, networkName)
+            val broadcasting = orphans.count {
+                it.state == PendingBroadcastRecord.STATE_BROADCASTING
+            }
             if (broadcasting > 0) {
                 logger.w(
                     TAG,
@@ -80,7 +82,7 @@ class StartupReconciler @Inject constructor(
         // not found → FAILED, in pool → leave alone (the natural pending state).
         // (#115 — addresses the user's "old ghosts still showing pending" case.)
         runCatching {
-            val orphanHashes = cacheManager.getOrphanPendingHashes(walletId, networkName)
+            val orphanHashes = transactions.getOrphanPendingHashes(walletId, networkName)
             if (orphanHashes.isNotEmpty()) {
                 logger.w(TAG, "Legacy reconcile: ${orphanHashes.size} orphan PENDING tx(s) on $networkName")
                 scope.launch {
@@ -100,7 +102,7 @@ class StartupReconciler @Inject constructor(
                             else -> null  // still in pool — leave PENDING
                         }
                         if (newStatus != null) {
-                            cacheManager.updateTransactionStatus(hash, newStatus)
+                            transactions.updateTransactionStatus(hash, newStatus)
                             logger.d(TAG, "Legacy reconcile: $hash → $newStatus")
                         }
                     }

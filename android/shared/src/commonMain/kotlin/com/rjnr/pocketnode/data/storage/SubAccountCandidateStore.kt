@@ -51,4 +51,12 @@ interface SubAccountCandidateStore {
         derivationPath: String,
         fromBlock: Long,
     )
+
+    /**
+     * Lock-script args of every candidate on record, across all parents and
+     * all lifecycle states (M3 #4). The gap-limit signature check treats them
+     * as scripts we know, so a change output landing on one is not a missing
+     * change leg.
+     */
+    suspend fun allScriptArgs(): List<String>
 }

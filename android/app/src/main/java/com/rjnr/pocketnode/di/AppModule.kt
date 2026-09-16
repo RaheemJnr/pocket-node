@@ -258,7 +258,6 @@ object AppModule {
         walletMigrationHelper: WalletMigrationHelper,
         walletDao: WalletDao,
         appDatabase: AppDatabase,
-        headerCacheDao: HeaderCacheDao,
         syncProgressDao: SyncProgressDao,
         pendingBroadcastDao: PendingBroadcastDao,
         broadcastClient: BroadcastClient,
@@ -266,6 +265,7 @@ object AppModule {
         daoHeaderResolver: com.rjnr.pocketnode.data.gateway.DaoHeaderResolver,
         daoDepositReader: com.rjnr.pocketnode.data.gateway.DaoDepositReader,
         lightClient: com.rjnr.pocketnode.data.gateway.LightClientReadOnly,
+        ledgerReader: com.rjnr.pocketnode.data.gateway.LedgerReader,
         subAccountReconciler: com.rjnr.pocketnode.data.wallet.SubAccountReconciler,
         subAccountDiscovery: com.rjnr.pocketnode.data.wallet.SubAccountDiscovery,
         syncServiceCommands: com.rjnr.pocketnode.data.sync.contract.SyncServiceCommands,
@@ -273,7 +273,7 @@ object AppModule {
         syncEngine: com.rjnr.pocketnode.data.sync.SyncEngine,
         startupReconciler: com.rjnr.pocketnode.data.gateway.StartupReconciler,
         logger: Logger,
-    ): GatewayRepository = GatewayRepository(keyManager, walletPreferences, json, transactionBuilder, cacheManager, daoSyncManager, walletMigrationHelper, walletDao, appDatabase, headerCacheDao, syncProgressDao, pendingBroadcastDao, broadcastClient, syncCoordinator, daoHeaderResolver, daoDepositReader, lightClient, subAccountReconciler, subAccountDiscovery, syncServiceCommands, nodeLifecycle, syncEngine, startupReconciler, logger)
+    ): GatewayRepository = GatewayRepository(keyManager, walletPreferences, json, transactionBuilder, cacheManager, daoSyncManager, walletMigrationHelper, walletDao, appDatabase, syncProgressDao, pendingBroadcastDao, broadcastClient, syncCoordinator, daoHeaderResolver, daoDepositReader, lightClient, ledgerReader, subAccountReconciler, subAccountDiscovery, syncServiceCommands, nodeLifecycle, syncEngine, startupReconciler, logger)
 
     /**
      * Production activity probe for sub-account discovery (#82 phase 2):

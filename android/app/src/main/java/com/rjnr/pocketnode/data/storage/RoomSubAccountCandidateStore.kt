@@ -19,6 +19,8 @@ class RoomSubAccountCandidateStore @Inject constructor(
         derivationPath: String,
         fromBlock: Long,
     ) = dao.updateRegisteredFrom(parentId, derivationPath, fromBlock)
+
+    override suspend fun allScriptArgs(): List<String> = dao.getAllScriptArgs()
 }
 
 private fun SubAccountCandidateEntity.toRecord() = SubAccountCandidateRecord(

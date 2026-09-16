@@ -1,8 +1,8 @@
 package com.rjnr.pocketnode.data.gateway
 
-import org.junit.Assert.assertFalse
-import org.junit.Assert.assertTrue
-import org.junit.Test
+import kotlin.test.Test
+import kotlin.test.assertFalse
+import kotlin.test.assertTrue
 
 /**
  * #332: the 0-live-cells rescue rescan looped indefinitely for DAO-heavy
@@ -28,7 +28,7 @@ class RescanPolicyTest {
     }
 
     @Test
-    fun `DAO-only wallet is not empty - no rescan`() {
+    fun `DAO only wallet is not empty no rescan`() {
         assertFalse(
             shouldAttemptZeroCellRescan(
                 spendableCapacity = 0L, typedCellCount = 3, hasTransactions = true,
@@ -38,7 +38,7 @@ class RescanPolicyTest {
     }
 
     @Test
-    fun `does not re-fire after an attempt this session`() {
+    fun `does not re fire after an attempt this session`() {
         assertFalse(
             shouldAttemptZeroCellRescan(
                 spendableCapacity = 0L, typedCellCount = 0, hasTransactions = true,
@@ -48,7 +48,7 @@ class RescanPolicyTest {
     }
 
     @Test
-    fun `never fires mid-sync`() {
+    fun `never fires mid sync`() {
         assertFalse(
             shouldAttemptZeroCellRescan(
                 spendableCapacity = 0L, typedCellCount = 0, hasTransactions = true,

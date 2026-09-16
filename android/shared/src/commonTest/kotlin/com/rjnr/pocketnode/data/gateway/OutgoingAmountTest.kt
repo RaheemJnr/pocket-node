@@ -1,8 +1,8 @@
 package com.rjnr.pocketnode.data.gateway
 
-import org.junit.Assert.assertEquals
-import org.junit.Assert.assertNull
-import org.junit.Test
+import kotlin.test.Test
+import kotlin.test.assertEquals
+import kotlin.test.assertNull
 
 /**
  * The pending activity row used to store min(all output capacities) as the
@@ -16,7 +16,7 @@ class OutgoingAmountTest {
     private val ckb = 100_000_000L
 
     @Test
-    fun `transfer with change shows amount sent plus fee, not the change`() {
+    fun `transfer with change shows amount sent plus fee not the change`() {
         // inputs 167,950.29; recipient 150,000 (not ours); change 17,950.29 (ours)
         val out = computeOutgoingShannons(
             inputCapacities = listOf(167_950_29000000L),
@@ -30,7 +30,7 @@ class OutgoingAmountTest {
     }
 
     @Test
-    fun `send-all with no change equals the inputs`() {
+    fun `send all with no change equals the inputs`() {
         val out = computeOutgoingShannons(
             inputCapacities = listOf(150_000 * ckb),
             outputs = listOf(OutgoingOutput(150_000 * ckb, isOurs = false, isTyped = false)),
@@ -39,7 +39,7 @@ class OutgoingAmountTest {
     }
 
     @Test
-    fun `self-send consolidation nets to zero`() {
+    fun `self send consolidation nets to zero`() {
         val out = computeOutgoingShannons(
             inputCapacities = listOf(100 * ckb),
             outputs = listOf(OutgoingOutput(100 * ckb, isOurs = true, isTyped = false)),
@@ -48,7 +48,7 @@ class OutgoingAmountTest {
     }
 
     @Test
-    fun `dao deposit counts the typed self-output as leaving spendable`() {
+    fun `dao deposit counts the typed self output as leaving spendable`() {
         // fee inputs 10,300; DAO cell 10,200 (ours, typed) + change 99 (ours)
         val out = computeOutgoingShannons(
             inputCapacities = listOf(10_300 * ckb),
@@ -66,7 +66,7 @@ class OutgoingAmountTest {
     // Sums outputs NOT locked to us — the recipient amount.
 
     @Test
-    fun `recipient-only sums non-ours outputs, ignoring change`() {
+    fun `recipient only sums non ours outputs ignoring change`() {
         val out = recipientOutgoingShannons(
             listOf(
                 OutgoingOutput(150_000 * ckb, isOurs = false, isTyped = false),
@@ -77,7 +77,7 @@ class OutgoingAmountTest {
     }
 
     @Test
-    fun `recipient-only is zero when every output returns to us`() {
+    fun `recipient only is zero when every output returns to us`() {
         // DAO unlock returns funds to self; no recipient leg. Shows 0 briefly,
         // then the synced row reclassifies it as dao_unlock (incoming).
         val out = recipientOutgoingShannons(
@@ -140,7 +140,7 @@ class OutgoingAmountTest {
     }
 
     @Test
-    fun `partially resolved inputs are unknown rather than under-counted`() {
+    fun `partially resolved inputs are unknown rather than under counted`() {
         // Checkpoint-synced wallet: one input cell predates the sync window,
         // so the light client never indexed it. Scoring the two we do have
         // would report a fee short by the whole missing input.
@@ -164,7 +164,7 @@ class OutgoingAmountTest {
     }
 
     @Test
-    fun `an inconsistent set that nets negative is unknown, never a negative fee`() {
+    fun `an inconsistent set that nets negative is unknown never a negative fee`() {
         assertNull(
             computeFeeShannons(
                 resolvedInputs = listOf(10 * ckb),
@@ -175,7 +175,7 @@ class OutgoingAmountTest {
     }
 
     @Test
-    fun `a genuinely zero fee is zero, distinct from unknown`() {
+    fun `a genuinely zero fee is zero distinct from unknown`() {
         assertEquals(
             0L,
             computeFeeShannons(
@@ -231,7 +231,7 @@ class OutgoingAmountTest {
     }
 
     @Test
-    fun `unlock fee ignores the deposit-versus-compensation split entirely`() {
+    fun `unlock fee ignores the deposit versus compensation split entirely`() {
         // Same fee whatever the compensation was — that is the whole point of
         // computing it here instead of from the confirmed transaction.
         assertEquals(

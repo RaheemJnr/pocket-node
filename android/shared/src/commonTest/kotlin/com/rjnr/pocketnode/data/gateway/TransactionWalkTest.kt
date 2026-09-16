@@ -6,10 +6,10 @@ import com.rjnr.pocketnode.data.gateway.models.JniTransactionView
 import com.rjnr.pocketnode.data.gateway.models.JniTxWithCell
 import com.rjnr.pocketnode.data.gateway.models.OutPoint
 import kotlinx.coroutines.test.runTest
-import org.junit.Assert.assertEquals
-import org.junit.Assert.assertFalse
-import org.junit.Assert.assertTrue
-import org.junit.Test
+import kotlin.test.Test
+import kotlin.test.assertEquals
+import kotlin.test.assertFalse
+import kotlin.test.assertTrue
 
 /**
  * Regression guard for the #386/#388 pagination-boundary bug class, verified
@@ -42,7 +42,7 @@ class TransactionWalkTest {
     // --- walkAllPages: the walk must not stop at the first page ---
 
     @Test
-    fun `walk collects every page across the 100-item boundary`() = runTest {
+    fun `walk collects every page across the 100 item boundary`() = runTest {
         // 200 interactions split into two full pages, exactly yanli's repro.
         val p1 = (0 until 100).map { interaction("0x${it}", "output", 1) }
         val p2 = (100 until 200).map { interaction("0x${it}", "output", 1) }
@@ -79,7 +79,7 @@ class TransactionWalkTest {
     }
 
     @Test
-    fun `walk stops on a null page (JNI failure)`() = runTest {
+    fun `walk stops on a null page JNI failure`() = runTest {
         val result = walkAllPages<JniTxWithCell>(pageLimit = 100, maxPages = 200) { _ -> null }
         assertTrue(result.items.isEmpty())
     }
@@ -87,7 +87,7 @@ class TransactionWalkTest {
     // --- netShannonsByTx: correct over the COMPLETE set ---
 
     @Test
-    fun `boundary-straddling transaction nets correctly from the full walk`() {
+    fun `boundary straddling transaction nets correctly from the full walk`() {
         // Tx T's input lands on page 1, its change output on page 2. Scored
         // from either page alone it looks like a +95k receive or a -100k send;
         // only the complete set gives the true -5k net (amount sent + fee).

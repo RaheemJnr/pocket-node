@@ -1,19 +1,22 @@
 package com.rjnr.pocketnode.data.gateway
 
-import com.rjnr.pocketnode.ui.screens.send.mapSendErrorMessage
-import org.junit.Assert.assertFalse
-import org.junit.Assert.assertTrue
-import org.junit.Test
+import kotlin.test.Test
+import kotlin.test.assertFalse
+import kotlin.test.assertTrue
 
 /**
  * A null read must say WHY: still syncing vs a transient hiccup. Neither may
- * blame the network (the Alex-report mistake). The not-ready branch must also
- * carry the token `mapSendErrorMessage` routes to the "still starting up" copy.
+ * blame the network (the Alex-report mistake).
+ *
+ * The third assertion this class used to carry — that the not-ready wording
+ * routes to the "still starting up" user copy — needs `mapSendErrorMessage`,
+ * which is Compose-side app code, so it stays behind in the app module as
+ * `ReadPathErrorRoutingTest`.
  */
 class ReadPathErrorTest {
 
     @Test
-    fun `not ready names the wait, never the network`() {
+    fun `not ready names the wait and never the network`() {
         val msg = readPathNullMessage("read cells", lightClientReady = false)
         assertTrue(msg.contains("light client not ready", ignoreCase = true))
         assertFalse(msg.contains("network connection", ignoreCase = true))
@@ -25,11 +28,5 @@ class ReadPathErrorTest {
         assertTrue(msg.contains("read balance", ignoreCase = true))
         assertTrue(msg.contains("transient", ignoreCase = true))
         assertFalse(msg.contains("network connection", ignoreCase = true))
-    }
-
-    @Test
-    fun `not ready message routes to the starting-up user copy`() {
-        val raw = readPathNullMessage("read cells", lightClientReady = false)
-        assertTrue(mapSendErrorMessage(raw).contains("starting up", ignoreCase = true))
     }
 }

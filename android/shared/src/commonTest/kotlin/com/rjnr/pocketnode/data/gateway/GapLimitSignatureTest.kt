@@ -2,9 +2,9 @@ package com.rjnr.pocketnode.data.gateway
 
 import com.rjnr.pocketnode.data.gateway.models.CellOutput
 import com.rjnr.pocketnode.data.gateway.models.Script
-import org.junit.Assert.assertFalse
-import org.junit.Assert.assertTrue
-import org.junit.Test
+import kotlin.test.Test
+import kotlin.test.assertFalse
+import kotlin.test.assertTrue
 
 /**
  * #382: seeds imported from Neuron (or any standard BIP44 wallet) spread funds
@@ -66,7 +66,7 @@ class GapLimitSignatureTest {
     }
 
     @Test
-    fun `send-max single output is not flagged`() {
+    fun `send max single output is not flagged`() {
         // One output and nothing back is the legitimate send-everything shape
         val flagged = isUnknownChangeSignature(
             netChangeShannons = -1_000 * ckb,
@@ -141,7 +141,7 @@ class GapLimitSignatureTest {
     }
 
     @Test
-    fun `known-args match is case-insensitive`() {
+    fun `known args match is case insensitive`() {
         val flagged = isUnknownChangeSignature(
             netChangeShannons = -900 * ckb,
             outputs = listOf(
@@ -154,7 +154,7 @@ class GapLimitSignatureTest {
     }
 
     @Test
-    fun `non-secp unknown lock does not count as the change leg`() {
+    fun `non secp unknown lock does not count as the change leg`() {
         // e.g. omnilock/ACP recipient plus a typed leg — still no plain secp change
         val exoticLock = Script(
             codeHash = "0x9b819793a64463aed77c615d6cb226eea5487ccfc0783043a587254cda2b6f26",

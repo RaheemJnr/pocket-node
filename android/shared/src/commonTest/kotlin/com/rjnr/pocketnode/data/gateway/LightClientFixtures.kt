@@ -177,6 +177,20 @@ object LightClientFixtures {
     /** Capacity of the first cell in [GET_CELLS_PAGE], for assertions. */
     const val GET_CELLS_FIRST_CAPACITY: Long = 0x374f10a5f2
 
+    /** Capacity of the second cell in [GET_CELLS_PAGE], for assertions. */
+    const val GET_CELLS_SECOND_CAPACITY: Long = 0x7c4e4e2fb1
+
+    /** `out_point` of the first cell in [GET_CELLS_PAGE], as the spent-set keys it. */
+    const val GET_CELLS_FIRST_OUTPOINT: String =
+        "0x68b6cabb75821b0e316bda61f5b8fe5555215b637db29d3bab6ca7f42714db57:0x0"
+
+    /** `out_point` of the second cell in [GET_CELLS_PAGE], as the spent-set keys it. */
+    const val GET_CELLS_SECOND_OUTPOINT: String =
+        "0xcfe64b1cd6ac96e4a5daf295a6d395cc6f237df47212515086c22e76a8e2dbbf:0x0"
+
+    /** The testnet secp256k1-blake160 lock args every cell and tx fixture here uses. */
+    const val LOCK_ARGS: String = "0xda648442dbb7347e467d1d09da13e5cd3a0ef0e1"
+
     /**
      * `get_transactions` -> `Pagination<Tx>`, one ungrouped `TxWithCell`.
      *

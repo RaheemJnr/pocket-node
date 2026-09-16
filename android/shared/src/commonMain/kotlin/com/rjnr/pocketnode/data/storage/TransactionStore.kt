@@ -1,11 +1,22 @@
 package com.rjnr.pocketnode.data.storage
 
+import com.rjnr.pocketnode.data.gateway.models.TransactionRecord
+
 /**
- * The cached-transaction reads the shared sync code performs.
+ * The cached-transaction reads and writes the shared sync and read paths
+ * perform (M3 #3, widened in M3 #4).
  *
- * One member for now, the single query `SyncCoordinator` needs (M3 #3). The
- * next extraction widens this interface rather than adding a second
- * transaction seam beside it (M3 #4).
+ * Android binds it to `TransactionDao` and `CacheManager` through
+ * `RoomTransactionStore`, and the members do NOT share one failure contract:
+ *
+ *  - [cacheTransactions] and [getPendingNotIn] swallow and log, so a cache
+ *    hiccup degrades to "nothing written" / "nothing pending" rather than
+ *    failing the read that called them;
+ *  - [getBlockNumbers] and [getOrphanPendingHashes] propagate, because they
+ *    are plain queries with no fallback answer that would be honest;
+ *  - [updateTransactionStatus] propagates on purpose. The broadcast watchdog
+ *    calls it before the terminal CAS precisely so a database failure leaves
+ *    the pending row recoverable; swallowing here would silently break that.
  */
 interface TransactionStore {
 
@@ -15,4 +26,38 @@ interface TransactionStore {
      * callers reduce the list themselves.
      */
     suspend fun getBlockNumbers(walletId: String, network: String): List<String>
+
+    /**
+     * Upsert a complete history walk. Implementations carry a previously
+     * cached fee forward for any record whose own fee could not be resolved.
+     */
+    suspend fun cacheTransactions(
+        records: List<TransactionRecord>,
+        network: String,
+        walletId: String,
+    )
+
+    /**
+     * Local PENDING and FAILED rows for the wallet that are not in
+     * [excludeHashes]. The history read merges these into the light client's
+     * confirmed-only feed.
+     */
+    suspend fun getPendingNotIn(
+        network: String,
+        excludeHashes: Set<String>,
+        walletId: String,
+    ): List<TransactionRecord>
+
+    /**
+     * Hashes of PENDING rows with no `pending_broadcasts` entry: rows that
+     * predate that table and which the watchdog therefore cannot see (#115).
+     * Propagates a store failure; the cold-start reconcile wraps the call.
+     */
+    suspend fun getOrphanPendingHashes(walletId: String, network: String): List<String>
+
+    /**
+     * Move one row to [status]. Propagates a store failure rather than
+     * swallowing it: see the class KDoc for why the watchdog depends on that.
+     */
+    suspend fun updateTransactionStatus(hash: String, status: String)
 }

@@ -1,9 +1,8 @@
 package com.rjnr.pocketnode.data.gateway
 
 /**
- * Decision for the 0-live-cells rescue rescan in
- * [GatewayRepository.refreshBalance] (#332). Pure so it is unit-testable
- * away from the JNI surface.
+ * Decision for the 0-live-cells rescue rescan in [LedgerReader.readBalance]
+ * (#332). Pure so it is unit-testable away from the JNI surface.
  *
  * History: the original trigger was `liveCapacity == 0 && transactions
  * exist`. `liveCapacity` excludes typed cells, so a wallet whose entire
