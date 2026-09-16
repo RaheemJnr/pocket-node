@@ -36,8 +36,8 @@ targets:
       path: PocketNode/Info.plist
       properties:
         CFBundleDisplayName: Pocket Node
-        CFBundleShortVersionString: "1.0.0"
-        CFBundleVersion: "1"
+        CFBundleShortVersionString: $(MARKETING_VERSION)
+        CFBundleVersion: $(CURRENT_PROJECT_VERSION)
         # Unwrapping the wallet's data key raises a Face ID prompt; without this
         # string iOS kills the app instead of showing it.
         NSFaceIDUsageDescription: Pocket Node uses Face ID to unlock your wallet keys.
@@ -47,12 +47,19 @@ targets:
           UIApplicationSupportsMultipleScenes: false
         UISupportedInterfaceOrientations:
           - UIInterfaceOrientationPortrait
+        # Suppresses the export-compliance prompt on every TestFlight upload:
+        # the app only uses standard iOS crypto (no custom/non-exempt encryption).
+        ITSAppUsesNonExemptEncryption: false
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.rjnr.pocketnode
         TARGETED_DEVICE_FAMILY: "1"
         SWIFT_VERSION: "6.0"
         GENERATE_INFOPLIST_FILE: NO
+        MARKETING_VERSION: "0.1.0"
+        CURRENT_PROJECT_VERSION: "1"
+        DEVELOPMENT_TEAM: ARF4H4N5CV
+        CODE_SIGN_STYLE: Automatic
         FRAMEWORK_SEARCH_PATHS: $(inherited) $(SRCROOT)/../android/shared/build/xcode-frameworks/$(CONFIGURATION)/$(SDK_NAME)
         OTHER_LDFLAGS: $(inherited) -framework PocketNodeCore
         ENABLE_USER_SCRIPT_SANDBOXING: NO
