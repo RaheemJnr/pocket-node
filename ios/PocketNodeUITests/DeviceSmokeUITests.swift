@@ -85,21 +85,25 @@ final class DeviceSmokeUITests: XCTestCase {
     /// instead and asserted together at the end, alongside `unexpectedExit`.
     private var problems: [String] = []
 
+    /// Reported from teardown so a hard assertion in a later step (Node
+    /// Status, relaunch) cannot abort the run before these are seen. An
+    /// override rather than `addTeardownBlock`, whose Sendable closure cannot
+    /// capture the test case under strict concurrency on a device build.
+    override func tearDownWithError() throws {
+        if let unexpectedExit {
+            problems.append("the app went away on its own: \(unexpectedExit)")
+        }
+        if !problems.isEmpty {
+            XCTFail(problems.joined(separator: "; "))
+        }
+        try super.tearDownWithError()
+    }
+
     override func setUpWithError() throws {
         continueAfterFailure = false
         #if targetEnvironment(simulator)
         throw XCTSkip("spends testnet coins and expects Face ID; physical iPhone only")
         #endif
-        // Reported from teardown so a hard assertion in a later step (Node
-        // Status, relaunch) cannot abort the run before these are seen.
-        addTeardownBlock { [self] in
-            if let unexpectedExit {
-                problems.append("the app went away on its own: \(unexpectedExit)")
-            }
-            if !problems.isEmpty {
-                XCTFail(problems.joined(separator: "; "))
-            }
-        }
         let environment = ProcessInfo.processInfo.environment
         try XCTSkipUnless(
             environment["POCKETNODE_NETWORK_TESTS"] == "1",
