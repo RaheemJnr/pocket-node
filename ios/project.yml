@@ -146,6 +146,10 @@ schemes:
   # only this scheme sets the second one. Run it on a physical iPhone with a
   # person holding it, because signing raises system Face ID that XCUITest
   # cannot answer. Never wired into CI.
+  # Only the smoke class runs here. The other UI suites reset the phone's
+  # wallet on launch, so letting them run after the smoke would wipe the
+  # funded wallet it just proved, and the attended-only onboarding case would
+  # fail with nobody expecting its Face ID prompt.
   PocketNodeDeviceSmoke:
     build:
       targets:
@@ -153,7 +157,9 @@ schemes:
     test:
       config: Debug
       targets:
-        - PocketNodeUITests
+        - name: PocketNodeUITests
+          selectedTests:
+            - DeviceSmokeUITests
       environmentVariables:
         POCKETNODE_NETWORK_TESTS: "1"
         POCKETNODE_DEVICE_SMOKE: "1"

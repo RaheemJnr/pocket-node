@@ -203,6 +203,14 @@ xcodebuild -project PocketNode.xcodeproj -scheme PocketNodeDeviceSmoke \
   -destination 'platform=iOS,id=<device-udid>' \
   -derivedDataPath /tmp/dd-m3-device \
   -only-testing:PocketNodeUITests/DeviceSmokeUITests test
+```
+
+The scheme itself selects only `DeviceSmokeUITests`, so the `-only-testing`
+flag is belt and braces. Without either, the remaining UI suites run after the
+smoke, reset the phone's wallet on launch and wipe the funded wallet the smoke
+just proved (this happened once, on testnet).
+
+```bash
 
 xcrun xcresulttool export attachments \
   --path /tmp/dd-m3-device/Logs/Test/<run>.xcresult \
