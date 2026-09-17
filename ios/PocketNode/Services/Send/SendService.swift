@@ -240,14 +240,13 @@ final class SendService: SendServicing {
         // the sync layer last published against the one this send started
         // from. `Sendable` because both boxes are. It only reports; the
         // re-reading is ``balanceTicker``'s job, because `refreshBalance` is
-        // main-actor isolated and this closure is not.
+        // main-actor isolated and this closure is not. "Is not" is what
+        // ``balanceChangedSupplier`` below enforces, rather than assumes.
         let latest = sync.balanceBox
         let baseline = balanceAtSend
         self.poller = SendStatusPoller(
             ledger: sync.ledger,
-            balanceChangedSinceStart: {
-                KotlinBoolean(bool: latest.get() != baseline.get())
-            },
+            balanceChangedSinceStart: Self.balanceChangedSupplier(latest: latest, baseline: baseline),
             logger: log,
             clock: SystemClock.shared,
             scopeContext: runtime.defaultContext
@@ -476,9 +475,57 @@ final class SendService: SendServicing {
             network: net,
             walletId: record.id,
             activeScript: script,
-            isSyncing: { KotlinBoolean(bool: flag.get()) },
+            isSyncing: Self.syncingSupplier(flag),
             scope: scope.scope
         )
+    }
+
+    // MARK: - Callbacks the shared core invokes from a Kotlin thread
+
+    // Both of these read nothing but a lock-guarded `SharedValueBox`, so they
+    // are safe on any thread. What is NOT safe is writing them as closure
+    // literals inside this type: `SendService` is `@MainActor`, the Kotlin
+    // parameter they satisfy is a plain Objective-C block rather than a
+    // `@Sendable` function type, and a closure formed in an isolated context
+    // therefore inherits that isolation. Swift then checks the isolation when
+    // the closure runs.
+    //
+    // `SendPipeline.sendTransaction` calls `isSyncing` from
+    // `Dispatchers.Default` five seconds after the broadcast (#332's guard
+    // against re-registering a still-catching-up wallet). With the isolation
+    // inherited, that check fails on a background queue and traps the WHOLE
+    // PROCESS: `EXC_BREAKPOINT` in `_dispatch_assert_queue_fail`, reached via
+    // `swift_task_checkIsolatedSwift`. It is not a Kotlin exception, so the
+    // pipeline's own `try`/`catch` around that block cannot see it, and it
+    // leaves no Swift error behind: the app simply vanishes five seconds after
+    // a send, with the transaction already broadcast and the status sheet
+    // still on screen. Verified on an iPhone 14 Pro, iOS 26.5.2.
+    //
+    // The `@Sendable` return type is what strips the isolation (see below),
+    // and the `SharedValueBox` lock is what makes that correct rather than
+    // merely quiet.
+
+    // Both are `internal` rather than `private` so
+    // `SendServiceIsolationTests` can call them off the main actor, which is
+    // the only way to prove the isolation is gone. The same reason
+    // `decodePrivateKey` below is.
+
+    // `@Sendable` on the return type is the half that carries the meaning: a
+    // `@Sendable` closure is non-isolated by definition, which is precisely
+    // what the inherited `@MainActor` was. It still satisfies the Kotlin
+    // block parameter, because `@Sendable` is a subtype of the plain function
+    // type. `SyncService.nodeReadySnapshot()` is written the same way, for the
+    // same reason.
+
+    nonisolated static func syncingSupplier(_ flag: SyncingFlag) -> @Sendable () -> KotlinBoolean {
+        { KotlinBoolean(bool: flag.get()) }
+    }
+
+    nonisolated static func balanceChangedSupplier(
+        latest: BalanceBox,
+        baseline: BalanceBox
+    ) -> @Sendable () -> KotlinBoolean {
+        { KotlinBoolean(bool: latest.get() != baseline.get()) }
     }
 
     /// The prompt above the app's own gate.

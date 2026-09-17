@@ -40,6 +40,10 @@ the one `PocketNodeUITests` target (`project.yml`):
   `POCKETNODE_NETWORK_TESTS=1` in its test action and runs the same
   `PocketNodeUITests` target, so `NodeStatusUITests` actually starts the node
   and waits for a real testnet tip this time. Not run in CI.
+- `xcodebuild -scheme PocketNodeDeviceSmoke ... test` additionally sets
+  `POCKETNODE_DEVICE_SMOKE=1`, which is the only thing that un-skips
+  `DeviceSmokeUITests`. Physical iPhone only, and it spends testnet coins;
+  see "The device smoke" below.
 - `WalletKeyStoreDeviceTests` and `PinServiceDeviceTests` are skipped on the
   simulator and need a physical iPhone with a passcode and enrolled
   biometrics:
@@ -66,6 +70,7 @@ into a release build.
 | `POCKETNODE_RESET_STATE` | `1` deletes the wallet envelope, the Secure Enclave wrapping key, every PIN Keychain item, `wallet.json` and the install marker, before anything else in `init()` runs. Used by `OnboardingUITests` (#517) so the real onboarding flow gets a clean device on every launch, not only a simulator's first one, and by the M3 suites so each starts from the same seeded wallet. It also relaunches with this flag in its own `tearDown`, so it leaves the device the way `WalletShellUITests`/`NodeStatusUITests` expect to find it (see `POCKETNODE_SKIP_ONBOARDING` above). |
 | `POCKETNODE_UITEST_ALLOW_CAPTURE` | `1` makes `PrivacyShield` ignore `UIScreen.isCaptured` for this one signal. XCUITest itself records the screen on a physical iPhone, which the shield otherwise (correctly) treats as a capture and hides the whole app behind it — every UI test sets this. |
 | `POCKETNODE_UITEST_EXPOSE_WORDS` | `1` drops the SwiftUI redaction from the recovery-phrase grid so an XCUITest can read the generated words back off it. Set alongside the flag above by every suite that reads text out of the accessibility tree. |
+| `POCKETNODE_DEVICE_SMOKE` | `1` un-skips `DeviceSmokeUITests`, the one test that claims from the testnet faucet and broadcasts a real transfer. Read by the test runner, not by the app, and set by exactly one scheme (`PocketNodeDeviceSmoke`) so no CI or everyday run can reach it. See "The device smoke" below. |
 | `POCKETNODE_START_ROUTE` | `send`, `receive`, `activity`, `nodeStatus` or `settings`, pushed onto the wallet shell's first appearance. A screenshot or acceptance run on a simulator cannot tap: driving the UI from outside the app needs assistive access a headless run does not have. |
 | `POCKETNODE_SEND_RECIPIENT` | An address to fill the Send form's recipient field with, on that screen's first appearance. The whole `POCKETNODE_SEND_*` family additionally requires the stored wallet's id to be the seeded `ui-test-wallet`, so these can only ever drive a wallet with no key material; on any other wallet they do nothing. |
 | `POCKETNODE_SEND_AMOUNT` | A CKB amount for the Send form, run through the same sanitiser a keystroke is. |
@@ -146,6 +151,80 @@ A `Text` inside a `Button` is folded into that button's label either way, which
 is why `SyncModeUITests` asserts Recommended by reading
 `app.buttons["syncMode.option.recent"].label` rather than looking the badge up
 on its own.
+
+### The device smoke
+
+`PocketNodeUITests/DeviceSmokeUITests.swift` is the only test that spends
+anything. On a physical iPhone against live testnet it creates a wallet through
+real onboarding, picks "New wallet" sync, reads its receive address, claims
+10,000 CKB from `faucet-api.nervos.org`, waits for the deposit, checks it in
+Activity (no fee row: the sender paid), prices a send, checks the sweep
+warning, broadcasts a real 100 CKB transfer, waits for the commit, and then
+relaunches to prove the wallet, its PIN and its sync choice survived.
+
+Use a throwaway testnet phone. The run launches with `POCKETNODE_RESET_STATE=1`,
+which destroys whatever wallet is already installed on that iPhone (envelope,
+Secure Enclave key, PIN, `wallet.json`) before onboarding its own. Its wallet
+uses the fixed PIN `123456` and is created with `POCKETNODE_UITEST_EXPOSE_WORDS`,
+so a run that fails inside onboarding leaves XCTest's automatic screenshot of
+the unredacted recovery phrase in the `.xcresult`. Treat a red run's result
+bundle as containing a private key, even though it is a testnet key with at
+most 10,000 faucet CKB behind it.
+
+It cannot be run unattended, and no XCUITest affordance changes that. There
+are two separate points where a person has to answer a system prompt that
+belongs to SpringBoard rather than to this app:
+
+1. **The backup reveal**, early in onboarding. `BackupViewModel.reveal()`
+   calls `WalletKeyStore.load`, which unwraps the data key with the Secure
+   Enclave key guarded by the current biometric set or the device passcode.
+   On a simulator that key is software and there is no prompt; on a phone it
+   is Face ID. `BackupQuiz.generate` also runs inside `reveal()`, so an
+   unanswered prompt means no words, no quiz and no way forward. The run
+   retries the reveal once and then fails with "the phrase grid never filled
+   in", which is a waiting prompt, not a slow decrypt.
+2. **The send confirmation**. The app's own PIN gate comes first and the test
+   types it; the Enclave prompt behind it is the one nobody can automate. The
+   run logs `SMOKE_WAITING_FOR_USER_AUTH` and waits four minutes; unattended
+   it logs `SMOKE_AUTH_TIMEOUT` and finishes the remaining steps rather than
+   failing on the spot.
+
+So: start it with the phone in your hand, not on the desk. The same is true
+of `OnboardingUITests.testCreateWalletFlowShowsATestnetReceiveAddress`, which
+reaches the same reveal and is therefore attended-only on hardware too, even
+though nothing in it says so.
+Every interesting value is logged with a `SMOKE_` prefix (address, faucet
+response, balance, receive hash, review fee, transaction hash, node peers) and
+the ten screenshots are `XCTAttachment`s named `01-home-first` to
+`10-relaunch`.
+
+```bash
+xcodebuild -project PocketNode.xcodeproj -scheme PocketNodeDeviceSmoke \
+  -destination 'platform=iOS,id=<device-udid>' \
+  -derivedDataPath /tmp/dd-m3-device \
+  -only-testing:PocketNodeUITests/DeviceSmokeUITests test
+
+xcrun xcresulttool export attachments \
+  --path /tmp/dd-m3-device/Logs/Test/<run>.xcresult \
+  --output-path /tmp/m3-device-smoke
+```
+
+`PocketNodeDeviceSmoke` is the only scheme that sets `POCKETNODE_DEVICE_SMOKE`,
+and the test skips itself without it, so the offline scheme, `PocketNodeNetwork`
+and CI all leave it alone. Note that a `TEST_RUNNER_`-prefixed build setting on
+the xcodebuild command line does not reach the runner; the scheme is what sets
+the variable. The wallet is left installed on the phone afterwards, holding
+whatever testnet CKB is left.
+
+Two things differ on hardware and are worth knowing before reading a red run:
+
+- `PrivacyShield` is an `.overlay`, so when it is up the elements underneath
+  stay findable but every tap lands on the shield. XCUITest records the screen
+  on a device, which is a capture, so any suite missing
+  `POCKETNODE_UITEST_ALLOW_CAPTURE` reads as "tapped the button, never
+  arrived". Every suite sets it.
+- `ScannerUITests` assumes no camera, which is only true on a simulator. Both
+  of its cases skip themselves on a real iPhone.
 
 ### Kotlin and Swift agreeing about money
 

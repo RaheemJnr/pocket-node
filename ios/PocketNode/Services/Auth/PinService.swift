@@ -83,7 +83,7 @@ actor PinPolicyActor {
         self.policy = PinPolicy(
             store: store,
             entropy: SecureRandomEntropySource(),
-            clock: { KotlinLong(longLong: clock()) },
+            clock: Self.clockSupplier(clock),
             logger: NSLogLogger(),
             argon2Params: Argon2id.Params(
                 iterations: cost.iterations,
@@ -100,6 +100,22 @@ actor PinPolicyActor {
     /// has to survive a process restart, which a monotonic clock does not.
     static let systemClock: @Sendable () -> Int64 = {
         Int64((Date().timeIntervalSince1970 * 1000).rounded())
+    }
+
+    /// Boxes the injected clock for Kotlin, in a `nonisolated` context.
+    ///
+    /// `PinService` is `@MainActor` and the Kotlin `clock` parameter is a
+    /// plain Objective-C block, not a `@Sendable` function type, so a closure
+    /// literal written in `init` would inherit main-actor isolation. Kotlin
+    /// reads the clock while hashing, which `PinPolicyActor` deliberately runs
+    /// off the main actor: the same shape that trapped the process in
+    /// `SendService.makeContext` (see `SendServiceIsolationTests`). The body
+    /// only calls an already-`@Sendable` function, so stripping the isolation
+    /// costs nothing.
+    private nonisolated static func clockSupplier(
+        _ clock: @escaping @Sendable () -> Int64
+    ) -> @Sendable () -> KotlinLong {
+        { KotlinLong(longLong: clock()) }
     }
 
     func setPin(digits: [UInt8]) throws {

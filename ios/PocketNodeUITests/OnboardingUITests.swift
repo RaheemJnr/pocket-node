@@ -62,7 +62,15 @@ final class OnboardingUITests: XCTestCase {
 
         // Read the 12 generated words back off the grid before writing
         // anything down: this is the only copy this test ever sees them.
-        XCTAssertTrue(app.staticTexts.matching(identifier: "backup.word.11").firstMatch.waitForExistence(timeout: 10))
+        //
+        // 20s rather than 10, but the timeout is not really the point: on a
+        // physical iPhone this step waits for a PERSON. `reveal()` unwraps the
+        // data key with the Secure Enclave key guarded by the current
+        // biometric set, so it raises a Face ID prompt that XCUITest cannot
+        // answer; on a simulator the key is software and there is no prompt.
+        // This case is therefore attended-only on hardware. The longer wait
+        // buys a moment to look at the phone, nothing more.
+        XCTAssertTrue(app.staticTexts.matching(identifier: "backup.word.11").firstMatch.waitForExistence(timeout: 20))
         let words = (0..<12).map { Self.word(at: $0, in: app) }
         XCTAssertEqual(words.count, 12)
         XCTAssertTrue(words.allSatisfy { !$0.isEmpty }, "\(words)")

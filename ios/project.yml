@@ -82,6 +82,10 @@ targets:
       base:
         SWIFT_VERSION: "6.0"
         GENERATE_INFOPLIST_FILE: YES
+        # Only signed on a device run; the simulator never asks. The app
+        # target sets the same team above.
+        DEVELOPMENT_TEAM: ARF4H4N5CV
+        CODE_SIGN_STYLE: Automatic
         # The tests import PocketNodeCore for the shared protocols. Only the
         # module map is needed here: the framework is static and already linked
         # into the host app, which the bundle loads its symbols from.
@@ -99,6 +103,8 @@ targets:
       base:
         SWIFT_VERSION: "6.0"
         GENERATE_INFOPLIST_FILE: YES
+        DEVELOPMENT_TEAM: ARF4H4N5CV
+        CODE_SIGN_STYLE: Automatic
         TEST_TARGET_NAME: PocketNode
 
 schemes:
@@ -133,3 +139,21 @@ schemes:
         - PocketNodeUITests
       environmentVariables:
         POCKETNODE_NETWORK_TESTS: "1"
+
+  # The by-hand device smoke (`DeviceSmokeUITests`). It claims from the testnet
+  # faucet and broadcasts a real transfer, so it is not something either of the
+  # schemes above should be able to trigger: the test needs BOTH variables and
+  # only this scheme sets the second one. Run it on a physical iPhone with a
+  # person holding it, because signing raises system Face ID that XCUITest
+  # cannot answer. Never wired into CI.
+  PocketNodeDeviceSmoke:
+    build:
+      targets:
+        PocketNode: all
+    test:
+      config: Debug
+      targets:
+        - PocketNodeUITests
+      environmentVariables:
+        POCKETNODE_NETWORK_TESTS: "1"
+        POCKETNODE_DEVICE_SMOKE: "1"

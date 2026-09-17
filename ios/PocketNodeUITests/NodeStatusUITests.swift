@@ -43,6 +43,12 @@ final class NodeStatusUITests: XCTestCase {
         // minting a real wallet. That record is also what makes the wallet
         // shell activate sync, which is what starts the node.
         app.launchEnvironment["POCKETNODE_SKIP_ONBOARDING"] = "1"
+        // Only matters on a physical device, which is where this suite is
+        // worth running: XCUITest records the screen there, `PrivacyShield`
+        // correctly treats that as a capture, and its overlay then swallows
+        // every tap while leaving the elements underneath findable. Without
+        // this the run reads as "tapped Node Status, never arrived".
+        app.launchEnvironment["POCKETNODE_UITEST_ALLOW_CAPTURE"] = "1"
         app.launch()
 
         app.buttons["root.nodeStatus"].tap()
