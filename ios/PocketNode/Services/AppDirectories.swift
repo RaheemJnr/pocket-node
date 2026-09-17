@@ -85,7 +85,32 @@ enum AppDirectories {
         let directory = try ensure(in: support, fileManager: fileManager)
             .appendingPathComponent(network, isDirectory: true)
         try fileManager.createDirectory(at: directory, withIntermediateDirectories: true)
+        excludeFromBackup(directory)
         return directory
+    }
+
+    /// Marks the light client's per-network directory as regenerable so
+    /// iCloud and iTunes backups skip it. `store.db` and `network/` are chain
+    /// data the node rebuilds from a checkpoint, and `pocket_node.db` (sync
+    /// progress, balance cache, transactions, pending broadcasts) is derived
+    /// from the chain too, so a restored device resyncs and re-derives them;
+    /// backing them up costs the user backup space for nothing, and App
+    /// Review rejects apps that back up this kind of regenerable cache. Only
+    /// the network subdirectory is marked, never `PocketNode/` itself, so
+    /// `wallet.json` stays backed up.
+    ///
+    /// Best-effort: called on every `dataDirectory` (safe, setting the flag
+    /// again is a no-op), and a failure here is logged, not thrown, because
+    /// the light client still works without it.
+    private static func excludeFromBackup(_ directory: URL) {
+        var directory = directory
+        var values = URLResourceValues()
+        values.isExcludedFromBackup = true
+        do {
+            try directory.setResourceValues(values)
+        } catch {
+            logger.error("could not exclude \(directory.path, privacy: .public) from backups: \(error.localizedDescription, privacy: .public)")
+        }
     }
 
     /// Moves whatever the light client left under the old spelling into the new

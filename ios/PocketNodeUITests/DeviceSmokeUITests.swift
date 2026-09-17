@@ -78,11 +78,28 @@ final class DeviceSmokeUITests: XCTestCase {
     /// the end instead, so it can never pass quietly.
     private var unexpectedExit: String?
 
+    /// Problems noted along the way that should not abort the run on their
+    /// own, because later steps still have something useful to say about the
+    /// app. `continueAfterFailure = false` means any `XCTAssertTrue` on the
+    /// spot would end the test right there, so these are collected here
+    /// instead and asserted together at the end, alongside `unexpectedExit`.
+    private var problems: [String] = []
+
     override func setUpWithError() throws {
         continueAfterFailure = false
         #if targetEnvironment(simulator)
         throw XCTSkip("spends testnet coins and expects Face ID; physical iPhone only")
         #endif
+        // Reported from teardown so a hard assertion in a later step (Node
+        // Status, relaunch) cannot abort the run before these are seen.
+        addTeardownBlock { [self] in
+            if let unexpectedExit {
+                problems.append("the app went away on its own: \(unexpectedExit)")
+            }
+            if !problems.isEmpty {
+                XCTFail(problems.joined(separator: "; "))
+            }
+        }
         let environment = ProcessInfo.processInfo.environment
         try XCTSkipUnless(
             environment["POCKETNODE_NETWORK_TESTS"] == "1",
@@ -143,10 +160,9 @@ final class DeviceSmokeUITests: XCTestCase {
         // (i) And it is all still there on the next launch.
         try relaunchAndVerify(app, expectedBalance: balance)
 
-        // Last, so everything above still produced its screenshots and logs.
-        if let unexpectedExit {
-            XCTFail("the app went away on its own: \(unexpectedExit)")
-        }
+        // `problems` and `unexpectedExit` are reported from the teardown
+        // block registered in `setUpWithError`, so they surface even when a
+        // step above aborted the run.
     }
 
     /// Brings the app back if it has gone away, and notes that it did.
@@ -613,7 +629,13 @@ final class DeviceSmokeUITests: XCTestCase {
 
         NSLog("SMOKE_SEND_FINAL at=%@ phase=%@ hash=%@", Self.now(), statusTitle.label, hash)
         capture(app, "07c-confirmed")
-        XCTAssertTrue(hash.hasPrefix("0x"), "no transaction hash was ever shown")
+        // Noted rather than asserted here: with `continueAfterFailure = false`
+        // an `XCTAssertTrue` on the spot would end the run before it reaches
+        // (h) and (i), and before `unexpectedExit` ever gets reported. Both
+        // are checked together at the end instead.
+        if !hash.hasPrefix("0x") {
+            problems.append("no transaction hash was ever shown")
+        }
 
         guard confirmedOnScreen else {
             // The sheet did not get to say so, either because the app went
@@ -621,7 +643,10 @@ final class DeviceSmokeUITests: XCTestCase {
             // list is checked next and is the better witness anyway, since it
             // reads the chain rather than this one send's poller.
             NSLog("SMOKE_SEND_UNCONFIRMED_ON_SHEET hash=%@", hash)
-            return hash
+            // Nil rather than "" when no hash ever showed up, so the caller's
+            // `if let` skips a hash lookup in Activity that could never match
+            // anything and would otherwise burn its own timeout for nothing.
+            return hash.isEmpty ? nil : hash
         }
 
         // Done on a confirmed send stops the poll and pops back to Home.

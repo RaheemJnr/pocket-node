@@ -181,13 +181,18 @@ final class SendService: SendServicing {
     /// In a box rather than a plain property because the comparison happens on
     /// a Kotlin thread. `SyncService.balanceBox` holds the other half, the
     /// latest published reading; the check is two lock-guarded loads and no
-    /// actor hop at all.
+    /// actor hop at all. Carries `isCached` alongside the number: `send()` and
+    /// `retry()` read `availableShannons` whenever they are called, which can
+    /// land before the first live balance of a launch or a wallet switch, and
+    /// a cached baseline compared against the first live reading would report
+    /// "changed" purely because the cache was stale, not because this send
+    /// landed. See `balanceChangedSupplier`.
     ///
     /// Android polls `refreshBalance` itself inside that loop. iOS does not
     /// need to: `SyncService` already re-reads the balance on every sync tick
     /// that moved the chain, and the change output only becomes visible when a
     /// block is synced, so there is nothing a second poke would find earlier.
-    @ObservationIgnored private let balanceAtSend = BalanceBox(0)
+    @ObservationIgnored private let balanceAtSend = BalanceBox(BalanceReading())
 
     @ObservationIgnored private nonisolated(unsafe) var observation: Task<Void, Never>?
 
@@ -318,7 +323,7 @@ final class SendService: SendServicing {
         }
 
         poller.markBuilding()
-        balanceAtSend.set(availableShannons)
+        balanceAtSend.set(BalanceReading(shannons: availableShannons, isCached: sync.balance.isCached))
 
         // The bundle is confined to this scope on purpose. It carries the
         // private key hex AND the mnemonic, both Swift `String`s, whose
@@ -390,7 +395,7 @@ final class SendService: SendServicing {
             return .failure(SendError(message: "Wallet not initialized"))
         }
         poller.markBroadcasting()
-        balanceAtSend.set(availableShannons)
+        balanceAtSend.set(BalanceReading(shannons: availableShannons, isCached: sync.balance.isCached))
         do {
             let hash = try await pipeline.retryBroadcastOrThrow(ctx: context, txHash: txHash)
             poller.start(txHash: hash)
@@ -525,7 +530,23 @@ final class SendService: SendServicing {
         latest: BalanceBox,
         baseline: BalanceBox
     ) -> @Sendable () -> KotlinBoolean {
-        { KotlinBoolean(bool: latest.get() != baseline.get()) }
+        {
+            let current = latest.get()
+            // The baseline was set from a cached reading, and this is the
+            // first live one since: adopt it as the new baseline instead of
+            // comparing against it, so the cache-to-live transition itself
+            // never counts as the balance moving. The compare and the adopt
+            // happen under one lock so a concurrent `send()` or `retry()`
+            // resetting the baseline cannot interleave. No actor hop.
+            let changed: Bool = baseline.update { start in
+                if start.isCached, !current.isCached {
+                    start = current
+                    return false
+                }
+                return current.shannons != start.shannons
+            }
+            return KotlinBoolean(bool: changed)
+        }
     }
 
     /// The prompt above the app's own gate.

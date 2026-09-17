@@ -203,8 +203,9 @@ final class SyncService: SyncStatusProviding {
 
     /// The last published balance, in the same kind of box and for the same
     /// reason: the send status poller asks whether it has moved, from a Kotlin
-    /// thread, once every three seconds.
-    @ObservationIgnored let balanceBox = BalanceBox(0)
+    /// thread, once every three seconds. Carries `isCached` alongside the
+    /// number so that boundary is visible on the other side of the box too.
+    @ObservationIgnored let balanceBox = BalanceBox(BalanceReading())
 
     /// The active wallet's address and lock script on the selected network,
     /// resolved once in ``activate(wallet:force:)``. The balance read needs
@@ -612,7 +613,7 @@ final class SyncService: SyncStatusProviding {
         )
         // The send status poller reads this from a Kotlin thread; see
         // `balanceBox`.
-        balanceBox.set(balance.shannons)
+        balanceBox.set(BalanceReading(shannons: balance.shannons, isCached: isCached))
     }
 
     private func reregister() async {

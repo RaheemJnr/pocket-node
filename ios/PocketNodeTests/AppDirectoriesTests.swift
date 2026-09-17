@@ -77,6 +77,28 @@ final class AppDirectoriesTests: XCTestCase {
         )
     }
 
+    // MARK: - Backup exclusion (#24)
+
+    /// The light client's per-network directory holds only regenerable chain
+    /// data (`store.db`, `network/`), so it must be excluded from iCloud and
+    /// iTunes backups. `wallet.json` lives one level up in `PocketNode/` and
+    /// has to stay backed up, so only the network subdirectory is marked.
+    /// Calling `dataDirectory` twice proves setting the flag again is a no-op,
+    /// not an error.
+    func testDataDirectoryIsExcludedFromBackupButItsParentIsNot() throws {
+        let dataDir = try AppDirectories.dataDirectory(in: support, network: "testnet", fileManager: fileManager)
+        let dataDirAgain = try AppDirectories.dataDirectory(in: support, network: "testnet", fileManager: fileManager)
+        XCTAssertEqual(dataDir, dataDirAgain)
+
+        let values = try dataDir.resourceValues(forKeys: [.isExcludedFromBackupKey])
+        XCTAssertEqual(values.isExcludedFromBackup, true)
+
+        let walletFolder = support.appendingPathComponent(AppDirectories.directoryName, isDirectory: true)
+        let walletValues = try walletFolder.resourceValues(forKeys: [.isExcludedFromBackupKey])
+        XCTAssertNotNil(values.isExcludedFromBackup, "the key must resolve on the network directory")
+        XCTAssertFalse(walletValues.isExcludedFromBackup ?? false)
+    }
+
     // MARK: - Migration
     //
     // These pass explicit names. The real pair cannot be told apart on a

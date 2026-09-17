@@ -57,13 +57,13 @@ final class SendServiceIsolationTests: XCTestCase {
     }
 
     func testTheBalanceChangedSupplierCanBeCalledOffTheMainActor() throws {
-        let latest = BalanceBox(1_000)
-        let baseline = BalanceBox(1_000)
+        let latest = BalanceBox(BalanceReading(shannons: 1_000, isCached: false))
+        let baseline = BalanceBox(BalanceReading(shannons: 1_000, isCached: false))
         let supplier = SendService.balanceChangedSupplier(latest: latest, baseline: baseline)
 
         XCTAssertFalse(offMainActor("balance unchanged") { supplier().boolValue })
 
-        latest.set(2_000)
+        latest.set(BalanceReading(shannons: 2_000, isCached: false))
         XCTAssertTrue(offMainActor("balance moved") { supplier().boolValue })
     }
 
