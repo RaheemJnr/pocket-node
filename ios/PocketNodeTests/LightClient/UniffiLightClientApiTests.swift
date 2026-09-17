@@ -131,11 +131,27 @@ final class UniffiLightClientApiTests: XCTestCase {
         )
     }
 
-    // No test calls start() or stop(). The bridge keeps its state in process
-    // globals, and `bridge_core::lifecycle::start` only checks that the state
-    // flag reads INIT, not that init actually ran, so calling it here would
-    // flip the whole process to RUNNING and change what every later test sees.
-    // The lifecycle paths are exercised on device, not in this bundle.
+    // No test calls stop(). It is terminal for the process (the `OnceLock`
+    // globals cannot be cleared) and would change what every later test sees.
+    // The lifecycle paths beyond the one case below are exercised on device,
+    // not in this bundle.
+
+    /// #15: `start` before `init` must refuse instead of flipping the process
+    /// to RUNNING. Before the fix, `bridge_core::lifecycle::start` only
+    /// checked that the state flag read INIT, which is also the flag's
+    /// default before `init` ever ran, so calling `start` here used to move
+    /// the whole process to RUNNING and change what every later test in this
+    /// bundle observed. It is safe to call now: the guard checks that `init`
+    /// actually published its storage, so this fails without touching state.
+    func testStartBeforeInitFailsWithoutFlippingTheProcessToRunning() {
+        let statusBefore = api.status()
+
+        let started = api.start()
+
+        XCTAssertFalse(started, "start before init must report failure")
+        XCTAssertNotEqual(api.status(), 1, "start before init must not move to RUNNING")
+        XCTAssertEqual(api.status(), statusBefore, "status must be unchanged by the failed start")
+    }
 
     /// The bridge reports a numeric state; the shared listener takes the same
     /// names the Android JNI callback sends.
