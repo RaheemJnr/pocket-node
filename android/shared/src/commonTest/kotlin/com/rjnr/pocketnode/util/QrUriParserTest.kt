@@ -37,6 +37,23 @@ class QrUriParserTest {
     }
 
     @Test
+    fun `uppercase plain address is extracted lowercased`() {
+        val addr = "CKB1QZDA0CR08M85HC8JYU3Z3FUHGXK23GHRB64KZK3R"
+        assertEquals("ckb1qzda0cr08m85hc8jyu3z3fuhgxk23ghrb64kzk3r", extractCkbAddress(addr))
+    }
+
+    @Test
+    fun `uppercase address inside a ckb URI is extracted lowercased`() {
+        val uri = "ckb:CKT1QZDA0CR08M85HC8JYU3Z3FUHGXK23GHRB64KZK3R"
+        assertEquals("ckt1qzda0cr08m85hc8jyu3z3fuhgxk23ghrb64kzk3r", extractCkbAddress(uri))
+    }
+
+    @Test
+    fun `mixed case address is rejected`() {
+        assertNull(extractCkbAddress("ckt1QzDa0cr08m85hc8jyu3z3fuhgxk23ghrb64kzk3r"))
+    }
+
+    @Test
     fun `unrecognized format returns null`() {
         assertNull(extractCkbAddress("not-an-address"))
         assertNull(extractCkbAddress("https://example.com/no-ckb"))

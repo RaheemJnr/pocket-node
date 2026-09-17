@@ -69,6 +69,17 @@ final class QrScannerViewModelTests: XCTestCase {
         XCTAssertGreaterThanOrEqual(scanner.stopCallCount, 1)
     }
 
+    func testUppercasePayloadScansWithTheLowercasedAddress() async throws {
+        let vm = makeViewModel()
+        vm.onAppear()
+        try await settle()
+
+        scanner.emit(Self.testnetAddress.uppercased())
+        try await settle()
+
+        XCTAssertEqual(scanned, [Self.testnetAddress])
+    }
+
     func testJoyidUriExtractsTheEmbeddedAddress() async throws {
         let vm = makeViewModel()
         vm.onAppear()
@@ -123,6 +134,22 @@ final class QrScannerViewModelTests: XCTestCase {
         try await settle()
 
         scanner.emit("not-an-address")
+        try await settle()
+
+        XCTAssertEqual(vm.errorMessage, "No CKB address in this code")
+        XCTAssertTrue(scanned.isEmpty)
+    }
+
+    func testMixedCasePayloadReportsNoAddressAndDoesNotCallBack() async throws {
+        let vm = makeViewModel()
+        vm.onAppear()
+        try await settle()
+
+        // Same address as `testnetAddress`, with one letter uppercased.
+        // Mixed case is invalid bech32, so this must be rejected the same
+        // way unparseable garbage is, not silently lowercased into validity.
+        let mixed = "ckt1Qzda0cr08m85hc8jlnfp3zer7xulejywt49kt2rr0vthywaa50xwsqgedakp7g0hm0cdlq298xuyqpvl4ja0cfqenlarn"
+        scanner.emit(mixed)
         try await settle()
 
         XCTAssertEqual(vm.errorMessage, "No CKB address in this code")
