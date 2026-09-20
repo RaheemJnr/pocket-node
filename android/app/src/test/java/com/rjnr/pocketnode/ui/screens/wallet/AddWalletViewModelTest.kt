@@ -3,10 +3,9 @@ package com.rjnr.pocketnode.ui.screens.wallet
 import androidx.fragment.app.FragmentActivity
 import com.rjnr.pocketnode.core.log.NoopLogger
 import androidx.lifecycle.SavedStateHandle
-import com.rjnr.pocketnode.data.database.entity.WalletEntity
 import com.rjnr.pocketnode.data.gateway.GatewayRepository
+import com.rjnr.pocketnode.data.gateway.SyncProgress
 import com.rjnr.pocketnode.data.crypto.WalletKeyBundle
-import com.rjnr.pocketnode.data.wallet.KeyManager
 import com.rjnr.pocketnode.data.wallet.MnemonicManager
 import com.rjnr.pocketnode.data.wallet.WalletKeyReader
 import com.rjnr.pocketnode.data.wallet.WalletKeyWriter
@@ -18,6 +17,7 @@ import io.mockk.mockk
 import io.mockk.slot
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExperimentalCoroutinesApi
+import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.test.StandardTestDispatcher
 import kotlinx.coroutines.test.advanceUntilIdle
 import kotlinx.coroutines.test.resetMain
@@ -37,7 +37,7 @@ import org.junit.Test
  *     `onActiveWalletChanged` hook).
  *   - Test #9: on a V2 parent the parent's mnemonic MUST be read via
  *     [WalletKeyReader.readKeyMaterial] BEFORE
- *     [WalletKeyWriter.persistNewWallet] is invoked — the previous
+ *     [WalletKeyWriter.persistNewWallet] is invoked, the previous
  *     (pre-#289) flow routed through the V1 path which crashed on V2
  *     parents.
  */
@@ -53,9 +53,6 @@ class AddWalletViewModelTest {
     private lateinit var authManager: com.rjnr.pocketnode.data.auth.AuthManager
     private lateinit var activity: FragmentActivity
 
-    private val parentMnemonicWords = "abandon abandon abandon abandon abandon abandon " +
-        "abandon abandon abandon abandon abandon about"
-
     @Before
     fun setUp() {
         Dispatchers.setMain(testDispatcher)
@@ -64,6 +61,8 @@ class AddWalletViewModelTest {
         // before exposing them; we just need it to return empty).
         coEvery { walletRepository.getAll() } returns emptyList()
         gatewayRepository = mockk(relaxed = true)
+        io.mockk.every { gatewayRepository.syncProgress } returns
+            MutableStateFlow(SyncProgress())
         mnemonicManager = mockk(relaxed = true)
         walletKeyReader = mockk(relaxed = true)
         walletKeyWriter = mockk(relaxed = true)
@@ -118,12 +117,12 @@ class AddWalletViewModelTest {
     }
 
     // NOTE: test #9 from the plan (`createSubAccount on V2 parent calls
-    // walletKeyReader before walletKeyWriter` — pins the #289 bonus bug fix
+    // walletKeyReader before walletKeyWriter`, pins the #289 bonus bug fix
     // ordering) cannot be expressed as a unit test against the current
     // MockK version. `WalletRepository.createSubAccount` returns
     // `kotlin.Result<WalletEntity>`, and MockK 1.13.16 cannot round-trip
     // a stubbed inline-value-class return through the suspend continuation
-    // resume boundary — neither `returns Result.success(...)` nor
+    // resume boundary, neither `returns Result.success(...)` nor
     // `returns Result.failure(...)` survive the boxing, surfacing as
     // `ClassCastException: kotlin.Result cannot be cast to WalletEntity`
     // at `AddWalletViewModel.kt:170`.
@@ -138,4 +137,11 @@ class AddWalletViewModelTest {
     //     the V2 parent path end-to-end on a real device.
     //
     // Restore as a real test if MockK adds inline-value-class support.
+
+    // #431: the post-import sync-mode sheet (showSyncModeDialog,
+    // onSyncModeSelected, skipSyncSelection) is covered in
+    // AddWalletViewModelImportSyncTest, which runs the import through a real
+    // WalletRepository instead of a mocked one, mocking
+    // `importFromMnemonic`'s `kotlin.Result<WalletEntity>` return hits the
+    // exact same MockK inline-value-class crash documented above.
 }
