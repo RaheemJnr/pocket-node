@@ -135,6 +135,12 @@ jobs:
           print(f"name={device['name']}")
           PY
 
+      # Ad-hoc signing ("-") with no team: simulator builds need no certificate,
+      # but an unsigned test host has no entitlements and every Keychain call
+      # fails with errSecMissingEntitlement (-34018), which is what the M2
+      # Keychain-backed tests hit under CODE_SIGNING_ALLOWED=NO. The per-test
+      # time allowances turn a stalled test into a named failure instead of a
+      # 45 minute job timeout.
       - name: Build PocketNode (iOS Simulator)
         working-directory: ios
         run: |
@@ -144,12 +150,12 @@ jobs:
           if command -v xcbeautify >/dev/null 2>&1; then
             xcodebuild -project PocketNode.xcodeproj -scheme PocketNode \
               -destination 'generic/platform=iOS Simulator' -configuration Debug \
-              CODE_SIGNING_ALLOWED=NO build 2>&1 | tee "$log" | xcbeautify
+              CODE_SIGN_IDENTITY=- CODE_SIGNING_REQUIRED=NO CODE_SIGN_STYLE=Manual DEVELOPMENT_TEAM= PROVISIONING_PROFILE_SPECIFIER= build 2>&1 | tee "$log" | xcbeautify
             status=${PIPESTATUS[0]}
           else
             xcodebuild -project PocketNode.xcodeproj -scheme PocketNode \
               -destination 'generic/platform=iOS Simulator' -configuration Debug \
-              CODE_SIGNING_ALLOWED=NO build > "$log" 2>&1
+              CODE_SIGN_IDENTITY=- CODE_SIGNING_REQUIRED=NO CODE_SIGN_STYLE=Manual DEVELOPMENT_TEAM= PROVISIONING_PROFILE_SPECIFIER= build > "$log" 2>&1
             status=$?
           fi
           if [ "$status" -ne 0 ]; then
@@ -171,12 +177,16 @@ jobs:
           if command -v xcbeautify >/dev/null 2>&1; then
             xcodebuild -project PocketNode.xcodeproj -scheme PocketNode \
               -destination "platform=iOS Simulator,id=$SIMULATOR_UDID" -configuration Debug \
-              CODE_SIGNING_ALLOWED=NO test 2>&1 | tee "$log" | xcbeautify
+              CODE_SIGN_IDENTITY=- CODE_SIGNING_REQUIRED=NO CODE_SIGN_STYLE=Manual DEVELOPMENT_TEAM= PROVISIONING_PROFILE_SPECIFIER= \
+              -test-timeouts-enabled YES -default-test-execution-time-allowance 120 \
+              -maximum-test-execution-time-allowance 600 test 2>&1 | tee "$log" | xcbeautify
             status=${PIPESTATUS[0]}
           else
             xcodebuild -project PocketNode.xcodeproj -scheme PocketNode \
               -destination "platform=iOS Simulator,id=$SIMULATOR_UDID" -configuration Debug \
-              CODE_SIGNING_ALLOWED=NO test > "$log" 2>&1
+              CODE_SIGN_IDENTITY=- CODE_SIGNING_REQUIRED=NO CODE_SIGN_STYLE=Manual DEVELOPMENT_TEAM= PROVISIONING_PROFILE_SPECIFIER= \
+              -test-timeouts-enabled YES -default-test-execution-time-allowance 120 \
+              -maximum-test-execution-time-allowance 600 test > "$log" 2>&1
             status=$?
           fi
           if [ "$status" -ne 0 ]; then
@@ -186,7 +196,7 @@ jobs:
           fi
 
       - name: Upload test results
-        if: failure()
+        if: failure() || cancelled()
         uses: actions/upload-artifact@v4
         with:
           name: ios-ci-failure-logs
