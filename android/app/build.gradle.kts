@@ -23,7 +23,7 @@ android {
         // GitHub Releases API URL for auto-update. Sourced from BuildConfig so
         // the canonical repo identity is reviewed alongside versionCode/
         // versionName at release time, not buried in a Kotlin constant. v1.5.0
-        // + v1.5.1 shipped with a stale fork URL — this guard makes that class
+        // + v1.5.1 shipped with a stale fork URL, this guard makes that class
         // of regression visible in build.gradle.kts diffs and pairs with a
         // unit test that asserts the URL shape (#142B).
         buildConfigField(
@@ -46,7 +46,7 @@ android {
         // SHA-256 of the release signing certificate, sourced from the
         // RELEASE_CERT_SHA256 env var. UpdateDownloader compares this
         // against the downloaded APK's signing cert before launching
-        // PackageInstaller (#293). Empty string disables the check —
+        // PackageInstaller (#293). Empty string disables the check , 
         // acceptable for debug builds; release builds with an empty
         // value will surface the missing cert at install time but the
         // gate is enforced strictly only when the constant is non-empty.
@@ -69,7 +69,7 @@ android {
         // permissions (src/playRelease/AndroidManifest.xml).
         buildConfigField("boolean", "BG_FGS_ENABLED", "true")
 
-        // Only include ARM ABIs — x86_64 is emulator-only and adds ~29 MB.
+        // Only include ARM ABIs, x86_64 is emulator-only and adds ~29 MB.
         // CI's upgrade-smoke harness opts in via BUILD_X86_64=1 (matched in
         // external/ckb-light-client/build-android-jni.sh).
         ndk {
@@ -113,7 +113,7 @@ android {
         // The upgrade-smoke harness builds the prev APK on one runner and the
         // PR APK on another; without a stable shared key, the androidTest APK
         // and the target app APK have different signatures, so instrumentation
-        // is denied. This keystore is public on purpose (it's a debug key —
+        // is denied. This keystore is public on purpose (it's a debug key , 
         // no security implication; matches Android docs).
         getByName("debug") {
             val sharedDebug = rootProject.file("ci/debug.keystore")
@@ -292,7 +292,7 @@ dependencies {
     implementation(libs.androidx.material.icons.extended)
     implementation(libs.androidx.navigation.compose)
     implementation(libs.compose.icons.lucide)
-    // Chrome Custom Tabs — keeps explorer-link round-trip inside the app's
+    // Chrome Custom Tabs, keeps explorer-link round-trip inside the app's
     // task so the OEM auth gate doesn't re-engage on return (#138).
     implementation(libs.androidx.browser)
     debugImplementation(libs.androidx.ui.tooling)
@@ -315,11 +315,6 @@ dependencies {
     implementation(libs.androidx.security.crypto)
     implementation(libs.secp256k1.kmp.jni.android)
 
-    // BouncyCastle: PIN KDF and the BIP32 HMAC-SHA512 ladder. The CKB Java SDK
-    // it used to sit next to is gone — blake2b, secp256k1, hex and the address
-    // codec now come from :shared (#454).
-    implementation(libs.bouncycastle)
-
     // Room (for caching)
     implementation(libs.room.runtime)
     implementation(libs.room.ktx)
@@ -330,7 +325,7 @@ dependencies {
     implementation(libs.androidx.paging.runtime)
     implementation(libs.androidx.paging.compose)
 
-    // CameraX for camera preview (ZXing decodes frames — no ML Kit native libs)
+    // CameraX for camera preview (ZXing decodes frames, no ML Kit native libs)
     implementation(libs.camerax.core)
     implementation(libs.camerax.camera2)
     implementation(libs.camerax.lifecycle)
@@ -368,15 +363,16 @@ dependencies {
 //
 //   org.nervos.ckb      the CKB Java SDK, oracle for signing and addresses (#454)
 //   cash.z.ecc.android  kotlin-bip39, oracle for mnemonics and seeds (#507)
+//   org.bouncycastle    Argon2BytesGenerator, oracle for the shared Argon2id KDF (#523)
 //
-// If one leaks back onto a shipping classpath — a transitive pull, a
-// copy-pasted dependency line — the app would silently ship two
+// If one leaks back onto a shipping classpath, a transitive pull, a
+// copy-pasted dependency line, the app would silently ship two
 // implementations of the same primitives, and the "it is gone" claim in the
 // commit history would quietly stop being true.
 //
-// The task name predates the second entry; it is left alone so the CI jobs and
-// docs that invoke it by name keep working.
-val testOnlyForbiddenGroups = listOf("org.nervos.ckb", "cash.z.ecc.android")
+// The task name predates the second and third entries; it is left alone so the
+// CI jobs and docs that invoke it by name keep working.
+val testOnlyForbiddenGroups = listOf("org.nervos.ckb", "cash.z.ecc.android", "org.bouncycastle")
 val checkNoCkbSdkOnRuntimeClasspath = tasks.register("checkNoCkbSdkOnRuntimeClasspath") {
     group = "verification"
     description =
@@ -395,7 +391,7 @@ val checkNoCkbSdkOnRuntimeClasspath = tasks.register("checkNoCkbSdkOnRuntimeClas
                 "A test-only reference library is back on releaseRuntimeClasspath: " +
                     offenders.joinToString(", ") +
                     ". These are differential-test dependencies of :shared " +
-                    "androidHostTest only (#454, #507)."
+                    "androidHostTest only (#454, #507, #523)."
             )
         }
     }

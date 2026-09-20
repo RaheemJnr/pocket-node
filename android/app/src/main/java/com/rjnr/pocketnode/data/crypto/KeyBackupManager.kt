@@ -1,6 +1,7 @@
 package com.rjnr.pocketnode.data.crypto
 
 import androidx.annotation.VisibleForTesting
+import com.rjnr.pocketnode.core.crypto.Argon2id
 import com.rjnr.pocketnode.core.log.Logger
 import kotlinx.serialization.ExperimentalSerializationApi
 import kotlinx.serialization.Serializable
@@ -9,8 +10,6 @@ import kotlinx.serialization.json.decodeFromStream
 import kotlinx.serialization.json.encodeToStream
 import java.io.ByteArrayInputStream
 import java.io.ByteArrayOutputStream
-import org.bouncycastle.crypto.generators.Argon2BytesGenerator
-import org.bouncycastle.crypto.params.Argon2Parameters
 import java.io.File
 import java.security.SecureRandom
 import javax.crypto.Cipher
@@ -38,7 +37,7 @@ class KeyBackupManager @Inject constructor(
 ) {
     private val json = Json { ignoreUnknownKeys = true; encodeDefaults = true }
 
-    // PBKDF2 iteration count — only used when READING legacy v1 backups.
+    // PBKDF2 iteration count, only used when READING legacy v1 backups.
     @VisibleForTesting
     internal var kdfIterations: Int = KDF_ITERATIONS
 
@@ -63,8 +62,8 @@ class KeyBackupManager @Inject constructor(
         // New backups are always written with the strongest KDF (Argon2id, v2).
         val key = deriveKey(pin, salt, FORMAT_VERSION_ARGON2)
 
-        // Serialize straight to bytes — no String intermediate for the
-        // plaintext key material — and zero the buffer once encrypted (#321).
+        // Serialize straight to bytes, no String intermediate for the
+        // plaintext key material, and zero the buffer once encrypted (#321).
         // Serializer-internal buffers and the Strings inside KeyMaterial
         // itself are beyond reach on the JVM; see #335 for the full rewrite.
         val plaintext = ByteArrayOutputStream().use { baos ->
@@ -211,16 +210,16 @@ class KeyBackupManager @Inject constructor(
         // Avoid String interning of the PIN.
         val pinBytes = String(pin).toByteArray(Charsets.UTF_8)
         try {
-            val params = Argon2Parameters.Builder(Argon2Parameters.ARGON2_id)
-                .withVersion(Argon2Parameters.ARGON2_VERSION_13)
-                .withIterations(argon2Iterations)
-                .withMemoryAsKB(argon2MemoryKb)
-                .withParallelism(argon2Parallelism)
-                .withSalt(salt)
-                .build()
-            val gen = Argon2BytesGenerator().also { it.init(params) }
-            val out = ByteArray(KEY_SIZE_BITS / 8)
-            gen.generateBytes(pinBytes, out)
+            val out = Argon2id.hash(
+                password = pinBytes,
+                salt = salt,
+                params = Argon2id.Params(
+                    iterations = argon2Iterations,
+                    memoryKib = argon2MemoryKb,
+                    parallelism = argon2Parallelism,
+                    tagLength = KEY_SIZE_BITS / 8,
+                ),
+            )
             return SecretKeySpec(out, "AES")
         } finally {
             pinBytes.fill(0)
