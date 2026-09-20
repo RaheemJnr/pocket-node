@@ -248,3 +248,7 @@ android/app/src/debug/assets/
 # Codemap (local-only tooling — kept on disk, never tracked in the repo)
 # ===================
 tools/codemap/
+
+# Maintainer-local helper scripts: kept on the maintainer's machine, not published.
+tools/scripts/
+scripts/devnet/
