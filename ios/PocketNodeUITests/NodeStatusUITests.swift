@@ -9,6 +9,11 @@ import XCTest
 /// offline `PocketNode` scheme for CI (#517), and that scheme does not set the
 /// variable, so this test skips itself there rather than timing out against a
 /// network `ios-ci.yml` has no route to.
+///
+/// `@MainActor` like the other UI suites: `XCUIApplication` and `XCUIElement`
+/// are main-actor only on Xcode 16 (the CI runner), and a plain test class is
+/// nonisolated there.
+@MainActor
 final class NodeStatusUITests: XCTestCase {
     private static let tipTimeout: TimeInterval = 120
     private static let stopTimeout: TimeInterval = 10
