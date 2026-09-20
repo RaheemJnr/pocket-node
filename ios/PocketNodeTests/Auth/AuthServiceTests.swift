@@ -19,7 +19,9 @@ final class AuthServiceTests: XCTestCase {
     // `async` on purpose: the non-async `setUp()` override of a `nonisolated`
     // superclass method runs task-isolated, so touching this class's
     // `@MainActor` properties from it is a concurrency warning. The async form
-    // inherits the class's isolation.
+    // inherits the class's isolation. No `super.setUp()` call: XCTestCase's is
+    // empty, and awaiting it from a main-actor override sends the non-Sendable
+    // test case across isolation, which Xcode 16 (the CI runner) rejects.
     override func setUp() async throws {
         try await super.setUp()
         keychain = KeychainStore(service: keychainService)
