@@ -15,7 +15,6 @@ final class ReceiveViewModelTests: XCTestCase {
     // `async` on purpose: see `PinServiceTests` — the non-async override runs
     // task-isolated and cannot touch this `@MainActor` test case's properties.
     override func setUp() async throws {
-        try await super.setUp()
         directory = FileManager.default.temporaryDirectory
             .appendingPathComponent("com.rjnr.pocketnode.tests.receiveVM-\(UUID().uuidString)")
         walletStore = WalletStore(directory: directory)
@@ -31,7 +30,6 @@ final class ReceiveViewModelTests: XCTestCase {
         walletStore = nil
         defaults = nil
         preferences = nil
-        try await super.tearDown()
     }
 
     private func makeRecord(type: String = "mnemonic", backedUp: Bool = false) -> WalletRecord {

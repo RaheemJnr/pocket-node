@@ -37,7 +37,6 @@ final class WalletCreatorTests: XCTestCase {
     private var creator: WalletCreator!
 
     override func setUp() async throws {
-        try await super.setUp()
         keychain = KeychainStore(service: service)
         wrapper = SecureEnclaveKeyWrapper(tag: tag)
         wipe()
@@ -57,7 +56,6 @@ final class WalletCreatorTests: XCTestCase {
         wrapper = nil
         keychain = nil
         directory = nil
-        try await super.tearDown()
     }
 
     private func wipe() {

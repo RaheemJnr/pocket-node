@@ -18,7 +18,6 @@ final class ReceiveScreenshotTests: XCTestCase {
     // `async` on purpose: see `PinServiceTests` — the non-async override runs
     // task-isolated and cannot touch this `@MainActor` test case's properties.
     override func setUp() async throws {
-        try await super.setUp()
         directory = FileManager.default.temporaryDirectory
             .appendingPathComponent("com.rjnr.pocketnode.tests.receive.screenshots-\(UUID().uuidString)")
         walletStore = WalletStore(directory: directory)
@@ -32,7 +31,6 @@ final class ReceiveScreenshotTests: XCTestCase {
         directory = nil
         walletStore = nil
         defaults = nil
-        try await super.tearDown()
     }
 
     func testReceiveViewRenders() throws {

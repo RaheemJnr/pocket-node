@@ -25,7 +25,6 @@ final class AuthScreenshotTests: XCTestCase {
     // override runs task-isolated and cannot touch this class's `@MainActor`
     // properties.
     override func setUp() async throws {
-        try await super.setUp()
         keychain = KeychainStore(service: keychainService)
         try? keychain.deleteAll()
         UserDefaults.standard.removePersistentDomain(forName: suiteName)
@@ -37,7 +36,6 @@ final class AuthScreenshotTests: XCTestCase {
         defaults.removePersistentDomain(forName: suiteName)
         keychain = nil
         defaults = nil
-        try await super.tearDown()
     }
 
     private func makeAuth(biometrics: StubBiometrics) -> AuthService {

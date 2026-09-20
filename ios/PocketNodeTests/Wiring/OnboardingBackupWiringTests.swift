@@ -23,7 +23,6 @@ final class OnboardingBackupWiringTests: XCTestCase {
     private var model: OnboardingViewModel!
 
     override func setUp() async throws {
-        try await super.setUp()
         keychain = KeychainStore(service: service)
         wrapper = SecureEnclaveKeyWrapper(tag: tag)
         try? keychain.deleteAll()
@@ -47,7 +46,6 @@ final class OnboardingBackupWiringTests: XCTestCase {
         wrapper = nil
         keychain = nil
         directory = nil
-        try await super.tearDown()
     }
 
     /// The backup step's view model as `AppContainer.makeBackupViewModel`

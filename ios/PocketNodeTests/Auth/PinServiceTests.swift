@@ -19,7 +19,6 @@ final class PinServiceTests: XCTestCase {
     // superclass method runs task-isolated, so it cannot build the
     // `@MainActor` `PinService`. The async form inherits the class's isolation.
     override func setUp() async throws {
-        try await super.setUp()
         keychain = KeychainStore(service: service)
         try? keychain.deleteAll()
         clock = TestClock()
@@ -31,7 +30,6 @@ final class PinServiceTests: XCTestCase {
         keychain = nil
         clock = nil
         pin = nil
-        try await super.tearDown()
     }
 
     private func makeService() -> PinService {

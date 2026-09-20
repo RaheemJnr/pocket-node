@@ -17,7 +17,6 @@ final class HomeViewModelTests: XCTestCase {
     // `async` on purpose: see `PinServiceTests` — the non-async override runs
     // task-isolated and cannot touch this `@MainActor` test case's properties.
     override func setUp() async throws {
-        try await super.setUp()
         directory = FileManager.default.temporaryDirectory
             .appendingPathComponent("com.rjnr.pocketnode.tests.homeVM-\(UUID().uuidString)")
         walletStore = WalletStore(directory: directory)
@@ -33,7 +32,6 @@ final class HomeViewModelTests: XCTestCase {
         walletStore = nil
         defaults = nil
         preferences = nil
-        try await super.tearDown()
     }
 
     private static let mainnetAddress = "ckb1qzda0cr08m85hc8jlnfp3zer7xulejywt49kt2rr0vthywaa50xwsqgedakp7g0hm0cdlq298xuyqpvl4ja0cfqhp5jft"
