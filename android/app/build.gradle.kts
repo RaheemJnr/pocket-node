@@ -315,11 +315,6 @@ dependencies {
     implementation(libs.androidx.security.crypto)
     implementation(libs.secp256k1.kmp.jni.android)
 
-    // BouncyCastle: PIN KDF and the BIP32 HMAC-SHA512 ladder. The CKB Java SDK
-    // it used to sit next to is gone — blake2b, secp256k1, hex and the address
-    // codec now come from :shared (#454).
-    implementation(libs.bouncycastle)
-
     // Room (for caching)
     implementation(libs.room.runtime)
     implementation(libs.room.ktx)
@@ -362,29 +357,41 @@ dependencies {
     androidTestImplementation("androidx.test.uiautomator:uiautomator:2.3.0")
 }
 
-// #454: the CKB Java SDK was removed from the app in favour of :shared's
-// multiplatform crypto. It survives only as a differential-test dependency of
-// :shared's androidHostTest source set, where it is the reference the signing
-// and address primitives are proved against. If it ever leaks back onto a
-// shipping classpath — a transitive pull, a copy-pasted dependency line — the
-// app would silently ship two implementations of the same primitives, and the
-// "SDK is gone" claim in the commit history would quietly stop being true.
-val ckbSdkForbiddenGroup = "org.nervos.ckb"
+// Libraries that :shared replaced with multiplatform code and that now exist
+// ONLY as differential-test dependencies of :shared's androidHostTest source
+// set, where each is the reference its replacement is proved against:
+//
+//   org.nervos.ckb      the CKB Java SDK, oracle for signing and addresses (#454)
+//   cash.z.ecc.android  kotlin-bip39, oracle for mnemonics and seeds (#507)
+//   org.bouncycastle    Argon2BytesGenerator, oracle for the shared Argon2id KDF (#523)
+//
+// If one leaks back onto a shipping classpath, a transitive pull, a
+// copy-pasted dependency line, the app would silently ship two
+// implementations of the same primitives, and the "it is gone" claim in the
+// commit history would quietly stop being true.
+//
+// The task name predates the second and third entries; it is left alone so the
+// CI jobs and docs that invoke it by name keep working.
+val testOnlyForbiddenGroups = listOf("org.nervos.ckb", "cash.z.ecc.android", "org.bouncycastle")
 val checkNoCkbSdkOnRuntimeClasspath = tasks.register("checkNoCkbSdkOnRuntimeClasspath") {
     group = "verification"
-    description = "Fails if $ckbSdkForbiddenGroup is on the release runtime classpath."
+    description =
+        "Fails if a test-only reference library (" +
+            testOnlyForbiddenGroups.joinToString(", ") +
+            ") is on the release runtime classpath."
     doLast {
         val offenders = configurations.getByName("releaseRuntimeClasspath")
             .incoming.resolutionResult.allComponents
             .mapNotNull { it.moduleVersion }
-            .filter { it.group == ckbSdkForbiddenGroup }
+            .filter { it.group in testOnlyForbiddenGroups }
             .map { "${it.group}:${it.name}:${it.version}" }
             .sorted()
         if (offenders.isNotEmpty()) {
             throw GradleException(
-                "$ckbSdkForbiddenGroup is back on releaseRuntimeClasspath: " +
+                "A test-only reference library is back on releaseRuntimeClasspath: " +
                     offenders.joinToString(", ") +
-                    ". It is a differential-test dependency of :shared androidHostTest only (#454)."
+                    ". These are differential-test dependencies of :shared " +
+                    "androidHostTest only (#454, #507, #523)."
             )
         }
     }
