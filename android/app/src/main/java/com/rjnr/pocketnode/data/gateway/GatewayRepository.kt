@@ -4,7 +4,6 @@ import com.rjnr.pocketnode.core.log.Logger
 import com.rjnr.pocketnode.BuildConfig
 import com.rjnr.pocketnode.data.database.AppDatabase
 import com.rjnr.pocketnode.data.database.DatabaseMaintenanceUtil
-import com.rjnr.pocketnode.data.database.dao.PendingBroadcastDao
 import com.rjnr.pocketnode.data.database.dao.SyncProgressDao
 import com.rjnr.pocketnode.data.database.dao.WalletDao
 import com.rjnr.pocketnode.data.database.entity.PendingBroadcastEntity
@@ -14,21 +13,15 @@ import com.rjnr.pocketnode.data.gateway.models.*
 import com.rjnr.pocketnode.data.sync.SyncEngine
 import com.rjnr.pocketnode.data.sync.contract.SyncServiceCommands
 import com.rjnr.pocketnode.data.migration.WalletMigrationHelper
-import com.rjnr.pocketnode.data.transaction.TransactionBuilder
 import com.rjnr.pocketnode.data.transaction.PrivateKeySigner
 import com.rjnr.pocketnode.data.send.SendContext
 import com.rjnr.pocketnode.data.send.SendPipeline
 import com.rjnr.pocketnode.data.transaction.RecipientOutput
-import com.rjnr.pocketnode.data.database.entity.SubAccountCandidateEntity
 import com.rjnr.pocketnode.data.wallet.AddressUtils
-import com.rjnr.pocketnode.data.transaction.SweepInput
 import com.rjnr.pocketnode.data.transaction.TransferPlan
-import com.rjnr.pocketnode.data.wallet.GapLimitResolution
 import com.rjnr.pocketnode.data.wallet.GapLimitStatus
 import com.rjnr.pocketnode.data.wallet.GapLimitSweepPreview
 import com.rjnr.pocketnode.data.wallet.KeyManager
-import com.rjnr.pocketnode.data.wallet.gapLimitResolution
-import com.rjnr.pocketnode.data.wallet.nextScanWindow
 import com.rjnr.pocketnode.data.wallet.WalletInfo
 import com.rjnr.pocketnode.data.wallet.WalletPreferences
 import com.rjnr.pocketnode.core.prefs.SyncStrategy
@@ -44,9 +37,7 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
-import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.withContext
-import kotlinx.serialization.encodeToString
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.decodeFromJsonElement
 import javax.inject.Inject
@@ -59,24 +50,22 @@ class GatewayRepository @Inject constructor(
     // Concrete (#461): touches all four preference domains.
     private val walletPreferences: WalletPreferences,
     private val json: Json,
-    private val transactionBuilder: TransactionBuilder,
     private val cacheManager: CacheManager,
-    private val daoSyncManager: DaoSyncManager,
     private val walletMigrationHelper: WalletMigrationHelper,
     private val walletDao: WalletDao,
     private val appDatabase: AppDatabase,
     private val syncProgressDao: SyncProgressDao,
-    private val pendingBroadcastDao: PendingBroadcastDao,
     // The shared send path (M3 #5): preview, build, reserve, broadcast, retry.
     private val sendPipeline: SendPipeline,
     private val syncCoordinator: SyncCoordinator,
-    private val daoHeaderResolver: DaoHeaderResolver,
-    private val daoDepositReader: DaoDepositReader,
+    // The DAO surface (#460): deposits, rescan, deposit/withdraw/unlock.
+    private val daoGateway: DaoGateway,
+    // Gap-limit recovery (#382): banner, deep scan, sweep.
+    private val gapLimitGateway: GapLimitGateway,
     private val lightClient: LightClientReadOnly,
     // The shared read path (M3 #4): balance, cells, history, tx status.
     private val ledgerReader: LedgerReader,
     private val subAccountReconciler: com.rjnr.pocketnode.data.wallet.SubAccountReconciler,
-    private val subAccountDiscovery: com.rjnr.pocketnode.data.wallet.SubAccountDiscovery,
     private val syncServiceCommands: SyncServiceCommands,
     private val nodeLifecycle: NodeLifecycle,
     private val syncEngine: SyncEngine,
@@ -96,10 +85,6 @@ class GatewayRepository @Inject constructor(
         isSyncing = { syncProgress.value.isSyncing },
         scope = scope,
     )
-
-    // #382: single-flight for the explicit gap-limit scan (Home banner and
-    // Settings both trigger it).
-    private val gapLimitScanMutex = Mutex()
 
     // The tip stream and the whole sync-progress poll live on [SyncEngine]
     // (#460, moved to the shared module in M3). These forward so the
@@ -135,7 +120,6 @@ class GatewayRepository @Inject constructor(
     // Node lifecycle (config copy, JNI init/start, status callback, network
     // selection and the restart-based switch) lives on [NodeLifecycle] (#460).
     // These forward so the repository's public surface is unchanged.
-    val nodeStatus: StateFlow<String> get() = nodeLifecycle.nodeStatus
     val network: StateFlow<NetworkType> get() = nodeLifecycle.network
     val currentNetwork: NetworkType get() = nodeLifecycle.currentNetwork
     val isSwitchingNetwork: StateFlow<Boolean> get() = nodeLifecycle.isSwitchingNetwork
@@ -602,300 +586,55 @@ class GatewayRepository @Inject constructor(
 
     fun hasCompletedInitialSync(): Boolean = walletPreferences.hasCompletedInitialSync(walletId = activeWalletId.ifEmpty { null })
 
-    /** #382: gap-limit banner is visible when the signature was detected for the active wallet and not dismissed. */
-    fun isGapLimitBannerVisible(): Boolean {
-        if (activeWalletId.isEmpty()) return false
-        return walletPreferences.isGapLimitSignalDetected(currentNetwork, activeWalletId) &&
-            !walletPreferences.isGapLimitBannerDismissed(currentNetwork, activeWalletId)
-    }
+    // ========================================
+    // Gap-limit recovery (delegated to [GapLimitGateway], #382 / #460)
+    // ========================================
 
-    fun dismissGapLimitBanner() {
-        if (activeWalletId.isEmpty()) return
-        walletPreferences.setGapLimitBannerDismissed(currentNetwork, activeWalletId)
-    }
+    private fun gapLimitContext(): GapLimitGateway.GapLimitContext = GapLimitGateway.GapLimitContext(
+        network = { currentNetwork },
+        walletId = { activeWalletId },
+        activeScript = { _walletInfo.value?.script },
+        savedSyncMode = { getSavedSyncMode() },
+        savedCustomBlockHeight = { getSavedCustomBlockHeight() },
+        getMnemonic = { getMnemonic() },
+        sendContext = { sendContext() },
+        registerAccountWithStrategy = { syncMode, customBlockHeight, savePreference ->
+            registerAccountWithStrategy(syncMode, customBlockHeight, savePreference)
+        },
+    )
 
-    /**
-     * #382 Tier 2: what the chain-axis candidate set means for the active
-     * wallet, plus the live capacity sitting on FOUND slots. Side effect:
-     * a CLEAR resolution (scan finished, nothing anywhere) retires the
-     * Tier 1 signal so the banner stops firing on stale evidence.
-     */
-    suspend fun getGapLimitStatus(): GapLimitStatus {
-        val wId = activeWalletId
-        if (wId.isEmpty()) return GapLimitStatus(GapLimitResolution.NOT_SCANNED, 0, 0L)
-        val chain = runCatching {
-            appDatabase.subAccountCandidateDao().getForParent(wId).filter { it.accountIndex == 0 }
-        }.onFailure {
-            logger.w(TAG, "getGapLimitStatus: candidate read failed, treating as not scanned: ${it.message}")
-        }.getOrDefault(emptyList())
-        val resolution = gapLimitResolution(chain)
-        if (resolution == GapLimitResolution.CLEAR &&
-            walletPreferences.isGapLimitSignalDetected(currentNetwork, wId)
-        ) {
-            logger.i(TAG, "gap-limit scan completed clean — retiring Tier 1 signal for $wId")
-            walletPreferences.setGapLimitSignalDetected(false, currentNetwork, wId)
-        }
-        if (resolution != GapLimitResolution.FOUND) return GapLimitStatus(resolution, 0, 0L)
+    /** @see GapLimitGateway.isGapLimitBannerVisible */
+    fun isGapLimitBannerVisible(): Boolean =
+        gapLimitGateway.isGapLimitBannerVisible(gapLimitContext())
 
-        val myScript = _walletInfo.value?.script
-            ?: return GapLimitStatus(resolution, chain.count { it.state == SubAccountCandidateEntity.STATE_FOUND }, 0L)
-        var total = 0L
-        var count = 0
-        chain.filter { it.state == SubAccountCandidateEntity.STATE_FOUND }.forEach { cand ->
-            runCatching {
-                val cap = liveUntypedCapacityFor(JniSearchKey(script = myScript.copy(args = cand.scriptArgs)))
-                if (cap > 0L) {
-                    total += cap
-                    count++
-                }
-            }.onFailure { logger.w(TAG, "gap-limit capacity read failed for ${cand.derivationPath}: ${it.message}") }
-        }
-        return GapLimitStatus(resolution, count, total)
-    }
+    /** @see GapLimitGateway.dismissGapLimitBanner */
+    fun dismissGapLimitBanner() =
+        gapLimitGateway.dismissGapLimitBanner(gapLimitContext())
 
-    /**
-     * #382 Tier 2: explicit deep scan. Covers wallets imported before the
-     * auto-scan shipped, and extends the window (20 -> 40 -> 60) when the
-     * current boundary slot shows activity. Needs the mnemonic (session-auth
-     * gated by [getMnemonic]); inserts are IGNORE so already-resolved slots
-     * keep their state, then scripts re-register so the new ones enter the
-     * light-client filter. Returns the window that is now covered.
-     */
-    /**
-     * V1 / session-auth entry: reads the seed via [getMnemonic] (which has an
-     * EncryptedSharedPreferences fallback). V2 (kdfVersion=2) wallets cannot
-     * decrypt without an authenticated Cipher, so their ViewModels unlock the
-     * seed via a BiometricPrompt and call [runGapLimitScan] with words (#408).
-     */
-    suspend fun runGapLimitScan(): Result<Int> = runCatching {
-        val words = getMnemonic() ?: throw Exception("Recovery phrase unavailable for this wallet")
-        runGapLimitScanInner(words)
-    }
+    /** @see GapLimitGateway.getGapLimitStatus */
+    suspend fun getGapLimitStatus(): GapLimitStatus =
+        gapLimitGateway.getGapLimitStatus(gapLimitContext())
 
-    /** V2 entry: [words] were already unlocked by the caller's BiometricPrompt (#408). */
-    suspend fun runGapLimitScan(words: List<String>): Result<Int> = runCatching {
-        runGapLimitScanInner(words)
-    }
+    /** @see GapLimitGateway.runGapLimitScan */
+    suspend fun runGapLimitScan(): Result<Int> =
+        gapLimitGateway.runGapLimitScan(gapLimitContext())
 
-    private suspend fun runGapLimitScanInner(words: List<String>): Int {
-        // Single-flight: the Home banner and Settings both trigger this, and
-        // a second concurrent pass would double the derivation work and
-        // interleave two CMD_SET_SCRIPTS_ALL registrations.
-        if (!gapLimitScanMutex.tryLock()) throw Exception("A scan is already running")
-        return try {
-            val wId = activeWalletId
-            if (wId.isEmpty()) throw Exception("No active wallet")
-            val dao = appDatabase.subAccountCandidateDao()
-            val existing = dao.getForParent(wId).filter { it.accountIndex == 0 }
-            val window = nextScanWindow(existing)
-            val now = System.currentTimeMillis()
-            val candidates = subAccountDiscovery.deriveChainCandidates(words, window = window)
-            // The mnemonic read and derivation are slow; if the user switched
-            // wallets meanwhile, inserting rows for the OLD wallet and then
-            // registering the NEW one would corrupt the scan. Abort instead.
-            if (activeWalletId != wId) throw Exception("Wallet changed during the scan; try again")
-            dao.insertAll(
-                candidates.map {
-                    SubAccountCandidateEntity(
-                        parentWalletId = wId,
-                        derivationPath = it.derivationPath,
-                        accountIndex = it.accountIndex,
-                        scriptArgs = it.scriptArgs,
-                        createdAt = now,
-                    )
-                }
-            )
-            // An explicit scan means "look AGAIN": re-arm chain slots a past
-            // pass retired as EMPTY. Without this the action was a silent
-            // no-op after any completed scan — funds arriving later (or on a
-            // different network than the pass that retired them) were
-            // undiscoverable forever (device-verification, 2026-07). The
-            // reconciler's probe re-judges them: activity -> FOUND, still
-            // nothing -> EMPTY again shortly.
-            val reArmed = dao.reArmEmptyChainSlots(wId)
-            if (reArmed > 0) logger.i(TAG, "gap-limit scan: re-armed $reArmed retired slot(s)")
-            // Fresh registration pass so new candidate scripts join the filter.
-            registerAccountWithStrategy(
-                getSavedSyncMode(), getSavedCustomBlockHeight(), savePreference = false
-            ).getOrThrow()
-            window
-        } finally {
-            gapLimitScanMutex.unlock()
-        }
-    }
+    /** @see GapLimitGateway.runGapLimitScan */
+    suspend fun runGapLimitScan(words: List<String>): Result<Int> =
+        gapLimitGateway.runGapLimitScan(gapLimitContext(), words)
 
-    /**
-     * Live spendable capacity for one script: cells walked to the end, spent
-     * outpoints subtracted, typed cells excluded — the same read-path rules
-     * as refreshBalance (nativeGetCellsCapacity alone can overstate; an
-     * inflated "found funds" number would re-create the exact panic #382 is
-     * meant to end).
-     */
-    private suspend fun liveUntypedCapacityFor(searchKey: JniSearchKey): Long =
-        liveUntypedCellsFor(searchKey).sumOf {
-            it.output.capacity.removePrefix("0x").toLongOrNull(16) ?: 0L
-        }
+    /** @see GapLimitGateway.prepareGapLimitSweep */
+    suspend fun prepareGapLimitSweep(): Result<GapLimitSweepPreview> =
+        gapLimitGateway.prepareGapLimitSweep(gapLimitContext())
 
-    /**
-     * The live untyped cells behind [liveUntypedCapacityFor] — the Tier 3
-     * sweep spends them. Outpoints reserved by ACTIVE pending broadcasts are
-     * excluded: a just-broadcast sweep's inputs are spent-in-flight, and
-     * counting them keeps the found-funds card at the old amount until the
-     * chain index catches up (and would let a double-tapped sweep try to
-     * respend them).
-     */
-    private suspend fun liveUntypedCellsFor(searchKey: JniSearchKey): List<JniCell> {
-        val searchKeyJson = json.encodeToString(searchKey)
-        val spent = fetchAllSpentOutpoints(searchKeyJson).toMutableSet()
-        runCatching {
-            pendingBroadcastDao.getActive(activeWalletId, currentNetwork.name)
-                .flatMap { json.decodeFromString<List<OutPoint>>(it.reservedInputs) }
-                .forEach { spent += "${it.txHash}:${it.index}" }
-        }.onFailure { logger.w(TAG, "liveUntypedCellsFor: reservation read failed: ${it.message}") }
-        val live = mutableListOf<JniCell>()
-        var cursor: String? = null
-        var pages = 0
-        while (pages < MAX_CELL_PAGES) {
-            val pageJson = LightClientNative.nativeGetCells(searchKeyJson, "desc", 100, cursor) ?: break
-            val page = json.decodeFromString<JniPagination<JniCell>>(pageJson)
-            page.objects.forEach { cell ->
-                val key = "${cell.outPoint.txHash}:${cell.outPoint.index}"
-                if (key !in spent && cell.output.type == null &&
-                    cell.output.capacity.removePrefix("0x").toLongOrNull(16) != null
-                ) {
-                    live += cell
-                }
-            }
-            pages++
-            if (page.objects.isEmpty() || page.objects.size < 100 || page.lastCursor.isNullOrEmpty()) break
-            cursor = page.lastCursor
-        }
-        return live
-    }
+    /** @see GapLimitGateway.sweepGapLimitFunds */
+    suspend fun sweepGapLimitFunds(): Result<String> =
+        gapLimitGateway.sweepGapLimitFunds(gapLimitContext())
 
-    /**
-     * #382 Tier 3: gather every live untyped cell sitting on FOUND chain-axis
-     * slots as sweep inputs, tagged with the lock args that identify their
-     * signing group. Second value = how many distinct addresses hold funds.
-     */
-    private suspend fun gatherSweepInputs(walletId: String): Pair<List<SweepInput>, Int> {
-        val myScript = _walletInfo.value?.script ?: throw Exception("Wallet not initialized")
-        val found = appDatabase.subAccountCandidateDao().getForParent(walletId)
-            .filter { it.accountIndex == 0 && it.state == SubAccountCandidateEntity.STATE_FOUND }
-        val inputs = mutableListOf<SweepInput>()
-        var addresses = 0
-        found.forEach { cand ->
-            val cells = liveUntypedCellsFor(JniSearchKey(script = myScript.copy(args = cand.scriptArgs)))
-            if (cells.isNotEmpty()) addresses++
-            cells.forEach { cell ->
-                inputs += SweepInput(
-                    outPoint = OutPoint(cell.outPoint.txHash, cell.outPoint.index),
-                    capacityShannons = cell.output.capacity.removePrefix("0x").toLongOrNull(16) ?: 0L,
-                    lockArgs = cand.scriptArgs,
-                )
-            }
-        }
-        return inputs to addresses
-    }
+    /** @see GapLimitGateway.sweepGapLimitFunds */
+    suspend fun sweepGapLimitFunds(words: List<String>): Result<String> =
+        gapLimitGateway.sweepGapLimitFunds(gapLimitContext(), words)
 
-    /**
-     * #382 Tier 3: the numbers for the sweep confirm dialog — total found,
-     * exact fee, distinct addresses. Key-free: gathering and planning need
-     * no mnemonic, only the confirm step does.
-     */
-    suspend fun prepareGapLimitSweep(): Result<GapLimitSweepPreview> = runCatching {
-        val wId = activeWalletId
-        if (wId.isEmpty()) throw Exception("No active wallet")
-        val myScript = _walletInfo.value?.script ?: throw Exception("Wallet not initialized")
-        val (inputs, addresses) = gatherSweepInputs(wId)
-        val plan = transactionBuilder.buildSweep(inputs, myScript, currentNetwork).getOrThrow()
-        GapLimitSweepPreview(
-            totalShannons = plan.totalShannons,
-            feeShannons = plan.feeShannons,
-            addressCount = addresses,
-        )
-    }
-
-    /**
-     * #382 Tier 3: the sweep itself. Re-gathers cells (a preview can go
-     * stale), derives each lock group's key from its candidate's derivation
-     * path, VERIFIES each derived key reproduces the candidate's lock args
-     * (a derivation mismatch must abort, never sign), signs one multi-group
-     * transaction and hands it to the idempotent sendTransaction path
-     * (pending row + watchdog). Keys and seed are zeroed after signing.
-     */
-    /**
-     * V1 / session-auth entry: reads the seed via [getMnemonic]. V2 wallets
-     * unlock the seed via a BiometricPrompt and call the words overload (#408).
-     */
-    suspend fun sweepGapLimitFunds(): Result<String> = runCatching {
-        val words = getMnemonic() ?: throw Exception("Recovery phrase unavailable for this wallet")
-        sweepGapLimitFundsInner(words)
-    }
-
-    /** V2 entry: [words] were already unlocked by the caller's BiometricPrompt (#408). */
-    suspend fun sweepGapLimitFunds(words: List<String>): Result<String> = runCatching {
-        sweepGapLimitFundsInner(words)
-    }
-
-    private suspend fun sweepGapLimitFundsInner(words: List<String>): String {
-        if (!gapLimitScanMutex.tryLock()) throw Exception("A scan or sweep is already running")
-        return try {
-            val wId = activeWalletId
-            if (wId.isEmpty()) throw Exception("No active wallet")
-            val myScript = _walletInfo.value?.script ?: throw Exception("Wallet not initialized")
-
-            val (inputs, _) = gatherSweepInputs(wId)
-            val plan = transactionBuilder.buildSweep(inputs, myScript, currentNetwork).getOrThrow()
-
-            val pathByArgs = appDatabase.subAccountCandidateDao().getForParent(wId)
-                .filter { it.accountIndex == 0 && it.state == SubAccountCandidateEntity.STATE_FOUND }
-                .associate { it.scriptArgs to it.derivationPath }
-
-            // BIP39 passphrase: the import UI has no passphrase field, so
-            // every wallet's candidates were derived with "". If that ever
-            // changes, the derived-args verification below aborts the sweep
-            // rather than signing with a mismatched key.
-            val seed = keyManager.mnemonicToSeed(words)
-            val keys = mutableMapOf<String, ByteArray>()
-            try {
-                plan.inputLockArgs.distinct().forEach { args ->
-                    val path = pathByArgs[args]
-                        ?: throw Exception("No derivation path recorded for a sweep input")
-                    val (chain, index) = com.rjnr.pocketnode.data.wallet.chainAndIndexFromPath(path)
-                        ?: throw Exception("Unparseable derivation path for a sweep input")
-                    val key = keyManager.deriveChainKey(seed, chainIndex = chain, addressIndex = index)
-                    val derivedArgs = keyManager.deriveLockScript(keyManager.derivePublicKey(key)).args
-                    if (!derivedArgs.equals(args, ignoreCase = true)) {
-                        key.fill(0)
-                        throw Exception("Derived key does not match the recorded address; sweep aborted")
-                    }
-                    keys[args] = key
-                }
-                if (activeWalletId != wId) throw Exception("Wallet changed during the sweep; try again")
-                val signed = transactionBuilder.signSweep(plan.transaction, plan.inputLockArgs, keys).getOrThrow()
-                val txHash = sendTransaction(signed, expectedWalletId = wId).getOrThrow()
-                logger.i(TAG, "gap-limit sweep broadcast: ${plan.inputLockArgs.size} inputs, ${keys.size} groups")
-                txHash
-            } finally {
-                keys.values.forEach { it.fill(0) }
-                seed.fill(0)
-            }
-        } finally {
-            gapLimitScanMutex.unlock()
-        }
-    }
-    
-    suspend fun forceResetSync(): Result<Unit> = runCatching {
-        logger.w(TAG, "Forcing sync reset...")
-        // Only clear sync-related preferences for the active wallet, not all preferences
-        setWalletSyncBlock(activeWalletId, 0L)
-        walletPreferences.setInitialSyncCompleted(false, walletId = activeWalletId.ifEmpty { null })
-        _isRegistered.value = false
-        _balance.value = null
-        registerAccount(SyncMode.RECENT)
-        logger.i(TAG, "Sync reset complete. Registered as RECENT.")
-    }
 
     suspend fun refreshBalance(address: String? = null): Result<BalanceResponse> = runCatching {
         val addr = address ?: getCurrentAddress() ?: throw Exception("Wallet not initialized")
@@ -1039,19 +778,6 @@ class GatewayRepository @Inject constructor(
 
     private suspend fun currentTipNumberOrZero(): Long = lightClient.currentTipNumberOrZero()
 
-    /**
-     * ALL spent outpoints for a script, walking the transaction cursor to the
-     * end. The previous single limit=100 page silently truncated the spent
-     * set for wallets with >100 transactions: cell selection then picked
-     * already-spent cells, every send failed local verification with a
-     * "network rejected" error that survived reinstall (it re-derives from
-     * the same chain data), and the balance math subtracted the wrong cells
-     * (Alex, Telegram 2026-07, ~646k CKB of history). Page cap is a runaway
-     * guard, far above real usage; truncation past it is logged, never silent.
-     */
-    private suspend fun fetchAllSpentOutpoints(searchKeyJson: String): MutableSet<String> =
-        ledgerReader.fetchAllSpentOutpoints(searchKeyJson)
-
     // ========================================
     // Send (delegated to the shared [SendPipeline], M3 #5)
     // ========================================
@@ -1147,10 +873,6 @@ class GatewayRepository @Inject constructor(
     suspend fun getTransactionStatus(txHash: String): Result<TransactionStatusResponse> =
         ledgerReader.getTransactionStatus(txHash)
 
-    suspend fun getGatewayStatus(): Result<StatusResponse> = runCatching {
-        StatusResponse(currentNetwork.name.lowercase(), "0x0", "0x0", 0, false, true)
-    }
-
     fun getCurrentAddress(): String? {
         val info = _walletInfo.value ?: return null
         return when (currentNetwork) {
@@ -1176,477 +898,64 @@ class GatewayRepository @Inject constructor(
     private fun getExistingScriptBlock(): Long =
         ledgerReader.existingScriptBlock(_walletInfo.value?.script?.args)
 
-    // Diagnostic / read-only JNI passthroughs moved to [LightClientReadOnly]
-    // (#106 phase 4). Thin shims kept so NodeStatusViewModel and other
-    // consumers don't need a constructor change.
-    suspend fun getPeers(): String? = lightClient.getPeers()
-    suspend fun getTipHeader(): String? = lightClient.getTipHeader()
-    suspend fun getScripts(): String? = lightClient.getScripts()
-    suspend fun callRpc(method: String): String? = lightClient.callRpc(method)
 
     // ========================================
-    // DAO Operations
+    // DAO Operations (delegated to [DaoGateway], #460)
     // ========================================
+    //
+    // The DAO bodies live on [DaoGateway]; what stays here is the context it
+    // reads the repository's mutable state through, plus a forward per public
+    // member so the DAO screen's API is unchanged.
 
-    suspend fun getCurrentEpoch(): Result<EpochInfo> = lightClient.getCurrentEpoch()
+    private fun daoContext(): DaoGateway.DaoContext = DaoGateway.DaoContext(
+        network = { currentNetwork },
+        walletId = { activeWalletId },
+        walletInfo = { _walletInfo.value },
+        currentAddress = { getCurrentAddress() },
+        existingScriptBlock = { getExistingScriptBlock() },
+        privateKey = { getPrivateKey() },
+        sendContext = { sendContext() },
+        setScriptsAndRecord = { statuses, walletIds, cmd, allowRewind ->
+            setScriptsAndRecord(statuses, walletIds, cmd, allowRewind)
+        },
+    )
 
-    // DAO chain-state helpers moved to [DaoHeaderResolver] (#106 phase 2).
-    // Thin shims kept so internal call sites stay unchanged. getOrFetchHeader's
-    // network arg is supplied here; resolver itself is network-agnostic.
-    private suspend fun getBlockHashForCell(txHash: String): String? =
-        daoHeaderResolver.getBlockHashForCell(txHash)
+    /** @see DaoGateway.getDaoDeposits */
+    suspend fun getDaoDeposits(): Result<List<DaoDeposit>> =
+        daoGateway.getDaoDeposits(daoContext())
 
-    private suspend fun getOrFetchHeader(blockHash: String): JniHeaderView? =
-        daoHeaderResolver.getOrFetchHeader(blockHash, currentNetwork)
+    /** @see DaoGateway.getInFlightWithdrawOutPoints */
+    suspend fun getInFlightWithdrawOutPoints(): List<OutPoint> =
+        daoGateway.getInFlightWithdrawOutPoints(daoContext())
 
-    suspend fun getDaoDeposits(): Result<List<DaoDeposit>> = runCatching {
-        val info = _walletInfo.value ?: throw Exception("No wallet")
-        val currentEpoch = getCurrentEpoch().getOrNull()
-        val live = daoDepositReader.list(info.script, currentEpoch, currentNetwork)
-        // #357: drop a spent deposit's stale DEPOSITED entry that the light
-        // client still lists alongside its new withdrawing cell, before the
-        // pending-withdraw overlay would paint it a duplicate "Confirming…".
-        val deduped = dedupeWithdrawnDeposits(live)
-        applyPendingWithdrawOverlay(mergeWithCachedDaoDeposits(deduped))
-    }
+    /** @see DaoGateway.rescanForOlderDaoDeposits */
+    suspend fun rescanForOlderDaoDeposits(): Result<Long> =
+        daoGateway.rescanForOlderDaoDeposits(daoContext())
 
-    /**
-     * #347: overlay in-flight phase-1 withdraws onto the deposit list. The
-     * deposit cell scans as DEPOSITED until the withdraw commits and is
-     * indexed, so without this a just-withdrawn deposit looks withdrawable
-     * again (double-withdraw) and the only "withdrawing" signal — the
-     * in-memory banner — is lost on restart. The persisted marker carries the
-     * state across process death; [resolvePendingWithdraw] decides per marker
-     * whether to overlay WITHDRAWING, or retire it (committed / failed).
-     */
-    private suspend fun applyPendingWithdrawOverlay(deposits: List<DaoDeposit>): List<DaoDeposit> {
-        val walletId = activeWalletId
-        if (walletId.isEmpty()) return deposits
-        val network = currentNetwork.name
-        val withdrawDao = appDatabase.pendingDaoWithdrawDao()
-        val pending = runCatching { withdrawDao.getByWalletAndNetwork(walletId, network) }
-            .getOrDefault(emptyList())
-        if (pending.isEmpty()) return deposits
-
-        fun key(txHash: String, index: String) = "$txHash:$index"
-        val depositedKeys = deposits
-            .filter { it.status == DaoCellStatus.DEPOSITED }
-            .map { key(it.outPoint.txHash, it.outPoint.index) }
-            .toSet()
-
-        val overlayKeys = mutableSetOf<String>()
-        for (p in pending) {
-            val k = key(p.depositTxHash, p.depositIndex)
-            val stillDeposited = k in depositedKeys
-            val txStatus = runCatching {
-                appDatabase.transactionDao().getByTxHash(p.withdrawTxHash)?.status
-            }.getOrNull()
-            when (resolvePendingWithdraw(stillDeposited, txStatus)) {
-                PendingWithdrawResolution.OVERLAY -> if (stillDeposited) overlayKeys.add(k)
-                PendingWithdrawResolution.CLEAR_CONFIRMED,
-                PendingWithdrawResolution.CLEAR_FAILED ->
-                    runCatching { withdrawDao.deleteByDeposit(p.depositTxHash, p.depositIndex) }
-            }
-        }
-        if (overlayKeys.isEmpty()) return deposits
-        return deposits.map {
-            if (key(it.outPoint.txHash, it.outPoint.index) in overlayKeys) {
-                it.copy(status = DaoCellStatus.WITHDRAWING)
-            } else it
-        }
-    }
-
-    /**
-     * Deposit outpoints with an in-flight withdraw (#347) — used by the DAO
-     * screen to rehydrate the "Withdrawing from DAO…" banner after restart.
-     */
-    suspend fun getInFlightWithdrawOutPoints(): List<OutPoint> {
-        val walletId = activeWalletId.takeIf { it.isNotEmpty() } ?: return emptyList()
-        return runCatching {
-            appDatabase.pendingDaoWithdrawDao()
-                .getByWalletAndNetwork(walletId, currentNetwork.name)
-                .map { OutPoint(it.depositTxHash, it.depositIndex) }
-        }.getOrDefault(emptyList())
-    }
-
-    /**
-     * #332 windowing recovery. The light client only indexes cells created
-     * AFTER the script's registered start block, so a DAO deposit older than
-     * the chosen sync window silently vanishes from both the deposit list and
-     * the balance. Mitigation:
-     *  1. write-through: every live scan persists its deposits to dao_cells;
-     *  2. reconcile: cached active deposits INSIDE the window that the live
-     *     scan no longer returns were spent/unlocked — mark COMPLETED;
-     *  3. merge: cached active deposits from BEFORE the window are appended,
-     *     flagged [DaoDeposit.outsideSyncWindow] so the UI can offer the
-     *     deeper-rescan recovery instead of pretending they don't exist.
-     */
-    private suspend fun mergeWithCachedDaoDeposits(live: List<DaoDeposit>): List<DaoDeposit> {
-        val walletId = activeWalletId
-        if (walletId.isEmpty()) return live
-        val network = currentNetwork.name
-        val nowMs = System.currentTimeMillis()
-
-        runCatching {
-            daoSyncManager.upsertDaoCells(live.map { it.toDaoCellEntity(network, walletId, nowMs) })
-        }.onFailure { logger.w(TAG, "DAO write-through failed: ${it.message}") }
-
-        val windowStart = getExistingScriptBlock()
-        val liveKeys = live.map { "${it.outPoint.txHash}:${it.outPoint.index}" }.toSet()
-
-        // #434: outpoints consumed by a live withdrawing cell's phase-1 tx.
-        // A cached deposit whose outpoint is here was spent by a withdraw and
-        // MUST be retired — never resurfaced as an outside-window entry.
-        // getExistingScriptBlock() returns the script's current sync head, not
-        // its registration start, so a just-spent recent deposit (block now
-        // behind the head) would otherwise fall into the `< windowStart` branch,
-        // reappear under "made before this wallet's sync window", and double the
-        // DAO total right after a withdraw confirms. Index formats are
-        // normalized (hex vs decimal) so the outpoint match is reliable.
-        fun normKey(txHash: String, index: String) =
-            "${txHash.lowercase()}:${index.removePrefix("0x").toLongOrNull(16) ?: index}"
-        val consumedByLive = live.flatMap { it.consumedDepositOutPoints }
-            .map { normKey(it.txHash, it.index) }
-            .toSet()
-
-        val cached = runCatching { daoSyncManager.getActiveDeposits(network, walletId) }
-            .getOrDefault(emptyList())
-
-        val outsideWindow = mutableListOf<DaoDeposit>()
-        for (entity in cached) {
-            val key = "${entity.txHash}:${entity.index}"
-            if (key in liveKeys) continue
-            // DEPOSITING rows are optimistic pre-confirmation inserts with
-            // blockNumber 0 — not windowing victims; leave them alone.
-            if (entity.status == DaoCellStatus.DEPOSITING.name) continue
-            if (normKey(entity.txHash, entity.index) in consumedByLive) {
-                // Spent by a live withdraw — retire so it neither resurfaces as
-                // an outside-window entry nor double-counts the DAO total (#434).
-                runCatching {
-                    daoSyncManager.updateStatus(entity.txHash, entity.index, DaoCellStatus.COMPLETED.name)
-                }
-            } else if (windowStart > 0 && entity.depositBlockNumber in 1 until windowStart) {
-                outsideWindow += entity.toOutsideWindowDeposit()
-            } else {
-                // Inside the window yet absent from the live scan: the cell
-                // was spent (withdrawn/unlocked) — retire the cached row so it
-                // doesn't resurrect.
-                runCatching {
-                    daoSyncManager.updateStatus(entity.txHash, entity.index, DaoCellStatus.COMPLETED.name)
-                }
-            }
-        }
-        if (outsideWindow.isNotEmpty()) {
-            logger.i(TAG, "DAO merge: ${outsideWindow.size} cached deposit(s) predate sync window (start=$windowStart)")
-        }
-        return live + outsideWindow
-    }
-
-    /**
-     * User-confirmed deeper rescan to re-index DAO deposits that predate the
-     * current sync window (#332). Rewinds the wallet's lock script to just
-     * before the oldest cached out-of-window deposit. Multi-hour cost on
-     * mainnet — callers must gate behind an explicit confirmation dialog.
-     * Returns the rewind target block.
-     */
-    suspend fun rescanForOlderDaoDeposits(): Result<Long> = runCatching {
-        val info = _walletInfo.value ?: throw Exception("No wallet")
-        val walletId = activeWalletId.takeIf { it.isNotEmpty() } ?: throw Exception("No active wallet")
-        val windowStart = getExistingScriptBlock()
-        val oldest = daoSyncManager.getActiveDeposits(currentNetwork.name, walletId)
-            .filter { it.status != DaoCellStatus.DEPOSITING.name }
-            .filter { windowStart > 0 && it.depositBlockNumber in 1 until windowStart }
-            .minOfOrNull { it.depositBlockNumber }
-            ?: throw Exception("No deposits older than the current sync window")
-        val target = (oldest - 100).coerceAtLeast(0L)
-        val ok = setScriptsAndRecord(
-            listOf(
-                JniScriptStatus(
-                    script = info.script,
-                    scriptType = "lock",
-                    blockNumber = "0x${target.toString(16)}"
-                )
-            ),
-            listOf(walletId),
-            LightClientNative.CMD_SET_SCRIPTS_PARTIAL,
-            allowRewind = true, // explicitly user-initiated rewind
-        )
-        if (!ok) throw Exception("Light client refused script registration")
-        logger.i(TAG, "DAO deep rescan: rewound script to block $target (oldest cached deposit at $oldest)")
-        target
-    }
-
-
-    suspend fun getDaoOverview(): Result<DaoOverview> = runCatching {
-        val deposits = getDaoDeposits().getOrThrow()
-        val active = deposits.filter { it.status != DaoCellStatus.COMPLETED }
-        val completed = deposits.filter { it.status == DaoCellStatus.COMPLETED }
-
-        // Capacity-weighted average APC from deposits that have APC data
-        val depositsWithApc = active.filter { it.apc > 0.0 }
-        val weightedApc = if (depositsWithApc.isNotEmpty()) {
-            val totalCap = depositsWithApc.sumOf { it.capacity }.toDouble()
-            depositsWithApc.sumOf { it.apc * it.capacity } / totalCap
-        } else 2.47 // fallback until headers are available
-
-        DaoOverview(
-            totalLocked = active.sumOf { it.capacity },
-            totalCompensation = deposits.sumOf { it.compensation },
-            currentApc = weightedApc,
-            activeCount = active.size,
-            completedCount = completed.size
-        )
-    }
-
+    /** @see DaoGateway.depositToDao */
     suspend fun depositToDao(amountShannons: Long): Result<String> =
-        getPrivateKey().let { key ->
-            try {
-                depositToDao(amountShannons, privateKey = key)
-            } finally {
-                key.fill(0) // transient signing key — zero after use (#321)
-            }
-        }
+        daoGateway.depositToDao(daoContext(), amountShannons)
 
-    /**
-     * V2-aware overload: caller supplies the private key already
-     * unlocked via BiometricPrompt CryptoObject. Used by [DaoViewModel]
-     * when the active wallet is on `kdfVersion=2` and requires explicit
-     * user authentication per signing operation (#213 sub-PR 5).
-     */
-    suspend fun depositToDao(
-        amountShannons: Long,
-        privateKey: ByteArray,
-    ): Result<String> = runCatching {
-        val info = _walletInfo.value ?: throw Exception("No wallet")
-        val address = getCurrentAddress() ?: throw Exception("No address")
+    /** @see DaoGateway.depositToDao */
+    suspend fun depositToDao(amountShannons: Long, privateKey: ByteArray): Result<String> =
+        daoGateway.depositToDao(daoContext(), amountShannons, privateKey)
 
-        require(amountShannons >= DaoConstants.MIN_DEPOSIT_SHANNONS) {
-            "Minimum deposit is ${DaoConstants.MIN_DEPOSIT_SHANNONS / 100_000_000} CKB"
-        }
-
-        // Route through the shared mutex + reservation filter (#320) so a deposit
-        // can't select inputs already reserved by an in-flight transfer.
-        val txHash = buildReserveAndSend(
-            address,
-            // #433: pending deposit reads "Dao Deposit <amount> CKB" (matching the
-            // confirmed row) rather than a generic "Sent" carrying amount + fee.
-            pendingDirection = "dao_deposit",
-            pendingAmountShannons = amountShannons,
-            // The builder prices the deposit from the tx it actually builds, so
-            // the pending row quotes the same estimator for the common
-            // one-input shape instead of the DEFAULT_FEE reservation, which
-            // over-reported the fee 100x until the confirmed row replaced it
-            // (#490). Corrected by the confirmed record either way.
-            pendingFeeShannons = transactionBuilder.estimateTransferFee(
-                inputCount = 1,
-                outputCount = 2,
-            ),
-        ) { availableCells, net ->
-            transactionBuilder.buildDaoDeposit(
-                amountShannons = amountShannons,
-                availableCells = availableCells,
-                senderScript = info.script,
-                privateKey = privateKey,
-                network = net
-            )
-        }
-        logger.d(TAG, "DAO deposit sent: $txHash")
-
-        // Track pending deposit in Room so UI shows it before JNI confirms
-        daoSyncManager.insertPendingDeposit(txHash, amountShannons, currentNetwork.name, walletId = activeWalletId)
-
-        txHash
-    }
-
+    /** @see DaoGateway.withdrawFromDao */
     suspend fun withdrawFromDao(depositOutPoint: OutPoint): Result<String> =
-        getPrivateKey().let { key ->
-            try {
-                withdrawFromDao(depositOutPoint, privateKey = key)
-            } finally {
-                key.fill(0) // transient signing key — zero after use (#321)
-            }
-        }
+        daoGateway.withdrawFromDao(daoContext(), depositOutPoint)
 
-    /** V2-aware overload — see [depositToDao]. */
-    suspend fun withdrawFromDao(
-        depositOutPoint: OutPoint,
-        privateKey: ByteArray,
-    ): Result<String> = runCatching {
-        val info = _walletInfo.value ?: throw Exception("No wallet")
-        val address = getCurrentAddress() ?: throw Exception("No address")
+    /** @see DaoGateway.withdrawFromDao */
+    suspend fun withdrawFromDao(depositOutPoint: OutPoint, privateKey: ByteArray): Result<String> =
+        daoGateway.withdrawFromDao(daoContext(), depositOutPoint, privateKey)
 
-        // Find the deposit cell
-        val deposits = getDaoDeposits().getOrThrow()
-        val deposit = deposits.find { it.outPoint == depositOutPoint }
-            ?: throw Exception("Deposit not found")
-
-        require(deposit.depositBlockHash.isNotBlank()) {
-            "Deposit block hash unavailable. Please retry after sync."
-        }
-
-        // Build a Cell from the deposit for the transaction builder. The
-        // deposit cell itself is a DAO (typed) cell and is NOT in getCells'
-        // output, so it isn't subject to the regular-cell reservation filter.
-        val depositCell = Cell(
-            outPoint = deposit.outPoint,
-            capacity = "0x${deposit.capacity.toString(16)}",
-            blockNumber = "0x${deposit.depositBlockNumber.toString(16)}",
-            lock = info.script,
-            type = DaoConstants.DAO_TYPE_SCRIPT,
-            data = "0x" + DaoConstants.DAO_DEPOSIT_DATA.joinToString("") { "%02x".format(it) }
-        )
-
-        // Route through the shared mutex + reservation filter (#320). DAO Phase 1
-        // preserves the deposit capacity exactly, so a regular fee input cell is
-        // mandatory (#119) — `availableCells` is the reservation-filtered regular
-        // CKB set, ensuring the fee cell isn't one an in-flight transfer reserved.
-        val txHash = buildReserveAndSend(
-            address,
-            // #433: show the pending withdraw as "Dao Withdraw <deposit> CKB"
-            // with the fee on its own line, not as a "-0.001 Sent". Phase-1
-            // preserves the deposit capacity exactly, so the fee is whatever
-            // the fee cell pays: the same dynamic estimate the builder uses,
-            // for the common deposit-plus-one-fee-cell shape (#490).
-            pendingDirection = "dao_withdraw",
-            pendingAmountShannons = deposit.capacity,
-            pendingFeeShannons = transactionBuilder.estimateTransferFee(
-                inputCount = 2,
-                outputCount = 2,
-            ),
-        ) { availableCells, net ->
-            transactionBuilder.buildDaoWithdraw(
-                depositCell = depositCell,
-                depositBlockNumber = deposit.depositBlockNumber,
-                depositBlockHash = deposit.depositBlockHash,
-                senderScript = info.script,
-                privateKey = privateKey,
-                network = net,
-                availableCells = availableCells
-            )
-        }
-        logger.d(TAG, "DAO withdraw (phase 1) sent: $txHash")
-
-        // #347: persist the in-flight withdraw so the deposit renders as
-        // WITHDRAWING ("Confirming…") across restart and can't be withdrawn
-        // twice. Cleared by applyPendingWithdrawOverlay on commit/failure.
-        runCatching {
-            appDatabase.pendingDaoWithdrawDao().upsert(
-                com.rjnr.pocketnode.data.database.entity.PendingDaoWithdrawEntity(
-                    depositTxHash = depositOutPoint.txHash,
-                    depositIndex = depositOutPoint.index,
-                    withdrawTxHash = txHash,
-                    walletId = activeWalletId,
-                    network = currentNetwork.name,
-                    createdAt = System.currentTimeMillis(),
-                )
-            )
-        }.onFailure { logger.w(TAG, "Failed to persist pending withdraw marker: ${it.message}") }
-
-        txHash
-    }
-
+    /** @see DaoGateway.unlockDao */
     suspend fun unlockDao(withdrawingOutPoint: OutPoint): Result<String> =
-        getPrivateKey().let { key ->
-            try {
-                unlockDao(withdrawingOutPoint, privateKey = key)
-            } finally {
-                key.fill(0) // transient signing key — zero after use (#321)
-            }
-        }
+        daoGateway.unlockDao(daoContext(), withdrawingOutPoint)
 
-    /** V2-aware overload — see [depositToDao]. */
-    suspend fun unlockDao(
-        withdrawingOutPoint: OutPoint,
-        privateKey: ByteArray,
-    ): Result<String> = runCatching {
-        val info = _walletInfo.value ?: throw Exception("No wallet")
-        val net = currentNetwork
+    /** @see DaoGateway.unlockDao */
+    suspend fun unlockDao(withdrawingOutPoint: OutPoint, privateKey: ByteArray): Result<String> =
+        daoGateway.unlockDao(daoContext(), withdrawingOutPoint, privateKey)
 
-        val deposits = getDaoDeposits().getOrThrow()
-        val deposit = deposits.find { it.outPoint == withdrawingOutPoint }
-            ?: throw Exception("Withdrawing cell not found")
-
-        require(deposit.status == DaoCellStatus.UNLOCKABLE) {
-            "Cell is not unlockable yet (status: ${deposit.status})"
-        }
-
-        // Use the deposit object's hashes — it is the single source of truth
-        val depositBlockHash = deposit.depositBlockHash
-        require(depositBlockHash.isNotBlank()) {
-            "Deposit block hash unavailable. Please retry after sync."
-        }
-        val withdrawBlockHash = deposit.withdrawBlockHash
-            ?: throw Exception("Withdraw block hash unavailable. Please retry after sync.")
-
-        // Get headers for max withdraw calculation (cache-first)
-        val depositHeader = getOrFetchHeader(depositBlockHash)
-            ?: throw Exception("Failed to get deposit header")
-
-        val withdrawHeader = getOrFetchHeader(withdrawBlockHash)
-            ?: throw Exception("Failed to get withdraw header")
-
-        val maxWithdraw = LightClientNative.nativeCalculateMaxWithdraw(
-            depositHeader.dao,
-            withdrawHeader.dao,
-            deposit.capacity,
-            DaoConstants.DEPOSIT_OCCUPIED_SHANNONS
-        )
-        if (maxWithdraw < 0) throw Exception("Failed to calculate max withdraw capacity")
-
-        val sinceValue = LightClientNative.nativeCalculateUnlockEpoch(
-            depositHeader.epoch,
-            withdrawHeader.epoch
-        ) ?: throw Exception("Failed to calculate unlock epoch")
-
-        val withdrawingCell = Cell(
-            outPoint = deposit.outPoint,
-            capacity = "0x${deposit.capacity.toString(16)}",
-            blockNumber = "0x${(deposit.withdrawBlockNumber ?: throw Exception("No withdraw block")).toString(16)}",
-            lock = info.script,
-            type = DaoConstants.DAO_TYPE_SCRIPT
-        )
-
-        val tx = transactionBuilder.buildDaoUnlock(
-            withdrawingCell = withdrawingCell,
-            maxWithdraw = maxWithdraw,
-            sinceValue = sinceValue,
-            depositBlockHash = depositBlockHash,
-            withdrawBlockHash = withdrawBlockHash,
-            senderScript = info.script,
-            privateKey = privateKey,
-            network = net
-        )
-
-        // The unlock's fee is knowable exactly here and NOWHERE ELSE (#497).
-        // On-chain the tx reads: one input whose declared capacity is the
-        // original deposit, one output worth maxWithdraw − fee. Since
-        // maxWithdraw = deposit + compensation, inputs − outputs comes out as
-        // fee − compensation, i.e. negative, and the confirmed-path formula
-        // can never score it. Recovering the compensation from the confirmed
-        // transaction would take two header fetches plus a JNI
-        // calculateMaxWithdraw per row, and would first have to decode the
-        // witness input_type to learn WHICH header dep is the deposit (the
-        // order is not load-bearing — see TransactionBuilder.buildDaoUnlock),
-        // which we cannot rely on for a tx we did not build. So the planned
-        // fee is persisted on the pending row and carried forward by
-        // CacheManager; an unlock with no recorded fee hides the row rather
-        // than promising a "Pending" that would never resolve.
-        val plannedFeeShannons = daoUnlockFeeShannons(
-            maxWithdraw = maxWithdraw,
-            outputCapacities = tx.cellOutputs.map {
-                it.capacity.removePrefix("0x").toLongOrNull(16)
-            },
-        )
-
-        // Unlock consumes only the withdrawing DAO cell (typed; never returned by
-        // getCells, so no transfer can select it) and pays the fee from that
-        // cell's own capacity — it selects no regular cells, so the
-        // reservation filter doesn't apply. sendTransaction still reserves this
-        // input and serializes the pre-broadcast insert under sendMutex (#320).
-        val txHash = sendTransaction(tx, pendingFeeShannons = plannedFeeShannons).getOrThrow()
-        logger.d(TAG, "DAO unlock (phase 2) sent: $txHash")
-        txHash
-    }
 
     // Sync registration + BALANCED filter delegated to [SyncCoordinator] (#106).
     private fun makeSyncContext(): SyncCoordinator.SyncContext = SyncCoordinator.SyncContext(
@@ -1731,13 +1040,6 @@ class GatewayRepository @Inject constructor(
 
     companion object {
         private const val TAG = "GatewayRepository"
-
-        /**
-         * Cell cursor-walk cap — a runaway guard far above real usage
-         * (100 cells/page → 5k cells). Hitting it is logged. The transaction
-         * counterpart moved to [LedgerReader] with the read path (M3 #4).
-         */
-        private const val MAX_CELL_PAGES = 50
 
         // BROADCAST_ERROR_PREFIX moved to SendPipeline with the send path (M3 #5).
 

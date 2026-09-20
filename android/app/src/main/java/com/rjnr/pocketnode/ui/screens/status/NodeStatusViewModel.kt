@@ -38,6 +38,7 @@ data class NodeStatusUiState(
 @HiltViewModel
 class NodeStatusViewModel @Inject constructor(
     private val repository: GatewayRepository,
+    private val lightClient: com.rjnr.pocketnode.data.gateway.LightClientReadOnly,
     private val json: Json,
     private val appDatabase: AppDatabase,
     private val errorJournal: com.rjnr.pocketnode.data.diagnostics.ErrorJournal,
@@ -80,9 +81,9 @@ class NodeStatusViewModel @Inject constructor(
         // displayed state on the previous mode's stale values. Without this,
         // the outer catch would short-circuit before _uiState.update and the
         // old tipHeader/peers would stick around indefinitely. (#90)
-        val tipRaw = runCatching { repository.getTipHeader() ?: "" }.getOrDefault("")
-        val peersRaw = runCatching { repository.getPeers() ?: "" }.getOrDefault("")
-        val scripts = runCatching { repository.getScripts() ?: "" }.getOrDefault("")
+        val tipRaw = runCatching { lightClient.getTipHeader() ?: "" }.getOrDefault("")
+        val peersRaw = runCatching { lightClient.getPeers() ?: "" }.getOrDefault("")
+        val scripts = runCatching { lightClient.getScripts() ?: "" }.getOrDefault("")
 
         val parsedTip = runCatching {
             if (tipRaw.isBlank()) null else json.decodeFromString<JniHeaderView>(tipRaw)
@@ -111,7 +112,7 @@ class NodeStatusViewModel @Inject constructor(
         viewModelScope.launch {
             try {
                 _uiState.update { it.copy(rpcResult = "Calling...") }
-                val result = repository.callRpc(method) ?: "null"
+                val result = lightClient.callRpc(method) ?: "null"
                 _uiState.update { it.copy(rpcResult = result) }
             } catch (e: Exception) {
                 _uiState.update { it.copy(rpcResult = "Error: ${e.message}") }

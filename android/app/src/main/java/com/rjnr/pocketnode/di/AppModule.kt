@@ -239,32 +239,62 @@ object AppModule {
 
     @Provides
     @Singleton
+    fun provideDaoGateway(
+        appDatabase: AppDatabase,
+        daoSyncManager: DaoSyncManager,
+        daoDepositReader: com.rjnr.pocketnode.data.gateway.DaoDepositReader,
+        daoHeaderResolver: com.rjnr.pocketnode.data.gateway.DaoHeaderResolver,
+        lightClient: com.rjnr.pocketnode.data.gateway.LightClientReadOnly,
+        transactionBuilder: TransactionBuilder,
+        sendPipeline: com.rjnr.pocketnode.data.send.SendPipeline,
+        logger: Logger,
+    ): com.rjnr.pocketnode.data.gateway.DaoGateway = com.rjnr.pocketnode.data.gateway.DaoGateway(
+        appDatabase, daoSyncManager, daoDepositReader, daoHeaderResolver,
+        lightClient, transactionBuilder, sendPipeline, logger,
+    )
+
+    @Provides
+    @Singleton
+    fun provideGapLimitGateway(
+        appDatabase: AppDatabase,
+        walletPreferences: WalletPreferences,
+        keyManager: KeyManager,
+        subAccountDiscovery: com.rjnr.pocketnode.data.wallet.SubAccountDiscovery,
+        transactionBuilder: TransactionBuilder,
+        ledgerReader: com.rjnr.pocketnode.data.gateway.LedgerReader,
+        pendingBroadcastDao: PendingBroadcastDao,
+        sendPipeline: com.rjnr.pocketnode.data.send.SendPipeline,
+        json: Json,
+        logger: Logger,
+    ): com.rjnr.pocketnode.data.gateway.GapLimitGateway = com.rjnr.pocketnode.data.gateway.GapLimitGateway(
+        appDatabase, walletPreferences, keyManager, subAccountDiscovery,
+        transactionBuilder, ledgerReader, pendingBroadcastDao, sendPipeline, json, logger,
+    )
+
+    @Provides
+    @Singleton
     fun provideGatewayRepository(
         keyManager: KeyManager,
         walletPreferences: WalletPreferences,
         json: Json,
-        transactionBuilder: TransactionBuilder,
         cacheManager: CacheManager,
-        daoSyncManager: DaoSyncManager,
         walletMigrationHelper: WalletMigrationHelper,
         walletDao: WalletDao,
         appDatabase: AppDatabase,
         syncProgressDao: SyncProgressDao,
-        pendingBroadcastDao: PendingBroadcastDao,
         sendPipeline: com.rjnr.pocketnode.data.send.SendPipeline,
         syncCoordinator: com.rjnr.pocketnode.data.gateway.SyncCoordinator,
-        daoHeaderResolver: com.rjnr.pocketnode.data.gateway.DaoHeaderResolver,
-        daoDepositReader: com.rjnr.pocketnode.data.gateway.DaoDepositReader,
+        daoGateway: com.rjnr.pocketnode.data.gateway.DaoGateway,
+        gapLimitGateway: com.rjnr.pocketnode.data.gateway.GapLimitGateway,
         lightClient: com.rjnr.pocketnode.data.gateway.LightClientReadOnly,
         ledgerReader: com.rjnr.pocketnode.data.gateway.LedgerReader,
         subAccountReconciler: com.rjnr.pocketnode.data.wallet.SubAccountReconciler,
-        subAccountDiscovery: com.rjnr.pocketnode.data.wallet.SubAccountDiscovery,
         syncServiceCommands: com.rjnr.pocketnode.data.sync.contract.SyncServiceCommands,
         nodeLifecycle: com.rjnr.pocketnode.data.gateway.NodeLifecycle,
         syncEngine: com.rjnr.pocketnode.data.sync.SyncEngine,
         startupReconciler: com.rjnr.pocketnode.data.gateway.StartupReconciler,
         logger: Logger,
-    ): GatewayRepository = GatewayRepository(keyManager, walletPreferences, json, transactionBuilder, cacheManager, daoSyncManager, walletMigrationHelper, walletDao, appDatabase, syncProgressDao, pendingBroadcastDao, sendPipeline, syncCoordinator, daoHeaderResolver, daoDepositReader, lightClient, ledgerReader, subAccountReconciler, subAccountDiscovery, syncServiceCommands, nodeLifecycle, syncEngine, startupReconciler, logger)
+    ): GatewayRepository = GatewayRepository(keyManager, walletPreferences, json, cacheManager, walletMigrationHelper, walletDao, appDatabase, syncProgressDao, sendPipeline, syncCoordinator, daoGateway, gapLimitGateway, lightClient, ledgerReader, subAccountReconciler, syncServiceCommands, nodeLifecycle, syncEngine, startupReconciler, logger)
 
     /**
      * Production activity probe for sub-account discovery (#82 phase 2):

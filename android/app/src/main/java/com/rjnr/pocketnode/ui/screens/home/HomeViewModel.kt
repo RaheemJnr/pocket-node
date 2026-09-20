@@ -56,6 +56,7 @@ class HomeViewModel @Inject constructor(
     private val pinManager: PinManager,
     private val authManager: AuthManager,
     private val cacheManager: CacheManager,
+    private val lightClient: com.rjnr.pocketnode.data.gateway.LightClientReadOnly,
     // Concrete (#461): spans SyncPreferences, UiPreferences and
     // AppStatePreferences, and observes the Android-only coachmark StateFlow.
     private val walletPreferences: com.rjnr.pocketnode.data.wallet.WalletPreferences,
@@ -456,7 +457,7 @@ class HomeViewModel @Inject constructor(
 
             // Refresh peer count (best-effort: parse JSON array size)
             try {
-                val peersJson = repository.getPeers()
+                val peersJson = lightClient.getPeers()
                 if (peersJson != null) {
                     val count = Json.parseToJsonElement(peersJson).jsonArray.size
                     _uiState.update { it.copy(peerCount = count) }
