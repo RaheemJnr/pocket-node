@@ -1,0 +1,6 @@
+version: 2
+# Test fixtures that look like secrets but are not: a pinned encrypted backup
+# blob built from a made-up private key and the standard all-"abandon" BIP-39
+# test phrase, used to prove the shared Argon2id restores BouncyCastle-era backups.
+paths-ignore:
+  - "android/app/src/test/java/com/rjnr/pocketnode/data/crypto/KeyBackupCompatibilityTest.kt"
