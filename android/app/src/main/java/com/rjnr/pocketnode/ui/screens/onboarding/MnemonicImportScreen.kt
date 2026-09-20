@@ -21,7 +21,6 @@ import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.rjnr.pocketnode.core.log.Logger
 import com.rjnr.pocketnode.data.gateway.GatewayRepository
-import com.rjnr.pocketnode.data.gateway.models.NetworkType
 import com.rjnr.pocketnode.data.gateway.models.SyncMode
 import com.rjnr.pocketnode.data.wallet.KeyManager
 import com.rjnr.pocketnode.data.wallet.MnemonicManager
@@ -168,13 +167,11 @@ class MnemonicImportViewModel @Inject constructor(
             result.onSuccess { entity ->
                 logger.d(TAG, "Imported wallet entity: ${entity.walletId}")
                 repository.onActiveWalletChanged(entity)
-                val showDialog = repository.currentNetwork == NetworkType.MAINNET
+                // #431: offer the sync-start picker after every import, on both
+                // networks, it used to be mainnet-only, so a testnet restore
+                // silently kept the RECENT default with no way to widen it here.
                 _uiState.update {
-                    it.copy(
-                        isImporting = false,
-                        importSuccess = !showDialog,
-                        showSyncModeDialog = showDialog
-                    )
+                    it.copy(isImporting = false, showSyncModeDialog = true)
                 }
             }.onFailure { error ->
                 logger.e(TAG, "Mnemonic import failed", error)
@@ -217,13 +214,9 @@ class MnemonicImportViewModel @Inject constructor(
             result.onSuccess { entity ->
                 logger.d(TAG, "Imported raw key wallet entity: ${entity.walletId}")
                 repository.onActiveWalletChanged(entity)
-                val showDialog = repository.currentNetwork == NetworkType.MAINNET
+                // #431: same as the mnemonic path, always offer the picker.
                 _uiState.update {
-                    it.copy(
-                        isImporting = false,
-                        importSuccess = !showDialog,
-                        showSyncModeDialog = showDialog
-                    )
+                    it.copy(isImporting = false, showSyncModeDialog = true)
                 }
             }.onFailure { error ->
                 logger.e(TAG, "Private key import failed", error)
@@ -265,12 +258,16 @@ class MnemonicImportViewModel @Inject constructor(
     fun onSyncModeSelected(mode: SyncMode, customHeight: Long?) {
         viewModelScope.launch {
             try {
-                if (mode != SyncMode.RECENT) {
-                    repository.resyncAccount(mode, customHeight)
-                }
+                // #431: apply unconditionally, including RECENT. The old
+                // `if (mode != RECENT)` short-circuit assumed RECENT was
+                // already registered, but the wallet may have imported with
+                // a different default (or the user is switching back to
+                // RECENT from another pick in this same sheet), skipping
+                // the call silently dropped the choice.
+                repository.resyncAccount(mode, customHeight)
                 _uiState.update { it.copy(showSyncModeDialog = false, importSuccess = true) }
             } catch (e: Exception) {
-                // Still proceed with import — resync can be retried from Settings
+                // Still proceed with import, resync can be retried from Settings
                 _uiState.update { it.copy(showSyncModeDialog = false, importSuccess = true, error = "Sync mode change failed: ${e.message}") }
             }
         }
@@ -299,7 +296,7 @@ fun MnemonicImportScreen(
     val clipboardManager = LocalClipboardManager.current
 
     // FLAG_SECURE: secret material (mnemonic / raw key) is entered or shown
-    // on this screen — block screenshots, screen recording, and the recents
+    // on this screen, block screenshots, screen recording, and the recents
     // thumbnail (#317).
     val secureView = androidx.compose.ui.platform.LocalView.current
     DisposableEffect(Unit) {
@@ -335,13 +332,15 @@ fun MnemonicImportScreen(
         )
     }
 
-    // Post-import sync mode dialog (mainnet only)
+    // Post-import sync mode dialog: shown after every import, both networks.
     if (uiState.showSyncModeDialog) {
         SyncOptionsSheet(
             currentMode = SyncMode.RECENT,
-            title = "Choose Sync Start Point",
-            description = "Select how far back to sync your wallet history. If your wallet is older than 30 days, choose Custom to enter a specific block height.",
-            availableModes = listOf(SyncMode.RECENT, SyncMode.CUSTOM),
+            title = stringResource(R.string.home_post_import_sync_title),
+            description = stringResource(R.string.home_post_import_sync_description),
+            availableModes = listOf(
+                SyncMode.NEW_WALLET, SyncMode.RECENT, SyncMode.FULL_HISTORY, SyncMode.CUSTOM
+            ),
             onDismiss = { viewModel.skipSyncSelection() },
             onSelectMode = { mode, height -> viewModel.onSyncModeSelected(mode, height) },
             // Help icons are intentionally hidden in the post-import flow:
@@ -425,7 +424,7 @@ fun MnemonicImportScreen(
                 Text(stringResource(R.string.mnemonic_import_have_private_key))
             }
 
-            // Heads-up that a SYSTEM credential sheet is about to appear —
+            // Heads-up that a SYSTEM credential sheet is about to appear , 
             // users restoring a seed didn't know which password the
             // "Secure wallet" prompt wanted (knmo, Nervos Talk, 2026-06).
             Text(

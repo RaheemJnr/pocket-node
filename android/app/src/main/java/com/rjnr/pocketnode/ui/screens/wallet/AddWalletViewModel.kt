@@ -7,6 +7,7 @@ import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.rjnr.pocketnode.data.database.entity.WalletEntity
 import com.rjnr.pocketnode.data.gateway.GatewayRepository
+import com.rjnr.pocketnode.data.gateway.models.SyncMode
 import com.rjnr.pocketnode.data.wallet.KeyManager
 import com.rjnr.pocketnode.data.wallet.MnemonicManager
 import com.rjnr.pocketnode.R
@@ -38,7 +39,12 @@ data class AddWalletUiState(
     val isNewlyGenerated: Boolean = false,
     val error: UiMessage? = null,
     val parentWallets: List<WalletEntity> = emptyList(),
-    val selectedParentId: String? = null
+    val selectedParentId: String? = null,
+    /** #431: post-import sync-start picker, shown after a successful mnemonic
+     * or raw-key import (not after creating a fresh wallet or sub-account,
+     * which already default correctly to NEW_WALLET / the parent's window). */
+    val showSyncModeDialog: Boolean = false,
+    val tipBlockNumber: Long = 0L,
 )
 
 @HiltViewModel
@@ -134,6 +140,11 @@ class AddWalletViewModel @Inject constructor(
     private val _uiState = MutableStateFlow(AddWalletUiState())
     val uiState: StateFlow<AddWalletUiState> = _uiState.asStateFlow()
 
+    // #431: the wallet a mnemonic/raw-key import just produced, held back from
+    // `createdWallet` (which drives screen navigation) until the sync-mode
+    // sheet resolves, either an explicit pick or a dismiss.
+    private var pendingImportedWallet: WalletEntity? = null
+
     init {
         viewModelScope.launch {
             val mnemonicRoots = walletRepository.getAll()
@@ -150,6 +161,36 @@ class AddWalletViewModel @Inject constructor(
                 )
             }
         }
+        viewModelScope.launch {
+            gatewayRepository.syncProgress.collect { progress ->
+                _uiState.update { it.copy(tipBlockNumber = progress.tipBlockNumber) }
+            }
+        }
+    }
+
+    /**
+     * Apply the user's post-import sync-mode pick. Called unconditionally
+     * (RECENT included), the wallet may have imported at a different
+     * default, so short-circuiting RECENT can silently drop the choice.
+     */
+    fun onSyncModeSelected(mode: SyncMode, customHeight: Long?) {
+        viewModelScope.launch {
+            try {
+                gatewayRepository.resyncAccount(mode, customHeight)
+            } catch (e: Exception) {
+                logger.e(TAG, "Post-import sync mode change failed", e)
+            }
+            val wallet = pendingImportedWallet
+            pendingImportedWallet = null
+            _uiState.update { it.copy(showSyncModeDialog = false, createdWallet = wallet) }
+        }
+    }
+
+    /** Dismissing the sheet leaves the RECENT default from import in place. */
+    fun skipSyncSelection() {
+        val wallet = pendingImportedWallet
+        pendingImportedWallet = null
+        _uiState.update { it.copy(showSyncModeDialog = false, createdWallet = wallet) }
     }
 
     fun selectParent(walletId: String) {
@@ -161,7 +202,7 @@ class AddWalletViewModel @Inject constructor(
      * back-to-back:
      *
      *   1. Read parent's mnemonic via [WalletKeyReader.readKeyMaterial]
-     *      (bonus bug fix — the previous flow routed through V1 storage
+     *      (bonus bug fix, the previous flow routed through V1 storage
      *      and crashed on V2 parents).
      *   2. Encrypt + persist the new sub-account's key material via
      *      [WalletKeyWriter.persistNewWallet] (inside [persistKeys]).
@@ -333,7 +374,7 @@ class AddWalletViewModel @Inject constructor(
         }
 
         // Wallet count is no longer capped at creation time (#118). The cap is
-        // applied at sync-registration time only — `registerAllWalletScripts`
+        // applied at sync-registration time only, `registerAllWalletScripts`
         // takes the first MAX_CONCURRENT_WALLET_SCRIPTS under the ALL_WALLETS
         // strategy. Users can create as many wallets as they want; only the
         // first N stay actively synced when ALL_WALLETS is selected.
@@ -406,7 +447,9 @@ class AddWalletViewModel @Inject constructor(
             )
             result.onSuccess { wallet ->
                 gatewayRepository.onActiveWalletChanged(wallet)
-                _uiState.update { it.copy(isLoading = false, createdWallet = wallet) }
+                // #431: hold navigation until the sync-mode sheet resolves.
+                pendingImportedWallet = wallet
+                _uiState.update { it.copy(isLoading = false, showSyncModeDialog = true) }
             }.onFailure { error ->
                 logger.e(TAG, "Mnemonic import failed", error)
                 _uiState.update { it.copy(isLoading = false, error = persistErrorMessage(error)) }
@@ -445,7 +488,9 @@ class AddWalletViewModel @Inject constructor(
             }
             result.onSuccess { wallet ->
                 gatewayRepository.onActiveWalletChanged(wallet)
-                _uiState.update { it.copy(isLoading = false, createdWallet = wallet) }
+                // #431: hold navigation until the sync-mode sheet resolves.
+                pendingImportedWallet = wallet
+                _uiState.update { it.copy(isLoading = false, showSyncModeDialog = true) }
             }.onFailure { error ->
                 logger.e(TAG, "Raw key import failed", error)
                 _uiState.update { it.copy(isLoading = false, error = persistErrorMessage(error)) }
@@ -458,7 +503,7 @@ class AddWalletViewModel @Inject constructor(
     }
 
     companion object {
-        /** See `OnboardingViewModel.persistErrorMessage` — same shape. */
+        /** See `OnboardingViewModel.persistErrorMessage`, same shape. */
         internal fun persistErrorMessage(error: Throwable): UiMessage? {
             val pex = error as? WalletKeyWriter.PersistException
             return when (val r = pex?.result) {

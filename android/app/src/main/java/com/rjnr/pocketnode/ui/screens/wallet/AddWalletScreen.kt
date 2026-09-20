@@ -61,7 +61,9 @@ import com.composables.icons.lucide.Users
 import com.composables.icons.lucide.Wallet
 import androidx.compose.ui.res.stringResource
 import com.rjnr.pocketnode.R
+import com.rjnr.pocketnode.data.gateway.models.SyncMode
 import com.rjnr.pocketnode.ui.components.MnemonicWordInput
+import com.rjnr.pocketnode.ui.components.SyncOptionsSheet
 import com.rjnr.pocketnode.ui.util.resolveString
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -76,7 +78,7 @@ fun AddWalletScreen(
     val snackbarHostState = remember { SnackbarHostState() }
 
     // FLAG_SECURE: secret material (mnemonic / raw key) is entered or shown
-    // on this screen — block screenshots, screen recording, and the recents
+    // on this screen, block screenshots, screen recording, and the recents
     // thumbnail (#317).
     val secureView = androidx.compose.ui.platform.LocalView.current
     DisposableEffect(Unit) {
@@ -121,6 +123,24 @@ fun AddWalletScreen(
         com.rjnr.pocketnode.ui.components.NoDeviceLockConsentDialog(
             onConfirm = { viewModel.confirmNoLockConsent() },
             onDismiss = { viewModel.dismissNoLockConsent() },
+        )
+    }
+
+    // #431: post-import sync-start picker, shown after a mnemonic or raw-key
+    // import completes, same sheet and copy as the onboarding import path.
+    if (uiState.showSyncModeDialog) {
+        SyncOptionsSheet(
+            currentMode = SyncMode.RECENT,
+            title = stringResource(R.string.home_post_import_sync_title),
+            description = stringResource(R.string.home_post_import_sync_description),
+            availableModes = listOf(
+                SyncMode.NEW_WALLET, SyncMode.RECENT, SyncMode.FULL_HISTORY, SyncMode.CUSTOM
+            ),
+            onDismiss = { viewModel.skipSyncSelection() },
+            onSelectMode = { mode, height -> viewModel.onSyncModeSelected(mode, height) },
+            onTopicHelp = {},
+            showHelpIcons = false,
+            tipBlockNumber = uiState.tipBlockNumber,
         )
     }
 
