@@ -22,7 +22,6 @@ final class OnboardingScreenshotTests: XCTestCase {
     private var model: OnboardingViewModel!
 
     override func setUp() async throws {
-        try await super.setUp()
         keychain = KeychainStore(service: service)
         wrapper = SecureEnclaveKeyWrapper(tag: service)
         try? keychain.deleteAll()
@@ -47,7 +46,6 @@ final class OnboardingScreenshotTests: XCTestCase {
         wrapper = nil
         keychain = nil
         directory = nil
-        try await super.tearDown()
     }
 
     func testWelcomeRenders() {

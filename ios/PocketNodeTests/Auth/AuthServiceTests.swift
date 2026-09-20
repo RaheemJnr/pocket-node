@@ -23,7 +23,6 @@ final class AuthServiceTests: XCTestCase {
     // empty, and awaiting it from a main-actor override sends the non-Sendable
     // test case across isolation, which Xcode 16 (the CI runner) rejects.
     override func setUp() async throws {
-        try await super.setUp()
         keychain = KeychainStore(service: keychainService)
         try? keychain.deleteAll()
         UserDefaults.standard.removePersistentDomain(forName: suiteName)
@@ -41,7 +40,6 @@ final class AuthServiceTests: XCTestCase {
         preferences = nil
         biometrics = nil
         clock = nil
-        try await super.tearDown()
     }
 
     private func makeAuth() -> AuthService {

@@ -17,7 +17,6 @@ final class BackupScreenshotTests: XCTestCase {
     // `async` on purpose: see `PinServiceTests` — the non-async override runs
     // task-isolated and cannot touch this `@MainActor` test case's properties.
     override func setUp() async throws {
-        try await super.setUp()
         directory = FileManager.default.temporaryDirectory
             .appendingPathComponent("com.rjnr.pocketnode.tests.backup.screenshots-\(UUID().uuidString)")
         walletStore = WalletStore(directory: directory)
@@ -27,7 +26,6 @@ final class BackupScreenshotTests: XCTestCase {
         try? FileManager.default.removeItem(at: directory)
         directory = nil
         walletStore = nil
-        try await super.tearDown()
     }
 
     private func makeRevealedViewModel() async -> BackupViewModel {
