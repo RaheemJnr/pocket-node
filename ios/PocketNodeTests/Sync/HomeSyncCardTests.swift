@@ -17,7 +17,6 @@ final class HomeSyncCardTests: XCTestCase {
     // `async` on purpose: see `PinServiceTests`: the non-async override runs
     // task-isolated and cannot touch this `@MainActor` test case's properties.
     override func setUp() async throws {
-        try await super.setUp()
         directory = FileManager.default.temporaryDirectory
             .appendingPathComponent("com.rjnr.pocketnode.tests.homeSync-\(UUID().uuidString)")
         walletStore = WalletStore(directory: directory)
@@ -45,7 +44,6 @@ final class HomeSyncCardTests: XCTestCase {
         walletStore = nil
         defaults = nil
         preferences = nil
-        try await super.tearDown()
     }
 
     private func makeModel(_ sync: FakeSyncStatusProvider?) -> HomeViewModel {

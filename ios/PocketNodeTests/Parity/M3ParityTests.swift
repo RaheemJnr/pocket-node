@@ -481,7 +481,6 @@ final class M3ParityTests: XCTestCase {
     private var walletStore: WalletStore!
 
     override func setUp() async throws {
-        try await super.setUp()
         directory = FileManager.default.temporaryDirectory
             .appendingPathComponent("com.rjnr.pocketnode.tests.parity-\(UUID().uuidString)")
         walletStore = WalletStore(directory: directory)
@@ -493,7 +492,6 @@ final class M3ParityTests: XCTestCase {
     override func tearDown() async throws {
         UserDefaults.standard.removePersistentDomain(forName: suiteName)
         try? FileManager.default.removeItem(at: directory)
-        try await super.tearDown()
     }
 
     // MARK: - Sync start block

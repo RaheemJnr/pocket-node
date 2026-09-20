@@ -23,7 +23,6 @@ final class QrScannerViewModelTests: XCTestCase {
     // non-async override runs task-isolated and cannot touch this
     // `@MainActor` test case's properties.
     override func setUp() async throws {
-        try await super.setUp()
         scanner = FakeQrScanner()
         preferences = FakeNetworkPreferences(network: .testnet)
         scanned = []
@@ -33,7 +32,6 @@ final class QrScannerViewModelTests: XCTestCase {
         scanner = nil
         preferences = nil
         scanned = []
-        try await super.tearDown()
     }
 
     private func makeViewModel() -> QrScannerViewModel {
