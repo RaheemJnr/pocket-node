@@ -8,6 +8,9 @@ import XCTest
 /// nothing here ever waits on a sync, a balance or a chain read. What they
 /// cover is the part the view-model tests cannot, that the screens are
 /// reachable and that the words on them are the ones the shared core produced.
+/// `@MainActor` because `XCUIApplication` and `XCUIElement` are main-actor
+/// only on Xcode 16 (the CI runner); every caller is a main-actor test class.
+@MainActor
 enum M3UITest {
 
     /// The pinned testnet address of the seeded UI Test Wallet, and the same

@@ -30,11 +30,19 @@ final class OnboardingUITests: XCTestCase {
     /// behind would silently change what they see depending on run order.
     /// Relaunching once more with the same reset flag leaves the device the
     /// way this suite found it.
+    ///
+    /// `MainActor.assumeIsolated` because XCTest declares this override
+    /// nonisolated on Xcode 16 (the CI runner) while `XCUIApplication` is
+    /// main-actor only; XCTest always calls teardown on the main thread, so
+    /// the assumption holds. Xcode 26 accepts the direct calls, which is why
+    /// this only ever failed in CI.
     override func tearDownWithError() throws {
-        let cleanup = XCUIApplication()
-        cleanup.launchEnvironment["POCKETNODE_RESET_STATE"] = "1"
-        cleanup.launch()
-        cleanup.terminate()
+        MainActor.assumeIsolated {
+            let cleanup = XCUIApplication()
+            cleanup.launchEnvironment["POCKETNODE_RESET_STATE"] = "1"
+            cleanup.launch()
+            cleanup.terminate()
+        }
         try super.tearDownWithError()
     }
 

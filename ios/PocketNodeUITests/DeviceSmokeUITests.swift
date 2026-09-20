@@ -76,19 +76,24 @@ final class DeviceSmokeUITests: XCTestCase {
     /// thing then is to bring the app back and carry on collecting evidence
     /// about a transaction that is already on chain. The run fails on it at
     /// the end instead, so it can never pass quietly.
-    private var unexpectedExit: String?
+    nonisolated(unsafe) private var unexpectedExit: String?
 
     /// Problems noted along the way that should not abort the run on their
     /// own, because later steps still have something useful to say about the
     /// app. `continueAfterFailure = false` means any `XCTAssertTrue` on the
     /// spot would end the test right there, so these are collected here
     /// instead and asserted together at the end, alongside `unexpectedExit`.
-    private var problems: [String] = []
+    nonisolated(unsafe) private var problems: [String] = []
 
     /// Reported from teardown so a hard assertion in a later step (Node
     /// Status, relaunch) cannot abort the run before these are seen. An
     /// override rather than `addTeardownBlock`, whose Sendable closure cannot
     /// capture the test case under strict concurrency on a device build.
+    ///
+    /// The two properties are `nonisolated(unsafe)` because XCTest declares
+    /// this override nonisolated on Xcode 16 (the CI runner) while the class
+    /// is main-actor; XCTest runs the test body and its teardown on the main
+    /// thread, so there is no concurrent access to make the annotation unsafe.
     override func tearDownWithError() throws {
         if let unexpectedExit {
             problems.append("the app went away on its own: \(unexpectedExit)")
