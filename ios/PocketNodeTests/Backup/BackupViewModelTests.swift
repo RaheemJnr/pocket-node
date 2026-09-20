@@ -12,7 +12,6 @@ final class BackupViewModelTests: XCTestCase {
     // `@MainActor` test case's stored properties. The async form inherits the
     // class's isolation (see `PinServiceTests` for the same note).
     override func setUp() async throws {
-        try await super.setUp()
         directory = FileManager.default.temporaryDirectory
             .appendingPathComponent("com.rjnr.pocketnode.tests.backupVM-\(UUID().uuidString)")
         walletStore = WalletStore(directory: directory)
@@ -22,7 +21,6 @@ final class BackupViewModelTests: XCTestCase {
         try? FileManager.default.removeItem(at: directory)
         directory = nil
         walletStore = nil
-        try await super.tearDown()
     }
 
     private func makeRecord(type: String = "mnemonic", backedUp: Bool = false) -> WalletRecord {

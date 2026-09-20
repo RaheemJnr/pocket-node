@@ -15,7 +15,6 @@ final class HomeBalanceTests: XCTestCase {
     private var preferences: UserDefaultsPreferences!
 
     override func setUp() async throws {
-        try await super.setUp()
         directory = FileManager.default.temporaryDirectory
             .appendingPathComponent("com.rjnr.pocketnode.tests.homeBalance-\(UUID().uuidString)")
         walletStore = WalletStore(directory: directory)
@@ -39,7 +38,6 @@ final class HomeBalanceTests: XCTestCase {
     override func tearDown() async throws {
         UserDefaults.standard.removePersistentDomain(forName: suiteName)
         try? FileManager.default.removeItem(at: directory)
-        try await super.tearDown()
     }
 
     private func model(_ sync: FakeSyncStatusProvider) -> HomeViewModel {

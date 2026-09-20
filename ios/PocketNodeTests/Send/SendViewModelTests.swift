@@ -17,7 +17,6 @@ final class SendViewModelTests: XCTestCase {
     private let ckb = SendFixtures.ckb
 
     override func setUp() async throws {
-        try await super.setUp()
         service = FakeSendService()
         model = SendViewModel(service: service)
     }
@@ -25,7 +24,6 @@ final class SendViewModelTests: XCTestCase {
     override func tearDown() async throws {
         service = nil
         model = nil
-        try await super.tearDown()
     }
 
     // MARK: - Address indicator
