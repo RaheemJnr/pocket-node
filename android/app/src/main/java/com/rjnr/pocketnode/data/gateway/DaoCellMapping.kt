@@ -45,6 +45,18 @@ internal fun DaoDeposit.toDaoCellEntity(
     walletId = walletId,
 )
 
+/**
+ * The cached row as the screen's own record of the position (#529).
+ *
+ * Same fields as [toOutsideWindowDeposit] without the `outsideSyncWindow`
+ * flag: used while an unlock for the cell is confirming, where the row is
+ * absent from the live scan because it is being spent, not because it
+ * predates the window. Flagging it would raise the deep-rescan banner for a
+ * position that is mid-claim.
+ */
+internal fun DaoCellEntity.toCachedDeposit(): DaoDeposit =
+    toOutsideWindowDeposit().copy(outsideSyncWindow = false)
+
 internal fun DaoCellEntity.toOutsideWindowDeposit(): DaoDeposit = DaoDeposit(
     outPoint = OutPoint(txHash = txHash, index = index),
     capacity = capacity,

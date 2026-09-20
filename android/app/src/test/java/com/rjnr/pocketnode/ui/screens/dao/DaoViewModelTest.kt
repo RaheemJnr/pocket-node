@@ -7,6 +7,7 @@ import com.rjnr.pocketnode.data.gateway.models.*
 import com.rjnr.pocketnode.data.wallet.WalletInfo
 import com.rjnr.pocketnode.data.wallet.WalletKeyReader
 import com.rjnr.pocketnode.data.wallet.WalletRepository
+import com.rjnr.pocketnode.ui.util.UiMessage
 import io.mockk.coEvery
 import io.mockk.every
 import io.mockk.mockk
@@ -190,5 +191,112 @@ class DaoViewModelTest {
     fun `shouldClear Unlocking false when outPoint still present`() {
         val deposits = listOf(makeDaoDeposit(outPoint = testOutPoint))
         assertFalse(shouldClearPendingAction(DaoAction.Unlocking(testOutPoint), deposits))
+    }
+
+    // --- #529: double unlock, spinner clearing, rescan prompt ---
+    //
+    // NOTE: the remaining half of the spinner contract, "a failed unlockDao
+    // clears pendingAction and surfaces the message", cannot be expressed
+    // here. `GatewayRepository.unlockDao` returns `kotlin.Result<String>`, and
+    // MockK 1.13.16 cannot round-trip a stubbed inline-value-class return
+    // through the suspend continuation resume boundary (the same limitation
+    // documented in AddWalletViewModelTest): the stub comes back as a boxed
+    // `kotlin.Result` and the call site throws ClassCastException before the
+    // ViewModel sees it. Any test here that drives the launched coroutine hits
+    // it, relaxed stubs included. The failure itself is pinned one layer down
+    // in DaoGatewayUnlockTest, which asserts the terminal Result.failure and
+    // its message; the `onFailure { pendingAction = null }` clause it feeds is
+    // the same one every other DAO operation already uses.
+
+    @Test
+    fun `shouldClear Unlocking when the outPoint survives the spend as COMPLETED`() {
+        // COMPLETED is a terminal state for the position, whether or not the
+        // retired row is surfaced. Insisting on total absence is what left
+        // the spinner running forever.
+        val deposits = listOf(makeDaoDeposit(outPoint = testOutPoint, status = DaoCellStatus.COMPLETED))
+        assertTrue(shouldClearPendingAction(DaoAction.Unlocking(testOutPoint), deposits))
+    }
+
+    @Test
+    fun `unlock is refused while another action is already in flight for that outPoint`() {
+        val vm = DaoViewModel(repository, authManager, pinManager, walletKeyReader, walletRepository)
+
+        vm.withdraw(makeDaoDeposit(status = DaoCellStatus.DEPOSITED))
+        assertEquals(DaoAction.Withdrawing(testOutPoint), vm.uiState.value.pendingAction)
+
+        // Same position, second operation: must not replace the in-flight one.
+        vm.unlock(makeDaoDeposit(status = DaoCellStatus.UNLOCKABLE))
+
+        assertEquals(DaoAction.Withdrawing(testOutPoint), vm.uiState.value.pendingAction)
+    }
+
+    @Test
+    fun `unlock is refused for a deposit already overlaid as UNLOCKING`() {
+        // After a relaunch mid-unlock the in-memory pending action is gone;
+        // the persisted marker's UNLOCKING overlay is the only guard left.
+        val vm = DaoViewModel(repository, authManager, pinManager, walletKeyReader, walletRepository)
+
+        vm.unlock(makeDaoDeposit(status = DaoCellStatus.UNLOCKING))
+
+        assertNull(vm.uiState.value.pendingAction)
+    }
+
+    @Test
+    fun `a failure on one deposit leaves another deposit's spinner alone`() {
+        val vm = DaoViewModel(repository, authManager, pinManager, walletKeyReader, walletRepository)
+
+        // One position is genuinely unlocking.
+        vm.unlock(makeDaoDeposit(outPoint = testOutPoint, status = DaoCellStatus.UNLOCKABLE))
+        assertEquals(DaoAction.Unlocking(testOutPoint), vm.uiState.value.pendingAction)
+
+        // A failure reported against a DIFFERENT outpoint must not stop it.
+        vm.failAction(otherOutPoint, "This deposit was already unlocked")
+
+        assertEquals(DaoAction.Unlocking(testOutPoint), vm.uiState.value.pendingAction)
+        assertEquals(UiMessage.Raw("This deposit was already unlocked"), vm.uiState.value.error)
+    }
+
+    @Test
+    fun `a failure on the deposit that is in flight clears its spinner`() {
+        val vm = DaoViewModel(repository, authManager, pinManager, walletKeyReader, walletRepository)
+
+        vm.unlock(makeDaoDeposit(outPoint = testOutPoint, status = DaoCellStatus.UNLOCKABLE))
+        vm.failAction(testOutPoint, "This deposit was already unlocked")
+
+        assertNull(vm.uiState.value.pendingAction)
+        assertEquals(UiMessage.Raw("This deposit was already unlocked"), vm.uiState.value.error)
+    }
+
+    @Test
+    fun `withdraw is refused for a deposit already overlaid as WITHDRAWING`() {
+        val vm = DaoViewModel(repository, authManager, pinManager, walletKeyReader, walletRepository)
+
+        vm.withdraw(makeDaoDeposit(status = DaoCellStatus.WITHDRAWING))
+
+        assertNull(vm.uiState.value.pendingAction)
+    }
+
+    // --- outsideWindowPromptCount (pure function) ---
+
+    @Test
+    fun `rescan prompt ignores a retired outside-window deposit`() {
+        val deposits = listOf(
+            makeDaoDeposit(status = DaoCellStatus.COMPLETED).copy(outsideSyncWindow = true)
+        )
+        assertEquals(0, outsideWindowPromptCount(deposits))
+    }
+
+    @Test
+    fun `rescan prompt still fires for a live outside-window deposit`() {
+        val deposits = listOf(
+            makeDaoDeposit(status = DaoCellStatus.DEPOSITED).copy(outsideSyncWindow = true)
+        )
+        assertEquals(1, outsideWindowPromptCount(deposits))
+    }
+
+    @Test
+    fun `rescan prompt ignores deposits the light client can see`() {
+        val deposits = listOf(makeDaoDeposit(status = DaoCellStatus.DEPOSITED))
+        assertEquals(0, outsideWindowPromptCount(deposits))
     }
 }

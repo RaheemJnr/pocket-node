@@ -124,6 +124,24 @@ class WalkingMigrationTest {
     }
 
     /**
+     * #529: a v10 file walked all the way to v17 must gain the
+     * `pending_dao_unlocks` table + its index (MIGRATION_16_17), with
+     * schema validation passing.
+     */
+    @Test
+    fun `walk to v17 creates pending_dao_unlocks table`() {
+        bootstrapV10()
+        openViaRoomAndValidate()
+        val db = openedRoomDb!!.openHelper.readableDatabase
+        db.query("SELECT name FROM sqlite_master WHERE type='table' AND name='pending_dao_unlocks'").use { c ->
+            assertTrue("pending_dao_unlocks table missing after MIGRATION_16_17", c.moveToNext())
+        }
+        db.query("SELECT name FROM sqlite_master WHERE type='index' AND name='idx_pending_unlock_wallet_network'").use { c ->
+            assertTrue("idx_pending_unlock_wallet_network missing", c.moveToNext())
+        }
+    }
+
+    /**
      * #82 phase 1: a v10 file walked to v13 must gain the
      * `sub_account_candidates` table (MIGRATION_12_13), with schema
      * validation passing.
@@ -250,7 +268,7 @@ class WalkingMigrationTest {
                 .addMigrations(
                     MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4, MIGRATION_4_5,
                     MIGRATION_5_6, MIGRATION_6_7, MIGRATION_7_8, noOpMigration8To9,
-                    MIGRATION_9_10, MIGRATION_10_11, MIGRATION_11_12, MIGRATION_12_13, MIGRATION_13_14, MIGRATION_14_15, MIGRATION_15_16,
+                    MIGRATION_9_10, MIGRATION_10_11, MIGRATION_11_12, MIGRATION_12_13, MIGRATION_13_14, MIGRATION_14_15, MIGRATION_15_16, MIGRATION_16_17,
                 )
                 .build()
             openedRoomDb = db
@@ -280,7 +298,7 @@ class WalkingMigrationTest {
             .addMigrations(
                 MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4, MIGRATION_4_5,
                 MIGRATION_5_6, MIGRATION_6_7, MIGRATION_7_8, MIGRATION_8_9,
-                MIGRATION_9_10, MIGRATION_10_11, MIGRATION_11_12, MIGRATION_12_13, MIGRATION_13_14, MIGRATION_14_15, MIGRATION_15_16,
+                MIGRATION_9_10, MIGRATION_10_11, MIGRATION_11_12, MIGRATION_12_13, MIGRATION_13_14, MIGRATION_14_15, MIGRATION_15_16, MIGRATION_16_17,
             )
             .build()
         openedRoomDb = db

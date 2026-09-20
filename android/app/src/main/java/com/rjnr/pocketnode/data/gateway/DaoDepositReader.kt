@@ -321,6 +321,14 @@ class DaoDepositReader @Inject constructor(
         } else 0.0
         val cycleProgress = ((depositedEpochs % DaoConstants.WITHDRAW_EPOCHS) / DaoConstants.WITHDRAW_EPOCHS).toFloat()
 
+        // The three pending flags are deliberately false here: this class sees
+        // only committed chain state, so it cannot know about a transaction
+        // this wallet broadcast moments ago. The in-flight states are applied
+        // afterwards by DaoGateway, from the persisted markers
+        // (`pending_dao_withdraws` #347, `pending_dao_unlocks` #529), which is
+        // also what lets them survive process death. Keep passing them rather
+        // than dropping the parameters: they are the shared status contract
+        // the iOS core will drive the same way.
         val status = determineDaoStatus(
             isWithdrawingCell = isWithdrawing,
             hasPendingWithdraw = false,

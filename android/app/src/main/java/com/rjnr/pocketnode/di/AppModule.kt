@@ -24,6 +24,7 @@ import com.rjnr.pocketnode.data.database.MIGRATION_12_13
 import com.rjnr.pocketnode.data.database.MIGRATION_13_14
 import com.rjnr.pocketnode.data.database.MIGRATION_14_15
 import com.rjnr.pocketnode.data.database.MIGRATION_15_16
+import com.rjnr.pocketnode.data.database.MIGRATION_16_17
 import com.rjnr.pocketnode.data.database.dao.BalanceCacheDao
 import com.rjnr.pocketnode.data.database.dao.ContactDao
 import com.rjnr.pocketnode.data.database.dao.DaoCellDao
@@ -135,7 +136,7 @@ object AppModule {
     fun provideAppDatabase(@ApplicationContext context: Context): AppDatabase =
         Room.databaseBuilder(context, AppDatabase::class.java, "pocket_node.db")
             .setJournalMode(RoomDatabase.JournalMode.WRITE_AHEAD_LOGGING)
-            .addMigrations(MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4, MIGRATION_4_5, MIGRATION_5_6, MIGRATION_6_7, MIGRATION_7_8, MIGRATION_8_9, MIGRATION_9_10, MIGRATION_10_11, MIGRATION_11_12, MIGRATION_12_13, MIGRATION_13_14, MIGRATION_14_15, MIGRATION_15_16)
+            .addMigrations(MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4, MIGRATION_4_5, MIGRATION_5_6, MIGRATION_6_7, MIGRATION_7_8, MIGRATION_8_9, MIGRATION_9_10, MIGRATION_10_11, MIGRATION_11_12, MIGRATION_12_13, MIGRATION_13_14, MIGRATION_14_15, MIGRATION_15_16, MIGRATION_16_17)
             .build()
 
     @Provides
@@ -154,6 +155,11 @@ object AppModule {
     @Singleton
     fun providePendingDaoWithdrawDao(db: AppDatabase): com.rjnr.pocketnode.data.database.dao.PendingDaoWithdrawDao =
         db.pendingDaoWithdrawDao()
+
+    @Provides
+    @Singleton
+    fun providePendingDaoUnlockDao(db: AppDatabase): com.rjnr.pocketnode.data.database.dao.PendingDaoUnlockDao =
+        db.pendingDaoUnlockDao()
 
     @Provides
     fun provideWalletDao(db: AppDatabase): WalletDao = db.walletDao()
@@ -220,8 +226,11 @@ object AppModule {
         headerCacheDao: HeaderCacheDao,
         daoCellDao: DaoCellDao,
         pendingDaoWithdrawDao: com.rjnr.pocketnode.data.database.dao.PendingDaoWithdrawDao,
+        pendingDaoUnlockDao: com.rjnr.pocketnode.data.database.dao.PendingDaoUnlockDao,
         logger: Logger,
-    ): DaoSyncManager = DaoSyncManager(headerCacheDao, daoCellDao, pendingDaoWithdrawDao, logger)
+    ): DaoSyncManager = DaoSyncManager(
+        headerCacheDao, daoCellDao, pendingDaoWithdrawDao, pendingDaoUnlockDao, logger,
+    )
 
     @Provides
     @Singleton

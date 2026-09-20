@@ -105,7 +105,8 @@ class AddWalletViewModelImportSyncTest {
         walletPreferences = WalletPreferences(context, NoopLogger)
         walletRepository = WalletRepository(
             db.walletDao(), keyManager, walletPreferences, walletPreferences, mnemonicManager, db,
-            db.transactionDao(), db.balanceCacheDao(), db.daoCellDao(), db.keyMaterialDao(),
+            db.transactionDao(), db.balanceCacheDao(), db.daoCellDao(),
+            db.pendingDaoWithdrawDao(), db.pendingDaoUnlockDao(), db.keyMaterialDao(),
             db.subAccountCandidateDao(), SubAccountDiscovery(mnemonicManager, keyManager), NoopLogger,
         )
 

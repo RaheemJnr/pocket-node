@@ -563,3 +563,35 @@ val MIGRATION_15_16 = object : Migration(15, 16) {
         db.execSQL("ALTER TABLE `transactions` ADD COLUMN `fee_shannons` INTEGER")
     }
 }
+
+/**
+ * v17 (#529): the `pending_dao_unlocks` table, the phase-2 twin of
+ * `pending_dao_withdraws`.
+ *
+ * Keyed by the WITHDRAWING cell's outpoint, it marks an unlock that has been
+ * broadcast but not yet indexed. Until it existed, the withdrawing cell kept
+ * scanning UNLOCKABLE for the minutes between broadcast and commit, so the
+ * card still offered "Unlock" and the cached dao_cells row survived the spend
+ * as a phantom deposit. Pure additive migration: one CREATE TABLE, one index.
+ */
+val MIGRATION_16_17 = object : Migration(16, 17) {
+    override fun migrate(db: SupportSQLiteDatabase) {
+        db.execSQL(
+            """
+            CREATE TABLE IF NOT EXISTS `pending_dao_unlocks` (
+                `withdrawingTxHash` TEXT NOT NULL,
+                `withdrawingIndex` TEXT NOT NULL,
+                `unlockTxHash` TEXT NOT NULL,
+                `walletId` TEXT NOT NULL,
+                `network` TEXT NOT NULL,
+                `createdAt` INTEGER NOT NULL,
+                PRIMARY KEY(`withdrawingTxHash`, `withdrawingIndex`)
+            )
+            """.trimIndent()
+        )
+        db.execSQL(
+            "CREATE INDEX IF NOT EXISTS `idx_pending_unlock_wallet_network` " +
+                "ON `pending_dao_unlocks` (`walletId`, `network`)"
+        )
+    }
+}

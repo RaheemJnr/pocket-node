@@ -915,6 +915,7 @@ class GatewayRepository @Inject constructor(
         existingScriptBlock = { getExistingScriptBlock() },
         privateKey = { getPrivateKey() },
         sendContext = { sendContext() },
+        transactionStatus = { hash -> getTransactionStatus(hash) },
         setScriptsAndRecord = { statuses, walletIds, cmd, allowRewind ->
             setScriptsAndRecord(statuses, walletIds, cmd, allowRewind)
         },
@@ -947,6 +948,10 @@ class GatewayRepository @Inject constructor(
     /** @see DaoGateway.withdrawFromDao */
     suspend fun withdrawFromDao(depositOutPoint: OutPoint, privateKey: ByteArray): Result<String> =
         daoGateway.withdrawFromDao(daoContext(), depositOutPoint, privateKey)
+
+    /** @see DaoGateway.unlockPreflight */
+    suspend fun unlockPreflight(withdrawingOutPoint: OutPoint): Result<Unit> =
+        daoGateway.unlockPreflight(daoContext(), withdrawingOutPoint)
 
     /** @see DaoGateway.unlockDao */
     suspend fun unlockDao(withdrawingOutPoint: OutPoint): Result<String> =

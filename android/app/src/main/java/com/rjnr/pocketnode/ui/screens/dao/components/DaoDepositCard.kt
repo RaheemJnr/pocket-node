@@ -30,7 +30,11 @@ fun DaoDepositCard(
     deposit: DaoDeposit,
     onWithdraw: () -> Unit,
     onUnlock: () -> Unit,
-    modifier: Modifier = Modifier
+    modifier: Modifier = Modifier,
+    // #529: false while this position already has a withdraw or unlock in
+    // flight. The chain-visible status lags the broadcast by minutes, so the
+    // button must close on what the app knows, not on what the scan shows.
+    actionEnabled: Boolean = true,
 ) {
     Surface(
         modifier = modifier.fillMaxWidth(),
@@ -140,6 +144,7 @@ fun DaoDepositCard(
                     Spacer(modifier = Modifier.height(12.dp))
                     Button(
                         onClick = onWithdraw,
+                        enabled = actionEnabled,
                         modifier = Modifier.fillMaxWidth(),
                         shape = RoundedCornerShape(8.dp),
                         colors = ButtonDefaults.buttonColors(
@@ -154,6 +159,7 @@ fun DaoDepositCard(
                     Spacer(modifier = Modifier.height(12.dp))
                     Button(
                         onClick = onUnlock,
+                        enabled = actionEnabled,
                         modifier = Modifier.fillMaxWidth(),
                         shape = RoundedCornerShape(8.dp),
                         colors = ButtonDefaults.buttonColors(
