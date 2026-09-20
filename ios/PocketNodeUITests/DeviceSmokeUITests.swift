@@ -89,12 +89,19 @@ final class DeviceSmokeUITests: XCTestCase {
     /// Status, relaunch) cannot abort the run before these are seen. An
     /// override rather than `addTeardownBlock`, whose Sendable closure cannot
     /// capture the test case under strict concurrency on a device build.
+    ///
+    /// `MainActor.assumeIsolated` because XCTest declares this override
+    /// nonisolated on Xcode 16 (the CI runner) while `problems` and
+    /// `unexpectedExit` belong to this main-actor class; teardown always runs
+    /// on the main thread, so the assumption holds.
     override func tearDownWithError() throws {
-        if let unexpectedExit {
-            problems.append("the app went away on its own: \(unexpectedExit)")
-        }
-        if !problems.isEmpty {
-            XCTFail(problems.joined(separator: "; "))
+        MainActor.assumeIsolated {
+            if let unexpectedExit {
+                problems.append("the app went away on its own: \(unexpectedExit)")
+            }
+            if !problems.isEmpty {
+                XCTFail(problems.joined(separator: "; "))
+            }
         }
         try super.tearDownWithError()
     }
