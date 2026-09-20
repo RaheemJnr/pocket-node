@@ -1,6 +1,7 @@
 import CkbLightClient
 import Foundation
 import os
+import PocketNodeCore
 
 /// Lifecycle state reported by the Rust light client.
 enum NodeStatus: UInt8 {
@@ -102,8 +103,9 @@ private final class StatusRelay: StatusListener {
     }
 }
 
-/// Owns the embedded CKB light client. M1 is testnet only; `mainnet.toml` is
-/// bundled but never loaded.
+/// Owns the embedded CKB light client. Which network it points at comes from
+/// `NetworkPreferences` (read once, at construction, by `AppContainer`); both
+/// `mainnet.toml` and `testnet.toml` are bundled.
 @MainActor
 @Observable
 final class LightClientService {
@@ -116,23 +118,25 @@ final class LightClientService {
     private(set) var peerCount: Int = 0
     private(set) var lastError: String?
 
+    private let network: NetworkType
     private let runner = LightClientRunner()
     private let logger = Logger(subsystem: "com.rjnr.pocketnode", category: "LightClientService")
 
     /// `autoStart` is off under XCTest: the unit tests run inside the app host,
     /// and a node spinning up in the background would race their assertions and
     /// leave a store behind.
-    init(autoStart: Bool = !ProcessInfo.processInfo.isRunningTests) {
+    init(network: NetworkType, autoStart: Bool = !ProcessInfo.processInfo.isRunningTests) {
+        self.network = network
         guard autoStart else { return }
         Task { await bootstrap() }
     }
 
-    /// Refreshes `testnet.toml` from the bundle and hands its directory to the
-    /// light client as the data directory.
+    /// Refreshes `<network>.toml` from the bundle and hands its directory to
+    /// the light client as the data directory.
     private func bootstrap() async {
         do {
-            let dataDir = try Self.prepareDataDirectory(network: "testnet")
-            let configPath = try Self.installConfig(named: "testnet", into: dataDir)
+            let dataDir = try Self.prepareDataDirectory(network: network.configName)
+            let configPath = try Self.installConfig(named: network.configName, into: dataDir)
             let relay = StatusRelay { [weak self] raw in
                 Task { @MainActor in self?.apply(rawStatus: raw) }
             }
@@ -289,4 +293,11 @@ extension ProcessInfo {
     var isRunningTests: Bool {
         environment["XCTestConfigurationFilePath"] != nil
     }
+}
+
+private extension NetworkType {
+    /// Matches the bundled `<name>.toml` resource and the `data/<name>/`
+    /// directory layout (Android's `GatewayRepository` uses the same
+    /// lowercased-name convention for its `data/mainnet` / `data/testnet`).
+    var configName: String { name.lowercased() }
 }

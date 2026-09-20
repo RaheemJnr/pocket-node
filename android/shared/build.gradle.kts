@@ -30,6 +30,9 @@ kotlin {
         commonMain.dependencies {
             implementation(libs.secp256k1.kmp)
             implementation(libs.kotlincrypto.blake2)
+            // SHA-256 for the BIP-39 checksum, HMAC-SHA-512 for PBKDF2 (#507).
+            implementation(libs.kotlincrypto.sha2)
+            implementation(libs.kotlincrypto.hmac.sha2)
             implementation(libs.kotlinx.serialization.json)
         }
         commonTest.dependencies {
@@ -55,6 +58,14 @@ kotlin {
             // `utils` (Blake2b, ECKeyPair, Sign, Numeric) is only a runtime dep of
             // `core`, so the differential tests have to ask for it by name.
             implementation(libs.ckb.sdk.utils.difftest)
+            // Same arrangement for BIP-39: kotlin-bip39 is JVM-only, so it is the
+            // reference `Bip39` is proved against here and ships nowhere (#507).
+            implementation(libs.kotlin.bip39.difftest)
+            // And again for Argon2id: BouncyCastle's Argon2BytesGenerator is the
+            // reference the shared implementation is proved against. It stays an app
+            // dependency for now (the BIP-32 code still uses it) but must never reach
+            // the shared module's production classpath (#509).
+            implementation(libs.bouncycastle.difftest)
         }
     }
 }

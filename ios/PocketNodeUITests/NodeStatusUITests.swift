@@ -4,17 +4,39 @@ import XCTest
 /// wait for the testnet tip to advance past genesis, then stop it.
 ///
 /// The node has to reach real testnet bootnodes, so this test lives in its own
-/// `PocketNodeNetwork` scheme and is not part of the default test action.
+/// `PocketNodeNetwork` scheme, which sets `POCKETNODE_NETWORK_TESTS=1` in its
+/// test action (`project.yml`). `PocketNodeUITests` also runs under the
+/// offline `PocketNode` scheme for CI (#517), and that scheme does not set the
+/// variable, so this test skips itself there rather than timing out against a
+/// network `ios-ci.yml` has no route to.
+///
+/// `@MainActor` like the other UI suites: `XCUIApplication` and `XCUIElement`
+/// are main-actor only on Xcode 16 (the CI runner), and a plain test class is
+/// nonisolated there.
+@MainActor
 final class NodeStatusUITests: XCTestCase {
     private static let tipTimeout: TimeInterval = 120
     private static let stopTimeout: TimeInterval = 10
 
     override func setUpWithError() throws {
         continueAfterFailure = false
+        try XCTSkipUnless(
+            ProcessInfo.processInfo.environment["POCKETNODE_NETWORK_TESTS"] == "1",
+            "needs live testnet bootnodes; run under the PocketNodeNetwork scheme"
+        )
     }
 
     func testNodeStatusReachesTestnetTipAndStops() throws {
         let app = XCUIApplication()
+        // `NetworkPreferences` defaults to mainnet (#514); this test needs
+        // testnet, so it asks `AppContainer` to select it at launch rather
+        // than the app defaulting to it for everyone.
+        app.launchEnvironment["POCKETNODE_NETWORK"] = "testnet"
+        // #515 put onboarding in front of the wallet shell this test drives.
+        // Nothing on the Node Status path reads key material, so `AppContainer`
+        // answers this by writing a throwaway metadata record rather than by
+        // minting a real wallet.
+        app.launchEnvironment["POCKETNODE_SKIP_ONBOARDING"] = "1"
         app.launch()
 
         app.buttons["root.nodeStatus"].tap()

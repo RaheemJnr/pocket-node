@@ -25,9 +25,181 @@ project. A pre-build script phase runs
 
 ## Tests
 
-- `xcodebuild -scheme PocketNode ... test` runs the offline unit tests.
-- `xcodebuild -scheme PocketNodeNetwork ... test` runs the Node Status
-  acceptance test, which starts the node and waits for a real testnet tip.
+Two schemes split the UI tests by whether they need a network, both built from
+the one `PocketNodeUITests` target (`project.yml`):
+
+- `xcodebuild -scheme PocketNode ... test` runs the offline unit tests
+  (`PocketNodeTests`) plus the offline UI tests (`PocketNodeUITests`):
+  `OnboardingUITests` (#517) and `WalletShellUITests`. `NodeStatusUITests`
+  also builds here, since it lives in the same target, but skips itself with
+  `XCTSkip` unless `POCKETNODE_NETWORK_TESTS=1` is set — this scheme's test
+  action does not set it. `.github/workflows/ios-ci.yml` runs this scheme.
+- `xcodebuild -scheme PocketNodeNetwork ... test` sets
+  `POCKETNODE_NETWORK_TESTS=1` in its test action and runs the same
+  `PocketNodeUITests` target, so `NodeStatusUITests` actually starts the node
+  and waits for a real testnet tip this time. Not run in CI.
+- `WalletKeyStoreDeviceTests` and `PinServiceDeviceTests` are skipped on the
+  simulator and need a physical iPhone with a passcode and enrolled
+  biometrics:
+
+  ```bash
+  xcodebuild -project PocketNode.xcodeproj -scheme PocketNode \
+    -destination 'platform=iOS,id=<device-udid>' \
+    -only-testing:PocketNodeTests/WalletKeyStoreDeviceTests test
+  ```
+
+  It prompts for Face ID or Touch ID and prints the store's diagnostics, which
+  report `hardwareBacked: true` only on real hardware.
+
+### Debug-only launch environment flags
+
+`AppContainer` reads these from `ProcessInfo.processInfo.environment` inside
+`#if DEBUG`; none of them compile into a release build.
+
+| Flag | Effect |
+|------|--------|
+| `POCKETNODE_NETWORK` | `testnet` or `mainnet`, seeds `NetworkPreferences.setSelectedNetwork` before anything else reads it. Overrides the default (mainnet, #514). |
+| `POCKETNODE_SKIP_ONBOARDING` | `1` writes a throwaway `WalletRecord` (the pinned test vector's addresses, no key material) so `RootView` opens straight to the wallet shell instead of onboarding. Only takes effect when no wallet is already stored. Used by `WalletShellUITests` and `NodeStatusUITests`, neither of which cares about onboarding. |
+| `POCKETNODE_RESET_STATE` | `1` deletes the wallet envelope, the Secure Enclave wrapping key, every PIN Keychain item, `wallet.json` and the install marker, before anything else in `init()` runs. Used by `OnboardingUITests` (#517) so the real onboarding flow gets a clean device on every launch, not only a simulator's first one. It also relaunches with this flag in its own `tearDown`, so it leaves the device the way `WalletShellUITests`/`NodeStatusUITests` expect to find it (see `POCKETNODE_SKIP_ONBOARDING` above). |
+| `POCKETNODE_UITEST_ALLOW_CAPTURE` | `1` makes `PrivacyShield` ignore `UIScreen.isCaptured` for this one signal. XCUITest itself records the screen on a physical iPhone, which the shield otherwise (correctly) treats as a capture and hides the whole app behind it — every UI test sets this. |
+
+## Wallet keys
+
+`PocketNode/Services/Keys/` holds the key material at rest, mirroring the
+Android Keystore V2 threat model: the wallet bundle is AES-256-GCM ciphertext
+under a random data key, and that data key is wrapped by a P-256 key generated
+inside the Secure Enclave and guarded by the current biometric set or the device
+passcode. Both blobs live in the Keychain as
+`kSecAttrAccessibleWhenPasscodeSetThisDeviceOnly`, non-synchronizable items. The
+simulator has no Enclave, so it uses a software P-256 key behind the same
+protocol; `isHardwareBacked` reports which one is in play. Keychain items
+survive app deletion, so `InstallMarker` wipes them on the first launch of a
+fresh install.
+
+## Authentication
+
+`PocketNode/Services/Auth/` holds the lock. `AuthService` owns the session
+state (`noPin` / `locked` / `unlocked`), locks on `scenePhase == .background`
+only, and exposes `requireAuth(reason:)` for step-up auth on a single action
+(the recovery phrase reveal, later the send confirmation). `BiometricService`
+wraps `LocalAuthentication` with `.deviceOwnerAuthenticationWithBiometrics`:
+the device passcode is deliberately not a fallback, our own 6-digit PIN is.
+
+`PinService` wraps the shared Kotlin `PinPolicy` (`data/auth/PinPolicy.kt`), so
+the Argon2id hashing and the lockout schedule are literally the same code
+Android runs: 5 failures lock for 30 s, then 1 min, 5 min, 30 min, 1 h, and a
+permanent lock at 10. `KeychainPinStore` supplies the six storage fields under
+its own Keychain service (`com.rjnr.pocketnode.pin`), where Android supplies
+`EncryptedSharedPreferences`. The Keychain has no multi-item transaction, so
+`KeychainPinStore.apply` orders the writes such that any interrupted prefix
+leaves a safe state; the rules are documented on that method. The counter
+persists across reinstalls by design (#370), except on the first launch of a
+fresh install, where `AppContainer` clears the PIN service on the same signal
+`InstallMarker` uses for the wallet.
+
+Argon2id runs on `PinPolicyActor`, off the main actor: 64 MiB at t=3 is around
+150 ms in a release build and over a second in a debug one. Tests lower the
+cost via `Argon2Cost.testing` and drive the schedule with an injected clock
+(`PocketNodeTests/Auth/`).
+
+`Screens/Auth/` has the UI: `PinEntryView` (the reusable 6-digit pad, no
+keyboard), `LockView` (the app-wide gate `RootView` shows while locked) and
+`PinSetupView` (create, confirm, then the biometric opt-in). Onboarding (#515)
+is what sets the first PIN; until one exists nothing is gated.
+
+## Preferences and wallet metadata
+
+`PocketNode/Services/Preferences/UserDefaultsPreferences.swift` implements
+the shared `core.prefs` interfaces (`SyncPreferences`, `UiPreferences`,
+`NetworkPreferences`, `AppStatePreferences` from `PocketNodeCore`) on
+`UserDefaults`, key-for-key with Android's
+`data/wallet/WalletPreferences.kt`: same key names, same defaults (network
+selection defaults to mainnet; sync mode defaults to `NEW_WALLET`), same
+per-network / per-wallet key suffixing. No Keychain access here; nothing
+secret goes into UserDefaults.
+
+`PocketNode/Services/Wallet/WalletStore.swift` persists the single active
+wallet's metadata (name, type, addresses, derivation path,
+`mnemonicBackedUp`, `createdAt`) as a JSON file in
+`Application Support/PocketNode/wallet.json`, complete-file-protected and
+written atomically. This is the M2 single-wallet store; M3 decides whether
+multi-wallet moves to Room via KMP or SQLDelight, and `WalletRecord`'s field
+names mirror Android's `WalletEntity` so that migration can read this file
+directly.
+
+`AppContainer` reads the selected network from `NetworkPreferences` once at
+launch and passes it to `LightClientService`. The `PocketNodeNetwork`
+acceptance test needs testnet specifically, so it sets
+`POCKETNODE_NETWORK=testnet` in `app.launchEnvironment` before launching
+rather than the app defaulting to testnet for everyone (`NodeStatusUITests`,
+`AppContainer.applyNetworkOverrideForTestingIfPresent`).
+
+## Onboarding
+
+`Screens/Onboarding/OnboardingViewModel.swift` (#515) drives the first-run flow
+as a step machine — `welcome -> create|importWallet -> backup -> pinSetup ->
+done` — mirroring Android's `OnboardingScreen` through
+`InitialPinSetupScreen`. A wallet created fresh goes through `backup` because
+nobody has written the phrase down yet; a wallet imported from a phrase or a
+raw key skips straight to `pinSetup`, because the user already holds it (or
+there is no phrase at all). `OnboardingView.swift` renders whichever step the
+model is on and owns nothing itself.
+
+`Services/Wallet/WalletCreator.swift` is the one place that creates or imports
+the wallet: `createWallet` (`Bip39.shared.generate` then
+`Bip32.shared.deriveCkbPrivateKey`), `importMnemonic` (validates, then the same
+derivation) and `importPrivateKey` (validates the scalar range directly in
+Swift, since a Kotlin `IllegalArgumentException` would terminate the process
+rather than reach a `catch`). Key material is stored before metadata; a failed
+metadata write rolls the key material back rather than leaving an orphaned
+wallet `AppContainer.hasWallet` would send straight to the wallet shell with no
+way back into onboarding. `CreateWalletView.swift` and `ImportWalletView.swift`
+are the two entry screens; `PinSetupView` (see Authentication above) is what
+`Step/pinSetup` shows.
+
+The pinned cross-platform vector — the standard all-"abandon" BIP-39 phrase,
+its `m/44'/309'/0'/0/0` private key and both addresses — is asserted three
+times: `WalletCreatorTests` (iOS unit), the shared module's
+`CrossPlatformAddressParityTest` (`:shared:testAndroidHostTest` and
+`:shared:iosSimulatorArm64Test`, `android/shared/src/commonTest/kotlin/com/rjnr/pocketnode/data/wallet/`),
+and `OnboardingUITests.testImportingTheTestPhraseShowsThePinnedTestnetAddress`
+through the real UI (#517). A derivation drift on either platform fails at
+least one of the three.
+
+## Backup and Receive
+
+`Screens/Backup/BackupViewModel.swift` drives the recovery-phrase backup flow:
+a `gate -> display -> verify -> success` step machine mirroring Android's
+`MnemonicBackupViewModel`, simplified to iOS's one key-material shape. The
+gate calls `AuthService.requireAuth(reason:)` unless this is the verified
+onboarding hop (`isOnboarding && !hasPin()`, re-checked on every reveal so a
+stale flag can never skip the gate once a PIN exists); `WalletKeyStore.load`
+then decrypts the bundle. A raw-key wallet (no mnemonic) goes to a `.noPhrase`
+step instead of `.display`. `BackupQuiz.swift` is the pure quiz generator: 3
+distinct word positions, 4 shuffled choices each (the correct word plus 3
+distinct decoys, topped up from `Bip39.shared.WORDLIST` if the phrase itself
+cannot supply enough), driven entirely through an injectable
+`RandomNumberGenerator` so tests are deterministic. The words live in memory
+only for `.display`/`.verify`; `onBackgrounded()` (wired to `scenePhase`) wipes
+them and returns to `.gate`, the same ON_STOP re-arm Android does.
+`Screens/Backup/PrivacyShield.swift` additionally covers the phrase whenever
+the scene is not active or the screen is being captured/mirrored — a
+supplement to the wipe, not a replacement for it. `BackupView` takes the view
+model and an `onFinished` closure; it does not know how it got there or where
+it goes next.
+
+`Screens/Receive/ReceiveViewModel.swift` reads the active wallet's address for
+`NetworkPreferences.getSelectedNetwork()` and shows the Android-parity protect
+dialog ("Protect your wallet") when the wallet is an unbacked-up mnemonic
+wallet; "Back up now" calls an injected `onBackUp` closure. `Services/Qr/QrCodeGenerator.swift`
+renders the bare address (no scheme prefix, matching Android's ZXing writer)
+through CoreImage's `CIQRCodeGenerator` at correction level "M", scaling the
+vector image before rasterising so modules stay crisp with no interpolation.
+
+Both `BackupView` and `ReceiveView` are self-contained: every dependency comes
+through their view model's initializer, with no reference to `RootView` or
+`AppContainer`, so they can be previewed, tested and wired into navigation
+independently of who owns the surrounding flow.
 
 ## CI
 
@@ -37,5 +209,7 @@ project. A pre-build script phase runs
 (`:shared:iosSimulatorArm64Test`, `:shared:testAndroidHostTest`), builds the
 `CkbLightClientFFI.xcframework` via `build-ios.sh`, regenerates the Xcode
 project with `xcodegen`, then builds and tests the offline `PocketNode`
-scheme on a simulator resolved at run time. The networked `PocketNodeNetwork`
-scheme talks to real testnet peers and is intentionally not run in CI.
+scheme on a simulator resolved at run time — unit tests and the offline UI
+tests (`OnboardingUITests`, `WalletShellUITests`) together. The networked
+`PocketNodeNetwork` scheme talks to real testnet peers and is intentionally
+not run in CI.
