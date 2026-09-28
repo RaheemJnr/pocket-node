@@ -70,6 +70,15 @@ class AuthViewModel @Inject constructor(
         _uiState.update { it.copy(authSuccess = true) }
     }
 
+    /**
+     * Marks a success as used, so it cannot unlock a later re-auth lock
+     * (#524). The overlay calls this when it unlocks and when a new lock
+     * session starts.
+     */
+    fun consumeAuthSuccess() {
+        _uiState.update { it.copy(authSuccess = false) }
+    }
+
     fun onBiometricFailed(errorMessage: String) {
         _uiState.update { it.copy(error = UiMessage.Raw(errorMessage)) }
     }
