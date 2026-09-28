@@ -40,6 +40,19 @@ class ReauthLockPolicyTest {
             Bundle().also {
                 policy.onSaveInstanceState(it, routes, hasWallet = true, hasPin = true, changingConfig)
             }
+
+        /**
+         * The real teardown order on API 28+: onStop, then
+         * onSaveInstanceState, both seeing the same isChangingConfigurations.
+         */
+        fun stopAndSave(routes: List<String>, changingConfig: Boolean): Bundle {
+            policy.onStop(routes, hasWallet = true, hasPin = true, isChangingConfigurations = changingConfig)
+            return save(routes, changingConfig)
+        }
+
+        fun restoreFrom(saved: Bundle): Activity = Activity().also {
+            it.policy.onRestore(saved, hasWallet = true, hasPin = true)
+        }
     }
 
     private val main = listOf(Screen.Main.route)
@@ -50,7 +63,7 @@ class ReauthLockPolicyTest {
     @Test
     fun `onStop on an ordinary screen locks`() {
         val a = Activity()
-        a.policy.onStop(main, hasWallet = true, hasPin = true)
+        a.policy.onStop(main, hasWallet = true, hasPin = true, isChangingConfigurations = false)
         assertTrue(a.gate.locked)
         assertEquals(1, newLocks)
     }
@@ -58,15 +71,18 @@ class ReauthLockPolicyTest {
     @Test
     fun `onStop on a PinEntry that confirms a Send locks (NEW-1)`() {
         val a = Activity()
-        a.policy.onStop(sendPin, hasWallet = true, hasPin = true)
+        a.policy.onStop(sendPin, hasWallet = true, hasPin = true, isChangingConfigurations = false)
         assertTrue(a.gate.locked)
     }
 
     @Test
     fun `onStop in the cold-start flow does not lock (S2)`() {
         val a = Activity()
-        a.policy.onStop(listOf(Screen.Auth.route), hasWallet = true, hasPin = true)
-        a.policy.onStop(listOf(Screen.Auth.route, Screen.PinEntry.route), hasWallet = true, hasPin = true)
+        a.policy.onStop(listOf(Screen.Auth.route), hasWallet = true, hasPin = true, isChangingConfigurations = false)
+        a.policy.onStop(
+            listOf(Screen.Auth.route, Screen.PinEntry.route),
+            hasWallet = true, hasPin = true, isChangingConfigurations = false,
+        )
         assertFalse(a.gate.locked)
     }
 
@@ -75,7 +91,7 @@ class ReauthLockPolicyTest {
         val a = Activity()
         a.policy.onStop(
             listOf(Screen.Auth.route, Screen.PinEntry.route, Screen.ForgotPin.route),
-            hasWallet = true, hasPin = true,
+            hasWallet = true, hasPin = true, isChangingConfigurations = false,
         )
         assertFalse(a.gate.locked)
     }
@@ -83,8 +99,8 @@ class ReauthLockPolicyTest {
     @Test
     fun `onStop without a wallet or a PIN does not lock`() {
         val a = Activity()
-        a.policy.onStop(main, hasWallet = false, hasPin = true)
-        a.policy.onStop(main, hasWallet = true, hasPin = false)
+        a.policy.onStop(main, hasWallet = false, hasPin = true, isChangingConfigurations = false)
+        a.policy.onStop(main, hasWallet = true, hasPin = false, isChangingConfigurations = false)
         assertFalse(a.gate.locked)
     }
 
@@ -117,7 +133,7 @@ class ReauthLockPolicyTest {
     @Test
     fun `a saved lock restores locked with its session, even in an unlocked process`() {
         val a = Activity()
-        a.policy.onStop(main, hasWallet = true, hasPin = true)
+        a.policy.onStop(main, hasWallet = true, hasPin = true, isChangingConfigurations = false)
         process.unlocked = true
         val saved = a.save(main)
         val locksBefore = newLocks
@@ -144,15 +160,58 @@ class ReauthLockPolicyTest {
     @Test
     fun `an unlock sets the process flag, so a later rotation restores unlocked`() {
         val a = Activity()
-        a.policy.onStop(main, hasWallet = true, hasPin = true)
+        a.policy.onStop(main, hasWallet = true, hasPin = true, isChangingConfigurations = false)
         a.policy.onUnlocked(a.gate.session)
         assertFalse(a.gate.locked)
         assertTrue(process.unlocked)
 
-        val b = Activity()
-        b.policy.onRestore(a.save(main, changingConfig = true), hasWallet = true, hasPin = true)
+        val b = a.restoreFrom(a.stopAndSave(main, changingConfig = true))
 
         assertFalse(b.gate.locked)
+    }
+
+    // --- configuration changes (R3-1), in the real lifecycle order ---
+
+    @Test
+    fun `a configuration change while unlocked stays unlocked in the same session`() {
+        process.unlocked = true
+        val a = Activity()
+        val session = a.gate.session
+
+        val b = a.restoreFrom(a.stopAndSave(main, changingConfig = true))
+
+        assertFalse(a.gate.locked)
+        assertFalse(b.gate.locked)
+        assertEquals(session, b.gate.session)
+        assertEquals(0, newLocks)
+    }
+
+    @Test
+    fun `a configuration change on the lock screen keeps the same session and its store`() {
+        process.unlocked = true
+        val a = Activity()
+        a.policy.onStop(main, hasWallet = true, hasPin = true, isChangingConfigurations = false)
+        val session = a.gate.session
+        val locksBefore = newLocks
+
+        val b = a.restoreFrom(a.stopAndSave(main, changingConfig = true))
+
+        assertTrue(b.gate.locked)
+        assertEquals(session, b.gate.session)
+        // No new lock: the session's ViewModel store was not cleared.
+        assertEquals(locksBefore, newLocks)
+    }
+
+    @Test
+    fun `a real trip to the background still locks, in the same order`() {
+        process.unlocked = true
+        val a = Activity()
+
+        val b = a.restoreFrom(a.stopAndSave(main, changingConfig = false))
+
+        assertTrue(a.gate.locked)
+        assertTrue(b.gate.locked)
+        assertEquals(1, newLocks)
     }
 
     @Test
@@ -196,9 +255,9 @@ class ReauthLockPolicyTest {
     @Test
     fun `a success from an older session keeps the lock and clears the session PIN`() {
         val a = Activity()
-        a.policy.onStop(main, hasWallet = true, hasPin = true)
+        a.policy.onStop(main, hasWallet = true, hasPin = true, isChangingConfigurations = false)
         val first = a.gate.session
-        a.policy.onStop(main, hasWallet = true, hasPin = true)
+        a.policy.onStop(main, hasWallet = true, hasPin = true, isChangingConfigurations = false)
 
         a.policy.onUnlocked(first)
 
@@ -210,7 +269,7 @@ class ReauthLockPolicyTest {
     @Test
     fun `a duplicate success after a genuine unlock does not clear the session PIN`() {
         val a = Activity()
-        a.policy.onStop(main, hasWallet = true, hasPin = true)
+        a.policy.onStop(main, hasWallet = true, hasPin = true, isChangingConfigurations = false)
         a.policy.onUnlocked(a.gate.session)
         a.policy.onUnlocked(a.gate.session)
         assertEquals(0, secretsCleared)

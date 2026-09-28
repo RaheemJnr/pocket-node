@@ -159,7 +159,9 @@ class ReauthOverlayTest {
     /** Background the app on an ordinary screen (MainActivity.onStop). */
     private fun lock() {
         rule.runOnUiThread {
-            policy.onStop(listOf(Screen.Main.route), hasWallet = true, hasPin = true)
+            policy.onStop(
+                listOf(Screen.Main.route), hasWallet = true, hasPin = true, isChangingConfigurations = false,
+            )
         }
         rule.waitForIdle()
     }
