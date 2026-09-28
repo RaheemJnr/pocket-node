@@ -13,6 +13,10 @@ concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
+env:
+  CARGO_AUDIT_VERSION: "0.22.2"
+
+
 jobs:
   changes:
     runs-on: ubuntu-latest
@@ -54,16 +58,18 @@ jobs:
           key: cargo-audit-db-${{ hashFiles('external/ckb-light-client/Cargo.lock') }}
           restore-keys: cargo-audit-db-
 
+      # Pinned so the cached binary is tied to a known version; bump
+      # CARGO_AUDIT_VERSION to pick up cargo-audit fixes (the cache key follows).
       - name: Cache cargo-audit binary
         id: cache-audit-bin
         uses: actions/cache@v4
         with:
           path: ~/.cargo/bin/cargo-audit
-          key: cargo-audit-bin-${{ runner.os }}-1
+          key: cargo-audit-bin-${{ runner.os }}-${{ env.CARGO_AUDIT_VERSION }}
 
       - name: Install cargo-audit
         if: steps.cache-audit-bin.outputs.cache-hit != 'true'
-        run: cargo install cargo-audit --locked
+        run: cargo install cargo-audit --version "${CARGO_AUDIT_VERSION}" --locked
 
       - name: cargo audit
         working-directory: external/ckb-light-client
