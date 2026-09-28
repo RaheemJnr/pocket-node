@@ -30,6 +30,7 @@ import com.rjnr.pocketnode.ui.components.MnemonicWordInput
 import com.rjnr.pocketnode.ui.components.SyncOptionsSheet
 import com.rjnr.pocketnode.ui.util.Bip39WordList
 import dagger.hilt.android.lifecycle.HiltViewModel
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -47,6 +48,8 @@ data class MnemonicImportUiState(
     val importSuccess: Boolean = false,
     val showPrivateKeyDialog: Boolean = false,
     val showSyncModeDialog: Boolean = false,
+    /** #431: an Apply from the sync sheet is in flight; see onSyncModeSelected. */
+    val isApplyingSyncChoice: Boolean = false,
     val tipBlockNumber: Long = 0L,
     val error: String? = null
 )
@@ -256,24 +259,42 @@ class MnemonicImportViewModel @Inject constructor(
     }
 
     fun onSyncModeSelected(mode: SyncMode, customHeight: Long?) {
+        // Ignore a second Apply tap while the first resync is in flight.
+        if (_uiState.value.isApplyingSyncChoice) return
+        _uiState.update { it.copy(isApplyingSyncChoice = true) }
         viewModelScope.launch {
-            try {
-                // #431: apply unconditionally, including RECENT. The old
-                // `if (mode != RECENT)` short-circuit assumed RECENT was
-                // already registered, but the wallet may have imported with
-                // a different default (or the user is switching back to
-                // RECENT from another pick in this same sheet), skipping
-                // the call silently dropped the choice.
-                repository.resyncAccount(mode, customHeight)
-                _uiState.update { it.copy(showSyncModeDialog = false, importSuccess = true) }
+            // #431: apply unconditionally, including RECENT. The old
+            // `if (mode != RECENT)` short-circuit assumed RECENT was
+            // already registered, but the wallet may have imported with
+            // a different default (or the user is switching back to
+            // RECENT from another pick in this same sheet), skipping
+            // the call silently dropped the choice.
+            // resyncAccount reports failure through its Result; the catch is
+            // a backstop so an unexpected throw still clears the in-flight flag.
+            val failure = try {
+                repository.resyncAccount(mode, customHeight).exceptionOrNull()
+            } catch (e: CancellationException) {
+                throw e
             } catch (e: Exception) {
-                // Still proceed with import, resync can be retried from Settings
-                _uiState.update { it.copy(showSyncModeDialog = false, importSuccess = true, error = "Sync mode change failed: ${e.message}") }
+                e
+            }
+            if (failure == null) {
+                _uiState.update {
+                    it.copy(isApplyingSyncChoice = false, showSyncModeDialog = false, importSuccess = true)
+                }
+            } else {
+                // Keep the sheet open so the user can retry or dismiss
+                // (dismiss keeps the RECENT default from import).
+                logger.e(TAG, "Post-import sync mode change failed", failure)
+                _uiState.update {
+                    it.copy(isApplyingSyncChoice = false, error = "Sync mode change failed: ${failure.message}")
+                }
             }
         }
     }
 
     fun skipSyncSelection() {
+        if (_uiState.value.isApplyingSyncChoice) return
         _uiState.update { it.copy(showSyncModeDialog = false, importSuccess = true) }
     }
 
@@ -348,7 +369,8 @@ fun MnemonicImportScreen(
             // this constrained context, so we suppress the affordance entirely.
             onTopicHelp = {},
             showHelpIcons = false,
-            tipBlockNumber = uiState.tipBlockNumber
+            tipBlockNumber = uiState.tipBlockNumber,
+            isApplying = uiState.isApplyingSyncChoice,
         )
     }
 

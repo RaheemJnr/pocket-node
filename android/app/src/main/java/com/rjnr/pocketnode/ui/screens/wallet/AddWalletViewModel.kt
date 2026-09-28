@@ -17,6 +17,7 @@ import com.rjnr.pocketnode.data.wallet.WalletRepository
 import com.rjnr.pocketnode.ui.util.Bip39WordList
 import com.rjnr.pocketnode.ui.util.UiMessage
 import dagger.hilt.android.lifecycle.HiltViewModel
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -44,6 +45,9 @@ data class AddWalletUiState(
      * or raw-key import (not after creating a fresh wallet or sub-account,
      * which already default correctly to NEW_WALLET / the parent's window). */
     val showSyncModeDialog: Boolean = false,
+    /** #431: an Apply from the sync sheet is in flight; the sheet disables
+     * its buttons and further submissions are ignored until it resolves. */
+    val isApplyingSyncChoice: Boolean = false,
     val tipBlockNumber: Long = 0L,
 )
 
@@ -174,20 +178,49 @@ class AddWalletViewModel @Inject constructor(
      * default, so short-circuiting RECENT can silently drop the choice.
      */
     fun onSyncModeSelected(mode: SyncMode, customHeight: Long?) {
+        // A second Apply tap while the first is in flight must not launch a
+        // second resync: each would publish createdWallet, and a later one
+        // could publish null over the first and strand navigation.
+        if (_uiState.value.isApplyingSyncChoice) return
+        val wallet = pendingImportedWallet ?: return
+        _uiState.update { it.copy(isApplyingSyncChoice = true) }
         viewModelScope.launch {
-            try {
-                gatewayRepository.resyncAccount(mode, customHeight)
+            // resyncAccount reports failure through its Result; the catch is
+            // a backstop so an unexpected throw still clears the in-flight
+            // flag instead of leaving Apply disabled for good.
+            val failure = try {
+                gatewayRepository.resyncAccount(mode, customHeight).exceptionOrNull()
+            } catch (e: CancellationException) {
+                throw e
             } catch (e: Exception) {
-                logger.e(TAG, "Post-import sync mode change failed", e)
+                e
             }
-            val wallet = pendingImportedWallet
-            pendingImportedWallet = null
-            _uiState.update { it.copy(showSyncModeDialog = false, createdWallet = wallet) }
+            if (failure == null) {
+                pendingImportedWallet = null
+                _uiState.update {
+                    it.copy(isApplyingSyncChoice = false, showSyncModeDialog = false, createdWallet = wallet)
+                }
+            } else {
+                // Keep the sheet open and the wallet pending so the user can
+                // retry or dismiss; the mode was not applied.
+                logger.e(TAG, "Post-import sync mode change failed", failure)
+                _uiState.update {
+                    it.copy(
+                        isApplyingSyncChoice = false,
+                        error = UiMessage.Resource(
+                            R.string.vm_error_sync_mode_change_failed,
+                            listOf(failure.message ?: ""),
+                        ),
+                    )
+                }
+            }
         }
     }
 
     /** Dismissing the sheet leaves the RECENT default from import in place. */
     fun skipSyncSelection() {
+        // An Apply in flight owns the pending wallet and publishes it itself.
+        if (_uiState.value.isApplyingSyncChoice) return
         val wallet = pendingImportedWallet
         pendingImportedWallet = null
         _uiState.update { it.copy(showSyncModeDialog = false, createdWallet = wallet) }

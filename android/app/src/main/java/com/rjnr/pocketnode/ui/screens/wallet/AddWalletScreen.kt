@@ -141,6 +141,7 @@ fun AddWalletScreen(
             onTopicHelp = {},
             showHelpIcons = false,
             tipBlockNumber = uiState.tipBlockNumber,
+            isApplying = uiState.isApplyingSyncChoice,
         )
     }
 

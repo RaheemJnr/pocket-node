@@ -75,6 +75,8 @@ internal fun SyncOptionsSheet(
     tipBlockNumber: Long = 0L,
     onLookupAddressOnExplorer: (() -> Unit)? = null,
     showHelpIcons: Boolean = true,
+    /** An Apply is in flight: both buttons disable so a double tap cannot resubmit (#431). */
+    isApplying: Boolean = false,
 ) {
     val initialMode = remember(currentMode, availableModes) {
         currentMode.takeIf { it in availableModes } ?: availableModes.firstOrNull() ?: currentMode
@@ -203,7 +205,7 @@ internal fun SyncOptionsSheet(
                 modifier = Modifier.fillMaxWidth(),
                 horizontalArrangement = Arrangement.End,
             ) {
-                TextButton(onClick = onDismiss) {
+                TextButton(onClick = onDismiss, enabled = !isApplying) {
                     Text(stringResource(R.string.common_cancel))
                 }
                 Spacer(Modifier.width(8.dp))
@@ -214,8 +216,8 @@ internal fun SyncOptionsSheet(
                         val custom = if (selectedMode == SyncMode.CUSTOM) parsedHeight else null
                         onSelectMode(selectedMode, custom)
                     },
-                    enabled = selectedMode != SyncMode.CUSTOM ||
-                        (parsedHeight != null && parsedHeight > 0 && withinTip),
+                    enabled = !isApplying && (selectedMode != SyncMode.CUSTOM ||
+                        (parsedHeight != null && parsedHeight > 0 && withinTip)),
                     modifier = Modifier.uaTestTag("sync-sheet-apply"),
                 ) {
                     Text(stringResource(R.string.common_apply))
