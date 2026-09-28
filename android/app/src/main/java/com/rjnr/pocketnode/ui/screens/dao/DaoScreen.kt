@@ -10,6 +10,7 @@ import androidx.compose.material.icons.filled.Lock
 import androidx.compose.material3.*
 import androidx.compose.material3.pulltorefresh.PullToRefreshBox
 import androidx.compose.runtime.*
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
@@ -46,10 +47,19 @@ fun DaoScreen(
     val availableBalance by viewModel.availableBalance.collectAsState()
     val networkType by viewModel.networkType.collectAsState()
     val snackbarHostState = remember { SnackbarHostState() }
-    var showDepositSheet by remember { mutableStateOf(false) }
+    // #524: the open deposit sheet and the withdraw / unlock confirmations
+    // survive the re-auth lock and rotation. Targets are saved by out point
+    // and read from the current deposits, so a spent one closes.
+    var showDepositSheet by rememberSaveable { mutableStateOf(false) }
     var showDeepRescanConfirm by remember { mutableStateOf(false) }
-    var withdrawTarget by remember { mutableStateOf<DaoDeposit?>(null) }
-    var unlockTarget by remember { mutableStateOf<DaoDeposit?>(null) }
+    var withdrawTargetKey by rememberSaveable { mutableStateOf<String?>(null) }
+    var unlockTargetKey by rememberSaveable { mutableStateOf<String?>(null) }
+    fun DaoDeposit.key() = "${outPoint.txHash}:${outPoint.index}"
+    fun depositFor(key: String?): DaoDeposit? = key?.let { k ->
+        (uiState.activeDeposits + uiState.completedDeposits).firstOrNull { it.key() == k }
+    }
+    val withdrawTarget = depositFor(withdrawTargetKey)
+    val unlockTarget = depositFor(unlockTargetKey)
     val context = LocalContext.current
 
     // Captured here so the non-@Composable LaunchedEffect callback below
@@ -230,8 +240,8 @@ fun DaoScreen(
                     items(deposits, key = { "${it.outPoint.txHash}:${it.outPoint.index}" }) { deposit ->
                         DaoDepositCard(
                             deposit = deposit,
-                            onWithdraw = { withdrawTarget = deposit },
-                            onUnlock = { unlockTarget = deposit }
+                            onWithdraw = { withdrawTargetKey = deposit.key() },
+                            onUnlock = { unlockTargetKey = deposit.key() }
                         )
                     }
                 }
@@ -343,7 +353,7 @@ fun DaoScreen(
     // Withdraw confirmation
     withdrawTarget?.let { deposit ->
         AlertDialog(
-            onDismissRequest = { withdrawTarget = null },
+            onDismissRequest = { withdrawTargetKey = null },
             title = { Text(stringResource(R.string.dao_withdraw_title)) },
             text = {
                 Column {
@@ -362,13 +372,13 @@ fun DaoScreen(
                     val activity = context as? FragmentActivity
                     if (activity != null) viewModel.withdrawWithActivity(activity, deposit)
                     else viewModel.withdraw(deposit)
-                    withdrawTarget = null
+                    withdrawTargetKey = null
                 }) {
                     Text(stringResource(R.string.dao_withdraw_confirm))
                 }
             },
             dismissButton = {
-                TextButton(onClick = { withdrawTarget = null }) {
+                TextButton(onClick = { withdrawTargetKey = null }) {
                     Text(stringResource(R.string.dao_withdraw_cancel))
                 }
             }
@@ -379,7 +389,7 @@ fun DaoScreen(
     unlockTarget?.let { deposit ->
         val totalReceived = deposit.capacity + deposit.compensation
         AlertDialog(
-            onDismissRequest = { unlockTarget = null },
+            onDismissRequest = { unlockTargetKey = null },
             title = { Text(stringResource(R.string.dao_unlock_title)) },
             text = {
                 Column {
@@ -394,13 +404,13 @@ fun DaoScreen(
                     val activity = context as? FragmentActivity
                     if (activity != null) viewModel.unlockWithActivity(activity, deposit)
                     else viewModel.unlock(deposit)
-                    unlockTarget = null
+                    unlockTargetKey = null
                 }) {
                     Text(stringResource(R.string.dao_unlock_confirm))
                 }
             },
             dismissButton = {
-                TextButton(onClick = { unlockTarget = null }) {
+                TextButton(onClick = { unlockTargetKey = null }) {
                     Text(stringResource(R.string.dao_unlock_cancel))
                 }
             }
