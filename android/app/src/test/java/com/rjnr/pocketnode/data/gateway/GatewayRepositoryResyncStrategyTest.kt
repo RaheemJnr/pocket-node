@@ -285,6 +285,55 @@ class GatewayRepositoryResyncStrategyTest {
         assertEquals(ACTIVE_PROGRESS, repository.getWalletSyncBlock(ACTIVE))
     }
 
+    /**
+     * Codex on ddd6609: registration can wait seconds for the tip while the
+     * user switches wallets. The rollback must target the wallet the resync
+     * was started for, not whichever wallet is active when it fails.
+     */
+    @Test
+    fun `a failed resync rolls back the initiating wallet even if the active wallet changed mid-registration`() =
+        runBlocking {
+            walletPreferences.setSyncStrategy(SyncStrategy.ALL_WALLETS)
+            val other = db.walletDao().getById(OTHER)!!
+            bridge.setScriptsReturn = false
+            // One-shot: the switch's own registration reads the tip too.
+            bridge.onTipRead = {
+                bridge.onTipRead = {}
+                runCatching { repository.onActiveWalletChanged(other) }
+            }
+
+            assertTrue(repository.resyncAccount(SyncMode.CUSTOM, CUSTOM_HEIGHT).isFailure)
+
+            assertEquals(ACTIVE_PROGRESS, repository.getWalletSyncBlock(ACTIVE))
+            assertEquals(SyncMode.RECENT, walletPreferences.getSyncModeOrNull(walletId = ACTIVE))
+            assertEquals(null, walletPreferences.getCustomBlockHeight(walletId = ACTIVE))
+            assertEquals("other wallet's progress untouched", OTHER_PROGRESS, repository.getWalletSyncBlock(OTHER))
+            assertEquals(SyncMode.RECENT, walletPreferences.getSyncModeOrNull(walletId = OTHER))
+            assertEquals(null, walletPreferences.getCustomBlockHeight(walletId = OTHER))
+        }
+
+    @Test
+    fun `ACTIVE_ONLY resync fails rather than apply its mode to a wallet switched to mid-registration`() =
+        runBlocking {
+            walletPreferences.setSyncStrategy(SyncStrategy.ACTIVE_ONLY)
+            val other = db.walletDao().getById(OTHER)!!
+            var switched = false
+            coEvery { nodeLifecycle.awaitNodeReady() } coAnswers {
+                if (!switched) {
+                    switched = true
+                    repository.onActiveWalletChanged(other)
+                }
+                true
+            }
+
+            val result = repository.resyncAccount(SyncMode.CUSTOM, CUSTOM_HEIGHT)
+
+            assertEquals("Active wallet changed during registration", result.exceptionOrNull()?.message)
+            assertEquals(SyncMode.RECENT, walletPreferences.getSyncModeOrNull(walletId = OTHER))
+            assertEquals(null, walletPreferences.getCustomBlockHeight(walletId = OTHER))
+            assertNotEquals(SyncMode.CUSTOM, walletPreferences.getSyncMode(walletId = ACTIVE))
+        }
+
     /** Review N2: the concurrency cap keeps the active wallet even when others are more recent. */
     @Test
     fun `the wallet cap never drops the active wallet`() = runBlocking {
