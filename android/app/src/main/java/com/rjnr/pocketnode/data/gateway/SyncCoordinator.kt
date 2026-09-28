@@ -524,7 +524,8 @@ class SyncCoordinator @Inject constructor(
             .sortedByDescending { it.walletId == ctx.activeWalletId }
             .take(MAX_CONCURRENT_WALLET_SCRIPTS)
         if (candidateWallets.size > wallets.size) {
-            val droppedIds = candidateWallets.drop(wallets.size).map { it.walletId }
+            val keptIds = wallets.map { it.walletId }.toSet()
+            val droppedIds = candidateWallets.map { it.walletId }.filterNot { it in keptIds }
             logger.i(
                 TAG,
                 "${strategy.name}: syncing top-${wallets.size} of ${candidateWallets.size} wallets " +
