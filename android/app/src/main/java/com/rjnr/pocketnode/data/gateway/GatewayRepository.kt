@@ -581,7 +581,36 @@ class GatewayRepository @Inject constructor(
         // deliberately asking us to look again (knmo).
         walletPreferences.clearZeroCellRescanDone(activeWalletId)
         balanceRescanAttempted.remove(activeWalletId)
-        return registerAccount(syncMode, customBlockHeight, savePreference = true, forceResync = true)
+        return when (walletPreferences.getSyncStrategy()) {
+            // registerAccount issues CMD_SET_SCRIPTS_ALL with only the active
+            // wallet's scripts, which under ALL_WALLETS / BALANCED unregistered
+            // every other wallet on each sync-mode change (#431). Re-register
+            // the whole set instead, the same way registerAccountWithStrategy
+            // does: persist the new mode first (the coordinator reads it to
+            // compute the start block), then register all wallets.
+            SyncStrategy.ALL_WALLETS, SyncStrategy.BALANCED -> runCatching {
+                val wId = activeWalletId.ifEmpty { null }
+                walletPreferences.setSyncMode(syncMode, walletId = wId)
+                if (syncMode == SyncMode.CUSTOM) {
+                    walletPreferences.setCustomBlockHeight(customBlockHeight, walletId = wId)
+                }
+                walletPreferences.setInitialSyncCompleted(true, walletId = wId)
+                // forceResync for the active wallet only: its saved progress
+                // reads as 0 so it restarts from the new mode's start block,
+                // even if the sync poll re-saved the old progress between the
+                // reset above and the registration. Other wallets resume.
+                val resyncWalletId = activeWalletId
+                syncCoordinator.registerAllWalletScripts(
+                    ctx = makeSyncContext().copy(
+                        getWalletSyncBlock = { walletId ->
+                            if (walletId == resyncWalletId) 0L else getWalletSyncBlock(walletId)
+                        },
+                    ),
+                )
+            }
+            SyncStrategy.ACTIVE_ONLY ->
+                registerAccount(syncMode, customBlockHeight, savePreference = true, forceResync = true)
+        }
     }
 
     /**
