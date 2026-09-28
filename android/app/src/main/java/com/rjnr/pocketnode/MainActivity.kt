@@ -3,6 +3,7 @@ package com.rjnr.pocketnode
 import android.os.Bundle
 import android.util.Log
 import androidx.activity.compose.setContent
+import androidx.activity.viewModels
 import androidx.activity.enableEdgeToEdge
 import com.rjnr.pocketnode.core.log.Logger
 import androidx.compose.foundation.layout.fillMaxSize
@@ -19,7 +20,6 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.ui.Modifier
 import androidx.fragment.app.FragmentActivity
 import androidx.navigation.NavHostController
-import androidx.navigation.compose.rememberNavController
 import com.rjnr.pocketnode.data.auth.AuthManager
 import com.rjnr.pocketnode.data.auth.PinManager
 import com.rjnr.pocketnode.data.gateway.GatewayRepository
@@ -33,6 +33,8 @@ import com.rjnr.pocketnode.data.wallet.WalletRepository
 import com.rjnr.pocketnode.ui.screens.auth.ReauthGate
 import com.rjnr.pocketnode.ui.screens.auth.ReauthGateHost
 import com.rjnr.pocketnode.ui.screens.auth.ReauthOverlay
+import com.rjnr.pocketnode.ui.screens.auth.ReauthSessionStore
+import com.rjnr.pocketnode.ui.navigation.rememberLockSafeNavController
 import com.rjnr.pocketnode.ui.theme.CkbWalletTheme
 import com.rjnr.pocketnode.ui.util.LocalWindowSizeClass
 import dagger.hilt.android.AndroidEntryPoint
@@ -77,8 +79,23 @@ class MainActivity : FragmentActivity() {
     // frame.
     private val reauthGate = ReauthGate(mutableStateOf(false), mutableIntStateOf(0))
 
+    // The lock screen's ViewModels, one store per lock session.
+    private val reauthSessionStore: ReauthSessionStore by viewModels()
+
+    private val reauthPolicy by lazy {
+        ReauthLockPolicy(
+            gate = reauthGate,
+            process = processUnlockState,
+            onNewLock = { reauthSessionStore.clearAll() },
+            clearSessionSecrets = {
+                authManager.clearSession()
+                keyManager.clearSessionPin()
+            },
+        )
+    }
+
     // Set on first composition; read in onStop/onSaveInstanceState for the
-    // current route. Until then, [initialRoute] stands in on a fresh start.
+    // back stack. Until then, [initialRoute] stands in on a fresh start.
     private var navController: NavHostController? = null
     private var initialRoute: String? = null
 
@@ -152,32 +169,12 @@ class MainActivity : FragmentActivity() {
             route
         }
 
-        // #524: a start with nothing to unlock (onboarding, first PIN setup)
-        // counts as unlocked for this process.
+        // #524: see ReauthLockPolicy.
         if (savedInstanceState == null) {
             initialRoute = startDestination
-            if (startDestination == Screen.Onboarding.route ||
-                startDestination == Screen.InitialPinSetup.route
-            ) {
-                unlockedThisProcess = true
-            }
+            reauthPolicy.onColdStart(startDestination)
         } else {
-            val savedLocked = savedInstanceState.getBoolean(KEY_REAUTH_LOCKED)
-            val startLocked = shouldStartLocked(
-                savedLocked = savedLocked,
-                savedOnAuthRoute = savedInstanceState.getBoolean(KEY_REAUTH_ON_AUTH_ROUTE),
-                unlockedThisProcess = unlockedThisProcess,
-                hasWallet = cachedHasWallet,
-                hasPin = pinManager.hasPin(),
-            )
-            // A lock carried over (e.g. a rotation on the lock screen) keeps
-            // its session, so the lock screen's own state survives; a new
-            // lock starts a new session.
-            reauthGate.restore(
-                session = savedInstanceState.getInt(KEY_REAUTH_SESSION),
-                locked = startLocked && savedLocked,
-            )
-            if (startLocked && !savedLocked) reauthGate.lock()
+            reauthPolicy.onRestore(savedInstanceState, cachedHasWallet, pinManager.hasPin())
         }
 
         setContent {
@@ -190,7 +187,8 @@ class MainActivity : FragmentActivity() {
                     modifier = Modifier.fillMaxSize(),
                     color = MaterialTheme.colorScheme.background
                 ) {
-                    val navController = rememberNavController()
+                    // Keeps a restored back stack while the lock hides the graph.
+                    val navController = rememberLockSafeNavController()
                     SideEffect { this@MainActivity.navController = navController }
 
                     // While locked the nav graph is not composed at all (see
@@ -206,15 +204,14 @@ class MainActivity : FragmentActivity() {
                                 needsMnemonicBackup = {
                                     runBlocking { repository.needsMnemonicBackup() }
                                 },
-                                onAuthUnlocked = { unlockedThisProcess = true },
+                                onAuthUnlocked = { reauthPolicy.onColdStartAuthUnlocked() },
                             )
                         },
                         overlay = {
                             ReauthOverlay(
                                 session = reauthGate.session,
-                                onUnlocked = { session ->
-                                    if (reauthGate.unlock(session)) unlockedThisProcess = true
-                                },
+                                sessionStore = reauthSessionStore,
+                                onUnlocked = { session -> reauthPolicy.onUnlocked(session) },
                                 // Back on the lock screen leaves the app
                                 // without finishing the activity, so the
                                 // screen underneath is kept for the unlock.
@@ -251,8 +248,9 @@ class MainActivity : FragmentActivity() {
         // onCreate) is still stale here (Codex #428 P1). No-op on FGS builds.
         syncWorkScheduler.enqueueBackgroundCatchUp()
         // Use cached value — avoids blocking main thread on every onStop
-        if (cachedHasWallet && pinManager.hasPin()) {
-            if (!routeSkipsLock(currentRoute())) reauthGate.lock()
+        val hasPin = pinManager.hasPin()
+        reauthPolicy.onStop(backStackRoutes(), cachedHasWallet, hasPin)
+        if (cachedHasWallet && hasPin) {
             // Wipe the cached session PIN when the app backgrounds so the next
             // foregrounding forces a fresh unlock before any PIN-gated action.
             authManager.clearSession()
@@ -261,61 +259,22 @@ class MainActivity : FragmentActivity() {
     }
 
     override fun onSaveInstanceState(outState: Bundle) {
-        // API 26-27 save state before onStop, so lock here too: a process
-        // killed in the background must not restore unlocked.
-        if (!isChangingConfigurations && cachedHasWallet && pinManager.hasPin() &&
-            !routeSkipsLock(currentRoute())
-        ) {
-            reauthGate.lock()
-        }
-        outState.putBoolean(KEY_REAUTH_LOCKED, reauthGate.locked)
-        outState.putInt(KEY_REAUTH_SESSION, reauthGate.session)
-        outState.putBoolean(KEY_REAUTH_ON_AUTH_ROUTE, isOnColdStartAuthRoute())
+        reauthPolicy.onSaveInstanceState(
+            outState = outState,
+            backStackRoutes = backStackRoutes(),
+            hasWallet = cachedHasWallet,
+            hasPin = pinManager.hasPin(),
+            isChangingConfigurations = isChangingConfigurations,
+        )
         super.onSaveInstanceState(outState)
     }
 
-    private fun currentRoute(): String? =
-        navController?.currentBackStackEntry?.destination?.route ?: initialRoute
-
-    // The cold-start Auth route is still on the back stack: the user has not
-    // passed it yet, and it is itself a lock (a successful unlock pops it).
-    private fun isOnColdStartAuthRoute(): Boolean {
-        val controller = navController ?: return initialRoute == Screen.Auth.route
-        return runCatching { controller.getBackStackEntry(Screen.Auth.route) }.isSuccess
+    private fun backStackRoutes(): List<String> {
+        val controller = navController ?: return listOfNotNull(initialRoute)
+        return controller.currentBackStack.value.mapNotNull { it.destination.route }
     }
 
     companion object {
-        private const val KEY_REAUTH_LOCKED = "reauth_locked"
-        private const val KEY_REAUTH_SESSION = "reauth_session"
-        private const val KEY_REAUTH_ON_AUTH_ROUTE = "reauth_on_auth_route"
-
-        /**
-         * True once this process has passed a lock (or started with nothing
-         * to unlock). A recreated activity in a process where this is still
-         * false, e.g. restored after process death, starts locked (#524).
-         */
-        @Volatile
-        private var unlockedThisProcess = false
-
-        /**
-         * Backgrounding on the Auth or PinEntry route does not lock: those
-         * screens already ask for the credential (the pre-#524 rule).
-         */
-        internal fun routeSkipsLock(route: String?): Boolean =
-            route == Screen.Auth.route || route == Screen.PinEntry.route
-
-        /**
-         * Whether a recreated activity starts locked: it was locked when
-         * saved, or this process has not been unlocked and the saved screen
-         * was not the cold-start Auth route (which asks by itself).
-         */
-        internal fun shouldStartLocked(
-            savedLocked: Boolean,
-            savedOnAuthRoute: Boolean,
-            unlockedThisProcess: Boolean,
-            hasWallet: Boolean,
-            hasPin: Boolean,
-        ): Boolean = hasWallet && hasPin &&
-            (savedLocked || (!unlockedThisProcess && !savedOnAuthRoute))
+        private val processUnlockState = ProcessUnlockState()
     }
 }
