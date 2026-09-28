@@ -1,30 +1,17 @@
 # gitleaks config for Pocket Node. Extends the built-in default ruleset
-# (generic-api-key, private-key blocks, cloud provider keys, etc.) rather than
-# replacing it.
+# (generic-api-key, private-key blocks, cloud provider keys, etc.).
 #
-# The allowlist below is scoped to test source sets and recorded test
-# fixtures only: BIP-39/BIP-32 test vectors, hardcoded dummy private keys used
-# in unit tests, and mock chain-state fixtures. It does not cover app/main
-# source, CI config, gradle files, scripts, server/, or docs: a finding there
-# is reported, not allowlisted (see the CI workflow's supply-chain docs).
-#
-# Historical commits touching these same paths are covered by the path match
-# itself (gitleaks matches per-commit file path, not just the current tree),
-# so no .gitleaksignore fingerprints are needed today. See .gitleaksignore
-# for how to add one if a future rename or a one-off historical false
-# positive needs it instead of widening this file.
+# There is no directory-wide allowlist: a new credential pasted into any file,
+# test sources included, is reported. Known test fixtures (BIP-39/BIP-32
+# vectors, dummy keys, the KeyBackupCompatibilityTest blob, dummy_pow.toml)
+# and two reviewed false positives are listed by exact fingerprint in
+# .gitleaksignore, so each new one has to be reviewed and added on purpose.
 
 [extend]
 useDefault = true
 
 [allowlist]
-description = "Test source sets and recorded test fixtures: BIP-39/BIP-32 vectors and dummy keys, not real secrets"
+description = "The ignore file itself holds fingerprints that look like keys"
 paths = [
-    '''^android/app/src/test/java/com/rjnr/pocketnode/data/crypto/KeyBackupCompatibilityTest\.kt$''',
-    '''^android/app/src/test/.*''',
-    '''^android/app/src/androidTest/.*''',
-    '''^android/shared/src/commonTest/.*''',
-    '''^android/shared/src/androidHostTest/.*''',
-    '''^ios/PocketNodeTests/.*''',
-    '''^external/ckb-light-client/light-client-lib/src/tests/.*''',
+    '''^\.gitleaksignore$''',
 ]

@@ -4,9 +4,6 @@
 # one-off historical false positive falls outside a test source set (for
 # example after a file rename that a path pattern no longer matches).
 #
-# Every known test-vector/fixture finding is at a path covered by
-# .gitleaks.toml's [allowlist].paths, across all commits that touched it.
-# The entries below are the only reviewed exceptions.
 
 # Reviewed false positives outside test source sets (2026-09-28):
 # WalletInfo.kt:6 is KDoc prose ("compressed public key, secp256k1-blake160"), no value.
@@ -16,3 +13,30 @@
 26967f6de7d242e8e7841e5c91fca37f295e4db0:docs/superpowers/plans/2026-04-13-key-storage-redesign-phase1.md:generic-api-key:192
 26967f6de7d242e8e7841e5c91fca37f295e4db0:docs/superpowers/plans/2026-04-13-key-storage-redesign-phase1.md:generic-api-key:211
 26967f6de7d242e8e7841e5c91fca37f295e4db0:docs/superpowers/plans/2026-04-13-key-storage-redesign-phase1.md:generic-api-key:489
+
+# Known test fixtures (reviewed 2026-09-28): BIP-39/BIP-32 vectors, dummy keys,
+# the KeyBackupCompatibilityTest blob and dummy_pow.toml.
+3231e9cb3c978fac01a9a406039a52bddde176fb:android/app/src/test/java/com/rjnr/pocketnode/data/crypto/KeyBackupCompatibilityTest.kt:generic-api-key:57
+3f588972ff367ddff24336117d102152ba6d01e2:ios/PocketNodeTests/Keys/WalletKeyStoreDeviceTests.swift:generic-api-key:54
+3f588972ff367ddff24336117d102152ba6d01e2:ios/PocketNodeTests/Keys/WalletKeyStoreTests.swift:generic-api-key:45
+3f588972ff367ddff24336117d102152ba6d01e2:ios/PocketNodeTests/Keys/WalletKeyStoreTests.swift:generic-api-key:57
+626cf30b438ba3549290503b4a8418d3929cdbe2:external/ckb-light-client/light-client-lib/src/tests/specs/dummy_pow.toml:generic-api-key:73
+626cf30b438ba3549290503b4a8418d3929cdbe2:external/ckb-light-client/light-client-lib/src/tests/specs/dummy_pow.toml:generic-api-key:80
+86b755953c9647b2d9742e2124ebb55d535d60a2:android/app/src/test/java/com/rjnr/pocketnode/data/crypto/KeyBackupCompatibilityTest.kt:generic-api-key:57
+8a8a9ba5a3a7a8751ac7ecb4bd5f7f0dce95306c:android/app/src/test/java/com/rjnr/pocketnode/data/crypto/KeyBackupCompatibilityTest.kt:generic-api-key:57
+dba3b0fdc5ce3574caeac63534630d336408f625:android/app/src/test/java/com/rjnr/pocketnode/data/crypto/KeyBackupCompatibilityTest.kt:generic-api-key:57
+e80c8b1cc21ddeae9ea89c008c7651a1bb278810:android/shared/src/commonTest/kotlin/com/rjnr/pocketnode/core/crypto/Bip32Test.kt:generic-api-key:106
+e80c8b1cc21ddeae9ea89c008c7651a1bb278810:android/shared/src/commonTest/kotlin/com/rjnr/pocketnode/core/crypto/Bip32Test.kt:generic-api-key:114
+e80c8b1cc21ddeae9ea89c008c7651a1bb278810:android/shared/src/commonTest/kotlin/com/rjnr/pocketnode/core/crypto/Bip32Test.kt:generic-api-key:122
+e80c8b1cc21ddeae9ea89c008c7651a1bb278810:android/shared/src/commonTest/kotlin/com/rjnr/pocketnode/core/crypto/Bip32Test.kt:generic-api-key:130
+e80c8b1cc21ddeae9ea89c008c7651a1bb278810:android/shared/src/commonTest/kotlin/com/rjnr/pocketnode/core/crypto/Bip32Test.kt:generic-api-key:138
+e80c8b1cc21ddeae9ea89c008c7651a1bb278810:android/shared/src/commonTest/kotlin/com/rjnr/pocketnode/core/crypto/Bip32Test.kt:generic-api-key:184
+e80c8b1cc21ddeae9ea89c008c7651a1bb278810:android/shared/src/commonTest/kotlin/com/rjnr/pocketnode/core/crypto/Bip32Test.kt:generic-api-key:192
+e80c8b1cc21ddeae9ea89c008c7651a1bb278810:android/shared/src/commonTest/kotlin/com/rjnr/pocketnode/core/crypto/Bip32Test.kt:generic-api-key:32
+e80c8b1cc21ddeae9ea89c008c7651a1bb278810:android/shared/src/commonTest/kotlin/com/rjnr/pocketnode/core/crypto/Bip32Test.kt:generic-api-key:47
+e80c8b1cc21ddeae9ea89c008c7651a1bb278810:android/shared/src/commonTest/kotlin/com/rjnr/pocketnode/core/crypto/Bip32Test.kt:generic-api-key:55
+e80c8b1cc21ddeae9ea89c008c7651a1bb278810:android/shared/src/commonTest/kotlin/com/rjnr/pocketnode/core/crypto/Bip32Test.kt:generic-api-key:63
+e80c8b1cc21ddeae9ea89c008c7651a1bb278810:android/shared/src/commonTest/kotlin/com/rjnr/pocketnode/core/crypto/Bip32Test.kt:generic-api-key:71
+e80c8b1cc21ddeae9ea89c008c7651a1bb278810:android/shared/src/commonTest/kotlin/com/rjnr/pocketnode/core/crypto/Bip32Test.kt:generic-api-key:79
+e80c8b1cc21ddeae9ea89c008c7651a1bb278810:android/shared/src/commonTest/kotlin/com/rjnr/pocketnode/core/crypto/Bip32Test.kt:generic-api-key:98
+f34146a2ffb888b95913f941dc78b22c13ffe488:ios/PocketNodeTests/Onboarding/WalletCreatorTests.swift:generic-api-key:23
