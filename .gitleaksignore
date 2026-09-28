@@ -1,0 +1,9 @@
+# Fingerprints of specific historical findings to ignore, one per line, in
+# gitleaks' "<commit>:<file>:<rule>:<startLine>" format (see `gitleaks git`
+# output). Prefer this over widening .gitleaks.toml's path allowlist when a
+# one-off historical false positive falls outside a test source set (for
+# example after a file rename that a path pattern no longer matches).
+#
+# Empty today: every known test-vector/fixture finding is still at a path
+# covered by .gitleaks.toml's [allowlist].paths, across all commits that
+# touched it.
