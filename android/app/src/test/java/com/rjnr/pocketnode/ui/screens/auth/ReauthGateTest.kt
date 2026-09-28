@@ -1,5 +1,6 @@
 package com.rjnr.pocketnode.ui.screens.auth
 
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
@@ -7,84 +8,64 @@ import org.junit.Assert.assertTrue
 import org.junit.Before
 import org.junit.Test
 
-/**
- * Pure state-machine tests for the #524 reauth overlay gate. No Robolectric
- * or Compose UI test rule needed: androidx.compose.runtime's MutableState
- * works as plain Kotlin on the JVM.
- */
+/** State tests for the #524 re-auth gate: sessions and stale unlocks. */
 class ReauthGateTest {
 
     private lateinit var gate: ReauthGate
 
     @Before
     fun setUp() {
-        gate = ReauthGate(mutableStateOf(false), mutableStateOf(false))
+        gate = ReauthGate(mutableStateOf(false), mutableIntStateOf(0))
     }
 
     @Test
-    fun `starts unlocked and on the biometric level`() {
+    fun `starts unlocked`() {
         assertFalse(gate.locked)
-        assertFalse(gate.showingPinFallback)
     }
 
     @Test
-    fun `lock arms the gate without touching the pin fallback level`() {
+    fun `lock arms the gate and starts a new session`() {
         gate.lock()
         assertTrue(gate.locked)
-        assertFalse(gate.showingPinFallback)
+        assertEquals(1, gate.session)
     }
 
     @Test
-    fun `showPinFallback moves to the nested pin level while still locked`() {
+    fun `unlock with the current session clears the gate`() {
         gate.lock()
-        gate.showPinFallback()
-        assertTrue(gate.locked)
-        assertTrue(gate.showingPinFallback)
-    }
-
-    @Test
-    fun `unlock clears both the lock and the pin fallback level`() {
-        gate.lock()
-        gate.showPinFallback()
-        gate.unlock()
+        assertTrue(gate.unlock(gate.session))
         assertFalse(gate.locked)
-        assertFalse(gate.showingPinFallback)
     }
 
     @Test
-    fun `back on the pin fallback level returns to the biometric level and stays locked`() {
+    fun `a success earned in an earlier session cannot open a later lock`() {
         gate.lock()
-        gate.showPinFallback()
-
-        val action = gate.onBackPressed()
-
-        assertEquals(ReauthGate.BackAction.HandledWithinGate, action)
-        assertTrue(gate.locked)
-        assertFalse(gate.showingPinFallback)
-    }
-
-    @Test
-    fun `back on the biometric level has nothing left to pop within the gate`() {
+        val earlier = gate.session
         gate.lock()
 
-        val action = gate.onBackPressed()
-
-        // The caller (MainActivity) maps LeaveGate to finish() rather than
-        // dismissing the overlay: this assertion is the contract, the gate
-        // itself must still report locked afterwards.
-        assertEquals(ReauthGate.BackAction.LeaveGate, action)
+        assertFalse(gate.unlock(earlier))
         assertTrue(gate.locked)
     }
 
     @Test
-    fun `a second lock after unlock re-arms cleanly`() {
+    fun `locking again while locked starts a new session`() {
         gate.lock()
-        gate.showPinFallback()
-        gate.unlock()
-
+        val first = gate.session
         gate.lock()
-
+        assertTrue(gate.session > first)
         assertTrue(gate.locked)
-        assertFalse(gate.showingPinFallback)
+    }
+
+    @Test
+    fun `unlock while not locked reports false`() {
+        assertFalse(gate.unlock(gate.session))
+    }
+
+    @Test
+    fun `restore keeps the saved session and lock`() {
+        gate.restore(session = 7, locked = true)
+        assertTrue(gate.locked)
+        assertEquals(7, gate.session)
+        assertTrue(gate.unlock(7))
     }
 }
