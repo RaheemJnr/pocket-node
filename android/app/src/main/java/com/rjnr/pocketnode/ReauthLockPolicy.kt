@@ -1,11 +1,15 @@
 package com.rjnr.pocketnode
 
 import android.os.Bundle
+import java.util.UUID
 import com.rjnr.pocketnode.ui.navigation.Screen
 import com.rjnr.pocketnode.ui.screens.auth.ReauthGate
 
-/** Whether this process has passed a lock (#524). One instance per process. */
-class ProcessUnlockState {
+/**
+ * Whether this process has passed a lock (#524), plus a random [token] that
+ * identifies this process. One instance per process.
+ */
+class ProcessUnlockState(val token: String = UUID.randomUUID().toString()) {
     @Volatile
     var unlocked = false
 }
@@ -41,7 +45,9 @@ class ReauthLockPolicy(
     /**
      * Recreated activity: a saved lock is kept with its session (so a
      * rotation keeps the lock screen's state); a process that has not been
-     * unlocked starts a new lock unless it was saved in the cold-start flow.
+     * unlocked starts a new lock unless it was saved in the cold-start flow,
+     * or the save was a configuration change in this same, still-running
+     * process (its token matches), which cannot have passed any credential.
      */
     fun onRestore(savedState: Bundle, hasWallet: Boolean, hasPin: Boolean) {
         if (!hasWallet || !hasPin) return
@@ -51,7 +57,13 @@ class ReauthLockPolicy(
             gate.restore(session = session, locked = true)
         } else {
             gate.restore(session = session, locked = false)
-            if (!process.unlocked && !savedState.getBoolean(KEY_COLD_START_FLOW)) lock()
+            val sameProcessConfigChange =
+                savedState.getString(KEY_CONFIG_CHANGE_TOKEN) == process.token
+            if (!process.unlocked && !savedState.getBoolean(KEY_COLD_START_FLOW) &&
+                !sameProcessConfigChange
+            ) {
+                lock()
+            }
         }
     }
 
@@ -89,6 +101,10 @@ class ReauthLockPolicy(
         outState.putBoolean(KEY_LOCKED, gate.locked)
         outState.putInt(KEY_SESSION, gate.session)
         outState.putBoolean(KEY_COLD_START_FLOW, isColdStartFlow(backStackRoutes))
+        // Only a configuration change carries the token: a save for the
+        // background never does, and a new process has a new token, so a
+        // restore after process death still locks.
+        if (isChangingConfigurations) outState.putString(KEY_CONFIG_CHANGE_TOKEN, process.token)
     }
 
     /** A biometric or PIN success earned in [session]. */
@@ -120,6 +136,7 @@ class ReauthLockPolicy(
         private const val KEY_LOCKED = "reauth_locked"
         private const val KEY_SESSION = "reauth_session"
         private const val KEY_COLD_START_FLOW = "reauth_cold_start_flow"
+        private const val KEY_CONFIG_CHANGE_TOKEN = "reauth_config_change_token"
 
         fun isColdStartFlow(backStackRoutes: List<String>): Boolean =
             Screen.Auth.route in backStackRoutes

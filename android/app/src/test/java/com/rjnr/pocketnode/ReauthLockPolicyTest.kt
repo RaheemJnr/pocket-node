@@ -27,11 +27,11 @@ class ReauthLockPolicyTest {
     private var newLocks = 0
     private var secretsCleared = 0
 
-    private inner class Activity {
+    private inner class Activity(proc: ProcessUnlockState = process) {
         val gate = ReauthGate(mutableStateOf(false), mutableIntStateOf(0))
         val policy = ReauthLockPolicy(
             gate = gate,
-            process = process,
+            process = proc,
             onNewLock = { newLocks++ },
             clearSessionSecrets = { secretsCleared++ },
         )
@@ -50,9 +50,8 @@ class ReauthLockPolicyTest {
             return save(routes, changingConfig)
         }
 
-        fun restoreFrom(saved: Bundle): Activity = Activity().also {
-            it.policy.onRestore(saved, hasWallet = true, hasPin = true)
-        }
+        fun restoreFrom(saved: Bundle, proc: ProcessUnlockState = process): Activity =
+            Activity(proc).also { it.policy.onRestore(saved, hasWallet = true, hasPin = true) }
     }
 
     private val main = listOf(Screen.Main.route)
@@ -147,12 +146,12 @@ class ReauthLockPolicyTest {
     }
 
     @Test
-    fun `restore in a process that was never unlocked starts locked`() {
+    fun `an unlocked save restored in a new process that was never unlocked starts locked`() {
         val a = Activity()
         val saved = a.save(main, changingConfig = true)
 
-        val b = Activity()
-        b.policy.onRestore(saved, hasWallet = true, hasPin = true)
+        // Process death: a new process with its own token, never unlocked.
+        val b = a.restoreFrom(saved, proc = ProcessUnlockState())
 
         assertTrue(b.gate.locked)
     }
@@ -248,6 +247,58 @@ class ReauthLockPolicyTest {
         val b = Activity()
         b.policy.onRestore(saved, hasWallet = true, hasPin = false)
         assertFalse(b.gate.locked)
+    }
+
+    // --- a start that was never unlocked, e.g. Recovery (Codex finding) ---
+
+    private val recovery = listOf(Screen.Recovery.route)
+
+    @Test
+    fun `a configuration change on the Recovery start stays unlocked and on Recovery`() {
+        val a = Activity()
+        a.policy.onColdStart(Screen.Recovery.route)
+        assertFalse(process.unlocked)
+
+        val b = a.restoreFrom(a.stopAndSave(recovery, changingConfig = true))
+
+        assertFalse(b.gate.locked)
+        assertEquals(0, newLocks)
+        // Not marked unlocked: only the configuration change was let through.
+        assertFalse(process.unlocked)
+    }
+
+    @Test
+    fun `a real trip to the background from the Recovery start locks, as on main`() {
+        val a = Activity()
+        a.policy.onColdStart(Screen.Recovery.route)
+
+        val b = a.restoreFrom(a.stopAndSave(recovery, changingConfig = false))
+
+        assertTrue(a.gate.locked)
+        assertTrue(b.gate.locked)
+    }
+
+    @Test
+    fun `a configuration-change save restored in another process locks`() {
+        val saved = Activity().stopAndSave(recovery, changingConfig = true)
+
+        val b = Activity().restoreFrom(saved, proc = ProcessUnlockState())
+
+        assertTrue(b.gate.locked)
+    }
+
+    @Test
+    fun `a configuration-change save while locked restores locked in the same session`() {
+        val a = Activity()
+        a.policy.onStop(recovery, hasWallet = true, hasPin = true, isChangingConfigurations = false)
+        val session = a.gate.session
+        val locksBefore = newLocks
+
+        val b = a.restoreFrom(a.stopAndSave(recovery, changingConfig = true))
+
+        assertTrue(b.gate.locked)
+        assertEquals(session, b.gate.session)
+        assertEquals(locksBefore, newLocks)
     }
 
     // --- stale successes (B1, N-b) ---
