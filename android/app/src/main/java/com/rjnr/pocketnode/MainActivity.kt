@@ -249,7 +249,7 @@ class MainActivity : FragmentActivity() {
         syncWorkScheduler.enqueueBackgroundCatchUp()
         // Use cached value — avoids blocking main thread on every onStop
         val hasPin = pinManager.hasPin()
-        reauthPolicy.onStop(backStackRoutes(), cachedHasWallet, hasPin)
+        reauthPolicy.onStop(backStackRoutes(), cachedHasWallet, hasPin, isChangingConfigurations)
         if (cachedHasWallet && hasPin) {
             // Wipe the cached session PIN when the app backgrounds so the next
             // foregrounding forces a fresh unlock before any PIN-gated action.

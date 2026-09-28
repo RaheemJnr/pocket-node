@@ -55,7 +55,19 @@ class ReauthLockPolicy(
         }
     }
 
-    fun onStop(backStackRoutes: List<String>, hasWallet: Boolean, hasPin: Boolean) {
+    /**
+     * A configuration change (rotation, dark mode, locale, resize) also runs
+     * onStop; it is not a trip to the background, so it neither locks nor
+     * starts a new session (which would reset the lock screen and prompt
+     * twice).
+     */
+    fun onStop(
+        backStackRoutes: List<String>,
+        hasWallet: Boolean,
+        hasPin: Boolean,
+        isChangingConfigurations: Boolean,
+    ) {
+        if (isChangingConfigurations) return
         if (shouldLock(backStackRoutes, hasWallet, hasPin)) lock()
     }
 
@@ -70,7 +82,10 @@ class ReauthLockPolicy(
         hasPin: Boolean,
         isChangingConfigurations: Boolean,
     ) {
-        if (!isChangingConfigurations && shouldLock(backStackRoutes, hasWallet, hasPin)) lock()
+        // Already locked (onStop ran first, API 28+): keep that session.
+        if (!isChangingConfigurations && !gate.locked && shouldLock(backStackRoutes, hasWallet, hasPin)) {
+            lock()
+        }
         outState.putBoolean(KEY_LOCKED, gate.locked)
         outState.putInt(KEY_SESSION, gate.session)
         outState.putBoolean(KEY_COLD_START_FLOW, isColdStartFlow(backStackRoutes))

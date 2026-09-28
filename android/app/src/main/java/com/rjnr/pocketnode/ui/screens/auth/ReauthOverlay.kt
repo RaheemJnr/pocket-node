@@ -64,6 +64,9 @@ fun ReauthOverlay(
         SessionViewModelStoreOwner(sessionStore.storeFor(session), parentOwner)
     }
     DisposableEffect(sessionOwner) {
+        // Only once this session's overlay is committed: drop any older
+        // session's store (never from composition, which may be abandoned).
+        sessionStore.retainOnly(session)
         onDispose {
             // Unlocked (or a new session took over): drop this session's
             // ViewModels. A configuration change keeps them.
@@ -169,26 +172,24 @@ private fun ReauthLevels(
  * a stale lockout timer, PIN verify or migration stops with it.
  */
 class ReauthSessionStore : ViewModel() {
-    private var session: Int? = null
-    private var store: ViewModelStore? = null
+    private val stores = mutableMapOf<Int, ViewModelStore>()
 
-    fun storeFor(session: Int): ViewModelStore {
-        if (session != this.session) {
-            clearAll()
-            this.session = session
-        }
-        return store ?: ViewModelStore().also { store = it }
+    /** [session]'s store, created on first use. Clears nothing. */
+    fun storeFor(session: Int): ViewModelStore = stores.getOrPut(session) { ViewModelStore() }
+
+    /** Clear every store except [session]'s. */
+    fun retainOnly(session: Int) {
+        stores.keys.filter { it != session }.forEach { stores.remove(it)?.clear() }
     }
 
-    /** Clear [session]'s store if it is still the current one. */
+    /** Clear [session]'s store. */
     fun clear(session: Int) {
-        if (session == this.session) clearAll()
+        stores.remove(session)?.clear()
     }
 
     fun clearAll() {
-        store?.clear()
-        store = null
-        session = null
+        stores.values.forEach { it.clear() }
+        stores.clear()
     }
 
     override fun onCleared() = clearAll()
