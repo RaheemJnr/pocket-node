@@ -10,7 +10,7 @@ import androidx.compose.runtime.MutableState
  * away the back stack; a successful unlock then landed on Home regardless of
  * where the user had been. The fix draws the lock as a Box overlay above
  * `CkbNavGraph` in MainActivity instead of a navigation destination, so the
- * gate never touches a `NavController` — [ReauthGate]'s public API has no
+ * gate never touches a `NavController`: [ReauthGate]'s public API has no
  * navigation dependency at all, by construction.
  *
  * [locked] and [showingPinFallback] are backed by caller-supplied
@@ -48,7 +48,7 @@ class ReauthGate(
 
         /**
          * Nothing left to pop within the gate. The caller must NOT dismiss
-         * the overlay here — MainActivity maps this to finishing the
+         * the overlay here: MainActivity maps this to finishing the
          * activity, matching the pre-#524 behaviour where Auth, as the back
          * stack's sole entry after the old popUpTo(Main), had nothing to pop
          * to either.
