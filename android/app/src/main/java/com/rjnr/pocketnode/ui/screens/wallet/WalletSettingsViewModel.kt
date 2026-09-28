@@ -7,6 +7,7 @@ import com.rjnr.pocketnode.core.prefs.NetworkPreferences
 import androidx.lifecycle.SavedStateHandle
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
+import com.rjnr.pocketnode.ui.screens.auth.onEachReauthLock
 import com.rjnr.pocketnode.data.auth.PinManager
 import com.rjnr.pocketnode.data.database.dao.DaoCellDao
 import com.rjnr.pocketnode.data.database.dao.KeyMaterialDao
@@ -55,6 +56,8 @@ class WalletSettingsViewModel @Inject constructor(
     val uiState: StateFlow<WalletSettingsUiState> = _uiState.asStateFlow()
 
     init {
+        // #524: a revealed seed phrase or private key never survives a lock.
+        viewModelScope.onEachReauthLock { lockSeedPhrase() }
         _uiState.update { it.copy(network = networkPreferences.getSelectedNetwork()) }
         loadWallet()
         observeSubAccounts()

@@ -31,6 +31,7 @@ import com.rjnr.pocketnode.ui.navigation.Screen
 import com.rjnr.pocketnode.data.wallet.WalletPreferences
 import com.rjnr.pocketnode.data.wallet.WalletRepository
 import com.rjnr.pocketnode.ui.screens.auth.ReauthGate
+import com.rjnr.pocketnode.ui.screens.auth.ReauthLockEvents
 import com.rjnr.pocketnode.ui.screens.auth.ReauthGateHost
 import com.rjnr.pocketnode.ui.screens.auth.ReauthOverlay
 import com.rjnr.pocketnode.ui.screens.auth.ReauthSessionStore
@@ -86,7 +87,10 @@ class MainActivity : FragmentActivity() {
         ReauthLockPolicy(
             gate = reauthGate,
             process = processUnlockState,
-            onNewLock = { reauthSessionStore.clearAll() },
+            onNewLock = {
+                reauthSessionStore.clearAll()
+                ReauthLockEvents.onLocked()
+            },
             clearSessionSecrets = {
                 authManager.clearSession()
                 keyManager.clearSessionPin()

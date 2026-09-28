@@ -5,6 +5,7 @@ import com.rjnr.pocketnode.core.log.Logger
 import androidx.lifecycle.SavedStateHandle
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
+import com.rjnr.pocketnode.ui.screens.auth.onEachReauthLock
 import com.rjnr.pocketnode.data.database.entity.WalletEntity
 import com.rjnr.pocketnode.data.gateway.GatewayRepository
 import com.rjnr.pocketnode.data.wallet.KeyManager
@@ -135,6 +136,17 @@ class AddWalletViewModel @Inject constructor(
     val uiState: StateFlow<AddWalletUiState> = _uiState.asStateFlow()
 
     init {
+        // #524: a typed recovery phrase or private key never survives a lock.
+        viewModelScope.onEachReauthLock {
+            _uiState.update {
+                it.copy(
+                    importWords = List(12) { "" },
+                    importSuggestions = emptyMap(),
+                    importWordErrors = emptySet(),
+                    importPrivateKey = "",
+                )
+            }
+        }
         viewModelScope.launch {
             val mnemonicRoots = walletRepository.getAll()
                 .filter { it.type == "mnemonic" && it.parentWalletId == null }

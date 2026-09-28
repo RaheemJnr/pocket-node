@@ -46,6 +46,7 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -97,7 +98,9 @@ fun AddWalletScreen(
     // the WalletManager per-row "Add" button (Telegram bug 2). Skip the
     // mode picker and land directly on the sub-account form, with the
     // parent pre-selected by AddWalletViewModel.
-    var selectedMode by remember {
+    // #524: the chosen form survives the re-auth lock and rotation (typed
+    // secrets in it are cleared by the ViewModel on lock).
+    var selectedMode by rememberSaveable {
         mutableIntStateOf(if (viewModel.preselectedParentId != null) 4 else 0)
     }
 
