@@ -9,7 +9,7 @@ import org.junit.Test
 
 /**
  * Pure state-machine tests for the #524 reauth overlay gate. No Robolectric
- * or Compose UI test rule needed — androidx.compose.runtime's MutableState
+ * or Compose UI test rule needed: androidx.compose.runtime's MutableState
  * works as plain Kotlin on the JVM.
  */
 class ReauthGateTest {
@@ -70,7 +70,7 @@ class ReauthGateTest {
         val action = gate.onBackPressed()
 
         // The caller (MainActivity) maps LeaveGate to finish() rather than
-        // dismissing the overlay — this assertion is the contract: the gate
+        // dismissing the overlay: this assertion is the contract, the gate
         // itself must still report locked afterwards.
         assertEquals(ReauthGate.BackAction.LeaveGate, action)
         assertTrue(gate.locked)

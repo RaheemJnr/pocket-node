@@ -24,7 +24,7 @@ import org.robolectric.annotation.Config
  * `NavController` reference at all in its public API. This test drives its
  * full lock / pin-fallback / back-press / unlock state machine next to a
  * real `NavController` parked on a non-Home route and asserts the route
- * never moves — the exact property the old navigate(Screen.Auth) call broke.
+ * never moves: the exact property the old navigate(Screen.Auth) call broke.
  */
 @RunWith(RobolectricTestRunner::class)
 @Config(sdk = [28], manifest = Config.NONE)
