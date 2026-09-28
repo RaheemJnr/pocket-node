@@ -4,7 +4,6 @@ import android.app.Application
 import android.content.ComponentName
 import android.content.res.Resources
 import android.os.Looper
-import androidx.activity.ComponentActivity
 import androidx.compose.foundation.layout.Column
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
@@ -22,20 +21,33 @@ import androidx.compose.ui.test.onNodeWithContentDescription
 import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.performClick
+import androidx.fragment.app.FragmentActivity
 import androidx.lifecycle.ViewModel
+import androidx.lifecycle.ViewModelProvider
+import androidx.lifecycle.viewModelScope
 import androidx.lifecycle.viewmodel.compose.viewModel
 import androidx.navigation.NavHostController
 import androidx.navigation.compose.NavHost
 import androidx.navigation.compose.composable
 import androidx.navigation.compose.rememberNavController
+import androidx.test.core.app.ApplicationProvider
+import com.rjnr.pocketnode.ProcessUnlockState
 import com.rjnr.pocketnode.R
+import com.rjnr.pocketnode.ReauthLockPolicy
 import com.rjnr.pocketnode.core.log.NoopLogger
 import com.rjnr.pocketnode.data.auth.AuthManager
 import com.rjnr.pocketnode.data.auth.PinManager
+import com.rjnr.pocketnode.data.crypto.KeystoreV2MigrationHelper
+import com.rjnr.pocketnode.ui.navigation.Screen
+import io.mockk.coEvery
 import io.mockk.every
 import io.mockk.mockk
+import io.mockk.verify
+import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.isActive
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNotSame
 import org.junit.Assert.assertSame
 import org.junit.Assert.assertTrue
 import org.junit.Rule
@@ -46,13 +58,16 @@ import org.junit.runner.RunWith
 import org.robolectric.RobolectricTestRunner
 import org.robolectric.Shadows.shadowOf
 import org.robolectric.annotation.Config
-import androidx.test.core.app.ApplicationProvider
+import java.util.concurrent.CountDownLatch
+import java.util.concurrent.TimeUnit
 
 /**
- * Compose tests for the #524 re-auth overlay: only a genuine credential
- * earned in the current lock opens it, the PIN and Forgot PIN levels never
- * leave it, and nothing from the screen underneath survives on screen while
- * it is up.
+ * Compose tests for the #524 re-auth overlay, wired the way MainActivity
+ * wires it: a [ReauthLockPolicy] over a [ReauthGate], a [ReauthSessionStore]
+ * holding each lock session's real ViewModels, and a FragmentActivity host so
+ * the migration branch runs. Only a genuine credential earned in the current
+ * lock opens it, the PIN and Forgot PIN levels never leave it, and nothing
+ * from the screen underneath survives on screen while it is up.
  */
 @RunWith(RobolectricTestRunner::class)
 // Tall enough for the whole PIN pad, Forgot PIN link included.
@@ -84,21 +99,41 @@ class ReauthOverlayTest {
         every { isBiometricEnrolled() } returns false
         every { isBiometricEnabled() } returns false
     }
+    private val migrationHelper = mockk<KeystoreV2MigrationHelper>(relaxed = true).apply {
+        coEvery { pendingWalletIds() } returns emptyList()
+        coEvery { finalize() } returns Result.success(Unit)
+    }
 
-    // One ViewModel for every session: the worst case, as if it were
-    // Activity-scoped (the B1 finding). Production keys them per session.
-    private val authViewModel = AuthViewModel(
-        authManager, pinManager, mockk(relaxed = true), mockk(relaxed = true),
-        mockk(relaxed = true), NoopLogger,
-    )
-    private val pinViewModel by lazy { PinViewModel(pinManager, authManager) }
-    private val forgotPinViewModel = ForgotPinViewModel(
-        mockk(relaxed = true), mockk(relaxed = true), pinManager, mockk(relaxed = true),
-        mockk(relaxed = true), NoopLogger,
-    )
+    // Every ViewModel the overlay asks for, in creation order.
+    private val created = mutableListOf<ViewModel>()
+    private val factory = object : ViewModelProvider.Factory {
+        @Suppress("UNCHECKED_CAST")
+        override fun <T : ViewModel> create(modelClass: Class<T>): T = when (modelClass) {
+            AuthViewModel::class.java -> AuthViewModel(
+                authManager, pinManager, mockk(relaxed = true), migrationHelper,
+                mockk(relaxed = true), NoopLogger,
+            )
+            PinViewModel::class.java -> PinViewModel(pinManager, authManager)
+            ForgotPinViewModel::class.java -> ForgotPinViewModel(
+                mockk(relaxed = true), mockk(relaxed = true), pinManager, mockk(relaxed = true),
+                mockk(relaxed = true), NoopLogger,
+            )
+            else -> error("unexpected $modelClass")
+        }.also { created += it } as T
+    }
 
     private val gate = ReauthGate(mutableStateOf(false), mutableIntStateOf(0))
+    private val sessionStore = ReauthSessionStore()
+    private var secretsCleared = 0
+    private val policy = ReauthLockPolicy(
+        gate = gate,
+        process = ProcessUnlockState(),
+        onNewLock = { sessionStore.clearAll() },
+        clearSessionSecrets = { secretsCleared++ },
+    )
     private var leaveCount = 0
+
+    private inline fun <reified VM : ViewModel> vms(): List<VM> = created.filterIsInstance<VM>()
 
     private fun setHost(content: @Composable () -> Unit = { Text("SECRET") }) {
         rule.setContent {
@@ -114,17 +149,35 @@ class ReauthOverlayTest {
     private fun Overlay() {
         ReauthOverlay(
             session = gate.session,
-            onUnlocked = { gate.unlock(it) },
+            sessionStore = sessionStore,
+            onUnlocked = { policy.onUnlocked(it) },
             onLeave = { leaveCount++ },
-            authViewModel = authViewModel,
-            pinViewModel = pinViewModel,
-            forgotPinViewModel = forgotPinViewModel,
+            viewModelFactory = factory,
         )
     }
 
+    /** Background the app on an ordinary screen (MainActivity.onStop). */
     private fun lock() {
-        rule.runOnUiThread { gate.lock() }
+        rule.runOnUiThread {
+            policy.onStop(listOf(Screen.Main.route), hasWallet = true, hasPin = true)
+        }
         rule.waitForIdle()
+    }
+
+    // viewModelScope work resumes on the main looper, which the compose
+    // clock does not drive: idle it while waiting.
+    private fun idleUntil(condition: () -> Boolean) {
+        rule.waitUntil(timeoutMillis = 5_000) {
+            shadowOf(Looper.getMainLooper()).idle()
+            condition()
+        }
+    }
+
+    private fun idle() {
+        repeat(3) {
+            shadowOf(Looper.getMainLooper()).idle()
+            rule.waitForIdle()
+        }
     }
 
     private fun pressBack() {
@@ -132,8 +185,17 @@ class ReauthOverlayTest {
         rule.waitForIdle()
     }
 
+    private fun usePin() {
+        rule.onNodeWithTag("auth-use-pin").performClick()
+        rule.waitForIdle()
+    }
+
     private fun enterPin() {
-        rule.runOnUiThread { repeat(PinManager.PIN_LENGTH) { pinViewModel.onDigitEntered('1') } }
+        repeat(PinManager.PIN_LENGTH) { rule.onNodeWithTag("pin-keypad-1").performClick() }
+    }
+
+    private fun biometricSuccess() {
+        rule.runOnUiThread { vms<AuthViewModel>().last().onBiometricSuccess() }
     }
 
     private fun assertLockedOnBiometricLevel() {
@@ -142,31 +204,82 @@ class ReauthOverlayTest {
         assertTrue(gate.locked)
     }
 
+    private fun ViewModel.isCleared() = !viewModelScope.isActive
+
     @Test
-    fun `a second lock is not opened by the first lock's success (B1)`() {
+    fun `each lock gets its own ViewModels and a stale one cannot open it (B1)`() {
         setHost()
         lock()
         assertLockedOnBiometricLevel()
+        val firstAuth = vms<AuthViewModel>().single()
 
-        rule.runOnUiThread { authViewModel.onBiometricSuccess() }
-        rule.waitUntil { !gate.locked }
+        biometricSuccess()
+        idleUntil { !gate.locked }
         rule.onNodeWithText("SECRET").assertExists()
+        assertTrue(firstAuth.isCleared())
 
         lock()
         assertLockedOnBiometricLevel()
-        assertFalse(authViewModel.uiState.value.authSuccess)
+        val secondAuth = vms<AuthViewModel>().last()
+        assertNotSame(firstAuth, secondAuth)
+        assertFalse(secondAuth.uiState.value.authSuccess)
 
-        rule.runOnUiThread { authViewModel.onBiometricSuccess() }
-        rule.waitUntil { !gate.locked }
+        // The first lock's ViewModel succeeding again does nothing.
+        rule.runOnUiThread { firstAuth.onBiometricSuccess() }
+        idle()
+        assertLockedOnBiometricLevel()
+
+        biometricSuccess()
+        idleUntil { !gate.locked }
         rule.onNodeWithText("SECRET").assertExists()
     }
 
     @Test
-    fun `a success left in the ViewModel before the lock does not open it (B1)`() {
+    fun `a new lock clears the previous session's ViewModels at once (S-c)`() {
         setHost()
-        rule.runOnUiThread { authViewModel.onBiometricSuccess() }
+        lock()
+        usePin()
+        val firstAuth = vms<AuthViewModel>().single()
+        val firstPin = vms<PinViewModel>().single()
 
         lock()
+
+        assertTrue(firstAuth.isCleared())
+        assertTrue(firstPin.isCleared())
+        assertLockedOnBiometricLevel()
+        assertTrue(vms<AuthViewModel>().last().viewModelScope.isActive)
+    }
+
+    @Test
+    fun `a relock while locked returns to a fresh biometric level (N-a)`() {
+        setHost()
+        lock()
+        usePin()
+        rule.onNodeWithText("Wallet is locked").assertDoesNotExist()
+
+        lock()
+
+        // A fresh AuthScreen composition, so its once-per-instance
+        // biometric auto-prompt runs again for the new lock.
+        assertLockedOnBiometricLevel()
+    }
+
+    @Test
+    fun `a migration from an older lock never opens the new one (S-b)`() {
+        val migrationGo = CompletableDeferred<Unit>()
+        coEvery { migrationHelper.pendingWalletIds() } coAnswers {
+            migrationGo.await()
+            emptyList()
+        }
+        setHost()
+        lock()
+        biometricSuccess()
+        idle()
+        assertTrue(gate.locked)
+
+        lock()
+        migrationGo.complete(Unit)
+        idle()
 
         assertLockedOnBiometricLevel()
     }
@@ -176,27 +289,41 @@ class ReauthOverlayTest {
         setHost()
         lock()
 
-        rule.onNodeWithTag("auth-use-pin").performClick()
-        rule.waitForIdle()
+        usePin()
         rule.onNodeWithText("Wallet is locked").assertDoesNotExist()
         rule.onNodeWithText("Enter PIN").assertExists()
 
         enterPin()
-        // The verify resumes on the main looper (viewModelScope), which the
-        // compose clock does not drive: idle it while waiting.
-        rule.waitUntil(timeoutMillis = 5_000) {
-            shadowOf(Looper.getMainLooper()).idle()
-            !gate.locked
-        }
+        idleUntil { !gate.locked }
         rule.onNodeWithText("SECRET").assertExists()
+    }
+
+    @Test
+    fun `a PIN verify still running when the app locks again sets no session PIN (N-b)`() {
+        val verifyGo = CountDownLatch(1)
+        every { pinManager.verifyPin(any()) } answers {
+            verifyGo.await(5, TimeUnit.SECONDS)
+            true
+        }
+        setHost()
+        lock()
+        usePin()
+        enterPin()
+
+        lock()
+        verifyGo.countDown()
+        Thread.sleep(200)
+        idle()
+
+        verify(exactly = 0) { authManager.setSessionPin(any()) }
+        assertLockedOnBiometricLevel()
     }
 
     @Test
     fun `Forgot PIN stays inside the lock and back returns to the PIN level (B3)`() {
         setHost()
         lock()
-        rule.onNodeWithTag("auth-use-pin").performClick()
-        rule.waitForIdle()
+        usePin()
 
         rule.onNodeWithText("Forgot PIN?").performClick()
         rule.waitForIdle()
@@ -233,8 +360,7 @@ class ReauthOverlayTest {
         every { pinManager.getRemainingAttempts() } returns 0
         setHost()
         lock()
-        rule.onNodeWithTag("auth-use-pin").performClick()
-        rule.waitForIdle()
+        usePin()
 
         rule.onNodeWithText("Wallet locked").assertExists()
         rule.onNodeWithText("Reset & restore").performClick()
@@ -269,8 +395,8 @@ class ReauthOverlayTest {
         // Only the overlay's own window is left.
         assertEquals(1, rule.onAllNodes(isRoot()).fetchSemanticsNodes().size)
 
-        rule.runOnUiThread { authViewModel.onBiometricSuccess() }
-        rule.waitUntil { !gate.locked }
+        biometricSuccess()
+        idleUntil { !gate.locked }
         rule.onNodeWithText("SECRET").assertExists()
         rule.onNodeWithText("DIALOG").assertExists()
     }
@@ -314,8 +440,8 @@ class ReauthOverlayTest {
         lock()
         rule.onNodeWithText("amount=3").assertDoesNotExist()
 
-        rule.runOnUiThread { authViewModel.onBiometricSuccess() }
-        rule.waitUntil { !gate.locked }
+        biometricSuccess()
+        idleUntil { !gate.locked }
 
         rule.onNodeWithText("amount=3").assertExists()
         assertEquals("send", navController.currentDestination?.route)
@@ -334,9 +460,10 @@ class ReauthOverlayTest {
  * resolves the app's string resources to their names (e.g.
  * "forgot_pin_title") and strings the app does not declare (Material's own)
  * to an empty string. Dialog windows take their resources from the activity
- * too.
+ * too. A FragmentActivity, like MainActivity, so AuthScreen and the overlay
+ * take their FragmentActivity (migration) branch.
  */
-class NamedStringsActivity : ComponentActivity() {
+class NamedStringsActivity : FragmentActivity() {
     private var named: Resources? = null
 
     @Suppress("DEPRECATION")
