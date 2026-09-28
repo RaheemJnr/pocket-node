@@ -517,8 +517,12 @@ class SyncCoordinator @Inject constructor(
             lastBalancedEligibleSet = candidateWallets.map { it.walletId }.toSet()
         }
 
-        // Step 2: Cap (unchanged behavior for ALL_WALLETS).
-        val wallets = candidateWallets.take(MAX_CONCURRENT_WALLET_SCRIPTS)
+        // Step 2: Cap (unchanged behavior for ALL_WALLETS). The active wallet
+        // goes first so the cap can never drop it, whatever its lastActiveAt
+        // (stable sort: the rest keep their recency order).
+        val wallets = candidateWallets
+            .sortedByDescending { it.walletId == ctx.activeWalletId }
+            .take(MAX_CONCURRENT_WALLET_SCRIPTS)
         if (candidateWallets.size > wallets.size) {
             val droppedIds = candidateWallets.drop(wallets.size).map { it.walletId }
             logger.i(
@@ -594,19 +598,10 @@ class SyncCoordinator @Inject constructor(
                     } else {
                         val syncMode = syncPreferences.getSyncMode(walletId = wallet.walletId)
                         val customHeight = syncPreferences.getCustomBlockHeight(walletId = wallet.walletId)
-                        val calculated = syncMode.toFromBlock(
-                            if (syncMode == SyncMode.CUSTOM) customHeight else null,
-                            tipHeight,
-                            ctx.network,
-                        )
-                        val calculatedLong = calculated.toLongOrNull() ?: 0L
-                        // Safety: don't start from block 0 — use checkpoint if available
-                        val checkpoint = getCheckpoint(ctx.network)
-                        blockNum = if (calculatedLong == 0L && syncMode != SyncMode.FULL_HISTORY && checkpoint > 0) {
-                            checkpoint.toString()
-                        } else {
-                            calculated
-                        }
+                        // Same guards as registerAccount: a start past the tip
+                        // (e.g. a CUSTOM height above it) resets to the RECENT
+                        // window, and 0 outside FULL_HISTORY uses the checkpoint.
+                        blockNum = historicalStartBlock(syncMode, customHeight, tipHeight, ctx.network).toString()
                     }
                     val blockNumberHex = "0x${blockNum.toLongOrNull()?.toString(16) ?: "0"}"
 

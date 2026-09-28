@@ -473,7 +473,7 @@ class GatewayRepository @Inject constructor(
 
         val info = _walletInfo.value ?: throw Exception("Wallet not initialized")
 
-        val tipStr = LightClientNative.nativeGetTipHeader()
+        val tipStr = lightClient.getTipHeader()
         val tipHeight = if (tipStr != null) {
             val tip = json.decodeFromString<JniHeaderView>(tipStr)
             tip.number.removePrefix("0x").toLongOrNull(16) ?: 0L
@@ -575,6 +575,8 @@ class GatewayRepository @Inject constructor(
         customBlockHeight: Long? = null
     ): Result<Unit> {
         _isRegistered.value = false
+        // Snapshot for the ALL_WALLETS / BALANCED rollback below.
+        val previousSyncBlock = getWalletSyncBlock(activeWalletId)
         // Clear saved sync progress when explicitly resyncing (per-wallet)
         setWalletSyncBlock(activeWalletId, 0L)
         // Re-arm the zero-cell rescue rescan: an explicit resync is the user
@@ -588,25 +590,43 @@ class GatewayRepository @Inject constructor(
             // the whole set instead, the same way registerAccountWithStrategy
             // does: persist the new mode first (the coordinator reads it to
             // compute the start block), then register all wallets.
-            SyncStrategy.ALL_WALLETS, SyncStrategy.BALANCED -> runCatching {
+            SyncStrategy.ALL_WALLETS, SyncStrategy.BALANCED -> {
                 val wId = activeWalletId.ifEmpty { null }
-                walletPreferences.setSyncMode(syncMode, walletId = wId)
-                if (syncMode == SyncMode.CUSTOM) {
-                    walletPreferences.setCustomBlockHeight(customBlockHeight, walletId = wId)
+                // The prefs are written before registering, so a failed
+                // registration must put them back: otherwise the mode the UI
+                // reports as failed takes effect on the next startup
+                // (ACTIVE_ONLY only persists on success).
+                val previousMode = walletPreferences.getSyncModeOrNull(walletId = wId)
+                val previousHeight = walletPreferences.getCustomBlockHeight(walletId = wId)
+                val previousInitialSync = walletPreferences.hasCompletedInitialSync(walletId = wId)
+                runCatching {
+                    walletPreferences.setSyncMode(syncMode, walletId = wId)
+                    if (syncMode == SyncMode.CUSTOM) {
+                        walletPreferences.setCustomBlockHeight(customBlockHeight, walletId = wId)
+                    }
+                    walletPreferences.setInitialSyncCompleted(true, walletId = wId)
+                    // forceResync for the active wallet only: its saved progress
+                    // reads as 0 so it restarts from the new mode's start block,
+                    // even if the sync poll re-saved the old progress between the
+                    // reset above and the registration. Other wallets resume.
+                    val resyncWalletId = activeWalletId
+                    syncCoordinator.registerAllWalletScripts(
+                        ctx = makeSyncContext().copy(
+                            getWalletSyncBlock = { walletId ->
+                                if (walletId == resyncWalletId) 0L else getWalletSyncBlock(walletId)
+                            },
+                        ),
+                    )
+                }.onFailure {
+                    if (previousMode != null) {
+                        walletPreferences.setSyncMode(previousMode, walletId = wId)
+                    } else {
+                        walletPreferences.clearSyncMode(walletId = wId)
+                    }
+                    walletPreferences.setCustomBlockHeight(previousHeight, walletId = wId)
+                    walletPreferences.setInitialSyncCompleted(previousInitialSync, walletId = wId)
+                    setWalletSyncBlock(activeWalletId, previousSyncBlock)
                 }
-                walletPreferences.setInitialSyncCompleted(true, walletId = wId)
-                // forceResync for the active wallet only: its saved progress
-                // reads as 0 so it restarts from the new mode's start block,
-                // even if the sync poll re-saved the old progress between the
-                // reset above and the registration. Other wallets resume.
-                val resyncWalletId = activeWalletId
-                syncCoordinator.registerAllWalletScripts(
-                    ctx = makeSyncContext().copy(
-                        getWalletSyncBlock = { walletId ->
-                            if (walletId == resyncWalletId) 0L else getWalletSyncBlock(walletId)
-                        },
-                    ),
-                )
             }
             SyncStrategy.ACTIVE_ONLY ->
                 registerAccount(syncMode, customBlockHeight, savePreference = true, forceResync = true)
@@ -2267,9 +2287,9 @@ class GatewayRepository @Inject constructor(
      * This represents how far the light client has synced for our wallet.
      * In multi-wallet mode, matches the active wallet's script by lock args.
      */
-    private fun getExistingScriptBlock(): Long {
+    private suspend fun getExistingScriptBlock(): Long {
         return try {
-            val scriptsJson = LightClientNative.nativeGetScripts() ?: return 0L
+            val scriptsJson = lightClient.getScripts() ?: return 0L
             val scripts = json.decodeFromString<List<JniScriptStatus>>(scriptsJson)
             val activeArgs = _walletInfo.value?.script?.args
             val match = if (activeArgs != null) {
