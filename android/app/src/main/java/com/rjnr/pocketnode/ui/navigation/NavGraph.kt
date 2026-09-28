@@ -3,6 +3,7 @@ package com.rjnr.pocketnode.ui.navigation
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.ui.Modifier
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
 import androidx.navigation.NavHostController
@@ -141,7 +142,8 @@ fun CkbNavGraph(
     navController: NavHostController,
     startDestination: String = Screen.Onboarding.route,
     pinManager: PinManager,
-    needsMnemonicBackup: () -> Boolean = { false }
+    needsMnemonicBackup: () -> Boolean = { false },
+    modifier: Modifier = Modifier,
 ) {
     // PIN is mandatory: if the user doesn't have one yet, any "go to Main" action
     // must first pass through PIN setup. Once a PIN exists, mnemonic backup is
@@ -155,7 +157,8 @@ fun CkbNavGraph(
 
     NavHost(
         navController = navController,
-        startDestination = startDestination
+        startDestination = startDestination,
+        modifier = modifier,
     ) {
         composable(Screen.Onboarding.route) {
             com.rjnr.pocketnode.ui.screens.onboarding.OnboardingScreen(

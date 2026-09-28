@@ -2,21 +2,31 @@ package com.rjnr.pocketnode
 
 import android.os.Bundle
 import android.util.Log
+import androidx.activity.compose.BackHandler
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import com.rjnr.pocketnode.core.log.Logger
+import androidx.compose.foundation.background
+import androidx.compose.foundation.gestures.awaitEachGesture
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
 import androidx.compose.material3.windowsizeclass.ExperimentalMaterial3WindowSizeClassApi
 import androidx.compose.material3.windowsizeclass.calculateWindowSizeClass
 import androidx.compose.runtime.CompositionLocalProvider
-import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.SideEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.input.pointer.PointerEventPass
+import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.semantics.clearAndSetSemantics
 import androidx.fragment.app.FragmentActivity
+import androidx.hilt.lifecycle.viewmodel.compose.hiltViewModel
 import androidx.navigation.compose.rememberNavController
 import com.rjnr.pocketnode.data.auth.AuthManager
 import com.rjnr.pocketnode.data.auth.PinManager
@@ -28,6 +38,11 @@ import com.rjnr.pocketnode.ui.navigation.CkbNavGraph
 import com.rjnr.pocketnode.ui.navigation.Screen
 import com.rjnr.pocketnode.data.wallet.WalletPreferences
 import com.rjnr.pocketnode.data.wallet.WalletRepository
+import com.rjnr.pocketnode.ui.screens.auth.AuthScreen
+import com.rjnr.pocketnode.ui.screens.auth.AuthViewModel
+import com.rjnr.pocketnode.ui.screens.auth.PinEntryScreen
+import com.rjnr.pocketnode.ui.screens.auth.PinMode
+import com.rjnr.pocketnode.ui.screens.auth.ReauthGate
 import com.rjnr.pocketnode.ui.theme.CkbWalletTheme
 import com.rjnr.pocketnode.ui.util.LocalWindowSizeClass
 import dagger.hilt.android.AndroidEntryPoint
@@ -65,7 +80,15 @@ class MainActivity : FragmentActivity() {
     @Inject
     lateinit var logger: Logger
 
-    private val _requireReauth = mutableStateOf(false)
+    // Assigned on first composition below (see [ReauthGate]), backed by
+    // rememberSaveable so the gate survives configuration change and process
+    // death exactly the way the rest of the compose tree's saved state does:
+    // onStop() locks it from outside composition, and
+    // androidx.compose.runtime.saveable persists the underlying booleans
+    // through the activity's saved-instance-state bundle. Null only in the
+    // brief window before the first composition has run, which onStop can
+    // never observe (onStart/onResume always precede onStop).
+    private var reauthGate: ReauthGate? = null
 
     // Cached at startup — updated when wallet state changes
     private var cachedHasWallet = false
@@ -149,31 +172,108 @@ class MainActivity : FragmentActivity() {
                 ) {
                     val navController = rememberNavController()
 
-                    val reauth = _requireReauth.value
-                    LaunchedEffect(reauth) {
+                    // #524: the reauth gate is drawn as an overlay above the
+                    // nav graph rather than a navigation destination, so the
+                    // back stack and any in-progress screen state (e.g. a
+                    // typed Send amount) survive the lock/unlock cycle.
+                    // rememberSaveable ties the underlying booleans to the
+                    // activity's saved instance state, so the gate stays
+                    // locked across a config change or a process-death
+                    // recreation exactly like it did before (when the
+                    // earlier Auth-route navigation was itself what survived
+                    // recreation).
+                    val lockedState = rememberSaveable { mutableStateOf(false) }
+                    val pinFallbackState = rememberSaveable { mutableStateOf(false) }
+                    val gate = remember(lockedState, pinFallbackState) {
+                        ReauthGate(lockedState, pinFallbackState)
+                    }
+                    SideEffect { reauthGate = gate }
+                    val reauth = gate.locked
+
+                    Box(modifier = Modifier.fillMaxSize()) {
+                        CkbNavGraph(
+                            navController = navController,
+                            startDestination = startDestination,
+                            pinManager = pinManager,
+                            needsMnemonicBackup = {
+                                runBlocking { repository.needsMnemonicBackup() }
+                            },
+                            // Still composed underneath while locked (so its
+                            // ViewModels and rememberSaveable state survive),
+                            // but unreachable: not by touch (the overlay
+                            // below consumes every pointer event) and not by
+                            // accessibility, which would otherwise still
+                            // announce it as navigable content behind the lock.
+                            modifier = if (reauth) Modifier.clearAndSetSemantics {} else Modifier,
+                        )
+
                         if (reauth) {
-                            _requireReauth.value = false
-                            val currentRoute =
-                                navController.currentBackStackEntry?.destination?.route
-                            if (currentRoute != Screen.Auth.route &&
-                                currentRoute != Screen.PinEntry.route
+                            val authViewModel: AuthViewModel = hiltViewModel()
+
+                            // Matches the pre-#524 Auth-route behaviour: back
+                            // while on the biometric/AuthScreen level used to
+                            // finish the activity (Auth was the back stack's
+                            // only entry after the old popUpTo(Main)); back
+                            // while on the nested PIN-entry level used to pop
+                            // back to AuthScreen. Neither level may dismiss
+                            // the overlay and reveal the screen underneath.
+                            BackHandler(enabled = true) {
+                                when (gate.onBackPressed()) {
+                                    ReauthGate.BackAction.HandledWithinGate -> Unit
+                                    ReauthGate.BackAction.LeaveGate -> finish()
+                                }
+                            }
+
+                            Box(
+                                modifier = Modifier
+                                    .fillMaxSize()
+                                    .background(MaterialTheme.colorScheme.background)
+                                    // Swallow any touch AuthScreen/PinEntryScreen's
+                                    // own children didn't already consume (e.g. a
+                                    // tap on empty space) so it can never fall
+                                    // through to the nav graph beneath.
+                                    .pointerInput(Unit) {
+                                        awaitEachGesture {
+                                            do {
+                                                val event = awaitPointerEvent(pass = PointerEventPass.Final)
+                                                event.changes.forEach { it.consume() }
+                                            } while (event.changes.any { it.pressed })
+                                        }
+                                    }
                             ) {
-                                navController.navigate(Screen.Auth.route) {
-                                    popUpTo(Screen.Main.route) { inclusive = true }
-                                    launchSingleTop = true
+                                if (gate.showingPinFallback) {
+                                    PinEntryScreen(
+                                        mode = PinMode.VERIFY,
+                                        onPinComplete = {
+                                            // Mirrors NavGraph's
+                                            // previousRoute==Auth branch:
+                                            // notify the same AuthViewModel
+                                            // AuthScreen is observing, so its
+                                            // own LaunchedEffect(authSuccess)
+                                            // runs the migration check and
+                                            // then clears the gate via
+                                            // onAuthSuccess below.
+                                            authViewModel.onPinUnlockSuccess()
+                                        },
+                                        onForgotPin = {
+                                            // Destructive reset escape hatch:
+                                            // leave the gate entirely and let
+                                            // the ordinary ForgotPin
+                                            // destination take over.
+                                            gate.unlock()
+                                            navController.navigate(Screen.ForgotPin.route)
+                                        },
+                                    )
+                                } else {
+                                    AuthScreen(
+                                        viewModel = authViewModel,
+                                        onAuthSuccess = { gate.unlock() },
+                                        onNavigateToPinVerify = { gate.showPinFallback() },
+                                    )
                                 }
                             }
                         }
                     }
-
-                    CkbNavGraph(
-                        navController = navController,
-                        startDestination = startDestination,
-                        pinManager = pinManager,
-                        needsMnemonicBackup = {
-                            runBlocking { repository.needsMnemonicBackup() }
-                        }
-                    )
                 }
                 }
             }
@@ -204,7 +304,7 @@ class MainActivity : FragmentActivity() {
         syncWorkScheduler.enqueueBackgroundCatchUp()
         // Use cached value — avoids blocking main thread on every onStop
         if (cachedHasWallet && pinManager.hasPin()) {
-            _requireReauth.value = true
+            reauthGate?.lock()
             // Wipe the cached session PIN when the app backgrounds so the next
             // foregrounding forces a fresh unlock before any PIN-gated action.
             authManager.clearSession()
