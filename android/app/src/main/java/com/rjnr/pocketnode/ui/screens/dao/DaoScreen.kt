@@ -24,6 +24,7 @@ import com.rjnr.pocketnode.data.auth.AuthMethod
 import com.rjnr.pocketnode.data.gateway.models.DaoAction
 import androidx.compose.ui.res.stringResource
 import com.rjnr.pocketnode.R
+import com.rjnr.pocketnode.data.gateway.models.DaoCellStatus
 import com.rjnr.pocketnode.data.gateway.models.DaoDeposit
 import com.rjnr.pocketnode.ui.util.resolveString
 import com.rjnr.pocketnode.data.gateway.models.DaoOverview
@@ -49,17 +50,14 @@ fun DaoScreen(
     val snackbarHostState = remember { SnackbarHostState() }
     // #524: the open deposit sheet and the withdraw / unlock confirmations
     // survive the re-auth lock and rotation. Targets are saved by out point
-    // and read from the current deposits, so a spent one closes.
+    // and read from the current active deposits in the state their action
+    // needs, so a deposit that moved on (or was spent) closes its dialog.
     var showDepositSheet by rememberSaveable { mutableStateOf(false) }
     var showDeepRescanConfirm by remember { mutableStateOf(false) }
     var withdrawTargetKey by rememberSaveable { mutableStateOf<String?>(null) }
     var unlockTargetKey by rememberSaveable { mutableStateOf<String?>(null) }
-    fun DaoDeposit.key() = "${outPoint.txHash}:${outPoint.index}"
-    fun depositFor(key: String?): DaoDeposit? = key?.let { k ->
-        (uiState.activeDeposits + uiState.completedDeposits).firstOrNull { it.key() == k }
-    }
-    val withdrawTarget = depositFor(withdrawTargetKey)
-    val unlockTarget = depositFor(unlockTargetKey)
+    val withdrawTarget = resolveDaoTarget(uiState.activeDeposits, withdrawTargetKey, DaoCellStatus.DEPOSITED)
+    val unlockTarget = resolveDaoTarget(uiState.activeDeposits, unlockTargetKey, DaoCellStatus.UNLOCKABLE)
     val context = LocalContext.current
 
     // Captured here so the non-@Composable LaunchedEffect callback below
@@ -240,8 +238,8 @@ fun DaoScreen(
                     items(deposits, key = { "${it.outPoint.txHash}:${it.outPoint.index}" }) { deposit ->
                         DaoDepositCard(
                             deposit = deposit,
-                            onWithdraw = { withdrawTargetKey = deposit.key() },
-                            onUnlock = { unlockTargetKey = deposit.key() }
+                            onWithdraw = { withdrawTargetKey = deposit.daoTargetKey() },
+                            onUnlock = { unlockTargetKey = deposit.daoTargetKey() }
                         )
                     }
                 }
@@ -615,4 +613,20 @@ internal fun formatCkb(shannons: Long): String {
 internal fun formatCkbFull(shannons: Long): String {
     val ckb = shannons / 100_000_000.0
     return String.format("%,.8f", ckb)
+}
+
+/** Saved identity of a deposit for the withdraw / unlock dialogs (#524). */
+internal fun DaoDeposit.daoTargetKey(): String = "${outPoint.txHash}:${outPoint.index}"
+
+/**
+ * The deposit a saved withdraw or unlock dialog refers to, or null when it
+ * is no longer among [activeDeposits] in [status] (the only state its
+ * action applies to): withdraw needs DEPOSITED, unlock needs UNLOCKABLE.
+ */
+internal fun resolveDaoTarget(
+    activeDeposits: List<DaoDeposit>,
+    key: String?,
+    status: DaoCellStatus,
+): DaoDeposit? = key?.let { k ->
+    activeDeposits.firstOrNull { it.status == status && it.daoTargetKey() == k }
 }
