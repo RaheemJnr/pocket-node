@@ -60,10 +60,11 @@ class GatewayRepositoryResyncStrategyTest {
         val setScriptsCalls = mutableListOf<Pair<String, Int>>()
         /** Runs while the coordinator waits for the tip, i.e. mid-registration. */
         var onTipRead: suspend () -> Unit = {}
+        var setScriptsReturn = true
 
         override suspend fun setScripts(scriptsJson: String, command: Int): Boolean {
             setScriptsCalls += scriptsJson to command
-            return true
+            return setScriptsReturn
         }
 
         override suspend fun getTipHeaderRaw(): String {
@@ -114,31 +115,28 @@ class GatewayRepositoryResyncStrategyTest {
         every { nodeLifecycle.currentNetwork } returns network
         coEvery { nodeLifecycle.awaitNodeReady() } returns true
 
-        repository = GatewayRepository(
-            keyManager = mockk(relaxed = true),
+        // Tip and script reads go through LightClientReadOnly, so the
+        // single-wallet registerAccount path also reaches the fake bridge's
+        // setScripts: were resyncAccount to regress to it, these tests fail
+        // on the registered wallet set, not on a missing native library.
+        val realKeyManager = KeyManager(ctx, MnemonicManager(), NoopLogger)
+        val keyManager = mockk<KeyManager>(relaxed = true)
+        coEvery { keyManager.hasWallet() } returns true
+        every { keyManager.deriveWalletInfoFromEntity(any()) } answers {
+            realKeyManager.deriveWalletInfoFromEntity(firstArg())
+        }
+        val lightClient = mockk<LightClientReadOnly>(relaxed = true)
+        coEvery { lightClient.getTipHeader() } returns tipJson(tip)
+        coEvery { lightClient.getScripts() } returns null
+
+        repository = testGatewayRepository(
+            db = db,
             walletPreferences = walletPreferences,
-            json = json,
-            transactionBuilder = mockk(relaxed = true),
-            cacheManager = mockk(relaxed = true),
-            daoSyncManager = mockk(relaxed = true),
-            walletMigrationHelper = mockk(relaxed = true),
-            walletDao = db.walletDao(),
-            appDatabase = mockk(relaxed = true),
-            headerCacheDao = mockk(relaxed = true),
-            syncProgressDao = db.syncProgressDao(),
-            pendingBroadcastDao = mockk(relaxed = true),
-            broadcastClient = mockk(relaxed = true),
-            syncCoordinator = coordinator,
-            daoHeaderResolver = mockk(relaxed = true),
-            daoDepositReader = mockk(relaxed = true),
-            lightClient = mockk(relaxed = true),
-            subAccountReconciler = mockk(relaxed = true),
-            subAccountDiscovery = mockk(relaxed = true),
-            syncServiceCommands = mockk(relaxed = true),
             nodeLifecycle = nodeLifecycle,
-            syncPoller = mockk(relaxed = true),
-            startupReconciler = mockk(relaxed = true),
-            logger = NoopLogger,
+            syncCoordinator = coordinator,
+            keyManager = keyManager,
+            lightClient = lightClient,
+            json = json,
         )
 
         runBlocking {
@@ -147,6 +145,8 @@ class GatewayRepositoryResyncStrategyTest {
             // Both wallets mid-sync; the other wallet's progress must survive.
             seedProgress(ACTIVE, ACTIVE_PROGRESS)
             seedProgress(OTHER, OTHER_PROGRESS)
+            // Sets the active wallet's lock script, which registerAccount needs.
+            repository.initializeWallet().getOrThrow()
         }
         walletPreferences.setSyncMode(SyncMode.RECENT, walletId = ACTIVE)
         walletPreferences.setSyncMode(SyncMode.RECENT, walletId = OTHER)
@@ -227,18 +227,89 @@ class GatewayRepositoryResyncStrategyTest {
         }
 
     @Test
-    fun `ACTIVE_ONLY resync keeps the single-wallet path and does not register all wallets`() = runBlocking {
+    fun `ACTIVE_ONLY resync keeps the single-wallet path and registers only the active wallet`() = runBlocking {
         walletPreferences.setSyncStrategy(SyncStrategy.ACTIVE_ONLY)
-        // Stop registerAccount before its direct JNI tip read; reaching this
-        // failure proves the single-wallet path ran, not the coordinator's.
+
+        repository.resyncAccount(SyncMode.CUSTOM, CUSTOM_HEIGHT).getOrThrow()
+
+        assertEquals(mapOf(activeScript.args to CUSTOM_HEIGHT), registeredBlocks())
+        assertEquals(SyncMode.CUSTOM, walletPreferences.getSyncMode(walletId = ACTIVE))
+    }
+
+    @Test
+    fun `ACTIVE_ONLY resync failure does not persist the new mode`() = runBlocking {
+        walletPreferences.setSyncStrategy(SyncStrategy.ACTIVE_ONLY)
         coEvery { nodeLifecycle.awaitNodeReady() } returns false
 
         val result = repository.resyncAccount(SyncMode.CUSTOM, CUSTOM_HEIGHT)
 
         assertEquals("Node initialization failed", result.exceptionOrNull()?.message)
         assertTrue(bridge.setScriptsCalls.isEmpty())
-        // ACTIVE_ONLY persists the mode only after a successful registration.
         assertNotEquals(SyncMode.CUSTOM, walletPreferences.getSyncMode(walletId = ACTIVE))
+    }
+
+    /**
+     * Review S1: the ALL / BALANCED branch writes the prefs and zeroes the
+     * progress before registering, so a failed registration must put all of
+     * it back, or the mode the UI reports as failed applies on next startup.
+     */
+    @Test
+    fun `a failed ALL_WALLETS resync leaves prefs and saved progress exactly as before`() = runBlocking {
+        walletPreferences.setSyncStrategy(SyncStrategy.ALL_WALLETS)
+        walletPreferences.setInitialSyncCompleted(false, walletId = ACTIVE)
+        bridge.setScriptsReturn = false
+
+        val result = repository.resyncAccount(SyncMode.CUSTOM, CUSTOM_HEIGHT)
+
+        assertTrue(result.isFailure)
+        assertEquals(SyncMode.RECENT, walletPreferences.getSyncModeOrNull(walletId = ACTIVE))
+        assertEquals(null, walletPreferences.getCustomBlockHeight(walletId = ACTIVE))
+        assertEquals(false, walletPreferences.hasCompletedInitialSync(walletId = ACTIVE))
+        assertEquals(ACTIVE_PROGRESS, repository.getWalletSyncBlock(ACTIVE))
+        assertEquals(OTHER_PROGRESS, repository.getWalletSyncBlock(OTHER))
+    }
+
+    @Test
+    fun `a failed resync with no mode ever stored leaves the mode unset`() = runBlocking {
+        walletPreferences.setSyncStrategy(SyncStrategy.BALANCED)
+        walletPreferences.clearSyncMode(walletId = ACTIVE)
+        walletPreferences.setCustomBlockHeight(1_234L, walletId = ACTIVE)
+        walletPreferences.setInitialSyncCompleted(true, walletId = ACTIVE)
+        bridge.setScriptsReturn = false
+
+        assertTrue(repository.resyncAccount(SyncMode.FULL_HISTORY, null).isFailure)
+
+        assertEquals(null, walletPreferences.getSyncModeOrNull(walletId = ACTIVE))
+        assertEquals(1_234L, walletPreferences.getCustomBlockHeight(walletId = ACTIVE))
+        assertEquals(true, walletPreferences.hasCompletedInitialSync(walletId = ACTIVE))
+        assertEquals(ACTIVE_PROGRESS, repository.getWalletSyncBlock(ACTIVE))
+    }
+
+    /** Review N2: the concurrency cap keeps the active wallet even when others are more recent. */
+    @Test
+    fun `the wallet cap never drops the active wallet`() = runBlocking {
+        walletPreferences.setSyncStrategy(SyncStrategy.ALL_WALLETS)
+        seedWallet("wallet-c", script("cc"), lastActiveAt = 10L)
+        seedWallet("wallet-d", script("dd"), lastActiveAt = 11L)
+        seedWallet("wallet-e", script("ee"), lastActiveAt = 12L)
+
+        repository.resyncAccount(SyncMode.CUSTOM, CUSTOM_HEIGHT).getOrThrow()
+
+        val blocks = registeredBlocks()
+        assertEquals(3, blocks.size)
+        assertEquals(CUSTOM_HEIGHT, blocks[activeScript.args])
+        // The two most recent others fill the remaining slots.
+        assertEquals(setOf(activeScript.args, script("ee").args, script("dd").args), blocks.keys)
+    }
+
+    /** Review N1: a CUSTOM height above the tip resets to the RECENT window, as registerAccount does. */
+    @Test
+    fun `ALL_WALLETS resync clamps a CUSTOM height above the tip`() = runBlocking {
+        walletPreferences.setSyncStrategy(SyncStrategy.ALL_WALLETS)
+
+        repository.resyncAccount(SyncMode.CUSTOM, tip + 1_000L).getOrThrow()
+
+        assertEquals(tip - 200_000L, registeredBlocks()[activeScript.args])
     }
 
     private companion object {

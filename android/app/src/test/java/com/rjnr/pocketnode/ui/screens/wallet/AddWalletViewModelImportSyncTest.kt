@@ -135,16 +135,26 @@ class AddWalletViewModelImportSyncTest {
         db.close()
     }
 
-    private fun newViewModel(): AddWalletViewModel = AddWalletViewModel(
+    private fun newViewModel(
+        gateway: GatewayRepository = gatewayRepository,
+    ): AddWalletViewModel = AddWalletViewModel(
         savedStateHandle = SavedStateHandle(),
         walletRepository = walletRepository,
-        gatewayRepository = gatewayRepository,
+        gatewayRepository = gateway,
         mnemonicManager = mnemonicManager,
         walletKeyReader = walletKeyReader,
         walletKeyWriter = walletKeyWriter,
         authManager = authManager,
         logger = NoopLogger,
     )
+
+    private fun kotlinx.coroutines.test.TestScope.advanceUntil(condition: () -> Boolean) {
+        repeat(500) {
+            advanceUntilIdle()
+            if (condition()) return
+            Thread.sleep(10)
+        }
+    }
 
     private fun AddWalletViewModel.importValidMnemonic(name: String = "Restored") {
         val words = mnemonicManager.generateMnemonic(MnemonicManager.WordCount.TWELVE)
@@ -235,7 +245,7 @@ class AddWalletViewModelImportSyncTest {
         assertTrue(vm.uiState.value.showSyncModeDialog)
         assertNull(vm.uiState.value.createdWallet)
         assertFalse(vm.uiState.value.isApplyingSyncChoice)
-        assertTrue(vm.uiState.value.error != null)
+        assertTrue(vm.uiState.value.syncChoiceError != null)
 
         // The wallet stays pending: a retry that succeeds still navigates.
         coEvery { gatewayRepository.resyncAccount(any(), any()) } returns Result.success(Unit)
@@ -244,6 +254,60 @@ class AddWalletViewModelImportSyncTest {
 
         assertFalse(vm.uiState.value.showSyncModeDialog)
         assertTrue(vm.uiState.value.createdWallet != null)
+        assertNull(vm.uiState.value.syncChoiceError)
+    }
+
+    /**
+     * Review S2: the same failure, but as a `Result.failure` the repository
+     * actually RETURNS (not a throw into the catch backstop). A real
+     * GatewayRepository under ACTIVE_ONLY whose node never becomes ready
+     * returns `Result.failure("Node initialization failed")` from
+     * resyncAccount, with no MockK boxing in between.
+     */
+    @Test
+    fun `a returned Result failure keeps the sheet open and does not navigate`() = runTest {
+        walletPreferences.setSyncStrategy(com.rjnr.pocketnode.core.prefs.SyncStrategy.ACTIVE_ONLY)
+        val nodeLifecycle = mockk<com.rjnr.pocketnode.data.gateway.NodeLifecycle>(relaxed = true)
+        coEvery { nodeLifecycle.awaitNodeReady() } returns false
+        val syncPoller = mockk<com.rjnr.pocketnode.data.gateway.SyncPoller>(relaxed = true)
+        every { syncPoller.syncProgress } returns MutableStateFlow(SyncProgress())
+        val realGateway = com.rjnr.pocketnode.data.gateway.testGatewayRepository(
+            db = db,
+            walletPreferences = walletPreferences,
+            nodeLifecycle = nodeLifecycle,
+            syncPoller = syncPoller,
+        )
+        // Sanity: the repository really returns a failure, not a throw.
+        assertTrue(realGateway.resyncAccount(SyncMode.RECENT, null).isFailure)
+
+        val vm = newViewModel(realGateway)
+        vm.importValidMnemonic()
+        // The real repository hops to Dispatchers.IO, which advanceUntilIdle
+        // cannot see: keep draining the Main queue until the state settles.
+        advanceUntil { vm.uiState.value.showSyncModeDialog }
+        assertTrue(vm.uiState.value.showSyncModeDialog)
+
+        vm.onSyncModeSelected(SyncMode.FULL_HISTORY, null)
+        advanceUntil { !vm.uiState.value.isApplyingSyncChoice }
+
+        assertTrue(vm.uiState.value.showSyncModeDialog)
+        assertNull(vm.uiState.value.createdWallet)
+        assertFalse(vm.uiState.value.isApplyingSyncChoice)
+        assertTrue(vm.uiState.value.syncChoiceError != null)
+    }
+
+    /** Review N5: Apply with no pending wallet still resyncs and closes the sheet. */
+    @Test
+    fun `Apply with no pending wallet still resyncs and closes the sheet`() = runTest {
+        coEvery { gatewayRepository.resyncAccount(any(), any()) } returns Result.success(Unit)
+        val vm = newViewModel()
+
+        vm.onSyncModeSelected(SyncMode.RECENT, null)
+        advanceUntilIdle()
+
+        coVerify(exactly = 1) { gatewayRepository.resyncAccount(SyncMode.RECENT, null) }
+        assertFalse(vm.uiState.value.showSyncModeDialog)
+        assertFalse(vm.uiState.value.isApplyingSyncChoice)
     }
 
     /**
