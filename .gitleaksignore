@@ -4,6 +4,15 @@
 # one-off historical false positive falls outside a test source set (for
 # example after a file rename that a path pattern no longer matches).
 #
-# Empty today: every known test-vector/fixture finding is still at a path
-# covered by .gitleaks.toml's [allowlist].paths, across all commits that
-# touched it.
+# Every known test-vector/fixture finding is at a path covered by
+# .gitleaks.toml's [allowlist].paths, across all commits that touched it.
+# The entries below are the only reviewed exceptions.
+
+# Reviewed false positives outside test source sets (2026-09-28):
+# WalletInfo.kt:6 is KDoc prose ("compressed public key, secp256k1-blake160"), no value.
+8b92ffbdfa45b0a0364ab83f962ad2744262a9ef:android/shared/src/commonMain/kotlin/com/rjnr/pocketnode/data/wallet/WalletInfo.kt:generic-api-key:6
+# A since-untracked plan doc used a made-up placeholder key ("a1b2c3d4e5f6" repeated) in example test code.
+26967f6de7d242e8e7841e5c91fca37f295e4db0:docs/superpowers/plans/2026-04-13-key-storage-redesign-phase1.md:generic-api-key:172
+26967f6de7d242e8e7841e5c91fca37f295e4db0:docs/superpowers/plans/2026-04-13-key-storage-redesign-phase1.md:generic-api-key:192
+26967f6de7d242e8e7841e5c91fca37f295e4db0:docs/superpowers/plans/2026-04-13-key-storage-redesign-phase1.md:generic-api-key:211
+26967f6de7d242e8e7841e5c91fca37f295e4db0:docs/superpowers/plans/2026-04-13-key-storage-redesign-phase1.md:generic-api-key:489
