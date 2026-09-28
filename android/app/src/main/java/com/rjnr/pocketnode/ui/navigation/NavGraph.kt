@@ -256,11 +256,16 @@ fun CkbNavGraph(
             val modeString = backStackEntry.arguments?.getString("mode") ?: "verify"
             val mode = runCatching { PinMode.valueOf(modeString.uppercase()) }
                 .getOrDefault(PinMode.VERIFY)
-            val setupPin = navController.previousBackStackEntry
-                ?.savedStateHandle
-                ?.get<String>("setup_pin")
+            // #524: the SETUP step's PIN is held in memory only (never in a
+            // SavedStateHandle, which is written to the saved-state Bundle).
+            val setupPin = if (mode == PinMode.CONFIRM) {
+                navController.previousBackStackEntry?.let { PinSetupCandidate.of(it).pin }
+            } else {
+                null
+            }
 
-            // If CONFIRM mode but setupPin was lost (e.g. process death), go back to SETUP
+            // If CONFIRM mode but setupPin was lost (process death or a
+            // re-auth lock), go back to SETUP so the user types it again.
             if (mode == PinMode.CONFIRM && setupPin == null) {
                 LaunchedEffect(Unit) { navController.popBackStack() }
                 return@composable
@@ -272,9 +277,7 @@ fun CkbNavGraph(
                 onPinComplete = { enteredPin ->
                     when (mode) {
                         PinMode.SETUP -> {
-                            navController.currentBackStackEntry
-                                ?.savedStateHandle
-                                ?.set("setup_pin", enteredPin)
+                            PinSetupCandidate.of(backStackEntry).set(enteredPin)
                             navController.navigate(Screen.PinEntry.createRoute("confirm"))
                         }
                         PinMode.CONFIRM -> {

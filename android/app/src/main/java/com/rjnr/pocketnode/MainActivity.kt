@@ -35,6 +35,7 @@ import com.rjnr.pocketnode.ui.screens.auth.ReauthLockEvents
 import com.rjnr.pocketnode.ui.screens.auth.ReauthGateHost
 import com.rjnr.pocketnode.ui.screens.auth.ReauthOverlay
 import com.rjnr.pocketnode.ui.screens.auth.ReauthSessionStore
+import com.rjnr.pocketnode.ui.navigation.clearPendingPinVerifications
 import com.rjnr.pocketnode.ui.navigation.rememberLockSafeNavController
 import com.rjnr.pocketnode.ui.theme.CkbWalletTheme
 import com.rjnr.pocketnode.ui.util.LocalWindowSizeClass
@@ -90,6 +91,7 @@ class MainActivity : FragmentActivity() {
             onNewLock = {
                 reauthSessionStore.clearAll()
                 ReauthLockEvents.onLocked()
+                navController?.clearPendingPinVerifications()
             },
             clearSessionSecrets = {
                 authManager.clearSession()
