@@ -29,6 +29,8 @@ import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.ModalBottomSheet
+import androidx.compose.material3.ModalBottomSheetProperties
+import androidx.compose.material3.SheetValue
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
@@ -38,6 +40,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
@@ -77,6 +80,8 @@ internal fun SyncOptionsSheet(
     showHelpIcons: Boolean = true,
     /** An Apply is in flight: both buttons disable so a double tap cannot resubmit (#431). */
     isApplying: Boolean = false,
+    /** A failed Apply, shown inline: a screen snackbar would sit under the sheet's window (#431). */
+    errorText: String? = null,
 ) {
     val initialMode = remember(currentMode, availableModes) {
         currentMode.takeIf { it in availableModes } ?: availableModes.firstOrNull() ?: currentMode
@@ -88,9 +93,23 @@ internal fun SyncOptionsSheet(
         mutableStateOf(savedCustomBlockHeight?.toString() ?: "")
     }
     var showCustomInput by rememberSaveable(initialMode) { mutableStateOf(initialMode == SyncMode.CUSTOM) }
-    val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
+    // While an Apply is in flight the owner ignores dismissal, so the sheet
+    // must not hide itself either (swipe, scrim, back), or it would vanish
+    // while its state still says shown (#431).
+    val applying by rememberUpdatedState(isApplying)
+    val sheetState = rememberModalBottomSheetState(
+        skipPartiallyExpanded = true,
+        confirmValueChange = { it != SheetValue.Hidden || !applying },
+    )
 
-    ModalBottomSheet(onDismissRequest = onDismiss, sheetState = sheetState) {
+    ModalBottomSheet(
+        onDismissRequest = onDismiss,
+        sheetState = sheetState,
+        properties = ModalBottomSheetProperties(
+            shouldDismissOnBackPress = !isApplying,
+            shouldDismissOnClickOutside = !isApplying,
+        ),
+    ) {
         Column(
             modifier = Modifier
                 .fillMaxWidth()
@@ -198,6 +217,15 @@ internal fun SyncOptionsSheet(
                         )
                     }
                 }
+            }
+
+            if (errorText != null) {
+                Spacer(Modifier.height(4.dp))
+                Text(
+                    text = errorText,
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.error,
+                )
             }
 
             Spacer(Modifier.height(8.dp))

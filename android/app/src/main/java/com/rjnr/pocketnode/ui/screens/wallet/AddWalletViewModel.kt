@@ -48,6 +48,9 @@ data class AddWalletUiState(
     /** #431: an Apply from the sync sheet is in flight; the sheet disables
      * its buttons and further submissions are ignored until it resolves. */
     val isApplyingSyncChoice: Boolean = false,
+    /** #431: why the last Apply failed, shown inside the sheet (a snackbar
+     * would sit under the sheet's window). Cleared on the next Apply. */
+    val syncChoiceError: UiMessage? = null,
     val tipBlockNumber: Long = 0L,
 )
 
@@ -182,8 +185,10 @@ class AddWalletViewModel @Inject constructor(
         // second resync: each would publish createdWallet, and a later one
         // could publish null over the first and strand navigation.
         if (_uiState.value.isApplyingSyncChoice) return
-        val wallet = pendingImportedWallet ?: return
-        _uiState.update { it.copy(isApplyingSyncChoice = true) }
+        // Taken once here. Null only if the sheet shows without a pending
+        // import; the choice is then still applied and the sheet closes.
+        val wallet = pendingImportedWallet
+        _uiState.update { it.copy(isApplyingSyncChoice = true, syncChoiceError = null) }
         viewModelScope.launch {
             // resyncAccount reports failure through its Result; the catch is
             // a backstop so an unexpected throw still clears the in-flight
@@ -207,7 +212,7 @@ class AddWalletViewModel @Inject constructor(
                 _uiState.update {
                     it.copy(
                         isApplyingSyncChoice = false,
-                        error = UiMessage.Resource(
+                        syncChoiceError = UiMessage.Resource(
                             R.string.vm_error_sync_mode_change_failed,
                             listOf(failure.message ?: ""),
                         ),
@@ -223,7 +228,7 @@ class AddWalletViewModel @Inject constructor(
         if (_uiState.value.isApplyingSyncChoice) return
         val wallet = pendingImportedWallet
         pendingImportedWallet = null
-        _uiState.update { it.copy(showSyncModeDialog = false, createdWallet = wallet) }
+        _uiState.update { it.copy(showSyncModeDialog = false, syncChoiceError = null, createdWallet = wallet) }
     }
 
     fun selectParent(walletId: String) {

@@ -142,6 +142,7 @@ fun AddWalletScreen(
             showHelpIcons = false,
             tipBlockNumber = uiState.tipBlockNumber,
             isApplying = uiState.isApplyingSyncChoice,
+            errorText = uiState.syncChoiceError?.resolveString(context),
         )
     }
 

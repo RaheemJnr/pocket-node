@@ -50,6 +50,8 @@ data class MnemonicImportUiState(
     val showSyncModeDialog: Boolean = false,
     /** #431: an Apply from the sync sheet is in flight; see onSyncModeSelected. */
     val isApplyingSyncChoice: Boolean = false,
+    /** #431: why the last Apply failed, shown inside the sheet. */
+    val syncChoiceError: String? = null,
     val tipBlockNumber: Long = 0L,
     val error: String? = null
 )
@@ -261,7 +263,7 @@ class MnemonicImportViewModel @Inject constructor(
     fun onSyncModeSelected(mode: SyncMode, customHeight: Long?) {
         // Ignore a second Apply tap while the first resync is in flight.
         if (_uiState.value.isApplyingSyncChoice) return
-        _uiState.update { it.copy(isApplyingSyncChoice = true) }
+        _uiState.update { it.copy(isApplyingSyncChoice = true, syncChoiceError = null) }
         viewModelScope.launch {
             // #431: apply unconditionally, including RECENT. The old
             // `if (mode != RECENT)` short-circuit assumed RECENT was
@@ -287,7 +289,7 @@ class MnemonicImportViewModel @Inject constructor(
                 // (dismiss keeps the RECENT default from import).
                 logger.e(TAG, "Post-import sync mode change failed", failure)
                 _uiState.update {
-                    it.copy(isApplyingSyncChoice = false, error = "Sync mode change failed: ${failure.message}")
+                    it.copy(isApplyingSyncChoice = false, syncChoiceError = "Sync mode change failed: ${failure.message}")
                 }
             }
         }
@@ -295,7 +297,7 @@ class MnemonicImportViewModel @Inject constructor(
 
     fun skipSyncSelection() {
         if (_uiState.value.isApplyingSyncChoice) return
-        _uiState.update { it.copy(showSyncModeDialog = false, importSuccess = true) }
+        _uiState.update { it.copy(showSyncModeDialog = false, syncChoiceError = null, importSuccess = true) }
     }
 
     fun clearError() {
@@ -371,6 +373,7 @@ fun MnemonicImportScreen(
             showHelpIcons = false,
             tipBlockNumber = uiState.tipBlockNumber,
             isApplying = uiState.isApplyingSyncChoice,
+            errorText = uiState.syncChoiceError,
         )
     }
 
