@@ -211,6 +211,67 @@ class AddWalletViewModelImportSyncTest {
     }
 
     /**
+     * Codex P2 on PR #532: resyncAccount returns its failure as a Result
+     * rather than throwing, so the old try/catch treated a failed apply as
+     * success and navigated away with the mode unapplied.
+     *
+     * MockK 1.13.16 cannot return a `Result.failure` from a suspend stub (the
+     * inline-value-class boxing limitation described on this class: the
+     * failure arrives double-boxed and reads as success), so the failure is
+     * driven through a throw, which the ViewModel folds into the same
+     * failure branch as a returned `Result.failure`.
+     */
+    @Test
+    fun `a failed sync-mode apply keeps the sheet open and does not navigate`() = runTest {
+        coEvery { gatewayRepository.resyncAccount(any(), any()) } throws
+            IllegalStateException("Failed to set scripts")
+        val vm = newViewModel()
+        vm.importValidMnemonic()
+        advanceUntilIdle()
+
+        vm.onSyncModeSelected(SyncMode.FULL_HISTORY, null)
+        advanceUntilIdle()
+
+        assertTrue(vm.uiState.value.showSyncModeDialog)
+        assertNull(vm.uiState.value.createdWallet)
+        assertFalse(vm.uiState.value.isApplyingSyncChoice)
+        assertTrue(vm.uiState.value.error != null)
+
+        // The wallet stays pending: a retry that succeeds still navigates.
+        coEvery { gatewayRepository.resyncAccount(any(), any()) } returns Result.success(Unit)
+        vm.onSyncModeSelected(SyncMode.RECENT, null)
+        advanceUntilIdle()
+
+        assertFalse(vm.uiState.value.showSyncModeDialog)
+        assertTrue(vm.uiState.value.createdWallet != null)
+    }
+
+    /**
+     * Codex P2 on PR #532: a double tap on Apply launched two coroutines that
+     * each consumed pendingImportedWallet; a later completion could publish
+     * createdWallet = null over the first and strand navigation.
+     */
+    @Test
+    fun `a double tap on Apply resyncs once and still reveals createdWallet`() = runTest {
+        coEvery { gatewayRepository.resyncAccount(any(), any()) } returns Result.success(Unit)
+        val vm = newViewModel()
+        vm.importValidMnemonic()
+        advanceUntilIdle()
+
+        vm.onSyncModeSelected(SyncMode.RECENT, null)
+        assertTrue(vm.uiState.value.isApplyingSyncChoice)
+        vm.onSyncModeSelected(SyncMode.RECENT, null)
+        // A dismiss while the apply is in flight is ignored as well.
+        vm.skipSyncSelection()
+        advanceUntilIdle()
+
+        coVerify(exactly = 1) { gatewayRepository.resyncAccount(any(), any()) }
+        assertFalse(vm.uiState.value.isApplyingSyncChoice)
+        assertFalse(vm.uiState.value.showSyncModeDialog)
+        assertTrue(vm.uiState.value.createdWallet != null)
+    }
+
+    /**
      * #431's actual bug: import must not silently keep the NEW_WALLET (tip)
      * default. This end-to-end path (real WalletRepository, real
      * WalletPreferences) confirms RECENT is what's on disk right after
