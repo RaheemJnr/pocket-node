@@ -2069,6 +2069,26 @@ class GatewayRepository @Inject constructor(
             logger.w(TAG, "getTransactions: known-scripts set incomplete: ${it.message}")
             setOf(myScript.args)
         }
+
+        // Self-transfer scope, narrower than knownLockArgs above: only the
+        // ACTIVE wallet's own main address plus its own HD/derived and
+        // sub-account candidates (sub_account_candidates rows are keyed by
+        // parentWalletId == activeWalletId, both the account-axis
+        // not-yet-restored sibling slots and the chain-axis gap-limit
+        // receive/change slots derived for this same wallet). This must NOT
+        // include any other wallet in the app: knownLockArgs does, on
+        // purpose, for the gap-limit check above, but a send from wallet A to
+        // wallet B is a real transfer, not a self transfer, even though
+        // wallet B's address would be in knownLockArgs.
+        val selfWalletLockArgs: Set<String> = runCatching {
+            buildSet {
+                add(myScript.args)
+                addAll(appDatabase.subAccountCandidateDao().getForParent(activeWalletId).map { it.scriptArgs })
+            }
+        }.getOrElse {
+            logger.w(TAG, "getTransactions: self-transfer script set incomplete: ${it.message}")
+            setOf(myScript.args)
+        }
         var gapLimitSignal = false
 
         // Fetch tip height once for confirmation calculations (avoid per-tx JNI calls)
@@ -2087,14 +2107,15 @@ class GatewayRepository @Inject constructor(
             val netChangeShannons = netByTx[txHash] ?: 0L
 
             // A real self transfer always pays the fee, so its net change is
-            // negative, not zero — "out" unless every output lands on a
-            // script we track (see isSelfTransferSignature). DAO deposits and
-            // withdrawals also net negative but are reclassified below by
-            // finalDirection, which takes priority over this "out"/"self" call.
+            // negative, not zero: "out" unless every output lands on this
+            // wallet's own script (see isSelfTransferSignature, scoped by
+            // selfWalletLockArgs above). DAO deposits and withdrawals also net
+            // negative but are reclassified below by finalDirection, which
+            // takes priority over this "out"/"self" call.
             val direction = when {
                 netChangeShannons > 0 -> "in"
                 netChangeShannons < 0 ->
-                    if (isSelfTransferSignature(netChangeShannons, tx.outputs, knownLockArgs)) "self" else "out"
+                    if (isSelfTransferSignature(netChangeShannons, tx.outputs, selfWalletLockArgs)) "self" else "out"
                 else -> "self"
             }
 

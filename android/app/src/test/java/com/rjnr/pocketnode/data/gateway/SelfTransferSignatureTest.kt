@@ -8,12 +8,17 @@ import org.junit.Test
 
 /**
  * A transfer between a wallet's own addresses always pays the fee, so its net
- * change is negative, never zero — `GatewayRepository.getTransactions` used to
+ * change is negative, never zero: `GatewayRepository.getTransactions` used to
  * read that as a plain "Sent". `isSelfTransferSignature` is the piece that
- * tells the two apart: negative net change where every output still lands on
- * a script we track (main address, HD/derived candidates — the same
- * `knownLockArgs` set [isUnknownChangeSignature] uses) is a self transfer, not
- * an outgoing payment.
+ * tells the two apart: negative net change where every output is a plain
+ * secp256k1-blake160 cell whose args are in the caller's known-args set is a
+ * self transfer, not an outgoing payment.
+ *
+ * The set passed in must be scoped to the CURRENT wallet only (its own main
+ * address plus its own HD/derived and sub-account candidates), not the
+ * broader all-wallets `knownLockArgs` set [isUnknownChangeSignature] uses:
+ * otherwise a send to a different wallet in the same app would misclassify
+ * as a self transfer.
  *
  * DAO priority (a DAO output or header-dep count overrides this call
  * entirely) and the "exact-zero net still self" / "positive net is 'in'"
@@ -30,10 +35,19 @@ class SelfTransferSignatureTest {
     private val mainArgs = "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
     private val derivedArgs = "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
     private val foreignArgs = "0xcccccccccccccccccccccccccccccccccccccccc"
+    private val otherWalletArgs = "0xdddddddddddddddddddddddddddddddddddddddd"
+
+    private val multisigCodeHash = "0x5c5069eb0857efc65e1bca0c07df34c31663b3622fd3876c876320fc9634e2a8"
 
     private fun secpOutput(capacityCkb: Long, args: String) = CellOutput(
         capacity = "0x${(capacityCkb * ckb).toString(16)}",
         lock = Script(Script.SECP256K1_CODE_HASH, "type", args),
+        type = null
+    )
+
+    private fun output(capacityCkb: Long, codeHash: String, hashType: String, args: String) = CellOutput(
+        capacity = "0x${(capacityCkb * ckb).toString(16)}",
+        lock = Script(codeHash, hashType, args),
         type = null
     )
 
@@ -139,5 +153,39 @@ class SelfTransferSignatureTest {
             knownLockArgs = setOf(mainArgs),
         )
         assertTrue(flagged)
+    }
+
+    @Test
+    fun `send to a different wallet in the same app is a plain send, not a self transfer`() {
+        // The caller must scope its known-args set to the CURRENT wallet only.
+        // otherWalletArgs stands in for a second wallet's address that a
+        // broader, all-wallets set would have included; here it is correctly
+        // left out, so the send to it reads as "out", not "self".
+        val flagged = isSelfTransferSignature(
+            netChangeShannons = -100_000L,
+            outputs = listOf(secpOutput(100, otherWalletArgs)),
+            knownLockArgs = setOf(mainArgs),
+        )
+        assertFalse(flagged)
+    }
+
+    @Test
+    fun `same args under a multisig lock is not ours, even though the args match`() {
+        val flagged = isSelfTransferSignature(
+            netChangeShannons = -100_000L,
+            outputs = listOf(output(100, multisigCodeHash, "type", mainArgs)),
+            knownLockArgs = setOf(mainArgs),
+        )
+        assertFalse(flagged)
+    }
+
+    @Test
+    fun `same args and code hash but a different hash type is not ours`() {
+        val flagged = isSelfTransferSignature(
+            netChangeShannons = -100_000L,
+            outputs = listOf(output(100, Script.SECP256K1_CODE_HASH, "data", mainArgs)),
+            knownLockArgs = setOf(mainArgs),
+        )
+        assertFalse(flagged)
     }
 }
