@@ -312,6 +312,69 @@ class GatewayRepositoryResyncStrategyTest {
             assertEquals(null, walletPreferences.getCustomBlockHeight(walletId = OTHER))
         }
 
+    /**
+     * Codex on b90260a: under BALANCED, a resync for A that is still waiting
+     * for the tip when the user switches to a lagging wallet B must not
+     * finish its own CMD_SET_SCRIPTS_ALL after the switch's, or it would
+     * drop B as a laggard and leave the displayed wallet unsynced.
+     */
+    @Test
+    fun `a stale BALANCED resync aborts before setScripts when the user switches to a lagging wallet`() =
+        runBlocking {
+            walletPreferences.setSyncStrategy(SyncStrategy.BALANCED)
+            // C leads; B (OTHER) lags C by far more than the BALANCED threshold.
+            seedWallet("wallet-c", script("cc"), lastActiveAt = 3L)
+            seedProgress("wallet-c", ACTIVE_PROGRESS)
+            seedProgress(OTHER, 1_000_000L)
+            val laggard = db.walletDao().getById(OTHER)!!
+            // One-shot: switch to B while A's registration waits for the tip.
+            bridge.onTipRead = {
+                bridge.onTipRead = {}
+                repository.onActiveWalletChanged(laggard)
+            }
+
+            val result = repository.resyncAccount(SyncMode.CUSTOM, CUSTOM_HEIGHT)
+
+            assertEquals("Active wallet changed during registration", result.exceptionOrNull()?.message)
+            // Only the switch's registration reached the light client, and it kept B.
+            val blocks = registeredBlocks()
+            assertTrue("switched-to wallet must stay registered", otherScript.args in blocks.keys)
+            // A was rolled back to where it was.
+            assertEquals(ACTIVE_PROGRESS, repository.getWalletSyncBlock(ACTIVE))
+            assertEquals(SyncMode.RECENT, walletPreferences.getSyncModeOrNull(walletId = ACTIVE))
+        }
+
+    /** Codex on b90260a (1): BALANCED keeps the LIVE active wallet, not the context's snapshot. */
+    @Test
+    fun `BALANCED keeps the live active wallet even when the context snapshot names another`() = runBlocking {
+        walletPreferences.setSyncStrategy(SyncStrategy.BALANCED)
+        seedProgress(OTHER, 1_000_000L) // lags ACTIVE (19.5M) by far more than the threshold
+        val coordinator = SyncCoordinator(
+            walletDao = db.walletDao(),
+            syncProgressDao = db.syncProgressDao(),
+            syncPreferences = walletPreferences,
+            keyManager = KeyManager(ApplicationProvider.getApplicationContext(), MnemonicManager(), NoopLogger),
+            json = json,
+            lightClient = bridge,
+            subAccountCandidateDao = db.subAccountCandidateDao(),
+            transactionDao = db.transactionDao(),
+            logger = NoopLogger,
+        )
+
+        coordinator.registerAllWalletScripts(
+            SyncCoordinator.SyncContext(
+                network = network,
+                activeWalletId = ACTIVE, // stale snapshot
+                awaitNodeReady = { true },
+                getWalletSyncBlock = { id -> repository.getWalletSyncBlock(id) },
+                onScriptsRegistered = {},
+                liveActiveWalletId = { OTHER },
+            ),
+        )
+
+        assertTrue("live active laggard kept", otherScript.args in registeredBlocks().keys)
+    }
+
     @Test
     fun `ACTIVE_ONLY resync fails rather than apply its mode to a wallet switched to mid-registration`() =
         runBlocking {

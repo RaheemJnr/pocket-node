@@ -626,12 +626,21 @@ class GatewayRepository @Inject constructor(
                     // progress reads as 0 so it restarts from the new mode's
                     // start block, even if the sync poll re-saved the old
                     // progress between the reset above and the registration.
-                    // Other wallets resume.
+                    // Other wallets resume. The filter and the cap keep the
+                    // LIVE active wallet (makeSyncContext). If the user
+                    // switched wallets while this waited for the node or tip,
+                    // the switch started its own CMD_SET_SCRIPTS_ALL: abort
+                    // this stale one before it can overwrite that set, and
+                    // roll back below.
                     syncCoordinator.registerAllWalletScripts(
                         ctx = makeSyncContext().copy(
-                            activeWalletId = walletId,
                             getWalletSyncBlock = { id ->
                                 if (id == walletId) 0L else getWalletSyncBlock(id)
+                            },
+                            beforeSetScripts = {
+                                if (activeWalletId != walletId) {
+                                    throw Exception("Active wallet changed during registration")
+                                }
                             },
                         ),
                     )
@@ -2804,6 +2813,7 @@ class GatewayRepository @Inject constructor(
         awaitNodeReady = ::awaitNodeReady,
         getWalletSyncBlock = { walletId -> getWalletSyncBlock(walletId) },
         onScriptsRegistered = { _isRegistered.value = true },
+        liveActiveWalletId = { activeWalletId },
     )
 
     private suspend fun setScriptsAndRecord(

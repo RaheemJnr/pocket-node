@@ -231,6 +231,19 @@ class SyncCoordinator @Inject constructor(
         val awaitNodeReady: suspend () -> Boolean,
         val getWalletSyncBlock: suspend (walletId: String) -> Long,
         val onScriptsRegistered: () -> Unit,
+        /**
+         * The active wallet as of NOW, read when the BALANCED filter and the
+         * cap run (after the node wait). [activeWalletId] is a snapshot from
+         * when the context was built; a wallet switch in between must still
+         * keep the wallet the user is looking at (#431).
+         */
+        val liveActiveWalletId: () -> String = { activeWalletId },
+        /**
+         * Runs right before the CMD_SET_SCRIPTS_ALL call, after the tip
+         * wait. Throwing aborts the registration without touching the
+         * light client, e.g. when a resync went stale (#431).
+         */
+        val beforeSetScripts: suspend () -> Unit = {},
     )
 
     @Volatile
@@ -466,7 +479,7 @@ class SyncCoordinator @Inject constructor(
      */
     suspend fun maybeReregisterBalanced(ctx: SyncContext) {
         val allWallets = walletDao.getAll().sortedByDescending { it.lastActiveAt }
-        val filtered = applyBalancedFilter(allWallets, ctx.activeWalletId, ctx.network)
+        val filtered = applyBalancedFilter(allWallets, ctx.liveActiveWalletId(), ctx.network)
         val newSet = filtered.map { it.walletId }.toSet()
 
         if (newSet == lastBalancedEligibleSet) return
@@ -507,10 +520,13 @@ class SyncCoordinator @Inject constructor(
         val allWallets = preFetchedWallets
             ?: walletDao.getAll().sortedByDescending { it.lastActiveAt }
         val strategy = syncPreferences.getSyncStrategy()
+        // Read after the node wait: the wallet the user is on now is the one
+        // the filter and the cap must keep.
+        val activeWalletId = ctx.liveActiveWalletId()
 
         // Step 1: BALANCED filter runs BEFORE the cap (Q2=A in design).
         val candidateWallets = preFilteredCandidates ?: when (strategy) {
-            SyncStrategy.BALANCED -> applyBalancedFilter(allWallets, ctx.activeWalletId, ctx.network)
+            SyncStrategy.BALANCED -> applyBalancedFilter(allWallets, activeWalletId, ctx.network)
             else -> allWallets
         }
         if (strategy == SyncStrategy.BALANCED) {
@@ -521,7 +537,7 @@ class SyncCoordinator @Inject constructor(
         // goes first so the cap can never drop it, whatever its lastActiveAt
         // (stable sort: the rest keep their recency order).
         val wallets = candidateWallets
-            .sortedByDescending { it.walletId == ctx.activeWalletId }
+            .sortedByDescending { it.walletId == activeWalletId }
             .take(MAX_CONCURRENT_WALLET_SCRIPTS)
         if (candidateWallets.size > wallets.size) {
             val keptIds = wallets.map { it.walletId }.toSet()
@@ -644,6 +660,7 @@ class SyncCoordinator @Inject constructor(
 
         val scriptStatuses = pairs.map { it.second }
         val walletIds = pairs.map { it.first }
+        ctx.beforeSetScripts()
         logger.d(TAG, "Registering ${scriptStatuses.size} wallet scripts with light client")
         val result = setScriptsAndRecord(scriptStatuses, walletIds, LightClientNative.CMD_SET_SCRIPTS_ALL, ctx.network)
         if (!result) throw Exception("Failed to set scripts for all wallets")
