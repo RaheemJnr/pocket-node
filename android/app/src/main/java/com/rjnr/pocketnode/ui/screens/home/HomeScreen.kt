@@ -1101,6 +1101,7 @@ private fun TransactionDetailSheet(
 ) {
     val isIncoming = transaction.isIncoming()
     val isOutgoing = transaction.isOutgoing()
+    val isSelfTransfer = transaction.isSelfTransfer()
     val explorerUrl = buildExplorerUrl(transaction.txHash, network)
     val displayState = TransactionStatusUi.displayState(
         status = transaction.status,
@@ -1171,6 +1172,7 @@ private fun TransactionDetailSheet(
                     Text(
                         text = when {
                             isIncoming -> "Received"
+                            isSelfTransfer -> "Self Transfer"
                             isOutgoing -> "Sent"
                             else -> "Amount"
                         },
@@ -1185,6 +1187,8 @@ private fun TransactionDetailSheet(
                         color = when {
                             isIncoming -> SuccessGreen
                             isOutgoing -> ErrorRed
+                            // isSelfTransfer falls through here: onSurface,
+                            // the same neutral tone the Home card icon uses.
                             else -> MaterialTheme.colorScheme.onSurface
                         }
                     )
