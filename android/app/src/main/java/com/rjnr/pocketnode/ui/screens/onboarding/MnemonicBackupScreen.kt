@@ -142,6 +142,15 @@ class MnemonicBackupViewModel @Inject constructor(
      * (verified onboarding, a sub-account, or a V1 wallet with no PIN), and
      * nothing is re-armed for those — there would be no way back in.
      */
+    /**
+     * Bumped on every [onBackgrounded] (#524). A reveal records it before
+     * prompting or reading and drops its result if it changed meanwhile, so
+     * a reveal that finishes after the app went to the background (a
+     * device-credential screen on API 28-29 stops the activity mid-prompt)
+     * never puts the secret back behind the re-auth lock.
+     */
+    private var stopGeneration = 0
+
     private var armedGateUsesPin: Boolean? = null
 
     private val _uiState = MutableStateFlow(MnemonicBackupUiState())
@@ -163,6 +172,9 @@ class MnemonicBackupViewModel @Inject constructor(
      * state the user has already earned.
      */
     fun onBackgrounded() {
+        // A reveal still in flight (prompt, device-credential screen, read)
+        // must not land after this: see [stopGeneration].
+        stopGeneration++
         val gateUsesPin = armedGateUsesPin ?: return
         if (_uiState.value.currentStep >= 3) {
             _uiState.update { it.copy(words = emptyList(), privateKeyHex = null) }
@@ -325,7 +337,8 @@ class MnemonicBackupViewModel @Inject constructor(
      * the un-gated onboarding read, the V2 biometric reveal and the V1
      * post-PIN reveal.
      */
-    private fun showWords(words: List<String>) {
+    private fun showWords(words: List<String>, generation: Int = stopGeneration) {
+        if (generation != stopGeneration) return
         val random = java.util.Random(System.nanoTime())
         val positions = words.indices.toList().shuffled(random).take(3).sorted()
         val options = positions.associateWith { pos ->
@@ -357,6 +370,7 @@ class MnemonicBackupViewModel @Inject constructor(
      */
     fun revealMnemonicWithBiometrics(activity: androidx.fragment.app.FragmentActivity) {
         if (!_uiState.value.pinRequiredForMnemonic) return
+        val generation = stopGeneration
         viewModelScope.launch {
             val targetWalletId = walletIdArg
                 ?: walletRepository.getActive()?.walletId
@@ -369,7 +383,7 @@ class MnemonicBackupViewModel @Inject constructor(
             )
             when (result) {
                 is com.rjnr.pocketnode.data.wallet.SeedPhraseAuthorizer.SeedResult.Words -> {
-                    showWords(result.words)
+                    showWords(result.words, generation)
                 }
                 is com.rjnr.pocketnode.data.wallet.SeedPhraseAuthorizer.SeedResult.Cancelled -> {
                     // Silent — user dismissed the prompt; the reveal button
@@ -393,12 +407,13 @@ class MnemonicBackupViewModel @Inject constructor(
      */
     fun onPinVerified() {
         val state = _uiState.value
+        val generation = stopGeneration
         if (state.pinRequiredForMnemonic && state.mnemonicGateUsesPin) {
-            viewModelScope.launch { fetchMnemonicAfterPin() }
+            viewModelScope.launch { fetchMnemonicAfterPin(generation) }
             return
         }
         if (!state.pinRequiredForPrivateKey) return
-        viewModelScope.launch { fetchPrivateKey() }
+        viewModelScope.launch { fetchPrivateKey(generation) }
     }
 
     /**
@@ -406,7 +421,7 @@ class MnemonicBackupViewModel @Inject constructor(
      * once [PinEntryScreen] has confirmed the app PIN the repository read is
      * the same one that used to run un-gated in `init` before #488.
      */
-    private suspend fun fetchMnemonicAfterPin() {
+    private suspend fun fetchMnemonicAfterPin(generation: Int) {
         val words = try {
             readMnemonic()
         } catch (_: com.rjnr.pocketnode.data.crypto.V2KeyMaterialRequiresAuthException) {
@@ -425,10 +440,10 @@ class MnemonicBackupViewModel @Inject constructor(
             _uiState.update { it.copy(error = "Recovery phrase not available for this wallet.") }
             return
         }
-        showWords(words)
+        showWords(words, generation)
     }
 
-    private suspend fun fetchPrivateKey() {
+    private suspend fun fetchPrivateKey(generation: Int = stopGeneration) {
         val privateKeyHex = try {
             // Scoped like the phrase read: a named wallet must never surface
             // the active wallet's key, so no elvis fallback here. (Manage
@@ -450,6 +465,7 @@ class MnemonicBackupViewModel @Inject constructor(
             }
             return
         }
+        if (generation != stopGeneration) return
         _uiState.update { it.copy(privateKeyHex = privateKeyHex, privateKeyRevealed = true) }
     }
 

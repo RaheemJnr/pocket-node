@@ -47,6 +47,7 @@ import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.hapticfeedback.HapticFeedbackType
 import androidx.compose.ui.platform.LocalHapticFeedback
@@ -97,7 +98,9 @@ fun ActivityScreen(
     viewModel: ActivityViewModel = hiltViewModel()
 ) {
     val uiState by viewModel.uiState.collectAsState()
-    var selectedTransaction by remember { mutableStateOf<TransactionRecord?>(null) }
+    // #524: only the hash is saved (it survives the re-auth lock and
+    // rotation); the record is read from the current list below.
+    var selectedTxHash by rememberSaveable { mutableStateOf<String?>(null) }
     var retryDialogTx by remember { mutableStateOf<TransactionRecord?>(null) }
     val clipboardManager = LocalClipboardManager.current
     val haptic = LocalHapticFeedback.current
@@ -140,6 +143,16 @@ fun ActivityScreen(
     }
 
     val pagingItems = viewModel.transactionPagingFlow.collectAsLazyPagingItems()
+    val selectedTransaction = selectedTxHash?.let { hash ->
+        pagingItems.itemSnapshotList.items.firstOrNull { it.txHash == hash }
+    }
+    // The open transaction left the loaded list (e.g. another filter or
+    // wallet): close the sheet rather than reopen it later.
+    val selectionMissing = selectedTxHash != null && selectedTransaction == null &&
+        pagingItems.itemCount > 0 && pagingItems.loadState.refresh is LoadState.NotLoading
+    LaunchedEffect(selectionMissing) {
+        if (selectionMissing) selectedTxHash = null
+    }
     val broadcastStates by viewModel.broadcastStates.collectAsState()
 
     // "Pending · 2 min" has to age on screen. The ticker only runs while
@@ -254,7 +267,7 @@ fun ActivityScreen(
                                 transaction = tx,
                                 broadcast = broadcastStates[tx.txHash],
                                 nowMillis = now,
-                                onClick = { selectedTransaction = tx },
+                                onClick = { selectedTxHash = tx.txHash },
                                 onRetry = if (tx.status == "FAILED" && tx.isOutgoing()) {
                                     { retryDialogTx = tx }
                                 } else null
@@ -285,13 +298,13 @@ fun ActivityScreen(
                     broadcast = broadcastStates[tx.txHash],
                     nowMillis = now,
                     network = uiState.currentNetwork,
-                    onDismiss = { selectedTransaction = null },
+                    onDismiss = { selectedTxHash = null },
                     onCopyTxHash = { hash ->
                         haptic.performHapticFeedback(HapticFeedbackType.Confirm) // #304
                         clipboardManager.setText(AnnotatedString(hash))
                     },
                     onRetry = { failed ->
-                        selectedTransaction = null
+                        selectedTxHash = null
                         retryDialogTx = failed
                     },
                     onOpenExplorer = { url ->
