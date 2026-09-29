@@ -2086,9 +2086,15 @@ class GatewayRepository @Inject constructor(
             // taken from the precomputed complete-walk map (netShannonsByTx).
             val netChangeShannons = netByTx[txHash] ?: 0L
 
+            // A real self transfer always pays the fee, so its net change is
+            // negative, not zero — "out" unless every output lands on a
+            // script we track (see isSelfTransferSignature). DAO deposits and
+            // withdrawals also net negative but are reclassified below by
+            // finalDirection, which takes priority over this "out"/"self" call.
             val direction = when {
                 netChangeShannons > 0 -> "in"
-                netChangeShannons < 0 -> "out"
+                netChangeShannons < 0 ->
+                    if (isSelfTransferSignature(netChangeShannons, tx.outputs, knownLockArgs)) "self" else "out"
                 else -> "self"
             }
 

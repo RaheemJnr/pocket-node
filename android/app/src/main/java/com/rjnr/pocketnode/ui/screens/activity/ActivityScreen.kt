@@ -653,6 +653,8 @@ private fun TransactionDetailSheet(
         transaction.isDaoWithdraw() -> AmberPending
         transaction.isDaoUnlock() || transaction.isIncoming() -> MaterialTheme.colorScheme.primary
         transaction.isOutgoing() -> ErrorRed
+        // isSelfTransfer() falls through here: onSurfaceVariant, same neutral
+        // tone the Activity row and Home card already use for it.
         else -> MaterialTheme.colorScheme.onSurfaceVariant
     }
 
@@ -718,6 +720,7 @@ private fun TransactionDetailSheet(
                             transaction.isDaoWithdraw() -> "Dao Withdraw"
                             transaction.isDaoUnlock() -> "Dao Unlock"
                             transaction.isIncoming() -> "Received"
+                            transaction.isSelfTransfer() -> "Self Transfer"
                             transaction.isOutgoing() -> "Sent"
                             else -> "Amount"
                         },
