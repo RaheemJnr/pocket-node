@@ -2,6 +2,7 @@ package com.rjnr.pocketnode.data.gateway
 
 import com.rjnr.pocketnode.core.log.Logger
 import com.rjnr.pocketnode.data.database.dao.DaoCellDao
+import com.rjnr.pocketnode.data.database.dao.PendingDaoUnlockDao
 import com.rjnr.pocketnode.data.database.dao.PendingDaoWithdrawDao
 import com.rjnr.pocketnode.data.database.dao.HeaderCacheDao
 import com.rjnr.pocketnode.data.database.entity.DaoCellEntity
@@ -16,6 +17,7 @@ class DaoSyncManager @Inject constructor(
     private val headerCacheDao: HeaderCacheDao,
     private val daoCellDao: DaoCellDao,
     private val pendingDaoWithdrawDao: PendingDaoWithdrawDao,
+    private val pendingDaoUnlockDao: PendingDaoUnlockDao,
     private val logger: Logger,
 ) {
     // --- Header cache (permanent — block headers are immutable) ---
@@ -146,6 +148,7 @@ class DaoSyncManager @Inject constructor(
             headerCacheDao.deleteByNetwork(network)
             daoCellDao.deleteByNetwork(network)
             pendingDaoWithdrawDao.deleteByNetwork(network)
+            pendingDaoUnlockDao.deleteByNetwork(network)
             logger.d(TAG, "DAO caches cleared for $network")
         } catch (e: CancellationException) {
             throw e
@@ -159,6 +162,7 @@ class DaoSyncManager @Inject constructor(
             headerCacheDao.deleteAll()
             daoCellDao.deleteAll()
             pendingDaoWithdrawDao.deleteAll()
+            pendingDaoUnlockDao.deleteAll()
             logger.d(TAG, "All DAO caches cleared")
         } catch (e: CancellationException) {
             throw e
