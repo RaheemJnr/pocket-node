@@ -2472,6 +2472,23 @@ class GatewayRepository @Inject constructor(
     }
 
     /**
+     * What the chain says about an unlock transaction, or
+     * [DaoUnlockChainVerdict.UNKNOWN] when it will not say (#529). Every
+     * failure mode collapses to UNKNOWN on purpose: the caller must never
+     * read "could not tell" as "spent".
+     */
+    private suspend fun chainVerdictFor(txHash: String): DaoUnlockChainVerdict {
+        val status = runCatching { getTransactionStatus(txHash).getOrNull() }.getOrNull()
+            ?: return DaoUnlockChainVerdict.UNKNOWN
+        return when {
+            status.status == "committed" -> DaoUnlockChainVerdict.COMMITTED
+            status.status == "rejected" -> DaoUnlockChainVerdict.REJECTED
+            status.isPending() -> DaoUnlockChainVerdict.IN_POOL
+            else -> DaoUnlockChainVerdict.UNKNOWN
+        }
+    }
+
+    /**
      * Every phase-2 marker for the active wallet, resolved against the
      * transaction cache, the marker's age and [liveDeposits] (the scan the
      * refresh is working from, before any cached rows are merged in).
@@ -2494,12 +2511,24 @@ class GatewayRepository @Inject constructor(
                 appDatabase.transactionDao().getByTxHash(row.unlockTxHash)?.status
             }.getOrNull()
             val ageMs = (now - row.createdAt).coerceAtLeast(0L)
+            // Only an old marker the local cache never scored is worth a chain
+            // round trip, and only then can a marker be promoted to CONFIRMED.
+            // CacheManager swallows a failed pending-transaction insert and the
+            // watchdog scores only while the app is running, so "no local row"
+            // says nothing at all about what happened on chain.
+            val verdict = if (
+                ageMs >= DAO_UNLOCK_MARKER_GRACE_MS && status != "CONFIRMED" && status != "FAILED"
+            ) {
+                chainVerdictFor(row.unlockTxHash)
+            } else {
+                DaoUnlockChainVerdict.UNKNOWN
+            }
             PendingUnlock(
                 entity = row,
                 state = daoUnlockMarkerState(
                     unlockTxStatus = status,
                     markerAgeMs = ageMs,
-                    chainVerdict = DaoUnlockChainVerdict.UNKNOWN,
+                    chainVerdict = verdict,
                 ),
                 stillLive = normalizedOutPointKey(row.withdrawingTxHash, row.withdrawingIndex) in liveKeys,
             )
