@@ -79,6 +79,17 @@ class GatewayRepositoryResyncStrategyTest {
         override suspend fun getScriptsRaw(): String? = null
     }
 
+    /** Lets a test observe the coordinator reaching "Registering N scripts" (just before the lock). */
+    private class SignalLogger : com.rjnr.pocketnode.core.log.Logger {
+        var onDebug: (String) -> Unit = {}
+        override fun d(tag: String, msg: String) = onDebug(msg)
+        override fun i(tag: String, msg: String) {}
+        override fun w(tag: String, msg: String, t: Throwable?) {}
+        override fun e(tag: String, msg: String, t: Throwable?) {}
+    }
+
+    private val coordinatorLogger = SignalLogger()
+
     private fun script(byte: String) = Script(
         codeHash = "0x9bd7e06f3ecf4be0f2fcd2188b23f1b9fcc88e5d4b65a8637b17723bbda3cce8",
         hashType = "type",
@@ -112,7 +123,7 @@ class GatewayRepositoryResyncStrategyTest {
             lightClient = bridge,
             subAccountCandidateDao = db.subAccountCandidateDao(),
             transactionDao = db.transactionDao(),
-            logger = NoopLogger,
+            logger = coordinatorLogger,
         )
 
         nodeLifecycle = mockk(relaxed = true)
@@ -364,14 +375,25 @@ class GatewayRepositoryResyncStrategyTest {
         seedProgress(OTHER, 1_000_000L) // B lags C far beyond the threshold
         val laggard = db.walletDao().getById(OTHER)!!
         var switchJob: kotlinx.coroutines.Job? = null
+        // Signalled when B's registration logs "Registering N wallet
+        // scripts", its last step before setScriptsAndRecord (the lock).
+        val bAtLock = kotlinx.coroutines.CompletableDeferred<Unit>()
+        var registeringLogs = 0
+        coordinatorLogger.onDebug = { msg ->
+            if (msg.startsWith("Registering") && ++registeringLogs == 2) bAtLock.complete(Unit)
+        }
         // One-shot, inside A's set (after A's check passed).
         bridge.onSetScripts = {
             bridge.onSetScripts = {}
             switchJob = kotlinx.coroutines.CoroutineScope(kotlinx.coroutines.Dispatchers.IO).launch {
                 repository.onActiveWalletChanged(laggard)
             }
-            // Give B every chance to complete before A's set takes effect.
-            kotlinx.coroutines.withTimeoutOrNull(1_000) { switchJob!!.join() }
+            // B is past its node and tip waits and at the lock. Without the
+            // mutex it would now finish in milliseconds; with it, it cannot
+            // until A's set returns. The short grace only lets the unguarded
+            // case complete; it cannot make the test pass falsely.
+            kotlinx.coroutines.withTimeout(10_000) { bAtLock.await() }
+            kotlinx.coroutines.withTimeoutOrNull(300) { switchJob!!.join() }
         }
 
         repository.resyncAccount(SyncMode.CUSTOM, CUSTOM_HEIGHT).getOrThrow()
@@ -382,6 +404,85 @@ class GatewayRepositoryResyncStrategyTest {
         assertEquals(LightClientNative.CMD_SET_SCRIPTS_ALL, lastCmd)
         val lastArgs = json.decodeFromString<List<JniScriptStatus>>(lastPayload).map { it.script.args }
         assertTrue("the switched-to wallet's set must stand", otherScript.args in lastArgs)
+    }
+
+    /**
+     * Review S1: the resync persists nothing before its set lands. A switch
+     * during the resync's tip wait must see the resynced wallet X at its
+     * saved progress and old mode, and the aborted resync must leave X as
+     * it was, so the light client and the prefs agree.
+     */
+    @Test
+    fun `a switch during the resync's tip wait registers the wallet at its saved state and the abort changes nothing`() =
+        runBlocking {
+            walletPreferences.setSyncStrategy(SyncStrategy.ALL_WALLETS)
+            val other = db.walletDao().getById(OTHER)!!
+            bridge.onTipRead = {
+                bridge.onTipRead = {}
+                repository.onActiveWalletChanged(other)
+            }
+
+            val result = repository.resyncAccount(SyncMode.CUSTOM, CUSTOM_HEIGHT)
+
+            assertTrue(result.exceptionOrNull() is ActiveWalletChangedException)
+            // Only the switch's set reached the light client, with X unchanged.
+            val blocks = registeredBlocks()
+            assertEquals(ACTIVE_PROGRESS, blocks[activeScript.args])
+            assertEquals(OTHER_PROGRESS, blocks[otherScript.args])
+            assertEquals(ACTIVE_PROGRESS, repository.getWalletSyncBlock(ACTIVE))
+            assertEquals(SyncMode.RECENT, walletPreferences.getSyncModeOrNull(walletId = ACTIVE))
+            assertEquals(null, walletPreferences.getCustomBlockHeight(walletId = ACTIVE))
+        }
+
+    /**
+     * Review S2: every all-wallet registration re-checks the live active
+     * wallet under the lock. A poller-driven BALANCED re-registration
+     * computed for A must not land after a switch to laggard B, and the
+     * abort is a quiet no-op.
+     */
+    @Test
+    fun `a BALANCED re-registration computed for A does not land after a switch to laggard B`() = runBlocking {
+        walletPreferences.setSyncStrategy(SyncStrategy.BALANCED)
+        seedProgress(OTHER, 1_000_000L) // B lags A (19.5M) far beyond the threshold
+        var live = ACTIVE
+        val coordinator = SyncCoordinator(
+            walletDao = db.walletDao(),
+            syncProgressDao = db.syncProgressDao(),
+            syncPreferences = walletPreferences,
+            keyManager = KeyManager(ApplicationProvider.getApplicationContext(), MnemonicManager(), NoopLogger),
+            json = json,
+            lightClient = bridge,
+            subAccountCandidateDao = db.subAccountCandidateDao(),
+            transactionDao = db.transactionDao(),
+            logger = NoopLogger,
+        )
+        // The switch lands while the re-registration waits for the tip.
+        bridge.onTipRead = { bridge.onTipRead = {}; live = OTHER }
+
+        coordinator.maybeReregisterBalanced(
+            SyncCoordinator.SyncContext(
+                network = network,
+                activeWalletId = ACTIVE,
+                awaitNodeReady = { true },
+                getWalletSyncBlock = { id -> repository.getWalletSyncBlock(id) },
+                onScriptsRegistered = {},
+                liveActiveWalletId = { live },
+            ),
+        )
+
+        assertTrue("the stale set must not reach the light client", bridge.setScriptsCalls.isEmpty())
+    }
+
+    /** Review S3: an ACTIVE_ONLY resync that fails puts the wallet's saved progress back. */
+    @Test
+    fun `a failed ACTIVE_ONLY resync restores the wallet's saved progress`() = runBlocking {
+        walletPreferences.setSyncStrategy(SyncStrategy.ACTIVE_ONLY)
+        coEvery { nodeLifecycle.awaitNodeReady() } returns false
+
+        assertTrue(repository.resyncAccount(SyncMode.CUSTOM, CUSTOM_HEIGHT).isFailure)
+
+        assertEquals(ACTIVE_PROGRESS, repository.getWalletSyncBlock(ACTIVE))
+        assertEquals(OTHER_PROGRESS, repository.getWalletSyncBlock(OTHER))
     }
 
     /** Codex on b90260a (1): BALANCED keeps the LIVE active wallet, not the context's snapshot. */
