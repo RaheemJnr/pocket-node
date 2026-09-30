@@ -141,7 +141,7 @@ class DaoViewModel @Inject constructor(
                         completedDeposits = completed,
                         isLoading = false,
                         error = null,
-                        outsideWindowCount = deposits.count { d -> d.outsideSyncWindow }
+                        outsideWindowCount = outsideWindowPromptCount(deposits)
                     )
                 }
 
@@ -383,6 +383,18 @@ class DaoViewModel @Inject constructor(
         _uiState.update { it.copy(error = null) }
     }
 }
+
+/**
+ * How many cached deposits justify offering the deep rescan (#529).
+ *
+ * Only a deposit that is still LIVE somewhere the light client cannot see
+ * warrants an operation that costs hours on mainnet. A retired position
+ * (unlocked, its funds already back in the balance) is not missing, and used
+ * to raise "Deep rescan for older deposits?" moments after the user claimed
+ * it.
+ */
+internal fun outsideWindowPromptCount(deposits: List<DaoDeposit>): Int =
+    deposits.count { it.outsideSyncWindow && it.status != DaoCellStatus.COMPLETED }
 
 internal fun shouldClearPendingAction(
     pendingAction: DaoAction,
