@@ -64,6 +64,9 @@ import java.util.Locale
 fun WalletBalanceCard(
     balanceCkb: Double,
     fiatBalance: String?,
+    // #531: when the "Fiat price" network service is off, hide the line
+    // entirely instead of falling back to a placeholder or a stale value.
+    isFiatEnabled: Boolean = true,
     address: String,
     peerCount: Int,
     isBalanceHidden: Boolean = false,
@@ -107,11 +110,13 @@ fun WalletBalanceCard(
                 fontSize = 32.sp,
                 fontWeight = FontWeight.Bold
             )
-            Text(
-                text = if (isBalanceHidden) "••••" else (fiatBalance ?: "≈ — USD"),
-                style = MaterialTheme.typography.bodyMedium,
-                color = MaterialTheme.colorScheme.onSurfaceVariant
-            )
+            if (isFiatEnabled) {
+                Text(
+                    text = if (isBalanceHidden) "••••" else (fiatBalance ?: "≈ — USD"),
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+            }
             HorizontalDivider(
                 color = MaterialTheme.colorScheme.outlineVariant,
                 modifier = Modifier.padding(vertical = 12.dp)

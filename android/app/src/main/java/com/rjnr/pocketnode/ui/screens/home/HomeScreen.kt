@@ -686,6 +686,7 @@ fun HomeScreenUI(
                 WalletBalanceCard(
                     balanceCkb = uiState.balanceCkb,
                     fiatBalance = uiState.fiatBalance,
+                    isFiatEnabled = uiState.isPriceServiceEnabled,
                     address = uiState.address,
                     peerCount = uiState.peerCount,
                     isBalanceHidden = uiState.isBalanceHidden,

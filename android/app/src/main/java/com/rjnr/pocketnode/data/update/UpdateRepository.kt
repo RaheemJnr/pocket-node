@@ -2,6 +2,7 @@ package com.rjnr.pocketnode.data.update
 
 import com.rjnr.pocketnode.core.log.Logger
 import com.rjnr.pocketnode.BuildConfig
+import com.rjnr.pocketnode.data.wallet.WalletPreferences
 import io.ktor.client.HttpClient
 import io.ktor.client.request.get
 import io.ktor.client.request.header
@@ -44,35 +45,49 @@ data class UpdateInfo(
     val fileSize: Long = 0
 )
 
+/**
+ * Thrown (as a [Result.failure]) by [UpdateRepository.checkForUpdate] when the
+ * user has turned the "Update checks" network service off in Settings (#531).
+ * Kept distinct from a real check failure so the UI can say checks are off
+ * instead of "couldn't check".
+ */
+class UpdateServiceDisabledException : Exception("Update checks are disabled")
+
 @Singleton
 class UpdateRepository @Inject constructor(
     private val httpClient: HttpClient,
     private val json: Json,
     private val logger: Logger,
+    private val walletPreferences: WalletPreferences,
 ) {
-    suspend fun checkForUpdate(currentVersion: String): Result<UpdateInfo?> = runCatching {
-        val response = httpClient.get(GITHUB_API_URL) {
-            header("Accept", "application/vnd.github.v3+json")
+    suspend fun checkForUpdate(currentVersion: String): Result<UpdateInfo?> {
+        if (!walletPreferences.isUpdateServiceEnabled()) {
+            return Result.failure(UpdateServiceDisabledException())
         }
-        val body = response.bodyAsText()
-        val release = json.decodeFromString<GitHubRelease>(body)
-        val latestVersion = release.tagName.removePrefix("v")
+        return runCatching {
+            val response = httpClient.get(GITHUB_API_URL) {
+                header("Accept", "application/vnd.github.v3+json")
+            }
+            val body = response.bodyAsText()
+            val release = json.decodeFromString<GitHubRelease>(body)
+            val latestVersion = release.tagName.removePrefix("v")
 
-        if (!isNewer(currentVersion, latestVersion)) {
-            return@runCatching null
+            if (!isNewer(currentVersion, latestVersion)) {
+                return@runCatching null
+            }
+
+            val apkAsset = findApkAsset(release.assets)
+
+            UpdateInfo(
+                latestVersion = latestVersion,
+                downloadUrl = release.htmlUrl,
+                releaseNotes = release.body,
+                apkDownloadUrl = apkAsset?.browserDownloadUrl,
+                fileSize = apkAsset?.size ?: 0
+            )
+        }.onFailure { error ->
+            logger.w(TAG, "Update check failed: ${error.message}")
         }
-
-        val apkAsset = findApkAsset(release.assets)
-
-        UpdateInfo(
-            latestVersion = latestVersion,
-            downloadUrl = release.htmlUrl,
-            releaseNotes = release.body,
-            apkDownloadUrl = apkAsset?.browserDownloadUrl,
-            fileSize = apkAsset?.size ?: 0
-        )
-    }.onFailure { error ->
-        logger.w(TAG, "Update check failed: ${error.message}")
     }
 
     companion object {
