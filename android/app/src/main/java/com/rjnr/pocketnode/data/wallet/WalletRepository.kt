@@ -91,12 +91,26 @@ class WalletRepository @Inject constructor(
 
     /**
      * A newly generated wallet has no history, so default its sync mode to NEW_WALLET
-     * (start from current tip) on both networks. Imports keep whatever sync mode the
-     * import UI selected.
+     * (start from current tip) on both networks. Imports default to RECENT instead
+     * (see [markImportedWalletSyncMode]) since an imported key may already have
+     * on-chain history; the post-import sync sheet lets the user override either
+     * default before the wallet registers with the light client.
      */
     private fun markFreshWalletSyncMode(walletId: String) {
         syncPreferences.setSyncMode(SyncMode.NEW_WALLET, NetworkType.MAINNET, walletId)
         syncPreferences.setSyncMode(SyncMode.NEW_WALLET, NetworkType.TESTNET, walletId)
+    }
+
+    /**
+     * An imported wallet (mnemonic or raw key) may have pre-existing on-chain
+     * history, so default its sync mode to RECENT (last ~30 days) on both
+     * networks rather than NEW_WALLET (current tip), starting at the tip would
+     * silently hide any activity the user is restoring the wallet to see (#431).
+     * The post-import sync sheet still lets the user pick a different mode.
+     */
+    private fun markImportedWalletSyncMode(walletId: String) {
+        syncPreferences.setSyncMode(SyncMode.RECENT, NetworkType.MAINNET, walletId)
+        syncPreferences.setSyncMode(SyncMode.RECENT, NetworkType.TESTNET, walletId)
     }
 
     /**
@@ -209,6 +223,7 @@ class WalletRepository @Inject constructor(
             walletDao.deactivateAll()
             walletDao.insert(entity)
             appStatePreferences.setActiveWalletId(walletId)
+            markImportedWalletSyncMode(walletId)
         } catch (e: Throwable) {
             logger.e(TAG, "Post-persist entity insert failed for $walletId; attempting rollback", e)
             runCatching { keyMaterialDao.delete(walletId) }
@@ -217,7 +232,7 @@ class WalletRepository @Inject constructor(
         }
 
         // #82 phase 1: record derivable sub-account slots while the mnemonic
-        // is in memory. Args only, no keys. Never allowed to fail the import —
+        // is in memory. Args only, no keys. Never allowed to fail the import , 
         // discovery is an enhancement, the wallet row above is the product.
         // #382 Tier 2 adds the gap-limit slots along account 0's receiving
         // and change chains: an imported seed may have been used in Neuron or
@@ -286,6 +301,7 @@ class WalletRepository @Inject constructor(
             walletDao.deactivateAll()
             walletDao.insert(entity)
             appStatePreferences.setActiveWalletId(walletId)
+            markImportedWalletSyncMode(walletId)
         } catch (e: Throwable) {
             logger.e(TAG, "Post-persist entity insert failed for $walletId; attempting rollback", e)
             runCatching { keyMaterialDao.delete(walletId) }
@@ -300,11 +316,11 @@ class WalletRepository @Inject constructor(
     /**
      * Create a sub-account derived from a parent mnemonic wallet.
      *
-     * The parent mnemonic is now a mandatory parameter — callers must
+     * The parent mnemonic is now a mandatory parameter, callers must
      * pre-unlock the parent via [WalletKeyReader.readKeyMaterial] (which
      * fires its own BiometricPrompt) and pass the recovered words in. The
      * previous fallback that silently read V1 storage (and crashed on V2
-     * parents — #213 sub-PR 5) is gone.
+     * parents, #213 sub-PR 5) is gone.
      *
      * Persistence of the new sub-account's key material flows through
      * [persistKeys] (same callback contract as [createWallet]).
@@ -346,7 +362,7 @@ class WalletRepository @Inject constructor(
         val now = System.currentTimeMillis()
         val colorIndex = walletDao.count() % 8
 
-        // Sub-accounts don't store mnemonic — only the parent holds it.
+        // Sub-accounts don't store mnemonic, only the parent holds it.
         val bundle = keyManager.encodePlaintextBundle(privateKey, mnemonic = null)
         val persistResult = persistKeys(walletId, bundle)
         if (persistResult !is WalletKeyWriter.Result.Success) {
@@ -373,7 +389,7 @@ class WalletRepository @Inject constructor(
             walletDao.insert(entity)
             appStatePreferences.setActiveWalletId(walletId)
             if (explicitIndex != null) {
-                // Discovery restore: the account has on-chain HISTORY — fresh
+                // Discovery restore: the account has on-chain HISTORY, fresh
                 // from-tip sync would hide exactly what made it discoverable.
                 // Inherit the parent's sync window per network instead.
                 for (net in listOf(NetworkType.MAINNET, NetworkType.TESTNET)) {
@@ -453,7 +469,7 @@ class WalletRepository @Inject constructor(
 
     /**
      * Delete a wallet and its keys. Runs VACUUM afterward to reclaim freed pages.
-     * Refuses to delete the active wallet — callers must switch first.
+     * Refuses to delete the active wallet, callers must switch first.
      */
     suspend fun deleteWallet(walletId: String) {
         val wallet = walletDao.getById(walletId)
@@ -462,7 +478,7 @@ class WalletRepository @Inject constructor(
             throw IllegalStateException("Cannot delete the active wallet. Switch to another wallet first.")
         }
         // Delete the wallet row and wallet-scoped caches first, all in one transaction.
-        // Only destroy keys after the DB removal commits — otherwise a failure between
+        // Only destroy keys after the DB removal commits, otherwise a failure between
         // key destruction and row deletion leaves an orphaned wallet whose keys are gone.
         appDatabase.withTransaction {
             walletDao.delete(walletId)
@@ -473,7 +489,7 @@ class WalletRepository @Inject constructor(
             }
         }
         keyManager.deleteWalletKeys(walletId)
-        // VACUUM must run outside the transaction above — SQLite rejects VACUUM
+        // VACUUM must run outside the transaction above, SQLite rejects VACUUM
         // when a transaction is open on the same connection.
         DatabaseMaintenanceUtil.vacuum(appDatabase)
         logger.d(TAG, "Deleted wallet and caches: $walletId")
@@ -489,7 +505,7 @@ class WalletRepository @Inject constructor(
      * or the process JNI state (the caller should restart the process
      * after this returns to flush the embedded light client).
      *
-     * The user's funds remain on-chain — only their seed phrase can
+     * The user's funds remain on-chain, only their seed phrase can
      * restore the wallet after this runs.
      *
      * Implementation notes
