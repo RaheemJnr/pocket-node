@@ -19,6 +19,7 @@ import androidx.fragment.app.FragmentActivity
 import androidx.hilt.lifecycle.viewmodel.compose.hiltViewModel
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
+import com.rjnr.pocketnode.ui.screens.auth.onEachReauthLock
 import com.rjnr.pocketnode.core.log.Logger
 import com.rjnr.pocketnode.data.gateway.GatewayRepository
 import com.rjnr.pocketnode.data.gateway.models.NetworkType
@@ -68,6 +69,12 @@ class MnemonicImportViewModel @Inject constructor(
     val uiState: StateFlow<MnemonicImportUiState> = _uiState.asStateFlow()
 
     init {
+        // #524: a typed recovery phrase never survives a lock.
+        viewModelScope.onEachReauthLock {
+            _uiState.update {
+                it.copy(words = List(12) { "" }, suggestions = emptyMap(), wordErrors = emptySet())
+            }
+        }
         viewModelScope.launch {
             repository.syncProgress.collect { progress ->
                 _uiState.update { it.copy(tipBlockNumber = progress.tipBlockNumber) }

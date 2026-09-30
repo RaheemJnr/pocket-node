@@ -7,6 +7,8 @@ import com.rjnr.pocketnode.core.prefs.NetworkPreferences
 import androidx.lifecycle.SavedStateHandle
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
+import com.rjnr.pocketnode.ui.screens.auth.ReauthLockEvents
+import com.rjnr.pocketnode.ui.screens.auth.onEachReauthLock
 import com.rjnr.pocketnode.data.auth.PinManager
 import com.rjnr.pocketnode.data.database.dao.DaoCellDao
 import com.rjnr.pocketnode.data.database.dao.KeyMaterialDao
@@ -55,6 +57,8 @@ class WalletSettingsViewModel @Inject constructor(
     val uiState: StateFlow<WalletSettingsUiState> = _uiState.asStateFlow()
 
     init {
+        // #524: a revealed seed phrase or private key never survives a lock.
+        viewModelScope.onEachReauthLock { lockSeedPhrase() }
         _uiState.update { it.copy(network = networkPreferences.getSelectedNetwork()) }
         loadWallet()
         observeSubAccounts()
@@ -265,7 +269,23 @@ class WalletSettingsViewModel @Inject constructor(
     }
 
     fun lockSeedPhrase() {
-        _uiState.update { it.copy(seedPhraseUnlocked = false, privateKeyHex = null, mnemonicWords = null) }
+        _uiState.update { it.withSecretsLocked() }
+    }
+
+    /**
+     * #524: commit a reveal only if no re-auth lock started since
+     * [lockAtStart] (read before prompting or reading). A reveal that
+     * finishes after a lock (e.g. a device-credential screen on API 28-29
+     * stops the activity mid-prompt) is dropped: the secret must not come
+     * back behind the lock screen.
+     */
+    private fun commitReveal(lockAtStart: Int, update: (WalletSettingsUiState) -> WalletSettingsUiState): Boolean {
+        if (ReauthLockEvents.locks.value != lockAtStart) {
+            logger.i(TAG, "Dropping a reveal that finished after a re-auth lock")
+            return false
+        }
+        _uiState.update(update)
+        return true
     }
 
     fun getMnemonic(): List<String>? = _uiState.value.mnemonicWords
@@ -277,7 +297,9 @@ class WalletSettingsViewModel @Inject constructor(
      * must be used — otherwise the V2 read throws and the seed phrase view
      * shows blank fields (#213 sub-PR 5).
      */
-    fun loadSensitiveData() {
+    fun loadSensitiveData() = loadSensitiveDataV1(ReauthLockEvents.locks.value)
+
+    private fun loadSensitiveDataV1(lockAtStart: Int) {
         viewModelScope.launch {
             if (keyMaterialDao.getKdfVersion(walletId) == 2) {
                 _uiState.update {
@@ -287,7 +309,11 @@ class WalletSettingsViewModel @Inject constructor(
             }
             try {
                 val keyHex = keyManager.getPrivateKeyForWallet(walletId)?.let { bytes ->
-                    bytes.joinToString("") { "%02x".format(it) }
+                    try {
+                        bytes.joinToString("") { "%02x".format(it) }
+                    } finally {
+                        bytes.fill(0)
+                    }
                 }
                 val words = try {
                     keyManager.getMnemonicForWallet(walletId)
@@ -295,7 +321,7 @@ class WalletSettingsViewModel @Inject constructor(
                     logger.e(TAG, "Failed to get mnemonic", e)
                     null
                 }
-                _uiState.update { it.copy(privateKeyHex = keyHex, mnemonicWords = words) }
+                commitReveal(lockAtStart) { it.copy(privateKeyHex = keyHex, mnemonicWords = words) }
             } catch (e: Exception) {
                 // Since #496 an unreadable key_material row throws instead of
                 // quietly handing back the legacy copy. Blank fields told the
@@ -320,6 +346,7 @@ class WalletSettingsViewModel @Inject constructor(
      * pulled from the same V2 bundle, so V2 reads cost exactly one prompt.
      */
     fun loadSensitiveData(activity: FragmentActivity) {
+        val lockAtStart = ReauthLockEvents.locks.value
         viewModelScope.launch {
             val kdf = keyMaterialDao.getKdfVersion(walletId)
             // Lazy V1 → V2 migration on first sensitive-data reveal.
@@ -358,10 +385,10 @@ class WalletSettingsViewModel @Inject constructor(
                         return@launch
                     }
                     logger.i(TAG, "No secure lock, no PIN — V1 reveal for $walletId")
-                    loadSensitiveData()
+                    loadSensitiveDataV1(lockAtStart)
                     // The screen gate is `seedPhraseUnlocked || !requiresPin`;
                     // flip so the loaded words show.
-                    _uiState.update { it.copy(seedPhraseUnlocked = true) }
+                    commitReveal(lockAtStart) { it.copy(seedPhraseUnlocked = true) }
                     return@launch
                 }
                 val cipher = try {
@@ -396,7 +423,7 @@ class WalletSettingsViewModel @Inject constructor(
                                 return@launch
                             }
                         val words = bundle.mnemonic?.split(" ")
-                        _uiState.update {
+                        commitReveal(lockAtStart) {
                             it.copy(
                                 privateKeyHex = bundle.privateKeyHex,
                                 mnemonicWords = words,
@@ -408,7 +435,7 @@ class WalletSettingsViewModel @Inject constructor(
                 }
             }
             if (kdf != 2) {
-                loadSensitiveData()
+                loadSensitiveDataV1(lockAtStart)
                 return@launch
             }
             // V2 path: single BiometricPrompt CryptoObject unlocks the
@@ -433,14 +460,20 @@ class WalletSettingsViewModel @Inject constructor(
                     }
                 }
                 is WalletKeyReader.MaterialResult.Success -> {
-                    val keyHex = result.privateKey.joinToString("") { "%02x".format(it) }
+                    val keyHex = try {
+                        result.privateKey.joinToString("") { "%02x".format(it) }
+                    } finally {
+                        result.privateKey.fill(0)
+                    }
                     val words = result.mnemonic?.split(" ")
                     // seedPhraseUnlocked must flip here so the screen
                     // gate (`showSeedPhrase && (seedPhraseUnlocked || !requiresPinForSeedPhrase())`)
                     // shows the mnemonic. Previously this flag was set
                     // only via onPinVerified, so V2 reveals worked by
                     // accident only when no PIN was set.
-                    _uiState.update { it.copy(privateKeyHex = keyHex, mnemonicWords = words, seedPhraseUnlocked = true) }
+                    commitReveal(lockAtStart) {
+                        it.copy(privateKeyHex = keyHex, mnemonicWords = words, seedPhraseUnlocked = true)
+                    }
                 }
             }
         }
@@ -569,6 +602,10 @@ class WalletSettingsViewModel @Inject constructor(
             hasPin && !alreadyUnlocked
     }
 }
+
+/** The state with every revealed secret dropped and the reveal gate re-armed (#524). */
+internal fun WalletSettingsUiState.withSecretsLocked(): WalletSettingsUiState =
+    copy(seedPhraseUnlocked = false, privateKeyHex = null, mnemonicWords = null)
 
 data class WalletSettingsUiState(
     val wallet: WalletEntity? = null,

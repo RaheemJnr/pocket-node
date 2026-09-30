@@ -158,10 +158,15 @@ class UpgradeSmokeTest {
         )
 
         // Phase-transition sync: confirm we actually landed on CONFIRM and
-        // not some other screen (network switch, error dialog, etc).
+        // not some other screen (network switch, error dialog, etc). 10 s
+        // was too tight on a loaded CI emulator (run 35514880329, #330):
+        // tapDigit1UntilTitleChanges had already confirmed SETUP ended, the
+        // CONFIRM composable just hadn't finished rendering within the old
+        // bound yet. Waiting on the screen's own state (this is a poll, not
+        // a fixed sleep) rather than assuming the transition is instant.
         assertTrue(
             "SETUP→CONFIRM transition didn't complete — was a SETUP click missed?",
-            device.wait(Until.hasObject(By.text("Confirm PIN").pkg(PKG)), 10_000L)
+            device.wait(Until.hasObject(By.text("Confirm PIN").pkg(PKG)), 20_000L)
         )
         device.waitForIdle(500L)
 
@@ -181,9 +186,14 @@ class UpgradeSmokeTest {
         // until a post-#286 build becomes the prev artifact.
         clickButton("bg-sync-optin-skip", "Only when app is open", 5_000L)
 
+        // Same "cold Home render right after heavy crypto work" wait as
+        // assertHomeAfterUpgrade below, just post-PIN-setup instead of
+        // post-migration: reuse its longer timeout instead of the plain
+        // onboarding one. 3 of the last 4 CI first-attempt failures (#330)
+        // were this exact assertion timing out at the shorter 15 s bound.
         val balanceRow = device.wait(
             Until.findObject(By.res("home-balance-row")),
-            ONBOARDING_TIMEOUT_MS
+            POST_UPGRADE_HOME_TIMEOUT_MS
         )
         assertNotNull("Home balance row not found after onboarding", balanceRow)
     }

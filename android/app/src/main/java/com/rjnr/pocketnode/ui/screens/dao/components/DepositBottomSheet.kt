@@ -9,6 +9,7 @@ import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.TextStyle
@@ -30,8 +31,9 @@ fun DepositBottomSheet(
     onDismiss: () -> Unit
 ) {
     val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
-    var amountText by remember { mutableStateOf("") }
-    var reserveEnabled by remember { mutableStateOf(true) }
+    // #524: typed input survives the re-auth lock and rotation.
+    var amountText by rememberSaveable { mutableStateOf("") }
+    var reserveEnabled by rememberSaveable { mutableStateOf(true) }
     var showRules by remember { mutableStateOf(false) }
 
     val amountCkb = amountText.toDoubleOrNull() ?: 0.0
