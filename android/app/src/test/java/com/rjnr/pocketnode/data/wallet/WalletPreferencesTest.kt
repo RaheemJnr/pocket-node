@@ -199,4 +199,45 @@ class WalletPreferencesTest {
         // setUp already cleared everything; newPrefs() runs migration on a blank slate
         assertEquals(NetworkType.MAINNET, newPrefs().getSelectedNetwork())
     }
+
+    // --- Network services (#531) ---
+
+    @Test
+    fun `price service defaults to enabled`() {
+        assertTrue(newPrefs().isPriceServiceEnabled())
+    }
+
+    @Test
+    fun `update service defaults to enabled`() {
+        assertTrue(newPrefs().isUpdateServiceEnabled())
+    }
+
+    @Test
+    fun `setPriceServiceEnabled round trips across instances`() {
+        val prefs = newPrefs()
+        prefs.setPriceServiceEnabled(false)
+        assertFalse(newPrefs().isPriceServiceEnabled())
+
+        prefs.setPriceServiceEnabled(true)
+        assertTrue(newPrefs().isPriceServiceEnabled())
+    }
+
+    @Test
+    fun `setUpdateServiceEnabled round trips across instances`() {
+        val prefs = newPrefs()
+        prefs.setUpdateServiceEnabled(false)
+        assertFalse(newPrefs().isUpdateServiceEnabled())
+
+        prefs.setUpdateServiceEnabled(true)
+        assertTrue(newPrefs().isUpdateServiceEnabled())
+    }
+
+    @Test
+    fun `priceServiceEnabledFlow reflects the current value and reacts to writes`() {
+        val prefs = newPrefs()
+        assertTrue(prefs.priceServiceEnabledFlow.value)
+
+        prefs.setPriceServiceEnabled(false)
+        assertFalse(prefs.priceServiceEnabledFlow.value)
+    }
 }

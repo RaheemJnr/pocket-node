@@ -1,0 +1,81 @@
+# cargo-deny config for the vendored CKB light client workspace.
+# Run from external/ckb-light-client: `cargo deny check`.
+#
+# Keep [advisories.ignore] consistent with .cargo/audit.toml: same RUSTSEC
+# IDs, same reasons. cargo-deny's advisory matching does not detect three of
+# these (RUSTSEC-2026-0306, RUSTSEC-2026-0253, RUSTSEC-2026-0186) against the
+# locked versions the way cargo-audit does; they are kept here anyway so both
+# tools' ignore lists read the same, and cargo-deny only emits a harmless
+# "advisory-not-detected" note for them, not a failure.
+
+[advisories]
+ignore = [
+    { id = "RUSTSEC-2025-0024", reason = "crossbeam-channel double-free on Drop, transitive via ckb-channel/ckb-network. Review by 2026-12-28." },
+    { id = "RUSTSEC-2026-0204", reason = "crossbeam-epoch invalid pointer deref in a Debug fmt impl, transitive, not on a reachable path. Review by 2026-12-28." },
+    { id = "RUSTSEC-2026-0258", reason = "h2 unbounded empty DATA frames DoS, transitive via the tentacle/hyper stack, not exercised by this light client's RPC surface. Review by 2026-12-28." },
+    { id = "RUSTSEC-2025-0004", reason = "openssl use-after-free in select_next_proto, ALPN negotiation is not used here. Review by 2026-12-28." },
+    { id = "RUSTSEC-2025-0022", reason = "openssl use-after-free in Md::fetch/Cipher::fetch, transitive via tentacle-secio. Review by 2026-12-28." },
+    { id = "RUSTSEC-2024-0437", reason = "protobuf uncontrolled recursion, transitive, not on a network-facing decode path here. Review by 2026-12-28." },
+    { id = "RUSTSEC-2025-0057", reason = "fxhash unmaintained, transitive hashing utility, no known vulnerability. Review by 2026-12-28." },
+    { id = "RUSTSEC-2024-0384", reason = "instant unmaintained, transitive via parking_lot/governor. Review by 2026-12-28." },
+    { id = "RUSTSEC-2025-0119", reason = "number_prefix unmaintained, transitive build-time dependency only. Review by 2026-12-28." },
+    { id = "RUSTSEC-2024-0436", reason = "paste unmaintained, proc-macro helper, no known vulnerability. Review by 2026-12-28." },
+    { id = "RUSTSEC-2024-0370", reason = "proc-macro-error unmaintained, build-time proc-macro dependency only. Review by 2026-12-28." },
+    { id = "RUSTSEC-2026-0190", reason = "anyhow Error::downcast_mut unsoundness, we do not call downcast_mut on anyhow::Error here. Review by 2026-12-28." },
+    { id = "RUSTSEC-2026-0306", reason = "faster-hex AVX2 hex_decode_unchecked read past src, we do not use the unchecked decode API. Review by 2026-12-28." },
+    { id = "RUSTSEC-2026-0253", reason = "lru LruCache::pop panic-safety unsoundness, transitive, no panicking Drop/Eq in the cached types we use. Review by 2026-12-28." },
+    { id = "RUSTSEC-2026-0186", reason = "memmap2 unchecked pointer offset, transitive via storage backends, no untrusted offsets fed in here. Review by 2026-12-28." },
+    { id = "RUSTSEC-2026-0097", reason = "rand unsound with a custom logger using rand::rng(), we do not install a custom log::Log that reenters rand. Review by 2026-12-28." },
+]
+
+[licenses]
+allow = [
+    "0BSD",
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "BSD-1-Clause",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "BSL-1.0",
+    "CC0-1.0",
+    "ISC",
+    "LGPL-2.1-or-later",
+    "MIT",
+    "MPL-2.0",
+    "Unicode-3.0",
+    "Unlicense",
+    "Zlib",
+]
+
+# light-client-db-common is a local no-op stub crate (see
+# wasm/light-client-db-common/Cargo.toml), never published, with no license
+# file of its own to match against.
+[[licenses.clarify]]
+crate = "light-client-db-common"
+expression = "MIT"
+license-files = []
+
+[licenses.private]
+ignore = true
+
+[bans]
+# Upstream CKB crates duplicate a lot of transitive dependencies (rand,
+# windows-*, syn, thiserror, ...) across major versions; that is normal for a
+# workspace this size and not something we control here, so warn only.
+multiple-versions = "warn"
+# light-client-lib depends on light-client-db-common via a path dependency
+# with no version requirement, which cargo-deny's wildcard check treats the
+# same as a "*" version wildcard. Setting wildcards = "deny" with
+# allow-wildcard-paths = true still fails here because cargo-deny refuses
+# allow-wildcard-paths for crates it considers publishable (crates.io itself
+# disallows path deps on publish), and this vendored workspace's Cargo.toml
+# does not set publish = false. Falling back to "allow" rather than editing
+# the vendored manifest.
+wildcards = "allow"
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]
+# No git dependencies are used anywhere in this workspace's Cargo.lock today.
+allow-git = []

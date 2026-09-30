@@ -365,6 +365,38 @@ class WalletPreferences @Inject constructor(
         prefs.edit().putLong(KEY_LAST_VACUUM_AT, timestampMs).apply()
     }
 
+    // --- Network services (#531) ---
+    // User-controlled switches for the two outbound HTTP calls the app makes
+    // on its own, with no user tap: fiat price lookups and update-availability
+    // checks. Both default on. Deliberately not on any of the shared
+    // core.prefs interfaces (SyncPreferences/UiPreferences/NetworkPreferences/
+    // AppStatePreferences): iOS parity for this Settings section is future
+    // work, tracked on the issue, not part of this change.
+
+    private val _priceServiceEnabled = MutableStateFlow(
+        prefs.getBoolean(KEY_NETWORK_SERVICE_PRICE_ENABLED, true)
+    )
+
+    /**
+     * Live view so Home can hide the fiat line the instant the user flips
+     * this off in Settings, and re-fetch the instant they flip it back on.
+     */
+    val priceServiceEnabledFlow: StateFlow<Boolean> = _priceServiceEnabled.asStateFlow()
+
+    fun isPriceServiceEnabled(): Boolean = _priceServiceEnabled.value
+
+    fun setPriceServiceEnabled(enabled: Boolean) {
+        prefs.edit().putBoolean(KEY_NETWORK_SERVICE_PRICE_ENABLED, enabled).apply()
+        _priceServiceEnabled.value = enabled
+    }
+
+    fun isUpdateServiceEnabled(): Boolean =
+        prefs.getBoolean(KEY_NETWORK_SERVICE_UPDATES_ENABLED, true)
+
+    fun setUpdateServiceEnabled(enabled: Boolean) {
+        prefs.edit().putBoolean(KEY_NETWORK_SERVICE_UPDATES_ENABLED, enabled).apply()
+    }
+
     // --- Active wallet (M3 multi-wallet) ---
 
     override fun getActiveWalletId(): String? = prefs.getString(KEY_ACTIVE_WALLET_ID, null)
@@ -484,5 +516,7 @@ class WalletPreferences @Inject constructor(
         private const val KEY_LAST_VACUUM_AT = "last_vacuum_at"
         private const val KEY_SYNC_PROGRESS_MIGRATED = "sync_progress_migrated_to_room_v7"
         private const val KEY_SYNC_COACHMARK_SEEN = "sync_coachmark_seen"
+        private const val KEY_NETWORK_SERVICE_PRICE_ENABLED = "network_service_price_enabled"
+        private const val KEY_NETWORK_SERVICE_UPDATES_ENABLED = "network_service_updates_enabled"
     }
 }
