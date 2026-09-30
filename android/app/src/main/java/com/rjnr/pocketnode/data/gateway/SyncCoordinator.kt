@@ -527,7 +527,8 @@ class SyncCoordinator @Inject constructor(
      */
     suspend fun maybeReregisterBalanced(ctx: SyncContext) {
         val allWallets = walletDao.getAll().sortedByDescending { it.lastActiveAt }
-        val filtered = applyBalancedFilter(allWallets, ctx.liveActiveWalletId(), ctx.network)
+        val filteredFor = ctx.liveActiveWalletId()
+        val filtered = applyBalancedFilter(allWallets, filteredFor, ctx.network)
         val newSet = filtered.map { it.walletId }.toSet()
 
         if (newSet == lastBalancedEligibleSet) return
@@ -541,7 +542,12 @@ class SyncCoordinator @Inject constructor(
         // where wallet add/delete between calls would update the cache against
         // a different set than the comparison was made on).
         try {
-            registerAllWalletScripts(ctx, preFetchedWallets = allWallets, preFilteredCandidates = filtered)
+            registerAllWalletScripts(
+                ctx,
+                preFetchedWallets = allWallets,
+                preFilteredCandidates = filtered,
+                preFilteredFor = filteredFor,
+            )
         } catch (e: ActiveWalletChangedException) {
             // The switch's own registration supersedes this one.
             logger.d(TAG, "BALANCED re-registration skipped: ${e.message}")
@@ -559,6 +565,10 @@ class SyncCoordinator @Inject constructor(
         ctx: SyncContext,
         preFetchedWallets: List<WalletEntity>? = null,
         preFilteredCandidates: List<WalletEntity>? = null,
+        // The active wallet [preFilteredCandidates] was computed for. The
+        // under-lock check compares against it, so a switch between that
+        // filter and this registration aborts the stale set (#431).
+        preFilteredFor: String? = null,
     ) = withContext(Dispatchers.IO) {
         // Force IO dispatcher for the whole body — JNI calls (nativeGetTipHeader,
         // nativeSetScripts via setScriptsAndRecord) block the UI thread otherwise.
@@ -574,8 +584,13 @@ class SyncCoordinator @Inject constructor(
             ?: walletDao.getAll().sortedByDescending { it.lastActiveAt }
         val strategy = syncPreferences.getSyncStrategy()
         // Read after the node wait: the wallet the user is on now is the one
-        // the filter and the cap must keep.
-        val activeWalletId = ctx.liveActiveWalletId()
+        // the filter and the cap must keep. A caller-supplied filtered set
+        // stays tied to the wallet it was computed for.
+        val activeWalletId = if (preFilteredCandidates != null && preFilteredFor != null) {
+            preFilteredFor
+        } else {
+            ctx.liveActiveWalletId()
+        }
 
         // Step 1: BALANCED filter runs BEFORE the cap (Q2=A in design).
         val candidateWallets = preFilteredCandidates ?: when (strategy) {

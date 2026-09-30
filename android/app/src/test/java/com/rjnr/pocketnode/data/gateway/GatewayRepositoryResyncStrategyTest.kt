@@ -473,6 +473,45 @@ class GatewayRepositoryResyncStrategyTest {
         assertTrue("the stale set must not reach the light client", bridge.setScriptsCalls.isEmpty())
     }
 
+    /**
+     * Codex on 4cb0189: maybeReregisterBalanced filters for A, then hands the
+     * filtered set to registerAllWalletScripts. A switch to laggard B between
+     * the two must abort that stale set, not let it pass the under-lock check
+     * against a fresh read of B.
+     */
+    @Test
+    fun `a switch between the BALANCED filter and its registration aborts the stale set`() = runBlocking {
+        walletPreferences.setSyncStrategy(SyncStrategy.BALANCED)
+        seedProgress(OTHER, 1_000_000L) // B lags A (19.5M) far beyond the threshold
+        var live = ACTIVE
+        val coordinator = SyncCoordinator(
+            walletDao = db.walletDao(),
+            syncProgressDao = db.syncProgressDao(),
+            syncPreferences = walletPreferences,
+            keyManager = KeyManager(ApplicationProvider.getApplicationContext(), MnemonicManager(), NoopLogger),
+            json = json,
+            lightClient = bridge,
+            subAccountCandidateDao = db.subAccountCandidateDao(),
+            transactionDao = db.transactionDao(),
+            logger = NoopLogger,
+        )
+
+        coordinator.maybeReregisterBalanced(
+            SyncCoordinator.SyncContext(
+                network = network,
+                activeWalletId = ACTIVE,
+                // The switch lands after the filter, during the node wait,
+                // before registerAllWalletScripts reads the active wallet.
+                awaitNodeReady = { live = OTHER; true },
+                getWalletSyncBlock = { id -> repository.getWalletSyncBlock(id) },
+                onScriptsRegistered = {},
+                liveActiveWalletId = { live },
+            ),
+        )
+
+        assertTrue("the stale set must not reach the light client", bridge.setScriptsCalls.isEmpty())
+    }
+
     /** Review S3: an ACTIVE_ONLY resync that fails puts the wallet's saved progress back. */
     @Test
     fun `a failed ACTIVE_ONLY resync restores the wallet's saved progress`() = runBlocking {
