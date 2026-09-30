@@ -20,6 +20,8 @@ import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 import kotlinx.serialization.encodeToString
 import kotlinx.serialization.json.Json
@@ -240,11 +242,15 @@ class SyncCoordinator @Inject constructor(
         val liveActiveWalletId: () -> String = { activeWalletId },
         /**
          * Runs right before the CMD_SET_SCRIPTS_ALL call, after the tip
-         * wait. Throwing aborts the registration without touching the
-         * light client, e.g. when a resync went stale (#431).
+         * wait, under the registration mutex together with that call.
+         * Throwing aborts the registration without touching the light
+         * client, e.g. when a resync went stale (#431).
          */
         val beforeSetScripts: suspend () -> Unit = {},
     )
+
+    /** Serialises every script registration; see [setScriptsAndRecord]. */
+    private val registrationMutex = Mutex()
 
     @Volatile
     private var scriptArgsToWalletId: Map<String, String> = emptyMap()
@@ -265,6 +271,14 @@ class SyncCoordinator @Inject constructor(
      *
      * `walletIds` is parallel to `statuses` — same length, same order.
      * For single-wallet PARTIAL paths, pass `listOf(activeWalletId)`.
+     *
+     * Every registration in the app reaches the light client through here,
+     * so [registrationMutex] serialises them: [beforeSet] (a staleness
+     * check that may throw to abort) and the JNI set run as one step, and
+     * no other registration can land between them (#431, #539). Only this
+     * short section is locked, never the node or tip waits. [beforeSet]
+     * must not call back into a registration path (the mutex is not
+     * reentrant).
      */
     suspend fun setScriptsAndRecord(
         statuses: List<JniScriptStatus>,
@@ -272,6 +286,18 @@ class SyncCoordinator @Inject constructor(
         cmd: Int,
         network: NetworkType,
         allowRewind: Boolean = false,
+        beforeSet: suspend () -> Unit = {},
+    ): Boolean = registrationMutex.withLock {
+        beforeSet()
+        setScriptsAndRecordLocked(statuses, walletIds, cmd, network, allowRewind)
+    }
+
+    private suspend fun setScriptsAndRecordLocked(
+        statuses: List<JniScriptStatus>,
+        walletIds: List<String>,
+        cmd: Int,
+        network: NetworkType,
+        allowRewind: Boolean,
     ): Boolean {
         require(statuses.size == walletIds.size) {
             "setScriptsAndRecord: statuses (${statuses.size}) and walletIds (${walletIds.size}) must be parallel"
@@ -660,9 +686,11 @@ class SyncCoordinator @Inject constructor(
 
         val scriptStatuses = pairs.map { it.second }
         val walletIds = pairs.map { it.first }
-        ctx.beforeSetScripts()
         logger.d(TAG, "Registering ${scriptStatuses.size} wallet scripts with light client")
-        val result = setScriptsAndRecord(scriptStatuses, walletIds, LightClientNative.CMD_SET_SCRIPTS_ALL, ctx.network)
+        val result = setScriptsAndRecord(
+            scriptStatuses, walletIds, LightClientNative.CMD_SET_SCRIPTS_ALL, ctx.network,
+            beforeSet = ctx.beforeSetScripts,
+        )
         if (!result) throw Exception("Failed to set scripts for all wallets")
 
         // #382: persist each candidate's scan-from block so the reconciler's

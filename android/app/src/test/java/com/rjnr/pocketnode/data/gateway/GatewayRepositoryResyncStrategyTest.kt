@@ -20,6 +20,7 @@ import com.rjnr.pocketnode.data.wallet.WalletPreferences
 import io.mockk.coEvery
 import io.mockk.every
 import io.mockk.mockk
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
 import kotlinx.serialization.json.Json
 import org.junit.After
@@ -61,8 +62,11 @@ class GatewayRepositoryResyncStrategyTest {
         /** Runs while the coordinator waits for the tip, i.e. mid-registration. */
         var onTipRead: suspend () -> Unit = {}
         var setScriptsReturn = true
+        /** Runs inside setScripts before the call is recorded (i.e. takes effect). */
+        var onSetScripts: suspend () -> Unit = {}
 
         override suspend fun setScripts(scriptsJson: String, command: Int): Boolean {
+            onSetScripts()
             setScriptsCalls += scriptsJson to command
             return setScriptsReturn
         }
@@ -343,6 +347,42 @@ class GatewayRepositoryResyncStrategyTest {
             assertEquals(ACTIVE_PROGRESS, repository.getWalletSyncBlock(ACTIVE))
             assertEquals(SyncMode.RECENT, walletPreferences.getSyncModeOrNull(walletId = ACTIVE))
         }
+
+    /**
+     * Codex on 919afc9 (#539): the staleness check and the JNI set must be
+     * one step. A's resync passes its check, then (while A's set is in
+     * flight) the user switches to lagging B and B's registration runs. With
+     * the registration mutex B waits for A's set and lands last, so B's set
+     * stands; without it B's set would land first and A's (which dropped B
+     * as a laggard) would overwrite it.
+     */
+    @Test
+    fun `a switch landing between the resync's check and its set cannot be overwritten`() = runBlocking {
+        walletPreferences.setSyncStrategy(SyncStrategy.BALANCED)
+        seedWallet("wallet-c", script("cc"), lastActiveAt = 3L)
+        seedProgress("wallet-c", ACTIVE_PROGRESS)
+        seedProgress(OTHER, 1_000_000L) // B lags C far beyond the threshold
+        val laggard = db.walletDao().getById(OTHER)!!
+        var switchJob: kotlinx.coroutines.Job? = null
+        // One-shot, inside A's set (after A's check passed).
+        bridge.onSetScripts = {
+            bridge.onSetScripts = {}
+            switchJob = kotlinx.coroutines.CoroutineScope(kotlinx.coroutines.Dispatchers.IO).launch {
+                repository.onActiveWalletChanged(laggard)
+            }
+            // Give B every chance to complete before A's set takes effect.
+            kotlinx.coroutines.withTimeoutOrNull(1_000) { switchJob!!.join() }
+        }
+
+        repository.resyncAccount(SyncMode.CUSTOM, CUSTOM_HEIGHT).getOrThrow()
+        switchJob!!.join()
+
+        assertEquals(2, bridge.setScriptsCalls.size)
+        val (lastPayload, lastCmd) = bridge.setScriptsCalls.last()
+        assertEquals(LightClientNative.CMD_SET_SCRIPTS_ALL, lastCmd)
+        val lastArgs = json.decodeFromString<List<JniScriptStatus>>(lastPayload).map { it.script.args }
+        assertTrue("the switched-to wallet's set must stand", otherScript.args in lastArgs)
+    }
 
     /** Codex on b90260a (1): BALANCED keeps the LIVE active wallet, not the context's snapshot. */
     @Test

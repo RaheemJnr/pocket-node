@@ -561,7 +561,14 @@ class GatewayRepository @Inject constructor(
         val result = setScriptsAndRecord(
             scriptStatuses + candidateRegistrations.map { it.status },
             listOf(walletId) + candidateRegistrations.map { "" },
-            LightClientNative.CMD_SET_SCRIPTS_ALL
+            LightClientNative.CMD_SET_SCRIPTS_ALL,
+            // Re-checked under the registration mutex, atomically with the
+            // set: a switch after the check above must not be overwritten.
+            beforeSet = {
+                if (expectedWalletId != null && activeWalletId != expectedWalletId) {
+                    throw Exception("Active wallet changed during registration")
+                }
+            },
         )
         if (!result) throw Exception("Failed to set scripts")
 
@@ -2821,7 +2828,8 @@ class GatewayRepository @Inject constructor(
         walletIds: List<String>,
         cmd: Int,
         allowRewind: Boolean = false,
-    ): Boolean = syncCoordinator.setScriptsAndRecord(statuses, walletIds, cmd, currentNetwork, allowRewind)
+        beforeSet: suspend () -> Unit = {},
+    ): Boolean = syncCoordinator.setScriptsAndRecord(statuses, walletIds, cmd, currentNetwork, allowRewind, beforeSet)
 
     private suspend fun maybeReregisterBalanced() {
         syncCoordinator.maybeReregisterBalanced(makeSyncContext())
