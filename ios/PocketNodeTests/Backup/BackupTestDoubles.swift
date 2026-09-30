@@ -28,8 +28,28 @@ final class StubWalletKeyReader: WalletKeyReading, @unchecked Sendable {
         _result = result
     }
 
+    /// Runs inside `load(reason:)` before it answers, standing in for
+    /// whatever happens while the real read is suspended on a Face ID or
+    /// passcode prompt (the app going to the background, the session locking).
+    var whileLoading: (@Sendable () async -> Void)? {
+        get {
+            lock.lock()
+            defer { lock.unlock() }
+            return _whileLoading
+        }
+        set {
+            lock.lock()
+            defer { lock.unlock() }
+            _whileLoading = newValue
+        }
+    }
+    private var _whileLoading: (@Sendable () async -> Void)?
+
     func load(reason: String) async throws -> WalletKeyBundle {
-        try recordLoadAndAnswer()
+        if let whileLoading {
+            await whileLoading()
+        }
+        return try recordLoadAndAnswer()
     }
 
     /// Taken through a synchronous helper: `NSLock.lock()` is unavailable from
@@ -54,10 +74,14 @@ final class StubAuthGate: AuthGating {
     private(set) var requestCount = 0
     private(set) var lastReason: String?
     var granted = true
+    var lockGeneration = 0
+    /// Runs while the prompt is "up", before it answers.
+    var whilePrompting: (() -> Void)?
 
     func requireAuth(reason: String) async -> Bool {
         requestCount += 1
         lastReason = reason
+        whilePrompting?()
         return granted
     }
 }
