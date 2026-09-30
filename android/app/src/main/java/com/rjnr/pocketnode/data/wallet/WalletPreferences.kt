@@ -135,6 +135,27 @@ class WalletPreferences @Inject constructor(
         prefs.edit().putStringSet(KEY_BULK_TX_HASHES, current + hash).apply()
     }
 
+    /**
+     * Tx hashes broadcast by sweepGapLimitFunds (#538 review). A sweep spends
+     * FOUND candidate cells (derived addresses) back to the main address;
+     * getTransactions's per-tx walk is queried with only the main script, so
+     * it never sees those candidate-script inputs and the net reads positive
+     * (a sweep would otherwise show as "Received", hiding the fee it paid).
+     * Recorded locally at send time, same one-set-across-wallets/networks
+     * shape as [isBulkTxHash] above, so the confirmed row can be classified
+     * "self" without an extra per-candidate-script JNI lookup on every
+     * getTransactions call. Plain method, not part of a core.prefs interface:
+     * gap-limit sweep is Android-only (#382), so this stays out of the
+     * iOS-shared surface.
+     */
+    fun isSweepTxHash(hash: String): Boolean =
+        prefs.getStringSet(KEY_SWEEP_TX_HASHES, emptySet())?.contains(hash) == true
+
+    fun addSweepTxHash(hash: String) {
+        val current = prefs.getStringSet(KEY_SWEEP_TX_HASHES, emptySet()) ?: emptySet()
+        prefs.edit().putStringSet(KEY_SWEEP_TX_HASHES, current + hash).apply()
+    }
+
     init {
         migrateIfNeeded()
     }
@@ -508,6 +529,7 @@ class WalletPreferences @Inject constructor(
         private const val KEY_THEME_MODE = "theme_mode"
         private const val KEY_BULK_SEND_UNLOCKED = "bulk_send_unlocked"
         private const val KEY_BULK_TX_HASHES = "bulk_tx_hashes"
+        private const val KEY_SWEEP_TX_HASHES = "sweep_tx_hashes"
         private const val KEY_BACKGROUND_SYNC = "background_sync_enabled"
         private const val KEY_LAST_SYNCED_AT = "last_synced_at_ms"
         private const val KEY_BG_SYNC_PILL_DISMISSED = "bg_sync_pill_dismissed"

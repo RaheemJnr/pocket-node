@@ -95,3 +95,60 @@ fun selfTransferDisplayAmount(feeShannons: Long?, netChangeAmount: Long): Long =
  */
 fun isSelfTransferFallbackSafe(outputs: List<CellOutput>, mainScriptArgs: String): Boolean =
     outputs.all { it.lock.args.equals(mainScriptArgs, ignoreCase = true) }
+
+/** [pendingTransferDisplay]'s result: what a pending activity row should show. */
+data class PendingTransferDisplay(val direction: String, val amountShannons: Long)
+
+/**
+ * What a freshly built plain transfer's pending activity row should show,
+ * for the same reason [selfTransferDisplayAmount] exists on the confirmed
+ * side (#538 review): `buildReserveAndSend`'s own net-debit computation only
+ * treats an output as change when it is locked to `fromAddress` exactly, so a
+ * self-send to a DERIVED candidate address (a different string, still this
+ * wallet's own script) reads its own output as a real recipient and shows the
+ * full amount sent plus the fee, not just the fee, until the confirmed row
+ * (already fixed) takes over.
+ *
+ * Reuses [isSelfTransferSignature] against [selfWalletLockArgs] (the same set
+ * the confirmed row will use once indexed), so the pending row agrees with
+ * what it eventually becomes. Returns null when the built transaction is not
+ * a self transfer, so the caller keeps its own direction/amount unchanged.
+ */
+fun pendingTransferDisplay(
+    outputs: List<CellOutput>,
+    selfWalletLockArgs: Set<String>,
+    plannedFeeShannons: Long?,
+    outgoingAmountShannons: Long,
+): PendingTransferDisplay? {
+    // netChangeShannons is only used for its sign by isSelfTransferSignature;
+    // a plain transfer always pays a fee, so it is always negative here.
+    if (!isSelfTransferSignature(netChangeShannons = -1L, outputs = outputs, knownLockArgs = selfWalletLockArgs)) {
+        return null
+    }
+    return PendingTransferDisplay("self", plannedFeeShannons ?: outgoingAmountShannons)
+}
+
+/**
+ * Classify a transaction that might be a candidate-funded gap-limit sweep
+ * (#538 review): sweepGapLimitFunds spends FOUND derived candidates back to
+ * the main address, so the info.script-scoped JNI walk only ever sees the
+ * main-script output (the candidate-script inputs never match the query) and
+ * its net reads positive: without this check it would show as "Received",
+ * hiding the fee actually paid.
+ *
+ * A foreign input's owning lock script is not knowable here without an extra
+ * JNI lookup per input (see sweepGapLimitFundsInner/WalletPreferences for the
+ * cheaper alternative actually used: the sweep's own tx hash is recorded
+ * locally at send time), so [isKnownSweepTxHash] is that purely local signal,
+ * never derived from chain data. Returns null when it is false, so the
+ * caller keeps its own classification (a genuine receive from a foreign
+ * input is never marked and is always left as "in").
+ */
+fun sweepRowDisplay(
+    isKnownSweepTxHash: Boolean,
+    recordedFeeShannons: Long?,
+    netChangeAmount: Long,
+): PendingTransferDisplay? {
+    if (!isKnownSweepTxHash) return null
+    return PendingTransferDisplay("self", recordedFeeShannons ?: netChangeAmount)
+}

@@ -287,4 +287,90 @@ class SelfTransferSignatureTest {
         )
         assertFalse(flagged)
     }
+
+    // --- pendingTransferDisplay (#538 review) ---
+
+    @Test
+    fun `a freshly built self-send's pending row reads self with the fee`() {
+        // buildReserveAndSend's own net-debit computation only treats an
+        // output as change when it is locked to fromAddress exactly, so a
+        // send to a derived candidate (change back to main) would otherwise
+        // report the full 100 CKB plus the fee as the pending amount.
+        val fee = 1_000L
+        val outputs = listOf(secpOutput(60, derivedArgs), secpOutput(40, mainArgs))
+        val wronglyInflatedOutgoingAmount = 100 * ckb + fee
+
+        val display = pendingTransferDisplay(
+            outputs = outputs,
+            selfWalletLockArgs = setOf(mainArgs, derivedArgs),
+            plannedFeeShannons = fee,
+            outgoingAmountShannons = wronglyInflatedOutgoingAmount,
+        )
+
+        assertEquals(PendingTransferDisplay("self", fee), display)
+    }
+
+    @Test
+    fun `pending display falls back to the outgoing amount when the fee is unknown`() {
+        val outgoingAmount = 500L
+        val display = pendingTransferDisplay(
+            outputs = listOf(secpOutput(100, mainArgs)),
+            selfWalletLockArgs = setOf(mainArgs),
+            plannedFeeShannons = null,
+            outgoingAmountShannons = outgoingAmount,
+        )
+        assertEquals(PendingTransferDisplay("self", outgoingAmount), display)
+    }
+
+    @Test
+    fun `pending display is null (unchanged) for a real send to someone else`() {
+        val display = pendingTransferDisplay(
+            outputs = listOf(secpOutput(100, foreignArgs)),
+            selfWalletLockArgs = setOf(mainArgs),
+            plannedFeeShannons = 1_000L,
+            outgoingAmountShannons = 100 * ckb + 1_000L,
+        )
+        assertEquals(null, display)
+    }
+
+    // --- sweepRowDisplay (#538 review) ---
+
+    @Test
+    fun `a sweep from a candidate to main is self with the fee`() {
+        // The walk only counted the main-script output (the candidate-script
+        // inputs never matched the info.script-scoped query), so its net read
+        // positive: netChangeAmount stands in for the wrongly-positive amount
+        // that would otherwise show as "Received".
+        val fee = 1_000L
+        val wronglyPositiveNet = 150 * ckb
+        val display = sweepRowDisplay(
+            isKnownSweepTxHash = true,
+            recordedFeeShannons = fee,
+            netChangeAmount = wronglyPositiveNet,
+        )
+        assertEquals(PendingTransferDisplay("self", fee), display)
+    }
+
+    @Test
+    fun `a sweep with no recorded fee falls back to the net change`() {
+        val netChangeAmount = 150 * ckb
+        val display = sweepRowDisplay(
+            isKnownSweepTxHash = true,
+            recordedFeeShannons = null,
+            netChangeAmount = netChangeAmount,
+        )
+        assertEquals(PendingTransferDisplay("self", netChangeAmount), display)
+    }
+
+    @Test
+    fun `a genuine receive from a foreign input stays in`() {
+        // Not marked as a sweep, so the caller must keep its own
+        // classification (a positive net change read as "in").
+        val display = sweepRowDisplay(
+            isKnownSweepTxHash = false,
+            recordedFeeShannons = null,
+            netChangeAmount = 10_000 * ckb,
+        )
+        assertEquals(null, display)
+    }
 }
