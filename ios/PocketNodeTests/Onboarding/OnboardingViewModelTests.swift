@@ -292,7 +292,11 @@ final class OnboardingViewModelTests: XCTestCase {
             .pinSetup,
             "a raw key has no phrase to back up"
         )
-        XCTAssertEqual(OnboardingViewModel.resumeStep(for: nil), .pinSetup)
+        XCTAssertEqual(
+            OnboardingViewModel.resumeStep(for: nil),
+            .backup,
+            "an unreadable record must not skip the backup of a phrase that may never have been written down"
+        )
     }
 
     func testAResumedFlowCarriesOnFromTheStepItWasGiven() {

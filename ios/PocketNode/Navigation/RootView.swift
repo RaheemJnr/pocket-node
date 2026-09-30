@@ -89,7 +89,14 @@ struct RootView: View {
         // an unfinished onboarding after all and goes back to it.
         .onChange(of: auth.state) { _, _ in
             guard phase == .wallet, container.needsSecuritySetup else { return }
-            Task { route(to: await container.launchDestination) }
+            Task {
+                let destination = await container.launchDestination
+                // Checked again after the await: another state change may
+                // have routed already, and a second route would build a
+                // second onboarding view model over the first.
+                guard phase == .wallet, container.needsSecuritySetup else { return }
+                route(to: destination)
+            }
         }
         .onChange(of: colorScheme, initial: true) {
             container.theme = Theme.forScheme(colorScheme)

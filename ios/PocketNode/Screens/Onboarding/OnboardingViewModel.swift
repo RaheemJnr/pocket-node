@@ -95,11 +95,16 @@ final class OnboardingViewModel {
     /// wallet goes to backup, an imported one straight to the PIN), read back
     /// from the record's `type` and `mnemonicBackedUp` since those are what
     /// survive the process.
+    ///
+    /// No readable record (a `wallet.json` that failed to decode, or keys with
+    /// no metadata) resumes at the backup too: the backup step reads the
+    /// phrase from the key store, so it works without the record, and
+    /// skipping it would risk a generated phrase never being written down.
     static func resumeStep(for record: WalletRecord?) -> Step {
-        guard let record,
-              record.type == WalletCreator.typeMnemonic,
-              !record.mnemonicBackedUp
-        else { return .pinSetup }
+        guard let record else { return .backup }
+        guard record.type == WalletCreator.typeMnemonic, !record.mnemonicBackedUp else {
+            return .pinSetup
+        }
         return .backup
     }
 
