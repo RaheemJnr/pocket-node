@@ -77,7 +77,7 @@ class WalletRepositoryTest {
             walletDao, keyManager, walletPreferences, walletPreferences, mnemonicManager, db,
             db.transactionDao(), db.balanceCacheDao(), db.daoCellDao(),
             db.pendingDaoWithdrawDao(), db.pendingDaoUnlockDao(), db.keyMaterialDao(),
-            db.subAccountCandidateDao(), SubAccountDiscovery(mnemonicManager, keyManager), NoopLogger
+            db.subAccountCandidateDao(), SubAccountDiscovery(mnemonicManager, keyManager), walletPreferences, NoopLogger
         )
     }
 

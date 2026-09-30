@@ -10,6 +10,7 @@ import com.rjnr.pocketnode.data.auth.PinManager
 import com.rjnr.pocketnode.data.database.dao.KeyMaterialDao
 import com.rjnr.pocketnode.data.gateway.GatewayRepository
 import com.rjnr.pocketnode.data.update.UpdateRepository
+import com.rjnr.pocketnode.data.update.UpdateServiceDisabledException
 import com.rjnr.pocketnode.data.gateway.models.NetworkType
 import com.rjnr.pocketnode.data.gateway.models.SyncMode
 import com.rjnr.pocketnode.data.wallet.SeedPhraseAuthorizer
@@ -62,6 +63,8 @@ class SettingsViewModel @Inject constructor(
         data object UpToDate : UpdateStatus
         data class Available(val version: String, val url: String) : UpdateStatus
         data object Failed : UpdateStatus
+        /** The user turned "Update checks" off in Settings (#531); no request was made. */
+        data object Disabled : UpdateStatus
     }
 
     data class UiState(
@@ -72,6 +75,10 @@ class SettingsViewModel @Inject constructor(
         val currentNetwork: NetworkType = NetworkType.MAINNET,
         val themeMode: ThemeMode = ThemeMode.SYSTEM,
         val isBackgroundSyncEnabled: Boolean = true,
+        // Network services (#531): user-controlled switches for the two
+        // outbound HTTP calls the app makes on its own.
+        val isPriceServiceEnabled: Boolean = true,
+        val isUpdateServiceEnabled: Boolean = true,
         val showSyncDialog: Boolean = false,
         val showSyncStrategyDialog: Boolean = false,
         val showNetworkSwitchDialog: Boolean = false,
@@ -145,7 +152,9 @@ class SettingsViewModel @Inject constructor(
                 syncStrategy = walletPrefs.getSyncStrategy(),
                 currentNetwork = repository.currentNetwork,
                 themeMode = walletPrefs.getThemeMode(),
-                isBackgroundSyncEnabled = walletPrefs.isBackgroundSyncEnabled()
+                isBackgroundSyncEnabled = walletPrefs.isBackgroundSyncEnabled(),
+                isPriceServiceEnabled = walletPrefs.isPriceServiceEnabled(),
+                isUpdateServiceEnabled = walletPrefs.isUpdateServiceEnabled()
             )
         }
     }
@@ -308,6 +317,26 @@ class SettingsViewModel @Inject constructor(
     }
 
     /**
+     * Network services (#531). Home observes [WalletPreferences.priceServiceEnabledFlow]
+     * directly so the fiat line hides/refetches live; this just persists the
+     * choice and keeps this screen's own switch in sync.
+     */
+    fun togglePriceService(enabled: Boolean) {
+        walletPrefs.setPriceServiceEnabled(enabled)
+        _uiState.update { it.copy(isPriceServiceEnabled = enabled) }
+    }
+
+    fun toggleUpdateService(enabled: Boolean) {
+        walletPrefs.setUpdateServiceEnabled(enabled)
+        _uiState.update { it.copy(isUpdateServiceEnabled = enabled) }
+        if (enabled) {
+            checkForUpdate()
+        } else {
+            _uiState.update { it.copy(updateStatus = UpdateStatus.Disabled) }
+        }
+    }
+
+    /**
      * Check GitHub for a newer release and surface it on the About > Version
      * row. Runs on init and on the manual "Check for updates" tap (#369). The
      * Home screen already shows an update dialog; this puts the same signal
@@ -334,8 +363,16 @@ class SettingsViewModel @Inject constructor(
                         )
                     }
                 }
-                .onFailure {
-                    _uiState.update { it.copy(updateStatus = UpdateStatus.Failed) }
+                .onFailure { error ->
+                    _uiState.update {
+                        it.copy(
+                            updateStatus = if (error is UpdateServiceDisabledException) {
+                                UpdateStatus.Disabled
+                            } else {
+                                UpdateStatus.Failed
+                            }
+                        )
+                    }
                 }
         }
     }

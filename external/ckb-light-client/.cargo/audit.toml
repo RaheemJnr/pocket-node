@@ -1,0 +1,31 @@
+# cargo-audit config. Read from .cargo/audit.toml relative to the working
+# directory (external/ckb-light-client) by the supply-chain CI workflow and by
+# `cargo audit` run locally from this directory.
+#
+# Every ignored advisory below is transitive (pulled in by upstream CKB or
+# libp2p/tentacle crates), not something this crate calls directly in an
+# affected way. Review each one again by the date noted and drop it once the
+# transitive dependency is bumped upstream.
+#
+# Keep this list consistent with deny.toml's [advisories.ignore]: the same
+# RUSTSEC IDs, same reasons.
+
+[advisories]
+ignore = [
+    "RUSTSEC-2025-0024", # crossbeam-channel double-free on Drop, transitive via ckb-channel/ckb-network. Review by 2026-12-28.
+    "RUSTSEC-2026-0204", # crossbeam-epoch invalid pointer deref in a Debug fmt impl, transitive, not on a reachable path. Review by 2026-12-28.
+    "RUSTSEC-2026-0258", # h2 unbounded empty DATA frames DoS, transitive via the tentacle/hyper stack, not exercised by this light client's RPC surface. Review by 2026-12-28.
+    "RUSTSEC-2025-0004", # openssl use-after-free in select_next_proto, ALPN negotiation is not used here. Review by 2026-12-28.
+    "RUSTSEC-2025-0022", # openssl use-after-free in Md::fetch/Cipher::fetch, transitive via tentacle-secio. Review by 2026-12-28.
+    "RUSTSEC-2024-0437", # protobuf uncontrolled recursion, transitive, not on a network-facing decode path here. Review by 2026-12-28.
+    "RUSTSEC-2025-0057", # fxhash unmaintained, transitive hashing utility, no known vulnerability. Review by 2026-12-28.
+    "RUSTSEC-2024-0384", # instant unmaintained, transitive via parking_lot/governor. Review by 2026-12-28.
+    "RUSTSEC-2025-0119", # number_prefix unmaintained, transitive build-time dependency only. Review by 2026-12-28.
+    "RUSTSEC-2024-0436", # paste unmaintained, proc-macro helper, no known vulnerability. Review by 2026-12-28.
+    "RUSTSEC-2024-0370", # proc-macro-error unmaintained, build-time proc-macro dependency only. Review by 2026-12-28.
+    "RUSTSEC-2026-0190", # anyhow Error::downcast_mut unsoundness, we do not call downcast_mut on anyhow::Error here. Review by 2026-12-28.
+    "RUSTSEC-2026-0306", # faster-hex AVX2 hex_decode_unchecked read past src, we do not use the unchecked decode API. Review by 2026-12-28.
+    "RUSTSEC-2026-0253", # lru LruCache::pop panic-safety unsoundness, transitive, no panicking Drop/Eq in the cached types we use. Review by 2026-12-28.
+    "RUSTSEC-2026-0186", # memmap2 unchecked pointer offset, transitive via storage backends, no untrusted offsets fed in here. Review by 2026-12-28.
+    "RUSTSEC-2026-0097", # rand unsound with a custom logger using rand::rng(), we do not install a custom log::Log that reenters rand. Review by 2026-12-28.
+]

@@ -57,6 +57,14 @@ class PinViewModel @Inject constructor(
     private var setupPin: String? = null
     private var lockoutTimerJob: Job? = null
 
+    init {
+        // #524: typed digits and a candidate PIN never survive a lock.
+        viewModelScope.onEachReauthLock {
+            setupPin = null
+            _uiState.update { it.copy(enteredDigits = "", pinComplete = false) }
+        }
+    }
+
     fun setMode(mode: PinMode) {
         val (title, subtitle) = when (mode) {
             PinMode.SETUP -> "Create PIN" to "Choose a 6-digit PIN"

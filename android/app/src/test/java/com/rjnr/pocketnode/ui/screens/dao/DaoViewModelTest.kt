@@ -9,9 +9,11 @@ import com.rjnr.pocketnode.data.wallet.WalletKeyReader
 import com.rjnr.pocketnode.data.wallet.WalletRepository
 import com.rjnr.pocketnode.ui.util.UiMessage
 import io.mockk.coEvery
+import io.mockk.coVerify
 import io.mockk.every
 import io.mockk.mockk
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.awaitCancellation
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.test.StandardTestDispatcher

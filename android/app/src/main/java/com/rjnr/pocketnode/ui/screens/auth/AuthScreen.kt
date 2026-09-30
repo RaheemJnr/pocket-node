@@ -27,6 +27,8 @@ import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.saveable.rememberSaveable
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
@@ -112,17 +114,27 @@ fun AuthScreen(
         prompt.authenticate(promptInfo)
     }
 
+    // Auto-launch once per AuthScreen instance. Saveable, so a configuration
+    // change does not launch a second prompt over the one androidx keeps
+    // alive across the recreation.
+    var biometricAutoLaunched by rememberSaveable { mutableStateOf(false) }
     LaunchedEffect(Unit) {
-        if (viewModel.shouldAutoTriggerBiometric()) {
+        if (!biometricAutoLaunched && viewModel.shouldAutoTriggerBiometric()) {
+            biometricAutoLaunched = true
             launchBiometric()
         }
     }
 
     // Cancel any pending prompt when AuthScreen is disposed (e.g. after a
     // successful unlock pops it off the back stack) so it can't reappear
-    // over the next screen.
+    // over the next screen. Not on a configuration change: the prompt
+    // survives it and is not relaunched (see above).
     DisposableEffect(Unit) {
-        onDispose { cancelBiometric() }
+        onDispose {
+            if ((context as? FragmentActivity)?.isChangingConfigurations != true) {
+                cancelBiometric()
+            }
+        }
     }
 
     LaunchedEffect(uiState.authSuccess) {

@@ -41,6 +41,7 @@ class WalletRepository @Inject constructor(
     private val keyMaterialDao: KeyMaterialDao,
     private val subAccountCandidateDao: com.rjnr.pocketnode.data.database.dao.SubAccountCandidateDao,
     private val subAccountDiscovery: SubAccountDiscovery,
+    private val walletPreferences: WalletPreferences,
     private val logger: Logger,
 ) {
     val walletsFlow: Flow<List<WalletEntity>> = walletDao.getAllFlow()
@@ -499,6 +500,10 @@ class WalletRepository @Inject constructor(
             }
         }
         keyManager.deleteWalletKeys(walletId)
+        // #538 review: a deleted wallet's gap-limit sweep markers must not
+        // outlive it (they are keyed by walletId, but nothing else ever
+        // reads or prunes them otherwise).
+        walletPreferences.clearSweepTxHashes(walletId)
         // VACUUM must run outside the transaction above, SQLite rejects VACUUM
         // when a transaction is open on the same connection.
         DatabaseMaintenanceUtil.vacuum(appDatabase)
