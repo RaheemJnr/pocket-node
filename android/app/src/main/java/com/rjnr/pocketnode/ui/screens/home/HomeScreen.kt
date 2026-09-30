@@ -146,7 +146,12 @@ fun HomeScreen(
     val haptic = LocalHapticFeedback.current
     val context = LocalContext.current
     val snackbarHostState = remember { SnackbarHostState() }
-    var selectedTransaction by remember { mutableStateOf<TransactionRecord?>(null) }
+    // #524: only the hash is saved (it survives the re-auth lock and
+    // rotation); the record is read from the current list.
+    var selectedTxHash by rememberSaveable { mutableStateOf<String?>(null) }
+    val selectedTransaction = selectedTxHash?.let { hash ->
+        uiState.transactions.firstOrNull { it.txHash == hash }
+    }
     var retryDialogTx by remember { mutableStateOf<TransactionRecord?>(null) }
     var showAccountSelector by remember { mutableStateOf(false) }
     val scope = rememberCoroutineScope()
@@ -347,7 +352,7 @@ fun HomeScreen(
             transaction = selectedTransaction!!,
             broadcast = uiState.broadcastStates[selectedTransaction!!.txHash],
             network = uiState.currentNetwork,
-            onDismiss = { selectedTransaction = null },
+            onDismiss = { selectedTxHash = null },
             onCopyTxHash = { txHash ->
                 haptic.performHapticFeedback(HapticFeedbackType.Confirm) // #304
                 clipboardManager.setText(AnnotatedString(txHash))
@@ -362,7 +367,7 @@ fun HomeScreen(
                 com.rjnr.pocketnode.ui.util.openInBrowser(context, url)
             },
             onRetry = { tx ->
-                selectedTransaction = null
+                selectedTxHash = null
                 retryDialogTx = tx
             }
         )
@@ -493,7 +498,7 @@ fun HomeScreen(
                     clipboardManager = clipboardManager,
                     snackbarHostState = snackbarHostState,
                     scope = scope,
-                    selectedTransaction = { selectedTransaction = it },
+                    selectedTransaction = { selectedTxHash = it.txHash },
                     onRetryFailed = { retryDialogTx = it },
                     onTopicHelp = { topic -> educationTopic = topic },
                     onSyncStallSwitchToRecent = { viewModel.switchToRecentSyncFromStall() },

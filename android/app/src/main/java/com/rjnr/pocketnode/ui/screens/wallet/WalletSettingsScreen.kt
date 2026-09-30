@@ -76,7 +76,9 @@ fun WalletSettingsScreen(
     val context = androidx.compose.ui.platform.LocalContext.current
     val scope = androidx.compose.runtime.rememberCoroutineScope()
     var showSeedPhrase by rememberSaveable { mutableStateOf(false) }
-    var showAddAccountDialog by remember { mutableStateOf(false) }
+    // #524: the add-account dialog and its typed name survive the re-auth
+    // lock and rotation.
+    var showAddAccountDialog by rememberSaveable { mutableStateOf(false) }
 
     // FLAG_SECURE: this screen can render the full mnemonic and raw private
     // key after biometric unlock — block screenshots, screen recording, and
@@ -172,7 +174,7 @@ fun WalletSettingsScreen(
 
     // Add sub-account dialog
     if (showAddAccountDialog) {
-        var accountName by remember { mutableStateOf("") }
+        var accountName by rememberSaveable { mutableStateOf("") }
         AlertDialog(
             onDismissRequest = { showAddAccountDialog = false },
             title = { Text(stringResource(R.string.wallet_settings_new_account_title)) },

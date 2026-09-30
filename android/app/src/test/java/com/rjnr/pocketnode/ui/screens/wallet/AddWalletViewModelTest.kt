@@ -91,6 +91,33 @@ class AddWalletViewModelTest {
     )
 
     @Test
+    fun `a re-auth lock clears a typed recovery phrase and private key but keeps the name (#524)`() = runTest {
+        val vm = newViewModel()
+        advanceUntilIdle()
+        vm.updateName("Savings")
+        vm.updateImportWord(0, "abandon")
+        vm.updateImportPrivateKey("0x" + "11".repeat(32))
+
+        com.rjnr.pocketnode.ui.screens.auth.ReauthLockEvents.onLocked()
+        advanceUntilIdle()
+
+        assertTrue(vm.uiState.value.importWords.all { it.isEmpty() })
+        assertEquals("", vm.uiState.value.importPrivateKey)
+        assertEquals("Savings", vm.uiState.value.name)
+    }
+
+    @Test
+    fun `a lock that happened before the ViewModel existed clears nothing (#524)`() = runTest {
+        com.rjnr.pocketnode.ui.screens.auth.ReauthLockEvents.onLocked()
+        val vm = newViewModel()
+        advanceUntilIdle()
+        vm.updateImportWord(0, "abandon")
+        advanceUntilIdle()
+
+        assertEquals("abandon", vm.uiState.value.importWords[0])
+    }
+
+    @Test
     fun `Cancelled BiometricPrompt during sub-account read does not pollute Room`() = runTest {
         coEvery {
             walletKeyReader.readKeyMaterial(any(), eq("parent-id"), any(), any())

@@ -70,6 +70,15 @@ class AuthViewModel @Inject constructor(
         _uiState.update { it.copy(authSuccess = true) }
     }
 
+    /**
+     * Marks a success as used, so it cannot unlock a later re-auth lock
+     * (#524). The overlay calls this when it unlocks and when a new lock
+     * session starts.
+     */
+    fun consumeAuthSuccess() {
+        _uiState.update { it.copy(authSuccess = false) }
+    }
+
     fun onBiometricFailed(errorMessage: String) {
         _uiState.update { it.copy(error = UiMessage.Raw(errorMessage)) }
     }
@@ -143,14 +152,14 @@ class AuthViewModel @Inject constructor(
                     is KeystoreV2MigrationRunner.Outcome.Failed -> {
                         logger.e(TAG, "Migration failed: ${outcome.reason} for ${outcome.failedWalletIds}")
                         val errorMessage = if (outcome.failedWalletIds.isEmpty()) {
-                            "Migration could not complete. Tap an affected wallet to retry, or re-import from your recovery phrase."
+                            "Migration could not complete. It will retry the next time you unlock, or you can re-import from your recovery phrase."
                         } else {
                             val names = outcome.failedWalletIds.map { id ->
                                 walletDao.getById(id)?.name?.takeIf { it.isNotBlank() } ?: "Wallet ${id.take(8)}"
                             }
                             val nameList = names.joinToString(", ")
                             "Migration could not complete for: $nameList. " +
-                                "Tap an affected wallet to retry, or re-import from your recovery phrase."
+                                "It will retry the next time you unlock, or you can re-import from your recovery phrase."
                         }
                         _uiState.update {
                             it.copy(error = UiMessage.Raw(errorMessage))
