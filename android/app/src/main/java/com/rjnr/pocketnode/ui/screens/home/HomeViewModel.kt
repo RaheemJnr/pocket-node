@@ -183,7 +183,7 @@ class HomeViewModel @Inject constructor(
 
         // React live to the "Fiat price" network-services switch (#531),
         // wherever it's flipped from (only Settings today). `drop(1)` skips
-        // the flow's initial replay — startup fetch is already handled by
+        // the flow's initial replay: startup fetch is already handled by
         // initializeWallet() -> fetchPrice(). Off: hide the fiat line rather
         // than leave a stale value. On: fetch immediately, no waiting for the
         // 5-min ticker.
