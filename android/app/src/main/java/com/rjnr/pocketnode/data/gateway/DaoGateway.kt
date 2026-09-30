@@ -601,6 +601,10 @@ class DaoGateway(
     ): Result<String> = runCatching {
         val info = ctx.walletInfo() ?: throw Exception("No wallet")
         val net = ctx.network()
+        // The wallet this unlock is signed for, read before the broadcast: a
+        // wallet switch while it is in flight must not file the marker under
+        // the wallet the user switched to (#529).
+        val walletId = ctx.walletId()
 
         val deposits = getDaoDeposits(ctx).getOrThrow()
         // #529: a cell the unlock already spent is gone from the list. Fail
@@ -711,7 +715,7 @@ class DaoGateway(
                     withdrawingTxHash = withdrawingOutPoint.txHash,
                     withdrawingIndex = withdrawingOutPoint.index,
                     unlockTxHash = txHash,
-                    walletId = ctx.walletId(),
+                    walletId = walletId,
                     network = net.name,
                     createdAt = System.currentTimeMillis(),
                 )

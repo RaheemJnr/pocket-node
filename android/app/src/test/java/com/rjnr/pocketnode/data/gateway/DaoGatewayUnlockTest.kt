@@ -3,6 +3,7 @@ package com.rjnr.pocketnode.data.gateway
 import android.content.Context
 import androidx.room.Room
 import androidx.test.core.app.ApplicationProvider
+import com.nervosnetwork.ckblightclient.LightClientNative
 import com.rjnr.pocketnode.core.log.NoopLogger
 import com.rjnr.pocketnode.data.database.AppDatabase
 import com.rjnr.pocketnode.data.database.entity.PendingDaoUnlockEntity
@@ -13,6 +14,10 @@ import com.rjnr.pocketnode.data.gateway.models.JniHeaderView
 import com.rjnr.pocketnode.data.gateway.models.NetworkType
 import com.rjnr.pocketnode.data.gateway.models.OutPoint
 import com.rjnr.pocketnode.data.gateway.models.Script
+import com.rjnr.pocketnode.data.gateway.models.CellDep
+import com.rjnr.pocketnode.data.gateway.models.CellInput
+import com.rjnr.pocketnode.data.gateway.models.CellOutput
+import com.rjnr.pocketnode.data.gateway.models.Transaction
 import com.rjnr.pocketnode.data.gateway.models.TransactionStatusResponse
 import com.rjnr.pocketnode.data.send.SendContext
 import com.rjnr.pocketnode.data.send.SendPipeline
@@ -36,6 +41,9 @@ import org.junit.Before
 import org.junit.Test
 import org.junit.runner.RunWith
 import org.robolectric.RobolectricTestRunner
+import org.robolectric.annotation.Config
+import org.robolectric.annotation.Implementation
+import org.robolectric.annotation.Implements
 
 /**
  * #529: what happens to a DAO position around its phase-2 unlock.
@@ -51,6 +59,10 @@ import org.robolectric.RobolectricTestRunner
  * database, because the retirement IS a database write.
  */
 @RunWith(RobolectricTestRunner::class)
+@Config(
+    shadows = [DaoUnlockShadowLightClientNative::class],
+    instrumentedPackages = ["com.nervosnetwork.ckblightclient"],
+)
 class DaoGatewayUnlockTest {
 
     private lateinit var db: AppDatabase
@@ -125,9 +137,12 @@ class DaoGatewayUnlockTest {
      */
     private var chainStatus: TransactionStatusResponse? = null
 
-    private fun ctx() = DaoGateway.DaoContext(
+    /** Every transaction the gateway asked the chain about. */
+    private val chainQueries = mutableListOf<String>()
+
+    private fun ctx(walletIdOf: () -> String = { walletId }) = DaoGateway.DaoContext(
         network = { network },
-        walletId = { walletId },
+        walletId = walletIdOf,
         walletInfo = { WalletInfo("0xpub", script, "ckt1...", "ckb1...") },
         currentAddress = { "ckt1..." },
         existingScriptBlock = { syncHead },
@@ -142,6 +157,7 @@ class DaoGatewayUnlockTest {
             )
         },
         transactionStatus = { hash ->
+            chainQueries += hash
             chainStatus?.let { Result.success(it.copy(txHash = hash)) }
                 ?: Result.failure(Exception("node unavailable"))
         },
@@ -560,4 +576,128 @@ class DaoGatewayUnlockTest {
             result.getOrNull(),
         )
     }
+
+    private fun agedPendingOnChainHoldsTheCardConfirming(poolStatus: String) = runTest {
+        seedCachedWithdrawingRow()
+        markUnlockInFlight(
+            txStatus = "PENDING",
+            createdAt = System.currentTimeMillis() - DAO_UNLOCK_MARKER_GRACE_MS - 1,
+        )
+        chainStatus = TransactionStatusResponse(
+            txHash = unlockTxHash, status = poolStatus, confirmations = 0,
+        )
+
+        coEvery { depositReader.list(any(), any(), any()) } returns emptyList()
+        val deposits = gateway.getDaoDeposits(ctx()).getOrThrow()
+
+        assertTrue("an aged marker must be taken to the chain", unlockTxHash in chainQueries)
+        assertEquals(DaoCellStatus.UNLOCKING, deposits.single().status)
+        assertFalse(
+            "a still-pooled unlock must keep its marker",
+            db.pendingDaoUnlockDao().getByWalletAndNetwork(walletId, network.name).isEmpty(),
+        )
+        assertEquals(
+            "nothing is retired or restored while the unlock is in the pool",
+            DaoCellStatus.UNLOCKABLE.name,
+            daoSyncManager.getByOutPoint(withdrawingOutPoint.txHash, withdrawingOutPoint.index)?.status,
+        )
+    }
+
+    @Test
+    fun `an aged marker still pending in the pool keeps the position confirming`() =
+        agedPendingOnChainHoldsTheCardConfirming("pending")
+
+    @Test
+    fun `an aged marker still proposed in the pool keeps the position confirming`() =
+        agedPendingOnChainHoldsTheCardConfirming("proposed")
+
+    /**
+     * Public #529 review S1: the marker is filed under the wallet the unlock
+     * was signed for, read before the broadcast, not whichever wallet is
+     * active once the broadcast returns.
+     */
+    @Test
+    fun `a wallet switch during the broadcast files the unlock marker under the initiating wallet`() = runTest {
+        val otherWalletId = "wallet-2"
+        var active = walletId
+        coEvery { depositReader.list(any(), any(), any()) } returns listOf(withdrawingDeposit())
+        val headerResolver = mockk<DaoHeaderResolver>()
+        coEvery { headerResolver.getOrFetchHeader(any(), any()) } returns tipHeader()
+        val builder = mockk<TransactionBuilder>(relaxed = true)
+        every {
+            builder.buildDaoUnlock(any(), any(), any(), any(), any(), any(), any<ByteArray>(), any())
+        } returns Transaction(
+            cellDeps = listOf(CellDep.SECP256K1_TESTNET),
+            cellInputs = listOf(CellInput(previousOutput = withdrawingOutPoint)),
+            cellOutputs = listOf(CellOutput(capacity = "0x" + 20_000_000_000L.toString(16), lock = script)),
+            outputsData = listOf("0x"),
+            witnesses = listOf("0x"),
+        )
+        every { builder.computeTxHash(any()) } returns unlockTxHash
+        // The user switches wallets while the unlock is on its way out.
+        val api = mockk<LightClientApi>(relaxed = true)
+        every { api.sendTransaction(any()) } answers {
+            active = otherWalletId
+            "\"$unlockTxHash\""
+        }
+        val pipeline = SendPipeline(
+            lightClient = api,
+            transactionBuilder = builder,
+            ledger = mockk(relaxed = true),
+            pendingBroadcasts = mockk(relaxed = true),
+            transactions = mockk(relaxed = true),
+            syncEngine = mockk(relaxed = true),
+            syncCoordinator = mockk(relaxed = true),
+            uiPreferences = mockk(relaxed = true),
+            json = Json { ignoreUnknownKeys = true; encodeDefaults = true },
+            logger = NoopLogger,
+        )
+        val switching = DaoGateway(
+            appDatabase = db,
+            daoSyncManager = daoSyncManager,
+            daoDepositReader = depositReader,
+            daoHeaderResolver = headerResolver,
+            lightClient = lightClient,
+            transactionBuilder = builder,
+            sendPipeline = pipeline,
+            logger = NoopLogger,
+        )
+
+        val result = switching.unlockDao(ctx(walletIdOf = { active }), withdrawingOutPoint, privateKey = ByteArray(32))
+
+        assertTrue("unlock should broadcast: ${result.exceptionOrNull()}", result.isSuccess)
+        assertEquals(otherWalletId, active)
+        assertEquals(
+            unlockTxHash,
+            db.pendingDaoUnlockDao().getByWalletAndNetwork(walletId, network.name).single().unlockTxHash,
+        )
+        assertTrue(
+            "the marker must not follow the wallet the user switched to",
+            db.pendingDaoUnlockDao().getByWalletAndNetwork(otherWalletId, network.name).isEmpty(),
+        )
+    }
+}
+
+/**
+ * Stands in for the two static natives the unlock path calls directly on
+ * [LightClientNative] in [DaoGatewayUnlockTest]. Every native not named here
+ * keeps Robolectric's default (null / 0).
+ */
+@Implements(LightClientNative::class)
+class DaoUnlockShadowLightClientNative {
+
+    /** Deposit plus a fixed compensation, enough for the unlock path to build. */
+    @Implementation
+    fun nativeCalculateMaxWithdraw(
+        @Suppress("UNUSED_PARAMETER") depositHeaderDaoHex: String,
+        @Suppress("UNUSED_PARAMETER") withdrawHeaderDaoHex: String,
+        depositCapacity: Long,
+        @Suppress("UNUSED_PARAMETER") occupiedCapacity: Long,
+    ): Long = depositCapacity + 1_000L
+
+    @Implementation
+    fun nativeCalculateUnlockEpoch(
+        @Suppress("UNUSED_PARAMETER") depositEpochHex: String,
+        @Suppress("UNUSED_PARAMETER") withdrawEpochHex: String,
+    ): String? = "0x20000000000000"
 }
