@@ -240,6 +240,9 @@ class DaoViewModel @Inject constructor(
     /** V2-aware withdraw entry point. See [depositWithActivity]. */
     fun withdrawWithActivity(activity: FragmentActivity, deposit: DaoDeposit) {
         if (!daoActionEnabled(deposit, _uiState.value.pendingAction)) return
+        // Claim the position before launching (#529): the guard above reads
+        // pendingAction, so a second tap in the same frame must already see it.
+        _uiState.update { it.copy(pendingAction = DaoAction.Withdrawing(deposit.outPoint)) }
         viewModelScope.launch {
             executeDaoOperationWithActivity(
                 activity = activity,
@@ -285,12 +288,18 @@ class DaoViewModel @Inject constructor(
     /** V2-aware unlock entry point. See [depositWithActivity]. */
     fun unlockWithActivity(activity: FragmentActivity, deposit: DaoDeposit) {
         if (!daoActionEnabled(deposit, _uiState.value.pendingAction)) return
+        // Claim the position before launching (#529): the guard above reads
+        // pendingAction, so a second tap in the same frame must already see it
+        // and never reach a second preflight or auth prompt.
+        _uiState.update { it.copy(pendingAction = DaoAction.Unlocking(deposit.outPoint)) }
         viewModelScope.launch {
             // #529: ask the wallet's own records first. An already-claimed
             // position used to cost a full biometric or PIN prompt before
             // unlockDao could tell the user it was already unlocked.
             val preflight = repository.unlockPreflight(deposit.outPoint)
             if (preflight.isFailure) {
+                // Clears only this claim: failAction leaves any other
+                // outpoint's in-flight action alone.
                 failAction(deposit.outPoint, preflight.exceptionOrNull()?.message)
                 return@launch
             }

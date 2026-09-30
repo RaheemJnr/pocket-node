@@ -8,10 +8,13 @@ import com.rjnr.pocketnode.data.wallet.WalletInfo
 import com.rjnr.pocketnode.data.wallet.WalletKeyReader
 import com.rjnr.pocketnode.data.wallet.WalletRepository
 import com.rjnr.pocketnode.ui.util.UiMessage
+import androidx.fragment.app.FragmentActivity
 import io.mockk.coEvery
+import io.mockk.coVerify
 import io.mockk.every
 import io.mockk.mockk
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.awaitCancellation
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.test.StandardTestDispatcher
@@ -274,6 +277,47 @@ class DaoViewModelTest {
         vm.withdraw(makeDaoDeposit(status = DaoCellStatus.WITHDRAWING))
 
         assertNull(vm.uiState.value.pendingAction)
+    }
+
+    @Test
+    fun `a same-frame double tap on Unlock runs one preflight and keeps the spinner`() {
+        // The preflight never returns, so the first attempt stays in flight and
+        // no kotlin.Result crosses the MockK resume boundary (see NOTE above).
+        coEvery { repository.unlockPreflight(any()) } coAnswers { awaitCancellation() }
+        coEvery { repository.getDaoDeposits() } coAnswers { awaitCancellation() } // park the poll
+        val vm = DaoViewModel(repository, authManager, pinManager, walletKeyReader, walletRepository)
+        val activity = mockk<FragmentActivity>(relaxed = true)
+        val deposit = makeDaoDeposit(status = DaoCellStatus.UNLOCKABLE)
+
+        vm.unlockWithActivity(activity, deposit)
+        assertEquals(
+            "the position is claimed before any coroutine runs",
+            DaoAction.Unlocking(testOutPoint),
+            vm.uiState.value.pendingAction,
+        )
+        vm.unlockWithActivity(activity, deposit)
+        testDispatcher.scheduler.runCurrent()
+
+        coVerify(exactly = 1) { repository.unlockPreflight(testOutPoint) }
+        assertEquals(DaoAction.Unlocking(testOutPoint), vm.uiState.value.pendingAction)
+    }
+
+    @Test
+    fun `a same-frame double tap on Withdraw asks for auth once and keeps the spinner`() {
+        every { walletRepository.activeWalletIdSnapshot() } returns "wallet-1"
+        coEvery { walletKeyReader.readPrivateKey(any(), any(), any(), any()) } coAnswers { awaitCancellation() }
+        coEvery { repository.getDaoDeposits() } coAnswers { awaitCancellation() } // park the poll
+        val vm = DaoViewModel(repository, authManager, pinManager, walletKeyReader, walletRepository)
+        val activity = mockk<FragmentActivity>(relaxed = true)
+        val deposit = makeDaoDeposit(status = DaoCellStatus.DEPOSITED)
+
+        vm.withdrawWithActivity(activity, deposit)
+        assertEquals(DaoAction.Withdrawing(testOutPoint), vm.uiState.value.pendingAction)
+        vm.withdrawWithActivity(activity, deposit)
+        testDispatcher.scheduler.runCurrent()
+
+        coVerify(exactly = 1) { walletKeyReader.readPrivateKey(any(), any(), any(), any()) }
+        assertEquals(DaoAction.Withdrawing(testOutPoint), vm.uiState.value.pendingAction)
     }
 
     // --- outsideWindowPromptCount (pure function) ---
