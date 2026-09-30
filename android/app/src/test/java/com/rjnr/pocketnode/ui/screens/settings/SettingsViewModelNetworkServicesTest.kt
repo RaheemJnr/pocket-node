@@ -34,6 +34,7 @@ import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
+import org.junit.Assume.assumeTrue
 import org.junit.Before
 import org.junit.Test
 import org.junit.runner.RunWith
@@ -158,6 +159,12 @@ class SettingsViewModelNetworkServicesTest {
 
     @Test
     fun `toggleUpdateService back on checks again`() = runTest(testDispatcher) {
+        // checkForUpdate() (called by toggleUpdateService(true)) early-returns
+        // on the playRelease build type before ever touching the switch or
+        // the repository, since Play forbids the self-update flow entirely
+        // (BuildConfig.UPDATER_ENABLED = false there). This test needs a real
+        // check to run, so it only applies where the updater is compiled in.
+        assumeTrue(BuildConfig.UPDATER_ENABLED)
         walletPrefs.setUpdateServiceEnabled(false)
         val viewModel = newViewModel(noUpdateAvailableRepository())
         runCurrent()
@@ -182,6 +189,10 @@ class SettingsViewModelNetworkServicesTest {
 
     @Test
     fun `checkForUpdate reports Disabled instead of Failed when the switch is off`() = runTest(testDispatcher) {
+        // Same reason as the test above: checkForUpdate() itself is a no-op
+        // on the playRelease build type regardless of the switch, so there is
+        // no Disabled transition to observe there.
+        assumeTrue(BuildConfig.UPDATER_ENABLED)
         walletPrefs.setUpdateServiceEnabled(false)
         val viewModel = newViewModel(noUpdateAvailableRepository())
         runCurrent()
