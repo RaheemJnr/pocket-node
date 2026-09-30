@@ -18,6 +18,9 @@ extension WalletKeyStore: WalletKeyReading {}
 @MainActor
 protocol AuthGating: AnyObject {
     func requireAuth(reason: String) async -> Bool
+    /// Bumped on every session lock. A reveal records it before prompting and
+    /// drops its result if it moved, so a phrase never lands behind the lock.
+    var lockGeneration: Int { get }
 }
 
 extension AuthService: AuthGating {}
@@ -62,6 +65,12 @@ final class BackupViewModel {
     private let hasPin: () -> Bool
     private var rng: any RandomNumberGenerator
 
+    /// Bumped on every ``onBackgrounded()``. With ``AuthGating/lockGeneration``
+    /// it makes up the generation a reveal records before it prompts or reads
+    /// (see ``reveal()``), the same guard as Android's `stopGeneration` in
+    /// `MnemonicBackupScreen`.
+    private var stopGeneration = 0
+
     /// - Parameters:
     ///   - isOnboarding: true only on the single first-run hop straight out of
     ///     wallet creation, before `InitialPinSetup` runs.
@@ -94,19 +103,33 @@ final class BackupViewModel {
     /// Runs the re-auth gate (unless exempt) and decrypts the wallet. Safe to
     /// call again after a cancelled or failed attempt — the gate step stays
     /// put until this succeeds.
+    ///
+    /// Both awaits here can outlast the screen: the app can go to the
+    /// background, or the session can lock, while the prompt is up or the key
+    /// is being read. ``onBackgrounded()`` is a no-op on ``Step/gate``, so
+    /// without a check the read would land afterwards and put the phrase back
+    /// on screen. The generation is recorded before the first await and
+    /// re-checked after each one; a reveal that finds it moved is dropped
+    /// without decrypting (after the prompt) or without showing anything
+    /// (after the read). The dropped bundle's strings are released here and
+    /// never copied into ``words``; Swift offers no supported way to zero a
+    /// `String`, which is why nothing retains them.
     func reveal() async {
         guard !isRevealing else { return }
         isRevealing = true
         errorMessage = nil
         defer { isRevealing = false }
 
+        let generation = currentGeneration
+
         if !isOnboardingExempt {
             let granted = await auth.requireAuth(reason: Self.revealReason)
-            guard granted else { return }
+            guard granted, generation == currentGeneration else { return }
         }
 
         do {
             let bundle = try await walletKeyStore.load(reason: Self.revealReason)
+            guard generation == currentGeneration else { return }
             guard let mnemonic = bundle.mnemonic, !mnemonic.isEmpty else {
                 step = .noPhrase
                 return
@@ -116,6 +139,9 @@ final class BackupViewModel {
             selections = [:]
             step = .display
         } catch {
+            // A failure that lands after a background or lock is as stale as
+            // a success: say nothing about a reveal nobody is watching.
+            guard generation == currentGeneration else { return }
             errorMessage = Self.unreadableKeyMaterialMessage
         }
     }
@@ -179,9 +205,11 @@ final class BackupViewModel {
     }
 
     /// Called when the scene goes to the background. Wipes the phrase and
-    /// returns to the gate on the two steps that show it; a no-op everywhere
-    /// else, matching Android's `onBackgrounded` (called from `ON_STOP`).
+    /// returns to the gate on the two steps that show it, matching Android's
+    /// `onBackgrounded` (called from `ON_STOP`). On every step it also ends
+    /// any reveal still in flight (see ``reveal()``).
     func onBackgrounded() {
+        stopGeneration += 1
         guard step == .display || step == .verify else { return }
         wipeWords()
         step = .gate
@@ -197,6 +225,15 @@ final class BackupViewModel {
         wipeWords()
         step = .gate
         errorMessage = Self.screenshotTakenMessage
+    }
+
+    private struct Generation: Equatable {
+        let stop: Int
+        let lock: Int
+    }
+
+    private var currentGeneration: Generation {
+        Generation(stop: stopGeneration, lock: auth.lockGeneration)
     }
 
     private func wipeWords() {
