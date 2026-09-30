@@ -9,6 +9,9 @@ import com.rjnr.pocketnode.data.database.AppDatabase
 import com.rjnr.pocketnode.data.database.entity.PendingDaoUnlockEntity
 import com.rjnr.pocketnode.data.database.entity.TransactionEntity
 import com.rjnr.pocketnode.data.database.entity.WalletEntity
+import com.rjnr.pocketnode.data.gateway.models.CellDep
+import com.rjnr.pocketnode.data.gateway.models.CellInput
+import com.rjnr.pocketnode.data.gateway.models.CellOutput
 import com.rjnr.pocketnode.data.gateway.models.DaoCellStatus
 import com.rjnr.pocketnode.data.gateway.models.DaoDeposit
 import com.rjnr.pocketnode.data.gateway.models.JniHeaderView
@@ -18,6 +21,8 @@ import com.rjnr.pocketnode.data.gateway.models.JniTxStatus
 import com.rjnr.pocketnode.data.gateway.models.NetworkType
 import com.rjnr.pocketnode.data.gateway.models.OutPoint
 import com.rjnr.pocketnode.data.gateway.models.Script
+import com.rjnr.pocketnode.data.gateway.models.Transaction
+import com.rjnr.pocketnode.data.transaction.TransactionBuilder
 import com.rjnr.pocketnode.data.wallet.KeyManager
 import com.rjnr.pocketnode.data.wallet.WalletInfo
 import com.rjnr.pocketnode.data.wallet.WalletPreferences
@@ -67,7 +72,12 @@ class GatewayRepositoryDaoUnlockTest {
     private lateinit var db: AppDatabase
     private lateinit var daoSyncManager: DaoSyncManager
     private lateinit var depositReader: DaoDepositReader
+    private lateinit var daoHeaderResolver: DaoHeaderResolver
+    private lateinit var transactionBuilder: TransactionBuilder
     private lateinit var repository: GatewayRepository
+
+    /** What the broadcast does, for tests that let an unlock reach the network. */
+    private var onBroadcast: suspend (String) -> String? = { null }
 
     private val json = Json { ignoreUnknownKeys = true; encodeDefaults = true }
     private val walletId = "wallet-1"
@@ -101,6 +111,8 @@ class GatewayRepositoryDaoUnlockTest {
             NoopLogger,
         )
         depositReader = mockk()
+        daoHeaderResolver = mockk(relaxed = true)
+        transactionBuilder = mockk(relaxed = true)
 
         // On main the repository reads the chain straight off the JNI object
         // (tip for the epoch, registered scripts for the sync head, one
@@ -111,6 +123,7 @@ class GatewayRepositoryDaoUnlockTest {
             listOf(JniScriptStatus(script = script, blockNumber = "0x" + syncHead.toString(16)))
         )
         DaoUnlockShadowLightClientNative.chainStatus = null
+        DaoUnlockShadowLightClientNative.transactionQueries.clear()
 
         val walletPreferences = WalletPreferences(context, NoopLogger)
         walletPreferences.setActiveWalletId(walletId)
@@ -129,7 +142,7 @@ class GatewayRepositoryDaoUnlockTest {
             keyManager = keyManager,
             walletPreferences = walletPreferences,
             json = json,
-            transactionBuilder = mockk(relaxed = true),
+            transactionBuilder = transactionBuilder,
             cacheManager = mockk(relaxed = true),
             daoSyncManager = daoSyncManager,
             walletMigrationHelper = mockk(relaxed = true),
@@ -138,9 +151,9 @@ class GatewayRepositoryDaoUnlockTest {
             headerCacheDao = db.headerCacheDao(),
             syncProgressDao = db.syncProgressDao(),
             pendingBroadcastDao = db.pendingBroadcastDao(),
-            broadcastClient = mockk(relaxed = true),
+            broadcastClient = BroadcastClient { txJson -> onBroadcast(txJson) },
             syncCoordinator = mockk(relaxed = true),
-            daoHeaderResolver = mockk(relaxed = true),
+            daoHeaderResolver = daoHeaderResolver,
             daoDepositReader = depositReader,
             lightClient = LightClientReadOnly(json, NoopLogger),
             subAccountReconciler = mockk(relaxed = true),
@@ -369,6 +382,9 @@ class GatewayRepositoryDaoUnlockTest {
 
         val deposits = repository.getDaoDeposits().getOrThrow()
 
+        // A rejection and an unanswered query restore the position alike, by
+        // design; what this pins is that the verdict came from the chain.
+        assertTrue(unlockTxHash in DaoUnlockShadowLightClientNative.transactionQueries)
         assertEquals(DaoCellStatus.UNLOCKABLE, deposits.single().status)
         assertTrue(
             "a written-off marker must not keep the card spinning",
@@ -387,6 +403,7 @@ class GatewayRepositoryDaoUnlockTest {
 
         assertEquals(DaoCellStatus.UNLOCKING, deposits.single().status)
         assertFalse(db.pendingDaoUnlockDao().getByWalletAndNetwork(walletId, network.name).isEmpty())
+        assertTrue(DaoUnlockShadowLightClientNative.transactionQueries.isEmpty())
     }
 
     @Test
@@ -594,6 +611,85 @@ class GatewayRepositoryDaoUnlockTest {
             result.getOrNull(),
         )
     }
+
+    private fun agedPendingOnChainHoldsTheCardConfirming(poolStatus: String) = runTest {
+        seedCachedWithdrawingRow()
+        markUnlockInFlight(
+            txStatus = "PENDING",
+            createdAt = System.currentTimeMillis() - DAO_UNLOCK_MARKER_GRACE_MS - 1,
+        )
+        chainStatus = poolStatus
+
+        coEvery { depositReader.list(any(), any(), any()) } returns emptyList()
+        val deposits = repository.getDaoDeposits().getOrThrow()
+
+        assertTrue(
+            "an aged marker must be taken to the chain",
+            unlockTxHash in DaoUnlockShadowLightClientNative.transactionQueries,
+        )
+        assertEquals(DaoCellStatus.UNLOCKING, deposits.single().status)
+        assertFalse(
+            "a still-pooled unlock must keep its marker",
+            db.pendingDaoUnlockDao().getByWalletAndNetwork(walletId, network.name).isEmpty(),
+        )
+        assertEquals(
+            "nothing is retired or restored while the unlock is in the pool",
+            DaoCellStatus.UNLOCKABLE.name,
+            daoSyncManager.getByOutPoint(withdrawingOutPoint.txHash, withdrawingOutPoint.index)?.status,
+        )
+    }
+
+    @Test
+    fun `an aged marker still pending in the pool keeps the position confirming`() =
+        agedPendingOnChainHoldsTheCardConfirming("pending")
+
+    @Test
+    fun `an aged marker still proposed in the pool keeps the position confirming`() =
+        agedPendingOnChainHoldsTheCardConfirming("proposed")
+
+    @Test
+    fun `a wallet switch during the broadcast files the unlock marker under the initiating wallet`() = runTest {
+        val otherWalletId = "wallet-2"
+        db.walletDao().insert(
+            WalletEntity(
+                walletId = otherWalletId, name = otherWalletId, type = KeyManager.WALLET_TYPE_MNEMONIC,
+                derivationPath = "m/44'/309'/1'/0/0", parentWalletId = null, accountIndex = 1,
+                mainnetAddress = "ckb1...", testnetAddress = "ckt1...",
+                isActive = false, createdAt = 0L, lastActiveAt = 0L,
+            )
+        )
+        coEvery { depositReader.list(any(), any(), any()) } returns listOf(withdrawingDeposit())
+        coEvery { daoHeaderResolver.getOrFetchHeader(any(), any()) } returns tipHeader()
+        every {
+            transactionBuilder.buildDaoUnlock(any(), any(), any(), any(), any(), any(), any(), any())
+        } returns Transaction(
+            cellDeps = listOf(CellDep.SECP256K1_TESTNET),
+            cellInputs = listOf(CellInput(previousOutput = withdrawingOutPoint)),
+            cellOutputs = listOf(CellOutput(capacity = "0x" + 20_000_000_000L.toString(16), lock = script)),
+            outputsData = listOf("0x"),
+            witnesses = listOf("0x"),
+        )
+        every { transactionBuilder.computeTxHash(any()) } returns unlockTxHash
+        // The user switches wallets while the unlock is on its way out.
+        onBroadcast = {
+            runCatching {
+                repository.onActiveWalletChanged(db.walletDao().getById(otherWalletId)!!)
+            }
+            "\"$unlockTxHash\""
+        }
+
+        val result = repository.unlockDao(withdrawingOutPoint, privateKey = ByteArray(32))
+
+        assertTrue("unlock should broadcast: ${result.exceptionOrNull()}", result.isSuccess)
+        assertEquals(
+            unlockTxHash,
+            db.pendingDaoUnlockDao().getByWalletAndNetwork(walletId, network.name).single().unlockTxHash,
+        )
+        assertTrue(
+            "the marker must not follow the wallet the user switched to",
+            db.pendingDaoUnlockDao().getByWalletAndNetwork(otherWalletId, network.name).isEmpty(),
+        )
+    }
 }
 
 /**
@@ -612,13 +708,28 @@ class DaoUnlockShadowLightClientNative {
     @Implementation
     fun nativeGetScripts(): String? = scripts
 
+    /** Deposit plus a fixed compensation, enough for the unlock path to build. */
+    @Implementation
+    fun nativeCalculateMaxWithdraw(
+        @Suppress("UNUSED_PARAMETER") depositHeaderDaoHex: String,
+        @Suppress("UNUSED_PARAMETER") withdrawHeaderDaoHex: String,
+        depositCapacity: Long,
+        @Suppress("UNUSED_PARAMETER") occupiedCapacity: Long,
+    ): Long = depositCapacity + 1_000L
+
+    @Implementation
+    fun nativeCalculateUnlockEpoch(
+        @Suppress("UNUSED_PARAMETER") depositEpochHex: String,
+        @Suppress("UNUSED_PARAMETER") withdrawEpochHex: String,
+    ): String? = "0x20000000000000"
+
     /**
      * The unlock transaction as the chain reports it, or null, which is the
      * bridge's own answer when the node does not know the transaction.
      */
     @Implementation
-    fun nativeGetTransaction(@Suppress("UNUSED_PARAMETER") hash: String): String? =
-        chainStatus?.let {
+    fun nativeGetTransaction(hash: String): String? =
+        chainStatus.also { transactionQueries += hash }?.let {
             Json.encodeToString(
                 JniTransactionWithStatus(
                     txStatus = JniTxStatus(
@@ -633,5 +744,8 @@ class DaoUnlockShadowLightClientNative {
         var tipHeader: String? = null
         var scripts: String? = null
         var chainStatus: String? = null
+
+        /** Every transaction the repository asked the chain about. */
+        val transactionQueries = mutableListOf<String>()
     }
 }

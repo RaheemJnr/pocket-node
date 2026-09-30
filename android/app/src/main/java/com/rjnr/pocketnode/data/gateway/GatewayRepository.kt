@@ -2938,6 +2938,10 @@ class GatewayRepository @Inject constructor(
     ): Result<String> = runCatching {
         val info = _walletInfo.value ?: throw Exception("No wallet")
         val net = currentNetwork
+        // The wallet this unlock is signed for, read before the broadcast: a
+        // wallet switch while it is in flight must not file the marker under
+        // the wallet the user switched to (#529).
+        val walletId = activeWalletId
 
         val deposits = getDaoDeposits().getOrThrow()
         // #529: a cell the unlock already spent is gone from the list. Fail
@@ -3044,7 +3048,7 @@ class GatewayRepository @Inject constructor(
                     withdrawingTxHash = withdrawingOutPoint.txHash,
                     withdrawingIndex = withdrawingOutPoint.index,
                     unlockTxHash = txHash,
-                    walletId = activeWalletId,
+                    walletId = walletId,
                     network = net.name,
                     createdAt = System.currentTimeMillis(),
                 )
