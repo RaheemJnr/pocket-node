@@ -17,6 +17,8 @@ import com.rjnr.pocketnode.data.wallet.SeedPhraseAuthorizer
 import com.rjnr.pocketnode.data.wallet.WalletPreferences
 import com.rjnr.pocketnode.data.wallet.WalletRepository
 import dagger.hilt.android.lifecycle.HiltViewModel
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -332,6 +334,9 @@ class SettingsViewModel @Inject constructor(
         if (enabled) {
             checkForUpdate()
         } else {
+            // A check started earlier (on launch) must not land after the
+            // switch is off and replace "Update checks are off" with its result.
+            updateCheckJob?.cancel()
             _uiState.update { it.copy(updateStatus = UpdateStatus.Disabled) }
         }
     }
@@ -342,13 +347,20 @@ class SettingsViewModel @Inject constructor(
      * Home screen already shows an update dialog; this puts the same signal
      * where users look for it. Non-fatal: failures show a retry-able state.
      */
+    private var updateCheckJob: Job? = null
+
     fun checkForUpdate() {
         // Defensive: the "Check for updates" row is hidden on Play builds, but
         // guard the entry point too so the updater can never run there.
         if (!BuildConfig.UPDATER_ENABLED) return
         _uiState.update { it.copy(updateStatus = UpdateStatus.Checking) }
-        viewModelScope.launch {
-            updateRepository.checkForUpdate(BuildConfig.VERSION_NAME)
+        updateCheckJob?.cancel()
+        updateCheckJob = viewModelScope.launch {
+            val result = updateRepository.checkForUpdate(BuildConfig.VERSION_NAME)
+            // The repository turns a cancellation into Result.failure; a check
+            // cancelled because the switch went off must not write any status.
+            ensureActive()
+            result
                 .onSuccess { info ->
                     _uiState.update {
                         it.copy(
