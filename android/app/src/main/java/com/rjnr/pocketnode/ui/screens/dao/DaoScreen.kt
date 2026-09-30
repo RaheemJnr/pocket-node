@@ -239,7 +239,8 @@ fun DaoScreen(
                         DaoDepositCard(
                             deposit = deposit,
                             onWithdraw = { withdrawTargetKey = deposit.daoTargetKey() },
-                            onUnlock = { unlockTargetKey = deposit.daoTargetKey() }
+                            onUnlock = { unlockTargetKey = deposit.daoTargetKey() },
+                            actionEnabled = daoActionEnabled(deposit, uiState.pendingAction),
                         )
                     }
                 }

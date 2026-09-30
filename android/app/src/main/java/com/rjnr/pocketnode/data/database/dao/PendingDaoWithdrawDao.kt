@@ -17,6 +17,9 @@ interface PendingDaoWithdrawDao {
     @Query("DELETE FROM pending_dao_withdraws WHERE depositTxHash = :depositTxHash AND depositIndex = :depositIndex")
     suspend fun deleteByDeposit(depositTxHash: String, depositIndex: String)
 
+    @Query("DELETE FROM pending_dao_withdraws WHERE walletId = :walletId AND network = :network")
+    suspend fun deleteByWalletAndNetwork(walletId: String, network: String)
+
     @Query("DELETE FROM pending_dao_withdraws WHERE network = :network")
     suspend fun deleteByNetwork(network: String)
 

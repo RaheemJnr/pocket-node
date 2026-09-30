@@ -21,6 +21,10 @@ import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import javax.inject.Inject
+import com.rjnr.pocketnode.data.gateway.models.DaoAction
+import com.rjnr.pocketnode.data.gateway.models.DaoCellStatus
+import com.rjnr.pocketnode.data.gateway.models.DaoDeposit
+import com.rjnr.pocketnode.data.gateway.models.OutPoint
 
 @HiltViewModel
 class DaoViewModel @Inject constructor(
@@ -137,7 +141,7 @@ class DaoViewModel @Inject constructor(
                         completedDeposits = completed,
                         isLoading = false,
                         error = null,
-                        outsideWindowCount = deposits.count { d -> d.outsideSyncWindow }
+                        outsideWindowCount = outsideWindowPromptCount(deposits)
                     )
                 }
 
@@ -225,19 +229,20 @@ class DaoViewModel @Inject constructor(
     }
 
     fun withdraw(deposit: DaoDeposit) {
+        if (!daoActionEnabled(deposit, _uiState.value.pendingAction)) return
         _uiState.update { it.copy(pendingAction = DaoAction.Withdrawing(deposit.outPoint)) }
         viewModelScope.launch {
             repository.withdrawFromDao(deposit.outPoint)
-                .onFailure { e ->
-                    _uiState.update {
-                        it.copy(error = e.message?.let(com.rjnr.pocketnode.ui.util.UiMessage::Raw), pendingAction = null)
-                    }
-                }
+                .onFailure { e -> failAction(deposit.outPoint, e.message) }
         }
     }
 
     /** V2-aware withdraw entry point. See [depositWithActivity]. */
     fun withdrawWithActivity(activity: FragmentActivity, deposit: DaoDeposit) {
+        if (!daoActionEnabled(deposit, _uiState.value.pendingAction)) return
+        // Claim the position before launching (#529): the guard above reads
+        // pendingAction, so a second tap in the same frame must already see it.
+        _uiState.update { it.copy(pendingAction = DaoAction.Withdrawing(deposit.outPoint)) }
         viewModelScope.launch {
             executeDaoOperationWithActivity(
                 activity = activity,
@@ -251,20 +256,53 @@ class DaoViewModel @Inject constructor(
     }
 
     fun unlock(deposit: DaoDeposit) {
+        if (!daoActionEnabled(deposit, _uiState.value.pendingAction)) return
         _uiState.update { it.copy(pendingAction = DaoAction.Unlocking(deposit.outPoint)) }
         viewModelScope.launch {
             repository.unlockDao(withdrawingOutPoint = deposit.outPoint)
-                .onFailure { e ->
-                    _uiState.update {
-                        it.copy(error = e.message?.let(com.rjnr.pocketnode.ui.util.UiMessage::Raw), pendingAction = null)
-                    }
-                }
+                .onFailure { e -> failAction(deposit.outPoint, e.message) }
+        }
+    }
+
+    /**
+     * Report a failed operation on [outPoint] and stop ITS spinner (#529).
+     *
+     * Clearing `pendingAction` outright dropped whichever operation happened
+     * to be in flight, so a refusal on one deposit could leave another
+     * deposit's card spinning with nothing left to clear it.
+     *
+     * Internal rather than private only so the test can drive it: the
+     * failures that reach it come back from `kotlin.Result`-returning
+     * repository calls, which MockK 1.13.16 cannot stub through a suspend
+     * resume (see the note in DaoViewModelTest).
+     */
+    internal fun failAction(outPoint: OutPoint, message: String?) {
+        _uiState.update {
+            it.copy(
+                error = message?.let(com.rjnr.pocketnode.ui.util.UiMessage::Raw),
+                pendingAction = if (daoActionTargets(it.pendingAction, outPoint)) null else it.pendingAction,
+            )
         }
     }
 
     /** V2-aware unlock entry point. See [depositWithActivity]. */
     fun unlockWithActivity(activity: FragmentActivity, deposit: DaoDeposit) {
+        if (!daoActionEnabled(deposit, _uiState.value.pendingAction)) return
+        // Claim the position before launching (#529): the guard above reads
+        // pendingAction, so a second tap in the same frame must already see it
+        // and never reach a second preflight or auth prompt.
+        _uiState.update { it.copy(pendingAction = DaoAction.Unlocking(deposit.outPoint)) }
         viewModelScope.launch {
+            // #529: ask the wallet's own records first. An already-claimed
+            // position used to cost a full biometric or PIN prompt before
+            // unlockDao could tell the user it was already unlocked.
+            val preflight = repository.unlockPreflight(deposit.outPoint)
+            if (preflight.isFailure) {
+                // Clears only this claim: failAction leaves any other
+                // outpoint's in-flight action alone.
+                failAction(deposit.outPoint, preflight.exceptionOrNull()?.message)
+                return@launch
+            }
             executeDaoOperationWithActivity(
                 activity = activity,
                 pendingAction = DaoAction.Unlocking(deposit.outPoint),
@@ -276,6 +314,13 @@ class DaoViewModel @Inject constructor(
         }
     }
 
+    /**
+     * Null when [action] is the operation currently in flight, otherwise the
+     * one that is: a failure must only stop its own spinner (#529).
+     */
+    fun clearedIfCurrent(action: DaoAction): DaoAction? =
+        _uiState.value.pendingAction.takeIf { it != action }
+
     private suspend inline fun executeDaoOperationWithActivity(
         activity: FragmentActivity,
         pendingAction: DaoAction,
@@ -285,7 +330,7 @@ class DaoViewModel @Inject constructor(
     ) {
         val walletId = walletRepository.activeWalletIdSnapshot()
         if (walletId.isNullOrEmpty()) {
-            _uiState.update { it.copy(error = com.rjnr.pocketnode.ui.util.UiMessage.Resource(com.rjnr.pocketnode.R.string.vm_error_no_active_wallet), pendingAction = null) }
+            _uiState.update { it.copy(error = com.rjnr.pocketnode.ui.util.UiMessage.Resource(com.rjnr.pocketnode.R.string.vm_error_no_active_wallet), pendingAction = clearedIfCurrent(pendingAction)) }
             return
         }
         _uiState.update {
@@ -298,25 +343,25 @@ class DaoViewModel @Inject constructor(
             promptSubtitle = promptSubtitle,
         )) {
             is WalletKeyReader.Result.Cancelled ->
-                _uiState.update { it.copy(pendingAction = null) }
+                _uiState.update { it.copy(pendingAction = clearedIfCurrent(pendingAction)) }
             is WalletKeyReader.Result.AuthError ->
                 _uiState.update {
-                    it.copy(error = com.rjnr.pocketnode.ui.util.UiMessage.Resource(com.rjnr.pocketnode.R.string.vm_error_auth_failed_with_reason, listOf(read.message.toString())), pendingAction = null)
+                    it.copy(error = com.rjnr.pocketnode.ui.util.UiMessage.Resource(com.rjnr.pocketnode.R.string.vm_error_auth_failed_with_reason, listOf(read.message.toString())), pendingAction = clearedIfCurrent(pendingAction))
                 }
             is WalletKeyReader.Result.NotAvailable ->
                 _uiState.update {
-                    it.copy(error = com.rjnr.pocketnode.ui.util.UiMessage.Resource(com.rjnr.pocketnode.R.string.vm_error_cannot_read_wallet_key, listOf(read.reason)), pendingAction = null)
+                    it.copy(error = com.rjnr.pocketnode.ui.util.UiMessage.Resource(com.rjnr.pocketnode.R.string.vm_error_cannot_read_wallet_key, listOf(read.reason)), pendingAction = clearedIfCurrent(pendingAction))
                 }
             is WalletKeyReader.Result.KeyInvalidated ->
                 _uiState.update {
                     it.copy(
                         error = com.rjnr.pocketnode.ui.util.UiMessage.Resource(com.rjnr.pocketnode.R.string.vm_error_biometric_changed_send),
-                        pendingAction = null,
+                        pendingAction = clearedIfCurrent(pendingAction),
                     )
                 }
             is WalletKeyReader.Result.Success ->
                 operation(read.privateKey).onFailure { e ->
-                    _uiState.update { it.copy(error = e.message?.let(com.rjnr.pocketnode.ui.util.UiMessage::Raw), pendingAction = null) }
+                    _uiState.update { it.copy(error = e.message?.let(com.rjnr.pocketnode.ui.util.UiMessage::Raw), pendingAction = clearedIfCurrent(pendingAction)) }
                 }
         }
     }
@@ -348,6 +393,18 @@ class DaoViewModel @Inject constructor(
     }
 }
 
+/**
+ * How many cached deposits justify offering the deep rescan (#529).
+ *
+ * Only a deposit that is still LIVE somewhere the light client cannot see
+ * warrants an operation that costs hours on mainnet. A retired position
+ * (unlocked, its funds already back in the balance) is not missing, and used
+ * to raise "Deep rescan for older deposits?" moments after the user claimed
+ * it.
+ */
+internal fun outsideWindowPromptCount(deposits: List<DaoDeposit>): Int =
+    deposits.count { it.outsideSyncWindow && it.status != DaoCellStatus.COMPLETED }
+
 internal fun shouldClearPendingAction(
     pendingAction: DaoAction,
     deposits: List<DaoDeposit>
@@ -367,5 +424,42 @@ internal fun shouldClearPendingAction(
     is DaoAction.Withdrawing -> deposits.none {
         it.outPoint == pendingAction.outPoint && it.status == DaoCellStatus.DEPOSITED
     }
-    is DaoAction.Unlocking -> deposits.none { it.outPoint == pendingAction.outPoint }
+    // Phase 2 (Unlock) consumes the withdrawing cell, so the spinner clears
+    // when its outPoint leaves the list, which the #529 retirement now makes
+    // reliable. COMPLETED counts as gone too: the retired row is excluded from
+    // the list today, but it is a real persisted state, and a spinner that
+    // insisted on total absence is exactly what ran forever before.
+    is DaoAction.Unlocking -> deposits.none {
+        it.outPoint == pendingAction.outPoint && it.status != DaoCellStatus.COMPLETED
+    }
 }
+
+// Pure action guards shared by DaoScreen and the view model. They live in this
+// file so the codemap sees them on the view-model layer, which both the screen
+// and the view model may call (the screen must not be called by the view model).
+/**
+ * Is a DAO chain operation already in flight against [outPoint]? (#529)
+ *
+ * A deposit carries no outpoint yet, so [DaoAction.Depositing] never matches
+ * a specific card.
+ */
+fun daoActionTargets(pendingAction: DaoAction?, outPoint: OutPoint): Boolean = when (pendingAction) {
+    is DaoAction.Withdrawing -> pendingAction.outPoint == outPoint
+    is DaoAction.Unlocking -> pendingAction.outPoint == outPoint
+    else -> false
+}
+
+/**
+ * Whether the card's action button (Withdraw or Unlock) may be tapped (#529).
+ *
+ * The chain gives no instant feedback: a withdrawing cell keeps scanning
+ * UNLOCKABLE for minutes after its unlock is broadcast, and a deposit keeps
+ * scanning DEPOSITED after its withdraw is. So the button has to be closed by
+ * what THIS app knows is in flight: the pending action it just started, and
+ * the confirming status the persisted markers overlay for it. A second tap
+ * can only build a transaction against an outpoint that is already spent.
+ */
+fun daoActionEnabled(deposit: DaoDeposit, pendingAction: DaoAction?): Boolean =
+    !daoActionTargets(pendingAction, deposit.outPoint) &&
+        deposit.status != DaoCellStatus.WITHDRAWING &&
+        deposit.status != DaoCellStatus.UNLOCKING

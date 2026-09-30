@@ -124,6 +124,24 @@ class WalkingMigrationTest {
     }
 
     /**
+     * #529: a v10 file walked all the way to v17 must gain the
+     * `pending_dao_unlocks` table + its index (MIGRATION_16_17), with
+     * schema validation passing.
+     */
+    @Test
+    fun `walk to v17 creates pending_dao_unlocks table`() {
+        bootstrapV10()
+        openViaRoomAndValidate()
+        val db = openedRoomDb!!.openHelper.readableDatabase
+        db.query("SELECT name FROM sqlite_master WHERE type='table' AND name='pending_dao_unlocks'").use { c ->
+            assertTrue("pending_dao_unlocks table missing after MIGRATION_16_17", c.moveToNext())
+        }
+        db.query("SELECT name FROM sqlite_master WHERE type='index' AND name='idx_pending_unlock_wallet_network'").use { c ->
+            assertTrue("idx_pending_unlock_wallet_network missing", c.moveToNext())
+        }
+    }
+
+    /**
      * #82 phase 1: a v10 file walked to v13 must gain the
      * `sub_account_candidates` table (MIGRATION_12_13), with schema
      * validation passing.
@@ -206,6 +224,41 @@ class WalkingMigrationTest {
     }
 
     /**
+     * #529: 1.8.4 ships Room v15, so its users walk 15 -> 16 -> 17. Neither
+     * migration touches dao_cells, so a DAO position cached before the upgrade
+     * must come through untouched: every column of a withdrawing
+     * dao_cells row reads back the same at v17, and no unlock is on record.
+     */
+    @Test
+    fun `v15 walks to v17 keeping a cached DAO position intact`() {
+        bootstrapV15WithDaoCell()
+        openViaRoomAndValidate()
+        val db = openedRoomDb!!.openHelper.readableDatabase
+        db.query(
+            "SELECT txHash, `index`, capacity, status, depositBlockNumber, depositBlockHash, " +
+                "withdrawBlockNumber, withdrawBlockHash, compensation, network, walletId FROM dao_cells"
+        ).use { c ->
+            assertTrue("pre-v17 dao_cells row lost by MIGRATION_16_17", c.moveToNext())
+            org.junit.Assert.assertEquals("0x" + "6d".repeat(32), c.getString(0))
+            org.junit.Assert.assertEquals("0x0", c.getString(1))
+            org.junit.Assert.assertEquals(15_000_000_000L, c.getLong(2))
+            org.junit.Assert.assertEquals("LOCKED", c.getString(3))
+            org.junit.Assert.assertEquals(22_424_745L, c.getLong(4))
+            org.junit.Assert.assertEquals("0x" + "7f".repeat(32), c.getString(5))
+            org.junit.Assert.assertEquals(22_424_767L, c.getLong(6))
+            org.junit.Assert.assertEquals("0x" + "42".repeat(32), c.getString(7))
+            org.junit.Assert.assertEquals(1047L, c.getLong(8))
+            org.junit.Assert.assertEquals("TESTNET", c.getString(9))
+            org.junit.Assert.assertEquals("wallet-1", c.getString(10))
+            org.junit.Assert.assertFalse("exactly one row expected", c.moveToNext())
+        }
+        db.query("SELECT COUNT(*) FROM pending_dao_unlocks").use { c ->
+            assertTrue(c.moveToNext())
+            org.junit.Assert.assertEquals("no unlock may be on record after the upgrade", 0, c.getInt(0))
+        }
+    }
+
+    /**
      * v1.6.x → v1.7.0 path: bootstrap a v9 SQLite file (no `kdfVersion`
      * column on `key_material`) and confirm MIGRATION_9_10 adds the
      * column with default 1, then Room schema validation passes.
@@ -250,7 +303,7 @@ class WalkingMigrationTest {
                 .addMigrations(
                     MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4, MIGRATION_4_5,
                     MIGRATION_5_6, MIGRATION_6_7, MIGRATION_7_8, noOpMigration8To9,
-                    MIGRATION_9_10, MIGRATION_10_11, MIGRATION_11_12, MIGRATION_12_13, MIGRATION_13_14, MIGRATION_14_15, MIGRATION_15_16,
+                    MIGRATION_9_10, MIGRATION_10_11, MIGRATION_11_12, MIGRATION_12_13, MIGRATION_13_14, MIGRATION_14_15, MIGRATION_15_16, MIGRATION_16_17,
                 )
                 .build()
             openedRoomDb = db
@@ -280,7 +333,7 @@ class WalkingMigrationTest {
             .addMigrations(
                 MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4, MIGRATION_4_5,
                 MIGRATION_5_6, MIGRATION_6_7, MIGRATION_7_8, MIGRATION_8_9,
-                MIGRATION_9_10, MIGRATION_10_11, MIGRATION_11_12, MIGRATION_12_13, MIGRATION_13_14, MIGRATION_14_15, MIGRATION_15_16,
+                MIGRATION_9_10, MIGRATION_10_11, MIGRATION_11_12, MIGRATION_12_13, MIGRATION_13_14, MIGRATION_14_15, MIGRATION_15_16, MIGRATION_16_17,
             )
             .build()
         openedRoomDb = db
@@ -373,6 +426,47 @@ class WalkingMigrationTest {
                 )
                 db.execSQL("CREATE TABLE IF NOT EXISTS room_master_table (id INTEGER PRIMARY KEY,identity_hash TEXT)")
                 db.execSQL("INSERT OR REPLACE INTO room_master_table VALUES(42, 'bootstrap-v14')")
+            }
+            override fun onUpgrade(db: SupportSQLiteDatabase, oldV: Int, newV: Int) = Unit
+        }
+        val config = SupportSQLiteOpenHelper.Configuration.builder(ctx)
+            .name(dbName)
+            .callback(callback)
+            .build()
+        val helper = factory.create(config)
+        helper.writableDatabase.close()
+        helper.close()
+    }
+
+    /**
+     * Bootstrap a v15 SQLite file (full migration chain over the v8 shape)
+     * holding one withdrawing `dao_cells` row, the shape of a phase-1
+     * withdrawn position waiting out its lock, for the 1.8.4 upgrade (#529).
+     */
+    private fun bootstrapV15WithDaoCell() {
+        val factory = FrameworkSQLiteOpenHelperFactory()
+        val callback = object : SupportSQLiteOpenHelper.Callback(15) {
+            override fun onCreate(db: SupportSQLiteDatabase) {
+                createV8Tables(db, pathA = true)
+                MIGRATION_8_9.migrate(db)
+                MIGRATION_9_10.migrate(db)
+                MIGRATION_10_11.migrate(db)
+                MIGRATION_11_12.migrate(db)
+                MIGRATION_12_13.migrate(db)
+                MIGRATION_13_14.migrate(db)
+                MIGRATION_14_15.migrate(db)
+                db.execSQL(
+                    "INSERT INTO dao_cells " +
+                        "(txHash, `index`, capacity, status, depositBlockNumber, depositBlockHash, " +
+                        "depositEpochHex, withdrawBlockNumber, withdrawBlockHash, withdrawEpochHex, " +
+                        "compensation, unlockEpochHex, depositTimestamp, network, lastUpdatedAt, walletId) " +
+                        "VALUES ('0x${"6d".repeat(32)}', '0x0', 15000000000, 'LOCKED', 22424745, " +
+                        "'0x${"7f".repeat(32)}', '0x7080328003605', 22424767, '0x${"42".repeat(32)}', " +
+                        "'0x708033e003605', 1047, '0x70803280036b9', 1789462481359, 'TESTNET', " +
+                        "1790628014965, 'wallet-1')"
+                )
+                db.execSQL("CREATE TABLE IF NOT EXISTS room_master_table (id INTEGER PRIMARY KEY,identity_hash TEXT)")
+                db.execSQL("INSERT OR REPLACE INTO room_master_table VALUES(42, 'bootstrap-v15-dao')")
             }
             override fun onUpgrade(db: SupportSQLiteDatabase, oldV: Int, newV: Int) = Unit
         }

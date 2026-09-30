@@ -8,6 +8,7 @@ import com.rjnr.pocketnode.data.database.dao.DaoCellDao
 import com.rjnr.pocketnode.data.database.dao.HeaderCacheDao
 import com.rjnr.pocketnode.data.database.dao.KeyMaterialDao
 import com.rjnr.pocketnode.data.database.dao.PendingBroadcastDao
+import com.rjnr.pocketnode.data.database.dao.PendingDaoUnlockDao
 import com.rjnr.pocketnode.data.database.dao.PendingDaoWithdrawDao
 import com.rjnr.pocketnode.data.database.dao.SyncProgressDao
 import com.rjnr.pocketnode.data.database.dao.TransactionDao
@@ -20,6 +21,7 @@ import com.rjnr.pocketnode.data.database.entity.DaoCellEntity
 import com.rjnr.pocketnode.data.database.entity.HeaderCacheEntity
 import com.rjnr.pocketnode.data.database.entity.KeyMaterialEntity
 import com.rjnr.pocketnode.data.database.entity.PendingBroadcastEntity
+import com.rjnr.pocketnode.data.database.entity.PendingDaoUnlockEntity
 import com.rjnr.pocketnode.data.database.entity.SyncProgressEntity
 import com.rjnr.pocketnode.data.database.entity.TransactionEntity
 import com.rjnr.pocketnode.data.database.entity.WalletEntity
@@ -37,6 +39,7 @@ import com.rjnr.pocketnode.data.database.entity.WalletEntity
         ContactEntity::class,
         PendingDaoWithdrawEntity::class,
         SubAccountCandidateEntity::class,
+        PendingDaoUnlockEntity::class,
     ],
     // Bumped from 8 to 9 in v1.5.2 because TransactionEntity / BalanceCacheEntity
     // / DaoCellEntity gained @Index(idx_tx_pending) + @ColumnInfo(defaultValue)
@@ -77,7 +80,13 @@ import com.rjnr.pocketnode.data.database.entity.WalletEntity
     // from cache. MIGRATION_15_16 is a single ALTER TABLE; existing rows
     // backfill to null ("fee not known yet") and are repopulated by the next
     // activity walk.
-    version = 16,
+    //
+    // Bumped from 16 to 17 for #529: adds the `pending_dao_unlocks` table,
+    // the phase-2 twin of `pending_dao_withdraws`, the durable marker for an
+    // in-flight DAO unlock. Without it a just-unlocked position kept offering
+    // "Unlock" until the spend was indexed, and the cached dao_cells row was
+    // never retired. MIGRATION_16_17 is a single CREATE TABLE + 1 CREATE INDEX.
+    version = 17,
     // Schema export re-enabled (#149). It was OFF because Room 2.8.4's
     // bundled kotlinx-serialization-core crashed KSP with an AbstractMethodError
     // against the project's kotlinx-serialization-json:1.8.0. Verified clean
@@ -100,5 +109,6 @@ abstract class AppDatabase : RoomDatabase() {
     abstract fun pendingBroadcastDao(): PendingBroadcastDao
     abstract fun contactDao(): ContactDao
     abstract fun pendingDaoWithdrawDao(): PendingDaoWithdrawDao
+    abstract fun pendingDaoUnlockDao(): PendingDaoUnlockDao
     abstract fun subAccountCandidateDao(): com.rjnr.pocketnode.data.database.dao.SubAccountCandidateDao
 }

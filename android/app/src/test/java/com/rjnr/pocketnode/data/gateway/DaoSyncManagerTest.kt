@@ -28,7 +28,13 @@ class DaoSyncManagerTest {
         db = Room.inMemoryDatabaseBuilder(context, AppDatabase::class.java)
             .allowMainThreadQueries()
             .build()
-        manager = DaoSyncManager(db.headerCacheDao(), db.daoCellDao(), db.pendingDaoWithdrawDao(), NoopLogger)
+        manager = DaoSyncManager(
+            db.headerCacheDao(),
+            db.daoCellDao(),
+            db.pendingDaoWithdrawDao(),
+            db.pendingDaoUnlockDao(),
+            NoopLogger,
+        )
     }
 
     @After

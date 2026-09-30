@@ -11,6 +11,8 @@ import com.rjnr.pocketnode.data.database.MIGRATION_2_3
 import com.rjnr.pocketnode.data.database.MIGRATION_3_4
 import com.rjnr.pocketnode.data.database.MIGRATION_4_5
 import com.rjnr.pocketnode.data.database.dao.WalletDao
+import com.rjnr.pocketnode.data.database.entity.PendingDaoUnlockEntity
+import com.rjnr.pocketnode.data.database.entity.PendingDaoWithdrawEntity
 import com.rjnr.pocketnode.data.crypto.KeyStoreMigrationHelper
 import com.rjnr.pocketnode.data.crypto.KeystoreV2MigrationHelper
 import com.rjnr.pocketnode.data.crypto.WalletKeyBundle
@@ -73,7 +75,8 @@ class WalletRepositoryTest {
         walletPreferences = WalletPreferences(context, NoopLogger)
         repo = WalletRepository(
             walletDao, keyManager, walletPreferences, walletPreferences, mnemonicManager, db,
-            db.transactionDao(), db.balanceCacheDao(), db.daoCellDao(), db.keyMaterialDao(),
+            db.transactionDao(), db.balanceCacheDao(), db.daoCellDao(),
+            db.pendingDaoWithdrawDao(), db.pendingDaoUnlockDao(), db.keyMaterialDao(),
             db.subAccountCandidateDao(), SubAccountDiscovery(mnemonicManager, keyManager), NoopLogger
         )
     }
@@ -152,6 +155,55 @@ class WalletRepositoryTest {
 
         // wallet2 should still exist
         assertNotNull(walletDao.getById(wallet2.walletId))
+    }
+
+    @Test
+    fun `deleteWallet clears the in-flight DAO markers of that wallet only`() = runTest {
+        val wallet1 = repo.createWallet(
+            name = "Wallet 1",
+            persistKeys = { walletId, bundle -> fakePersistV2(walletId, bundle) },
+        ).getOrThrow()
+        val wallet2 = repo.createWallet(
+            name = "Wallet 2",
+            persistKeys = { walletId, bundle -> fakePersistV2(walletId, bundle) },
+        ).getOrThrow()
+
+        // Distinct outpoints per wallet: both marker tables are keyed by the
+        // outpoint alone, so reusing one would just overwrite the other's row
+        // and the scoping assertion below would prove nothing.
+        listOf(wallet1 to "aa", wallet2 to "bb").forEach { (wallet, tag) ->
+            db.pendingDaoWithdrawDao().upsert(
+                PendingDaoWithdrawEntity(
+                    depositTxHash = "0x" + tag.repeat(32),
+                    depositIndex = "0x0",
+                    withdrawTxHash = "0x" + "22".repeat(32),
+                    walletId = wallet.walletId,
+                    network = "TESTNET",
+                    createdAt = 0L,
+                )
+            )
+            db.pendingDaoUnlockDao().upsert(
+                PendingDaoUnlockEntity(
+                    withdrawingTxHash = "0x" + tag.repeat(32),
+                    withdrawingIndex = "0x1",
+                    unlockTxHash = "0x" + "44".repeat(32),
+                    walletId = wallet.walletId,
+                    network = "TESTNET",
+                    createdAt = 0L,
+                )
+            )
+        }
+        assertEquals(1, db.pendingDaoUnlockDao().getByWalletAndNetwork(wallet1.walletId, "TESTNET").size)
+
+        repo.deleteWallet(wallet1.walletId)
+
+        // Left behind, a marker re-attaches to a wallet re-imported under the
+        // same id and overlays a confirming state on a position with nothing
+        // in flight.
+        assertTrue(db.pendingDaoWithdrawDao().getByWalletAndNetwork(wallet1.walletId, "TESTNET").isEmpty())
+        assertTrue(db.pendingDaoUnlockDao().getByWalletAndNetwork(wallet1.walletId, "TESTNET").isEmpty())
+        assertEquals(1, db.pendingDaoWithdrawDao().getByWalletAndNetwork(wallet2.walletId, "TESTNET").size)
+        assertEquals(1, db.pendingDaoUnlockDao().getByWalletAndNetwork(wallet2.walletId, "TESTNET").size)
     }
 
     @Test

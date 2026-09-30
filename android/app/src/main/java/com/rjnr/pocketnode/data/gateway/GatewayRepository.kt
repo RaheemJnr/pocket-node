@@ -2385,7 +2385,14 @@ class GatewayRepository @Inject constructor(
         // client still lists alongside its new withdrawing cell, before the
         // pending-withdraw overlay would paint it a duplicate "Confirming…".
         val deduped = dedupeWithdrawnDeposits(live)
-        applyPendingWithdrawOverlay(mergeWithCachedDaoDeposits(deduped))
+        // #529: read the phase-2 markers ONCE, before anything consumes them.
+        // The merge needs them to decide whether an absent cell was spent, and
+        // the overlay deletes the markers it resolves, so the overlay must not
+        // run first or the merge would see no marker on the very poll where
+        // the unlock resolves.
+        val pendingUnlocks = readPendingUnlocks(deduped)
+        val merged = mergeWithCachedDaoDeposits(deduped, pendingUnlocks)
+        applyPendingUnlockOverlay(applyPendingWithdrawOverlay(merged), pendingUnlocks)
     }
 
     /**
@@ -2435,6 +2442,164 @@ class GatewayRepository @Inject constructor(
     }
 
     /**
+     * One persisted phase-2 marker plus the unlock transaction's locally
+     * cached status, read together so the merge and the overlay decide on
+     * exactly the same facts within one [getDaoDeposits] call (#529).
+     */
+    private class PendingUnlock(
+        val entity: com.rjnr.pocketnode.data.database.entity.PendingDaoUnlockEntity,
+        val state: DaoUnlockMarkerState,
+        val stillLive: Boolean,
+    ) {
+        val cellKey: String = normalizedOutPointKey(entity.withdrawingTxHash, entity.withdrawingIndex)
+    }
+
+    /**
+     * Every cached DAO row of the active wallet, active and completed alike,
+     * indexed by normalized outpoint and carrying the exact (txHash, index)
+     * strings it is stored under, which is what a status write must name.
+     */
+    private suspend fun cachedRowKeys(): Map<String, Pair<String, String>> {
+        val walletId = activeWalletId.takeIf { it.isNotEmpty() } ?: return emptyMap()
+        val network = currentNetwork.name
+        val rows = runCatching {
+            daoSyncManager.getActiveDeposits(network, walletId) +
+                daoSyncManager.getCompletedDeposits(network, walletId)
+        }.getOrDefault(emptyList())
+        return rows.associate {
+            normalizedOutPointKey(it.txHash, it.index) to (it.txHash to it.index)
+        }
+    }
+
+    /**
+     * What the chain says about an unlock transaction, or
+     * [DaoUnlockChainVerdict.UNKNOWN] when it will not say (#529). Every
+     * failure mode collapses to UNKNOWN on purpose: the caller must never
+     * read "could not tell" as "spent".
+     */
+    private suspend fun chainVerdictFor(txHash: String): DaoUnlockChainVerdict {
+        val status = runCatching { getTransactionStatus(txHash).getOrNull() }.getOrNull()
+            ?: return DaoUnlockChainVerdict.UNKNOWN
+        return when {
+            status.status == "committed" -> DaoUnlockChainVerdict.COMMITTED
+            status.status == "rejected" -> DaoUnlockChainVerdict.REJECTED
+            status.isPending() -> DaoUnlockChainVerdict.IN_POOL
+            else -> DaoUnlockChainVerdict.UNKNOWN
+        }
+    }
+
+    /**
+     * Every phase-2 marker for the active wallet, resolved against the
+     * transaction cache, the marker's age and [liveDeposits] (the scan the
+     * refresh is working from, before any cached rows are merged in).
+     */
+    private suspend fun readPendingUnlocks(
+        liveDeposits: List<DaoDeposit>,
+    ): List<PendingUnlock> {
+        val walletId = activeWalletId
+        if (walletId.isEmpty()) return emptyList()
+        val rows = runCatching {
+            appDatabase.pendingDaoUnlockDao().getByWalletAndNetwork(walletId, currentNetwork.name)
+        }.getOrDefault(emptyList())
+        if (rows.isEmpty()) return emptyList()
+        val liveKeys = liveDeposits
+            .map { normalizedOutPointKey(it.outPoint.txHash, it.outPoint.index) }
+            .toSet()
+        val now = System.currentTimeMillis()
+        return rows.map { row ->
+            val status = runCatching {
+                appDatabase.transactionDao().getByTxHash(row.unlockTxHash)?.status
+            }.getOrNull()
+            val ageMs = (now - row.createdAt).coerceAtLeast(0L)
+            // Only an old marker the local cache never scored is worth a chain
+            // round trip, and only then can a marker be promoted to CONFIRMED.
+            // CacheManager swallows a failed pending-transaction insert and the
+            // watchdog scores only while the app is running, so "no local row"
+            // says nothing at all about what happened on chain.
+            val verdict = if (
+                ageMs >= DAO_UNLOCK_MARKER_GRACE_MS && status != "CONFIRMED" && status != "FAILED"
+            ) {
+                chainVerdictFor(row.unlockTxHash)
+            } else {
+                DaoUnlockChainVerdict.UNKNOWN
+            }
+            PendingUnlock(
+                entity = row,
+                state = daoUnlockMarkerState(
+                    unlockTxStatus = status,
+                    markerAgeMs = ageMs,
+                    chainVerdict = verdict,
+                ),
+                stillLive = normalizedOutPointKey(row.withdrawingTxHash, row.withdrawingIndex) in liveKeys,
+            )
+        }
+    }
+
+    /**
+     * #529: overlay in-flight phase-2 unlocks onto the deposit list.
+     *
+     * The withdrawing cell keeps scanning UNLOCKABLE from the moment the
+     * unlock is broadcast until the light client indexes the spend, minutes
+     * during which the card offered "Unlock" again and accepted a second tap
+     * that could only ever fail. This paints the cell UNLOCKING for that
+     * window, from a persisted marker so a relaunch mid-unlock still shows a
+     * spinner instead of a live Unlock button.
+     *
+     * A marker is deleted only once its transaction is terminal, so a later
+     * failure can still hand the position back. On success the cached row is
+     * marked COMPLETED at the same time; on failure it is restored to
+     * UNLOCKABLE, which matters for a deposit the light client cannot see:
+     * the cached row is then the only record that it exists at all.
+     */
+    private suspend fun applyPendingUnlockOverlay(
+        deposits: List<DaoDeposit>,
+        pendingUnlocks: List<PendingUnlock>,
+    ): List<DaoDeposit> {
+        if (pendingUnlocks.isEmpty()) return deposits
+        val unlockDao = appDatabase.pendingDaoUnlockDao()
+        // dao_cells is keyed by the exact strings the row was written with, so
+        // the status write has to name the row's OWN spelling of the index.
+        // Using the marker's would silently update zero rows while the marker
+        // itself was deleted, losing the verdict entirely.
+        val cachedKeys = cachedRowKeys()
+
+        suspend fun retireMarker(p: PendingUnlock, status: DaoCellStatus) {
+            val row = cachedKeys[p.cellKey]
+            runCatching {
+                daoSyncManager.updateStatus(
+                    row?.first ?: p.entity.withdrawingTxHash,
+                    row?.second ?: p.entity.withdrawingIndex,
+                    status.name,
+                )
+            }
+            runCatching {
+                unlockDao.deleteByWithdrawingCell(
+                    p.entity.withdrawingTxHash,
+                    p.entity.withdrawingIndex,
+                )
+            }
+        }
+
+        val overlayKeys = mutableSetOf<String>()
+        for (p in pendingUnlocks) {
+            when (resolvePendingUnlock(p.stillLive, p.state)) {
+                PendingUnlockResolution.OVERLAY -> overlayKeys.add(p.cellKey)
+                PendingUnlockResolution.RETIRE -> retireMarker(p, DaoCellStatus.COMPLETED)
+                // The cell is the user's again. UNLOCKABLE is the state it was
+                // in when they tapped: a withdrawing cell whose lock period is
+                // over does not go back.
+                PendingUnlockResolution.RESTORE -> retireMarker(p, DaoCellStatus.UNLOCKABLE)
+            }
+        }
+        if (overlayKeys.isEmpty()) return deposits
+        return deposits.map {
+            if (normalizedOutPointKey(it.outPoint.txHash, it.outPoint.index) in overlayKeys) {
+                it.copy(status = DaoCellStatus.UNLOCKING)
+            } else it
+        }
+    }
+
+    /**
      * Deposit outpoints with an in-flight withdraw (#347) — used by the DAO
      * screen to rehydrate the "Withdrawing from DAO…" banner after restart.
      */
@@ -2459,7 +2624,10 @@ class GatewayRepository @Inject constructor(
      *     flagged [DaoDeposit.outsideSyncWindow] so the UI can offer the
      *     deeper-rescan recovery instead of pretending they don't exist.
      */
-    private suspend fun mergeWithCachedDaoDeposits(live: List<DaoDeposit>): List<DaoDeposit> {
+    private suspend fun mergeWithCachedDaoDeposits(
+        live: List<DaoDeposit>,
+        pendingUnlocks: List<PendingUnlock>,
+    ): List<DaoDeposit> {
         val walletId = activeWalletId
         if (walletId.isEmpty()) return live
         val network = currentNetwork.name
@@ -2470,7 +2638,13 @@ class GatewayRepository @Inject constructor(
         }.onFailure { logger.w(TAG, "DAO write-through failed: ${it.message}") }
 
         val windowStart = getExistingScriptBlock()
-        val liveKeys = live.map { "${it.outPoint.txHash}:${it.outPoint.index}" }.toSet()
+        // Normalized, like every other outpoint comparison here: a raw compare
+        // let one cell count as live AND absent when the cached row and the
+        // scan spelled the index differently, which appended a duplicate card
+        // for it further down.
+        val liveKeys = live
+            .map { normalizedOutPointKey(it.outPoint.txHash, it.outPoint.index) }
+            .toSet()
 
         // #434: outpoints consumed by a live withdrawing cell's phase-1 tx.
         // A cached deposit whose outpoint is here was spent by a withdraw and
@@ -2481,43 +2655,53 @@ class GatewayRepository @Inject constructor(
         // reappear under "made before this wallet's sync window", and double the
         // DAO total right after a withdraw confirms. Index formats are
         // normalized (hex vs decimal) so the outpoint match is reliable.
-        fun normKey(txHash: String, index: String) =
-            "${txHash.lowercase()}:${index.removePrefix("0x").toLongOrNull(16) ?: index}"
         val consumedByLive = live.flatMap { it.consumedDepositOutPoints }
-            .map { normKey(it.txHash, it.index) }
+            .map { normalizedOutPointKey(it.txHash, it.index) }
             .toSet()
+
+        // #529: the phase-2 counterpart of `consumedByLive`. An unlock's output
+        // is a plain CKB cell, never a DAO cell, so NOTHING in the live scan
+        // points back at the withdrawing cell it spent: the only record that
+        // the spend happened is the marker this wallet wrote when it broadcast
+        // the unlock. Without it the withdrawing row's cached deposit block
+        // (the ORIGINAL deposit, always far behind the sync head) sent it
+        // straight into the outside-window branch, where it kept rendering an
+        // "Unlock" button for a cell that no longer exists.
+        val unlockStates = pendingUnlocks.associate { it.cellKey to it.state }
 
         val cached = runCatching { daoSyncManager.getActiveDeposits(network, walletId) }
             .getOrDefault(emptyList())
 
         val outsideWindow = mutableListOf<DaoDeposit>()
+        val confirming = mutableListOf<DaoDeposit>()
         for (entity in cached) {
-            val key = "${entity.txHash}:${entity.index}"
-            if (key in liveKeys) continue
-            // DEPOSITING rows are optimistic pre-confirmation inserts with
-            // blockNumber 0 — not windowing victims; leave them alone.
-            if (entity.status == DaoCellStatus.DEPOSITING.name) continue
-            if (normKey(entity.txHash, entity.index) in consumedByLive) {
-                // Spent by a live withdraw — retire so it neither resurfaces as
-                // an outside-window entry nor double-counts the DAO total (#434).
-                runCatching {
+            val normKey = normalizedOutPointKey(entity.txHash, entity.index)
+            if (normKey in liveKeys) continue
+            when (
+                resolveCachedDaoCell(
+                    cachedStatus = entity.status,
+                    depositBlockNumber = entity.depositBlockNumber,
+                    windowStart = windowStart,
+                    consumedByLiveWithdraw = normKey in consumedByLive,
+                    unlockState = unlockStates[normKey],
+                )
+            ) {
+                CachedDaoCellFate.IGNORE -> Unit
+                CachedDaoCellFate.RETIRE -> runCatching {
                     daoSyncManager.updateStatus(entity.txHash, entity.index, DaoCellStatus.COMPLETED.name)
                 }
-            } else if (windowStart > 0 && entity.depositBlockNumber in 1 until windowStart) {
-                outsideWindow += entity.toOutsideWindowDeposit()
-            } else {
-                // Inside the window yet absent from the live scan: the cell
-                // was spent (withdrawn/unlocked) — retire the cached row so it
-                // doesn't resurrect.
-                runCatching {
-                    daoSyncManager.updateStatus(entity.txHash, entity.index, DaoCellStatus.COMPLETED.name)
-                }
+                // Still confirming: keep the position on screen so it reads
+                // "Confirming…" (the overlay paints it) rather than vanishing
+                // or, worse, reappearing as an unlockable outside-window row
+                // for the minutes between broadcast and the tx being scored.
+                CachedDaoCellFate.UNLOCK_IN_FLIGHT -> confirming += entity.toCachedDeposit()
+                CachedDaoCellFate.OUTSIDE_WINDOW -> outsideWindow += entity.toOutsideWindowDeposit()
             }
         }
         if (outsideWindow.isNotEmpty()) {
             logger.i(TAG, "DAO merge: ${outsideWindow.size} cached deposit(s) predate sync window (start=$windowStart)")
         }
-        return live + outsideWindow
+        return live + confirming + outsideWindow
     }
 
     /**
@@ -2723,6 +2907,21 @@ class GatewayRepository @Inject constructor(
         txHash
     }
 
+    /**
+     * Fail an unlock the wallet already knows is pointless BEFORE the caller
+     * spends a biometric or PIN prompt on it (#529). Success means only "no
+     * local record says this is already claimed": [unlockDao] still does the
+     * full check against the live list.
+     */
+    suspend fun unlockPreflight(withdrawingOutPoint: OutPoint): Result<Unit> = runCatching {
+        val claim = unlockClaimState(withdrawingOutPoint)
+        when (claim.claim) {
+            UnlockClaim.RETIRED -> throw Exception(ALREADY_UNLOCKED_MESSAGE)
+            UnlockClaim.IN_FLIGHT -> throw Exception(alreadyUnlockingMessage(claim.unlockTxHash))
+            UnlockClaim.NONE -> Unit
+        }
+    }
+
     suspend fun unlockDao(withdrawingOutPoint: OutPoint): Result<String> =
         getPrivateKey().let { key ->
             try {
@@ -2739,11 +2938,25 @@ class GatewayRepository @Inject constructor(
     ): Result<String> = runCatching {
         val info = _walletInfo.value ?: throw Exception("No wallet")
         val net = currentNetwork
+        // The wallet this unlock is signed for, read before the broadcast: a
+        // wallet switch while it is in flight must not file the marker under
+        // the wallet the user switched to (#529).
+        val walletId = activeWalletId
 
         val deposits = getDaoDeposits().getOrThrow()
+        // #529: a cell the unlock already spent is gone from the list. Fail
+        // here with a terminal, readable message instead of building a
+        // transaction against an outpoint that cannot be spent twice. The
+        // caller clears its spinner on failure, so "not found" must never be
+        // reachable for a position the user has in fact already claimed.
         val deposit = deposits.find { it.outPoint == withdrawingOutPoint }
-            ?: throw Exception("Withdrawing cell not found")
+            ?: throw Exception(missingWithdrawingCellMessage(withdrawingOutPoint))
 
+        if (deposit.status == DaoCellStatus.UNLOCKING) {
+            throw Exception(
+                alreadyUnlockingMessage(unlockClaimState(withdrawingOutPoint).unlockTxHash)
+            )
+        }
         require(deposit.status == DaoCellStatus.UNLOCKABLE) {
             "Cell is not unlockable yet (status: ${deposit.status})"
         }
@@ -2823,7 +3036,74 @@ class GatewayRepository @Inject constructor(
         // input and serializes the pre-broadcast insert under sendMutex (#320).
         val txHash = sendTransaction(tx, pendingFeeShannons = plannedFeeShannons).getOrThrow()
         logger.d(TAG, "DAO unlock (phase 2) sent: $txHash")
+
+        // #529: persist the in-flight unlock, the phase-2 twin of the #347
+        // withdraw marker. Until the spend is indexed the withdrawing cell
+        // still scans UNLOCKABLE, so without this row the card re-offers
+        // "Unlock" (and accepts the tap) while this transaction is in flight,
+        // and the cached dao_cells row is never retired once it commits.
+        runCatching {
+            appDatabase.pendingDaoUnlockDao().upsert(
+                com.rjnr.pocketnode.data.database.entity.PendingDaoUnlockEntity(
+                    withdrawingTxHash = withdrawingOutPoint.txHash,
+                    withdrawingIndex = withdrawingOutPoint.index,
+                    unlockTxHash = txHash,
+                    walletId = walletId,
+                    network = net.name,
+                    createdAt = System.currentTimeMillis(),
+                )
+            )
+        }.onFailure { logger.w(TAG, "Failed to persist pending unlock marker: ${it.message}") }
+
         txHash
+    }
+
+    /** What this device's own records say about a withdrawing cell (#529). */
+    private enum class UnlockClaim { NONE, IN_FLIGHT, RETIRED }
+
+    /** [UnlockClaim] plus the unlock transaction behind it, when there is one. */
+    private class UnlockClaimResult(val claim: UnlockClaim, val unlockTxHash: String? = null)
+
+    /**
+     * Whether this position is already claimed or mid-claim, from the two
+     * Room reads alone. No chain access, so it is cheap enough to run before
+     * asking the user to authenticate.
+     *
+     * Both lookups normalize the outpoint index, because the spelling the UI
+     * hands back (hex vs decimal) need not match the spelling the row was
+     * written with, and a mismatch would silently answer "not claimed".
+     */
+    private suspend fun unlockClaimState(outPoint: OutPoint): UnlockClaimResult {
+        val walletId = activeWalletId
+        if (walletId.isEmpty()) return UnlockClaimResult(UnlockClaim.NONE)
+        val network = currentNetwork.name
+        val key = normalizedOutPointKey(outPoint.txHash, outPoint.index)
+        val marker = runCatching {
+            appDatabase.pendingDaoUnlockDao().getByWalletAndNetwork(walletId, network)
+                .firstOrNull { normalizedOutPointKey(it.withdrawingTxHash, it.withdrawingIndex) == key }
+        }.getOrNull()
+        if (marker != null) return UnlockClaimResult(UnlockClaim.IN_FLIGHT, marker.unlockTxHash)
+        val retired = runCatching {
+            daoSyncManager.getCompletedDeposits(network, walletId)
+                .any { normalizedOutPointKey(it.txHash, it.index) == key }
+        }.getOrDefault(false)
+        return UnlockClaimResult(if (retired) UnlockClaim.RETIRED else UnlockClaim.NONE)
+    }
+
+    /**
+     * Why the withdrawing cell the user tapped is not in the list: already
+     * claimed (its row is retired, or an unlock for it is on record), or
+     * genuinely not visible yet.
+     */
+    private suspend fun missingWithdrawingCellMessage(
+        outPoint: OutPoint,
+    ): String {
+        val claim = unlockClaimState(outPoint)
+        return when (claim.claim) {
+            UnlockClaim.RETIRED -> ALREADY_UNLOCKED_MESSAGE
+            UnlockClaim.IN_FLIGHT -> alreadyUnlockingMessage(claim.unlockTxHash)
+            UnlockClaim.NONE -> "Withdrawing cell not found"
+        }
     }
 
     // Sync registration + BALANCED filter delegated to [SyncCoordinator] (#106).
@@ -2933,6 +3213,35 @@ class GatewayRepository @Inject constructor(
 
     companion object {
         private const val TAG = "GatewayRepository"
+
+        /** Terminal failure for a position whose unlock already went through (#529). */
+        const val ALREADY_UNLOCKED_MESSAGE = "This deposit was already unlocked"
+
+        /** Terminal failure for a second tap while the first unlock is in flight (#529). */
+        const val ALREADY_UNLOCKING_MESSAGE = "This deposit is already being unlocked"
+
+        /**
+         * The same refusal, naming the transaction the user is waiting on so
+         * they can look it up in an explorer rather than only being told to
+         * wait. A marker that never resolves blocks the position until the
+         * chain settles it, so the hash is the one thing that lets the user
+         * find out why.
+         */
+        fun alreadyUnlockingMessage(unlockTxHash: String?): String =
+            if (unlockTxHash.isNullOrBlank()) ALREADY_UNLOCKING_MESSAGE
+            else "$ALREADY_UNLOCKING_MESSAGE (tx ${shortenTxHash(unlockTxHash)})"
+
+        /** "0x1234abcd...5678ef90", enough to recognise without filling a snackbar. */
+        private fun shortenTxHash(txHash: String): String =
+            if (txHash.length <= 22) txHash else "${txHash.take(10)}...${txHash.takeLast(8)}"
+
+        /**
+         * Outpoint key with the index normalized (hex vs decimal) so a match
+         * across the live scan, the dao_cells cache and the pending markers is
+         * reliable whatever spelling each recorded.
+         */
+        private fun normalizedOutPointKey(txHash: String, index: String): String =
+            "${txHash.lowercase()}:${index.removePrefix("0x").toLongOrNull(16) ?: index}"
 
         /**
          * Cursor-walk caps — runaway guards far above real usage

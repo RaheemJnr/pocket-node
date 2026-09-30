@@ -9,6 +9,8 @@ import com.rjnr.pocketnode.data.database.DatabaseMaintenanceUtil
 import com.rjnr.pocketnode.data.database.dao.BalanceCacheDao
 import com.rjnr.pocketnode.data.database.dao.DaoCellDao
 import com.rjnr.pocketnode.data.database.dao.KeyMaterialDao
+import com.rjnr.pocketnode.data.database.dao.PendingDaoUnlockDao
+import com.rjnr.pocketnode.data.database.dao.PendingDaoWithdrawDao
 import com.rjnr.pocketnode.data.database.dao.TransactionDao
 import com.rjnr.pocketnode.data.database.dao.WalletDao
 import com.rjnr.pocketnode.data.database.entity.WalletEntity
@@ -34,6 +36,8 @@ class WalletRepository @Inject constructor(
     private val transactionDao: TransactionDao,
     private val balanceCacheDao: BalanceCacheDao,
     private val daoCellDao: DaoCellDao,
+    private val pendingDaoWithdrawDao: PendingDaoWithdrawDao,
+    private val pendingDaoUnlockDao: PendingDaoUnlockDao,
     private val keyMaterialDao: KeyMaterialDao,
     private val subAccountCandidateDao: com.rjnr.pocketnode.data.database.dao.SubAccountCandidateDao,
     private val subAccountDiscovery: SubAccountDiscovery,
@@ -486,6 +490,12 @@ class WalletRepository @Inject constructor(
                 transactionDao.deleteByWalletAndNetwork(walletId, network)
                 balanceCacheDao.deleteByWalletAndNetwork(walletId, network)
                 daoCellDao.deleteByWalletAndNetwork(walletId, network)
+                // The two in-flight DAO markers are wallet-scoped too. Left
+                // behind, they would re-attach to a wallet re-imported under
+                // the same id and overlay a confirming state on a position
+                // that has nothing in flight (#529).
+                pendingDaoWithdrawDao.deleteByWalletAndNetwork(walletId, network)
+                pendingDaoUnlockDao.deleteByWalletAndNetwork(walletId, network)
             }
         }
         keyManager.deleteWalletKeys(walletId)
