@@ -24,6 +24,13 @@ import com.rjnr.pocketnode.data.gateway.models.Script
  * cell this wallet's own key controls, even though the args happen to match,
  * so it must not count as ours.
  *
+ * A typed output (a type script present) is never counted either, even when
+ * its lock matches: an xUDT, Spore, .bit or any other token/NFT minted onto
+ * our own lock still moved a distinct on-chain asset, so labelling that "Self
+ * Transfer" (a CKB-only phrase) would misrepresent it, and the DAO callers
+ * that legitimately mint their own typed cells classify before this function
+ * is ever reached (see GatewayRepository.getTransactions's DAO priority).
+ *
  * An empty output list (nothing to check) is not a self transfer, it falls
  * back to "out", the safe default. Same for any output landing on a script we
  * don't recognize: it keeps the "Sent" label rather than risk hiding a real
@@ -39,7 +46,8 @@ fun isSelfTransferSignature(
 
     val known = knownLockArgs.map { it.lowercase() }.toSet()
     return outputs.all {
-        it.lock.codeHash == Script.SECP256K1_CODE_HASH &&
+        it.type == null &&
+            it.lock.codeHash == Script.SECP256K1_CODE_HASH &&
             it.lock.hashType == "type" &&
             it.lock.args.lowercase() in known
     }
@@ -56,15 +64,18 @@ fun isSelfTransferSignature(
  * that row would keep naming the restored child's script as "ours" forever,
  * so a transfer from the parent wallet to that now-distinct child would
  * misclassify as a self transfer instead of a real transfer between two
- * wallets. GatewayRepository.getTransactions also subtracts every other
- * WalletEntity's own address from the self-transfer set as defence in depth,
- * in case a candidate row's state is ever stale.
+ * wallets. GatewayRepository.selfWalletLockArgsFor (shared by getTransactions,
+ * for the confirmed row, and buildReserveAndSend, for the pending row) also
+ * subtracts every other WalletEntity's own address from the self-transfer set
+ * as defence in depth, in case a candidate row's state is ever stale.
  */
 fun activeSelfTransferCandidateArgs(candidates: List<SubAccountCandidateEntity>): List<String> =
     candidates.filter { it.state != SubAccountCandidateEntity.STATE_RESTORED }.map { it.scriptArgs }
 
 /**
- * The amount to display on a self-transfer row (#538 review).
+ * The amount to display on a self-transfer row once it has already been
+ * decided safe to show as "self" (#538 review; see [selfRowDirectionAndAmount]
+ * for the decision that guards this).
  *
  * [netChangeAmount] (`abs(netChangeShannons)`) is wrong whenever a non-change
  * output went to another script this wallet also owns, such as a derived
@@ -74,14 +85,6 @@ fun activeSelfTransferCandidateArgs(candidates: List<SubAccountCandidateEntity>)
  * not the fee it actually cost). [feeShannons] is computed from the FULL
  * declared transaction (every input and output, not the walk), so it is the
  * honest number here and is preferred whenever it is known.
- *
- * [netChangeAmount] is only used as a fallback when [feeShannons] is null,
- * and is only a SAFE fallback (see [isSelfTransferFallbackSafe]) when every
- * output lands on the wallet's own main script: in that one case nothing is
- * missing from the walk, so it already equals the fee exactly. When that is
- * not the case there is no honest number to fall back to, so the same value
- * is still returned (never worse than the pre-#538 behavior) but the caller
- * should log the uncertainty rather than trust it silently.
  */
 fun selfTransferDisplayAmount(feeShannons: Long?, netChangeAmount: Long): Long =
     feeShannons ?: netChangeAmount
@@ -89,12 +92,41 @@ fun selfTransferDisplayAmount(feeShannons: Long?, netChangeAmount: Long): Long =
 /**
  * Whether the [selfTransferDisplayAmount] fallback (used when `feeShannons`
  * is null) is backed by every output landing on the wallet's own main
- * script, [mainScriptArgs]. False does not mean the returned amount is
- * definitely wrong, only that it cannot be vouched for the way it can when
- * this is true.
+ * script, [mainScriptArgs]. True means nothing is missing from the walk, so
+ * `netChangeAmount` already equals the fee exactly and is a safe stand-in.
+ * False means it is not: see [selfRowDirectionAndAmount].
  */
 fun isSelfTransferFallbackSafe(outputs: List<CellOutput>, mainScriptArgs: String): Boolean =
     outputs.all { it.lock.args.equals(mainScriptArgs, ignoreCase = true) }
+
+/**
+ * The direction+amount to show for a row [isSelfTransferSignature] classified
+ * "self" (#538 review, safety fallback).
+ *
+ * When [feeShannons] is known, this is simply "self" + that fee (the honest
+ * number, per [selfTransferDisplayAmount]). But when it is unknown AND the
+ * abs(net) fallback is not provably safe (see [isSelfTransferFallbackSafe]:
+ * an output touched a script other than the wallet's own main script), there
+ * is no honest number left: `netChangeAmount` at that point is a PARTIAL
+ * value, missing whatever capacity went to the other owned script, and
+ * showing it under the reassuring "Self Transfer" label would hide that gap
+ * from the user. Rather than guess, this demotes the row to "out" with
+ * `netChangeAmount` as-is, exactly as if [isSelfTransferSignature] had said
+ * no in the first place: the safe default is to look like an ordinary send
+ * (potentially alarming, never reassuring) rather than to mislabel an
+ * uncertain amount as safely self-contained.
+ */
+fun selfRowDirectionAndAmount(
+    feeShannons: Long?,
+    outputs: List<CellOutput>,
+    mainScriptArgs: String,
+    netChangeAmount: Long,
+): Pair<String, Long> =
+    if (feeShannons == null && !isSelfTransferFallbackSafe(outputs, mainScriptArgs)) {
+        "out" to netChangeAmount
+    } else {
+        "self" to selfTransferDisplayAmount(feeShannons, netChangeAmount)
+    }
 
 /** [pendingTransferDisplay]'s result: what a pending activity row should show. */
 data class PendingTransferDisplay(val direction: String, val amountShannons: Long)
@@ -112,17 +144,25 @@ data class PendingTransferDisplay(val direction: String, val amountShannons: Lon
  * Reuses [isSelfTransferSignature] against [selfWalletLockArgs] (the same set
  * the confirmed row will use once indexed), so the pending row agrees with
  * what it eventually becomes. Returns null when the built transaction is not
- * a self transfer, so the caller keeps its own direction/amount unchanged.
+ * a self transfer, so the caller keeps its own direction/amount unchanged;
+ * also null when [plannedFeeShannons] is unknown and the abs(net) fallback is
+ * not safe (see [isSelfTransferFallbackSafe] / [selfRowDirectionAndAmount]),
+ * for the same reason: never show a possibly-wrong amount under "Self
+ * Transfer" when there is no honest number to show.
  */
 fun pendingTransferDisplay(
     outputs: List<CellOutput>,
     selfWalletLockArgs: Set<String>,
     plannedFeeShannons: Long?,
     outgoingAmountShannons: Long,
+    mainScriptArgs: String,
 ): PendingTransferDisplay? {
     // netChangeShannons is only used for its sign by isSelfTransferSignature;
     // a plain transfer always pays a fee, so it is always negative here.
     if (!isSelfTransferSignature(netChangeShannons = -1L, outputs = outputs, knownLockArgs = selfWalletLockArgs)) {
+        return null
+    }
+    if (plannedFeeShannons == null && !isSelfTransferFallbackSafe(outputs, mainScriptArgs)) {
         return null
     }
     return PendingTransferDisplay("self", plannedFeeShannons ?: outgoingAmountShannons)
@@ -138,19 +178,31 @@ fun pendingTransferDisplay(
  *
  * A foreign input's owning lock script is not knowable here without an extra
  * JNI lookup per input (see sweepGapLimitFundsInner/WalletPreferences for the
- * cheaper alternative actually used: the sweep's own tx hash is recorded
- * locally at send time), so [isKnownSweepTxHash] is that purely local signal,
- * never derived from chain data. Returns null when it is false, so the
- * caller keeps its own classification (a genuine receive from a foreign
- * input is never marked and is always left as "in").
+ * cheaper alternative actually used: the sweep's own tx hash, scoped to
+ * walletId+network, is recorded locally at send time), so
+ * [isKnownSweepTxHash] is that purely local signal, never derived from chain
+ * data. It is trusted only together with [outputsAreSelf] (the caller's own
+ * fresh [isSelfTransferSignature] check against the VIEWING wallet's self
+ * set, #538 review): a wallet-scoped marker could otherwise still be misread
+ * for a wallet it does not belong to if the scoping were ever wrong, so this
+ * is defence in depth, never derived-chain-data trust alone.
+ *
+ * Returns null when either signal is false or [recordedFeeShannons] is
+ * unknown, so the caller keeps its own classification. Unlike
+ * [selfRowDirectionAndAmount]'s "out" fallback, there is no abs(net) fallback
+ * here at all: for a sweep the walk's own net is the FULL swept balance (not
+ * a partial value the way a plain self-send's undercounted net is), so
+ * showing it under "out" would be just as misleading as "self" would be;
+ * doing nothing and leaving the caller's pre-existing classification (an
+ * ordinary positive-net "in") stand is the safe choice instead.
  */
 fun sweepRowDisplay(
     isKnownSweepTxHash: Boolean,
+    outputsAreSelf: Boolean,
     recordedFeeShannons: Long?,
-    netChangeAmount: Long,
 ): PendingTransferDisplay? {
-    if (!isKnownSweepTxHash) return null
-    return PendingTransferDisplay("self", recordedFeeShannons ?: netChangeAmount)
+    if (!isKnownSweepTxHash || !outputsAreSelf || recordedFeeShannons == null) return null
+    return PendingTransferDisplay("self", recordedFeeShannons)
 }
 
 /**
@@ -186,11 +238,14 @@ fun sendTransactionPendingAmount(
  * gap-limit sweep) would regress back to sendTransaction's own default "out"
  * + wrong amount for as long as the retry is pending, undoing the fix this
  * whole PR makes. [cachedDirection]/[cachedFeeShannons] are read from that
- * row BEFORE it is deleted. Returns null for any other direction (or no
- * cached row at all), so the caller falls back to sendTransaction's default.
- * The fee is deliberately left nullable here (unlike [PendingTransferDisplay]'s
- * amount): "unknown" must stay distinguishable from a genuine zero so
- * sendTransactionPendingAmount can fall back to the recipient amount instead.
+ * row BEFORE it is deleted.
+ *
+ * Returns null (the caller falls back to sendTransaction's plain "out"
+ * default) for any other direction, no cached row at all, OR when the fee is
+ * unknown (#538 review, safety fallback): sendTransaction has no way to tell
+ * this function's caller whether its own abs(net)/recipient-amount fallback
+ * would be safe the way [selfRowDirectionAndAmount] can, so an unresolved fee
+ * here is never trusted to override "out" with a "self" label.
  */
-fun retryPendingOverride(cachedDirection: String?, cachedFeeShannons: Long?): Pair<String, Long?>? =
-    if (cachedDirection == "self") "self" to cachedFeeShannons else null
+fun retryPendingOverride(cachedDirection: String?, cachedFeeShannons: Long?): Pair<String, Long>? =
+    if (cachedDirection == "self" && cachedFeeShannons != null) "self" to cachedFeeShannons else null

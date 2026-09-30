@@ -855,7 +855,7 @@ fun HomeScreenUI(
                     TransactionItems(
                         transaction = tx,
                         onClick = { selectedTransaction(tx) },
-                        onRetry = if (tx.status == "FAILED" && tx.isOutgoing()) {
+                        onRetry = if (tx.status == "FAILED" && tx.canRetry()) {
                             { onRetryFailed(tx) }
                         } else null,
                         broadcast = uiState.broadcastStates[tx.txHash],
@@ -1300,11 +1300,14 @@ private fun TransactionDetailSheet(
                 )
             }
 
-            // Retry CTA — only for FAILED plain transfers. Retry now re-broadcasts
-            // the original signed bytes (#316), so it's safe regardless of tx type;
-            // the gate stays conservative (plain outgoing transfers) to keep the
-            // CTA off DAO/self-transfer rows until those flows are exercised.
-            if (displayState == TxDisplayState.FAILED && transaction.isOutgoing() && onRetry != null) {
+            // Retry CTA, for any FAILED row this wallet originated (plain
+            // sends and self-transfers/sweeps, canRetry(); #538 review: a
+            // self-transfer or gap-limit sweep is broadcast by this device
+            // too, just to one of its own scripts, so it must not lose Retry
+            // just because it isn't isOutgoing()). Retry re-broadcasts the
+            // original signed bytes (#316), so it's safe regardless of tx
+            // type; DAO rows are still excluded, canRetry() does not cover them.
+            if (displayState == TxDisplayState.FAILED && transaction.canRetry() && onRetry != null) {
                 Spacer(modifier = Modifier.height(24.dp))
                 Button(
                     onClick = { onRetry(transaction) },

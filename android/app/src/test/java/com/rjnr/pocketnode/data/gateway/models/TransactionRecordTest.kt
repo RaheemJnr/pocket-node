@@ -91,6 +91,30 @@ class TransactionRecordTest {
         assertTrue(makeRecord(direction = "self").isSelfTransfer())
     }
 
+    // --- canRetry (#538 review: a FAILED self row must not lose Retry) ---
+
+    @Test
+    fun `canRetry is true for out`() {
+        assertTrue(makeRecord(direction = "out").canRetry())
+    }
+
+    @Test
+    fun `canRetry is true for self`() {
+        assertTrue(makeRecord(direction = "self").canRetry())
+    }
+
+    @Test
+    fun `canRetry is false for in`() {
+        assertFalse(makeRecord(direction = "in").canRetry())
+    }
+
+    @Test
+    fun `canRetry is false for dao directions`() {
+        assertFalse(makeRecord(direction = "dao_deposit").canRetry())
+        assertFalse(makeRecord(direction = "dao_withdraw").canRetry())
+        assertFalse(makeRecord(direction = "dao_unlock").canRetry())
+    }
+
     // --- confirmation status ---
 
     @Test

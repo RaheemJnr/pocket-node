@@ -191,6 +191,47 @@ class SelfTransferSignatureTest {
         assertFalse(flagged)
     }
 
+    @Test
+    fun `a typed output on our own lock is not a self transfer`() {
+        // #538 review: an xUDT, Spore, .bit or any other token/NFT minted
+        // onto our own lock still moved a distinct on-chain asset; labelling
+        // that "Self Transfer" (a CKB-only phrase) would misrepresent it.
+        val typedOutput = CellOutput(
+            capacity = "0x${(100 * ckb).toString(16)}",
+            lock = Script(Script.SECP256K1_CODE_HASH, "type", mainArgs),
+            type = Script(
+                codeHash = "0x50bd8d6680b8b9cf98b73f3c08faf8b2a21914311954118ad6609be6e78a1b95",
+                hashType = "type",
+                args = "0x",
+            ),
+        )
+        val flagged = isSelfTransferSignature(
+            netChangeShannons = -100_000L,
+            outputs = listOf(typedOutput),
+            knownLockArgs = setOf(mainArgs),
+        )
+        assertFalse(flagged)
+    }
+
+    @Test
+    fun `a typed output alongside a plain self output is still not a self transfer`() {
+        val typedOutput = CellOutput(
+            capacity = "0x${(100 * ckb).toString(16)}",
+            lock = Script(Script.SECP256K1_CODE_HASH, "type", mainArgs),
+            type = Script(
+                codeHash = "0x50bd8d6680b8b9cf98b73f3c08faf8b2a21914311954118ad6609be6e78a1b95",
+                hashType = "type",
+                args = "0x",
+            ),
+        )
+        val flagged = isSelfTransferSignature(
+            netChangeShannons = -100_000L,
+            outputs = listOf(secpOutput(60, mainArgs), typedOutput),
+            knownLockArgs = setOf(mainArgs),
+        )
+        assertFalse(flagged)
+    }
+
     // --- selfTransferDisplayAmount / isSelfTransferFallbackSafe (#538 review) ---
 
     @Test
@@ -288,6 +329,51 @@ class SelfTransferSignatureTest {
         assertFalse(flagged)
     }
 
+    // --- selfRowDirectionAndAmount (#538 review, safety fallback) ---
+
+    @Test
+    fun `known fee wins even when the fallback would not have been safe`() {
+        val fee = 1_000L
+        val (dir, amt) = selfRowDirectionAndAmount(
+            feeShannons = fee,
+            outputs = listOf(secpOutput(60, mainArgs), secpOutput(40, derivedArgs)),
+            mainScriptArgs = mainArgs,
+            netChangeAmount = 100 * ckb + fee,
+        )
+        assertEquals("self", dir)
+        assertEquals(fee, amt)
+    }
+
+    @Test
+    fun `unknown fee with a safe fallback still reads self`() {
+        val netChangeAmount = 1_000L
+        val (dir, amt) = selfRowDirectionAndAmount(
+            feeShannons = null,
+            outputs = listOf(secpOutput(100, mainArgs)),
+            mainScriptArgs = mainArgs,
+            netChangeAmount = netChangeAmount,
+        )
+        assertEquals("self", dir)
+        assertEquals(netChangeAmount, amt)
+    }
+
+    @Test
+    fun `unknown fee with an unsafe fallback demotes to out`() {
+        // No honest number to show: netChangeAmount is missing whatever went
+        // to the derived candidate, so showing it under "Self Transfer" would
+        // hide that gap. Demoted to "out" instead (never worse than the
+        // pre-#538 behavior, and never mislabeled as safely self-contained).
+        val wronglyPositiveNet = 100 * ckb
+        val (dir, amt) = selfRowDirectionAndAmount(
+            feeShannons = null,
+            outputs = listOf(secpOutput(60, mainArgs), secpOutput(40, derivedArgs)),
+            mainScriptArgs = mainArgs,
+            netChangeAmount = wronglyPositiveNet,
+        )
+        assertEquals("out", dir)
+        assertEquals(wronglyPositiveNet, amt)
+    }
+
     // --- pendingTransferDisplay (#538 review) ---
 
     @Test
@@ -305,21 +391,39 @@ class SelfTransferSignatureTest {
             selfWalletLockArgs = setOf(mainArgs, derivedArgs),
             plannedFeeShannons = fee,
             outgoingAmountShannons = wronglyInflatedOutgoingAmount,
+            mainScriptArgs = mainArgs,
         )
 
         assertEquals(PendingTransferDisplay("self", fee), display)
     }
 
     @Test
-    fun `pending display falls back to the outgoing amount when the fee is unknown`() {
+    fun `pending display falls back to the outgoing amount when the fee is unknown but the fallback is safe`() {
         val outgoingAmount = 500L
         val display = pendingTransferDisplay(
             outputs = listOf(secpOutput(100, mainArgs)),
             selfWalletLockArgs = setOf(mainArgs),
             plannedFeeShannons = null,
             outgoingAmountShannons = outgoingAmount,
+            mainScriptArgs = mainArgs,
         )
         assertEquals(PendingTransferDisplay("self", outgoingAmount), display)
+    }
+
+    @Test
+    fun `pending display is null when the fee is unknown and the fallback is not safe`() {
+        // #538 review: a derived-candidate output means outgoingAmount could
+        // be wrong, and with no fee to fall back on there is no honest number
+        // to show under "Self Transfer": null lets buildReserveAndSend's own
+        // "out" + outgoingAmount stand instead.
+        val display = pendingTransferDisplay(
+            outputs = listOf(secpOutput(60, derivedArgs), secpOutput(40, mainArgs)),
+            selfWalletLockArgs = setOf(mainArgs, derivedArgs),
+            plannedFeeShannons = null,
+            outgoingAmountShannons = 100 * ckb,
+            mainScriptArgs = mainArgs,
+        )
+        assertEquals(null, display)
     }
 
     @Test
@@ -329,6 +433,7 @@ class SelfTransferSignatureTest {
             selfWalletLockArgs = setOf(mainArgs),
             plannedFeeShannons = 1_000L,
             outgoingAmountShannons = 100 * ckb + 1_000L,
+            mainScriptArgs = mainArgs,
         )
         assertEquals(null, display)
     }
@@ -337,29 +442,27 @@ class SelfTransferSignatureTest {
 
     @Test
     fun `a sweep from a candidate to main is self with the fee`() {
-        // The walk only counted the main-script output (the candidate-script
-        // inputs never matched the info.script-scoped query), so its net read
-        // positive: netChangeAmount stands in for the wrongly-positive amount
-        // that would otherwise show as "Received".
         val fee = 1_000L
-        val wronglyPositiveNet = 150 * ckb
         val display = sweepRowDisplay(
             isKnownSweepTxHash = true,
+            outputsAreSelf = true,
             recordedFeeShannons = fee,
-            netChangeAmount = wronglyPositiveNet,
         )
         assertEquals(PendingTransferDisplay("self", fee), display)
     }
 
     @Test
-    fun `a sweep with no recorded fee falls back to the net change`() {
-        val netChangeAmount = 150 * ckb
+    fun `a sweep with no recorded fee is not overridden (stays in)`() {
+        // #538 review: no abs(net) fallback for a sweep (its walk-based net
+        // is the FULL swept balance, not a partial value the way a plain
+        // self-send's undercounted net is), so an unresolved fee means no
+        // override at all, not a wrong amount under "self".
         val display = sweepRowDisplay(
             isKnownSweepTxHash = true,
+            outputsAreSelf = true,
             recordedFeeShannons = null,
-            netChangeAmount = netChangeAmount,
         )
-        assertEquals(PendingTransferDisplay("self", netChangeAmount), display)
+        assertEquals(null, display)
     }
 
     @Test
@@ -368,8 +471,21 @@ class SelfTransferSignatureTest {
         // classification (a positive net change read as "in").
         val display = sweepRowDisplay(
             isKnownSweepTxHash = false,
+            outputsAreSelf = false,
             recordedFeeShannons = null,
-            netChangeAmount = 10_000 * ckb,
+        )
+        assertEquals(null, display)
+    }
+
+    @Test
+    fun `a marker without the outputs also passing isSelfTransferSignature is not trusted`() {
+        // #538 review, defence in depth: even a wallet-scoped marker saying
+        // "yes" is not enough alone if the transaction's own outputs do not
+        // independently agree.
+        val display = sweepRowDisplay(
+            isKnownSweepTxHash = true,
+            outputsAreSelf = false,
+            recordedFeeShannons = 1_000L,
         )
         assertEquals(null, display)
     }
@@ -426,9 +542,13 @@ class SelfTransferSignatureTest {
     }
 
     @Test
-    fun `a retried self row with an unresolved cached fee still overrides direction`() {
+    fun `a retried self row with an unresolved cached fee is not overridden`() {
+        // #538 review, safety fallback: sendTransaction cannot tell whether
+        // its own recipient-amount fallback would be safe the way
+        // selfRowDirectionAndAmount can, so an unknown fee here is never
+        // trusted to override "out" with a "self" label.
         val override = retryPendingOverride(cachedDirection = "self", cachedFeeShannons = null)
-        assertEquals("self" to null, override)
+        assertEquals(null, override)
     }
 
     @Test

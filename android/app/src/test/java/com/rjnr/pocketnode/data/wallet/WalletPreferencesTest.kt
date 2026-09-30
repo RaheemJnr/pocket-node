@@ -244,22 +244,27 @@ class WalletPreferencesTest {
     // --- Sweep tx-hash/fee marker (#538 review, retry-path follow-up) ---
     // Stored in WalletPreferences itself, not the Room `transactions` cache,
     // because retryBroadcast deletes and re-inserts that row on every retry;
-    // a retried sweep must still find its fee afterward.
+    // a retried sweep must still find its fee afterward. Scoped by
+    // walletId+network (#538 review) so it cannot override the classification
+    // for a different wallet or network viewing the same hash.
+
+    private val walletA = "wallet-a"
+    private val walletB = "wallet-b"
 
     @Test
     fun `a hash never marked as a sweep has no fee and is not a sweep`() {
         val prefs = newPrefs()
-        assertFalse(prefs.isSweepTxHash("0xabc"))
-        assertNull(prefs.sweepFeeShannons("0xabc"))
+        assertFalse(prefs.isSweepTxHash(walletA, "TESTNET", "0xabc"))
+        assertNull(prefs.sweepFeeShannons(walletA, "TESTNET", "0xabc"))
     }
 
     @Test
     fun `addSweepTxHash records the fee, readable back on a fresh instance`() {
         val prefs = newPrefs()
-        prefs.addSweepTxHash("0xsweep1", 1_000L)
+        prefs.addSweepTxHash(walletA, "TESTNET", "0xsweep1", 1_000L)
 
-        assertTrue(newPrefs().isSweepTxHash("0xsweep1"))
-        assertEquals(1_000L, newPrefs().sweepFeeShannons("0xsweep1"))
+        assertTrue(newPrefs().isSweepTxHash(walletA, "TESTNET", "0xsweep1"))
+        assertEquals(1_000L, newPrefs().sweepFeeShannons(walletA, "TESTNET", "0xsweep1"))
     }
 
     @Test
@@ -269,20 +274,65 @@ class WalletPreferencesTest {
         // cannot reach this preference, so the fee recorded at send time is
         // still there after a simulated "retry" that never touches it again.
         val prefs = newPrefs()
-        prefs.addSweepTxHash("0xsweep2", 2_000L)
+        prefs.addSweepTxHash(walletA, "TESTNET", "0xsweep2", 2_000L)
 
         // Nothing else in this test writes to or clears sweep prefs, standing
         // in for a Room-row deletion elsewhere: the marker is unaffected.
-        assertEquals(2_000L, newPrefs().sweepFeeShannons("0xsweep2"))
+        assertEquals(2_000L, newPrefs().sweepFeeShannons(walletA, "TESTNET", "0xsweep2"))
     }
 
     @Test
     fun `multiple sweeps keep independent fees`() {
         val prefs = newPrefs()
-        prefs.addSweepTxHash("0xsweepA", 111L)
-        prefs.addSweepTxHash("0xsweepB", 222L)
+        prefs.addSweepTxHash(walletA, "TESTNET", "0xsweepA", 111L)
+        prefs.addSweepTxHash(walletA, "TESTNET", "0xsweepB", 222L)
 
-        assertEquals(111L, prefs.sweepFeeShannons("0xsweepA"))
-        assertEquals(222L, prefs.sweepFeeShannons("0xsweepB"))
+        assertEquals(111L, prefs.sweepFeeShannons(walletA, "TESTNET", "0xsweepA"))
+        assertEquals(222L, prefs.sweepFeeShannons(walletA, "TESTNET", "0xsweepB"))
+    }
+
+    @Test
+    fun `the same hash for a different wallet is not a sweep (unscoped would have leaked)`() {
+        // #538 review: an unscoped, hash-only marker would have overridden
+        // the classification for ANY wallet viewing this hash. Scoped, wallet
+        // B never sees wallet A's sweep.
+        val prefs = newPrefs()
+        prefs.addSweepTxHash(walletA, "TESTNET", "0xshared", 1_000L)
+
+        assertFalse(prefs.isSweepTxHash(walletB, "TESTNET", "0xshared"))
+        assertNull(prefs.sweepFeeShannons(walletB, "TESTNET", "0xshared"))
+    }
+
+    @Test
+    fun `the same hash and wallet on a different network is not a sweep`() {
+        val prefs = newPrefs()
+        prefs.addSweepTxHash(walletA, "TESTNET", "0xshared", 1_000L)
+
+        assertFalse(prefs.isSweepTxHash(walletA, "MAINNET", "0xshared"))
+        assertNull(prefs.sweepFeeShannons(walletA, "MAINNET", "0xshared"))
+    }
+
+    @Test
+    fun `clearSweepTxHashes removes only the given wallet's entries`() {
+        val prefs = newPrefs()
+        prefs.addSweepTxHash(walletA, "TESTNET", "0xsweep1", 111L)
+        prefs.addSweepTxHash(walletA, "MAINNET", "0xsweep2", 222L)
+        prefs.addSweepTxHash(walletB, "TESTNET", "0xsweep3", 333L)
+
+        prefs.clearSweepTxHashes(walletA)
+
+        assertNull(prefs.sweepFeeShannons(walletA, "TESTNET", "0xsweep1"))
+        assertNull(prefs.sweepFeeShannons(walletA, "MAINNET", "0xsweep2"))
+        assertEquals(333L, prefs.sweepFeeShannons(walletB, "TESTNET", "0xsweep3"))
+    }
+
+    @Test
+    fun `clearSweepTxHashes on a wallet with no entries is a harmless no-op`() {
+        val prefs = newPrefs()
+        prefs.addSweepTxHash(walletB, "TESTNET", "0xsweep3", 333L)
+
+        prefs.clearSweepTxHashes(walletA)
+
+        assertEquals(333L, prefs.sweepFeeShannons(walletB, "TESTNET", "0xsweep3"))
     }
 }
