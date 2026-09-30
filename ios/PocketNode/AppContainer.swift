@@ -44,6 +44,10 @@ final class AppContainer {
         self.preferences = UserDefaultsPreferences()
         Self.applyNetworkOverrideForTestingIfPresent(preferences: preferences)
         self.walletStore = WalletStore()
+        // Installs that saved `wallet.json` before it was excluded from
+        // backups get the flag on their next launch (`WalletStore.save` sets
+        // it on every write from now on).
+        walletStore.excludeFromBackup()
         self.lightClient = LightClientService(network: preferences.getSelectedNetwork())
 
         let keychain = KeychainStore()
@@ -128,15 +132,36 @@ final class AppContainer {
     }
 
     /// `POCKETNODE_SKIP_ONBOARDING` (below) seeds a metadata-only wallet with
-    /// no PIN for the UI tests that drive the wallet shell. Those tests need
-    /// the shell, not the PIN step onboarding would otherwise resume at.
-    /// Debug-only; release builds always enforce the PIN.
+    /// no PIN and no keys for the UI tests that drive the wallet shell. Those
+    /// tests need the shell, not the PIN step onboarding would otherwise
+    /// resume at, nor the restore flow a key-less wallet would get. The one
+    /// place that hook is read; always false in release builds, which always
+    /// enforce the PIN and the restore.
     private static var skipsOnboardingForTesting: Bool {
         #if DEBUG
         return ProcessInfo.processInfo.environment["POCKETNODE_SKIP_ONBOARDING"] == "1"
         #else
         return false
         #endif
+    }
+
+    /// The stored wallet, when its metadata is on this device but its key
+    /// envelope is confirmed absent; nil otherwise.
+    ///
+    /// That is what restoring an iCloud or Finder backup onto a new phone
+    /// leaves: `wallet.json` comes back, the `ThisDeviceOnly` Keychain items
+    /// do not. Such a wallet shows an address it can never spend from, and
+    /// ``WalletCreator`` would refuse to import it again because a wallet is
+    /// "already there", so `RootView` sends it to the restore flow instead of
+    /// the wallet shell. A Keychain that cannot be read yet (a launch before
+    /// the first device unlock) is not an absence and does not count.
+    var walletNeedingRestore: WalletRecord? {
+        get async {
+            // The metadata-only wallet `POCKETNODE_SKIP_ONBOARDING` seeds for
+            // the wallet shell UI tests has no keys on purpose.
+            if Self.skipsOnboardingForTesting { return nil }
+            return await walletCreator.walletNeedingRestore()
+        }
     }
 
     /// `PocketNodeNetwork`'s `NodeStatusUITests` exercises the light client,
@@ -151,7 +176,7 @@ final class AppContainer {
     /// Debug-only, and a no-op on every other launch.
     private static func seedWalletForTestingIfRequested(walletStore: WalletStore) {
         #if DEBUG
-        guard ProcessInfo.processInfo.environment["POCKETNODE_SKIP_ONBOARDING"] == "1",
+        guard Self.skipsOnboardingForTesting,
               !walletStore.hasWallet else { return }
         try? walletStore.save(
             WalletRecord(
