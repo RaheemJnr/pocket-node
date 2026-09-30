@@ -13,9 +13,14 @@ concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
+# dorny/paths-filter reads the PR file list through the REST API, which
+# needs pull-requests: read under a restricted default GITHUB_TOKEN.
+permissions:
+  contents: read
+  pull-requests: read
+
 env:
   CARGO_AUDIT_VERSION: "0.22.2"
-
 
 jobs:
   changes:
