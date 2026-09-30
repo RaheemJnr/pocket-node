@@ -82,7 +82,7 @@ struct OnboardingView: View {
 
     @ToolbarContentBuilder
     private var toolbar: some ToolbarContent {
-        if model.step == .create || model.step == .importWallet {
+        if (model.step == .create || model.step == .importWallet) && !model.isRestoring {
             ToolbarItem(placement: .topBarLeading) {
                 Button("Back") { model.backToWelcome() }
                     .disabled(model.isBusy)
