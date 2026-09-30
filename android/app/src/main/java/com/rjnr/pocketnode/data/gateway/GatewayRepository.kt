@@ -943,11 +943,14 @@ class GatewayRepository @Inject constructor(
         if (!gapLimitScanMutex.tryLock()) throw Exception("A scan or sweep is already running")
         return try {
             val wId = activeWalletId
+            // Snapshot the network with the wallet: the sweep marker must be filed
+            // under the network the transaction was built and broadcast on.
+            val sweepNetwork = currentNetwork
             if (wId.isEmpty()) throw Exception("No active wallet")
             val myScript = _walletInfo.value?.script ?: throw Exception("Wallet not initialized")
 
             val (inputs, _) = gatherSweepInputs(wId)
-            val plan = transactionBuilder.buildSweep(inputs, myScript, currentNetwork).getOrThrow()
+            val plan = transactionBuilder.buildSweep(inputs, myScript, sweepNetwork).getOrThrow()
 
             val pathByArgs = appDatabase.subAccountCandidateDao().getForParent(wId)
                 .filter { it.accountIndex == 0 && it.state == SubAccountCandidateEntity.STATE_FOUND }
@@ -999,7 +1002,7 @@ class GatewayRepository @Inject constructor(
                 // row) cannot erase the fee out from under it. See
                 // selfWalletLockArgsFor's sibling check in getTransactions for
                 // the read side.
-                walletPreferences.addSweepTxHash(wId, currentNetwork.name, txHash, plan.feeShannons)
+                walletPreferences.addSweepTxHash(wId, sweepNetwork.name, txHash, plan.feeShannons)
                 logger.i(TAG, "gap-limit sweep broadcast: ${plan.inputLockArgs.size} inputs, ${keys.size} groups")
                 txHash
             } finally {
