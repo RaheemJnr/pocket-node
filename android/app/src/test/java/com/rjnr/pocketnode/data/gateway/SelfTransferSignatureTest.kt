@@ -1,7 +1,9 @@
 package com.rjnr.pocketnode.data.gateway
 
+import com.rjnr.pocketnode.data.database.entity.SubAccountCandidateEntity
 import com.rjnr.pocketnode.data.gateway.models.CellOutput
 import com.rjnr.pocketnode.data.gateway.models.Script
+import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
@@ -185,6 +187,103 @@ class SelfTransferSignatureTest {
             netChangeShannons = -100_000L,
             outputs = listOf(output(100, Script.SECP256K1_CODE_HASH, "data", mainArgs)),
             knownLockArgs = setOf(mainArgs),
+        )
+        assertFalse(flagged)
+    }
+
+    // --- selfTransferDisplayAmount / isSelfTransferFallbackSafe (#538 review) ---
+
+    @Test
+    fun `self-send to a derived candidate with change to main shows exactly the fee`() {
+        // The JNI walk was queried with only the main script, so netChangeAmount
+        // (abs of Σ-outputs-to-main minus Σ-inputs-from-main) never saw the 100
+        // CKB leg that went to the derived candidate: it reads as ~100 CKB, not
+        // the fee. feeShannons, computed from the full declared transaction, is
+        // not fooled by that and is what must be shown.
+        val fee = 1_000L
+        val wronglyUndercountedNet = 100 * ckb + fee // what abs(net) reads as
+        val displayed = selfTransferDisplayAmount(feeShannons = fee, netChangeAmount = wronglyUndercountedNet)
+        assertEquals(fee, displayed)
+    }
+
+    @Test
+    fun `unknown fee falls back to net change`() {
+        val netChangeAmount = 1_000L
+        val displayed = selfTransferDisplayAmount(feeShannons = null, netChangeAmount = netChangeAmount)
+        assertEquals(netChangeAmount, displayed)
+    }
+
+    @Test
+    fun `fallback is safe when every output is on the main script`() {
+        val safe = isSelfTransferFallbackSafe(
+            outputs = listOf(secpOutput(100, mainArgs)),
+            mainScriptArgs = mainArgs,
+        )
+        assertTrue(safe)
+    }
+
+    @Test
+    fun `fallback is not safe when an output went to a derived candidate`() {
+        val safe = isSelfTransferFallbackSafe(
+            outputs = listOf(secpOutput(60, mainArgs), secpOutput(40, derivedArgs)),
+            mainScriptArgs = mainArgs,
+        )
+        assertFalse(safe)
+    }
+
+    // --- activeSelfTransferCandidateArgs (#538 review) ---
+
+    private fun candidate(scriptArgs: String, state: String, accountIndex: Int = 1) = SubAccountCandidateEntity(
+        parentWalletId = "parent-wallet",
+        derivationPath = "m/44'/309'/$accountIndex'/0/0",
+        accountIndex = accountIndex,
+        scriptArgs = scriptArgs,
+        state = state,
+        createdAt = 0L,
+    )
+
+    @Test
+    fun `RESTORED candidates are excluded from the self-transfer scope`() {
+        val args = activeSelfTransferCandidateArgs(
+            listOf(
+                candidate(derivedArgs, SubAccountCandidateEntity.STATE_PENDING),
+                candidate(foreignArgs, SubAccountCandidateEntity.STATE_RESTORED),
+            )
+        )
+        assertEquals(listOf(derivedArgs), args)
+    }
+
+    @Test
+    fun `non-RESTORED states are still included`() {
+        val args = activeSelfTransferCandidateArgs(
+            listOf(
+                candidate(derivedArgs, SubAccountCandidateEntity.STATE_PENDING),
+                candidate(foreignArgs, SubAccountCandidateEntity.STATE_FOUND),
+                candidate(otherWalletArgs, SubAccountCandidateEntity.STATE_EMPTY),
+            )
+        )
+        assertEquals(setOf(derivedArgs, foreignArgs, otherWalletArgs), args.toSet())
+    }
+
+    @Test
+    fun `parent to restored sub-account stays Sent`() {
+        // createSubAccount() promotes a candidate to its own separate
+        // WalletEntity and marks the candidate row RESTORED rather than
+        // deleting it. A send from the parent wallet to that now-distinct
+        // child must classify as "out", not "self".
+        val restoredChildArgs = derivedArgs
+        val knownArgs = buildSet {
+            add(mainArgs)
+            addAll(
+                activeSelfTransferCandidateArgs(
+                    listOf(candidate(restoredChildArgs, SubAccountCandidateEntity.STATE_RESTORED))
+                )
+            )
+        }
+        val flagged = isSelfTransferSignature(
+            netChangeShannons = -100_000L,
+            outputs = listOf(secpOutput(100, restoredChildArgs)),
+            knownLockArgs = knownArgs,
         )
         assertFalse(flagged)
     }

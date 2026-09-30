@@ -1,5 +1,6 @@
 package com.rjnr.pocketnode.data.gateway
 
+import com.rjnr.pocketnode.data.database.entity.SubAccountCandidateEntity
 import com.rjnr.pocketnode.data.gateway.models.CellOutput
 import com.rjnr.pocketnode.data.gateway.models.Script
 
@@ -43,3 +44,54 @@ fun isSelfTransferSignature(
             it.lock.args.lowercase() in known
     }
 }
+
+/**
+ * Sub-account candidate script args usable for the self-transfer scope:
+ * every candidate for the active wallet except ones in RESTORED state (#538
+ * review).
+ *
+ * createSubAccount() promotes a candidate to its own separate WalletEntity
+ * (its own walletId, its own address, its own row in the wallet switcher) and
+ * marks the candidate row RESTORED rather than deleting it. Left unfiltered,
+ * that row would keep naming the restored child's script as "ours" forever,
+ * so a transfer from the parent wallet to that now-distinct child would
+ * misclassify as a self transfer instead of a real transfer between two
+ * wallets. GatewayRepository.getTransactions also subtracts every other
+ * WalletEntity's own address from the self-transfer set as defence in depth,
+ * in case a candidate row's state is ever stale.
+ */
+fun activeSelfTransferCandidateArgs(candidates: List<SubAccountCandidateEntity>): List<String> =
+    candidates.filter { it.state != SubAccountCandidateEntity.STATE_RESTORED }.map { it.scriptArgs }
+
+/**
+ * The amount to display on a self-transfer row (#538 review).
+ *
+ * [netChangeAmount] (`abs(netChangeShannons)`) is wrong whenever a non-change
+ * output went to another script this wallet also owns, such as a derived
+ * candidate address: the JNI walk that produced it was queried with only the
+ * wallet's main script, so it never saw that output and undercounts by its
+ * capacity (a 100 CKB send to a derived address showed as ~100 CKB "self",
+ * not the fee it actually cost). [feeShannons] is computed from the FULL
+ * declared transaction (every input and output, not the walk), so it is the
+ * honest number here and is preferred whenever it is known.
+ *
+ * [netChangeAmount] is only used as a fallback when [feeShannons] is null,
+ * and is only a SAFE fallback (see [isSelfTransferFallbackSafe]) when every
+ * output lands on the wallet's own main script: in that one case nothing is
+ * missing from the walk, so it already equals the fee exactly. When that is
+ * not the case there is no honest number to fall back to, so the same value
+ * is still returned (never worse than the pre-#538 behavior) but the caller
+ * should log the uncertainty rather than trust it silently.
+ */
+fun selfTransferDisplayAmount(feeShannons: Long?, netChangeAmount: Long): Long =
+    feeShannons ?: netChangeAmount
+
+/**
+ * Whether the [selfTransferDisplayAmount] fallback (used when `feeShannons`
+ * is null) is backed by every output landing on the wallet's own main
+ * script, [mainScriptArgs]. False does not mean the returned amount is
+ * definitely wrong, only that it cannot be vouched for the way it can when
+ * this is true.
+ */
+fun isSelfTransferFallbackSafe(outputs: List<CellOutput>, mainScriptArgs: String): Boolean =
+    outputs.all { it.lock.args.equals(mainScriptArgs, ignoreCase = true) }

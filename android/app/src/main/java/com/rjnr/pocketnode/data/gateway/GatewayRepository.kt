@@ -2080,11 +2080,41 @@ class GatewayRepository @Inject constructor(
         // purpose, for the gap-limit check above, but a send from wallet A to
         // wallet B is a real transfer, not a self transfer, even though
         // wallet B's address would be in knownLockArgs.
+        //
+        // Two exclusions on top of that plain "candidates of this wallet" set:
+        //  - RESTORED candidates. createSubAccount() promotes a candidate to
+        //    its own separate WalletEntity (own walletId, own address, its own
+        //    row in the wallet switcher) and marks the candidate row RESTORED
+        //    rather than deleting it, so it would otherwise still read as
+        //    "ours" here forever. A transfer from the parent to that restored
+        //    child is a real transfer between two wallets, not a self
+        //    transfer, even though the candidate row still names its script.
+        //  - Any script that belongs to another WalletEntity in the app at
+        //    all (defence in depth): the same restored-child address could in
+        //    principle also appear as a PENDING/FOUND row for a different
+        //    axis, or a future bug could leave a stale RESTORED update out.
+        val otherWalletLockArgs: Set<String> = runCatching {
+            buildSet {
+                val addressPicker: (WalletEntity) -> String =
+                    if (currentNetwork == NetworkType.MAINNET) { w -> w.mainnetAddress } else { w -> w.testnetAddress }
+                walletDao.getAll().forEach { w ->
+                    if (w.walletId == activeWalletId) return@forEach
+                    val addr = addressPicker(w)
+                    if (addr.isNotBlank()) {
+                        runCatching { keyManager.deriveLockScriptFromAddress(addr) }
+                            .getOrNull()?.let { add(it.args) }
+                    }
+                }
+            }
+        }.getOrElse {
+            logger.w(TAG, "getTransactions: other-wallets script set incomplete: ${it.message}")
+            emptySet()
+        }
         val selfWalletLockArgs: Set<String> = runCatching {
             buildSet {
                 add(myScript.args)
-                addAll(appDatabase.subAccountCandidateDao().getForParent(activeWalletId).map { it.scriptArgs })
-            }
+                addAll(activeSelfTransferCandidateArgs(appDatabase.subAccountCandidateDao().getForParent(activeWalletId)))
+            } - otherWalletLockArgs
         }.getOrElse {
             logger.w(TAG, "getTransactions: self-transfer script set incomplete: ${it.message}")
             setOf(myScript.args)
@@ -2211,6 +2241,26 @@ class GatewayRepository @Inject constructor(
                 },
             )
 
+            // See selfTransferDisplayAmount's KDoc (#538 review): a self row's
+            // `amount` above undercounts whenever a non-change output went to
+            // another script this wallet also owns, since the JNI walk that
+            // fed netChangeShannons was queried with only myScript. feeShannons
+            // is computed from the full declared transaction, so it is
+            // preferred; `amount` is only a safe fallback when every output is
+            // on myScript itself.
+            val selfRowAmount = if (direction == "self") {
+                if (feeShannons == null && !isSelfTransferFallbackSafe(tx.outputs, myScript.args)) {
+                    logger.w(
+                        TAG,
+                        "getTransactions: self row $txHash has no resolved fee and touches " +
+                            "another owned script; amount shown may undercount (#538)"
+                    )
+                }
+                selfTransferDisplayAmount(feeShannons, amount)
+            } else {
+                amount
+            }
+
             val (finalDirection, finalAmount) = if (hasDaoOutput) {
                 val daoOutputCapacity = tx.outputs
                     .first { it.type?.codeHash == DaoConstants.DAO_CODE_HASH }
@@ -2227,7 +2277,7 @@ class GatewayRepository @Inject constructor(
                     .sumOf { it.ioCapacity.removePrefix("0x").toLongOrNull(16) ?: 0L }
                 "dao_unlock" to totalOutput
             } else {
-                direction to amount
+                direction to selfRowAmount
             }
 
             TransactionRecord(
