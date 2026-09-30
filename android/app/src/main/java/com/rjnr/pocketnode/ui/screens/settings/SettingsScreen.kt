@@ -577,8 +577,7 @@ private fun SettingsScreenUI(
             }
             item {
                 Text(
-                    text = "Run by CoinGecko and Binance. Shows your balance in USD. " +
-                        "Sends your IP address only.",
+                    text = "Run by CoinGecko and Binance. Shows your balance in USD.",
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                     modifier = Modifier
@@ -597,8 +596,7 @@ private fun SettingsScreenUI(
             }
             item {
                 Text(
-                    text = "Checks GitHub for a new release on launch. Sends your IP " +
-                        "address and device user agent.",
+                    text = "Checks GitHub for a new release on launch.",
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                     modifier = Modifier
