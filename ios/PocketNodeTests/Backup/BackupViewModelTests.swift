@@ -241,8 +241,6 @@ final class BackupViewModelTests: XCTestCase {
         XCTAssertEqual(vm.step, .success, "success is terminal; backgrounding must not re-arm the gate")
     }
 
-    // MARK: - Screenshot mitigation (M1)
-
     // MARK: - A reveal that outlives the screen
 
     /// The key read suspends on a Face ID or passcode prompt. If the app goes
@@ -330,6 +328,22 @@ final class BackupViewModelTests: XCTestCase {
         XCTAssertEqual(vm.step, .display)
         XCTAssertEqual(vm.words.count, 12)
     }
+
+    /// A read that fails after the app went to the background is just as
+    /// stale as one that succeeds: the user comes back to a clean gate, not an
+    /// error about a reveal they are no longer looking at.
+    func testAFailedReadAfterBackgroundingSetsNoError() async {
+        let (vm, reader, _) = makeViewModel(isOnboarding: true, hasPin: { false })
+        reader.set(result: .failure(StubWalletKeyReaderError.unreadable))
+        reader.whileLoading = { @MainActor in vm.onBackgrounded() }
+
+        await vm.reveal()
+
+        XCTAssertEqual(vm.step, .gate)
+        XCTAssertNil(vm.errorMessage)
+    }
+
+    // MARK: - Screenshot mitigation (M1)
 
     func testOnScreenshotTakenWipesWordsReturnsToGateAndSetsAnInfoMessage() async {
         let (vm, _, _) = makeViewModel()

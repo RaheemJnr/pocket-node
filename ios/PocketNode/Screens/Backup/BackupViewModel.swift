@@ -139,6 +139,9 @@ final class BackupViewModel {
             selections = [:]
             step = .display
         } catch {
+            // A failure that lands after a background or lock is as stale as
+            // a success: say nothing about a reveal nobody is watching.
+            guard generation == currentGeneration else { return }
             errorMessage = Self.unreadableKeyMaterialMessage
         }
     }
