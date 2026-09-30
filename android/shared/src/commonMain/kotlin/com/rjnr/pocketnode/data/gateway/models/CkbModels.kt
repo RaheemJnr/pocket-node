@@ -194,6 +194,17 @@ data class TransactionRecord(
     fun isOutgoing(): Boolean = direction == "out"
     fun isSelfTransfer(): Boolean = direction == "self"
 
+    /**
+     * Whether THIS device broadcast the transaction, so a FAILED row can
+     * offer Retry (#538 review). "out" was the only direction this ever
+     * meant, until a self-transfer or a gap-limit sweep (also broadcast by
+     * this wallet, just to one of its own scripts) could classify as "self"
+     * too: without `isSelfTransfer()` here, a FAILED self row silently lost
+     * its retry action, the only originating direction a "did we send this"
+     * check must never miss.
+     */
+    fun canRetry(): Boolean = isOutgoing() || isSelfTransfer()
+
     fun isDaoDeposit(): Boolean = direction == "dao_deposit"
     fun isDaoWithdraw(): Boolean = direction == "dao_withdraw"
     fun isDaoUnlock(): Boolean = direction == "dao_unlock"

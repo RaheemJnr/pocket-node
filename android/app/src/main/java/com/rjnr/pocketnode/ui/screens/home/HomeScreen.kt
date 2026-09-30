@@ -146,7 +146,12 @@ fun HomeScreen(
     val haptic = LocalHapticFeedback.current
     val context = LocalContext.current
     val snackbarHostState = remember { SnackbarHostState() }
-    var selectedTransaction by remember { mutableStateOf<TransactionRecord?>(null) }
+    // #524: only the hash is saved (it survives the re-auth lock and
+    // rotation); the record is read from the current list.
+    var selectedTxHash by rememberSaveable { mutableStateOf<String?>(null) }
+    val selectedTransaction = selectedTxHash?.let { hash ->
+        uiState.transactions.firstOrNull { it.txHash == hash }
+    }
     var retryDialogTx by remember { mutableStateOf<TransactionRecord?>(null) }
     var showAccountSelector by remember { mutableStateOf(false) }
     val scope = rememberCoroutineScope()
@@ -347,7 +352,7 @@ fun HomeScreen(
             transaction = selectedTransaction!!,
             broadcast = uiState.broadcastStates[selectedTransaction!!.txHash],
             network = uiState.currentNetwork,
-            onDismiss = { selectedTransaction = null },
+            onDismiss = { selectedTxHash = null },
             onCopyTxHash = { txHash ->
                 haptic.performHapticFeedback(HapticFeedbackType.Confirm) // #304
                 clipboardManager.setText(AnnotatedString(txHash))
@@ -362,7 +367,7 @@ fun HomeScreen(
                 com.rjnr.pocketnode.ui.util.openInBrowser(context, url)
             },
             onRetry = { tx ->
-                selectedTransaction = null
+                selectedTxHash = null
                 retryDialogTx = tx
             }
         )
@@ -493,7 +498,7 @@ fun HomeScreen(
                     clipboardManager = clipboardManager,
                     snackbarHostState = snackbarHostState,
                     scope = scope,
-                    selectedTransaction = { selectedTransaction = it },
+                    selectedTransaction = { selectedTxHash = it.txHash },
                     onRetryFailed = { retryDialogTx = it },
                     onTopicHelp = { topic -> educationTopic = topic },
                     onSyncStallSwitchToRecent = { viewModel.switchToRecentSyncFromStall() },
@@ -681,6 +686,7 @@ fun HomeScreenUI(
                 WalletBalanceCard(
                     balanceCkb = uiState.balanceCkb,
                     fiatBalance = uiState.fiatBalance,
+                    isFiatEnabled = uiState.isPriceServiceEnabled,
                     address = uiState.address,
                     peerCount = uiState.peerCount,
                     isBalanceHidden = uiState.isBalanceHidden,
@@ -849,7 +855,7 @@ fun HomeScreenUI(
                     TransactionItems(
                         transaction = tx,
                         onClick = { selectedTransaction(tx) },
-                        onRetry = if (tx.status == "FAILED" && tx.isOutgoing()) {
+                        onRetry = if (tx.status == "FAILED" && tx.canRetry()) {
                             { onRetryFailed(tx) }
                         } else null,
                         broadcast = uiState.broadcastStates[tx.txHash],
@@ -1095,6 +1101,7 @@ private fun TransactionDetailSheet(
 ) {
     val isIncoming = transaction.isIncoming()
     val isOutgoing = transaction.isOutgoing()
+    val isSelfTransfer = transaction.isSelfTransfer()
     val explorerUrl = buildExplorerUrl(transaction.txHash, network)
     val displayState = TransactionStatusUi.displayState(
         status = transaction.status,
@@ -1165,6 +1172,7 @@ private fun TransactionDetailSheet(
                     Text(
                         text = when {
                             isIncoming -> "Received"
+                            isSelfTransfer -> "Self Transfer"
                             isOutgoing -> "Sent"
                             else -> "Amount"
                         },
@@ -1179,6 +1187,8 @@ private fun TransactionDetailSheet(
                         color = when {
                             isIncoming -> SuccessGreen
                             isOutgoing -> ErrorRed
+                            // isSelfTransfer falls through here: onSurface,
+                            // the same neutral tone the Home card icon uses.
                             else -> MaterialTheme.colorScheme.onSurface
                         }
                     )
@@ -1290,11 +1300,14 @@ private fun TransactionDetailSheet(
                 )
             }
 
-            // Retry CTA — only for FAILED plain transfers. Retry now re-broadcasts
-            // the original signed bytes (#316), so it's safe regardless of tx type;
-            // the gate stays conservative (plain outgoing transfers) to keep the
-            // CTA off DAO/self-transfer rows until those flows are exercised.
-            if (displayState == TxDisplayState.FAILED && transaction.isOutgoing() && onRetry != null) {
+            // Retry CTA, for any FAILED row this wallet originated (plain
+            // sends and self-transfers/sweeps, canRetry(); #538 review: a
+            // self-transfer or gap-limit sweep is broadcast by this device
+            // too, just to one of its own scripts, so it must not lose Retry
+            // just because it isn't isOutgoing()). Retry re-broadcasts the
+            // original signed bytes (#316), so it's safe regardless of tx
+            // type; DAO rows are still excluded, canRetry() does not cover them.
+            if (displayState == TxDisplayState.FAILED && transaction.canRetry() && onRetry != null) {
                 Spacer(modifier = Modifier.height(24.dp))
                 Button(
                     onClick = { onRetry(transaction) },

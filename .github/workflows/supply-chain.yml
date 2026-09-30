@@ -1,0 +1,121 @@
+name: supply-chain
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+  schedule:
+    - cron: '0 6 * * 1'
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+# dorny/paths-filter reads the PR file list through the REST API, which
+# needs pull-requests: read under a restricted default GITHUB_TOKEN.
+permissions:
+  contents: read
+  pull-requests: read
+
+env:
+  CARGO_AUDIT_VERSION: "0.22.2"
+
+jobs:
+  changes:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      rust: ${{ steps.filter.outputs.rust }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Filter changed paths
+        uses: dorny/paths-filter@v4
+        id: filter
+        with:
+          filters: |
+            rust:
+              - 'external/ckb-light-client/**'
+              - '.github/workflows/supply-chain.yml'
+
+  cargo-audit:
+    needs: changes
+    if: needs.changes.outputs.rust == 'true' || github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install pinned Rust toolchain
+        working-directory: external/ckb-light-client
+        run: rustup show
+
+      - name: Cache Cargo registry and advisory database
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            ~/.cargo/advisory-db
+          key: cargo-audit-db-${{ hashFiles('external/ckb-light-client/Cargo.lock') }}
+          restore-keys: cargo-audit-db-
+
+      # Pinned so the cached binary is tied to a known version; bump
+      # CARGO_AUDIT_VERSION to pick up cargo-audit fixes (the cache key follows).
+      - name: Cache cargo-audit binary
+        id: cache-audit-bin
+        uses: actions/cache@v4
+        with:
+          path: ~/.cargo/bin/cargo-audit
+          key: cargo-audit-bin-${{ runner.os }}-${{ env.CARGO_AUDIT_VERSION }}
+
+      - name: Install cargo-audit
+        if: steps.cache-audit-bin.outputs.cache-hit != 'true'
+        run: cargo install cargo-audit --version "${CARGO_AUDIT_VERSION}" --locked
+
+      - name: cargo audit
+        working-directory: external/ckb-light-client
+        run: cargo audit
+
+  cargo-deny:
+    needs: changes
+    if: needs.changes.outputs.rust == 'true' || github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: cargo deny check
+        uses: EmbarkStudios/cargo-deny-action@v2
+        with:
+          manifest-path: external/ckb-light-client/Cargo.toml
+          # Keep in sync with external/ckb-light-client/rust-toolchain.
+          rust-version: "1.92.0"
+
+  secrets:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Install gitleaks
+        env:
+          GITLEAKS_VERSION: "8.30.1"
+          GITLEAKS_SHA256: "551f6fc83ea457d62a0d98237cbad105af8d557003051f41f3e7ca7b3f2470eb"
+        run: |
+          set -euo pipefail
+          curl -sSLO "https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz"
+          echo "${GITLEAKS_SHA256}  gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz" | sha256sum -c -
+          tar -xzf "gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz" gitleaks
+          sudo install -m 0755 gitleaks /usr/local/bin/gitleaks
+          rm gitleaks "gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz"
+
+      - name: gitleaks (full history)
+        run: gitleaks git --config .gitleaks.toml -v --redact

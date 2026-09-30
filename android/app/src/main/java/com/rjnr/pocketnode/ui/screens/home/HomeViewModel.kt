@@ -17,6 +17,7 @@ import com.rjnr.pocketnode.BuildConfig
 import com.rjnr.pocketnode.data.auth.AuthManager
 import com.rjnr.pocketnode.data.auth.PinManager
 import com.rjnr.pocketnode.data.price.PriceRepository
+import com.rjnr.pocketnode.data.price.PriceServiceDisabledException
 import com.rjnr.pocketnode.data.update.UpdateDownloader
 import com.rjnr.pocketnode.data.update.UpdateInfo
 import com.rjnr.pocketnode.data.update.UpdateRepository
@@ -101,6 +102,7 @@ class HomeViewModel @Inject constructor(
         HomeUiState(
             showSyncOptionsDialog = savedStateHandle.get<Boolean>(SAVED_KEY_SHOW_SYNC_OPTIONS) ?: false,
             showPostImportSyncDialog = savedStateHandle.get<Boolean>(SAVED_KEY_SHOW_POST_IMPORT_SYNC) ?: false,
+            isPriceServiceEnabled = walletPreferences.isPriceServiceEnabled(),
         )
     )
     val uiState: StateFlow<HomeUiState> = _uiState.asStateFlow()
@@ -177,6 +179,27 @@ class HomeViewModel @Inject constructor(
             while (true) {
                 kotlinx.coroutines.delay(PRICE_REFRESH_INTERVAL_MS)
                 refreshPriceIfStale()
+            }
+        }
+
+        // React live to the "Fiat price" network-services switch (#531),
+        // wherever it's flipped from (only Settings today). `drop(1)` skips
+        // the flow's initial replay: startup fetch is already handled by
+        // initializeWallet() -> fetchPrice(). Off: hide the fiat line rather
+        // than leave a stale value. On: fetch immediately, no waiting for the
+        // 5-min ticker.
+        viewModelScope.launch {
+            walletPreferences.priceServiceEnabledFlow.collect { enabled ->
+                _uiState.update { it.copy(isPriceServiceEnabled = enabled) }
+            }
+        }
+        viewModelScope.launch {
+            walletPreferences.priceServiceEnabledFlow.drop(1).collect { enabled ->
+                if (enabled) {
+                    fetchPrice()
+                } else {
+                    _uiState.update { it.copy(fiatBalance = null, ckbUsdPrice = null) }
+                }
             }
         }
 
@@ -316,8 +339,13 @@ class HomeViewModel @Inject constructor(
                 logger.d(TAG, "CKB price: $$price, fiat balance: $formatted")
             }
             .onFailure { error ->
-                logger.w(TAG, "Price fetch failed (non-critical): ${error.message}")
-                // Leave fiatBalance as-is; UI shows "≈ — USD" when null
+                if (error is PriceServiceDisabledException) {
+                    // #531: hide the fiat line rather than show a stale value.
+                    _uiState.update { it.copy(fiatBalance = null, ckbUsdPrice = null) }
+                } else {
+                    logger.w(TAG, "Price fetch failed (non-critical): ${error.message}")
+                    // Leave fiatBalance as-is; UI shows "≈ — USD" when null
+                }
             }
     }
 
@@ -328,6 +356,7 @@ class HomeViewModel @Inject constructor(
      * hammering CoinGecko/Binance on rapid foreground/background cycles.
      */
     fun refreshPriceIfStale() {
+        if (!walletPreferences.isPriceServiceEnabled()) return
         val now = System.currentTimeMillis()
         if (now - lastPriceFetchAt < PRICE_STALENESS_THRESHOLD_MS) return
         viewModelScope.launch { fetchPrice() }
@@ -1187,6 +1216,10 @@ data class HomeUiState(
     val balanceCkb: Double = 0.0,
     val fiatBalance: String? = null,
     val ckbUsdPrice: Double? = null,
+    // #531: mirrors WalletPreferences.priceServiceEnabledFlow so the balance
+    // card can hide the fiat line entirely when off, rather than fall back
+    // to a placeholder.
+    val isPriceServiceEnabled: Boolean = true,
     val peerCount: Int = 0,
     val transactions: List<TransactionRecord> = emptyList(),
     /**

@@ -142,7 +142,13 @@ jobs:
           # (run 27303458847: "Timeout waiting for emulator to boot").
           emulator-boot-timeout: 900
           force-avd-creation: false
-          emulator-options: -no-window -gpu swiftshader_indirect -noaudio -no-boot-anim -camera-back none
+          # force-avd-creation: false already means "reuse an AVD if one
+          # exists", but nothing here caches the AVD across runs, so every
+          # run creates one fresh and then wastes time on a doomed
+          # default_boot snapshot load ("Failed to load snapshot
+          # 'default_boot'" in every run's log, pass or fail). -no-snapshot
+          # skips that load-then-fallback-to-cold-boot round trip entirely.
+          emulator-options: -no-window -gpu swiftshader_indirect -noaudio -no-boot-anim -camera-back none -no-snapshot
           disable-animations: true
           # The action's inline-script splitter mangles multi-line shell
           # constructs (functions, traps, if/fi). Invoke a real bash file

@@ -15,8 +15,8 @@ android {
         applicationId = "com.rjnr.pocketnode"
         minSdk = 26
         targetSdk = 36
-        versionCode = 26
-        versionName = "1.8.4"
+        versionCode = 27
+        versionName = "1.8.5"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
 
@@ -346,9 +346,13 @@ dependencies {
     testImplementation("androidx.test:core:1.6.1")
     testImplementation(libs.mockk)
     testImplementation(libs.kotlinx.coroutines.test)
+    testImplementation(libs.ktor.client.mock)
     // Host-side unit tests call libsecp256k1 through :shared; the Android JNI
     // artifact only carries Android .so files, so the JVM payload is needed here.
     testImplementation(libs.secp256k1.kmp.jni.jvm)
+    // Compose UI tests under Robolectric (#524 re-auth overlay tests).
+    testImplementation(platform(libs.androidx.compose.bom))
+    testImplementation(libs.androidx.ui.test.junit4)
 
     // Instrumented tests
     androidTestImplementation("androidx.test.ext:junit:1.2.1")

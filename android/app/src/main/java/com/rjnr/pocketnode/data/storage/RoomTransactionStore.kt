@@ -62,4 +62,9 @@ class RoomTransactionStore @Inject constructor(
 
     override suspend fun deleteTransaction(txHash: String) =
         cacheManager.deleteTransaction(txHash)
+
+    // Any network, as public main's retryBroadcast read it: txHash is unique
+    // across networks in practice, and deleteTransaction is unscoped too.
+    override suspend fun cachedDirectionAndFee(txHash: String, network: String): Pair<String, Long?>? =
+        dao.getByTxHash(txHash)?.let { it.direction to it.feeShannons }
 }

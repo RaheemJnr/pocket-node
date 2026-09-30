@@ -90,4 +90,13 @@ interface TransactionStore {
      * a failure path and has a more useful error to report.
      */
     suspend fun deleteTransaction(txHash: String)
+
+    /**
+     * The cached row's direction and recorded fee for [txHash] on [network],
+     * or null when there is no row (public #538). A retry reads these before
+     * [deleteTransaction] so a re-sent "self" row keeps its label and fee.
+     * Propagates a store failure; the one caller wraps it. The default
+     * answers null, which only costs a retried self row its label.
+     */
+    suspend fun cachedDirectionAndFee(txHash: String, network: String): Pair<String, Long?>? = null
 }

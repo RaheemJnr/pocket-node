@@ -127,6 +127,27 @@ class MnemonicBackupViewModelTest {
     }
 
     @Test
+    fun `a PIN reveal that finishes after the app went to the background is dropped (#524)`() = runTest {
+        coEvery { walletRepository.getActive() } returns mnemonicEntity()
+        coEvery { keyMaterialDao.getKdfVersion("wallet-1") } returns 1
+        every { pinManager.hasPin() } returns true
+        lateinit var vm: MnemonicBackupViewModel
+        coEvery { repository.getMnemonic() } coAnswers {
+            // The activity stopped (and the re-auth lock armed) mid-read.
+            vm.onBackgrounded()
+            words
+        }
+
+        vm = createViewModel()
+        advanceUntilIdle()
+        vm.onPinVerified()
+        advanceUntilIdle()
+
+        assertTrue(vm.uiState.value.words.isEmpty())
+        assertTrue(vm.uiState.value.pinRequiredForMnemonic)
+    }
+
+    @Test
     fun `V1 mnemonic wallet loads the phrase after the PIN is verified`() = runTest {
         coEvery { walletRepository.getActive() } returns mnemonicEntity()
         coEvery { keyMaterialDao.getKdfVersion("wallet-1") } returns 1

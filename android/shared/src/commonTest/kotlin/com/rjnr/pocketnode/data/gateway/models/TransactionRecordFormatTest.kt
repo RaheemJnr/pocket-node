@@ -2,6 +2,8 @@ package com.rjnr.pocketnode.data.gateway.models
 
 import kotlin.test.Test
 import kotlin.test.assertEquals
+import kotlin.test.assertFalse
+import kotlin.test.assertTrue
 
 /**
  * Display formatting for [TransactionRecord], pinned to the strings the JVM
@@ -107,6 +109,18 @@ class TransactionRecordFormatTest {
         assertEquals("1 months ago", relativeTimeAgo(days = 30))
         assertEquals("12 months ago", relativeTimeAgo(days = 364))
         assertEquals("1 years ago", relativeTimeAgo(days = 365))
+    }
+
+    // --- canRetry (#538 review: a FAILED self row must not lose Retry) ---
+
+    @Test
+    fun canRetryIsTrueForOutAndSelfOnly() {
+        assertTrue(record(direction = "out").canRetry())
+        assertTrue(record(direction = "self").canRetry())
+        assertFalse(record(direction = "in").canRetry())
+        assertFalse(record(direction = "dao_deposit").canRetry())
+        assertFalse(record(direction = "dao_withdraw").canRetry())
+        assertFalse(record(direction = "dao_unlock").canRetry())
     }
 
     private fun relativeTimeAgo(
