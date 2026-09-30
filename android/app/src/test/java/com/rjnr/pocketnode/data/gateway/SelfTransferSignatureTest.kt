@@ -373,4 +373,73 @@ class SelfTransferSignatureTest {
         )
         assertEquals(null, display)
     }
+
+    // --- sendTransactionPendingAmount (#538 review) ---
+
+    @Test
+    fun `a sweep's pending row shows the fee, not the recipient amount of zero`() {
+        // Every output of a sweep is locked to the main script, so
+        // sendTransaction's own recipientOutgoingShannons (outputs NOT ours)
+        // reads 0: without this, the pending row would say "Sent 0 CKB".
+        val fee = 1_000L
+        val amount = sendTransactionPendingAmount(
+            pendingDirection = "self",
+            pendingFeeShannons = fee,
+            recipientAmountShannons = 0L,
+        )
+        assertEquals(fee, amount)
+    }
+
+    @Test
+    fun `pending amount for self with an unknown fee falls back to the recipient amount`() {
+        val recipientAmount = 500L
+        val amount = sendTransactionPendingAmount(
+            pendingDirection = "self",
+            pendingFeeShannons = null,
+            recipientAmountShannons = recipientAmount,
+        )
+        assertEquals(recipientAmount, amount)
+    }
+
+    @Test
+    fun `pending amount for a plain out send is unaffected`() {
+        val recipientAmount = 12_345L
+        val amount = sendTransactionPendingAmount(
+            pendingDirection = "out",
+            pendingFeeShannons = 1_000L,
+            recipientAmountShannons = recipientAmount,
+        )
+        assertEquals(recipientAmount, amount)
+    }
+
+    // --- retryPendingOverride (#538 review, retry-path follow-up) ---
+
+    @Test
+    fun `a retried sweep still shows the fee`() {
+        // retryBroadcast reads the cached row (direction "self", the fee the
+        // sweep was originally sent with) before deleting it, and this is
+        // what tells sendTransaction to show that fee again instead of
+        // regressing to its own default.
+        val fee = 1_000L
+        val override = retryPendingOverride(cachedDirection = "self", cachedFeeShannons = fee)
+        assertEquals("self" to fee, override)
+    }
+
+    @Test
+    fun `a retried self row with an unresolved cached fee still overrides direction`() {
+        val override = retryPendingOverride(cachedDirection = "self", cachedFeeShannons = null)
+        assertEquals("self" to null, override)
+    }
+
+    @Test
+    fun `a retried plain send is not overridden`() {
+        val override = retryPendingOverride(cachedDirection = "out", cachedFeeShannons = 1_000L)
+        assertEquals(null, override)
+    }
+
+    @Test
+    fun `no cached row at all is not overridden`() {
+        val override = retryPendingOverride(cachedDirection = null, cachedFeeShannons = null)
+        assertEquals(null, override)
+    }
 }

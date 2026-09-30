@@ -974,19 +974,31 @@ class GatewayRepository @Inject constructor(
                 }
                 if (activeWalletId != wId) throw Exception("Wallet changed during the sweep; try again")
                 val signed = transactionBuilder.signSweep(plan.transaction, plan.inputLockArgs, keys).getOrThrow()
-                // pendingFeeShannons: a sweep's inputs (candidate scripts) are
-                // never visible to getTransactions's info.script-scoped walk,
-                // so its confirmed fee can never be recomputed there either
-                // (same structural gap as a DAO unlock, #497). plan.feeShannons
-                // is known now, at build time, so it is passed through and
-                // persisted on the pending row.
-                val txHash = sendTransaction(signed, expectedWalletId = wId, pendingFeeShannons = plan.feeShannons).getOrThrow()
-                // #538 review: marks this hash so getTransactions can classify
-                // the confirmed row "self" (amount = fee) once it is indexed,
-                // without an extra per-candidate-script JNI lookup on every
-                // poll. See selfWalletLockArgsFor's sibling check in
-                // getTransactions for the read side.
-                walletPreferences.addSweepTxHash(txHash)
+                // #538 review: every output of a sweep lands on the main
+                // script, so sendTransaction's own recipient-amount insert
+                // (which only sums outputs NOT locked to us) would otherwise
+                // show a pending "Sent 0 CKB" until indexed. pendingDirection
+                // "self" tells it to show plan.feeShannons instead.
+                // plan.feeShannons is also passed as pendingFeeShannons: a
+                // sweep's inputs (candidate scripts) are never visible to
+                // getTransactions's info.script-scoped walk, so its confirmed
+                // fee can never be recomputed there either (same structural
+                // gap as a DAO unlock, #497).
+                val txHash = sendTransaction(
+                    signed,
+                    expectedWalletId = wId,
+                    pendingDirection = "self",
+                    pendingFeeShannons = plan.feeShannons,
+                ).getOrThrow()
+                // Marks this hash (with its fee) so getTransactions can
+                // classify the confirmed row "self" (amount = fee) once it is
+                // indexed, without an extra per-candidate-script JNI lookup on
+                // every poll. Stored in WalletPreferences, not the `transactions`
+                // cache, so a later retryBroadcast (which deletes that cached
+                // row) cannot erase the fee out from under it. See
+                // selfWalletLockArgsFor's sibling check in getTransactions for
+                // the read side.
+                walletPreferences.addSweepTxHash(txHash, plan.feeShannons)
                 logger.i(TAG, "gap-limit sweep broadcast: ${plan.inputLockArgs.size} inputs, ${keys.size} groups")
                 txHash
             } finally {
@@ -1806,14 +1818,30 @@ class GatewayRepository @Inject constructor(
      * already encodes, with no heuristic. We drop the FAILED row first so
      * [sendTransaction] re-inserts a fresh BROADCASTING row for the same hash
      * and the watchdog re-tracks it.
+     *
+     * #538 review: [sendTransaction]'s own insert always shows "out" and the
+     * recipient amount, which is wrong for a "self" row (a self-transfer or a
+     * gap-limit sweep): that reads as "Sent 0 CKB" (or the wrong amount) again
+     * until the confirmed row takes over. The cached row's direction/fee are
+     * read here BEFORE it is deleted below and threaded back through so a
+     * retried self row still shows "self" with its fee, not a regression back
+     * to the bug this whole PR fixes. A sweep's fee also survives independently
+     * in WalletPreferences (see sweepGapLimitFundsInner), so this matters most
+     * for a retried plain self-transfer, whose only record was this cached row.
      */
     suspend fun retryBroadcast(txHash: String): Result<String> = runCatching {
         val row = pendingBroadcastDao.getFailedRow(txHash)
             ?: error("This transaction is too old to retry automatically. Please send a new one.")
         val tx = json.decodeFromString<Transaction>(row.signedTxJson)
+        val cached = runCatching { appDatabase.transactionDao().getByTxHash(txHash) }.getOrNull()
         pendingBroadcastDao.delete(txHash)
         cacheManager.deleteTransaction(txHash)
-        sendTransaction(tx).getOrThrow()
+        val override = retryPendingOverride(cached?.direction, cached?.feeShannons)
+        if (override != null) {
+            sendTransaction(tx, pendingDirection = override.first, pendingFeeShannons = override.second).getOrThrow()
+        } else {
+            sendTransaction(tx).getOrThrow()
+        }
     }
 
     suspend fun sendTransaction(
@@ -1832,6 +1860,16 @@ class GatewayRepository @Inject constructor(
          * the confirmed transaction — see [unlockDao].
          */
         pendingFeeShannons: Long? = null,
+        /**
+         * Pending activity-row override (#538 review, mirroring
+         * buildReserveAndSend's own parameter of the same name). "out" (the
+         * default) keeps today's recipient-amount insert below. "self" is for
+         * a transaction whose every output lands on this wallet's own script
+         * (a gap-limit sweep, or a retried self-transfer): the recipient
+         * amount below would otherwise read 0 (nothing is "not ours"), so
+         * [pendingFeeShannons] is shown instead.
+         */
+        pendingDirection: String = "out",
     ): Result<String> = runCatching {
         logger.d(TAG, "📤 sendTransaction: building JSON")
         logger.d(TAG, "  Inputs: ${transaction.cellInputs.size}, Outputs: ${transaction.cellOutputs.size}")
@@ -1879,8 +1917,12 @@ class GatewayRepository @Inject constructor(
                 isTyped = output.type != null,
             )
         }
-        // Positive hex per existing convention; `direction = "out"` carries sign.
-        val balanceChangeHex = "0x${recipientOutgoingShannons(outgoingOutputs).toString(16)}"
+        // Positive hex per existing convention; `direction` carries the sign.
+        // See sendTransactionPendingAmount's KDoc: for "self" (every output is
+        // ours, so recipientOutgoingShannons reads 0) the fee is shown
+        // instead, same as the confirmed row.
+        val recipientAmount = recipientOutgoingShannons(outgoingOutputs)
+        val balanceChangeHex = "0x${sendTransactionPendingAmount(pendingDirection, pendingFeeShannons, recipientAmount).toString(16)}"
         val now = System.currentTimeMillis()
 
         logger.d(TAG, "📤 sendTransaction: JSON length=${txJson.length}, preHash=$txHash")
@@ -1911,7 +1953,7 @@ class GatewayRepository @Inject constructor(
                     network = network,
                     walletId = walletId,
                     balanceChange = balanceChangeHex,
-                    direction = "out",
+                    direction = pendingDirection,
                     fee = "0x0",
                     feeShannons = pendingFeeShannons
                 )
@@ -1980,7 +2022,7 @@ class GatewayRepository @Inject constructor(
                 network = network,
                 walletId = walletId,
                 balanceChange = balanceChangeHex,
-                direction = "out",
+                direction = pendingDirection,
                 fee = "0x0",
                 feeShannons = pendingFeeShannons
             )
@@ -2299,13 +2341,16 @@ class GatewayRepository @Inject constructor(
             // never visible to this walk (queried with only myScript), so
             // netChangeShannons only sees the main-script output and reads
             // positive: it would otherwise show as "Received", hiding the
-            // fee actually paid. sweepGapLimitFundsInner marks its own tx
-            // hash locally at send time (isSweepTxHash), so this is detected
-            // without an extra per-candidate-script JNI lookup on every
-            // getTransactions call; a genuine receive from a foreign input is
-            // never marked and is untouched. Only checked in the non-DAO
-            // branch below, so DAO priority is unaffected.
-            val isSweepRow = walletPreferences.isSweepTxHash(txHash)
+            // fee actually paid. sweepGapLimitFundsInner records its own tx
+            // hash AND fee locally at send time (WalletPreferences, not the
+            // Room `transactions` cache: retryBroadcast deletes that row on
+            // every retry, which was silently erasing the fee here too), so
+            // this is detected without an extra per-candidate-script JNI
+            // lookup on every getTransactions call; a genuine receive from a
+            // foreign input is never marked and is untouched. Only checked in
+            // the non-DAO branch below, so DAO priority is unaffected.
+            val sweepFeeShannons = walletPreferences.sweepFeeShannons(txHash)
+            val isSweepRow = sweepFeeShannons != null
 
             val (finalDirection, finalAmount, finalFeeShannons) = if (hasDaoOutput) {
                 val daoOutputCapacity = tx.outputs
@@ -2323,20 +2368,12 @@ class GatewayRepository @Inject constructor(
                     .sumOf { it.ioCapacity.removePrefix("0x").toLongOrNull(16) ?: 0L }
                 Triple("dao_unlock", totalOutput, feeShannons)
             } else if (isSweepRow) {
-                val sweepFeeShannons = runCatching {
-                    appDatabase.transactionDao().getByTxHash(txHash)?.feeShannons
-                }.getOrNull()
-                if (sweepFeeShannons == null) {
-                    logger.w(
-                        TAG,
-                        "getTransactions: sweep row $txHash has no recorded fee; amount shown may be wrong (#538)"
-                    )
-                }
-                // isKnownSweepTxHash is always true here (that is what put us in
-                // this branch); sweepRowDisplay's null case is exercised by its
-                // own unit tests, not reachable from this call site.
+                // sweepFeeShannons is never null here: isSweepRow is derived
+                // from it above. sweepRowDisplay's null-fee fallback (and
+                // isKnownSweepTxHash=false) are exercised by its own unit
+                // tests, not reachable from this call site.
                 val display = sweepRowDisplay(isSweepRow, sweepFeeShannons, amount)!!
-                Triple(display.direction, display.amountShannons, sweepFeeShannons ?: feeShannons)
+                Triple(display.direction, display.amountShannons, sweepFeeShannons)
             } else {
                 Triple(direction, selfRowAmount, feeShannons)
             }

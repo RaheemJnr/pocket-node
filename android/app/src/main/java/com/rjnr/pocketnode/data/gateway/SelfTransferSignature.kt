@@ -152,3 +152,45 @@ fun sweepRowDisplay(
     if (!isKnownSweepTxHash) return null
     return PendingTransferDisplay("self", recordedFeeShannons ?: netChangeAmount)
 }
+
+/**
+ * The balanceChange sendTransaction's own pending-row insert should show
+ * (#538 review, retry-path follow-up).
+ *
+ * sendTransaction's insert (used directly by sweepGapLimitFunds, and by
+ * retryBroadcast for any re-sent transaction) computes a recipient amount:
+ * the sum of outputs NOT locked to this wallet. That reads 0 whenever every
+ * output IS locked to this wallet, such as a gap-limit sweep (spends
+ * candidate cells back to the main address) or a retried self-transfer: the
+ * pending row would otherwise show "Sent 0 CKB" (or whatever wrong amount)
+ * until the confirmed row, already fixed elsewhere, takes over.
+ * [pendingDirection] "self" says this is one of those cases and prefers
+ * [pendingFeeShannons]; any other direction is untouched.
+ */
+fun sendTransactionPendingAmount(
+    pendingDirection: String,
+    pendingFeeShannons: Long?,
+    recipientAmountShannons: Long,
+): Long = if (pendingDirection == "self") {
+    pendingFeeShannons ?: recipientAmountShannons
+} else {
+    recipientAmountShannons
+}
+
+/**
+ * What retryBroadcast should pass through to sendTransaction for the row it
+ * is re-sending (#538 review, retry-path follow-up).
+ *
+ * retryBroadcast deletes the cached `transactions` row before re-sending, so
+ * without this, a "self" row (a self-transfer to a derived candidate, or a
+ * gap-limit sweep) would regress back to sendTransaction's own default "out"
+ * + wrong amount for as long as the retry is pending, undoing the fix this
+ * whole PR makes. [cachedDirection]/[cachedFeeShannons] are read from that
+ * row BEFORE it is deleted. Returns null for any other direction (or no
+ * cached row at all), so the caller falls back to sendTransaction's default.
+ * The fee is deliberately left nullable here (unlike [PendingTransferDisplay]'s
+ * amount): "unknown" must stay distinguishable from a genuine zero so
+ * sendTransactionPendingAmount can fall back to the recipient amount instead.
+ */
+fun retryPendingOverride(cachedDirection: String?, cachedFeeShannons: Long?): Pair<String, Long?>? =
+    if (cachedDirection == "self") "self" to cachedFeeShannons else null

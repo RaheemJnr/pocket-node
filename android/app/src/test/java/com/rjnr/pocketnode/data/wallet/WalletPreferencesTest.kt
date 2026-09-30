@@ -240,4 +240,49 @@ class WalletPreferencesTest {
         prefs.setPriceServiceEnabled(false)
         assertFalse(prefs.priceServiceEnabledFlow.value)
     }
+
+    // --- Sweep tx-hash/fee marker (#538 review, retry-path follow-up) ---
+    // Stored in WalletPreferences itself, not the Room `transactions` cache,
+    // because retryBroadcast deletes and re-inserts that row on every retry;
+    // a retried sweep must still find its fee afterward.
+
+    @Test
+    fun `a hash never marked as a sweep has no fee and is not a sweep`() {
+        val prefs = newPrefs()
+        assertFalse(prefs.isSweepTxHash("0xabc"))
+        assertNull(prefs.sweepFeeShannons("0xabc"))
+    }
+
+    @Test
+    fun `addSweepTxHash records the fee, readable back on a fresh instance`() {
+        val prefs = newPrefs()
+        prefs.addSweepTxHash("0xsweep1", 1_000L)
+
+        assertTrue(newPrefs().isSweepTxHash("0xsweep1"))
+        assertEquals(1_000L, newPrefs().sweepFeeShannons("0xsweep1"))
+    }
+
+    @Test
+    fun `the sweep fee survives independently of anything Room-side (simulated by never touching it)`() {
+        // The whole point of storing the fee here instead of the `transactions`
+        // row: retryBroadcast's cacheManager.deleteTransaction(txHash) call
+        // cannot reach this preference, so the fee recorded at send time is
+        // still there after a simulated "retry" that never touches it again.
+        val prefs = newPrefs()
+        prefs.addSweepTxHash("0xsweep2", 2_000L)
+
+        // Nothing else in this test writes to or clears sweep prefs, standing
+        // in for a Room-row deletion elsewhere: the marker is unaffected.
+        assertEquals(2_000L, newPrefs().sweepFeeShannons("0xsweep2"))
+    }
+
+    @Test
+    fun `multiple sweeps keep independent fees`() {
+        val prefs = newPrefs()
+        prefs.addSweepTxHash("0xsweepA", 111L)
+        prefs.addSweepTxHash("0xsweepB", 222L)
+
+        assertEquals(111L, prefs.sweepFeeShannons("0xsweepA"))
+        assertEquals(222L, prefs.sweepFeeShannons("0xsweepB"))
+    }
 }

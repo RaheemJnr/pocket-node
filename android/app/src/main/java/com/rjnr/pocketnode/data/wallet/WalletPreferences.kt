@@ -136,24 +136,41 @@ class WalletPreferences @Inject constructor(
     }
 
     /**
-     * Tx hashes broadcast by sweepGapLimitFunds (#538 review). A sweep spends
-     * FOUND candidate cells (derived addresses) back to the main address;
-     * getTransactions's per-tx walk is queried with only the main script, so
-     * it never sees those candidate-script inputs and the net reads positive
-     * (a sweep would otherwise show as "Received", hiding the fee it paid).
-     * Recorded locally at send time, same one-set-across-wallets/networks
-     * shape as [isBulkTxHash] above, so the confirmed row can be classified
-     * "self" without an extra per-candidate-script JNI lookup on every
-     * getTransactions call. Plain method, not part of a core.prefs interface:
-     * gap-limit sweep is Android-only (#382), so this stays out of the
-     * iOS-shared surface.
+     * Tx hash -> fee shannons for sweeps broadcast by sweepGapLimitFunds (#538
+     * review). A sweep spends FOUND candidate cells (derived addresses) back
+     * to the main address; getTransactions's per-tx walk is queried with only
+     * the main script, so it never sees those candidate-script inputs and the
+     * net reads positive (a sweep would otherwise show as "Received", hiding
+     * the fee it paid).
+     *
+     * The fee is stored HERE, not read back from the cached `transactions`
+     * row, because retryBroadcast deletes and re-inserts that row on every
+     * retry (#538 review, retry-path follow-up): a retried sweep's confirmed
+     * row would otherwise find no fee once indexed again and fall back to the
+     * wrongly-positive net (the whole swept balance), the same bug the fee
+     * lookup exists to avoid in the first place. Recorded locally at send
+     * time, one entry per hash (globally unique, so no wallet/network
+     * namespacing needed, same shape as [isBulkTxHash] above); the set only
+     * grows on the rare sweep. Plain methods, not part of a core.prefs
+     * interface: gap-limit sweep is Android-only (#382), so this stays out of
+     * the iOS-shared surface.
+     *
+     * Entries are `"$hash:$feeShannons"`; a tx hash is always `0x` + 64 hex
+     * chars, never containing ':', so splitting on the first one is safe.
      */
-    fun isSweepTxHash(hash: String): Boolean =
-        prefs.getStringSet(KEY_SWEEP_TX_HASHES, emptySet())?.contains(hash) == true
+    fun isSweepTxHash(hash: String): Boolean = sweepFeeShannons(hash) != null
 
-    fun addSweepTxHash(hash: String) {
-        val current = prefs.getStringSet(KEY_SWEEP_TX_HASHES, emptySet()) ?: emptySet()
-        prefs.edit().putStringSet(KEY_SWEEP_TX_HASHES, current + hash).apply()
+    fun sweepFeeShannons(hash: String): Long? {
+        val prefix = "$hash:"
+        return prefs.getStringSet(KEY_SWEEP_TX_FEES, emptySet())
+            ?.firstOrNull { it.startsWith(prefix) }
+            ?.substringAfter(':')
+            ?.toLongOrNull()
+    }
+
+    fun addSweepTxHash(hash: String, feeShannons: Long) {
+        val current = prefs.getStringSet(KEY_SWEEP_TX_FEES, emptySet()) ?: emptySet()
+        prefs.edit().putStringSet(KEY_SWEEP_TX_FEES, current + "$hash:$feeShannons").apply()
     }
 
     init {
@@ -529,7 +546,7 @@ class WalletPreferences @Inject constructor(
         private const val KEY_THEME_MODE = "theme_mode"
         private const val KEY_BULK_SEND_UNLOCKED = "bulk_send_unlocked"
         private const val KEY_BULK_TX_HASHES = "bulk_tx_hashes"
-        private const val KEY_SWEEP_TX_HASHES = "sweep_tx_hashes"
+        private const val KEY_SWEEP_TX_FEES = "sweep_tx_fees"
         private const val KEY_BACKGROUND_SYNC = "background_sync_enabled"
         private const val KEY_LAST_SYNCED_AT = "last_synced_at_ms"
         private const val KEY_BG_SYNC_PILL_DISMISSED = "bg_sync_pill_dismissed"
