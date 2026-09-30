@@ -208,8 +208,16 @@ final class WalletCreator {
 
     /// The restore counterpart of ``persist(_:name:type:backedUp:)``: the
     /// addresses are checked against the record before anything is written,
-    /// then the keys, then the record, rolling the keys back if the record
-    /// cannot be saved so a failed restore leaves the device as it found it.
+    /// then the keys, then the record.
+    ///
+    /// Unlike a fresh create, a record that cannot be saved does not roll the
+    /// keys back. The `wallet.json` already on disk describes exactly these
+    /// keys (the addresses were just checked against it), so the wallet is
+    /// whole without the save, which only carries `mnemonicBackedUp`. Deleting
+    /// the keys again would risk the opposite failure, an envelope left
+    /// behind without its wrapping key, which strands the wallet for good. So
+    /// the restore succeeds with the record as it was; at worst the backup
+    /// reminder shows for a phrase the user has just typed in.
     private func persistRestored(
         _ derived: Derived,
         replacing record: WalletRecord,
@@ -236,8 +244,7 @@ final class WalletCreator {
         do {
             try walletStore.save(restored)
         } catch {
-            try? await keyStore.delete()
-            throw WalletCreationError.metadataStorageFailed
+            return CreatedWallet(record: record, mnemonic: [])
         }
         return CreatedWallet(record: restored, mnemonic: [])
     }
