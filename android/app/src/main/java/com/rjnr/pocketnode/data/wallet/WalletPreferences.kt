@@ -218,6 +218,14 @@ class WalletPreferences @Inject constructor(
         prefs.edit().putString(key, mode.name).apply()
     }
 
+    /** Remove an explicit sync mode so [getSyncModeOrNull] reads null again (#431 rollback). */
+    fun clearSyncMode(network: NetworkType? = null, walletId: String? = null) {
+        val net = network ?: getSelectedNetwork()
+        val key = if (walletId != null) walletNetworkKey(walletId, net.name, KEY_SYNC_MODE)
+                  else networkKey(KEY_SYNC_MODE, net)
+        prefs.edit().remove(key).apply()
+    }
+
     // --- Custom block height ---
 
     override fun getCustomBlockHeight(network: NetworkType?, walletId: String?): Long? {

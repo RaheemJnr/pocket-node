@@ -14,6 +14,8 @@ import com.rjnr.pocketnode.data.database.dao.WalletDao
 import com.rjnr.pocketnode.data.crypto.KeyStoreMigrationHelper
 import com.rjnr.pocketnode.data.crypto.KeystoreV2MigrationHelper
 import com.rjnr.pocketnode.data.crypto.WalletKeyBundle
+import com.rjnr.pocketnode.data.gateway.models.NetworkType
+import com.rjnr.pocketnode.data.gateway.models.SyncMode
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.test.runTest
 import org.junit.After
@@ -37,7 +39,7 @@ class WalletRepositoryTest {
 
     /**
      * Fake persistKeys closure that mirrors what `WalletKeyWriter` does in
-     * production — encrypt the bundle with a fresh V2 cipher and write
+     * production, encrypt the bundle with a fresh V2 cipher and write
      * directly to `key_material` at kdfVersion=2. Skips the BiometricPrompt
      * (the test fixture has no Activity).
      */
@@ -200,7 +202,7 @@ class WalletRepositoryTest {
 
     /**
      * Discovery restore (#82 phase 2): explicitIndex recreates the account
-     * at the EXACT index whose script had history — not max+1. Same index
+     * at the EXACT index whose script had history, not max+1. Same index
      * must derive the same address a manual creation would have, and a
      * taken index must be refused rather than silently shifted.
      */
@@ -254,8 +256,8 @@ class WalletRepositoryTest {
 
     /**
      * #382 Tier 2: importing a seed must also record gap-limit candidates
-     * along account 0's receiving/change chains — the paths Neuron spreads
-     * funds across — so the auto-scan can register them for sync.
+     * along account 0's receiving/change chains, the paths Neuron spreads
+     * funds across, so the auto-scan can register them for sync.
      */
     @Test
     fun `importFromMnemonic records chain-axis gap-limit candidates`() = runTest {
@@ -287,7 +289,7 @@ class WalletRepositoryTest {
 
     /**
      * Chain-axis slots are scan targets, not wallets. createWallet (a fresh
-     * seed that never existed elsewhere) must NOT record them — auto-scan is
+     * seed that never existed elsewhere) must NOT record them, auto-scan is
      * an import-time behavior.
      */
     @Test
@@ -360,6 +362,72 @@ class WalletRepositoryTest {
         val error = result.exceptionOrNull()
         assertNotNull("Expected IllegalArgumentException", error)
         assertTrue(error is IllegalArgumentException)
+    }
+
+    /**
+     * #431: restored wallets used to start at the tip and show no history
+     * because import left the sync mode unset, which defaults to NEW_WALLET.
+     * Imports must now record RECENT explicitly, on both networks, so the
+     * wallet's history window is fetched even if the post-import sheet is
+     * dismissed.
+     */
+    @Test
+    fun `importFromMnemonic defaults sync mode to RECENT on both networks`() = runTest {
+        val words = mnemonicManager.generateMnemonic(MnemonicManager.WordCount.TWELVE)
+        val wallet = repo.importFromMnemonic(
+            words = words,
+            name = "Restored",
+            persistKeys = { walletId, bundle -> fakePersistV2(walletId, bundle) },
+        ).getOrThrow()
+
+        assertEquals(
+            SyncMode.RECENT,
+            walletPreferences.getSyncMode(NetworkType.MAINNET, wallet.walletId)
+        )
+        assertEquals(
+            SyncMode.RECENT,
+            walletPreferences.getSyncMode(NetworkType.TESTNET, wallet.walletId)
+        )
+    }
+
+    @Test
+    fun `importRawKey defaults sync mode to RECENT on both networks`() = runTest {
+        @Suppress("SpellCheckingInspection")
+        val privateKeyHex = "c".repeat(64)
+
+        val wallet = repo.importRawKey(
+            privateKeyHex = privateKeyHex,
+            name = "Restored Raw Key",
+            persistKeys = { walletId, bundle ->
+                fakePersistV2(walletId, bundle, walletType = KeyManager.WALLET_TYPE_RAW_KEY)
+            },
+        ).getOrThrow()
+
+        assertEquals(
+            SyncMode.RECENT,
+            walletPreferences.getSyncMode(NetworkType.MAINNET, wallet.walletId)
+        )
+        assertEquals(
+            SyncMode.RECENT,
+            walletPreferences.getSyncMode(NetworkType.TESTNET, wallet.walletId)
+        )
+    }
+
+    @Test
+    fun `createWallet still defaults sync mode to NEW_WALLET on both networks`() = runTest {
+        val wallet = repo.createWallet(
+            name = "Fresh Wallet",
+            persistKeys = { walletId, bundle -> fakePersistV2(walletId, bundle) },
+        ).getOrThrow()
+
+        assertEquals(
+            SyncMode.NEW_WALLET,
+            walletPreferences.getSyncMode(NetworkType.MAINNET, wallet.walletId)
+        )
+        assertEquals(
+            SyncMode.NEW_WALLET,
+            walletPreferences.getSyncMode(NetworkType.TESTNET, wallet.walletId)
+        )
     }
 
     @Test
