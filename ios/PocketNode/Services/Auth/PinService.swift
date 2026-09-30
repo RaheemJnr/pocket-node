@@ -47,6 +47,11 @@ struct PinState: Equatable, Sendable {
     var isLockedOut: Bool
     var lockoutRemainingMs: Int64
     var isPermanentlyLocked: Bool
+    /// False when any Keychain read behind this snapshot failed. The lockout
+    /// getters report a failed read as "no failures" (the shared store's
+    /// contract has no error channel), so a dirty snapshot can say "not
+    /// locked" about a wallet that is permanently locked.
+    var isReadClean: Bool = true
 
     /// True only when a PIN is known to be stored. An unreadable store is not
     /// "no PIN", so callers deciding whether to gate must use ``presence``.
@@ -179,13 +184,16 @@ actor PinPolicyActor {
     }
 
     func snapshot() -> PinState {
-        PinState(
+        store.clearFailure()
+        var state = PinState(
             presence: store.presence(),
             remainingAttempts: policy.getRemainingAttempts(),
             isLockedOut: policy.isLockedOut(),
             lockoutRemainingMs: policy.getLockoutRemainingMs(),
             isPermanentlyLocked: policy.isPermanentlyLocked()
         )
+        state.isReadClean = store.takeFailure() == nil
+        return state
     }
 }
 
@@ -212,11 +220,13 @@ final class PinService {
     /// ``refresh()`` while a lockout countdown is on screen.
     private(set) var state: PinState
 
-    /// False until the failure state has been read from the store at least
-    /// once. Until then ``state``'s lockout fields are the placeholder the
-    /// initializer seeds (no failures, not locked), not what is stored, so
-    /// anything that relaxes a gate on them, such as offering biometrics,
-    /// must wait for this.
+    /// True only while the latest ``refresh()`` read the failure state
+    /// cleanly. Before the first one, ``state``'s lockout fields are the
+    /// placeholder the initializer seeds (no failures, not locked); after a
+    /// read the Keychain refused, they are whatever the getters fell back to,
+    /// which is also "no failures". Neither is what is stored, so anything
+    /// that relaxes a gate on them, such as offering biometrics, must wait for
+    /// this.
     private(set) var hasLoadedState = false
 
     private let policy: PinPolicyActor
@@ -262,7 +272,7 @@ final class PinService {
     /// lockout countdown can call it on a timer.
     func refresh() async {
         state = await policy.snapshot()
-        hasLoadedState = true
+        hasLoadedState = state.isReadClean
     }
 
     /// Stores `pin`, clearing any previous failure state.

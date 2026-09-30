@@ -397,6 +397,79 @@ final class AuthServiceTests: XCTestCase {
         XCTAssertEqual(biometrics.prompts, 1)
     }
 
+    /// A refresh whose lockout reads fail is not a loaded state: the store's
+    /// getters report an unreadable failure counter as zero, so the snapshot
+    /// would claim "not locked" about a permanently locked wallet.
+    func testALockoutStateReadFailureKeepsBiometricsUnavailable() async throws {
+        let first = makeAuth()
+        try await first.setPin("123456")
+        first.isBiometricEnabled = true
+        await exhaustAllAttempts(on: first)
+        XCTAssertTrue(first.pin.isPermanentlyLocked)
+
+        let selective = SelectiveReadKeyValueStore(service: keychainService)
+        selective.failReads(to: [PinAccount.failedAttempts, PinAccount.lockoutUntil, PinAccount.lastFailedAt])
+        let cold = AuthService(
+            pin: PinService(keychain: selective, cost: .testing, clock: clock.source),
+            biometrics: biometrics,
+            preferences: preferences
+        )
+
+        await cold.refresh()
+
+        XCTAssertEqual(cold.pin.pinPresence, .present)
+        XCTAssertFalse(cold.pin.isPermanentlyLocked, "the dirty read really does say not locked")
+        XCTAssertFalse(cold.pin.hasLoadedState)
+        XCTAssertFalse(cold.canUseBiometrics)
+        let unlocked = await cold.unlockWithBiometrics()
+        XCTAssertFalse(unlocked)
+        XCTAssertEqual(biometrics.prompts, 0)
+        XCTAssertEqual(cold.state, .locked)
+
+        // Once the reads recover the real state shows, and it is locked.
+        selective.failReads(to: [])
+        await cold.refresh()
+        XCTAssertTrue(cold.pin.hasLoadedState)
+        XCTAssertTrue(cold.pin.isPermanentlyLocked)
+        XCTAssertFalse(cold.canUseBiometrics)
+    }
+
+    /// Biometrics stand in for a PIN, so they need one that is known to exist.
+    func testBiometricsNeedAPinThatIsConfirmedPresent() async throws {
+        let first = makeAuth()
+        try await first.setPin("123456")
+        first.isBiometricEnabled = true
+
+        let unreadable = UnreadableKeyValueStore(service: keychainService)
+        let cold = AuthService(
+            pin: PinService(keychain: unreadable, cost: .testing, clock: clock.source),
+            biometrics: biometrics,
+            preferences: preferences
+        )
+        await cold.refresh()
+
+        XCTAssertEqual(cold.pin.pinPresence, .unknown)
+        XCTAssertFalse(cold.canUseBiometrics)
+    }
+
+    /// The lock screen prompts on appear, and its button can be tapped while
+    /// that prompt's refresh is still in flight: only one prompt may result.
+    func testTwoOverlappingBiometricUnlocksRaiseOnePrompt() async throws {
+        let first = makeAuth()
+        try await first.setPin("123456")
+        first.isBiometricEnabled = true
+        let cold = makeAuth()
+        biometrics.promptDuration = .milliseconds(200)
+
+        async let a = cold.unlockWithBiometrics()
+        async let b = cold.unlockWithBiometrics()
+        let results = await [a, b]
+
+        XCTAssertEqual(biometrics.prompts, 1)
+        XCTAssertEqual(results.filter { $0 }.count, 1)
+        XCTAssertEqual(cold.state, .unlocked)
+    }
+
     /// A temporary lockout still allows biometrics, matching Android: that one
     /// is about slowing PIN guessing, not about revoking the wallet.
     func testBiometricsStillWorkDuringATemporaryLockout() async throws {
