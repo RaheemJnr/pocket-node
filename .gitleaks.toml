@@ -1,0 +1,17 @@
+# gitleaks config for Pocket Node. Extends the built-in default ruleset
+# (generic-api-key, private-key blocks, cloud provider keys, etc.).
+#
+# There is no directory-wide allowlist: a new credential pasted into any file,
+# test sources included, is reported. Known test fixtures (BIP-39/BIP-32
+# vectors, dummy keys, the KeyBackupCompatibilityTest blob, dummy_pow.toml)
+# and two reviewed false positives are listed by exact fingerprint in
+# .gitleaksignore, so each new one has to be reviewed and added on purpose.
+
+[extend]
+useDefault = true
+
+[allowlist]
+description = "The ignore file itself holds fingerprints that look like keys"
+paths = [
+    '''^\.gitleaksignore$''',
+]
