@@ -3,6 +3,7 @@ package com.rjnr.pocketnode.data.price
 import android.content.Context
 import android.content.SharedPreferences
 import com.rjnr.pocketnode.core.log.Logger
+import com.rjnr.pocketnode.data.wallet.WalletPreferences
 import dagger.hilt.android.qualifiers.ApplicationContext
 import io.ktor.client.HttpClient
 import io.ktor.client.request.get
@@ -16,6 +17,14 @@ import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
 import javax.inject.Inject
 import javax.inject.Singleton
+
+/**
+ * Thrown by [PriceRepository.getCkbUsdPrice] when the user has turned the
+ * "Fiat price" network service off in Settings (#531). Kept distinct from a
+ * real fetch failure so callers can hide the fiat line instead of showing a
+ * stale or placeholder value.
+ */
+class PriceServiceDisabledException : Exception("Fiat price service is disabled")
 
 /**
  * Fetches the CKB/USD spot price.
@@ -37,11 +46,16 @@ class PriceRepository @Inject constructor(
     private val json: Json,
     @ApplicationContext context: Context,
     private val logger: Logger,
+    private val walletPreferences: WalletPreferences,
 ) {
     private val prefs: SharedPreferences =
         context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
 
     suspend fun getCkbUsdPrice(): Result<Double> = withContext(Dispatchers.IO) {
+        if (!walletPreferences.isPriceServiceEnabled()) {
+            return@withContext Result.failure(PriceServiceDisabledException())
+        }
+
         // Try primary, then fallback. Each is its own runCatching so a failure
         // in one path doesn't shadow the success of the next.
         val primary = runCatching { fetchFromCoinGecko() }

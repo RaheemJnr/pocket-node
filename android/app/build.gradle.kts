@@ -346,6 +346,7 @@ dependencies {
     testImplementation("androidx.test:core:1.6.1")
     testImplementation(libs.mockk)
     testImplementation(libs.kotlinx.coroutines.test)
+    testImplementation(libs.ktor.client.mock)
     // Host-side unit tests call libsecp256k1 through :shared; the Android JNI
     // artifact only carries Android .so files, so the JVM payload is needed here.
     testImplementation(libs.secp256k1.kmp.jni.jvm)

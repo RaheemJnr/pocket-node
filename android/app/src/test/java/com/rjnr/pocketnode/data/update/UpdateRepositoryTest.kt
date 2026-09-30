@@ -1,14 +1,80 @@
 package com.rjnr.pocketnode.data.update
 
+import android.content.Context
+import androidx.test.core.app.ApplicationProvider
 import com.rjnr.pocketnode.BuildConfig
+import com.rjnr.pocketnode.core.log.NoopLogger
+import com.rjnr.pocketnode.data.wallet.WalletPreferences
+import io.ktor.client.HttpClient
+import io.ktor.client.engine.mock.MockEngine
+import io.ktor.client.engine.mock.respond
+import io.ktor.http.HttpStatusCode
+import kotlinx.coroutines.test.runTest
+import kotlinx.serialization.json.Json
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Assert.assertFalse
+import org.junit.Before
 import org.junit.Test
+import org.junit.runner.RunWith
+import org.robolectric.RobolectricTestRunner
+import org.robolectric.annotation.Config
 
+@RunWith(RobolectricTestRunner::class)
+@Config(sdk = [28], manifest = Config.NONE)
 class UpdateRepositoryTest {
+
+    private lateinit var context: Context
+
+    @Before
+    fun setUp() {
+        context = ApplicationProvider.getApplicationContext()
+        context.getSharedPreferences("ckb_wallet_prefs", Context.MODE_PRIVATE).edit().clear().commit()
+    }
+
+    private fun newWalletPreferences(): WalletPreferences = WalletPreferences(context, NoopLogger)
+
+    // --- Network-services gating (#531) ---
+
+    @Test
+    fun `makes no HTTP request and fails with a distinct exception when update checks are off`() = runTest {
+        val prefs = newWalletPreferences()
+        prefs.setUpdateServiceEnabled(false)
+        var requestCount = 0
+        val engine = MockEngine {
+            requestCount++
+            respond(content = "{}", status = HttpStatusCode.OK)
+        }
+        val repository = UpdateRepository(HttpClient(engine), Json { ignoreUnknownKeys = true }, NoopLogger, prefs)
+
+        val result = repository.checkForUpdate("1.0.0")
+
+        assertEquals("no network request should be made", 0, requestCount)
+        assertTrue(result.isFailure)
+        assertTrue(result.exceptionOrNull() is UpdateServiceDisabledException)
+    }
+
+    @Test
+    fun `checks GitHub when update checks are on`() = runTest {
+        val prefs = newWalletPreferences()
+        var requestCount = 0
+        val engine = MockEngine {
+            requestCount++
+            respond(
+                content = """{"tag_name":"v1.5.0","html_url":"https://example.com/release","body":"notes","assets":[]}""",
+                status = HttpStatusCode.OK,
+            )
+        }
+        val repository = UpdateRepository(HttpClient(engine), Json { ignoreUnknownKeys = true }, NoopLogger, prefs)
+
+        val result = repository.checkForUpdate("1.0.0")
+
+        assertEquals(1, requestCount)
+        assertTrue(result.isSuccess)
+        assertEquals("1.5.0", result.getOrThrow()?.latestVersion)
+    }
 
     // --- isNewer ---
 

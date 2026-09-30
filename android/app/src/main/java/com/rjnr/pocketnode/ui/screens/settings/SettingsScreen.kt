@@ -62,6 +62,7 @@ import androidx.compose.ui.unit.sp
 import androidx.core.content.ContextCompat
 import androidx.hilt.lifecycle.viewmodel.compose.hiltViewModel
 import com.composables.icons.lucide.ChevronRight
+import com.composables.icons.lucide.CircleDollarSign
 import com.composables.icons.lucide.CircleHelp
 import com.composables.icons.lucide.Github
 import com.composables.icons.lucide.Info
@@ -373,7 +374,9 @@ fun SettingsScreen(
                 }
             }
             viewModel.toggleBackgroundSync(enabled)
-        }
+        },
+        onTogglePriceService = { viewModel.togglePriceService(it) },
+        onToggleUpdateService = { viewModel.toggleUpdateService(it) }
     )
 }
 
@@ -395,7 +398,9 @@ private fun SettingsScreenUI(
     onCheckForUpdate: () -> Unit = {},
     onVersionTap: () -> Unit = {},
     onScanOtherAddresses: () -> Unit = {},
-    onToggleBackgroundSync: (Boolean) -> Unit = {}
+    onToggleBackgroundSync: (Boolean) -> Unit = {},
+    onTogglePriceService: (Boolean) -> Unit = {},
+    onToggleUpdateService: (Boolean) -> Unit = {}
 ) {
     Scaffold(
         containerColor = MaterialTheme.colorScheme.surface,
@@ -553,6 +558,55 @@ private fun SettingsScreenUI(
                 )
             }
 
+            // ── NETWORK SERVICES ─────────────────────────────────────────
+            // Pocket Node talks to CKB through its embedded light client, not
+            // through company servers. These two optional features are the
+            // only outbound requests the app makes on its own, with no user
+            // tap (#531). Each gets its own switch and an exact statement of
+            // what it sends; explorer links the user taps to open a browser
+            // do not count and are not listed here.
+            item { SectionHeader("NETWORK SERVICES") }
+
+            item {
+                SettingsSwitchRow(
+                    icon = Lucide.CircleDollarSign,
+                    title = "Fiat price",
+                    checked = uiState.isPriceServiceEnabled,
+                    onCheckedChange = onTogglePriceService
+                )
+            }
+            item {
+                Text(
+                    text = "Run by CoinGecko and Binance. Shows your balance in USD. " +
+                        "Sends your IP address only.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier
+                        .padding(horizontal = 16.dp)
+                        .padding(top = 4.dp, bottom = 8.dp)
+                )
+            }
+
+            item {
+                SettingsSwitchRow(
+                    icon = Lucide.RefreshCw,
+                    title = "Update checks",
+                    checked = uiState.isUpdateServiceEnabled,
+                    onCheckedChange = onToggleUpdateService
+                )
+            }
+            item {
+                Text(
+                    text = "Checks GitHub for a new release on launch. Sends your IP " +
+                        "address and device user agent.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier
+                        .padding(horizontal = 16.dp)
+                        .padding(top = 4.dp, bottom = 8.dp)
+                )
+            }
+
             // ── ABOUT ─────────────────────────────────────────────────────
             item { SectionHeader("ABOUT") }
 
@@ -608,6 +662,8 @@ private fun SettingsScreenUI(
                         is SettingsViewModel.UpdateStatus.Available ->
                             "Version ${updateStatus.version} available"
                         is SettingsViewModel.UpdateStatus.Failed -> "Couldn't check. Tap to retry"
+                        // #531: the "Update checks" switch above is off.
+                        is SettingsViewModel.UpdateStatus.Disabled -> "Update checks are off"
                         is SettingsViewModel.UpdateStatus.Idle -> null
                     }
                     SettingsValueRow(
@@ -617,10 +673,12 @@ private fun SettingsScreenUI(
                         valueColor = MaterialTheme.colorScheme.onSurfaceVariant,
                         onClick = {
                             val available = updateStatus as? SettingsViewModel.UpdateStatus.Available
-                            if (available != null) {
-                                com.rjnr.pocketnode.ui.util.openInBrowser(context, available.url)
-                            } else {
-                                onCheckForUpdate()
+                            when {
+                                available != null ->
+                                    com.rjnr.pocketnode.ui.util.openInBrowser(context, available.url)
+                                // Nothing to check while the switch above is off.
+                                updateStatus is SettingsViewModel.UpdateStatus.Disabled -> Unit
+                                else -> onCheckForUpdate()
                             }
                         }
                     )
