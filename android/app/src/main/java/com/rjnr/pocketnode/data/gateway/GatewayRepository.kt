@@ -274,7 +274,7 @@ class GatewayRepository @Inject constructor(
         when (walletPreferences.getSyncStrategy()) {
             // BALANCED reads per-wallet syncMode/customBlockHeight inside the loop
             // (registerAllWalletScripts at L1749), so the locals above are unused here.
-            SyncStrategy.ALL_WALLETS, SyncStrategy.BALANCED -> registerAllWalletScripts()
+            SyncStrategy.ALL_WALLETS, SyncStrategy.BALANCED -> registerAllWalletsQuietlyIfSuperseded()
             SyncStrategy.ACTIVE_ONLY -> registerAccount(
                 syncMode = walletSyncMode,
                 customBlockHeight = walletCustomHeight,
@@ -449,7 +449,7 @@ class GatewayRepository @Inject constructor(
                     }
                     walletPreferences.setInitialSyncCompleted(true, walletId = wId)
                 }
-                registerAllWalletScripts()
+                registerAllWalletsQuietlyIfSuperseded()
             }
             SyncStrategy.ACTIVE_ONLY -> {
                 registerAccount(syncMode, customBlockHeight, savePreference).getOrThrow()
@@ -481,7 +481,7 @@ class GatewayRepository @Inject constructor(
         val walletId = activeWalletId
         val info = _walletInfo.value ?: throw Exception("Wallet not initialized")
         if (expectedWalletId != null && walletId != expectedWalletId) {
-            throw Exception("Active wallet changed during registration")
+            throw ActiveWalletChangedException()
         }
 
         val tipStr = lightClient.getTipHeader()
@@ -566,7 +566,7 @@ class GatewayRepository @Inject constructor(
             // set: a switch after the check above must not be overwritten.
             beforeSet = {
                 if (expectedWalletId != null && activeWalletId != expectedWalletId) {
-                    throw Exception("Active wallet changed during registration")
+                    throw ActiveWalletChangedException()
                 }
             },
         )
@@ -599,10 +599,8 @@ class GatewayRepository @Inject constructor(
         // back whichever wallet happens to be active by then.
         val walletId = activeWalletId
         _isRegistered.value = false
-        // Snapshot for the ALL_WALLETS / BALANCED rollback below.
+        // Snapshot for the rollbacks below.
         val previousSyncBlock = getWalletSyncBlock(walletId)
-        // Clear saved sync progress when explicitly resyncing (per-wallet)
-        setWalletSyncBlock(walletId, 0L)
         // Re-arm the zero-cell rescue rescan: an explicit resync is the user
         // deliberately asking us to look again (knmo).
         walletPreferences.clearZeroCellRescanDone(walletId)
@@ -611,62 +609,77 @@ class GatewayRepository @Inject constructor(
             // registerAccount issues CMD_SET_SCRIPTS_ALL with only the active
             // wallet's scripts, which under ALL_WALLETS / BALANCED unregistered
             // every other wallet on each sync-mode change (#431). Re-register
-            // the whole set instead, the same way registerAccountWithStrategy
-            // does: persist the new mode first (the coordinator reads it to
-            // compute the start block), then register all wallets.
+            // the whole set instead.
             SyncStrategy.ALL_WALLETS, SyncStrategy.BALANCED -> {
                 val wId = walletId.ifEmpty { null }
-                // The prefs are written before registering, so a failed
-                // registration must put them back: otherwise the mode the UI
-                // reports as failed takes effect on the next startup
-                // (ACTIVE_ONLY only persists on success).
                 val previousMode = walletPreferences.getSyncModeOrNull(walletId = wId)
                 val previousHeight = walletPreferences.getCustomBlockHeight(walletId = wId)
                 val previousInitialSync = walletPreferences.hasCompletedInitialSync(walletId = wId)
+                // Nothing about this wallet is persisted until the set is
+                // certain to land: a concurrent registration (a wallet
+                // switch) must still see its saved progress and old mode, or
+                // it registers the wallet from the new start and a stale
+                // abort here leaves the light client rewound while the prefs
+                // say otherwise. The new mode reaches the start-block
+                // computation through the context instead, and forceResync
+                // for this wallet only reads its progress as 0; other
+                // wallets resume.
+                var persisted = false
                 runCatching {
-                    walletPreferences.setSyncMode(syncMode, walletId = wId)
-                    if (syncMode == SyncMode.CUSTOM) {
-                        walletPreferences.setCustomBlockHeight(customBlockHeight, walletId = wId)
-                    }
-                    walletPreferences.setInitialSyncCompleted(true, walletId = wId)
-                    // forceResync for the resynced wallet only: its saved
-                    // progress reads as 0 so it restarts from the new mode's
-                    // start block, even if the sync poll re-saved the old
-                    // progress between the reset above and the registration.
-                    // Other wallets resume. The filter and the cap keep the
-                    // LIVE active wallet (makeSyncContext). If the user
-                    // switched wallets while this waited for the node or tip,
-                    // the switch started its own CMD_SET_SCRIPTS_ALL: abort
-                    // this stale one before it can overwrite that set, and
-                    // roll back below.
                     syncCoordinator.registerAllWalletScripts(
                         ctx = makeSyncContext().copy(
                             getWalletSyncBlock = { id ->
                                 if (id == walletId) 0L else getWalletSyncBlock(id)
                             },
+                            syncModeOverride = { id ->
+                                if (id == walletId) syncMode to customBlockHeight else null
+                            },
+                            // Under the registration mutex, right before the
+                            // set. If the user switched wallets while this
+                            // waited, the switch's own registration stands:
+                            // abort with nothing written. Otherwise persist
+                            // the choice atomically with the set.
                             beforeSetScripts = {
-                                if (activeWalletId != walletId) {
-                                    throw Exception("Active wallet changed during registration")
+                                if (activeWalletId != walletId) throw ActiveWalletChangedException()
+                                setWalletSyncBlock(walletId, 0L)
+                                walletPreferences.setSyncMode(syncMode, walletId = wId)
+                                if (syncMode == SyncMode.CUSTOM) {
+                                    walletPreferences.setCustomBlockHeight(customBlockHeight, walletId = wId)
                                 }
+                                walletPreferences.setInitialSyncCompleted(true, walletId = wId)
+                                persisted = true
                             },
                         ),
                     )
                 }.onFailure {
-                    if (previousMode != null) {
-                        walletPreferences.setSyncMode(previousMode, walletId = wId)
-                    } else {
-                        walletPreferences.clearSyncMode(walletId = wId)
+                    // Only a set that failed AFTER the writes needs undoing;
+                    // an abort before them left everything as it was.
+                    if (persisted) {
+                        if (previousMode != null) {
+                            walletPreferences.setSyncMode(previousMode, walletId = wId)
+                        } else {
+                            walletPreferences.clearSyncMode(walletId = wId)
+                        }
+                        walletPreferences.setCustomBlockHeight(previousHeight, walletId = wId)
+                        walletPreferences.setInitialSyncCompleted(previousInitialSync, walletId = wId)
+                        setWalletSyncBlock(walletId, previousSyncBlock)
                     }
-                    walletPreferences.setCustomBlockHeight(previousHeight, walletId = wId)
-                    walletPreferences.setInitialSyncCompleted(previousInitialSync, walletId = wId)
-                    setWalletSyncBlock(walletId, previousSyncBlock)
                 }
             }
-            SyncStrategy.ACTIVE_ONLY ->
+            SyncStrategy.ACTIVE_ONLY -> {
+                // Clear saved sync progress when explicitly resyncing (per-wallet)
+                setWalletSyncBlock(walletId, 0L)
                 registerAccount(
                     syncMode, customBlockHeight, savePreference = true, forceResync = true,
                     expectedWalletId = walletId,
-                )
+                ).onFailure {
+                    // Nothing was registered: put the progress back, unless
+                    // the sync poll has already re-saved a newer block.
+                    if (getWalletSyncBlock(walletId) == 0L) {
+                        setWalletSyncBlock(walletId, previousSyncBlock)
+                    }
+                }
+            }
         }
     }
 
@@ -2833,6 +2846,20 @@ class GatewayRepository @Inject constructor(
 
     private suspend fun maybeReregisterBalanced() {
         syncCoordinator.maybeReregisterBalanced(makeSyncContext())
+    }
+
+    /**
+     * [registerAllWalletScripts] for callers that only refresh the set (a
+     * wallet switch, strategy registration, the gap-limit scan): if the user
+     * switched wallets before this set landed, the switch's own registration
+     * supersedes it, so the abort is a quiet no-op, not an error (#431).
+     */
+    private suspend fun registerAllWalletsQuietlyIfSuperseded() {
+        try {
+            registerAllWalletScripts()
+        } catch (e: ActiveWalletChangedException) {
+            logger.d(TAG, "Registration superseded by a wallet switch: ${e.message}")
+        }
     }
 
     private suspend fun registerAllWalletScripts(

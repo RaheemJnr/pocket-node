@@ -187,6 +187,14 @@ fun selectCandidatesForRegistration(
 }
 
 /**
+ * A registration computed for one active wallet was aborted because the
+ * user switched wallets before it reached the light client (#431). The
+ * switch starts its own registration, so callers that only refresh the
+ * set treat this as a quiet no-op.
+ */
+class ActiveWalletChangedException : Exception("Active wallet changed during registration")
+
+/**
  * Thin indirection over the two static JNI methods [SyncCoordinator]
  * touches. Exists so unit tests can fake the JNI surface without
  * forcing `System.loadLibrary` on the JVM — `external` methods can't
@@ -247,6 +255,13 @@ class SyncCoordinator @Inject constructor(
          * client, e.g. when a resync went stale (#431).
          */
         val beforeSetScripts: suspend () -> Unit = {},
+        /**
+         * A (syncMode, customHeight) to use for a wallet instead of its
+         * stored prefs, or null for the prefs. A resync passes its new
+         * choice here so it can write the prefs only once the set is
+         * certain to land (#431).
+         */
+        val syncModeOverride: (walletId: String) -> Pair<SyncMode, Long?>? = { null },
     )
 
     /** Serialises every script registration; see [setScriptsAndRecord]. */
@@ -474,13 +489,20 @@ class SyncCoordinator @Inject constructor(
         wallets: List<WalletEntity>,
         activeWalletId: String,
         network: NetworkType,
+        // Per-wallet progress when the caller knows better than the stored
+        // rows, e.g. a resync whose wallet restarts from 0 but whose row is
+        // only zeroed once the set lands (#431).
+        progressOf: (suspend (walletId: String) -> Long)? = null,
     ): List<WalletEntity> {
         if (wallets.size <= 1) return wallets
 
         val rows = syncProgressDao.getAllForNetwork(network.name)
             .associateBy { it.walletId }
         val progress = wallets.associate { wallet ->
-            wallet.walletId to (rows[wallet.walletId]?.localSavedBlockNumber ?: 0L)
+            wallet.walletId to (
+                progressOf?.invoke(wallet.walletId)
+                    ?: rows[wallet.walletId]?.localSavedBlockNumber ?: 0L
+                )
         }
 
         val (kept, dropped) = balancedFilterAlgorithm(
@@ -518,7 +540,12 @@ class SyncCoordinator @Inject constructor(
         // doesn't re-fetch + re-filter (avoids double I/O and a snapshot race
         // where wallet add/delete between calls would update the cache against
         // a different set than the comparison was made on).
-        registerAllWalletScripts(ctx, preFetchedWallets = allWallets, preFilteredCandidates = filtered)
+        try {
+            registerAllWalletScripts(ctx, preFetchedWallets = allWallets, preFilteredCandidates = filtered)
+        } catch (e: ActiveWalletChangedException) {
+            // The switch's own registration supersedes this one.
+            logger.d(TAG, "BALANCED re-registration skipped: ${e.message}")
+        }
     }
 
     /**
@@ -552,13 +579,11 @@ class SyncCoordinator @Inject constructor(
 
         // Step 1: BALANCED filter runs BEFORE the cap (Q2=A in design).
         val candidateWallets = preFilteredCandidates ?: when (strategy) {
-            SyncStrategy.BALANCED -> applyBalancedFilter(allWallets, activeWalletId, ctx.network)
+            SyncStrategy.BALANCED -> applyBalancedFilter(
+                allWallets, activeWalletId, ctx.network, progressOf = ctx.getWalletSyncBlock,
+            )
             else -> allWallets
         }
-        if (strategy == SyncStrategy.BALANCED) {
-            lastBalancedEligibleSet = candidateWallets.map { it.walletId }.toSet()
-        }
-
         // Step 2: Cap (unchanged behavior for ALL_WALLETS). The active wallet
         // goes first so the cap can never drop it, whatever its lastActiveAt
         // (stable sort: the rest keep their recency order).
@@ -633,14 +658,18 @@ class SyncCoordinator @Inject constructor(
                         return@async null
                     }
 
+                    // The wallet's sync mode + custom height: a resync passes
+                    // its new choice through the context instead of writing
+                    // the prefs before the set lands (#431).
+                    val (syncMode, customHeight) = ctx.syncModeOverride(wallet.walletId)
+                        ?: (syncPreferences.getSyncMode(walletId = wallet.walletId) to
+                            syncPreferences.getCustomBlockHeight(walletId = wallet.walletId))
                     // Resume from saved per-wallet progress, or calculate from sync mode if first sync
                     val savedBlock = ctx.getWalletSyncBlock(wallet.walletId)
                     val blockNum: String
                     if (savedBlock > 0) {
                         blockNum = savedBlock.toString()
                     } else {
-                        val syncMode = syncPreferences.getSyncMode(walletId = wallet.walletId)
-                        val customHeight = syncPreferences.getCustomBlockHeight(walletId = wallet.walletId)
                         // Same guards as registerAccount: a start past the tip
                         // (e.g. a CUSTOM height above it) resets to the RECENT
                         // window, and 0 outside FULL_HISTORY uses the checkpoint.
@@ -660,10 +689,8 @@ class SyncCoordinator @Inject constructor(
                     // #382 P1: candidates get their own HISTORICAL start —
                     // inheriting the parent's resume height registered them
                     // at ~tip on synced wallets, where a scan finds nothing.
-                    val syncModeForWallet = syncPreferences.getSyncMode(walletId = wallet.walletId)
-                    val customForWallet = syncPreferences.getCustomBlockHeight(walletId = wallet.walletId)
                     val candidateHex = "0x" + candidateScanStart(
-                        historicalStartBlock(syncModeForWallet, customForWallet, tipHeight, ctx.network),
+                        historicalStartBlock(syncMode, customHeight, tipHeight, ctx.network),
                         earliestCachedTxBlock(wallet.walletId, ctx.network.name),
                         tipHeight,
                     ).toString(16)
@@ -689,9 +716,20 @@ class SyncCoordinator @Inject constructor(
         logger.d(TAG, "Registering ${scriptStatuses.size} wallet scripts with light client")
         val result = setScriptsAndRecord(
             scriptStatuses, walletIds, LightClientNative.CMD_SET_SCRIPTS_ALL, ctx.network,
-            beforeSet = ctx.beforeSetScripts,
+            // Under the registration mutex, atomically with the set: a set
+            // computed for one active wallet must not land after a switch
+            // to another (#431); the switch's own registration stands.
+            beforeSet = {
+                if (ctx.liveActiveWalletId() != activeWalletId) throw ActiveWalletChangedException()
+                ctx.beforeSetScripts()
+            },
         )
         if (!result) throw Exception("Failed to set scripts for all wallets")
+        // Only a set that actually landed defines the eligible set the next
+        // maybeReregisterBalanced compares against.
+        if (strategy == SyncStrategy.BALANCED) {
+            lastBalancedEligibleSet = candidateWallets.map { it.walletId }.toSet()
+        }
 
         // #382: persist each candidate's scan-from block so the reconciler's
         // EMPTY coverage gate can actually pass (it is inert at 0).
