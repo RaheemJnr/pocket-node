@@ -2878,6 +2878,21 @@ class GatewayRepository @Inject constructor(
         txHash
     }
 
+    /**
+     * Fail an unlock the wallet already knows is pointless BEFORE the caller
+     * spends a biometric or PIN prompt on it (#529). Success means only "no
+     * local record says this is already claimed": [unlockDao] still does the
+     * full check against the live list.
+     */
+    suspend fun unlockPreflight(withdrawingOutPoint: OutPoint): Result<Unit> = runCatching {
+        val claim = unlockClaimState(withdrawingOutPoint)
+        when (claim.claim) {
+            UnlockClaim.RETIRED -> throw Exception(ALREADY_UNLOCKED_MESSAGE)
+            UnlockClaim.IN_FLIGHT -> throw Exception(alreadyUnlockingMessage(claim.unlockTxHash))
+            UnlockClaim.NONE -> Unit
+        }
+    }
+
     suspend fun unlockDao(withdrawingOutPoint: OutPoint): Result<String> =
         getPrivateKey().let { key ->
             try {
@@ -2896,9 +2911,19 @@ class GatewayRepository @Inject constructor(
         val net = currentNetwork
 
         val deposits = getDaoDeposits().getOrThrow()
+        // #529: a cell the unlock already spent is gone from the list. Fail
+        // here with a terminal, readable message instead of building a
+        // transaction against an outpoint that cannot be spent twice. The
+        // caller clears its spinner on failure, so "not found" must never be
+        // reachable for a position the user has in fact already claimed.
         val deposit = deposits.find { it.outPoint == withdrawingOutPoint }
-            ?: throw Exception("Withdrawing cell not found")
+            ?: throw Exception(missingWithdrawingCellMessage(withdrawingOutPoint))
 
+        if (deposit.status == DaoCellStatus.UNLOCKING) {
+            throw Exception(
+                alreadyUnlockingMessage(unlockClaimState(withdrawingOutPoint).unlockTxHash)
+            )
+        }
         require(deposit.status == DaoCellStatus.UNLOCKABLE) {
             "Cell is not unlockable yet (status: ${deposit.status})"
         }
@@ -2998,6 +3023,54 @@ class GatewayRepository @Inject constructor(
         }.onFailure { logger.w(TAG, "Failed to persist pending unlock marker: ${it.message}") }
 
         txHash
+    }
+
+    /** What this device's own records say about a withdrawing cell (#529). */
+    private enum class UnlockClaim { NONE, IN_FLIGHT, RETIRED }
+
+    /** [UnlockClaim] plus the unlock transaction behind it, when there is one. */
+    private class UnlockClaimResult(val claim: UnlockClaim, val unlockTxHash: String? = null)
+
+    /**
+     * Whether this position is already claimed or mid-claim, from the two
+     * Room reads alone. No chain access, so it is cheap enough to run before
+     * asking the user to authenticate.
+     *
+     * Both lookups normalize the outpoint index, because the spelling the UI
+     * hands back (hex vs decimal) need not match the spelling the row was
+     * written with, and a mismatch would silently answer "not claimed".
+     */
+    private suspend fun unlockClaimState(outPoint: OutPoint): UnlockClaimResult {
+        val walletId = activeWalletId
+        if (walletId.isEmpty()) return UnlockClaimResult(UnlockClaim.NONE)
+        val network = currentNetwork.name
+        val key = normalizedOutPointKey(outPoint.txHash, outPoint.index)
+        val marker = runCatching {
+            appDatabase.pendingDaoUnlockDao().getByWalletAndNetwork(walletId, network)
+                .firstOrNull { normalizedOutPointKey(it.withdrawingTxHash, it.withdrawingIndex) == key }
+        }.getOrNull()
+        if (marker != null) return UnlockClaimResult(UnlockClaim.IN_FLIGHT, marker.unlockTxHash)
+        val retired = runCatching {
+            daoSyncManager.getCompletedDeposits(network, walletId)
+                .any { normalizedOutPointKey(it.txHash, it.index) == key }
+        }.getOrDefault(false)
+        return UnlockClaimResult(if (retired) UnlockClaim.RETIRED else UnlockClaim.NONE)
+    }
+
+    /**
+     * Why the withdrawing cell the user tapped is not in the list: already
+     * claimed (its row is retired, or an unlock for it is on record), or
+     * genuinely not visible yet.
+     */
+    private suspend fun missingWithdrawingCellMessage(
+        outPoint: OutPoint,
+    ): String {
+        val claim = unlockClaimState(outPoint)
+        return when (claim.claim) {
+            UnlockClaim.RETIRED -> ALREADY_UNLOCKED_MESSAGE
+            UnlockClaim.IN_FLIGHT -> alreadyUnlockingMessage(claim.unlockTxHash)
+            UnlockClaim.NONE -> "Withdrawing cell not found"
+        }
     }
 
     // Sync registration + BALANCED filter delegated to [SyncCoordinator] (#106).
@@ -3107,6 +3180,27 @@ class GatewayRepository @Inject constructor(
 
     companion object {
         private const val TAG = "GatewayRepository"
+
+        /** Terminal failure for a position whose unlock already went through (#529). */
+        const val ALREADY_UNLOCKED_MESSAGE = "This deposit was already unlocked"
+
+        /** Terminal failure for a second tap while the first unlock is in flight (#529). */
+        const val ALREADY_UNLOCKING_MESSAGE = "This deposit is already being unlocked"
+
+        /**
+         * The same refusal, naming the transaction the user is waiting on so
+         * they can look it up in an explorer rather than only being told to
+         * wait. A marker that never resolves blocks the position until the
+         * chain settles it, so the hash is the one thing that lets the user
+         * find out why.
+         */
+        fun alreadyUnlockingMessage(unlockTxHash: String?): String =
+            if (unlockTxHash.isNullOrBlank()) ALREADY_UNLOCKING_MESSAGE
+            else "$ALREADY_UNLOCKING_MESSAGE (tx ${shortenTxHash(unlockTxHash)})"
+
+        /** "0x1234abcd...5678ef90", enough to recognise without filling a snackbar. */
+        private fun shortenTxHash(txHash: String): String =
+            if (txHash.length <= 22) txHash else "${txHash.take(10)}...${txHash.takeLast(8)}"
 
         /**
          * Outpoint key with the index normalized (hex vs decimal) so a match
