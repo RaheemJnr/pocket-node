@@ -18,6 +18,7 @@ import com.rjnr.pocketnode.data.wallet.WalletPreferences
 import com.rjnr.pocketnode.data.wallet.WalletRepository
 import dagger.hilt.android.lifecycle.HiltViewModel
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -355,7 +356,11 @@ class SettingsViewModel @Inject constructor(
         _uiState.update { it.copy(updateStatus = UpdateStatus.Checking) }
         updateCheckJob?.cancel()
         updateCheckJob = viewModelScope.launch {
-            updateRepository.checkForUpdate(BuildConfig.VERSION_NAME)
+            val result = updateRepository.checkForUpdate(BuildConfig.VERSION_NAME)
+            // The repository turns a cancellation into Result.failure; a check
+            // cancelled because the switch went off must not write any status.
+            ensureActive()
+            result
                 .onSuccess { info ->
                     _uiState.update {
                         it.copy(
