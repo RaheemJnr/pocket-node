@@ -1,6 +1,6 @@
 package com.rjnr.pocketnode.data.gateway
 
-import com.rjnr.pocketnode.data.database.entity.SubAccountCandidateEntity
+import com.rjnr.pocketnode.data.storage.SubAccountCandidateRecord
 import com.rjnr.pocketnode.data.gateway.models.CellOutput
 import com.rjnr.pocketnode.data.gateway.models.Script
 
@@ -15,7 +15,7 @@ import com.rjnr.pocketnode.data.gateway.models.Script
  * plus its own HD/derived and sub-account candidates. It must NOT include
  * other wallets in the app, otherwise a send from wallet A to wallet B would
  * misclassify as a self transfer when wallet A actually lost the full amount.
- * See the caller in GatewayRepository.getTransactions for how that narrower
+ * See the caller in LedgerReader.getTransactions for how that narrower
  * set is built, distinct from the broader `knownLockArgs` [isUnknownChangeSignature]
  * uses (which does intentionally span every wallet).
  *
@@ -29,7 +29,7 @@ import com.rjnr.pocketnode.data.gateway.models.Script
  * our own lock still moved a distinct on-chain asset, so labelling that "Self
  * Transfer" (a CKB-only phrase) would misrepresent it, and the DAO callers
  * that legitimately mint their own typed cells classify before this function
- * is ever reached (see GatewayRepository.getTransactions's DAO priority).
+ * is ever reached (see LedgerReader.getTransactions's DAO priority).
  *
  * An empty output list (nothing to check) is not a self transfer, it falls
  * back to "out", the safe default. Same for any output landing on a script we
@@ -64,13 +64,13 @@ fun isSelfTransferSignature(
  * that row would keep naming the restored child's script as "ours" forever,
  * so a transfer from the parent wallet to that now-distinct child would
  * misclassify as a self transfer instead of a real transfer between two
- * wallets. GatewayRepository.selfWalletLockArgsFor (shared by getTransactions,
+ * wallets. LedgerReader.selfWalletLockArgsFor (shared by getTransactions,
  * for the confirmed row, and buildReserveAndSend, for the pending row) also
  * subtracts every other WalletEntity's own address from the self-transfer set
  * as defence in depth, in case a candidate row's state is ever stale.
  */
-fun activeSelfTransferCandidateArgs(candidates: List<SubAccountCandidateEntity>): List<String> =
-    candidates.filter { it.state != SubAccountCandidateEntity.STATE_RESTORED }.map { it.scriptArgs }
+fun activeSelfTransferCandidateArgs(candidates: List<SubAccountCandidateRecord>): List<String> =
+    candidates.filter { it.state != SubAccountCandidateRecord.STATE_RESTORED }.map { it.scriptArgs }
 
 /**
  * The amount to display on a self-transfer row once it has already been

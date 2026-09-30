@@ -10,7 +10,10 @@ import com.rjnr.pocketnode.data.gateway.OutgoingOutput
 import com.rjnr.pocketnode.data.gateway.SyncCoordinator
 import com.rjnr.pocketnode.data.gateway.computeFeeShannons
 import com.rjnr.pocketnode.data.gateway.computeOutgoingShannons
+import com.rjnr.pocketnode.data.gateway.pendingTransferDisplay
 import com.rjnr.pocketnode.data.gateway.recipientOutgoingShannons
+import com.rjnr.pocketnode.data.gateway.retryPendingOverride
+import com.rjnr.pocketnode.data.gateway.sendTransactionPendingAmount
 import com.rjnr.pocketnode.data.gateway.models.Cell
 import com.rjnr.pocketnode.data.gateway.models.CellsResponse
 import com.rjnr.pocketnode.data.gateway.models.JniHeaderView
@@ -28,6 +31,8 @@ import com.rjnr.pocketnode.data.transaction.Signer
 import com.rjnr.pocketnode.data.transaction.TransactionBuilder
 import com.rjnr.pocketnode.data.transaction.TransferPlan
 import com.rjnr.pocketnode.data.wallet.AddressUtils
+import com.rjnr.pocketnode.data.wallet.WalletDerivation
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
@@ -278,14 +283,37 @@ class SendPipeline(
      * already encodes, with no heuristic. We drop the FAILED row first so
      * [sendTransaction] re-inserts a fresh BROADCASTING row for the same hash
      * and the watchdog re-tracks it.
+     *
+     * Public #538 review: [sendTransaction]'s own insert always shows "out"
+     * and the recipient amount, which is wrong for a "self" row (a
+     * self-transfer or a gap-limit sweep): that reads as "Sent 0 CKB" (or the
+     * wrong amount) again until the confirmed row takes over. The cached
+     * row's direction/fee are read here BEFORE it is deleted below and
+     * threaded back through so a retried self row still shows "self" with
+     * its fee.
      */
     suspend fun retryBroadcast(ctx: SendContext, txHash: String): Result<String> = runCatching {
         val row = pendingBroadcasts.getFailedRow(txHash)
             ?: error("This transaction is too old to retry automatically. Please send a new one.")
         val tx = json.decodeFromString<Transaction>(row.signedTxJson)
+        val cached = try {
+            transactions.cachedDirectionAndFee(txHash, row.network)
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            logger.w(TAG, "retryBroadcast: cached row lookup failed for $txHash: ${e.message}")
+            null
+        }
         pendingBroadcasts.delete(txHash)
         transactions.deleteTransaction(txHash)
-        sendTransaction(ctx, tx).getOrThrow()
+        val override = retryPendingOverride(cached?.first, cached?.second)
+        if (override != null) {
+            sendTransaction(
+                ctx, tx, pendingDirection = override.first, pendingFeeShannons = override.second,
+            ).getOrThrow()
+        } else {
+            sendTransaction(ctx, tx).getOrThrow()
+        }
     }
 
     suspend fun sendTransaction(
@@ -305,6 +333,16 @@ class SendPipeline(
          * the confirmed transaction.
          */
         pendingFeeShannons: Long? = null,
+        /**
+         * Pending activity-row override (public #538 review, mirroring
+         * [buildReserveAndSend]'s own parameter of the same name). "out" (the
+         * default) keeps the recipient-amount insert below. "self" is for a
+         * transaction whose every output lands on this wallet's own script (a
+         * gap-limit sweep, or a retried self-transfer): the recipient amount
+         * would otherwise read 0 (nothing is "not ours"), so
+         * [pendingFeeShannons] is shown instead.
+         */
+        pendingDirection: String = "out",
     ): Result<String> = runCatching {
         logger.d(TAG, "📤 sendTransaction: building JSON")
         logger.d(TAG, "  Inputs: ${transaction.cellInputs.size}, Outputs: ${transaction.cellOutputs.size}")
@@ -352,8 +390,13 @@ class SendPipeline(
                 isTyped = output.type != null,
             )
         }
-        // Positive hex per existing convention; `direction = "out"` carries sign.
-        val balanceChangeHex = "0x${recipientOutgoingShannons(outgoingOutputs).toString(16)}"
+        // Positive hex per existing convention; `direction` carries the sign.
+        // See sendTransactionPendingAmount's KDoc: for "self" (every output is
+        // ours, so recipientOutgoingShannons reads 0) the fee is shown
+        // instead, same as the confirmed row.
+        val recipientAmount = recipientOutgoingShannons(outgoingOutputs)
+        val balanceChangeHex =
+            "0x${sendTransactionPendingAmount(pendingDirection, pendingFeeShannons, recipientAmount).toString(16)}"
         val now = clock.nowMs()
 
         logger.d(TAG, "📤 sendTransaction: JSON length=${txJson.length}, preHash=$txHash")
@@ -384,7 +427,7 @@ class SendPipeline(
                     network = network,
                     walletId = walletId,
                     balanceChange = balanceChangeHex,
-                    direction = "out",
+                    direction = pendingDirection,
                     fee = "0x0",
                     feeShannons = pendingFeeShannons
                 )
@@ -455,7 +498,7 @@ class SendPipeline(
                 network = network,
                 walletId = walletId,
                 balanceChange = balanceChangeHex,
-                direction = "out",
+                direction = pendingDirection,
                 fee = "0x0",
                 feeShannons = pendingFeeShannons
             )
@@ -625,6 +668,31 @@ class SendPipeline(
                 },
             )
 
+            // Public #538 review: `outgoingOutputs`'s `isOurs` above only
+            // compares equality with `fromAddress`, so a self-send to a
+            // DERIVED candidate address (a different string, still this
+            // wallet's own script) reads its own output as a real recipient,
+            // not change: outgoingAmount then includes the full amount sent
+            // plus the fee, not just the fee, until the confirmed row takes
+            // over. pendingTransferDisplay reuses the same
+            // isSelfTransferSignature check the confirmed row uses, so the
+            // pending row agrees with what it will show. Only applies to a
+            // plain transfer's default pendingDirection ("out"); a DAO op's
+            // caller already overrides pendingDirection, so it is left alone.
+            val pendingSelfDisplay = if (pendingDirection == "out") {
+                runCatching { WalletDerivation.lockScriptFromAddress(fromAddress) }.getOrNull()?.args?.let { mainArgs ->
+                    pendingTransferDisplay(
+                        outputs = signed.cellOutputs,
+                        selfWalletLockArgs = ledger.selfWalletLockArgsFor(mainArgs, walletId, senderNetwork),
+                        plannedFeeShannons = plannedFeeShannons,
+                        outgoingAmountShannons = outgoingAmount,
+                        mainScriptArgs = mainArgs,
+                    )
+                }
+            } else {
+                null
+            }
+
             pendingBroadcasts.insert(
                 PendingBroadcastRecord(
                     txHash = txHash,
@@ -643,8 +711,12 @@ class SendPipeline(
                 txHash = txHash,
                 network = network,
                 walletId = walletId,
-                balanceChange = pendingAmountShannons?.let { "0x${it.toString(16)}" } ?: balanceChangeHex,
-                direction = pendingDirection,
+                balanceChange = when {
+                    pendingAmountShannons != null -> "0x${pendingAmountShannons.toString(16)}"
+                    pendingSelfDisplay != null -> "0x${pendingSelfDisplay.amountShannons.toString(16)}"
+                    else -> balanceChangeHex
+                },
+                direction = pendingSelfDisplay?.direction ?: pendingDirection,
                 fee = pendingFeeShannons?.let { "0x${it.toString(16)}" } ?: "0x0",
                 feeShannons = plannedFeeShannons
             )

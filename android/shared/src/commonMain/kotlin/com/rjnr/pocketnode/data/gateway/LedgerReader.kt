@@ -28,6 +28,7 @@ import com.rjnr.pocketnode.data.storage.WalletRegistry
 import com.rjnr.pocketnode.data.wallet.AddressUtils
 import com.rjnr.pocketnode.data.wallet.WalletDerivation
 import com.rjnr.pocketnode.util.redactAddress
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import kotlinx.serialization.encodeToString
@@ -451,6 +452,62 @@ class LedgerReader(
             .getOrDefault(false)
 
     /**
+     * The lock-script args a self-transfer check should treat as "ours" for
+     * [walletId]: its own main script ([mainScriptArgs]) plus its own
+     * non-RESTORED sub-account candidates (see
+     * [activeSelfTransferCandidateArgs]), minus every OTHER wallet's own
+     * address on [network] (defence in depth: a send from wallet A to wallet
+     * B is a real transfer, not a self transfer, even though the broader #382
+     * gap-limit `knownLockArgs` set intentionally spans every wallet). Shared
+     * by [getTransactions] (the confirmed row) and
+     * `SendPipeline.buildReserveAndSend` (the pending row inserted at send
+     * time, public #538 review) so both classify a self-send to a derived
+     * candidate address the same way.
+     */
+    suspend fun selfWalletLockArgsFor(
+        mainScriptArgs: String,
+        walletId: String,
+        network: NetworkType,
+    ): Set<String> {
+        val otherWalletLockArgs: Set<String> = try {
+            buildSet {
+                val addressPicker: (com.rjnr.pocketnode.data.storage.WalletRecord) -> String =
+                    if (network == NetworkType.MAINNET) { w -> w.mainnetAddress } else { w -> w.testnetAddress }
+                walletRegistry.allWallets().forEach { w ->
+                    if (w.walletId == walletId) return@forEach
+                    val addr = addressPicker(w)
+                    if (addr.isNotBlank()) {
+                        runCatching { WalletDerivation.lockScriptFromAddress(addr) }
+                            .getOrNull()?.let { add(it.args.lowercase()) }
+                    }
+                }
+            }
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            logger.w(TAG, "selfWalletLockArgsFor: other-wallets script set incomplete: ${e.message}")
+            emptySet()
+        }
+        return try {
+            val selfArgs = buildSet {
+                add(mainScriptArgs.lowercase())
+                activeSelfTransferCandidateArgs(candidates.getForParent(walletId))
+                    .forEach { add(it.lowercase()) }
+            }
+            // Both sides lowercased before the subtraction (#538 review): a
+            // case mismatch between how a script's args were normalized here
+            // vs. in the other-wallets loop above must never let a restored
+            // child's (or any other wallet's) script survive into the result.
+            selfArgs - otherWalletLockArgs
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            logger.w(TAG, "selfWalletLockArgsFor: self-transfer script set incomplete: ${e.message}")
+            setOf(mainScriptArgs.lowercase())
+        }
+    }
+
+    /**
      * Transaction history for the active wallet: the complete interaction
      * walk, grouped and netted per transaction, cached, then merged with the
      * wallet's local pending rows.
@@ -464,6 +521,13 @@ class LedgerReader(
         network: NetworkType,
         limit: Int = 50,
         cursor: String? = null,
+        /**
+         * The fee a gap-limit sweep recorded for a transaction hash at send
+         * time, or null (public #538). Android keeps that marker in its own
+         * WalletPreferences, outside the shared preference contracts, because
+         * the gap-limit sweep does not exist on iOS; iOS leaves the default.
+         */
+        sweepFeeShannons: (txHash: String) -> Long? = { null },
     ): Result<TransactionsResponse> = runCatching {
         val myScript = activeScript ?: throw Exception("No wallet")
         val searchKey = JniSearchKey(script = myScript)
@@ -526,6 +590,12 @@ class LedgerReader(
             logger.w(TAG, "getTransactions: known-scripts set incomplete: ${it.message}")
             setOf(myScript.args)
         }
+
+        // Self-transfer scope, narrower than knownLockArgs above: see
+        // selfWalletLockArgsFor's KDoc. Shared with buildReserveAndSend so a
+        // freshly-sent self-transfer's pending row classifies the same way
+        // the confirmed row eventually will (#538 review).
+        val selfWalletLockArgs: Set<String> = selfWalletLockArgsFor(myScript.args, activeWalletId, network)
         var gapLimitSignal = false
 
         // Fetch tip height once for confirmation calculations (avoid per-tx bridge calls)
@@ -543,9 +613,16 @@ class LedgerReader(
             // taken from the precomputed complete-walk map (netShannonsByTx).
             val netChangeShannons = netByTx[txHash] ?: 0L
 
+            // A real self transfer always pays the fee, so its net change is
+            // negative, not zero: "out" unless every output lands on this
+            // wallet's own script (see isSelfTransferSignature, scoped by
+            // selfWalletLockArgs above). DAO deposits and withdrawals also net
+            // negative but are reclassified below by finalDirection, which
+            // takes priority over this "out"/"self" call.
             val direction = when {
                 netChangeShannons > 0 -> "in"
-                netChangeShannons < 0 -> "out"
+                netChangeShannons < 0 ->
+                    if (isSelfTransferSignature(netChangeShannons, tx.outputs, selfWalletLockArgs)) "self" else "out"
                 else -> "self"
             }
 
@@ -641,23 +718,66 @@ class LedgerReader(
                 },
             )
 
-            val (finalDirection, finalAmount) = if (hasDaoOutput) {
+            // See selfRowDirectionAndAmount's KDoc (#538 review): a self
+            // row's `amount` above undercounts whenever a non-change output
+            // went to another script this wallet also owns, since the walk
+            // that fed netChangeShannons was queried with only myScript.
+            // feeShannons is computed from the full declared transaction, so
+            // it is preferred when known; when it is not, and the abs(net)
+            // fallback cannot be vouched for either, the row is demoted back
+            // to "out" rather than showing a possibly-wrong amount under
+            // "Self Transfer".
+            val (selfRowDirection, selfRowAmount) = if (direction == "self") {
+                selfRowDirectionAndAmount(feeShannons, tx.outputs, myScript.args, amount)
+            } else {
+                direction to amount
+            }
+
+            // #538 review: a gap-limit sweep spends FOUND candidate cells
+            // (derived addresses) back to the main address. Those inputs are
+            // never visible to this walk (queried with only myScript), so
+            // netChangeShannons only sees the main-script output and reads
+            // positive: it would otherwise show as "Received", hiding the fee
+            // actually paid. The sweep records its own tx hash AND fee at
+            // send time, scoped to walletId+network, handed in here as
+            // [sweepFeeShannons], so this is detected without an extra
+            // per-candidate-script lookup on every call. That marker is
+            // trusted only together with a fresh isSelfTransferSignature
+            // check against THIS viewing wallet's own self set (defence in
+            // depth), and a genuine receive from a foreign input passes
+            // neither check and is untouched. Only checked in the non-DAO
+            // branch below, so DAO priority is unaffected.
+            val recordedSweepFee = sweepFeeShannons(txHash)
+            val sweepOutputsAreSelf = isSelfTransferSignature(
+                netChangeShannons = -1L,
+                outputs = tx.outputs,
+                knownLockArgs = selfWalletLockArgs,
+            )
+            val sweepDisplay = sweepRowDisplay(
+                isKnownSweepTxHash = recordedSweepFee != null,
+                outputsAreSelf = sweepOutputsAreSelf,
+                recordedFeeShannons = recordedSweepFee,
+            )
+
+            val (finalDirection, finalAmount, finalFeeShannons) = if (hasDaoOutput) {
                 val daoOutputCapacity = tx.outputs
                     .first { it.type?.codeHash == DaoConstants.DAO_CODE_HASH }
                     .capacity.removePrefix("0x").toLongOrNull(16) ?: 0L
                 if (tx.headerDeps.isEmpty()) {
-                    "dao_deposit" to daoOutputCapacity
+                    Triple("dao_deposit", daoOutputCapacity, feeShannons)
                 } else {
-                    "dao_withdraw" to daoOutputCapacity
+                    Triple("dao_withdraw", daoOutputCapacity, feeShannons)
                 }
             } else if (tx.headerDeps.size >= 2) {
                 // Unlock: show total CKB returned (deposit + compensation)
                 val totalOutput = cellInteractions
                     .filter { it.ioType == "output" }
                     .sumOf { it.ioCapacity.removePrefix("0x").toLongOrNull(16) ?: 0L }
-                "dao_unlock" to totalOutput
+                Triple("dao_unlock", totalOutput, feeShannons)
+            } else if (sweepDisplay != null) {
+                Triple(sweepDisplay.direction, sweepDisplay.amountShannons, recordedSweepFee)
             } else {
-                direction to amount
+                Triple(selfRowDirection, selfRowAmount, feeShannons)
             }
 
             TransactionRecord(
@@ -671,7 +791,7 @@ class LedgerReader(
                 confirmations = confirmations,
                 blockTimestampHex = headerInfo.timestampHex,
                 isDaoRelated = hasDaoOutput || tx.headerDeps.size >= 2,
-                feeShannons = feeShannons
+                feeShannons = finalFeeShannons
             )
         }
 

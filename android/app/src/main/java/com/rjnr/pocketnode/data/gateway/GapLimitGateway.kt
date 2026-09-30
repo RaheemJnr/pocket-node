@@ -318,11 +318,14 @@ class GapLimitGateway(
         if (!gapLimitScanMutex.tryLock()) throw Exception("A scan or sweep is already running")
         return try {
             val wId = ctx.walletId()
+            // Snapshot the network with the wallet: the sweep marker must be filed
+            // under the network the transaction was built and broadcast on.
+            val sweepNetwork = ctx.network()
             if (wId.isEmpty()) throw Exception("No active wallet")
             val myScript = ctx.activeScript() ?: throw Exception("Wallet not initialized")
 
             val (inputs, _) = gatherSweepInputs(ctx, wId)
-            val plan = transactionBuilder.buildSweep(inputs, myScript, ctx.network()).getOrThrow()
+            val plan = transactionBuilder.buildSweep(inputs, myScript, sweepNetwork).getOrThrow()
 
             val pathByArgs = appDatabase.subAccountCandidateDao().getForParent(wId)
                 .filter { it.accountIndex == 0 && it.state == SubAccountCandidateEntity.STATE_FOUND }
@@ -350,11 +353,31 @@ class GapLimitGateway(
                 }
                 if (ctx.walletId() != wId) throw Exception("Wallet changed during the sweep; try again")
                 val signed = transactionBuilder.signSweep(plan.transaction, plan.inputLockArgs, keys).getOrThrow()
+                // #538 review: every output of a sweep lands on the main
+                // script, so sendTransaction's own recipient-amount insert
+                // (which only sums outputs NOT locked to us) would otherwise
+                // show a pending "Sent 0 CKB" until indexed. pendingDirection
+                // "self" tells it to show plan.feeShannons instead.
+                // plan.feeShannons is also passed as pendingFeeShannons: a
+                // sweep's inputs (candidate scripts) are never visible to
+                // getTransactions's active-script walk, so its confirmed fee
+                // can never be recomputed there either (same structural gap
+                // as a DAO unlock, #497).
                 val txHash = sendPipeline.sendTransaction(
                     ctx = ctx.sendContext(),
                     transaction = signed,
                     expectedWalletId = wId,
+                    pendingFeeShannons = plan.feeShannons,
+                    pendingDirection = "self",
                 ).getOrThrow()
+                // Marks this hash (with its fee) so getTransactions can
+                // classify the confirmed row "self" (amount = fee) once it is
+                // indexed, without an extra per-candidate-script lookup on
+                // every poll. Stored in WalletPreferences, not the
+                // `transactions` cache, so a later retryBroadcast (which
+                // deletes that cached row) cannot erase the fee out from
+                // under it. GatewayRepository.getTransactions is the read side.
+                walletPreferences.addSweepTxHash(wId, sweepNetwork.name, txHash, plan.feeShannons)
                 logger.i(TAG, "gap-limit sweep broadcast: ${plan.inputLockArgs.size} inputs, ${keys.size} groups")
                 txHash
             } finally {

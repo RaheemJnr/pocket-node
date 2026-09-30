@@ -937,11 +937,13 @@ class GatewayRepository @Inject constructor(
         transaction: Transaction,
         expectedWalletId: String? = null,
         pendingFeeShannons: Long? = null,
+        pendingDirection: String = "out",
     ): Result<String> = sendPipeline.sendTransaction(
         ctx = sendContext(),
         transaction = transaction,
         expectedWalletId = expectedWalletId,
         pendingFeeShannons = pendingFeeShannons,
+        pendingDirection = pendingDirection,
     )
 
     /** @see SendPipeline.buildReserveAndSend */
@@ -960,14 +962,28 @@ class GatewayRepository @Inject constructor(
         build = build,
     )
 
-    suspend fun getTransactions(limit: Int = 50, cursor: String? = null): Result<TransactionsResponse> =
-        ledgerReader.getTransactions(
+    suspend fun getTransactions(limit: Int = 50, cursor: String? = null): Result<TransactionsResponse> {
+        val walletId = activeWalletId
+        val network = currentNetwork
+        return ledgerReader.getTransactions(
             activeScript = _walletInfo.value?.script,
-            activeWalletId = activeWalletId,
-            network = currentNetwork,
+            activeWalletId = walletId,
+            network = network,
             limit = limit,
             cursor = cursor,
+            // Public #538: a gap-limit sweep's own hash and fee, recorded at
+            // send time (GapLimitGateway), so its confirmed row reads "self"
+            // with the fee rather than "Received".
+            sweepFeeShannons = { hash -> walletPreferences.sweepFeeShannons(walletId, network.name, hash) },
         )
+    }
+
+    /**
+     * @see LedgerReader.selfWalletLockArgsFor. Exposed for the wiring test,
+     * as public main's GatewayRepository does (#538).
+     */
+    internal suspend fun selfWalletLockArgsFor(mainScriptArgs: String, walletId: String): Set<String> =
+        ledgerReader.selfWalletLockArgsFor(mainScriptArgs, walletId, currentNetwork)
 
     suspend fun getTransactionStatus(txHash: String): Result<TransactionStatusResponse> =
         ledgerReader.getTransactionStatus(txHash)
