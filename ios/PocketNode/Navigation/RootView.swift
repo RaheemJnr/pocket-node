@@ -54,19 +54,27 @@ struct RootView: View {
             case .wallet:
                 // Only a confirmed absence of a PIN opens the gate: a PIN store
                 // that cannot be read stays locked (`AuthService.isGated`,
-                // #513). A wallet whose owner removed the PIN has no secret to
-                // check and goes straight to the wallet shell.
+                // #513). A wallet with no PIN at all is an onboarding that was
+                // cut short, never a wallet to open: nothing is drawn for it
+                // here, and the `onChange` below sends it back to the
+                // unfinished step.
                 if auth.isGated {
                     LockView(auth: auth)
+                } else if container.needsSecuritySetup {
+                    Color(uiColor: .systemBackground)
+                        .ignoresSafeArea()
                 } else {
                     wallet
                 }
             }
         }
-        // Decided once per launch. Onboarding stays on screen for the whole
-        // flow after that, including the steps that run after the wallet has
-        // been stored, so finishing the first one does not evict the user into
-        // the wallet before they have set a PIN.
+        // Decided once per launch, from what is stored rather than from how
+        // the last run ended (`OnboardingViewModel.launchDestination`), so a
+        // process killed after the wallet was stored but before the PIN was
+        // set resumes at the backup or PIN step instead of opening the wallet.
+        // Onboarding stays on screen for the whole flow after that, so
+        // finishing one step does not evict the user into the wallet before
+        // they have set a PIN.
         .task {
             guard phase == .undecided else { return }
             // Built before the phase is decided, so the wallet shell has it on
@@ -74,13 +82,14 @@ struct RootView: View {
             // wallet as empty state and re-reads on every appearance, so
             // building it ahead of onboarding costs nothing.
             home = container.makeHomeViewModel()
-            let hasWallet = await container.hasWallet
-            if hasWallet {
-                phase = .wallet
-            } else {
-                onboarding = OnboardingViewModel(creator: container.walletCreator)
-                phase = .onboarding
-            }
+            route(to: await container.launchDestination)
+        }
+        // A PIN store that could not be read at launch sends the wallet to
+        // the lock screen; if it then reads as holding no PIN, the wallet is
+        // an unfinished onboarding after all and goes back to it.
+        .onChange(of: auth.state) { _, _ in
+            guard phase == .wallet, container.needsSecuritySetup else { return }
+            Task { route(to: await container.launchDestination) }
         }
         .onChange(of: colorScheme, initial: true) {
             container.theme = Theme.forScheme(colorScheme)
@@ -102,6 +111,16 @@ struct RootView: View {
         // presented outside the root's own hierarchy and so is not covered;
         // the only one today is the PIN challenge above, which shows dots.
         .privacyShield()
+    }
+
+    private func route(to destination: OnboardingViewModel.LaunchDestination) {
+        switch destination {
+        case .wallet:
+            phase = .wallet
+        case .onboarding(let step):
+            onboarding = OnboardingViewModel(creator: container.walletCreator, resumingAt: step)
+            phase = .onboarding
+        }
     }
 
     private var wallet: some View {

@@ -131,6 +131,46 @@ final class AppContainer {
         }
     }
 
+    /// Where this launch lands: see
+    /// ``OnboardingViewModel/launchDestination(hasWallet:pinPresence:record:)``.
+    /// Asked once at launch and again whenever the PIN turns out to be absent
+    /// while the wallet shell is up.
+    var launchDestination: OnboardingViewModel.LaunchDestination {
+        get async {
+            let hasWallet = await self.hasWallet
+            #if DEBUG
+            if hasWallet && Self.skipsOnboardingForTesting { return .wallet }
+            #endif
+            return OnboardingViewModel.launchDestination(
+                hasWallet: hasWallet,
+                pinPresence: pinService.pinPresence,
+                record: walletStore.load()
+            )
+        }
+    }
+
+    /// True while a stored wallet has no PIN in front of it. The wallet shell
+    /// must not be shown in that state; `RootView` sends it back to the
+    /// unfinished onboarding step instead.
+    var needsSecuritySetup: Bool {
+        #if DEBUG
+        if Self.skipsOnboardingForTesting { return false }
+        #endif
+        return auth.state == .noPin
+    }
+
+    /// `POCKETNODE_SKIP_ONBOARDING` (below) seeds a metadata-only wallet with
+    /// no PIN for the UI tests that drive the wallet shell. Those tests need
+    /// the shell, not the PIN step onboarding would otherwise resume at.
+    /// Debug-only; release builds always enforce the PIN.
+    private static var skipsOnboardingForTesting: Bool {
+        #if DEBUG
+        return ProcessInfo.processInfo.environment["POCKETNODE_SKIP_ONBOARDING"] == "1"
+        #else
+        return false
+        #endif
+    }
+
     /// `PocketNodeNetwork`'s `NodeStatusUITests` exercises the light client,
     /// not onboarding, and #515 put an onboarding gate in front of the wallet
     /// shell it drives. Rather than have that test type a wallet in, it sets
