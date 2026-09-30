@@ -228,11 +228,132 @@ final class WalletRestoreTests: XCTestCase {
         )
     }
 
+    /// The metadata save failing after the keys are back must not delete the
+    /// keys again: the record already on disk describes them, and a rollback
+    /// can strand the wallet with an envelope and no wrapping key.
+    func testARecordSaveFailureAfterRestoreKeepsTheRestoredKeys() async throws {
+        let record = try await restoredMnemonicWallet()
+        let fileManager = FileManager.default
+        try fileManager.setAttributes([.posixPermissions: 0o555], ofItemAtPath: directory.path)
+        defer { try? fileManager.setAttributes([.posixPermissions: 0o755], ofItemAtPath: directory.path) }
+        XCTAssertThrowsError(try walletStore.save(record), "the directory must refuse writes for this test to mean anything")
+
+        let restored = try await creator.restoreMnemonic(words: WalletCreatorTests.testPhrase, replacing: record)
+
+        XCTAssertEqual(restored.record, record, "the record on disk is the one that stands")
+        XCTAssertEqual(walletStore.load(), record)
+        let envelope = await keyStore.envelopePresence
+        XCTAssertEqual(envelope, .present, "the keys stay")
+        XCTAssertTrue(wrapper.hasKey, "with their wrapping key")
+        let bundle = try await keyStore.load(reason: "test")
+        XCTAssertEqual(bundle.privateKeyHex, WalletCreatorTests.testPrivateKeyHex)
+        let needing = await creator.walletNeedingRestore()
+        XCTAssertNil(needing, "the wallet is whole")
+    }
+
+    // MARK: - Waiting behind the lock
+
+    /// The restore screen names the wallet and shows its address, so a PIN
+    /// that survived has to be answered first.
+    func testARestoreWaitsForTheUnlockWhenAPinExists() async throws {
+        let pinKeychain = KeychainStore(service: "\(service).pin")
+        try? pinKeychain.deleteAll()
+        defer { try? pinKeychain.deleteAll() }
+        let suite = "\(service).prefs"
+        UserDefaults.standard.removePersistentDomain(forName: suite)
+        defer { UserDefaults.standard.removePersistentDomain(forName: suite) }
+        let preferences = UserDefaultsPreferences(defaults: UserDefaults(suiteName: suite)!)
+        func makeAuth() -> AuthService {
+            AuthService(
+                pin: PinService(keychain: pinKeychain, cost: .testing),
+                biometrics: StubBiometrics(availability: .unavailable),
+                preferences: preferences
+            )
+        }
+
+        let fresh = makeAuth()
+        XCTAssertTrue(
+            OnboardingViewModel.mayStartRestore(
+                pinPresence: fresh.pin.pinPresence,
+                sessionUnlocked: fresh.state == .unlocked
+            ),
+            "no PIN, nothing to wait for"
+        )
+
+        try await fresh.setPin("123456")
+        let cold = makeAuth()
+        XCTAssertEqual(cold.state, .locked)
+        XCTAssertFalse(
+            OnboardingViewModel.mayStartRestore(
+                pinPresence: cold.pin.pinPresence,
+                sessionUnlocked: cold.state == .unlocked
+            ),
+            "locked: the lock screen comes first"
+        )
+
+        let unlocked = await cold.unlock(pin: "123456")
+        XCTAssertTrue(unlocked)
+        XCTAssertTrue(
+            OnboardingViewModel.mayStartRestore(
+                pinPresence: cold.pin.pinPresence,
+                sessionUnlocked: cold.state == .unlocked
+            )
+        )
+
+        XCTAssertFalse(
+            OnboardingViewModel.mayStartRestore(pinPresence: .unknown, sessionUnlocked: false),
+            "an unreadable PIN store waits too"
+        )
+    }
+
+    /// A launch that could not read the Keychain is not a restore; once the
+    /// Keychain reads again (the re-check on unlock and on coming back to the
+    /// front) the missing keys show.
+    func testMissingKeysShowOnceAnUnreadableKeychainReadsAgain() async throws {
+        let record = try await restoredMnemonicWallet()
+        let unreadable = UnreadableKeyValueStore(service: service)
+        let lockedCreator = WalletCreator(
+            keyStore: WalletKeyStore(keychain: unreadable, wrapper: wrapper),
+            walletStore: walletStore
+        )
+
+        let before = await lockedCreator.walletNeedingRestore()
+        XCTAssertNil(before)
+
+        unreadable.failReads(nil)
+        let after = await lockedCreator.walletNeedingRestore()
+        XCTAssertEqual(after, record)
+    }
+
     // MARK: - Backup exclusion
 
     func testWalletMetadataIsExcludedFromBackups() async throws {
         _ = try await creator.importMnemonic(words: WalletCreatorTests.testPhrase, name: "Savings")
 
         XCTAssertTrue(walletStore.isExcludedFromBackup)
+        XCTAssertTrue(walletStore.isDirectoryExcludedFromBackup)
+    }
+
+    /// The launch-time call covers an existing install before its next save:
+    /// the directory is flagged even with no file yet, and it keeps the flag
+    /// across the atomic replace a save does.
+    func testTheLaunchTimeExclusionFlagsTheDirectory() throws {
+        let fresh = FileManager.default.temporaryDirectory
+            .appendingPathComponent("\(service)-launch-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: fresh) }
+        let store = WalletStore(directory: fresh)
+        XCTAssertFalse(store.isDirectoryExcludedFromBackup)
+
+        store.excludeFromBackup()
+        XCTAssertTrue(store.isDirectoryExcludedFromBackup)
+
+        try store.save(
+            WalletRecord(
+                id: "w", name: "n", type: WalletCreator.typeMnemonic,
+                mainnetAddress: "ckb1", testnetAddress: "ckt1", createdAt: 0
+            )
+        )
+        XCTAssertTrue(store.isDirectoryExcludedFromBackup)
+        XCTAssertTrue(store.isExcludedFromBackup)
     }
 }

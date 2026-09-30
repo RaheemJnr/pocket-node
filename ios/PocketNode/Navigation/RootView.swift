@@ -32,6 +32,10 @@ struct RootView: View {
     @State private var phase: Phase = .undecided
     @State private var onboarding: OnboardingViewModel?
     @State private var home: HomeViewModel?
+    /// A wallet waiting for its keys to be restored while a PIN stands in
+    /// front of it: the restore flow names the wallet and shows its address,
+    /// so it waits for the unlock (see ``restore(_:)``).
+    @State private var pendingRestore: WalletRecord?
 
     private var auth: AuthService { container.auth }
     private var gate: LaunchGate { container.launchGate }
@@ -44,12 +48,21 @@ struct RootView: View {
                     .ignoresSafeArea()
             case .onboarding:
                 if let onboarding {
-                    OnboardingView(
-                        model: onboarding,
-                        auth: auth,
-                        makeBackupViewModel: { container.makeBackupViewModel(isOnboarding: true) }
-                    ) {
-                        phase = .wallet
+                    // A restore can run for a wallet whose PIN survived, after
+                    // the user unlocked with it. Going to the background locks
+                    // that session like any other, and the restore screen
+                    // (which names the wallet and shows its address) must go
+                    // behind the lock with it.
+                    if onboarding.isRestoring && auth.isGated {
+                        LockView(auth: auth)
+                    } else {
+                        OnboardingView(
+                            model: onboarding,
+                            auth: auth,
+                            makeBackupViewModel: { container.makeBackupViewModel(isOnboarding: true) }
+                        ) {
+                            phase = .wallet
+                        }
                     }
                 }
             case .wallet:
@@ -61,7 +74,7 @@ struct RootView: View {
                 // here, and `reroute()` sends them where they belong.
                 if auth.isGated {
                     LockView(auth: auth)
-                } else if gate.needsSecuritySetup {
+                } else if gate.needsSecuritySetup || pendingRestore != nil {
                     // Nothing else is guaranteed to change the session from
                     // here, so this re-reads it and routes on, rather than
                     // waiting on an `onChange` that may never fire.
@@ -96,12 +109,16 @@ struct RootView: View {
             }
             route(to: await gate.launchDestination)
         }
-        // A PIN store that could not be read at launch sends the wallet to
-        // the lock screen; if it then reads as holding no PIN, the wallet is
-        // an unfinished onboarding after all and goes back to it (or to the
-        // restore flow, if its keys turn out to be missing).
+        // Re-asked whenever the session changes and whenever the app comes
+        // back to the front, while the wallet phase is up: a PIN store that
+        // could not be read at launch may turn out to hold no PIN, a Keychain
+        // that could not be read may turn out to have no keys, and an unlock
+        // is what lets a restore held behind the lock screen go ahead.
         .onChange(of: auth.state) { _, _ in
-            guard phase == .wallet, gate.needsSecuritySetup else { return }
+            reroute()
+        }
+        .onChange(of: scenePhase) { _, newScenePhase in
+            guard newScenePhase == .active else { return }
             reroute()
         }
         .onChange(of: colorScheme, initial: true) {
@@ -126,10 +143,22 @@ struct RootView: View {
         .privacyShield()
     }
 
-    /// Sends a key-less wallet to the restore flow.
+    /// Sends a key-less wallet to the restore flow. With no PIN there is
+    /// nothing to wait for; with one (or one that cannot be read yet) the
+    /// wallet phase shows the lock screen first and the restore starts once
+    /// the session is unlocked.
     private func restore(_ record: WalletRecord) {
+        guard OnboardingViewModel.mayStartRestore(
+            pinPresence: container.pinService.pinPresence,
+            sessionUnlocked: auth.state == .unlocked
+        ) else {
+            pendingRestore = record
+            phase = .wallet
+            return
+        }
         let pinService = container.pinService
         path = NavigationPath()
+        pendingRestore = nil
         onboarding = OnboardingViewModel(
             creator: container.walletCreator,
             restoring: record,
@@ -152,6 +181,7 @@ struct RootView: View {
                 restore(record)
                 return
             }
+            pendingRestore = nil
             guard let destination = await gate.reroute(), phase == .wallet else { return }
             route(to: destination)
         }

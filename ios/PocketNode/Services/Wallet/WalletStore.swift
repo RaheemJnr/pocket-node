@@ -99,13 +99,22 @@ final class WalletStore {
     /// Backups taken before this existed still carry the file, which is why
     /// `AppContainer` also detects a wallet whose keys are missing.
     ///
+    /// The flag goes on the directory as well as the file. The directory
+    /// holds only wallet metadata (`wallet.json`, and a set-aside
+    /// `wallet.unreadable.json` if there ever was one), and unlike the file it is never
+    /// replaced, so its flag survives every atomic save; the file's own flag
+    /// is belt and braces. Called at launch too, so existing installs are
+    /// covered before their next save.
+    ///
     /// Best effort: a failure only means the file may be backed up, which is
     /// the state it was already in, and the key-less check covers that case.
     func excludeFromBackup() {
-        guard fileManager.fileExists(atPath: fileURL.path) else { return }
-        var url = fileURL
         var values = URLResourceValues()
         values.isExcludedFromBackup = true
+        var directory = fileURL.deletingLastPathComponent()
+        try? directory.setResourceValues(values)
+        guard fileManager.fileExists(atPath: fileURL.path) else { return }
+        var url = fileURL
         try? url.setResourceValues(values)
     }
 
@@ -133,6 +142,12 @@ final class WalletStore {
             try fileManager.removeItem(at: aside)
         }
         try fileManager.moveItem(at: fileURL, to: aside)
+    }
+
+    /// Whether the directory holding `wallet.json` is excluded. For tests.
+    var isDirectoryExcludedFromBackup: Bool {
+        let directory = fileURL.deletingLastPathComponent()
+        return (try? directory.resourceValues(forKeys: [.isExcludedFromBackupKey]))?.isExcludedFromBackup ?? false
     }
 
     func delete() throws {

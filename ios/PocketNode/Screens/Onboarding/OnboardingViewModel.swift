@@ -95,6 +95,16 @@ final class OnboardingViewModel {
     /// True for the restore flow.
     var isRestoring: Bool { restoringRecord != nil }
 
+    /// Whether a restore may open now or must wait behind the lock screen.
+    ///
+    /// The restore screen names the wallet and shows its address, so when a
+    /// PIN survived (or cannot be read yet) it waits until the session has
+    /// been unlocked with it. With a confirmed absent PIN there is nothing to
+    /// wait for.
+    static func mayStartRestore(pinPresence: PinPresence, sessionUnlocked: Bool) -> Bool {
+        pinPresence == .absent || sessionUnlocked
+    }
+
     // MARK: - Launch and resume
 
     /// Where a launch lands: onboarding at a given step, or the wallet shell.
