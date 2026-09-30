@@ -31,6 +31,7 @@ import com.rjnr.pocketnode.data.wallet.WalletInfo
 import com.rjnr.pocketnode.data.wallet.WalletPreferences
 import com.rjnr.pocketnode.core.prefs.SyncStrategy
 import com.nervosnetwork.ckblightclient.LightClientNative
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.Dispatchers
@@ -942,11 +943,14 @@ class GatewayRepository @Inject constructor(
         if (!gapLimitScanMutex.tryLock()) throw Exception("A scan or sweep is already running")
         return try {
             val wId = activeWalletId
+            // Snapshot the network with the wallet: the sweep marker must be filed
+            // under the network the transaction was built and broadcast on.
+            val sweepNetwork = currentNetwork
             if (wId.isEmpty()) throw Exception("No active wallet")
             val myScript = _walletInfo.value?.script ?: throw Exception("Wallet not initialized")
 
             val (inputs, _) = gatherSweepInputs(wId)
-            val plan = transactionBuilder.buildSweep(inputs, myScript, currentNetwork).getOrThrow()
+            val plan = transactionBuilder.buildSweep(inputs, myScript, sweepNetwork).getOrThrow()
 
             val pathByArgs = appDatabase.subAccountCandidateDao().getForParent(wId)
                 .filter { it.accountIndex == 0 && it.state == SubAccountCandidateEntity.STATE_FOUND }
@@ -974,7 +978,31 @@ class GatewayRepository @Inject constructor(
                 }
                 if (activeWalletId != wId) throw Exception("Wallet changed during the sweep; try again")
                 val signed = transactionBuilder.signSweep(plan.transaction, plan.inputLockArgs, keys).getOrThrow()
-                val txHash = sendTransaction(signed, expectedWalletId = wId).getOrThrow()
+                // #538 review: every output of a sweep lands on the main
+                // script, so sendTransaction's own recipient-amount insert
+                // (which only sums outputs NOT locked to us) would otherwise
+                // show a pending "Sent 0 CKB" until indexed. pendingDirection
+                // "self" tells it to show plan.feeShannons instead.
+                // plan.feeShannons is also passed as pendingFeeShannons: a
+                // sweep's inputs (candidate scripts) are never visible to
+                // getTransactions's info.script-scoped walk, so its confirmed
+                // fee can never be recomputed there either (same structural
+                // gap as a DAO unlock, #497).
+                val txHash = sendTransaction(
+                    signed,
+                    expectedWalletId = wId,
+                    pendingDirection = "self",
+                    pendingFeeShannons = plan.feeShannons,
+                ).getOrThrow()
+                // Marks this hash (with its fee) so getTransactions can
+                // classify the confirmed row "self" (amount = fee) once it is
+                // indexed, without an extra per-candidate-script JNI lookup on
+                // every poll. Stored in WalletPreferences, not the `transactions`
+                // cache, so a later retryBroadcast (which deletes that cached
+                // row) cannot erase the fee out from under it. See
+                // selfWalletLockArgsFor's sibling check in getTransactions for
+                // the read side.
+                walletPreferences.addSweepTxHash(wId, sweepNetwork.name, txHash, plan.feeShannons)
                 logger.i(TAG, "gap-limit sweep broadcast: ${plan.inputLockArgs.size} inputs, ${keys.size} groups")
                 txHash
             } finally {
@@ -1668,6 +1696,31 @@ class GatewayRepository @Inject constructor(
                 },
             )
 
+            // #538 review: `outgoingOutputs`'s `isOurs` above only compares
+            // equality with `fromAddress`, so a self-send to a DERIVED
+            // candidate address (a different string, still this wallet's own
+            // script) reads its own output as a real recipient, not change:
+            // outgoingAmount then includes the full amount sent plus the fee,
+            // not just the fee, until the confirmed row takes over.
+            // pendingTransferDisplay reuses the same isSelfTransferSignature
+            // check the confirmed row uses, so the pending row agrees with
+            // what it will show. Only applies to a plain transfer's default
+            // pendingDirection ("out"); a DAO op's caller already overrides
+            // pendingDirection, so it is left alone (null here).
+            val pendingSelfDisplay = if (pendingDirection == "out") {
+                runCatching { keyManager.deriveLockScriptFromAddress(fromAddress) }.getOrNull()?.args?.let { mainArgs ->
+                    pendingTransferDisplay(
+                        outputs = signed.cellOutputs,
+                        selfWalletLockArgs = selfWalletLockArgsFor(mainArgs, walletId),
+                        plannedFeeShannons = plannedFeeShannons,
+                        outgoingAmountShannons = outgoingAmount,
+                        mainScriptArgs = mainArgs,
+                    )
+                }
+            } else {
+                null
+            }
+
             pendingBroadcastDao.insert(
                 PendingBroadcastEntity(
                     txHash = txHash,
@@ -1686,8 +1739,12 @@ class GatewayRepository @Inject constructor(
                 txHash = txHash,
                 network = network,
                 walletId = walletId,
-                balanceChange = pendingAmountShannons?.let { "0x${it.toString(16)}" } ?: balanceChangeHex,
-                direction = pendingDirection,
+                balanceChange = when {
+                    pendingAmountShannons != null -> "0x${pendingAmountShannons.toString(16)}"
+                    pendingSelfDisplay != null -> "0x${pendingSelfDisplay.amountShannons.toString(16)}"
+                    else -> balanceChangeHex
+                },
+                direction = pendingSelfDisplay?.direction ?: pendingDirection,
                 fee = pendingFeeShannons?.let { "0x${it.toString(16)}" } ?: "0x0",
                 feeShannons = plannedFeeShannons
             )
@@ -1771,14 +1828,37 @@ class GatewayRepository @Inject constructor(
      * already encodes, with no heuristic. We drop the FAILED row first so
      * [sendTransaction] re-inserts a fresh BROADCASTING row for the same hash
      * and the watchdog re-tracks it.
+     *
+     * #538 review: [sendTransaction]'s own insert always shows "out" and the
+     * recipient amount, which is wrong for a "self" row (a self-transfer or a
+     * gap-limit sweep): that reads as "Sent 0 CKB" (or the wrong amount) again
+     * until the confirmed row takes over. The cached row's direction/fee are
+     * read here BEFORE it is deleted below and threaded back through so a
+     * retried self row still shows "self" with its fee, not a regression back
+     * to the bug this whole PR fixes. A sweep's fee also survives independently
+     * in WalletPreferences (see sweepGapLimitFundsInner), so this matters most
+     * for a retried plain self-transfer, whose only record was this cached row.
      */
     suspend fun retryBroadcast(txHash: String): Result<String> = runCatching {
         val row = pendingBroadcastDao.getFailedRow(txHash)
             ?: error("This transaction is too old to retry automatically. Please send a new one.")
         val tx = json.decodeFromString<Transaction>(row.signedTxJson)
+        val cached = try {
+            appDatabase.transactionDao().getByTxHash(txHash)
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            logger.w(TAG, "retryBroadcast: cached row lookup failed for $txHash: ${e.message}")
+            null
+        }
         pendingBroadcastDao.delete(txHash)
         cacheManager.deleteTransaction(txHash)
-        sendTransaction(tx).getOrThrow()
+        val override = retryPendingOverride(cached?.direction, cached?.feeShannons)
+        if (override != null) {
+            sendTransaction(tx, pendingDirection = override.first, pendingFeeShannons = override.second).getOrThrow()
+        } else {
+            sendTransaction(tx).getOrThrow()
+        }
     }
 
     suspend fun sendTransaction(
@@ -1797,6 +1877,16 @@ class GatewayRepository @Inject constructor(
          * the confirmed transaction — see [unlockDao].
          */
         pendingFeeShannons: Long? = null,
+        /**
+         * Pending activity-row override (#538 review, mirroring
+         * buildReserveAndSend's own parameter of the same name). "out" (the
+         * default) keeps today's recipient-amount insert below. "self" is for
+         * a transaction whose every output lands on this wallet's own script
+         * (a gap-limit sweep, or a retried self-transfer): the recipient
+         * amount below would otherwise read 0 (nothing is "not ours"), so
+         * [pendingFeeShannons] is shown instead.
+         */
+        pendingDirection: String = "out",
     ): Result<String> = runCatching {
         logger.d(TAG, "📤 sendTransaction: building JSON")
         logger.d(TAG, "  Inputs: ${transaction.cellInputs.size}, Outputs: ${transaction.cellOutputs.size}")
@@ -1844,8 +1934,12 @@ class GatewayRepository @Inject constructor(
                 isTyped = output.type != null,
             )
         }
-        // Positive hex per existing convention; `direction = "out"` carries sign.
-        val balanceChangeHex = "0x${recipientOutgoingShannons(outgoingOutputs).toString(16)}"
+        // Positive hex per existing convention; `direction` carries the sign.
+        // See sendTransactionPendingAmount's KDoc: for "self" (every output is
+        // ours, so recipientOutgoingShannons reads 0) the fee is shown
+        // instead, same as the confirmed row.
+        val recipientAmount = recipientOutgoingShannons(outgoingOutputs)
+        val balanceChangeHex = "0x${sendTransactionPendingAmount(pendingDirection, pendingFeeShannons, recipientAmount).toString(16)}"
         val now = System.currentTimeMillis()
 
         logger.d(TAG, "📤 sendTransaction: JSON length=${txJson.length}, preHash=$txHash")
@@ -1876,7 +1970,7 @@ class GatewayRepository @Inject constructor(
                     network = network,
                     walletId = walletId,
                     balanceChange = balanceChangeHex,
-                    direction = "out",
+                    direction = pendingDirection,
                     fee = "0x0",
                     feeShannons = pendingFeeShannons
                 )
@@ -1945,7 +2039,7 @@ class GatewayRepository @Inject constructor(
                 network = network,
                 walletId = walletId,
                 balanceChange = balanceChangeHex,
-                direction = "out",
+                direction = pendingDirection,
                 fee = "0x0",
                 feeShannons = pendingFeeShannons
             )
@@ -2004,6 +2098,65 @@ class GatewayRepository @Inject constructor(
         }
 
         returnedHash
+    }
+
+    /**
+     * The lock-script args a self-transfer check should treat as "ours" for
+     * [walletId]: its own main script ([mainScriptArgs]) plus its own
+     * non-RESTORED sub-account candidates (see
+     * [activeSelfTransferCandidateArgs]), minus every OTHER WalletEntity's
+     * own address in the app (defence in depth: a send from wallet A to
+     * wallet B is a real transfer, not a self transfer, even though the
+     * broader #382 gap-limit `knownLockArgs` set intentionally spans every
+     * wallet). Shared by [getTransactions] (the confirmed row) and
+     * [buildReserveAndSend] (the pending row inserted at send time, #538
+     * review) so both classify a self-send to a derived candidate address
+     * the same way.
+     *
+     * `internal`, not `private` (#538 review): its DB-only dependencies
+     * (walletDao, subAccountCandidateDao, keyManager's pure address
+     * derivation) need no JNI/light-client seam, unlike getTransactions or
+     * buildReserveAndSend as a whole, so a wiring test can call it directly
+     * against real Room data instead of a hand-built known-args set. See
+     * GatewayRepositorySelfTransferWiringTest.
+     */
+    internal suspend fun selfWalletLockArgsFor(mainScriptArgs: String, walletId: String): Set<String> {
+        val otherWalletLockArgs: Set<String> = try {
+            buildSet {
+                val addressPicker: (WalletEntity) -> String =
+                    if (currentNetwork == NetworkType.MAINNET) { w -> w.mainnetAddress } else { w -> w.testnetAddress }
+                walletDao.getAll().forEach { w ->
+                    if (w.walletId == walletId) return@forEach
+                    val addr = addressPicker(w)
+                    if (addr.isNotBlank()) {
+                        runCatching { keyManager.deriveLockScriptFromAddress(addr) }
+                            .getOrNull()?.let { add(it.args.lowercase()) }
+                    }
+                }
+            }
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            logger.w(TAG, "selfWalletLockArgsFor: other-wallets script set incomplete: ${e.message}")
+            emptySet()
+        }
+        return try {
+            val selfArgs = buildSet {
+                add(mainScriptArgs.lowercase())
+                activeSelfTransferCandidateArgs(appDatabase.subAccountCandidateDao().getForParent(walletId))
+                    .forEach { add(it.lowercase()) }
+            }
+            // Both sides lowercased before the subtraction (#538 review): a
+            // case mismatch between how a script's args were normalized here
+            // vs. in the other-wallets loop above must never let a restored
+            // child's (or any other wallet's) script survive into the result.
+            selfArgs - otherWalletLockArgs
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            logger.w(TAG, "selfWalletLockArgsFor: self-transfer script set incomplete: ${e.message}")
+            setOf(mainScriptArgs.lowercase())
+        }
     }
 
     suspend fun getTransactions(limit: Int = 50, cursor: String? = null): Result<TransactionsResponse> = runCatching {
@@ -2069,6 +2222,12 @@ class GatewayRepository @Inject constructor(
             logger.w(TAG, "getTransactions: known-scripts set incomplete: ${it.message}")
             setOf(myScript.args)
         }
+
+        // Self-transfer scope, narrower than knownLockArgs above: see
+        // selfWalletLockArgsFor's KDoc. Shared with buildReserveAndSend so a
+        // freshly-sent self-transfer's pending row classifies the same way
+        // the confirmed row eventually will (#538 review).
+        val selfWalletLockArgs: Set<String> = selfWalletLockArgsFor(myScript.args, activeWalletId)
         var gapLimitSignal = false
 
         // Fetch tip height once for confirmation calculations (avoid per-tx JNI calls)
@@ -2086,9 +2245,16 @@ class GatewayRepository @Inject constructor(
             // taken from the precomputed complete-walk map (netShannonsByTx).
             val netChangeShannons = netByTx[txHash] ?: 0L
 
+            // A real self transfer always pays the fee, so its net change is
+            // negative, not zero: "out" unless every output lands on this
+            // wallet's own script (see isSelfTransferSignature, scoped by
+            // selfWalletLockArgs above). DAO deposits and withdrawals also net
+            // negative but are reclassified below by finalDirection, which
+            // takes priority over this "out"/"self" call.
             val direction = when {
                 netChangeShannons > 0 -> "in"
-                netChangeShannons < 0 -> "out"
+                netChangeShannons < 0 ->
+                    if (isSelfTransferSignature(netChangeShannons, tx.outputs, selfWalletLockArgs)) "self" else "out"
                 else -> "self"
             }
 
@@ -2184,23 +2350,71 @@ class GatewayRepository @Inject constructor(
                 },
             )
 
-            val (finalDirection, finalAmount) = if (hasDaoOutput) {
+            // See selfRowDirectionAndAmount's KDoc (#538 review): a self
+            // row's `amount` above undercounts whenever a non-change output
+            // went to another script this wallet also owns, since the JNI
+            // walk that fed netChangeShannons was queried with only myScript.
+            // feeShannons is computed from the full declared transaction, so
+            // it is preferred when known; when it is not, and the abs(net)
+            // fallback cannot be vouched for either, the row is demoted back
+            // to "out" rather than showing a possibly-wrong amount under
+            // "Self Transfer".
+            val (selfRowDirection, selfRowAmount) = if (direction == "self") {
+                selfRowDirectionAndAmount(feeShannons, tx.outputs, myScript.args, amount)
+            } else {
+                direction to amount
+            }
+
+            // #538 review: sweepGapLimitFunds spends FOUND candidate cells
+            // (derived addresses) back to the main address. Those inputs are
+            // never visible to this walk (queried with only myScript), so
+            // netChangeShannons only sees the main-script output and reads
+            // positive: it would otherwise show as "Received", hiding the
+            // fee actually paid. sweepGapLimitFundsInner records its own tx
+            // hash AND fee locally at send time, scoped to walletId+network
+            // (WalletPreferences, not the Room `transactions` cache:
+            // retryBroadcast deletes that row on every retry, which was
+            // silently erasing the fee here too), so this is detected without
+            // an extra per-candidate-script JNI lookup on every getTransactions
+            // call. That local marker is trusted only together with a fresh
+            // isSelfTransferSignature check against THIS viewing wallet's own
+            // self set (defence in depth: a wallet-scoped marker should never
+            // be reachable for a different wallet, but this makes it provably
+            // so rather than trusting the marker alone), and a genuine receive
+            // from a foreign input passes neither check and is untouched.
+            // Only checked in the non-DAO branch below, so DAO priority is
+            // unaffected.
+            val sweepFeeShannons = walletPreferences.sweepFeeShannons(activeWalletId, currentNetwork.name, txHash)
+            val sweepOutputsAreSelf = isSelfTransferSignature(
+                netChangeShannons = -1L,
+                outputs = tx.outputs,
+                knownLockArgs = selfWalletLockArgs,
+            )
+            val sweepDisplay = sweepRowDisplay(
+                isKnownSweepTxHash = sweepFeeShannons != null,
+                outputsAreSelf = sweepOutputsAreSelf,
+                recordedFeeShannons = sweepFeeShannons,
+            )
+
+            val (finalDirection, finalAmount, finalFeeShannons) = if (hasDaoOutput) {
                 val daoOutputCapacity = tx.outputs
                     .first { it.type?.codeHash == DaoConstants.DAO_CODE_HASH }
                     .capacity.removePrefix("0x").toLongOrNull(16) ?: 0L
                 if (tx.headerDeps.isEmpty()) {
-                    "dao_deposit" to daoOutputCapacity
+                    Triple("dao_deposit", daoOutputCapacity, feeShannons)
                 } else {
-                    "dao_withdraw" to daoOutputCapacity
+                    Triple("dao_withdraw", daoOutputCapacity, feeShannons)
                 }
             } else if (tx.headerDeps.size >= 2) {
                 // Unlock: show total CKB returned (deposit + compensation)
                 val totalOutput = cellInteractions
                     .filter { it.ioType == "output" }
                     .sumOf { it.ioCapacity.removePrefix("0x").toLongOrNull(16) ?: 0L }
-                "dao_unlock" to totalOutput
+                Triple("dao_unlock", totalOutput, feeShannons)
+            } else if (sweepDisplay != null) {
+                Triple(sweepDisplay.direction, sweepDisplay.amountShannons, sweepFeeShannons)
             } else {
-                direction to amount
+                Triple(selfRowDirection, selfRowAmount, feeShannons)
             }
 
             TransactionRecord(
@@ -2214,7 +2428,7 @@ class GatewayRepository @Inject constructor(
                 confirmations = confirmations,
                 blockTimestampHex = headerInfo.timestampHex,
                 isDaoRelated = hasDaoOutput || tx.headerDeps.size >= 2,
-                feeShannons = feeShannons
+                feeShannons = finalFeeShannons
             )
         }
 

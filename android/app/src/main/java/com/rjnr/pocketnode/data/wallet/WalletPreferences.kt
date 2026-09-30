@@ -135,6 +135,65 @@ class WalletPreferences @Inject constructor(
         prefs.edit().putStringSet(KEY_BULK_TX_HASHES, current + hash).apply()
     }
 
+    /**
+     * Tx hash -> fee shannons for sweeps broadcast by sweepGapLimitFunds,
+     * scoped to the wallet+network that broadcast it (#538 review). A sweep
+     * spends FOUND candidate cells (derived addresses) back to the main
+     * address; getTransactions's per-tx walk is queried with only the main
+     * script, so it never sees those candidate-script inputs and the net
+     * reads positive (a sweep would otherwise show as "Received", hiding the
+     * fee it paid).
+     *
+     * Scoped by walletId+network, not a bare hash (#538 review: an unscoped
+     * marker would classify a matching hash as "self" for ANY wallet that
+     * happens to view it, not only the one that actually swept it). The
+     * caller (GatewayRepository.getTransactions) also independently re-checks
+     * that the transaction's outputs still pass `isSelfTransferSignature` for
+     * the viewing wallet before trusting this marker at all, so a stale or
+     * wrongly-scoped entry can never override a real transfer's
+     * classification on its own.
+     *
+     * The fee is stored HERE, not read back from the cached `transactions`
+     * row, because retryBroadcast deletes and re-inserts that row on every
+     * retry (#538 review, retry-path follow-up): a retried sweep's confirmed
+     * row would otherwise find no fee once indexed again and fall back to the
+     * wrongly-positive net (the whole swept balance), the same bug the fee
+     * lookup exists to avoid in the first place. Recorded locally at send
+     * time; [clearSweepTxHashes] removes a wallet's entries on delete so they
+     * cannot outlive it. Plain methods, not part of a core.prefs interface:
+     * gap-limit sweep is Android-only (#382), so this stays out of the iOS-
+     * shared surface.
+     *
+     * Entries are `"$walletId:$network:$hash:$feeShannons"`; walletId is a
+     * UUID and network is "MAINNET"/"TESTNET", neither ever containing ':',
+     * so a fixed prefix match is safe.
+     */
+    fun isSweepTxHash(walletId: String, network: String, hash: String): Boolean =
+        sweepFeeShannons(walletId, network, hash) != null
+
+    fun sweepFeeShannons(walletId: String, network: String, hash: String): Long? {
+        val prefix = "$walletId:$network:$hash:"
+        return prefs.getStringSet(KEY_SWEEP_TX_FEES, emptySet())
+            ?.firstOrNull { it.startsWith(prefix) }
+            ?.removePrefix(prefix)
+            ?.toLongOrNull()
+    }
+
+    fun addSweepTxHash(walletId: String, network: String, hash: String, feeShannons: Long) {
+        val current = prefs.getStringSet(KEY_SWEEP_TX_FEES, emptySet()) ?: emptySet()
+        prefs.edit().putStringSet(KEY_SWEEP_TX_FEES, current + "$walletId:$network:$hash:$feeShannons").apply()
+    }
+
+    /** Removes every sweep-fee entry recorded for [walletId] (#538 review), called on wallet delete. */
+    fun clearSweepTxHashes(walletId: String) {
+        val prefix = "$walletId:"
+        val current = prefs.getStringSet(KEY_SWEEP_TX_FEES, emptySet()) ?: emptySet()
+        val kept = current.filterNot { it.startsWith(prefix) }.toSet()
+        if (kept.size != current.size) {
+            prefs.edit().putStringSet(KEY_SWEEP_TX_FEES, kept).apply()
+        }
+    }
+
     init {
         migrateIfNeeded()
     }
@@ -508,6 +567,7 @@ class WalletPreferences @Inject constructor(
         private const val KEY_THEME_MODE = "theme_mode"
         private const val KEY_BULK_SEND_UNLOCKED = "bulk_send_unlocked"
         private const val KEY_BULK_TX_HASHES = "bulk_tx_hashes"
+        private const val KEY_SWEEP_TX_FEES = "sweep_tx_fees"
         private const val KEY_BACKGROUND_SYNC = "background_sync_enabled"
         private const val KEY_LAST_SYNCED_AT = "last_synced_at_ms"
         private const val KEY_BG_SYNC_PILL_DISMISSED = "bg_sync_pill_dismissed"

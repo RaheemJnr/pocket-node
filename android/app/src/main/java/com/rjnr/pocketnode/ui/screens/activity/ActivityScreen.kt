@@ -268,7 +268,7 @@ fun ActivityScreen(
                                 broadcast = broadcastStates[tx.txHash],
                                 nowMillis = now,
                                 onClick = { selectedTxHash = tx.txHash },
-                                onRetry = if (tx.status == "FAILED" && tx.isOutgoing()) {
+                                onRetry = if (tx.status == "FAILED" && tx.canRetry()) {
                                     { retryDialogTx = tx }
                                 } else null
                             )
@@ -653,6 +653,8 @@ private fun TransactionDetailSheet(
         transaction.isDaoWithdraw() -> AmberPending
         transaction.isDaoUnlock() || transaction.isIncoming() -> MaterialTheme.colorScheme.primary
         transaction.isOutgoing() -> ErrorRed
+        // isSelfTransfer() falls through here: onSurfaceVariant, same neutral
+        // tone the Activity row and Home card already use for it.
         else -> MaterialTheme.colorScheme.onSurfaceVariant
     }
 
@@ -718,6 +720,7 @@ private fun TransactionDetailSheet(
                             transaction.isDaoWithdraw() -> "Dao Withdraw"
                             transaction.isDaoUnlock() -> "Dao Unlock"
                             transaction.isIncoming() -> "Received"
+                            transaction.isSelfTransfer() -> "Self Transfer"
                             transaction.isOutgoing() -> "Sent"
                             else -> "Amount"
                         },
@@ -833,8 +836,10 @@ private fun TransactionDetailSheet(
                 )
             }
 
-            // Retry CTA — only for FAILED plain transfers (see HomeScreen for why).
-            if (displayState == TxDisplayState.FAILED && transaction.isOutgoing() && onRetry != null) {
+            // Retry CTA, for any FAILED row this wallet originated (see
+            // HomeScreen's canRetry() comment for why isOutgoing() alone missed
+            // self-transfers/sweeps, #538 review).
+            if (displayState == TxDisplayState.FAILED && transaction.canRetry() && onRetry != null) {
                 Spacer(modifier = Modifier.height(24.dp))
                 Button(
                     onClick = { onRetry(transaction) },
