@@ -3,7 +3,6 @@ package com.rjnr.pocketnode.data.gateway
 import android.content.Context
 import androidx.room.Room
 import androidx.test.core.app.ApplicationProvider
-import com.nervosnetwork.ckblightclient.LightClientNative
 import com.rjnr.pocketnode.core.log.NoopLogger
 import com.rjnr.pocketnode.data.database.AppDatabase
 import com.rjnr.pocketnode.data.database.entity.PendingBroadcastEntity
@@ -42,8 +41,6 @@ import org.junit.Test
 import org.junit.runner.RunWith
 import org.robolectric.RobolectricTestRunner
 import org.robolectric.annotation.Config
-import org.robolectric.annotation.Implementation
-import org.robolectric.annotation.Implements
 
 /**
  * #538 review, "wiring untested": the pure functions in SelfTransferSignature.kt
@@ -56,11 +53,17 @@ import org.robolectric.annotation.Implements
  * and real WalletPreferences/CacheManager/TransactionBuilder, with only the
  * JNI-touching surface faked: BroadcastClient (a fake, same shape as
  * GatewayRepositorySendTransactionTest) for sendTransaction/retryBroadcast, and
- * a Robolectric shadow of LightClientNative (same shape as #529's
- * GatewayRepositoryDaoUnlockTest; MockK cannot stub `external fun`, which is
- * why sendTransaction/retryBroadcast route their tip read through the
- * injectable LightClientReadOnly instead and getTransactions does not) for
- * getTransactions's own direct native calls.
+ * a Robolectric shadow of LightClientNative for getTransactions's own direct
+ * native calls (MockK cannot stub `external fun`, which is why
+ * sendTransaction/retryBroadcast route their tip read through the injectable
+ * LightClientReadOnly instead and getTransactions does not). This reuses
+ * #529's GatewayRepositoryDaoUnlockTest's DaoUnlockShadowLightClientNative
+ * (extended with nativeGetTransactions) rather than declaring a second
+ * `@Implements(LightClientNative::class)` shadow: LightClientNative is a
+ * Kotlin `object`, so Robolectric binds its shadow once per sandbox, and two
+ * test classes sharing a sandbox (same sdk, same instrumentedPackages) with
+ * two different shadow classes get a ClassCastException on whichever runs
+ * second, not a merge of both.
  *
  * Every test here was verified to fail when the production call site it pins
  * is reverted, then to pass again once restored; see this file's sibling
@@ -68,7 +71,7 @@ import org.robolectric.annotation.Implements
  */
 @RunWith(RobolectricTestRunner::class)
 @Config(
-    shadows = [SweepShadowLightClientNative::class],
+    shadows = [DaoUnlockShadowLightClientNative::class],
     instrumentedPackages = ["com.nervosnetwork.ckblightclient"],
 )
 class GatewayRepositorySelfTransferWiringTest {
@@ -94,7 +97,7 @@ class GatewayRepositorySelfTransferWiringTest {
         cacheManager = CacheManager(db.transactionDao(), db.balanceCacheDao(), NoopLogger)
         transactionBuilder = TransactionBuilder(NetworkValidator())
 
-        SweepShadowLightClientNative.transactionsPage = null
+        DaoUnlockShadowLightClientNative.transactionsPage = null
 
         walletPreferences = WalletPreferences(context, NoopLogger)
         walletPreferences.setActiveWalletId(walletId)
@@ -164,7 +167,7 @@ class GatewayRepositorySelfTransferWiringTest {
 
     @After
     fun teardown() {
-        SweepShadowLightClientNative.transactionsPage = null
+        DaoUnlockShadowLightClientNative.transactionsPage = null
         db.close()
     }
 
@@ -364,7 +367,7 @@ class GatewayRepositorySelfTransferWiringTest {
             outputsData = listOf("0x"),
             witnesses = emptyList(),
         )
-        SweepShadowLightClientNative.transactionsPage = json.encodeToString(
+        DaoUnlockShadowLightClientNative.transactionsPage = json.encodeToString(
             JniPagination(
                 objects = listOf(
                     JniTxWithCell(
@@ -386,32 +389,6 @@ class GatewayRepositorySelfTransferWiringTest {
         assertNotNull("sweep row must be present", record)
         assertEquals("self", record!!.direction)
         assertEquals(sweepFee, record.balanceChange.removePrefix("0x").toLong(16))
-    }
-}
-
-/**
- * Stands in for the light client's JNI surface in
- * [GatewayRepositorySelfTransferWiringTest]. MockK cannot stub `external fun`
- * (it throws UnsatisfiedLinkError at first real invocation), so a Robolectric
- * shadow answers getTransactions's own direct LightClientNative reads
- * instead, same technique as #529's GatewayRepositoryDaoUnlockTest. Every
- * native not named here keeps Robolectric's default (null / 0), which
- * getTransactions already handles gracefully (an unresolved header, a
- * missing tip) for every path this suite exercises.
- */
-@Implements(LightClientNative::class)
-class SweepShadowLightClientNative {
-
-    @Implementation
-    fun nativeGetTransactions(
-        @Suppress("UNUSED_PARAMETER") searchKeyJson: String,
-        @Suppress("UNUSED_PARAMETER") order: String,
-        @Suppress("UNUSED_PARAMETER") limit: Int,
-        @Suppress("UNUSED_PARAMETER") cursor: String?,
-    ): String? = transactionsPage
-
-    companion object {
-        var transactionsPage: String? = null
     }
 }
 

@@ -740,10 +740,25 @@ class DaoUnlockShadowLightClientNative {
             )
         }
 
+    /**
+     * A raw JNI transactions page, for [GatewayRepositorySelfTransferWiringTest]'s
+     * getTransactions coverage. Only that suite sets [transactionsPage]; every
+     * other test here leaves it null, which getTransactions already handles as
+     * an empty page.
+     */
+    @Implementation
+    fun nativeGetTransactions(
+        @Suppress("UNUSED_PARAMETER") searchKeyJson: String,
+        @Suppress("UNUSED_PARAMETER") order: String,
+        @Suppress("UNUSED_PARAMETER") limit: Int,
+        @Suppress("UNUSED_PARAMETER") cursor: String?,
+    ): String? = transactionsPage
+
     companion object {
         var tipHeader: String? = null
         var scripts: String? = null
         var chainStatus: String? = null
+        var transactionsPage: String? = null
 
         /** Every transaction the repository asked the chain about. */
         val transactionQueries = mutableListOf<String>()
