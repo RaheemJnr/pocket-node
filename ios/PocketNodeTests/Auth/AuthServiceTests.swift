@@ -319,6 +319,84 @@ final class AuthServiceTests: XCTestCase {
         XCTAssertEqual(biometrics.prompts, 0, "it went straight to the PIN, which cannot pass either")
     }
 
+    /// Cold start after a permanent lock: the PIN service seeds its lockout
+    /// fields as "not locked" until the first refresh, so reading biometric
+    /// availability on the first frame must fail closed rather than trust
+    /// that placeholder.
+    func testAColdStartAfterAPermanentLockOffersNoBiometricsOnTheFirstFrame() async throws {
+        let first = makeAuth()
+        try await first.setPin("123456")
+        first.isBiometricEnabled = true
+        await exhaustAllAttempts(on: first)
+        XCTAssertTrue(first.pin.isPermanentlyLocked)
+
+        // A relaunch: a new service over the same Keychain and clock.
+        let cold = makeAuth()
+        XCTAssertEqual(cold.state, .locked)
+        XCTAssertFalse(cold.pin.hasLoadedState)
+        XCTAssertFalse(cold.canUseBiometrics, "no biometric button before the lockout state is read")
+
+        let unlocked = await cold.unlockWithBiometrics()
+
+        XCTAssertFalse(unlocked)
+        XCTAssertEqual(cold.state, .locked)
+        XCTAssertEqual(biometrics.prompts, 0, "no prompt is raised on the first frame either")
+        XCTAssertTrue(cold.pin.isPermanentlyLocked)
+        XCTAssertFalse(cold.canUseBiometrics, "and still none once it is read")
+    }
+
+    func testAColdStartAfterAPermanentLockOffersNoBiometricsAfterTheRefresh() async throws {
+        let first = makeAuth()
+        try await first.setPin("123456")
+        first.isBiometricEnabled = true
+        await exhaustAllAttempts(on: first)
+
+        let cold = makeAuth()
+        await cold.refresh()
+
+        XCTAssertTrue(cold.pin.hasLoadedState)
+        XCTAssertTrue(cold.pin.isPermanentlyLocked)
+        XCTAssertFalse(cold.canUseBiometrics)
+        let challenge = Task { await cold.requireAuth(reason: "Reveal your recovery phrase") }
+        try await waitForChallenge(on: cold)
+        cold.resolveChallenge(granted: false)
+        _ = await challenge.value
+        XCTAssertEqual(biometrics.prompts, 0)
+    }
+
+    /// Failing closed must not cost an ordinary cold start its biometrics:
+    /// they come back as soon as the state has been read.
+    func testAColdStartWithoutALockOffersBiometricsOnceTheStateIsRead() async throws {
+        let first = makeAuth()
+        try await first.setPin("123456")
+        first.isBiometricEnabled = true
+
+        let cold = makeAuth()
+        XCTAssertFalse(cold.canUseBiometrics)
+
+        await cold.refresh()
+        XCTAssertTrue(cold.canUseBiometrics)
+
+        let unlocked = await cold.unlockWithBiometrics()
+        XCTAssertTrue(unlocked)
+        XCTAssertEqual(cold.state, .unlocked)
+    }
+
+    /// The first-frame tap itself: the lock screen's button calls straight
+    /// into `unlockWithBiometrics` without waiting for its own refresh.
+    func testAFirstFrameBiometricUnlockReadsTheStoreBeforePrompting() async throws {
+        let first = makeAuth()
+        try await first.setPin("123456")
+        first.isBiometricEnabled = true
+
+        let cold = makeAuth()
+        let unlocked = await cold.unlockWithBiometrics()
+
+        XCTAssertTrue(cold.pin.hasLoadedState)
+        XCTAssertTrue(unlocked, "an unlocked PIN still lets a face in")
+        XCTAssertEqual(biometrics.prompts, 1)
+    }
+
     /// A temporary lockout still allows biometrics, matching Android: that one
     /// is about slowing PIN guessing, not about revoking the wallet.
     func testBiometricsStillWorkDuringATemporaryLockout() async throws {

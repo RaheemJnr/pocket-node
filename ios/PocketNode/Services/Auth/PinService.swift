@@ -212,6 +212,13 @@ final class PinService {
     /// ``refresh()`` while a lockout countdown is on screen.
     private(set) var state: PinState
 
+    /// False until the failure state has been read from the store at least
+    /// once. Until then ``state``'s lockout fields are the placeholder the
+    /// initializer seeds (no failures, not locked), not what is stored, so
+    /// anything that relaxes a gate on them, such as offering biometrics,
+    /// must wait for this.
+    private(set) var hasLoadedState = false
+
     private let policy: PinPolicyActor
 
     /// Convenience accessors so views do not reach through `state`.
@@ -239,7 +246,9 @@ final class PinService {
         self.policy = PinPolicyActor(keychain: keychain, cost: cost, clock: clock)
         // Seeded synchronously from a non-prompting Keychain lookup so the lock
         // gate knows on the first frame whether to gate, instead of flashing
-        // the wallet while an async read lands.
+        // the wallet while an async read lands. Only the presence is real
+        // here: the lockout fields are placeholders until the first
+        // `refresh()`, which is what `hasLoadedState` records.
         self.state = PinState(
             presence: KeychainPinStore.pinPresence(keychain: keychain),
             remainingAttempts: PinPolicy.companion.MAX_ATTEMPTS,
@@ -253,6 +262,7 @@ final class PinService {
     /// lockout countdown can call it on a timer.
     func refresh() async {
         state = await policy.snapshot()
+        hasLoadedState = true
     }
 
     /// Stores `pin`, clearing any previous failure state.
