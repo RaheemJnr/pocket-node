@@ -109,6 +109,12 @@ class SettingsViewModelNetworkServicesTest {
         return UpdateRepository(HttpClient(engine), Json { ignoreUnknownKeys = true }, NoopLogger, walletPrefs)
     }
 
+    /** A real UpdateRepository whose GitHub request never completes until cancelled. */
+    private fun hangingUpdateRepository(): UpdateRepository {
+        val engine = MockEngine { kotlinx.coroutines.awaitCancellation() }
+        return UpdateRepository(HttpClient(engine), Json { ignoreUnknownKeys = true }, NoopLogger, walletPrefs)
+    }
+
     private fun newViewModel(updateRepository: UpdateRepository): SettingsViewModel = SettingsViewModel(
         repository = repository,
         walletPrefs = walletPrefs,
@@ -198,6 +204,24 @@ class SettingsViewModelNetworkServicesTest {
         runCurrent()
 
         viewModel.checkForUpdate()
+        runCurrent()
+
+        assertEquals(SettingsViewModel.UpdateStatus.Disabled, viewModel.uiState.value.updateStatus)
+    }
+
+    @Test
+    fun `turning update checks off while a check is in flight keeps Disabled, not Failed`() = runTest(testDispatcher) {
+        // The repository wraps the HTTP call in runCatching, so cancelling the
+        // in-flight check comes back as Result.failure; the view model must not
+        // write Failed over Disabled.
+        assumeTrue(BuildConfig.UPDATER_ENABLED)
+        val viewModel = newViewModel(hangingUpdateRepository())
+        runCurrent()
+        assertEquals(SettingsViewModel.UpdateStatus.Checking, viewModel.uiState.value.updateStatus)
+
+        viewModel.toggleUpdateService(false)
+        runCurrent()
+        Thread.sleep(200) // let the engine's cancellation land off the test dispatcher
         runCurrent()
 
         assertEquals(SettingsViewModel.UpdateStatus.Disabled, viewModel.uiState.value.updateStatus)
