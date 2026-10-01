@@ -46,8 +46,76 @@ final class OnboardingViewModel {
 
     private let creator: WalletCreator
 
-    init(creator: WalletCreator) {
+    /// Runs before a new wallet is created or imported. `AppContainer` clears
+    /// a PIN left behind with no wallet there, so the PIN step that follows
+    /// is not refused (see `OrphanedPin`).
+    private let prepareNewWallet: () async -> Void
+
+    /// - Parameter step: where the flow starts. ``Step/welcome`` for a device
+    ///   with no wallet; ``resumeStep(for:)`` for one whose onboarding was cut
+    ///   short after the wallet was stored (see ``launchDestination(hasWallet:pinPresence:record:)``).
+    init(
+        creator: WalletCreator,
+        resumingAt step: Step = .welcome,
+        prepareNewWallet: @escaping () async -> Void = {}
+    ) {
         self.creator = creator
+        self.prepareNewWallet = prepareNewWallet
+        self.step = step
+    }
+
+    // MARK: - Launch and resume
+
+    /// Where a launch lands: onboarding at a given step, or the wallet shell.
+    enum LaunchDestination: Equatable {
+        case onboarding(Step)
+        case wallet
+    }
+
+    /// Decides the launch from what is stored, not from anything remembered
+    /// about the last run, so a process killed between storing the wallet and
+    /// setting the PIN cannot skip the security steps.
+    ///
+    /// The wallet is stored before the backup and PIN steps run, so a wallet
+    /// on disk says nothing about whether onboarding finished. What does is
+    /// the PIN: onboarding is not over until one exists, and nothing else in
+    /// the app can reach the wallet shell without one. So a wallet with a
+    /// confirmed absent PIN resumes onboarding at its first unfinished step
+    /// (``resumeStep(for:)``) instead of opening. A PIN that is present, or
+    /// that cannot be read yet, goes to the wallet, which stays behind the
+    /// lock screen until it is answered; if the unreadable store later turns
+    /// out to hold no PIN, `RootView` re-runs this decision.
+    ///
+    /// Resuming at the PIN step when a PIN already exists would let whoever
+    /// holds the phone replace it without knowing it, which is why only
+    /// ``PinPresence/absent`` resumes.
+    static func launchDestination(
+        hasWallet: Bool,
+        pinPresence: PinPresence,
+        record: WalletRecord?
+    ) -> LaunchDestination {
+        guard hasWallet else { return .onboarding(.welcome) }
+        guard pinPresence == .absent else { return .wallet }
+        return .onboarding(resumeStep(for: record))
+    }
+
+    /// The first unfinished security step for a wallet that is already
+    /// stored: the backup, for a generated phrase the user has not verified
+    /// yet, otherwise the PIN. The same rule the live flow follows (a created
+    /// wallet goes to backup, an imported one straight to the PIN), read back
+    /// from the record's `type` and `mnemonicBackedUp` since those are what
+    /// survive the process.
+    ///
+    /// No readable record (a `wallet.json` that failed to decode, or keys with
+    /// no metadata) resumes at the backup too: the backup step reads the
+    /// phrase from the key store, so it works without the record, and
+    /// skipping it would risk a generated phrase never being written down.
+    static func resumeStep(for record: WalletRecord?) -> Step {
+        guard let record else { return .backup }
+        guard record.type == WalletCreator.typeMnemonic, !record.mnemonicBackedUp else {
+            return .pinSetup
+        }
+        return .backup
     }
 
     // MARK: - Navigation
@@ -93,6 +161,7 @@ final class OnboardingViewModel {
 
     func createWallet(wordCount: Int, name: String) async {
         await run {
+            await self.prepareNewWallet()
             // The returned phrase is deliberately dropped: the wallet is
             // stored by now, and the backup step reads the words back from
             // the key store rather than from a second copy kept here.
@@ -103,6 +172,7 @@ final class OnboardingViewModel {
 
     func importMnemonic(words: [String], name: String) async {
         await run {
+            await self.prepareNewWallet()
             try await self.creator.importMnemonic(words: words, name: name)
             // Nothing to back up: the user supplied the phrase.
             self.step = .pinSetup
@@ -111,6 +181,7 @@ final class OnboardingViewModel {
 
     func importPrivateKey(hex: String, name: String) async {
         await run {
+            await self.prepareNewWallet()
             try await self.creator.importPrivateKey(hex: hex, name: name)
             self.step = .pinSetup
         }

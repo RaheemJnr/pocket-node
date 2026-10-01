@@ -103,6 +103,60 @@ final class OnboardingBackupWiringTests: XCTestCase {
         XCTAssertEqual(model.step, .pinSetup)
     }
 
+    /// Keys stored, `wallet.json` gone or unreadable, no PIN: the launch
+    /// resumes at the backup step, and passing the quiz there must still lead
+    /// on to PIN setup even though there is no record to mark backed up.
+    func testAMissingRecordStillLetsTheResumedBackupReachThePinStep() async throws {
+        try await assertResumedBackupReachesThePinStep { directory in
+            try FileManager.default.removeItem(at: directory.appendingPathComponent("wallet.json"))
+        }
+    }
+
+    func testAnUndecodableRecordStillLetsTheResumedBackupReachThePinStep() async throws {
+        try await assertResumedBackupReachesThePinStep { directory in
+            try Data("not json".utf8).write(to: directory.appendingPathComponent("wallet.json"))
+        }
+    }
+
+    private func assertResumedBackupReachesThePinStep(
+        breakRecord: (URL) throws -> Void,
+        file: StaticString = #filePath,
+        line: UInt = #line
+    ) async throws {
+        await model.createWallet(wordCount: 12, name: "Main")
+        try breakRecord(directory)
+        XCTAssertNil(walletStore.load(), file: file, line: line)
+
+        // The relaunch.
+        let hasKeys = await keyStore.hasWallet
+        let destination = OnboardingViewModel.launchDestination(
+            hasWallet: hasKeys || walletStore.hasWallet,
+            pinPresence: .absent,
+            record: walletStore.load()
+        )
+        XCTAssertEqual(destination, .onboarding(.backup), file: file, line: line)
+        let resumed = OnboardingViewModel(
+            creator: WalletCreator(keyStore: keyStore, walletStore: walletStore),
+            resumingAt: .backup
+        )
+
+        let backup = makeOnboardingBackup(gate: StubAuthGate())
+        await backup.reveal()
+        XCTAssertEqual(backup.step, .display, file: file, line: line)
+        backup.advanceToVerify()
+        for prompt in backup.quiz {
+            backup.select(position: prompt.position, word: prompt.correctWord)
+        }
+        backup.submitVerify()
+
+        XCTAssertEqual(backup.step, .success, "never stuck on verify with nothing to retry", file: file, line: line)
+        XCTAssertNil(backup.errorMessage, file: file, line: line)
+        XCTAssertTrue(backup.words.isEmpty, file: file, line: line)
+
+        resumed.finishBackup()
+        XCTAssertEqual(resumed.step, .pinSetup, file: file, line: line)
+    }
+
     func testBackgroundingTheBackupStepWipesThePhraseAndReArmsTheGate() async {
         await model.createWallet(wordCount: 12, name: "Main")
         let backup = makeOnboardingBackup(gate: StubAuthGate())
