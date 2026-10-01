@@ -32,6 +32,10 @@ final class AppContainer {
     /// Session state and the lock gate. `RootView` reads it.
     let auth: AuthService
 
+    /// The two Keychain services, kept for ``removeOrphanedPin()``.
+    private let keyKeychain: KeychainStore
+    private let pinKeychain: KeychainStore
+
     /// Kept in sync with the system color scheme by `RootView`.
     var theme: Theme = .light
 
@@ -63,6 +67,17 @@ final class AppContainer {
         if !wasMarked && marker.isRecorded {
             try? pinKeychain.deleteAll()
         }
+        // That delete is not retried if it fails (the marker is already
+        // recorded), and a PIN left with no wallet would refuse every PIN the
+        // next onboarding tries to set. So any PIN with no wallet at all is
+        // cleared here, before `PinService` seeds its state from the store.
+        OrphanedPin.removeIfOrphaned(
+            walletMetadataExists: walletStore.hasWallet,
+            keyKeychain: keychain,
+            pinKeychain: pinKeychain
+        )
+        self.keyKeychain = keychain
+        self.pinKeychain = pinKeychain
 
         self.biometrics = BiometricService()
         let pinService = PinService(keychain: pinKeychain)
@@ -75,6 +90,18 @@ final class AppContainer {
         self.walletCreator = WalletCreator(keyStore: self.walletKeyStore, walletStore: self.walletStore)
 
         Self.seedWalletForTestingIfRequested(walletStore: self.walletStore)
+    }
+
+    /// Clears an orphaned PIN (see ``OrphanedPin``) and re-derives the
+    /// session from what is left. Onboarding calls this before it creates or
+    /// imports a wallet, retrying a launch-time cleanup that did not succeed.
+    func removeOrphanedPin() async {
+        guard OrphanedPin.removeIfOrphaned(
+            walletMetadataExists: walletStore.hasWallet,
+            keyKeychain: keyKeychain,
+            pinKeychain: pinKeychain
+        ) else { return }
+        await auth.refresh()
     }
 
     // MARK: - Screen graphs

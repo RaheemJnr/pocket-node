@@ -46,11 +46,21 @@ final class OnboardingViewModel {
 
     private let creator: WalletCreator
 
+    /// Runs before a new wallet is created or imported. `AppContainer` clears
+    /// a PIN left behind with no wallet there, so the PIN step that follows
+    /// is not refused (see `OrphanedPin`).
+    private let prepareNewWallet: () async -> Void
+
     /// - Parameter step: where the flow starts. ``Step/welcome`` for a device
     ///   with no wallet; ``resumeStep(for:)`` for one whose onboarding was cut
     ///   short after the wallet was stored (see ``launchDestination(hasWallet:pinPresence:record:)``).
-    init(creator: WalletCreator, resumingAt step: Step = .welcome) {
+    init(
+        creator: WalletCreator,
+        resumingAt step: Step = .welcome,
+        prepareNewWallet: @escaping () async -> Void = {}
+    ) {
         self.creator = creator
+        self.prepareNewWallet = prepareNewWallet
         self.step = step
     }
 
@@ -151,6 +161,7 @@ final class OnboardingViewModel {
 
     func createWallet(wordCount: Int, name: String) async {
         await run {
+            await self.prepareNewWallet()
             // The returned phrase is deliberately dropped: the wallet is
             // stored by now, and the backup step reads the words back from
             // the key store rather than from a second copy kept here.
@@ -161,6 +172,7 @@ final class OnboardingViewModel {
 
     func importMnemonic(words: [String], name: String) async {
         await run {
+            await self.prepareNewWallet()
             try await self.creator.importMnemonic(words: words, name: name)
             // Nothing to back up: the user supplied the phrase.
             self.step = .pinSetup
@@ -169,6 +181,7 @@ final class OnboardingViewModel {
 
     func importPrivateKey(hex: String, name: String) async {
         await run {
+            await self.prepareNewWallet()
             try await self.creator.importPrivateKey(hex: hex, name: name)
             self.step = .pinSetup
         }

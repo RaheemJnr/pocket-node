@@ -125,7 +125,12 @@ struct RootView: View {
         case .wallet:
             phase = .wallet
         case .onboarding(let step):
-            onboarding = OnboardingViewModel(creator: container.walletCreator, resumingAt: step)
+            let container = container
+            onboarding = OnboardingViewModel(
+                creator: container.walletCreator,
+                resumingAt: step,
+                prepareNewWallet: { await container.removeOrphanedPin() }
+            )
             phase = .onboarding
         }
     }
