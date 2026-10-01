@@ -562,10 +562,20 @@ private fun SettingsScreenUI(
             // Pocket Node talks to CKB through its embedded light client, not
             // through company servers. These two optional features are the
             // only outbound requests the app makes on its own, with no user
-            // tap (#531). Each gets its own switch and an exact statement of
-            // what it sends; explorer links the user taps to open a browser
-            // do not count and are not listed here.
+            // tap (#531). Each gets its own switch; one line under the header
+            // says what they receive. Explorer links the user taps to open a
+            // browser do not count and are not listed here.
             item { SectionHeader("NETWORK SERVICES") }
+            item {
+                Text(
+                    text = "These services see your IP address.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier
+                        .padding(horizontal = 16.dp)
+                        .padding(bottom = 8.dp)
+                )
+            }
 
             item {
                 SettingsSwitchRow(
@@ -577,8 +587,7 @@ private fun SettingsScreenUI(
             }
             item {
                 Text(
-                    text = "Run by CoinGecko and Binance. Shows your balance in USD. " +
-                        "Sends your IP address only.",
+                    text = "Run by CoinGecko and Binance. Shows your balance in USD.",
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                     modifier = Modifier
@@ -597,8 +606,7 @@ private fun SettingsScreenUI(
             }
             item {
                 Text(
-                    text = "Checks GitHub for a new release on launch. Sends your IP " +
-                        "address and device user agent.",
+                    text = "Checks GitHub for a new release on launch.",
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                     modifier = Modifier
