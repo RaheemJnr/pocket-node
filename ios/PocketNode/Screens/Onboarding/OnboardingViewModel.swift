@@ -51,6 +51,14 @@ final class OnboardingViewModel {
     /// is not refused (see `OrphanedPin`).
     private let prepareNewWallet: () async -> Void
 
+    /// The wallet whose keys are missing, when this flow is a restore rather
+    /// than a first run (see ``init(creator:restoring:hasPin:)``).
+    let restoringRecord: WalletRecord?
+
+    /// Re-read after a restore: a PIN that survived is left alone, rather than
+    /// letting the restore replace it without knowing it.
+    private let hasPin: () -> Bool
+
     /// - Parameter step: where the flow starts. ``Step/welcome`` for a device
     ///   with no wallet; ``resumeStep(for:)`` for one whose onboarding was cut
     ///   short after the wallet was stored (see ``launchDestination(hasWallet:pinPresence:record:)``).
@@ -61,7 +69,39 @@ final class OnboardingViewModel {
     ) {
         self.creator = creator
         self.prepareNewWallet = prepareNewWallet
+        self.restoringRecord = nil
+        self.hasPin = { false }
         self.step = step
+    }
+
+    /// A restore for a wallet whose metadata is on this device but whose keys
+    /// are not, the state a backup restored onto a new phone leaves (the
+    /// Keychain envelope is `ThisDeviceOnly` and does not travel). The flow
+    /// opens on the import step, and a phrase or key is accepted only if it
+    /// is the one for `record`; it then replaces the key-less entry under the
+    /// same id and address. There is no way back to the welcome step: the
+    /// device already has this wallet, so creating another would be refused.
+    init(creator: WalletCreator, restoring record: WalletRecord, hasPin: @escaping () -> Bool) {
+        self.creator = creator
+        // A restore puts keys back under an existing wallet; it never starts a
+        // new one, so there is no orphaned PIN to clear first.
+        self.prepareNewWallet = {}
+        self.restoringRecord = record
+        self.hasPin = hasPin
+        self.step = .importWallet
+    }
+
+    /// True for the restore flow.
+    var isRestoring: Bool { restoringRecord != nil }
+
+    /// Whether a restore may open now or must wait behind the lock screen.
+    ///
+    /// The restore screen names the wallet and shows its address, so when a
+    /// PIN survived (or cannot be read yet) it waits until the session has
+    /// been unlocked with it. With a confirmed absent PIN there is nothing to
+    /// wait for.
+    static func mayStartRestore(pinPresence: PinPresence, sessionUnlocked: Bool) -> Bool {
+        pinPresence == .absent || sessionUnlocked
     }
 
     // MARK: - Launch and resume
@@ -171,6 +211,13 @@ final class OnboardingViewModel {
     }
 
     func importMnemonic(words: [String], name: String) async {
+        if let record = restoringRecord {
+            await run {
+                try await self.creator.restoreMnemonic(words: words, replacing: record)
+                self.step = self.hasPin() ? .done : .pinSetup
+            }
+            return
+        }
         await run {
             await self.prepareNewWallet()
             try await self.creator.importMnemonic(words: words, name: name)
@@ -180,6 +227,13 @@ final class OnboardingViewModel {
     }
 
     func importPrivateKey(hex: String, name: String) async {
+        if let record = restoringRecord {
+            await run {
+                try await self.creator.restorePrivateKey(hex: hex, replacing: record)
+                self.step = self.hasPin() ? .done : .pinSetup
+            }
+            return
+        }
         await run {
             await self.prepareNewWallet()
             try await self.creator.importPrivateKey(hex: hex, name: name)
@@ -233,6 +287,8 @@ final class OnboardingViewModel {
             }
         case .metadataStorageFailed:
             return "Could not save your wallet. Try again."
+        case .doesNotMatchWallet:
+            return "That does not match this wallet. Enter the recovery phrase or private key for the address shown."
         }
     }
 }

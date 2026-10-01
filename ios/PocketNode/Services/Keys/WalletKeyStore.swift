@@ -30,6 +30,15 @@ enum WalletKeyStoreError: Error, Equatable {
     case wrapping(String)
 }
 
+/// Whether the wallet's key envelope is in the Keychain.
+enum KeyMaterialPresence: Equatable, Sendable {
+    case present
+    /// The Keychain was readable and holds no envelope.
+    case absent
+    /// The Keychain could not be read, so nothing is known either way.
+    case unknown
+}
+
 /// The wallet's key material at rest.
 ///
 /// Layout, mirroring the Android Keystore V2 design:
@@ -58,6 +67,20 @@ actor WalletKeyStore {
     /// it never prompts.
     var hasWallet: Bool {
         (try? keychain.contains(account: WalletKeyAccount.envelope)) ?? false
+    }
+
+    /// Whether the envelope is stored, keeping a lookup the Keychain refused
+    /// apart from a confirmed absence. ``hasWallet`` folds both into false,
+    /// which is right for "may a new wallet be created" but not for "have this
+    /// wallet's keys gone missing": a launch before the first device unlock
+    /// cannot read the Keychain, and that must not be mistaken for a wallet
+    /// whose keys were left behind by a backup restore. Never prompts.
+    var envelopePresence: KeyMaterialPresence {
+        do {
+            return try keychain.contains(account: WalletKeyAccount.envelope) ? .present : .absent
+        } catch {
+            return .unknown
+        }
     }
 
     /// Encrypts and stores `bundle`, replacing any wallet already there.
