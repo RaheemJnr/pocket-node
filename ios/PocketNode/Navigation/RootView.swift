@@ -81,9 +81,23 @@ struct RootView: View {
                     // the pending restore: the stand-in can already be up when
                     // a reroute starts holding one, and a task that has run
                     // once would leave it blank until the next backgrounding.
-                    Color(uiColor: .systemBackground)
-                        .ignoresSafeArea()
-                        .task(id: pendingRestore?.id) { reroute() }
+                    // A held restore whose key lookup keeps failing has
+                    // nothing else to move it on, so it is asked again every
+                    // two seconds while it is held.
+                    ZStack {
+                        Color(uiColor: .systemBackground)
+                            .ignoresSafeArea()
+                        ProgressView()
+                            .accessibilityLabel("Loading")
+                    }
+                    .task(id: pendingRestore?.id) {
+                        reroute()
+                        while pendingRestore != nil, !Task.isCancelled {
+                            try? await Task.sleep(for: .seconds(2))
+                            guard !Task.isCancelled else { return }
+                            reroute()
+                        }
+                    }
                 } else {
                     wallet
                 }
@@ -343,21 +357,29 @@ private struct AuthChallengeSheet: View {
     @State private var errorToken = 0
     @State private var isVerifying = false
     @State private var ticker: Task<Void, Never>?
+    /// Set once the first refresh has been attempted (see ``PinGateContent``).
+    @State private var didAttemptLoad = false
 
     private var pin: PinService { auth.pin }
 
     var body: some View {
         NavigationStack {
             Group {
-                // As on `LockView`: no pad before the failure state is read,
-                // or a permanently locked PIN would show one on first frame.
-                if !pin.hasLoadedState {
+                // As on `LockView`: no pad before the first refresh, or a
+                // permanently locked PIN would show one on the first frame.
+                switch PinGateContent.resolve(
+                    hasLoadedState: pin.hasLoadedState,
+                    didAttemptLoad: didAttemptLoad,
+                    isPermanentlyLocked: pin.isPermanentlyLocked
+                ) {
+                case .loading:
                     ProgressView()
                         .padding(.top, 24)
+                        .accessibilityLabel("Loading")
                         .accessibilityIdentifier("authChallenge.loading")
-                } else if pin.isPermanentlyLocked {
+                case .permanentLock:
                     permanentLock
-                } else {
+                case .pad:
                     PinEntryView(
                         title: "Enter PIN",
                         subtitle: challenge.reason,
@@ -387,6 +409,7 @@ private struct AuthChallengeSheet: View {
         .accessibilityIdentifier("authChallenge.root")
         .task {
             await pin.refresh()
+            didAttemptLoad = true
             startTickerIfNeeded()
         }
         .onDisappear { stopTicker() }

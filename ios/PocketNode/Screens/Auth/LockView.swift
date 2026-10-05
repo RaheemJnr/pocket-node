@@ -25,21 +25,23 @@ struct LockView: View {
     @State private var isVerifying = false
     /// Drives the lockout countdown. Only runs while a lockout is active.
     @State private var ticker: Task<Void, Never>?
+    /// Set once the first refresh has been attempted, clean or not.
+    @State private var didAttemptLoad = false
 
     var body: some View {
         VStack(spacing: 32) {
             header
 
-            // Until the failure state has been read, the permanent-lock flag
-            // is a placeholder `false` (`PinService.hasLoadedState`): the pad
-            // would flash on the first frame of a cold start after a
-            // permanent lock. Neither the pad nor the biometric button shows
-            // until the real state is in.
-            if !pin.hasLoadedState {
+            switch PinGateContent.resolve(
+                hasLoadedState: pin.hasLoadedState,
+                didAttemptLoad: didAttemptLoad,
+                isPermanentlyLocked: pin.isPermanentlyLocked
+            ) {
+            case .loading:
                 loading
-            } else if pin.isPermanentlyLocked {
+            case .permanentLock:
                 permanentLock
-            } else {
+            case .pad:
                 PinEntryView(
                     title: "Enter PIN",
                     subtitle: nil,
@@ -77,6 +79,7 @@ struct LockView: View {
         .accessibilityIdentifier("lock.root")
         .task {
             await auth.refresh()
+            didAttemptLoad = true
             startTickerIfNeeded()
             // Offer the sensor straight away, as Android does on `AuthScreen`,
             // so the common case is one glance rather than six taps. Skipped
@@ -124,6 +127,7 @@ struct LockView: View {
     private var loading: some View {
         ProgressView()
             .padding(.top, 16)
+            .accessibilityLabel("Loading")
             .accessibilityIdentifier("lock.loading")
     }
 
@@ -195,5 +199,27 @@ struct LockView: View {
     private func stopTicker() {
         ticker?.cancel()
         ticker = nil
+    }
+}
+
+/// What a PIN gate (``LockView``, the step-up challenge sheet) shows in place
+/// of the pad. Pure so the rule can be tested without rendering a view.
+enum PinGateContent: Equatable {
+    /// Before the first refresh: the permanent-lock flag is still the
+    /// placeholder `false` the service seeds, and the pad would flash on the
+    /// first frame of a cold start after a permanent lock.
+    case loading
+    case permanentLock
+    case pad
+
+    /// Waits only for the first refresh to be attempted, not for one that
+    /// reads cleanly. A read that keeps coming back dirty (a damaged
+    /// failure counter, say) would otherwise hold a spinner up for good,
+    /// although `PinService.verify` still checks a PIN against it, and a
+    /// match heals the counter. The biometric button has its own, stricter
+    /// rule (`AuthService.canUseBiometrics` needs a clean read).
+    static func resolve(hasLoadedState: Bool, didAttemptLoad: Bool, isPermanentlyLocked: Bool) -> PinGateContent {
+        guard hasLoadedState || didAttemptLoad else { return .loading }
+        return isPermanentlyLocked ? .permanentLock : .pad
     }
 }

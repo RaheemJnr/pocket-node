@@ -224,7 +224,14 @@ final class AuthService {
             // permanently locked wallet, so the state is read again, and a
             // read that does not come back clean is not proof it is unlocked.
             await pin.refresh()
-            guard pin.hasLoadedState, !pin.isPermanentlyLocked, state == .locked else { return false }
+            guard pin.hasLoadedState else {
+                // Not the user's doing: the face matched, the store did not
+                // answer. Said the same way as a PIN attempt it could not
+                // record.
+                storeMessage = Self.storeUnavailableMessage
+                return false
+            }
+            guard !pin.isPermanentlyLocked, state == .locked else { return false }
             markUnlocked()
             return true
         case .failure(let error):
@@ -323,6 +330,10 @@ final class AuthService {
         if canUseBiometrics {
             switch await biometrics.authenticate(reason: reason) {
             case .success:
+                // As for the unlock: the permanent lock can be reached while
+                // the prompt is up, and a face does not get past it.
+                await pin.refresh()
+                guard pin.hasLoadedState, !pin.isPermanentlyLocked else { return false }
                 return true
             case .failure(.cancelled):
                 return false

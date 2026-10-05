@@ -64,24 +64,25 @@ final class StubBiometrics: BiometricAuthenticating, @unchecked Sendable {
 
     private var _promptDuration: Duration = .zero
     private var _isHolding = false
-    private var _held: CheckedContinuation<Void, Never>?
+    private var _held: [CheckedContinuation<Void, Never>] = []
 
-    /// Keeps the next prompt up until ``releasePrompt()``, so a test can
-    /// change what is stored while the sheet is still on screen.
+    /// Keeps every prompt up until ``releasePrompt()``, so a test can change
+    /// what is stored while the sheet is still on screen. More than one
+    /// prompt can be held; the release answers them all.
     func holdPrompt() {
         lock.lock()
         defer { lock.unlock() }
         _isHolding = true
     }
 
-    /// Answers a prompt held by ``holdPrompt()``.
+    /// Answers every prompt held by ``holdPrompt()``.
     func releasePrompt() {
         lock.lock()
         _isHolding = false
         let held = _held
-        _held = nil
+        _held = []
         lock.unlock()
-        held?.resume()
+        held.forEach { $0.resume() }
     }
 
     func authenticate(reason: String) async -> Result<Void, BiometricError> {
@@ -106,7 +107,7 @@ final class StubBiometrics: BiometricAuthenticating, @unchecked Sendable {
             continuation.resume()
             return
         }
-        _held = continuation
+        _held.append(continuation)
         lock.unlock()
     }
 
