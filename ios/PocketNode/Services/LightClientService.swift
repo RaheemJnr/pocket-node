@@ -265,7 +265,7 @@ final class LightClientService {
     /// `wallet.json`. The folder name is `AppDirectories`' to own: this used to
     /// spell it `pocketnode`, which collides with the wallet store's spelling on
     /// the simulator's case-insensitive volume and kept the node from starting
-    /// at all (#22).
+    /// at all.
     private static func prepareDataDirectory(network: String) throws -> URL {
         try AppDirectories.dataDirectory(network: network)
     }

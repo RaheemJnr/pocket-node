@@ -2,8 +2,9 @@ import XCTest
 
 @testable import PocketNode
 
-/// Covers #22: the light client asked for `Application Support/pocketnode`
-/// while the wallet store had already made `Application Support/PocketNode`.
+/// Covers the folder name collision: the light client asked for
+/// `Application Support/pocketnode` while the wallet store had already made
+/// `Application Support/PocketNode`.
 /// On the simulator, whose container sits on the Mac's case-insensitive APFS
 /// volume, those are one folder, so the second `mkdir` failed and the node
 /// never initialised.
@@ -77,7 +78,7 @@ final class AppDirectoriesTests: XCTestCase {
         )
     }
 
-    // MARK: - Backup exclusion (#24)
+    // MARK: - Backup exclusion
 
     /// The light client's per-network directory holds only regenerable chain
     /// data (`store.db`, `network/`), so it must be excluded from iCloud and
