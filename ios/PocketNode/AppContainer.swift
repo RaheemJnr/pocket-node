@@ -145,25 +145,6 @@ final class AppContainer {
         #endif
     }
 
-    /// The stored wallet, when its metadata is on this device but its key
-    /// envelope is confirmed absent; nil otherwise.
-    ///
-    /// That is what restoring an iCloud or Finder backup onto a new phone
-    /// leaves: `wallet.json` comes back, the `ThisDeviceOnly` Keychain items
-    /// do not. Such a wallet shows an address it can never spend from, and
-    /// ``WalletCreator`` would refuse to import it again because a wallet is
-    /// "already there", so `RootView` sends it to the restore flow instead of
-    /// the wallet shell. A Keychain that cannot be read yet (a launch before
-    /// the first device unlock) is not an absence and does not count.
-    var walletNeedingRestore: WalletRecord? {
-        get async {
-            // The metadata-only wallet `POCKETNODE_SKIP_ONBOARDING` seeds for
-            // the wallet shell UI tests has no keys on purpose.
-            if Self.skipsOnboardingForTesting { return nil }
-            return await walletCreator.walletNeedingRestore()
-        }
-    }
-
     /// `PocketNodeNetwork`'s `NodeStatusUITests` exercises the light client,
     /// not onboarding, and #515 put an onboarding gate in front of the wallet
     /// shell it drives. Rather than have that test type a wallet in, it sets

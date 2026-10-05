@@ -180,6 +180,36 @@ final class LaunchGateTests: XCTestCase {
         XCTAssertEqual(destination, .onboarding(.welcome))
     }
 
+    /// No metadata, a key envelope the Keychain cannot look up, and a PIN.
+    /// The envelope may well be there, so this is not a walletless device:
+    /// welcome would let the user start a wallet that `prepareNewWallet`
+    /// refuses for as long as the PIN stands. It goes behind the lock.
+    func testAnUnreadableEnvelopeBehindAPinOpensBehindTheLockNotWelcome() async throws {
+        try await storeOldPin()
+        let unreadable = UnreadableKeyValueStore(service: keyService)
+        let gate = makeGate(keyStore: unreadable)
+        XCTAssertEqual(gate.pinService.pinPresence, .present, "an unknown envelope does not orphan the PIN")
+
+        let destination = await gate.launchDestination
+
+        XCTAssertEqual(destination, .wallet)
+        XCTAssertTrue(gate.auth.isGated)
+        XCTAssertFalse(gate.needsSecuritySetup)
+        let reroute = await gate.reroute()
+        XCTAssertNil(reroute, "the lock screen is the answer")
+    }
+
+    /// The same unreadable envelope with no PIN has nothing to lock behind,
+    /// and nothing for a new wallet to collide with, so it still starts at
+    /// welcome.
+    func testAnUnreadableEnvelopeWithNoPinStartsAtWelcome() async {
+        let gate = makeGate(keyStore: UnreadableKeyValueStore(service: keyService))
+
+        let destination = await gate.launchDestination
+
+        XCTAssertEqual(destination, .onboarding(.welcome))
+    }
+
     func testTheSkipHookOpensTheShell() async throws {
         try walletStore.save(
             WalletRecord(
@@ -210,10 +240,9 @@ final class LaunchGateTests: XCTestCase {
 
         let destination = await gate.launchDestination
 
-        if destination == .wallet {
-            XCTAssertFalse(gate.needsSecuritySetup, "the shell would be a blank screen")
-            XCTAssertTrue(gate.auth.isGated, "an unreadable PIN store locks")
-        }
+        XCTAssertEqual(destination, .wallet)
+        XCTAssertFalse(gate.needsSecuritySetup, "the shell would be a blank screen")
+        XCTAssertTrue(gate.auth.isGated, "an unreadable PIN store locks")
         let reroute = await gate.reroute()
         XCTAssertNil(reroute, "nothing to reroute to: the lock screen is the answer")
         XCTAssertFalse(gate.needsSecuritySetup)
@@ -234,6 +263,89 @@ final class LaunchGateTests: XCTestCase {
         let reroute = await gate.reroute()
 
         XCTAssertEqual(reroute, .onboarding(.pinSetup))
+    }
+
+    // MARK: - Restoring missing keys
+
+    private var keylessRecord: WalletRecord {
+        WalletRecord(
+            id: "restored", name: "From backup", type: WalletCreator.typeMnemonic,
+            mainnetAddress: "ckb1", testnetAddress: "ckt1", createdAt: 0
+        )
+    }
+
+    /// What `RootView` walks through for a backup restored onto a new phone
+    /// with its PIN: metadata with no keys, held behind the lock, and the
+    /// restore screen once the PIN is answered.
+    func testMetadataWithoutKeysBehindAPinWaitsForTheUnlockThenRestores() async throws {
+        try walletStore.save(keylessRecord)
+        try await storeOldPin()
+        let gate = makeGate()
+
+        let atLaunch = await gate.restoreRoute()
+        XCTAssertEqual(atLaunch, .hold(keylessRecord), "the restore screen names the wallet, so it waits")
+        XCTAssertTrue(gate.auth.isGated, "the lock screen is what shows")
+
+        let unlocked = await gate.auth.unlock(pin: "111111")
+        XCTAssertTrue(unlocked)
+        let afterUnlock = await gate.restoreRoute(pending: keylessRecord)
+
+        XCTAssertEqual(afterUnlock, .restore(keylessRecord))
+    }
+
+    func testMetadataWithoutKeysAndNoPinRestoresAtOnce() async throws {
+        try walletStore.save(keylessRecord)
+
+        let route = await makeGate().restoreRoute()
+
+        XCTAssertEqual(route, .restore(keylessRecord))
+    }
+
+    /// A Keychain lookup that fails right after the unlock says nothing about
+    /// the keys. The restore being held must stay held, not be dropped for
+    /// the wallet shell, and it goes ahead once the lookup answers.
+    func testAnUnreadableEnvelopeAfterTheUnlockKeepsTheRestorePending() async throws {
+        try walletStore.save(keylessRecord)
+        try await storeOldPin()
+        let flaky = UnreadableKeyValueStore(service: keyService, status: nil)
+        let gate = makeGate(keyStore: flaky)
+        let atLaunch = await gate.restoreRoute()
+        XCTAssertEqual(atLaunch, .hold(keylessRecord))
+        _ = await gate.auth.unlock(pin: "111111")
+
+        flaky.failReads(errSecInteractionNotAllowed)
+        let transient = await gate.restoreRoute(pending: keylessRecord)
+        XCTAssertEqual(transient, .hold(keylessRecord), "only an envelope confirmed present ends a pending restore")
+
+        flaky.failReads(nil)
+        let recovered = await gate.restoreRoute(pending: keylessRecord)
+        XCTAssertEqual(recovered, .restore(keylessRecord))
+    }
+
+    /// With no restore pending, an unreadable envelope is not a missing one:
+    /// launch goes on to the PIN routing, as before.
+    func testAnUnreadableEnvelopeWithNothingPendingIsNoRestore() async throws {
+        try walletStore.save(keylessRecord)
+        let route = await makeGate(keyStore: UnreadableKeyValueStore(service: keyService)).restoreRoute()
+
+        XCTAssertEqual(route, LaunchGate.RestoreRoute.none)
+    }
+
+    func testAWalletWithItsKeysEndsAPendingRestore() async throws {
+        try await importWallet()
+        let record = try XCTUnwrap(walletStore.load())
+
+        let route = await makeGate().restoreRoute(pending: record)
+
+        XCTAssertEqual(route, LaunchGate.RestoreRoute.none)
+    }
+
+    func testTheSkipHookNeverRestores() async throws {
+        try walletStore.save(keylessRecord)
+
+        let route = await makeGate(skipsOnboarding: true).restoreRoute()
+
+        XCTAssertEqual(route, LaunchGate.RestoreRoute.none)
     }
 
     // MARK: - Corrupt metadata with no keys

@@ -76,15 +76,26 @@ final class LaunchGate {
     /// The PIN is read through the session (``AuthService/refresh()``), the
     /// same source ``needsSecuritySetup`` reads, so the two cannot disagree
     /// and leave `RootView` on a screen neither one routes away from.
+    ///
+    /// No metadata and a key envelope the Keychain could not look up (a
+    /// launch before the first device unlock) is not a walletless device when
+    /// a PIN is there or may be: the envelope may well exist. Welcome would
+    /// let the user start a wallet that `prepareNewWallet` then refuses for
+    /// as long as that PIN stands, so the launch goes to the lock screen
+    /// instead, as for any other wallet behind a PIN.
     var launchDestination: OnboardingViewModel.LaunchDestination {
         get async {
             Self.setAsideUndecodableRecordIfWalletless(walletStore: walletStore, keyKeychain: keyKeychain)
             await auth.refresh()
             let hasWallet = await self.hasWallet
             if hasWallet && skipsOnboarding { return .wallet }
+            let pinPresence: PinPresence = auth.state == .noPin ? .absent : pinService.pinPresence
+            if !hasWallet, pinPresence != .absent, await walletKeyStore.envelopePresence == .unknown {
+                return .wallet
+            }
             return OnboardingViewModel.launchDestination(
                 hasWallet: hasWallet,
-                pinPresence: auth.state == .noPin ? .absent : pinService.pinPresence,
+                pinPresence: pinPresence,
                 record: walletStore.load()
             )
         }
@@ -106,6 +117,55 @@ final class LaunchGate {
         guard needsSecuritySetup else { return nil }
         let destination = await launchDestination
         return destination == .wallet ? nil : destination
+    }
+
+    // MARK: - Restoring missing keys
+
+    /// What the root should do about a wallet whose keys may not have come
+    /// across with a device backup.
+    ///
+    /// That is what restoring an iCloud or Finder backup onto a new phone
+    /// leaves: `wallet.json` comes back, the `ThisDeviceOnly` Keychain items
+    /// do not. Such a wallet shows an address it can never spend from, and
+    /// ``WalletCreator`` would refuse to import it again because a wallet is
+    /// "already there", so `RootView` sends it to the restore flow instead of
+    /// the wallet shell. A Keychain that cannot be read yet (a launch before
+    /// the first device unlock) is not an absence and does not count.
+    enum RestoreRoute: Equatable {
+        /// Open the restore flow for this wallet now.
+        case restore(WalletRecord)
+        /// Keep this wallet's restore pending: behind the lock screen until
+        /// the session is unlocked, or until the Keychain can say whether its
+        /// keys are there.
+        case hold(WalletRecord)
+        /// Nothing to restore; carry on with the PIN routing.
+        case none
+    }
+
+    /// Decides the restore routing from what is stored, for `RootView` to
+    /// carry out. Asked at launch and on every reroute of the wallet phase.
+    ///
+    /// - Parameter pending: the restore `RootView` is already holding, if
+    ///   any. A Keychain lookup that fails right after an unlock says nothing
+    ///   about the keys, so it keeps that restore pending rather than dropping
+    ///   it; only an envelope confirmed present (or the metadata gone) ends it.
+    func restoreRoute(pending: WalletRecord? = nil) async -> RestoreRoute {
+        // The metadata-only wallet `POCKETNODE_SKIP_ONBOARDING` seeds for
+        // the wallet shell UI tests has no keys on purpose.
+        if skipsOnboarding { return .none }
+        guard let record = walletStore.load() else { return .none }
+        switch await walletKeyStore.envelopePresence {
+        case .present:
+            return .none
+        case .unknown:
+            return pending.map { .hold($0) } ?? .none
+        case .absent:
+            let mayStart = OnboardingViewModel.mayStartRestore(
+                pinPresence: pinService.pinPresence,
+                sessionUnlocked: auth.state == .unlocked
+            )
+            return mayStart ? .restore(record) : .hold(record)
+        }
     }
 
     // MARK: - Starting a new wallet
