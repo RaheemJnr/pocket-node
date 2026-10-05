@@ -756,6 +756,56 @@ final class AuthServiceTests: XCTestCase {
         XCTAssertEqual(auth.state, .locked)
     }
 
+    /// Every background moves the lock generation, including one with no PIN
+    /// to lock (onboarding), so a reveal in flight can tell it is stale.
+    func testEveryBackgroundMovesTheLockGeneration() async throws {
+        let auth = makeAuth()
+        XCTAssertEqual(auth.state, .noPin)
+        let start = auth.lockGeneration
+
+        auth.handleScenePhase(.background)
+        XCTAssertEqual(auth.lockGeneration, start + 1)
+
+        try await auth.setPin("123456")
+        auth.handleScenePhase(.background)
+        XCTAssertEqual(auth.lockGeneration, start + 2)
+
+        auth.handleScenePhase(.inactive)
+        auth.handleScenePhase(.active)
+        XCTAssertEqual(auth.lockGeneration, start + 2, "only the background locks")
+    }
+
+    /// The whole race over the real service: biometrics approve the reveal,
+    /// the app goes to the background while the key is being read, and the
+    /// phrase that comes back must not be shown.
+    func testARecoveryPhraseReadThatLandsAfterTheLockIsDropped() async throws {
+        let auth = makeAuth()
+        try await auth.setPin("123456")
+        auth.isBiometricEnabled = true
+        let reader = StubWalletKeyReader(
+            result: .success(WalletKeyBundle(
+                privateKeyHex: "00",
+                mnemonic: "abandon ability able about above absent absorb abstract absurd abuse access accident"
+            ))
+        )
+        let backup = BackupViewModel(
+            walletKeyStore: reader,
+            walletStore: StubWalletRecordStore(),
+            auth: auth,
+            isOnboarding: false,
+            hasPin: { true }
+        )
+        reader.whileLoading = { @MainActor in auth.handleScenePhase(.background) }
+
+        await backup.reveal()
+
+        XCTAssertEqual(biometrics.prompts, 1)
+        XCTAssertEqual(reader.loadCount, 1)
+        XCTAssertEqual(auth.state, .locked)
+        XCTAssertEqual(backup.step, .gate)
+        XCTAssertTrue(backup.words.isEmpty)
+    }
+
     // MARK: - Preferences
 
     func testTheBiometricOptInPersistsUnderTheAndroidKeyName() {
