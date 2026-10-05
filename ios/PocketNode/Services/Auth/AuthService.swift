@@ -68,6 +68,9 @@ final class AuthService {
     let biometrics: any BiometricAuthenticating
 
     private let preferences: UserDefaultsPreferences
+    /// Set while ``unlockWithBiometrics()`` is running, so the lock screen's
+    /// automatic prompt and a tap on its button cannot both raise one.
+    private var isPromptingBiometrics = false
     private var challengeContinuation: CheckedContinuation<Bool, Never>?
 
     /// Whether the user has opted into unlocking with Face ID or Touch ID.
@@ -96,8 +99,19 @@ final class AuthService {
     /// it would hand the whole escalation schedule back to anyone holding the
     /// phone. A *temporary* lockout still allows biometrics, matching Android,
     /// because that one is about slowing PIN guessing.
+    ///
+    /// False until the PIN's failure state has actually been read
+    /// (``PinService/hasLoadedState``). On a cold start the permanent-lock
+    /// flag starts as a placeholder `false`, and reading it before the first
+    /// refresh would offer a face to a wallet that is permanently locked. The
+    /// same goes for a refresh whose Keychain reads failed, and for a PIN that
+    /// is not confirmed present.
     var canUseBiometrics: Bool {
-        isBiometricEnabled && biometrics.availability.canPrompt && !pin.isPermanentlyLocked
+        isBiometricEnabled
+            && pin.pinPresence == .present
+            && pin.hasLoadedState
+            && biometrics.availability.canPrompt
+            && !pin.isPermanentlyLocked
     }
 
     init(
@@ -185,6 +199,13 @@ final class AuthService {
     /// to and nothing to report for a deliberate dismissal.
     @discardableResult
     func unlockWithBiometrics() async -> Bool {
+        guard state == .locked, !isPromptingBiometrics else { return false }
+        isPromptingBiometrics = true
+        defer { isPromptingBiometrics = false }
+        // Re-read first so the decision is made on what is stored, not on
+        // whatever the lock screen last saw: a tap on its first frame, or one
+        // after the permanent lock was reached elsewhere, must not prompt.
+        await pin.refresh()
         guard canUseBiometrics, state == .locked else { return false }
         biometricMessage = nil
         switch await biometrics.authenticate(reason: Self.unlockReason) {
