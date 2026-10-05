@@ -509,7 +509,6 @@ final class AuthServiceTests: XCTestCase {
         try await first.setPin("123456")
         first.isBiometricEnabled = true
         let cold = makeAuth()
-        biometrics.promptDuration = .milliseconds(200)
 
         async let a = cold.unlockWithBiometrics()
         async let b = cold.unlockWithBiometrics()
@@ -518,6 +517,35 @@ final class AuthServiceTests: XCTestCase {
         XCTAssertEqual(biometrics.prompts, 1)
         XCTAssertEqual(results.filter { $0 }.count, 1)
         XCTAssertEqual(cold.state, .unlocked)
+    }
+
+    /// The PIN reaches the permanent lock while the biometric prompt is still
+    /// up (another session guessing). The face that answers it must not open
+    /// a wallet that is now recoverable only from the recovery phrase.
+    func testAPermanentLockReachedDuringThePromptIsNotUnlockedByIt() async throws {
+        let first = makeAuth()
+        try await first.setPin("123456")
+        first.isBiometricEnabled = true
+        let cold = makeAuth()
+        await cold.refresh()
+        XCTAssertTrue(cold.canUseBiometrics)
+        biometrics.holdPrompt()
+
+        let attempt = Task { await cold.unlockWithBiometrics() }
+        var waits = 0
+        while biometrics.prompts == 0 && waits < 200 {
+            try await Task.sleep(for: .milliseconds(10))
+            waits += 1
+        }
+        XCTAssertEqual(biometrics.prompts, 1, "the prompt is up")
+        await exhaustAllAttempts(on: first)
+        XCTAssertTrue(first.pin.isPermanentlyLocked)
+        biometrics.releasePrompt()
+        let unlocked = await attempt.value
+
+        XCTAssertFalse(unlocked)
+        XCTAssertEqual(cold.state, .locked)
+        XCTAssertTrue(cold.pin.isPermanentlyLocked)
     }
 
     /// A temporary lockout still allows biometrics, matching Android: that one

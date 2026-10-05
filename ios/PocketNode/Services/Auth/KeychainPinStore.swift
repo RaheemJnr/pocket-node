@@ -353,13 +353,24 @@ final class KeychainPinStore: NSObject, PocketNodeCore.PinStore {
     }
 
     private func readInt32(_ account: String) -> Int32? {
-        guard let data = read(account), data.count == MemoryLayout<Int32>.size else { return nil }
+        guard let data = read(account), hasSize(MemoryLayout<Int32>.size, data) else { return nil }
         return Int32(bigEndian: data.withUnsafeBytes { $0.loadUnaligned(as: Int32.self) })
     }
 
     private func readInt64(_ account: String) -> Int64? {
-        guard let data = read(account), data.count == MemoryLayout<Int64>.size else { return nil }
+        guard let data = read(account), hasSize(MemoryLayout<Int64>.size, data) else { return nil }
         return Int64(bigEndian: data.withUnsafeBytes { $0.loadUnaligned(as: Int64.self) })
+    }
+
+    /// A stored integer of the wrong width is damaged, not absent: its `nil`
+    /// would read as "no failures" or "no lockout". Recorded as a failure so
+    /// the read counts as a dirty one and every gate fails closed on it.
+    private func hasSize(_ size: Int, _ data: Data) -> Bool {
+        guard data.count == size else {
+            lastFailure = KeychainError(status: errSecDecode)
+            return false
+        }
+        return true
     }
 
     private func write(_ account: String, _ data: Data?) {

@@ -30,7 +30,14 @@ struct LockView: View {
         VStack(spacing: 32) {
             header
 
-            if pin.isPermanentlyLocked {
+            // Until the failure state has been read, the permanent-lock flag
+            // is a placeholder `false` (`PinService.hasLoadedState`): the pad
+            // would flash on the first frame of a cold start after a
+            // permanent lock. Neither the pad nor the biometric button shows
+            // until the real state is in.
+            if !pin.hasLoadedState {
+                loading
+            } else if pin.isPermanentlyLocked {
                 permanentLock
             } else {
                 PinEntryView(
@@ -111,6 +118,13 @@ struct LockView: View {
                     .multilineTextAlignment(.center)
             }
         }
+    }
+
+    /// A neutral stand-in while the PIN's failure state is read.
+    private var loading: some View {
+        ProgressView()
+            .padding(.top, 16)
+            .accessibilityIdentifier("lock.loading")
     }
 
     /// Reached after 10 cumulative failures. There is no timer to wait out and

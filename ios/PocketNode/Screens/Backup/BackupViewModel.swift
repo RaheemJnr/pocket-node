@@ -69,7 +69,7 @@ final class BackupViewModel {
     /// it makes up the generation a reveal records before it prompts or reads
     /// (see ``reveal()``), the same guard as Android's `stopGeneration` in
     /// `MnemonicBackupScreen`.
-    private var stopGeneration = 0
+    @ObservationIgnored private var stopGeneration = 0
 
     /// - Parameters:
     ///   - isOnboarding: true only on the single first-run hop straight out of

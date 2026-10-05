@@ -57,7 +57,9 @@ final class AuthService {
     /// phrase reveal) records it first and drops its result if it moved, so a
     /// secret never comes back behind the lock screen. The iOS side of
     /// Android's `ReauthLockEvents`.
-    private(set) var lockGeneration = 0
+    /// Not observed: no view reads it, and a bump on every background would
+    /// otherwise invalidate whatever happened to read it.
+    @ObservationIgnored private(set) var lockGeneration = 0
 
     /// Outstanding ``requireAuth(reason:)`` request, if any.
     private(set) var challenge: AuthChallenge?
@@ -217,6 +219,12 @@ final class AuthService {
         biometricMessage = nil
         switch await biometrics.authenticate(reason: Self.unlockReason) {
         case .success:
+            // The prompt can stay up for a while, and the PIN can reach the
+            // permanent lock elsewhere in that time. A face does not open a
+            // permanently locked wallet, so the state is read again, and a
+            // read that does not come back clean is not proof it is unlocked.
+            await pin.refresh()
+            guard pin.hasLoadedState, !pin.isPermanentlyLocked, state == .locked else { return false }
             markUnlocked()
             return true
         case .failure(let error):
