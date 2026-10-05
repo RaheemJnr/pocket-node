@@ -45,6 +45,13 @@ final class AuthService {
 
     private(set) var state: State
 
+    /// Bumped on every ``lock()`` call, including one that finds nothing to
+    /// lock. Anything that reveals a secret after an await (the recovery
+    /// phrase reveal) records it first and drops its result if it moved, so a
+    /// secret never comes back behind the lock screen. The iOS side of
+    /// Android's `ReauthLockEvents`.
+    private(set) var lockGeneration = 0
+
     /// Outstanding ``requireAuth(reason:)`` request, if any.
     private(set) var challenge: AuthChallenge?
 
@@ -150,6 +157,7 @@ final class AuthService {
 
     /// Locks the session. A no-op when there is no PIN to unlock with.
     func lock() {
+        lockGeneration += 1
         guard state == .unlocked else { return }
         state = .locked
         biometricMessage = nil
