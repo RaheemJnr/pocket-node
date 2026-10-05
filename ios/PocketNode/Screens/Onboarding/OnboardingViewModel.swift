@@ -95,6 +95,15 @@ final class OnboardingViewModel {
     /// True for the restore flow.
     var isRestoring: Bool { restoringRecord != nil }
 
+    /// True for a restore of a wallet type this version cannot restore,
+    /// neither a recovery phrase nor a raw private key (a record written by a
+    /// later version, say). No phrase or key typed here could match it, so
+    /// the screen says so instead of offering fields that refuse everything.
+    var isUnsupportedRestore: Bool {
+        guard let type = restoringRecord?.type else { return false }
+        return type != WalletCreator.typeMnemonic && type != WalletCreator.typeRawKey
+    }
+
     /// Whether a restore may open now or must wait behind the lock screen.
     ///
     /// The restore screen names the wallet and shows its address, so when a

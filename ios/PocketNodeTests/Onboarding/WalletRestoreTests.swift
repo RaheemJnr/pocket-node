@@ -60,6 +60,28 @@ final class WalletRestoreTests: XCTestCase {
         "worth", "useful", "legal", "winner", "thank", "yellow",
     ]
 
+    // MARK: - A wallet type this version cannot restore
+
+    /// Neither a phrase nor a raw key: the restore screen shows a message and
+    /// a way back instead of fields that would refuse everything.
+    func testAnUnknownWalletTypeIsAnUnsupportedRestore() {
+        func model(type: String) -> OnboardingViewModel {
+            OnboardingViewModel(
+                creator: creator,
+                restoring: WalletRecord(
+                    id: "w", name: "n", type: type,
+                    mainnetAddress: "ckb1", testnetAddress: "ckt1", createdAt: 0
+                ),
+                hasPin: { false }
+            )
+        }
+
+        XCTAssertTrue(model(type: "watch_only").isUnsupportedRestore)
+        XCTAssertFalse(model(type: WalletCreator.typeMnemonic).isUnsupportedRestore)
+        XCTAssertFalse(model(type: WalletCreator.typeRawKey).isUnsupportedRestore)
+        XCTAssertFalse(OnboardingViewModel(creator: creator).isUnsupportedRestore, "a first run is not a restore")
+    }
+
     // MARK: - Detection
 
     func testMetadataWithoutKeysIsReportedAsNeedingRestore() async throws {

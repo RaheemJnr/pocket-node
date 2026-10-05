@@ -35,6 +35,14 @@ struct ImportWalletView: View {
     }
 
     var body: some View {
+        if let record = model.restoringRecord, model.isUnsupportedRestore {
+            unsupportedRestore(record)
+        } else {
+            form
+        }
+    }
+
+    private var form: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 24) {
                 if let record = model.restoringRecord {
@@ -116,6 +124,27 @@ struct ImportWalletView: View {
         }
         .accessibilityElement(children: .contain)
         .accessibilityIdentifier("import.restore")
+    }
+
+    /// A wallet type this version cannot restore: a plain explanation and
+    /// no fields. The way out is on the toolbar (`OnboardingView`).
+    private func unsupportedRestore(_ record: WalletRecord) -> some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text("Restore \(record.name)")
+                .font(.headline)
+            Text("This wallet's keys did not come across with your backup, and this version of Pocket Node cannot restore this kind of wallet. Update the app and try again.")
+                .font(.subheadline)
+                .foregroundStyle(.secondary)
+            Text("The only way to start over is to delete the app and install it again.")
+                .font(.subheadline)
+                .foregroundStyle(.secondary)
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(24)
+        .accessibilityElement(children: .contain)
+        .accessibilityIdentifier("import.unsupportedRestore")
+        .navigationTitle("Restore wallet")
+        .navigationBarTitleDisplayMode(.inline)
     }
 
     // MARK: - Recovery phrase

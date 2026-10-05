@@ -89,6 +89,20 @@ struct OnboardingView: View {
                     .accessibilityIdentifier("onboarding.back")
             }
         }
+        // A restore that cannot go ahead still needs a way off the screen:
+        // back behind the lock when a PIN stands in front of the wallet,
+        // otherwise back to the welcome step.
+        if model.step == .importWallet && model.isUnsupportedRestore {
+            ToolbarItem(placement: .topBarLeading) {
+                if auth.state == .unlocked {
+                    Button("Lock") { auth.lock() }
+                        .accessibilityIdentifier("onboarding.lock")
+                } else {
+                    Button("Back") { model.backToWelcome() }
+                        .accessibilityIdentifier("onboarding.back")
+                }
+            }
+        }
     }
 }
 
