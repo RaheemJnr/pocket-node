@@ -189,8 +189,22 @@ final class BackupViewModel {
     /// save is a hard stop, not a silent success: `.verify` stays put with the
     /// words and selections intact so the user can retry, rather than being
     /// told the backup is done when it was never recorded.
+    ///
+    /// One exception: during onboarding, a record that cannot be loaded at
+    /// all (`wallet.json` missing or undecodable while the keys are there)
+    /// does not stop the flow. Onboarding resumes such a wallet at this step
+    /// (`OnboardingViewModel.resumeStep(for:)`), and holding it here would
+    /// keep the user from ever reaching PIN setup, with nothing a retry could
+    /// change. The flag is skipped and logged instead; the only cost is that
+    /// the backup reminder may show again later.
     private func markBackedUpAndComplete() {
         guard let record = walletStore.load() else {
+            if isOnboarding {
+                NSLog("W/BackupViewModel: no readable wallet record, backup verified but not recorded")
+                wipeWords()
+                step = .success
+                return
+            }
             errorMessage = Self.saveFailedMessage
             return
         }

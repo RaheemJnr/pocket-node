@@ -72,6 +72,56 @@ final class AuthServiceTests: XCTestCase {
         XCTAssertEqual(auth.state, .unlocked, "the user just chose the secret")
     }
 
+    /// Onboarding's PIN step trusts a launch-time read. If that read was
+    /// stale and a PIN is really stored, setting one must be refused rather
+    /// than replace a PIN the user never proved they know.
+    func testSetPinRefusesToReplaceAPinTheSessionHasNotProvedItKnows() async throws {
+        let stale = makeAuth()
+        XCTAssertEqual(stale.state, .noPin, "read at launch, before the PIN below existed")
+
+        // A PIN appears in the store behind this session's back.
+        try await makeAuth().setPin("123456")
+
+        do {
+            try await stale.setPin("999999")
+            XCTFail("expected a refusal")
+        } catch let error as AuthServiceError {
+            XCTAssertEqual(error, .pinAlreadySet)
+        }
+
+        XCTAssertEqual(stale.state, .locked, "the gate tightens to what is stored")
+        let oldStillWorks = await stale.unlock(pin: "123456")
+        XCTAssertTrue(oldStillWorks, "the stored PIN was not replaced")
+    }
+
+    func testSetPinIsRefusedOnALockedColdStart() async throws {
+        try await makeAuth().setPin("123456")
+        let cold = makeAuth()
+        XCTAssertEqual(cold.state, .locked)
+
+        do {
+            try await cold.setPin("999999")
+            XCTFail("expected a refusal")
+        } catch let error as AuthServiceError {
+            XCTAssertEqual(error, .pinAlreadySet)
+        }
+        let oldStillWorks = await cold.unlock(pin: "123456")
+        XCTAssertTrue(oldStillWorks)
+    }
+
+    /// An unlocked session proved the old PIN, so it may choose a new one.
+    func testAnUnlockedSessionCanChangeItsPin() async throws {
+        let auth = makeAuth()
+        try await auth.setPin("123456")
+
+        try await auth.setPin("654321")
+
+        XCTAssertEqual(auth.state, .unlocked)
+        let cold = makeAuth()
+        let newWorks = await cold.unlock(pin: "654321")
+        XCTAssertTrue(newWorks)
+    }
+
     func testRemovingAPinReturnsToNoPinAndDropsTheBiometricOptIn() async throws {
         let auth = makeAuth()
         try await auth.setPin("123456")

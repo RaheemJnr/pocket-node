@@ -46,8 +46,77 @@ final class OnboardingViewModel {
 
     private let creator: WalletCreator
 
-    init(creator: WalletCreator) {
+    /// Runs before a new wallet is created or imported. `LaunchGate` clears a
+    /// PIN left behind with no wallet there and answers whether the wallet
+    /// may be started; false means a PIN is still stored that the PIN step
+    /// would refuse to replace, so nothing is created.
+    private let prepareNewWallet: @MainActor () async -> Bool
+
+    /// - Parameter step: where the flow starts. ``Step/welcome`` for a device
+    ///   with no wallet; ``resumeStep(for:)`` for one whose onboarding was cut
+    ///   short after the wallet was stored (see ``launchDestination(hasWallet:pinPresence:record:)``).
+    init(
+        creator: WalletCreator,
+        resumingAt step: Step = .welcome,
+        prepareNewWallet: @escaping @MainActor () async -> Bool = { true }
+    ) {
         self.creator = creator
+        self.prepareNewWallet = prepareNewWallet
+        self.step = step
+    }
+
+    // MARK: - Launch and resume
+
+    /// Where a launch lands: onboarding at a given step, or the wallet shell.
+    enum LaunchDestination: Equatable {
+        case onboarding(Step)
+        case wallet
+    }
+
+    /// Decides the launch from what is stored, not from anything remembered
+    /// about the last run, so a process killed between storing the wallet and
+    /// setting the PIN cannot skip the security steps.
+    ///
+    /// The wallet is stored before the backup and PIN steps run, so a wallet
+    /// on disk says nothing about whether onboarding finished. What does is
+    /// the PIN: onboarding is not over until one exists, and nothing else in
+    /// the app can reach the wallet shell without one. So a wallet with a
+    /// confirmed absent PIN resumes onboarding at its first unfinished step
+    /// (``resumeStep(for:)``) instead of opening. A PIN that is present, or
+    /// that cannot be read yet, goes to the wallet, which stays behind the
+    /// lock screen until it is answered; if the unreadable store later turns
+    /// out to hold no PIN, `RootView` re-runs this decision.
+    ///
+    /// Resuming at the PIN step when a PIN already exists would let whoever
+    /// holds the phone replace it without knowing it, which is why only
+    /// ``PinPresence/absent`` resumes.
+    static func launchDestination(
+        hasWallet: Bool,
+        pinPresence: PinPresence,
+        record: WalletRecord?
+    ) -> LaunchDestination {
+        guard hasWallet else { return .onboarding(.welcome) }
+        guard pinPresence == .absent else { return .wallet }
+        return .onboarding(resumeStep(for: record))
+    }
+
+    /// The first unfinished security step for a wallet that is already
+    /// stored: the backup, for a generated phrase the user has not verified
+    /// yet, otherwise the PIN. The same rule the live flow follows (a created
+    /// wallet goes to backup, an imported one straight to the PIN), read back
+    /// from the record's `type` and `mnemonicBackedUp` since those are what
+    /// survive the process.
+    ///
+    /// No readable record (a `wallet.json` that failed to decode, or keys with
+    /// no metadata) resumes at the backup too: the backup step reads the
+    /// phrase from the key store, so it works without the record, and
+    /// skipping it would risk a generated phrase never being written down.
+    static func resumeStep(for record: WalletRecord?) -> Step {
+        guard let record else { return .backup }
+        guard record.type == WalletCreator.typeMnemonic, !record.mnemonicBackedUp else {
+            return .pinSetup
+        }
+        return .backup
     }
 
     // MARK: - Navigation
@@ -93,6 +162,7 @@ final class OnboardingViewModel {
 
     func createWallet(wordCount: Int, name: String) async {
         await run {
+            try await self.requireCleanStart()
             // The returned phrase is deliberately dropped: the wallet is
             // stored by now, and the backup step reads the words back from
             // the key store rather than from a second copy kept here.
@@ -103,6 +173,7 @@ final class OnboardingViewModel {
 
     func importMnemonic(words: [String], name: String) async {
         await run {
+            try await self.requireCleanStart()
             try await self.creator.importMnemonic(words: words, name: name)
             // Nothing to back up: the user supplied the phrase.
             self.step = .pinSetup
@@ -111,9 +182,20 @@ final class OnboardingViewModel {
 
     func importPrivateKey(hex: String, name: String) async {
         await run {
+            try await self.requireCleanStart()
             try await self.creator.importPrivateKey(hex: hex, name: name)
             self.step = .pinSetup
         }
+    }
+
+    /// Why onboarding refused to start a wallet.
+    enum StartError: Error, Equatable {
+        /// A PIN from earlier app data could not be cleared.
+        case staleAppData
+    }
+
+    private func requireCleanStart() async throws {
+        guard await prepareNewWallet() else { throw StartError.staleAppData }
     }
 
     private func run(_ body: () async throws -> Void) async {
@@ -130,6 +212,10 @@ final class OnboardingViewModel {
 
     // MARK: - Error copy
 
+    /// Shown when a PIN from earlier app data could not be cleared. Closing
+    /// and reopening the app retries the cleanup at launch.
+    static let staleAppDataMessage = "Could not clear old app data. Close the app and open it again, then try again."
+
     /// Maps a failure to what the user is told.
     ///
     /// `nil` for a cancelled authentication: the user dismissed the Face ID
@@ -137,6 +223,9 @@ final class OnboardingViewModel {
     /// would only be noise. Android's `OnboardingViewModel.persistErrorMessage`
     /// stays silent on its equivalent `Result.Cancelled` for the same reason.
     static func message(for error: Error) -> String? {
+        if error as? StartError == .staleAppData {
+            return staleAppDataMessage
+        }
         guard let error = error as? WalletCreationError else {
             return "Something went wrong. Try again."
         }

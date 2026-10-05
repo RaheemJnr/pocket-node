@@ -1,6 +1,13 @@
 import Foundation
 import SwiftUI
 
+/// Why ``AuthService`` refused a PIN operation outright.
+enum AuthServiceError: Error, Equatable {
+    /// ``AuthService/setPin(_:)`` was asked to set a PIN while one is stored
+    /// (or may be) and the session has not proved it knows it.
+    case pinAlreadySet
+}
+
 /// A request for the user to prove who they are before something sensitive
 /// happens, raised by ``AuthService/requireAuth(reason:)``. The root view
 /// presents it as a sheet; answering it resumes the caller.
@@ -247,7 +254,18 @@ final class AuthService {
     /// than left optimistic: if `PinService`'s cleanup could not remove a
     /// partially written PIN, the app locks behind it instead of believing
     /// there is none.
+    ///
+    /// - Throws: ``AuthServiceError/pinAlreadySet`` before writing anything
+    ///   unless the session is unlocked or the store, read again here,
+    ///   confirms there is no PIN. Onboarding reaches this on the strength of
+    ///   a launch-time read; if that read was stale, setting a PIN would
+    ///   replace one the user never proved they know.
     func setPin(_ value: String) async throws {
+        await pin.refresh()
+        guard state == .unlocked || pin.pinPresence == .absent else {
+            if state == .noPin { state = .locked }
+            throw AuthServiceError.pinAlreadySet
+        }
         do {
             try await pin.setPin(value)
         } catch {
@@ -265,6 +283,10 @@ final class AuthService {
     ///   stored in both outcomes, so a PIN that survived the attempt still
     ///   gates the app, and the biometric opt-in is only dropped once there is
     ///   really no PIN left for it to stand in for.
+    ///
+    /// Leaving a stored wallet with no PIN is not a state the wallet shell
+    /// accepts: `RootView` sees ``State/noPin`` and sends the user back to
+    /// onboarding's PIN step (`OnboardingViewModel.launchDestination`).
     func removePin() async throws {
         defer { state = pin.pinPresence == .absent ? .noPin : .locked }
         try await pin.removePin()
