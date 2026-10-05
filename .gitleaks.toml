@@ -20,5 +20,5 @@ paths = [
 # purpose. Matched by exact value so it is allowed in any file and any commit
 # (a fingerprint would break on squash merges), and nothing else is.
 regexes = [
-    '''b217d9a18ff657c99872cc11a2fa2aa3e970cef8c6faa7d6e424bf057cb3707b''',
+    '''^b217d9a18ff657c99872cc11a2fa2aa3e970cef8c6faa7d6e424bf057cb3707b$''',
 ]
