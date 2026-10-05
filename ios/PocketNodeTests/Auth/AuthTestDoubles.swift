@@ -47,11 +47,19 @@ final class StubBiometrics: BiometricAuthenticating, @unchecked Sendable {
         _result = result
     }
 
+    /// How long the "prompt" stays up before answering, like a real sensor
+    /// sheet. Zero answers at once.
+    var promptDuration: Duration = .zero
+
     func authenticate(reason: String) async -> Result<Void, BiometricError> {
         // Taken through a synchronous helper: `NSLock.lock()` is unavailable
         // from an async context, since holding one across a suspension would
         // block the cooperative pool.
-        recordPromptAndAnswer()
+        let result = recordPromptAndAnswer()
+        if promptDuration > .zero {
+            try? await Task.sleep(for: promptDuration)
+        }
+        return result
     }
 
     private func recordPromptAndAnswer() -> Result<Void, BiometricError> {
