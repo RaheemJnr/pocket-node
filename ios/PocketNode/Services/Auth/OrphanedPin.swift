@@ -23,11 +23,15 @@ enum OrphanedPin {
     ///   - walletMetadataExists: whether `wallet.json` is on disk.
     ///   - keyKeychain: the store holding the wallet's key envelope.
     ///   - pinKeychain: the PIN's own Keychain service.
+    ///   - preferences: where the biometric opt-in lives. It goes with the
+    ///     PIN, as it does in `AuthService.removePin`: a face standing in for
+    ///     a PIN that no longer exists is not a setting worth keeping.
     @discardableResult
     static func removeIfOrphaned(
         walletMetadataExists: Bool,
         keyKeychain: any KeyValueStoring,
-        pinKeychain: any KeyValueStoring
+        pinKeychain: any KeyValueStoring,
+        preferences: UserDefaultsPreferences
     ) -> Bool {
         guard !walletMetadataExists else { return false }
         // `try?` folds a refused lookup into nil, which is not an absence.
@@ -37,6 +41,7 @@ enum OrphanedPin {
         guard KeychainPinStore.pinPresence(keychain: pinKeychain) == .present else { return false }
         do {
             try pinKeychain.deleteAll()
+            preferences.isBiometricEnabled = false
             return true
         } catch {
             return false

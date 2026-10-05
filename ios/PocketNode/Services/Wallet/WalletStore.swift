@@ -87,6 +87,27 @@ final class WalletStore {
         try data.write(to: fileURL, options: [.atomic, .completeFileProtection])
     }
 
+    /// True when `wallet.json` can be read but does not decode as a record:
+    /// corrupt rather than merely locked. A file the data-protection class
+    /// keeps unreadable (a launch while the device is locked) does not count,
+    /// since nothing is known about its contents.
+    var hasUndecodableRecord: Bool {
+        guard let data = try? Data(contentsOf: fileURL) else { return false }
+        return (try? JSONDecoder().decode(WalletRecord.self, from: data)) == nil
+    }
+
+    /// Moves an undecodable `wallet.json` aside as `wallet.unreadable.json`,
+    /// replacing any earlier one, so the device reads as having no wallet
+    /// metadata. Kept rather than deleted, for diagnosis. Callers decide when
+    /// this is safe (see `LaunchGate`).
+    func setAsideUndecodableRecord() throws {
+        let aside = fileURL.deletingLastPathComponent().appendingPathComponent("wallet.unreadable.json")
+        if fileManager.fileExists(atPath: aside.path) {
+            try fileManager.removeItem(at: aside)
+        }
+        try fileManager.moveItem(at: fileURL, to: aside)
+    }
+
     func delete() throws {
         guard fileManager.fileExists(atPath: fileURL.path) else { return }
         try fileManager.removeItem(at: fileURL)

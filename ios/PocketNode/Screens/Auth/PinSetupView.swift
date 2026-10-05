@@ -116,6 +116,18 @@ struct PinSetupView: View {
         }
     }
 
+    /// A refused write can be retried; a PIN that is already stored cannot
+    /// be replaced from here, and saying "try again" would only loop.
+    static func message(for error: Error) -> String {
+        if error as? AuthServiceError == .pinAlreadySet {
+            return pinAlreadySetMessage
+        }
+        return "Could not save your PIN. Try again."
+    }
+
+    static let pinAlreadySetMessage =
+        "This device already has a PIN. Close the app and open it again to unlock with it."
+
     private func save(_ pin: String) async {
         isSaving = true
         defer { isSaving = false }
@@ -125,7 +137,7 @@ struct PinSetupView: View {
             first = ""
             digits = ""
             errorToken += 1
-            errorMessage = "Could not save your PIN. Try again."
+            errorMessage = Self.message(for: error)
             step = .create
             return
         }

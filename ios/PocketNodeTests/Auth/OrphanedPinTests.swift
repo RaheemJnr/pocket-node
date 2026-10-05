@@ -47,11 +47,15 @@ final class OrphanedPinTests: XCTestCase {
         defaults = nil
     }
 
+    private var preferences: UserDefaultsPreferences {
+        UserDefaultsPreferences(defaults: defaults)
+    }
+
     private func makeAuth() -> AuthService {
         AuthService(
             pin: PinService(keychain: pinKeychain, cost: .testing),
             biometrics: StubBiometrics(availability: .unavailable),
-            preferences: UserDefaultsPreferences(defaults: defaults)
+            preferences: preferences
         )
     }
 
@@ -64,7 +68,8 @@ final class OrphanedPinTests: XCTestCase {
         OrphanedPin.removeIfOrphaned(
             walletMetadataExists: walletStore.hasWallet,
             keyKeychain: keyStore ?? keyKeychain,
-            pinKeychain: pinStore ?? pinKeychain
+            pinKeychain: pinStore ?? pinKeychain,
+            preferences: preferences
         )
     }
 
@@ -117,44 +122,26 @@ final class OrphanedPinTests: XCTestCase {
         XCTAssertEqual(KeychainPinStore.pinPresence(keychain: pinKeychain), .present)
     }
 
-    // MARK: - Retry when onboarding starts a wallet
-
-    /// The launch cleanup failed, so the session starts locked behind the old
-    /// PIN with no wallet. Onboarding's retry before the import clears it, and
-    /// the PIN step that follows is accepted.
-    func testOnboardingRetriesTheCleanupAndCanThenSetAPin() async throws {
+    func testRemovingAnOrphanedPinAlsoDropsTheBiometricOptIn() async throws {
         try await storeOldPin()
-        let auth = makeAuth()
-        XCTAssertEqual(auth.state, .locked)
-        let keyKeychain = keyKeychain!
-        let pinKeychain = pinKeychain!
-        let walletStore = walletStore!
-        let model = OnboardingViewModel(
-            creator: WalletCreator(
-                keyStore: WalletKeyStore(keychain: keyKeychain, wrapper: wrapper),
-                walletStore: walletStore
-            ),
-            prepareNewWallet: {
-                guard OrphanedPin.removeIfOrphaned(
-                    walletMetadataExists: walletStore.hasWallet,
-                    keyKeychain: keyKeychain,
-                    pinKeychain: pinKeychain
-                ) else { return }
-                await auth.refresh()
-            }
-        )
+        preferences.isBiometricEnabled = true
 
-        await model.importPrivateKey(hex: WalletCreatorTests.testPrivateKeyHex, name: "Key")
-        XCTAssertEqual(model.step, .pinSetup)
-        XCTAssertEqual(auth.state, .noPin)
+        XCTAssertTrue(removeIfOrphaned())
 
-        try await auth.setPin("222222")
+        XCTAssertFalse(preferences.isBiometricEnabled)
+    }
 
-        XCTAssertEqual(auth.state, .unlocked)
-        model.finishPinSetup()
-        XCTAssertEqual(model.step, .done)
-        let cold = makeAuth()
-        let newPinWorks = await cold.unlock(pin: "222222")
-        XCTAssertTrue(newPinWorks)
+    /// A delete the Keychain refuses is reported, not assumed: the caller must
+    /// not go on as if the PIN were gone.
+    func testARefusedDeleteIsReportedAndLeavesThePinAndOptIn() async throws {
+        try await storeOldPin()
+        preferences.isBiometricEnabled = true
+        let refusing = FailingKeyValueStore(service: pinService)
+        refusing.failDeletes(true)
+
+        XCTAssertFalse(removeIfOrphaned(pinStore: refusing))
+
+        XCTAssertEqual(KeychainPinStore.pinPresence(keychain: pinKeychain), .present)
+        XCTAssertTrue(preferences.isBiometricEnabled)
     }
 }

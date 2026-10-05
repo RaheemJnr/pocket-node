@@ -46,10 +46,11 @@ final class OnboardingViewModel {
 
     private let creator: WalletCreator
 
-    /// Runs before a new wallet is created or imported. `AppContainer` clears
-    /// a PIN left behind with no wallet there, so the PIN step that follows
-    /// is not refused (see `OrphanedPin`).
-    private let prepareNewWallet: () async -> Void
+    /// Runs before a new wallet is created or imported. `LaunchGate` clears a
+    /// PIN left behind with no wallet there and answers whether the wallet
+    /// may be started; false means a PIN is still stored that the PIN step
+    /// would refuse to replace, so nothing is created.
+    private let prepareNewWallet: @MainActor () async -> Bool
 
     /// - Parameter step: where the flow starts. ``Step/welcome`` for a device
     ///   with no wallet; ``resumeStep(for:)`` for one whose onboarding was cut
@@ -57,7 +58,7 @@ final class OnboardingViewModel {
     init(
         creator: WalletCreator,
         resumingAt step: Step = .welcome,
-        prepareNewWallet: @escaping () async -> Void = {}
+        prepareNewWallet: @escaping @MainActor () async -> Bool = { true }
     ) {
         self.creator = creator
         self.prepareNewWallet = prepareNewWallet
@@ -161,7 +162,7 @@ final class OnboardingViewModel {
 
     func createWallet(wordCount: Int, name: String) async {
         await run {
-            await self.prepareNewWallet()
+            try await self.requireCleanStart()
             // The returned phrase is deliberately dropped: the wallet is
             // stored by now, and the backup step reads the words back from
             // the key store rather than from a second copy kept here.
@@ -172,7 +173,7 @@ final class OnboardingViewModel {
 
     func importMnemonic(words: [String], name: String) async {
         await run {
-            await self.prepareNewWallet()
+            try await self.requireCleanStart()
             try await self.creator.importMnemonic(words: words, name: name)
             // Nothing to back up: the user supplied the phrase.
             self.step = .pinSetup
@@ -181,10 +182,20 @@ final class OnboardingViewModel {
 
     func importPrivateKey(hex: String, name: String) async {
         await run {
-            await self.prepareNewWallet()
+            try await self.requireCleanStart()
             try await self.creator.importPrivateKey(hex: hex, name: name)
             self.step = .pinSetup
         }
+    }
+
+    /// Why onboarding refused to start a wallet.
+    enum StartError: Error, Equatable {
+        /// A PIN from earlier app data could not be cleared.
+        case staleAppData
+    }
+
+    private func requireCleanStart() async throws {
+        guard await prepareNewWallet() else { throw StartError.staleAppData }
     }
 
     private func run(_ body: () async throws -> Void) async {
@@ -201,6 +212,10 @@ final class OnboardingViewModel {
 
     // MARK: - Error copy
 
+    /// Shown when a PIN from earlier app data could not be cleared. Closing
+    /// and reopening the app retries the cleanup at launch.
+    static let staleAppDataMessage = "Could not clear old app data. Close the app and open it again, then try again."
+
     /// Maps a failure to what the user is told.
     ///
     /// `nil` for a cancelled authentication: the user dismissed the Face ID
@@ -208,6 +223,9 @@ final class OnboardingViewModel {
     /// would only be noise. Android's `OnboardingViewModel.persistErrorMessage`
     /// stays silent on its equivalent `Result.Cancelled` for the same reason.
     static func message(for error: Error) -> String? {
+        if error as? StartError == .staleAppData {
+            return staleAppDataMessage
+        }
         guard let error = error as? WalletCreationError else {
             return "Something went wrong. Try again."
         }

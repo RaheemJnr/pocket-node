@@ -32,9 +32,8 @@ final class AppContainer {
     /// Session state and the lock gate. `RootView` reads it.
     let auth: AuthService
 
-    /// The two Keychain services, kept for ``removeOrphanedPin()``.
-    private let keyKeychain: KeychainStore
-    private let pinKeychain: KeychainStore
+    /// The launch decisions about the wallet and its PIN (see ``LaunchGate``).
+    let launchGate: LaunchGate
 
     /// Kept in sync with the system color scheme by `RootView`.
     var theme: Theme = .light
@@ -67,41 +66,28 @@ final class AppContainer {
         if !wasMarked && marker.isRecorded {
             try? pinKeychain.deleteAll()
         }
-        // That delete is not retried if it fails (the marker is already
-        // recorded), and a PIN left with no wallet would refuse every PIN the
-        // next onboarding tries to set. So any PIN with no wallet at all is
-        // cleared here, before `PinService` seeds its state from the store.
-        OrphanedPin.removeIfOrphaned(
-            walletMetadataExists: walletStore.hasWallet,
-            keyKeychain: keychain,
-            pinKeychain: pinKeychain
-        )
-        self.keyKeychain = keychain
-        self.pinKeychain = pinKeychain
 
-        self.biometrics = BiometricService()
-        let pinService = PinService(keychain: pinKeychain)
-        self.pinService = pinService
-        self.auth = AuthService(
-            pin: pinService,
-            biometrics: self.biometrics,
-            preferences: self.preferences
+        // That delete is not retried if it fails (the marker is already
+        // recorded). `LaunchGate` clears any PIN left with no wallet, and sets
+        // aside an undecodable `wallet.json` with no keys, before the session
+        // reads the PIN store.
+        let biometrics = BiometricService()
+        self.biometrics = biometrics
+        let launchGate = LaunchGate(
+            walletStore: walletStore,
+            walletKeyStore: walletKeyStore,
+            keyKeychain: keychain,
+            pinKeychain: pinKeychain,
+            preferences: preferences,
+            biometrics: biometrics,
+            skipsOnboarding: Self.skipsOnboardingForTesting
         )
+        self.launchGate = launchGate
+        self.pinService = launchGate.pinService
+        self.auth = launchGate.auth
         self.walletCreator = WalletCreator(keyStore: self.walletKeyStore, walletStore: self.walletStore)
 
         Self.seedWalletForTestingIfRequested(walletStore: self.walletStore)
-    }
-
-    /// Clears an orphaned PIN (see ``OrphanedPin``) and re-derives the
-    /// session from what is left. Onboarding calls this before it creates or
-    /// imports a wallet, retrying a launch-time cleanup that did not succeed.
-    func removeOrphanedPin() async {
-        guard OrphanedPin.removeIfOrphaned(
-            walletMetadataExists: walletStore.hasWallet,
-            keyKeychain: keyKeychain,
-            pinKeychain: pinKeychain
-        ) else { return }
-        await auth.refresh()
     }
 
     // MARK: - Screen graphs
@@ -139,51 +125,6 @@ final class AppContainer {
     /// Backs the wallet shell's first screen.
     func makeHomeViewModel() -> HomeViewModel {
         HomeViewModel(walletStore: walletStore, preferences: preferences)
-    }
-
-    /// Whether onboarding has already been completed.
-    ///
-    /// Both halves are consulted: the Keychain envelope is the wallet, and
-    /// `wallet.json` is what the UI reads. A device with only one of them is
-    /// mid-failure rather than fresh, and sending it back through onboarding
-    /// would refuse at ``WalletCreator/createWallet(wordCount:name:)`` anyway,
-    /// so the honest answer is that a wallet is there.
-    var hasWallet: Bool {
-        get async {
-            // Spelled out rather than written with `||`: the short-circuit
-            // operator takes its right side as an autoclosure, which cannot
-            // carry the `await` the actor hop needs.
-            if walletStore.hasWallet { return true }
-            return await walletKeyStore.hasWallet
-        }
-    }
-
-    /// Where this launch lands: see
-    /// ``OnboardingViewModel/launchDestination(hasWallet:pinPresence:record:)``.
-    /// Asked once at launch and again whenever the PIN turns out to be absent
-    /// while the wallet shell is up.
-    var launchDestination: OnboardingViewModel.LaunchDestination {
-        get async {
-            let hasWallet = await self.hasWallet
-            #if DEBUG
-            if hasWallet && Self.skipsOnboardingForTesting { return .wallet }
-            #endif
-            return OnboardingViewModel.launchDestination(
-                hasWallet: hasWallet,
-                pinPresence: pinService.pinPresence,
-                record: walletStore.load()
-            )
-        }
-    }
-
-    /// True while a stored wallet has no PIN in front of it. The wallet shell
-    /// must not be shown in that state; `RootView` sends it back to the
-    /// unfinished onboarding step instead.
-    var needsSecuritySetup: Bool {
-        #if DEBUG
-        if Self.skipsOnboardingForTesting { return false }
-        #endif
-        return auth.state == .noPin
     }
 
     /// `POCKETNODE_SKIP_ONBOARDING` (below) seeds a metadata-only wallet with

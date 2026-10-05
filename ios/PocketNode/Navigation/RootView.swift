@@ -34,6 +34,7 @@ struct RootView: View {
     @State private var home: HomeViewModel?
 
     private var auth: AuthService { container.auth }
+    private var gate: LaunchGate { container.launchGate }
 
     var body: some View {
         Group {
@@ -60,9 +61,13 @@ struct RootView: View {
                 // unfinished step.
                 if auth.isGated {
                     LockView(auth: auth)
-                } else if container.needsSecuritySetup {
+                } else if gate.needsSecuritySetup {
+                    // Nothing else is guaranteed to change the session from
+                    // here, so this re-reads it and routes on, rather than
+                    // waiting on an `onChange` that may never fire.
                     Color(uiColor: .systemBackground)
                         .ignoresSafeArea()
+                        .task { reroute() }
                 } else {
                     wallet
                 }
@@ -82,21 +87,14 @@ struct RootView: View {
             // wallet as empty state and re-reads on every appearance, so
             // building it ahead of onboarding costs nothing.
             home = container.makeHomeViewModel()
-            route(to: await container.launchDestination)
+            route(to: await gate.launchDestination)
         }
         // A PIN store that could not be read at launch sends the wallet to
         // the lock screen; if it then reads as holding no PIN, the wallet is
         // an unfinished onboarding after all and goes back to it.
         .onChange(of: auth.state) { _, _ in
-            guard phase == .wallet, container.needsSecuritySetup else { return }
-            Task {
-                let destination = await container.launchDestination
-                // Checked again after the await: another state change may
-                // have routed already, and a second route would build a
-                // second onboarding view model over the first.
-                guard phase == .wallet, container.needsSecuritySetup else { return }
-                route(to: destination)
-            }
+            guard phase == .wallet, gate.needsSecuritySetup else { return }
+            reroute()
         }
         .onChange(of: colorScheme, initial: true) {
             container.theme = Theme.forScheme(colorScheme)
@@ -120,16 +118,32 @@ struct RootView: View {
         .privacyShield()
     }
 
+    /// Asks ``LaunchGate/reroute()`` where the wallet phase should go
+    /// instead, if anywhere. The phase is checked again after the await:
+    /// another trigger may have routed already, and a second route would
+    /// build a second onboarding view model over the first.
+    private func reroute() {
+        guard phase == .wallet else { return }
+        Task {
+            guard let destination = await gate.reroute(), phase == .wallet else { return }
+            route(to: destination)
+        }
+    }
+
     private func route(to destination: OnboardingViewModel.LaunchDestination) {
         switch destination {
         case .wallet:
             phase = .wallet
         case .onboarding(let step):
-            let container = container
+            let gate = gate
+            // A reroute can come from a pushed screen. Onboarding replaces the
+            // whole stack, and finishing it must land on Home, not on a stale
+            // screen the old path would bring back.
+            path = NavigationPath()
             onboarding = OnboardingViewModel(
                 creator: container.walletCreator,
                 resumingAt: step,
-                prepareNewWallet: { await container.removeOrphanedPin() }
+                prepareNewWallet: { await gate.prepareNewWallet() }
             )
             phase = .onboarding
         }
