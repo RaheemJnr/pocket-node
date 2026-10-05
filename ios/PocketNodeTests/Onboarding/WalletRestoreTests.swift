@@ -82,6 +82,24 @@ final class WalletRestoreTests: XCTestCase {
         XCTAssertFalse(OnboardingViewModel(creator: creator).isUnsupportedRestore, "a first run is not a restore")
     }
 
+    /// A restore has no way to the welcome step or to create: both would be
+    /// refused, since the device already has this wallet.
+    func testARestoreNeverReachesWelcomeOrCreate() {
+        let model = OnboardingViewModel(
+            creator: creator,
+            restoring: WalletRecord(
+                id: "w", name: "n", type: "watch_only",
+                mainnetAddress: "ckb1", testnetAddress: "ckt1", createdAt: 0
+            ),
+            hasPin: { false }
+        )
+
+        model.backToWelcome()
+        XCTAssertEqual(model.step, .importWallet)
+        model.beginCreate()
+        XCTAssertEqual(model.step, .importWallet)
+    }
+
     // MARK: - Detection
 
     func testMetadataWithoutKeysIsReportedAsNeedingRestore() async throws {

@@ -89,18 +89,15 @@ struct OnboardingView: View {
                     .accessibilityIdentifier("onboarding.back")
             }
         }
-        // A restore that cannot go ahead still needs a way off the screen:
-        // back behind the lock when a PIN stands in front of the wallet,
-        // otherwise back to the welcome step.
-        if model.step == .importWallet && model.isUnsupportedRestore {
+        // A restore that cannot go ahead offers a way back behind the lock
+        // when a PIN stands in front of the wallet. With no PIN there is
+        // nowhere to go back to: welcome would only offer a create that the
+        // existing wallet refuses, so the screen's own copy (reinstall) is
+        // the way out.
+        if model.step == .importWallet && model.isUnsupportedRestore && auth.state == .unlocked {
             ToolbarItem(placement: .topBarLeading) {
-                if auth.state == .unlocked {
-                    Button("Lock") { auth.lock() }
-                        .accessibilityIdentifier("onboarding.lock")
-                } else {
-                    Button("Back") { model.backToWelcome() }
-                        .accessibilityIdentifier("onboarding.back")
-                }
+                Button("Lock") { auth.lock() }
+                    .accessibilityIdentifier("onboarding.lock")
             }
         }
     }

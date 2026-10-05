@@ -171,6 +171,8 @@ final class OnboardingViewModel {
     // MARK: - Navigation
 
     func beginCreate() {
+        // Never from a restore: the device already has this wallet.
+        guard !isRestoring else { return }
         errorMessage = nil
         step = .create
     }
@@ -183,6 +185,9 @@ final class OnboardingViewModel {
     /// Back out of a create or import screen. Only reachable before a wallet
     /// has been stored, so there is nothing to undo.
     func backToWelcome() {
+        // A restore has no welcome step: create and import would both be
+        // refused, since the device already has this wallet.
+        guard !isRestoring else { return }
         errorMessage = nil
         step = .welcome
     }
