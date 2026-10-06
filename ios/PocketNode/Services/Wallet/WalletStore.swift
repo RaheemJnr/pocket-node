@@ -1,4 +1,5 @@
 import Foundation
+import os
 
 /// Metadata for the single wallet iOS supports before M3 multi-wallet.
 ///
@@ -49,8 +50,11 @@ struct WalletRecord: Codable, Equatable {
 /// `WalletRecord` shape is the migration seed, which is why its field names
 /// mirror Android's `WalletEntity` rather than being iOS-idiomatic.
 final class WalletStore {
-    private let fileURL: URL
+    /// Exposed so the tests can assert it resolves to the same folder the light
+    /// client uses; nothing in the app reads it.
+    let fileURL: URL
     private let fileManager: FileManager
+    private static let logger = Logger(subsystem: "com.rjnr.pocketnode", category: "WalletStore")
 
     /// `directory` defaults to `Application Support/PocketNode`; tests pass a
     /// throwaway directory (e.g. under `NSTemporaryDirectory()`) so nothing
@@ -97,14 +101,17 @@ final class WalletStore {
     /// back without the keys: a wallet the app shows but cannot use. Leaving
     /// the metadata out makes a restored device start from onboarding instead.
     /// Backups taken before this existed still carry the file, which is why
-    /// `AppContainer` also detects a wallet whose keys are missing.
+    /// `LaunchGate` also detects a wallet whose keys are missing.
     ///
-    /// The flag goes on the directory as well as the file. The directory
-    /// holds only wallet metadata (`wallet.json`, and a set-aside
-    /// `wallet.unreadable.json` if there ever was one), and unlike the file it is never
-    /// replaced, so its flag survives every atomic save; the file's own flag
-    /// is belt and braces. Called at launch too, so existing installs are
-    /// covered before their next save.
+    /// The flag goes on the directory as well as the file, and unlike the file
+    /// the directory is never replaced, so its flag survives every atomic
+    /// save; the file's own flag is belt and braces. The directory is the
+    /// app's own folder (`AppDirectories`), so the flag covers everything in
+    /// it: the wallet metadata (`wallet.json`, and a set-aside
+    /// `wallet.unreadable.json` if there ever was one) and the light client's
+    /// per-network stores, which are chain data the node rebuilds and which
+    /// `AppDirectories` excludes on their own as well. Called at launch too,
+    /// so existing installs are covered before their next save.
     ///
     /// Best effort: a failure only means the file may be backed up, which is
     /// the state it was already in, and the key-less check covers that case.
@@ -155,16 +162,21 @@ final class WalletStore {
         try fileManager.removeItem(at: fileURL)
     }
 
+    /// `Application Support/PocketNode`, the folder `AppDirectories` names for
+    /// the whole app; the light client's per-network stores sit inside it.
+    ///
+    /// `init` cannot throw, so a failure here is logged rather than raised, and
+    /// the intended path is returned uncreated. It is deliberately not swapped
+    /// for a writable one: this used to fall back to `temporaryDirectory`, which
+    /// put `wallet.json` where the system may delete it and said nothing. The
+    /// path stays right, `save()` retries the directory and throws the real
+    /// error, and `hasWallet` reports false rather than pointing at a stray file.
     private static func applicationSupportDirectory(fileManager: FileManager) -> URL {
-        let base = (try? fileManager.url(
-            for: .applicationSupportDirectory,
-            in: .userDomainMask,
-            appropriateFor: nil,
-            create: true
-        )) ?? fileManager.temporaryDirectory
-
-        let directory = base.appendingPathComponent("PocketNode", isDirectory: true)
-        try? fileManager.createDirectory(at: directory, withIntermediateDirectories: true)
-        return directory
+        do {
+            return try AppDirectories.ensure(fileManager: fileManager)
+        } catch {
+            logger.error("could not create the wallet directory: \(error.localizedDescription, privacy: .public)")
+            return AppDirectories.url(fileManager: fileManager)
+        }
     }
 }

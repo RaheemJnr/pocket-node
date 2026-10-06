@@ -509,7 +509,6 @@ final class AuthServiceTests: XCTestCase {
         try await first.setPin("123456")
         first.isBiometricEnabled = true
         let cold = makeAuth()
-        biometrics.promptDuration = .milliseconds(200)
 
         async let a = cold.unlockWithBiometrics()
         async let b = cold.unlockWithBiometrics()
@@ -518,6 +517,206 @@ final class AuthServiceTests: XCTestCase {
         XCTAssertEqual(biometrics.prompts, 1)
         XCTAssertEqual(results.filter { $0 }.count, 1)
         XCTAssertEqual(cold.state, .unlocked)
+    }
+
+    /// The PIN reaches the permanent lock while the biometric prompt is still
+    /// up (another session guessing). The face that answers it must not open
+    /// a wallet that is now recoverable only from the recovery phrase.
+    func testAPermanentLockReachedDuringThePromptIsNotUnlockedByIt() async throws {
+        let first = makeAuth()
+        try await first.setPin("123456")
+        first.isBiometricEnabled = true
+        let cold = makeAuth()
+        await cold.refresh()
+        XCTAssertTrue(cold.canUseBiometrics)
+        biometrics.holdPrompt()
+
+        let attempt = Task { await cold.unlockWithBiometrics() }
+        try await waitForPrompt()
+        await exhaustAllAttempts(on: first)
+        XCTAssertTrue(first.pin.isPermanentlyLocked)
+        biometrics.releasePrompt()
+        let unlocked = await attempt.value
+
+        XCTAssertFalse(unlocked)
+        XCTAssertEqual(cold.state, .locked)
+        XCTAssertTrue(cold.pin.isPermanentlyLocked)
+    }
+
+    /// The step-up prompt has the same race: a face that answers after the
+    /// permanent lock was reached elsewhere does not grant the request.
+    func testRequireAuthIsNotGrantedByAPromptThatOutlivedThePermanentLock() async throws {
+        let first = makeAuth()
+        try await first.setPin("123456")
+        first.isBiometricEnabled = true
+        let cold = makeAuth()
+        await cold.refresh()
+        XCTAssertTrue(cold.canUseBiometrics)
+        biometrics.holdPrompt()
+
+        let request = Task { await cold.requireAuth(reason: "Reveal your recovery phrase") }
+        try await waitForPrompt()
+        await exhaustAllAttempts(on: first)
+        XCTAssertTrue(first.pin.isPermanentlyLocked)
+        biometrics.releasePrompt()
+        let granted = await request.value
+
+        XCTAssertFalse(granted)
+        XCTAssertTrue(cold.pin.isPermanentlyLocked)
+    }
+
+    /// The face matched but the PIN state could not be read back cleanly:
+    /// no unlock, and the user is told it was the store, not them.
+    func testABiometricMatchOverADirtyReadSaysTheStoreFailed() async throws {
+        let first = makeAuth()
+        try await first.setPin("123456")
+        first.isBiometricEnabled = true
+        let selective = SelectiveReadKeyValueStore(service: keychainService)
+        let cold = AuthService(
+            pin: PinService(keychain: selective, cost: .testing, clock: clock.source),
+            biometrics: biometrics,
+            preferences: preferences
+        )
+        await cold.refresh()
+        XCTAssertTrue(cold.canUseBiometrics)
+        biometrics.holdPrompt()
+
+        let attempt = Task { await cold.unlockWithBiometrics() }
+        try await waitForPrompt()
+        selective.failReads(to: [PinAccount.failedAttempts])
+        biometrics.releasePrompt()
+        let unlocked = await attempt.value
+
+        XCTAssertFalse(unlocked)
+        XCTAssertEqual(cold.state, .locked)
+        XCTAssertEqual(cold.biometricMessage, AuthService.storeUnavailableMessage, "the line the lock screen shows")
+    }
+
+    // MARK: - What the PIN gates show
+
+    func testThePinGateWaitsOnlyForTheFirstRefreshAttempt() {
+        XCTAssertEqual(PinGateContent.resolve(hasLoadedState: false, didAttemptLoad: false, isPermanentlyLocked: false), .loading)
+        XCTAssertEqual(PinGateContent.resolve(hasLoadedState: false, didAttemptLoad: true, isPermanentlyLocked: false), .pad)
+        XCTAssertEqual(PinGateContent.resolve(hasLoadedState: true, didAttemptLoad: false, isPermanentlyLocked: false), .pad)
+        XCTAssertEqual(PinGateContent.resolve(hasLoadedState: true, didAttemptLoad: true, isPermanentlyLocked: true), .permanentLock)
+    }
+
+    /// A failure counter that keeps reading dirty (here, the wrong size)
+    /// must not hold a spinner up for good: the pad shows once a refresh has
+    /// been tried. It fails closed, though: even the right PIN is refused
+    /// before hashing, with the store message, and nothing in the store is
+    /// touched (a matching PIN must not reset the counter it cannot read).
+    func testADirtyFailureCounterShowsThePadButRefusesEvenTheRightPin() async throws {
+        try await assertADamagedFieldRefusesEveryPin(PinAccount.failedAttempts)
+    }
+
+    /// The same for a damaged lockout stamp, which reads as "not locked out".
+    func testADirtyLockoutRefusesEveryPinAndChangesNothing() async throws {
+        try await assertADamagedFieldRefusesEveryPin(PinAccount.lockoutUntil)
+    }
+
+    private func assertADamagedFieldRefusesEveryPin(
+        _ account: String,
+        file: StaticString = #filePath,
+        line: UInt = #line
+    ) async throws {
+        let first = makeAuth()
+        try await first.setPin("123456")
+        _ = await first.unlock(pin: "000000")
+        try keychain.set(Data([0x01, 0x02, 0x03]), account: account)
+        let before = try storedPinFields()
+
+        let cold = makeAuth()
+        await cold.refresh()
+        await cold.refresh()
+        XCTAssertFalse(cold.pin.hasLoadedState, "the read stays dirty", file: file, line: line)
+        XCTAssertEqual(
+            PinGateContent.resolve(
+                hasLoadedState: cold.pin.hasLoadedState,
+                didAttemptLoad: true,
+                isPermanentlyLocked: cold.pin.isPermanentlyLocked
+            ),
+            .pad,
+            file: file, line: line
+        )
+
+        let right = await cold.unlock(pin: "123456")
+        XCTAssertFalse(right, "no match oracle", file: file, line: line)
+        XCTAssertEqual(cold.storeMessage, AuthService.storeUnavailableMessage, file: file, line: line)
+        let wrong = await cold.unlock(pin: "999999")
+        XCTAssertFalse(wrong, file: file, line: line)
+        XCTAssertEqual(cold.storeMessage, AuthService.storeUnavailableMessage, file: file, line: line)
+
+        XCTAssertEqual(cold.state, .locked, file: file, line: line)
+        XCTAssertEqual(try storedPinFields(), before, "nothing in the store changed", file: file, line: line)
+    }
+
+    /// Every PIN field as stored, to prove an attempt wrote nothing.
+    private func storedPinFields() throws -> [String: Data] {
+        var fields: [String: Data] = [:]
+        for account in [PinAccount.hash, PinAccount.salt, PinAccount.kdfVersion,
+                        PinAccount.failedAttempts, PinAccount.lastFailedAt, PinAccount.lockoutUntil] {
+            fields[account] = try keychain.get(account: account)
+        }
+        return fields
+    }
+
+    /// A permanently locked wallet whose counter cannot be read still has
+    /// its permanent lockout stamp. It shows as permanently locked, not as a
+    /// countdown of billions of seconds.
+    func testAPermanentLockWithAnUnreadableCounterStillShowsAsPermanent() async throws {
+        let first = makeAuth()
+        try await first.setPin("123456")
+        await exhaustAllAttempts(on: first)
+        XCTAssertTrue(first.pin.isPermanentlyLocked)
+
+        let selective = SelectiveReadKeyValueStore(service: keychainService)
+        selective.failReads(to: [PinAccount.failedAttempts])
+        let cold = AuthService(
+            pin: PinService(keychain: selective, cost: .testing, clock: clock.source),
+            biometrics: biometrics,
+            preferences: preferences
+        )
+        await cold.refresh()
+
+        XCTAssertFalse(cold.pin.hasLoadedState)
+        XCTAssertTrue(cold.pin.isPermanentlyLocked)
+        XCTAssertEqual(
+            PinGateContent.resolve(
+                hasLoadedState: cold.pin.hasLoadedState,
+                didAttemptLoad: true,
+                isPermanentlyLocked: cold.pin.isPermanentlyLocked
+            ),
+            .permanentLock
+        )
+    }
+
+    /// The step-up prompt matched but the PIN state could not be read back
+    /// cleanly: that proves nothing either way, so the request goes on to
+    /// the PIN challenge instead of failing silently.
+    func testRequireAuthFallsThroughToThePinAfterADirtyRead() async throws {
+        let first = makeAuth()
+        try await first.setPin("123456")
+        first.isBiometricEnabled = true
+        let selective = SelectiveReadKeyValueStore(service: keychainService)
+        let cold = AuthService(
+            pin: PinService(keychain: selective, cost: .testing, clock: clock.source),
+            biometrics: biometrics,
+            preferences: preferences
+        )
+        await cold.refresh()
+        XCTAssertTrue(cold.canUseBiometrics)
+        biometrics.holdPrompt()
+
+        let request = Task { await cold.requireAuth(reason: "Reveal your recovery phrase") }
+        try await waitForPrompt()
+        selective.failReads(to: [PinAccount.failedAttempts])
+        biometrics.releasePrompt()
+        try await waitForChallenge(on: cold)
+        cold.resolveChallenge(granted: false)
+        let granted = await request.value
+
+        XCTAssertFalse(granted)
     }
 
     /// A temporary lockout still allows biometrics, matching Android: that one
@@ -838,6 +1037,15 @@ final class AuthServiceTests: XCTestCase {
             }
         }
         await auth.pin.refresh()
+    }
+
+    /// Waits for the stub's first prompt to be raised.
+    private func waitForPrompt(file: StaticString = #filePath, line: UInt = #line) async throws {
+        for _ in 0..<200 {
+            if biometrics.prompts > 0 { return }
+            try await Task.sleep(for: .milliseconds(10))
+        }
+        XCTFail("no prompt was raised", file: file, line: line)
     }
 
     /// `requireAuth` publishes the challenge from inside a suspended task, so

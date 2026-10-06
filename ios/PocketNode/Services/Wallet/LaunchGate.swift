@@ -76,15 +76,26 @@ final class LaunchGate {
     /// The PIN is read through the session (``AuthService/refresh()``), the
     /// same source ``needsSecuritySetup`` reads, so the two cannot disagree
     /// and leave `RootView` on a screen neither one routes away from.
+    ///
+    /// No metadata and a key envelope the Keychain could not look up (a
+    /// launch before the first device unlock) is not a walletless device when
+    /// a PIN is there or may be: the envelope may well exist. Welcome would
+    /// let the user start a wallet that `prepareNewWallet` then refuses for
+    /// as long as that PIN stands, so the launch goes to the lock screen
+    /// instead, as for any other wallet behind a PIN.
     var launchDestination: OnboardingViewModel.LaunchDestination {
         get async {
             Self.setAsideUndecodableRecordIfWalletless(walletStore: walletStore, keyKeychain: keyKeychain)
             await auth.refresh()
             let hasWallet = await self.hasWallet
             if hasWallet && skipsOnboarding { return .wallet }
+            let pinPresence: PinPresence = auth.state == .noPin ? .absent : pinService.pinPresence
+            if !hasWallet, pinPresence != .absent, await walletKeyStore.envelopePresence == .unknown {
+                return .wallet
+            }
             return OnboardingViewModel.launchDestination(
                 hasWallet: hasWallet,
-                pinPresence: auth.state == .noPin ? .absent : pinService.pinPresence,
+                pinPresence: pinPresence,
                 record: walletStore.load()
             )
         }
@@ -99,13 +110,117 @@ final class LaunchGate {
 
     /// Where the wallet phase should go instead, or nil to stay. Called when
     /// the session changes while the wallet shell (or its blank stand-in) is
-    /// up. Re-reads the PIN first, so a stale session cannot hold the shell
-    /// on a blank screen.
+    /// up, and when the app comes back to the front. Re-reads the PIN first,
+    /// so a stale session cannot hold the shell on a blank screen.
+    ///
+    /// The provisional wallet is checked first: a launch that found no
+    /// metadata and a key envelope it could not look up went behind the lock
+    /// on the chance a wallet is there (``launchDestination``). Once the
+    /// lookup answers that there is none, the device starts over the way a
+    /// cold launch would, instead of leaving an unlocked user on an empty
+    /// wallet shell until the next restart.
     func reroute() async -> OnboardingViewModel.LaunchDestination? {
+        if let startOver = await startOverIfNoWalletAfterAll() { return startOver }
         await auth.refresh()
         guard needsSecuritySetup else { return nil }
         let destination = await launchDestination
         return destination == .wallet ? nil : destination
+    }
+
+    /// What to do with a wallet phase that has no metadata behind it.
+    enum ProvisionalWalletCheck: Equatable {
+        /// Keep the wallet phase: there is metadata (readable or not), the
+        /// key envelope is there (keys without metadata, as before), or the
+        /// lookup still cannot answer and is asked again next time.
+        case stay
+        /// No metadata and no envelope, both confirmed: there is no wallet.
+        case startOver
+    }
+
+    /// The decision on its own, from what the stores answered.
+    ///
+    /// - Parameters:
+    ///   - metadataExists: whether `wallet.json` is on disk. A file that is
+    ///     there but cannot be read counts as existing: a failed read is not
+    ///     an absence.
+    ///   - envelope: the key envelope lookup.
+    static func provisionalWalletCheck(metadataExists: Bool, envelope: KeyMaterialPresence) -> ProvisionalWalletCheck {
+        guard !metadataExists, envelope == .absent else { return .stay }
+        return .startOver
+    }
+
+    /// Carries out ``provisionalWalletCheck(metadataExists:envelope:)``. On
+    /// ``ProvisionalWalletCheck/startOver`` it does what a cold launch does
+    /// for no wallet: the orphaned PIN cleanup (which itself deletes only on
+    /// a confirmed absent envelope and absent metadata), then the launch
+    /// decision, which lands on Welcome. If the PIN cannot be cleared,
+    /// Welcome says so when a wallet is started, as at launch.
+    private func startOverIfNoWalletAfterAll() async -> OnboardingViewModel.LaunchDestination? {
+        guard !skipsOnboarding else { return nil }
+        let check = Self.provisionalWalletCheck(
+            metadataExists: walletStore.hasWallet,
+            envelope: await walletKeyStore.envelopePresence
+        )
+        guard check == .startOver else { return nil }
+        OrphanedPin.removeIfOrphaned(
+            walletMetadataExists: walletStore.hasWallet,
+            keyKeychain: keyKeychain,
+            pinKeychain: pinKeychain,
+            preferences: preferences
+        )
+        let destination = await launchDestination
+        return destination == .wallet ? nil : destination
+    }
+
+    // MARK: - Restoring missing keys
+
+    /// What the root should do about a wallet whose keys may not have come
+    /// across with a device backup.
+    ///
+    /// That is what restoring an iCloud or Finder backup onto a new phone
+    /// leaves: `wallet.json` comes back, the `ThisDeviceOnly` Keychain items
+    /// do not. Such a wallet shows an address it can never spend from, and
+    /// ``WalletCreator`` would refuse to import it again because a wallet is
+    /// "already there", so `RootView` sends it to the restore flow instead of
+    /// the wallet shell. A Keychain that cannot be read yet (a launch before
+    /// the first device unlock) is not an absence and does not count. Now
+    /// that `wallet.json` is excluded from backups, only a backup made before
+    /// that exclusion (or by an older build) can produce metadata without keys.
+    enum RestoreRoute: Equatable {
+        /// Open the restore flow for this wallet now.
+        case restore(WalletRecord)
+        /// Keep this wallet's restore pending: behind the lock screen until
+        /// the session is unlocked, or until the Keychain can say whether its
+        /// keys are there.
+        case hold(WalletRecord)
+        /// Nothing to restore; carry on with the PIN routing.
+        case none
+    }
+
+    /// Decides the restore routing from what is stored, for `RootView` to
+    /// carry out. Asked at launch and on every reroute of the wallet phase.
+    ///
+    /// - Parameter pending: the restore `RootView` is already holding, if
+    ///   any. A Keychain lookup that fails right after an unlock says nothing
+    ///   about the keys, so it keeps that restore pending rather than dropping
+    ///   it; only an envelope confirmed present (or the metadata gone) ends it.
+    func restoreRoute(pending: WalletRecord? = nil) async -> RestoreRoute {
+        // The metadata-only wallet `POCKETNODE_SKIP_ONBOARDING` seeds for
+        // the wallet shell UI tests has no keys on purpose.
+        if skipsOnboarding { return .none }
+        guard let record = walletStore.load() else { return .none }
+        switch await walletKeyStore.envelopePresence {
+        case .present:
+            return .none
+        case .unknown:
+            return pending.map { .hold($0) } ?? .none
+        case .absent:
+            let mayStart = OnboardingViewModel.mayStartRestore(
+                pinPresence: pinService.pinPresence,
+                sessionUnlocked: auth.state == .unlocked
+            )
+            return mayStart ? .restore(record) : .hold(record)
+        }
     }
 
     // MARK: - Starting a new wallet

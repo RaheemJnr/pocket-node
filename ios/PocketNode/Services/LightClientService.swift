@@ -261,18 +261,13 @@ final class LightClientService {
         return (try? JSONSerialization.jsonObject(with: data)) as? [String: Any]
     }
 
+    /// `Application Support/PocketNode/<network>`, beside the wallet's
+    /// `wallet.json`. The folder name is `AppDirectories`' to own: this used to
+    /// spell it `pocketnode`, which collides with the wallet store's spelling on
+    /// the simulator's case-insensitive volume and kept the node from starting
+    /// at all.
     private static func prepareDataDirectory(network: String) throws -> URL {
-        let support = try FileManager.default.url(
-            for: .applicationSupportDirectory,
-            in: .userDomainMask,
-            appropriateFor: nil,
-            create: true
-        )
-        let dataDir = support
-            .appendingPathComponent("pocketnode", isDirectory: true)
-            .appendingPathComponent(network, isDirectory: true)
-        try FileManager.default.createDirectory(at: dataDir, withIntermediateDirectories: true)
-        return dataDir
+        try AppDirectories.dataDirectory(network: network)
     }
 
     /// Rewrites the on-disk config from the bundle on every init, so an app

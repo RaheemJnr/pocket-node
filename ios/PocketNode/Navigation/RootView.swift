@@ -34,8 +34,10 @@ struct RootView: View {
     @State private var home: HomeViewModel?
     /// A wallet waiting for its keys to be restored while a PIN stands in
     /// front of it: the restore flow names the wallet and shows its address,
-    /// so it waits for the unlock (see ``restore(_:)``).
+    /// so it waits for the unlock (``LaunchGate/RestoreRoute/hold(_:)``).
     @State private var pendingRestore: WalletRecord?
+    /// How many times the stand-in has asked again about the held restore.
+    @State private var heldRestoreRetries = 0
 
     private var auth: AuthService { container.auth }
     private var gate: LaunchGate { container.launchGate }
@@ -77,10 +79,41 @@ struct RootView: View {
                 } else if gate.needsSecuritySetup || pendingRestore != nil {
                     // Nothing else is guaranteed to change the session from
                     // here, so this re-reads it and routes on, rather than
-                    // waiting on an `onChange` that may never fire.
-                    Color(uiColor: .systemBackground)
-                        .ignoresSafeArea()
-                        .task { reroute() }
+                    // waiting on an `onChange` that may never fire. Keyed on
+                    // the pending restore: the stand-in can already be up when
+                    // a reroute starts holding one, and a task that has run
+                    // once would leave it blank until the next backgrounding.
+                    // A held restore whose key lookup keeps failing has
+                    // nothing else to move it on, so it is asked again every
+                    // two seconds while it is held.
+                    // After about ten seconds of that the user is told what
+                    // to do, rather than left watching a spinner.
+                    ZStack {
+                        Color(uiColor: .systemBackground)
+                            .ignoresSafeArea()
+                        VStack(spacing: 16) {
+                            ProgressView()
+                                .accessibilityLabel("Loading")
+                            if pendingRestore != nil && heldRestoreRetries >= 5 {
+                                Text("Could not read your wallet keys. Close the app and open it again.")
+                                    .font(.subheadline)
+                                    .foregroundStyle(.secondary)
+                                    .multilineTextAlignment(.center)
+                                    .padding(.horizontal, 32)
+                                    .accessibilityIdentifier("root.keysUnreadable")
+                            }
+                        }
+                    }
+                    .task(id: pendingRestore?.id) {
+                        heldRestoreRetries = 0
+                        await reroute()
+                        while pendingRestore != nil, !Task.isCancelled {
+                            try? await Task.sleep(for: .seconds(2))
+                            guard !Task.isCancelled else { return }
+                            heldRestoreRetries += 1
+                            await reroute()
+                        }
+                    }
                 } else {
                     wallet
                 }
@@ -91,7 +124,7 @@ struct RootView: View {
         // but before the PIN was set resumes at the backup or PIN step instead
         // of opening the wallet (`OnboardingViewModel.launchDestination`), and
         // a wallet whose keys did not come across with a device backup goes to
-        // the restore flow (`AppContainer.walletNeedingRestore`). The restore
+        // the restore flow (`LaunchGate.restoreRoute`). The restore
         // check comes first: a key-less wallet has no phrase to back up and no
         // keys for a PIN to protect. Onboarding stays on screen for the whole
         // flow after that, so finishing one step does not evict the user into
@@ -103,10 +136,7 @@ struct RootView: View {
             // wallet as empty state and re-reads on every appearance, so
             // building it ahead of onboarding costs nothing.
             home = container.makeHomeViewModel()
-            if let record = await container.walletNeedingRestore {
-                restore(record)
-                return
-            }
+            guard apply(await gate.restoreRoute()) else { return }
             route(to: await gate.launchDestination)
         }
         // Re-asked whenever the session changes and whenever the app comes
@@ -115,11 +145,11 @@ struct RootView: View {
         // that could not be read may turn out to have no keys, and an unlock
         // is what lets a restore held behind the lock screen go ahead.
         .onChange(of: auth.state) { _, _ in
-            reroute()
+            Task { await reroute() }
         }
         .onChange(of: scenePhase) { _, newScenePhase in
             guard newScenePhase == .active else { return }
-            reroute()
+            Task { await reroute() }
         }
         .onChange(of: colorScheme, initial: true) {
             container.theme = Theme.forScheme(colorScheme)
@@ -143,19 +173,26 @@ struct RootView: View {
         .privacyShield()
     }
 
-    /// Sends a key-less wallet to the restore flow. With no PIN there is
-    /// nothing to wait for; with one (or one that cannot be read yet) the
-    /// wallet phase shows the lock screen first and the restore starts once
-    /// the session is unlocked.
-    private func restore(_ record: WalletRecord) {
-        guard OnboardingViewModel.mayStartRestore(
-            pinPresence: container.pinService.pinPresence,
-            sessionUnlocked: auth.state == .unlocked
-        ) else {
+    /// Carries out a ``LaunchGate/RestoreRoute``. Returns true when there is
+    /// no restore to deal with and the PIN routing should go on.
+    private func apply(_ restoreRoute: LaunchGate.RestoreRoute) -> Bool {
+        switch restoreRoute {
+        case .restore(let record):
+            startRestore(record)
+            return false
+        case .hold(let record):
+            // The wallet phase shows the lock screen first, and the restore
+            // starts once the session is unlocked.
             pendingRestore = record
             phase = .wallet
-            return
+            return false
+        case .none:
+            pendingRestore = nil
+            return true
         }
+    }
+
+    private func startRestore(_ record: WalletRecord) {
         let pinService = container.pinService
         path = NavigationPath()
         pendingRestore = nil
@@ -172,19 +209,15 @@ struct RootView: View {
     /// phase is checked again after each await: another trigger may have
     /// routed already, and a second route would build a second onboarding
     /// view model over the first.
-    private func reroute() {
+    ///
+    /// Async so the stand-in's retry loop waits for each attempt instead of
+    /// piling them up; the `onChange` callers wrap it in a `Task`.
+    private func reroute() async {
         guard phase == .wallet else { return }
-        Task {
-            let record = await container.walletNeedingRestore
-            guard phase == .wallet else { return }
-            if let record {
-                restore(record)
-                return
-            }
-            pendingRestore = nil
-            guard let destination = await gate.reroute(), phase == .wallet else { return }
-            route(to: destination)
-        }
+        let restoreRoute = await gate.restoreRoute(pending: pendingRestore)
+        guard phase == .wallet, apply(restoreRoute) else { return }
+        guard let destination = await gate.reroute(), phase == .wallet else { return }
+        route(to: destination)
     }
 
     private func route(to destination: OnboardingViewModel.LaunchDestination) {
@@ -341,15 +374,29 @@ private struct AuthChallengeSheet: View {
     @State private var errorToken = 0
     @State private var isVerifying = false
     @State private var ticker: Task<Void, Never>?
+    /// Set once the first refresh has been attempted (see ``PinGateContent``).
+    @State private var didAttemptLoad = false
 
     private var pin: PinService { auth.pin }
 
     var body: some View {
         NavigationStack {
             Group {
-                if pin.isPermanentlyLocked {
+                // As on `LockView`: no pad before the first refresh, or a
+                // permanently locked PIN would show one on the first frame.
+                switch PinGateContent.resolve(
+                    hasLoadedState: pin.hasLoadedState,
+                    didAttemptLoad: didAttemptLoad,
+                    isPermanentlyLocked: pin.isPermanentlyLocked
+                ) {
+                case .loading:
+                    ProgressView()
+                        .padding(.top, 24)
+                        .accessibilityLabel("Loading")
+                        .accessibilityIdentifier("authChallenge.loading")
+                case .permanentLock:
                     permanentLock
-                } else {
+                case .pad:
                     PinEntryView(
                         title: "Enter PIN",
                         subtitle: challenge.reason,
@@ -379,6 +426,7 @@ private struct AuthChallengeSheet: View {
         .accessibilityIdentifier("authChallenge.root")
         .task {
             await pin.refresh()
+            didAttemptLoad = true
             startTickerIfNeeded()
         }
         .onDisappear { stopTicker() }

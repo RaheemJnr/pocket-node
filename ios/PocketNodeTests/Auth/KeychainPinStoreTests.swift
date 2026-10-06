@@ -187,6 +187,32 @@ final class KeychainPinStoreTests: XCTestCase {
         XCTAssertEqual(store.getLockoutUntil()?.int64Value, Int64.min)
     }
 
+    /// A stored integer of the wrong width is damaged, not absent. Its getter
+    /// still has to return the seam's `nil` (or 0), but the read is recorded
+    /// as a failure so it counts as dirty rather than as "no lockout".
+    func testAWrongSizedIntegerIsADirtyReadNotAnAbsence() throws {
+        store.update { $0.pinHash(v: "abc") }
+        for account in [PinAccount.failedAttempts, PinAccount.kdfVersion, PinAccount.lastFailedAt, PinAccount.lockoutUntil] {
+            try keychain.set(Data([0x01, 0x02, 0x03]), account: account)
+        }
+        XCTAssertNil(store.takeFailure())
+
+        XCTAssertEqual(store.getFailedAttempts(), 0)
+        XCTAssertEqual(store.takeFailure()?.status, errSecDecode)
+        XCTAssertNil(store.getKdfVersion())
+        XCTAssertEqual(store.takeFailure()?.status, errSecDecode)
+        XCTAssertNil(store.getLastFailedAt())
+        XCTAssertEqual(store.takeFailure()?.status, errSecDecode)
+        XCTAssertNil(store.getLockoutUntil())
+        XCTAssertEqual(store.takeFailure()?.status, errSecDecode)
+    }
+
+    /// A field that is really not there is still not a failure.
+    func testAMissingIntegerIsNotAFailure() {
+        XCTAssertNil(store.getLockoutUntil())
+        XCTAssertNil(store.takeFailure())
+    }
+
     // MARK: - Write probe
 
     func testTheWriteProbeSucceedsAndLeavesNothingBehind() throws {
