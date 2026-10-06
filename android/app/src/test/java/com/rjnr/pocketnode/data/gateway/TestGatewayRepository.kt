@@ -2,6 +2,8 @@ package com.rjnr.pocketnode.data.gateway
 
 import com.rjnr.pocketnode.core.log.NoopLogger
 import com.rjnr.pocketnode.data.database.AppDatabase
+import com.rjnr.pocketnode.data.database.dao.SyncProgressDao
+import com.rjnr.pocketnode.data.migration.WalletMigrationHelper
 import com.rjnr.pocketnode.data.wallet.KeyManager
 import com.rjnr.pocketnode.data.wallet.WalletPreferences
 import io.mockk.mockk
@@ -27,6 +29,8 @@ internal fun testGatewayRepository(
     lightClient: LightClientReadOnly = mockk(relaxed = true),
     syncPoller: SyncPoller = mockk(relaxed = true),
     json: Json = Json { ignoreUnknownKeys = true; encodeDefaults = true },
+    syncProgressDao: SyncProgressDao = db.syncProgressDao(),
+    walletMigrationHelper: WalletMigrationHelper = mockk(relaxed = true),
 ): GatewayRepository = GatewayRepository(
     keyManager = keyManager,
     walletPreferences = walletPreferences,
@@ -34,11 +38,11 @@ internal fun testGatewayRepository(
     transactionBuilder = mockk(relaxed = true),
     cacheManager = mockk(relaxed = true),
     daoSyncManager = mockk(relaxed = true),
-    walletMigrationHelper = mockk(relaxed = true),
+    walletMigrationHelper = walletMigrationHelper,
     walletDao = db.walletDao(),
     appDatabase = mockk(relaxed = true),
     headerCacheDao = mockk(relaxed = true),
-    syncProgressDao = db.syncProgressDao(),
+    syncProgressDao = syncProgressDao,
     pendingBroadcastDao = mockk(relaxed = true),
     broadcastClient = mockk(relaxed = true),
     syncCoordinator = syncCoordinator,
