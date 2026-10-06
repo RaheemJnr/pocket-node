@@ -349,11 +349,11 @@ class GatewayRepositoryDaoUnlockTest {
         coEvery { depositReader.recomputeCachedCompensation(any(), any()) } throws
             kotlinx.coroutines.CancellationException("cancelled")
 
-        val result = repository.getDaoDeposits()
+        val thrown = runCatching { repository.getDaoDeposits() }.exceptionOrNull()
 
         assertTrue(
-            "cancellation must propagate instead of falling back to the stored row",
-            result.exceptionOrNull() is kotlinx.coroutines.CancellationException,
+            "cancellation must escape getDaoDeposits, not fall back to the stored row or become a Result",
+            thrown is kotlinx.coroutines.CancellationException,
         )
     }
 

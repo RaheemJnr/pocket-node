@@ -2607,7 +2607,7 @@ class GatewayRepository @Inject constructor(
         val pendingUnlocks = readPendingUnlocks(deduped)
         val merged = mergeWithCachedDaoDeposits(deduped, pendingUnlocks)
         applyPendingUnlockOverlay(applyPendingWithdrawOverlay(merged), pendingUnlocks)
-    }
+    }.onFailure { if (it is CancellationException) throw it }
 
     /**
      * #347: overlay in-flight phase-1 withdraws onto the deposit list. The
