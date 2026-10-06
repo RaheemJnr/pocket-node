@@ -343,6 +343,33 @@ class GatewayRepositoryDaoUnlockTest {
     }
 
     @Test
+    fun `a cancelled compensation recompute is not swallowed`() = runTest {
+        seedCachedWithdrawingRow()
+        coEvery { depositReader.list(any(), any(), any()) } returns emptyList()
+        coEvery { depositReader.recomputeCachedCompensation(any(), any()) } throws
+            kotlinx.coroutines.CancellationException("cancelled")
+
+        val result = repository.getDaoDeposits()
+
+        assertTrue(
+            "cancellation must propagate instead of falling back to the stored row",
+            result.exceptionOrNull() is kotlinx.coroutines.CancellationException,
+        )
+    }
+
+    @Test
+    fun `a failed compensation recompute keeps the stored row`() = runTest {
+        seedCachedWithdrawingRow()
+        val stored = daoSyncManager.getByOutPoint(withdrawingOutPoint.txHash, withdrawingOutPoint.index)!!.compensation
+        coEvery { depositReader.list(any(), any(), any()) } returns emptyList()
+        coEvery { depositReader.recomputeCachedCompensation(any(), any()) } throws IllegalStateException("bridge")
+
+        val deposits = repository.getDaoDeposits().getOrThrow()
+
+        assertEquals(stored, deposits.single().compensation)
+    }
+
+    @Test
     fun `an unlock that later fails hands back a cell the light client cannot see`() = runTest {
         // The dangerous case: out-of-window cell, so absence proves nothing.
         seedCachedWithdrawingRow()
