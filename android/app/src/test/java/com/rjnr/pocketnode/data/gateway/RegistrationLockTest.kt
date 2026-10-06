@@ -24,7 +24,10 @@ import io.mockk.coEvery
 import io.mockk.coVerify
 import io.mockk.every
 import io.mockk.mockk
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.awaitCancellation
+import kotlinx.coroutines.cancelAndJoin
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
@@ -305,11 +308,13 @@ class RegistrationLockTest {
         assertRollbackRunsUnderLock(SyncStrategy.ACTIVE_ONLY)
 
     /** The light client took the set; the bookkeeping write right after it fails. */
-    private fun failingAfterLandingDao(): SyncProgressDao {
+    private fun failingAfterLandingDao(
+        failure: () -> Throwable = { IllegalStateException("disk full") },
+    ): SyncProgressDao {
         val real = db.syncProgressDao()
         return object : SyncProgressDao by real {
             override suspend fun updateLightStart(walletId: String, network: String, lightStart: Long, ts: Long): Int =
-                throw IllegalStateException("disk full")
+                throw failure()
         }
     }
 
@@ -326,19 +331,66 @@ class RegistrationLockTest {
         assertEquals(SyncMode.CUSTOM, walletPreferences.getSyncModeOrNull(walletId = ACTIVE))
         assertEquals(CUSTOM_HEIGHT, walletPreferences.getCustomBlockHeight(walletId = ACTIVE))
         assertEquals(0L, repository.getWalletSyncBlock(ACTIVE))
+        assertTrue("a landed set counts as registered", repository.isRegistered.value)
     }
 
-    @Test
-    fun `an ACTIVE_ONLY resync whose set landed is not rolled back when a later write fails`() = runBlocking {
-        build(coordinatorDao = failingAfterLandingDao())
+    private fun assertActiveOnlyLandedResyncKeepsNewMode(failure: () -> Throwable) = runBlocking {
+        build(coordinatorDao = failingAfterLandingDao(failure))
         walletPreferences.setSyncStrategy(SyncStrategy.ACTIVE_ONLY)
 
         val result = repository.resyncAccount(SyncMode.CUSTOM, CUSTOM_HEIGHT)
 
-        assertEquals("disk full", result.exceptionOrNull()?.message)
+        assertTrue(result.isFailure)
         assertEquals("the set landed", 1, bridge.landed.size)
         assertEquals("the reset progress stays reset", 0L, repository.getWalletSyncBlock(ACTIVE))
+        // The light client runs the CUSTOM start: the prefs must say so (#539 S1).
+        assertEquals(SyncMode.CUSTOM, walletPreferences.getSyncModeOrNull(walletId = ACTIVE))
+        assertEquals(CUSTOM_HEIGHT, walletPreferences.getCustomBlockHeight(walletId = ACTIVE))
+        assertTrue("a landed set counts as registered", repository.isRegistered.value)
     }
+
+    @Test
+    fun `an ACTIVE_ONLY resync whose set landed is not rolled back when a later write fails`() =
+        assertActiveOnlyLandedResyncKeepsNewMode { IllegalStateException("disk full") }
+
+    @Test
+    fun `an ACTIVE_ONLY resync whose set landed keeps the new mode when cancelled during bookkeeping`() =
+        assertActiveOnlyLandedResyncKeepsNewMode { CancellationException("user left Settings") }
+
+    // ------------------------------------------------------------------
+    // S2: a write cancelled midway is still undone
+    // ------------------------------------------------------------------
+
+    /** Zeroing the progress commits, then the caller is cancelled. */
+    private fun cancelledZeroingDao(): SyncProgressDao {
+        val real = db.syncProgressDao()
+        return object : SyncProgressDao by real {
+            override suspend fun updateLocalSaved(walletId: String, network: String, block: Long, ts: Long): Int {
+                val rows = real.updateLocalSaved(walletId, network, block, ts)
+                if (walletId == ACTIVE && block == 0L) throw CancellationException("user left Settings")
+                return rows
+            }
+        }
+    }
+
+    private fun assertCancelledZeroingIsUndone(strategy: SyncStrategy) = runBlocking {
+        build(repositoryDao = cancelledZeroingDao())
+        walletPreferences.setSyncStrategy(strategy)
+
+        assertTrue(repository.resyncAccount(SyncMode.CUSTOM, CUSTOM_HEIGHT).isFailure)
+
+        assertTrue("nothing reached the light client", bridge.setScriptsCalls.isEmpty())
+        assertEquals("progress put back", ACTIVE_PROGRESS, repository.getWalletSyncBlock(ACTIVE))
+        assertEquals(SyncMode.RECENT, walletPreferences.getSyncModeOrNull(walletId = ACTIVE))
+    }
+
+    @Test
+    fun `an ALL_WALLETS resync cancelled after zeroing the progress puts it back`() =
+        assertCancelledZeroingIsUndone(SyncStrategy.ALL_WALLETS)
+
+    @Test
+    fun `an ACTIVE_ONLY resync cancelled after zeroing the progress puts it back`() =
+        assertCancelledZeroingIsUndone(SyncStrategy.ACTIVE_ONLY)
 
     // ------------------------------------------------------------------
     // Inputs computed under the lock
@@ -469,6 +521,56 @@ class RegistrationLockTest {
         assertEquals(OTHER, coordinator.registeredActiveWalletId)
     }
 
+    /**
+     * S3: the user leaves the screen while the switch's registration waits
+     * for the tip. The cancelled caller cannot register, so the repository
+     * must, or the wallet on screen stays unregistered.
+     */
+    @Test
+    fun `a switch cancelled mid-registration still registers the active wallet`() = runBlocking {
+        build()
+        walletPreferences.setSyncStrategy(SyncStrategy.ALL_WALLETS)
+        val b = db.walletDao().getById(OTHER)!!
+        val atTip = CompletableDeferred<Unit>()
+        bridge.onTipRead = {
+            bridge.onTipRead = {}
+            atTip.complete(Unit)
+            awaitCancellation()
+        }
+
+        val switch = launch(Dispatchers.IO) { repository.onActiveWalletChanged(b) }
+        withTimeout(10_000) { atTip.await() }
+        switch.cancelAndJoin()
+        val ensure = repository.ensureRegistration
+        assertNotNull("the cancelled switch must hand the registration to the repository", ensure)
+        ensure!!.join()
+
+        assertEquals(OTHER, coordinator.registeredActiveWalletId)
+        assertEquals(setOf(activeScript.args, otherScript.args), argsOf(bridge.landed.single()))
+    }
+
+    /**
+     * S4: under ACTIVE_ONLY the single-wallet path registers _walletInfo's
+     * script under activeWalletId. A reassignment outside a switch leaves
+     * _walletInfo on the previous wallet, so the follow-up must not
+     * register A's script as B.
+     */
+    @Test
+    fun `an ACTIVE_ONLY reassignment never registers the previous wallet's script under the new id`() = runBlocking {
+        build()
+        walletPreferences.setSyncStrategy(SyncStrategy.ACTIVE_ONLY)
+        repository.registerAccountWithStrategy(savePreference = false).getOrThrow()
+        assertEquals(ACTIVE, coordinator.registeredActiveWalletId)
+        db.walletDao().deactivateAll()
+        db.walletDao().activate(OTHER)
+
+        repository.needsMnemonicBackup()
+        assertNotNullJob().join()
+
+        assertEquals("no set for B built from A's info", 1, bridge.landed.size)
+        assertEquals(ACTIVE, coordinator.registeredActiveWalletId)
+    }
+
     @Test
     fun `resolveActiveWalletType reassigning the active wallet triggers exactly one registration`() = runBlocking {
         build()
@@ -488,7 +590,7 @@ class RegistrationLockTest {
 
         // Resolving again with nothing changed registers nothing more.
         repository.needsMnemonicBackup()
-        assertSame(job, repository.reassignRegistration)
+        assertSame(job, repository.ensureRegistration)
         assertEquals(2, bridge.landed.size)
     }
 
@@ -517,12 +619,12 @@ class RegistrationLockTest {
     @Test
     fun `startup assigning the same active wallet triggers no registration`() = runBlocking {
         build()
-        assertEquals(null, repository.reassignRegistration)
+        assertEquals(null, repository.ensureRegistration)
         assertTrue(bridge.setScriptsCalls.isEmpty())
     }
 
     private fun assertNotNullJob(): kotlinx.coroutines.Job {
-        val job = repository.reassignRegistration
+        val job = repository.ensureRegistration
         assertNotNull("the reassignment must launch a registration", job)
         return job!!
     }
