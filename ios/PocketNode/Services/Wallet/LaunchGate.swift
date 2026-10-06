@@ -90,8 +90,9 @@ final class LaunchGate {
             let hasWallet = await self.hasWallet
             if hasWallet && skipsOnboarding { return .wallet }
             let pinPresence: PinPresence = auth.state == .noPin ? .absent : pinService.pinPresence
-            if !hasWallet, pinPresence != .absent, await walletKeyStore.envelopePresence == .unknown {
-                return .wallet
+            if !hasWallet, pinPresence != .absent {
+                let envelope = await walletKeyStore.envelopePresence
+                if envelope == .unknown { return .wallet }
             }
             return OnboardingViewModel.launchDestination(
                 hasWallet: hasWallet,
@@ -209,18 +210,29 @@ final class LaunchGate {
         // the wallet shell UI tests has no keys on purpose.
         if skipsOnboarding { return .none }
         guard let record = walletStore.load() else { return .none }
-        switch await walletKeyStore.envelopePresence {
+        let envelope = await walletKeyStore.envelopePresence
+        switch envelope {
         case .present:
             return .none
         case .unknown:
             return pending.map { .hold($0) } ?? .none
         case .absent:
-            let mayStart = OnboardingViewModel.mayStartRestore(
+            let mayStart = Self.mayStartRestore(
                 pinPresence: pinService.pinPresence,
                 sessionUnlocked: auth.state == .unlocked
             )
             return mayStart ? .restore(record) : .hold(record)
         }
+    }
+
+    /// Whether a restore may open now or must wait behind the lock screen.
+    ///
+    /// The restore screen names the wallet and shows its address, so when a
+    /// PIN survived (or cannot be read yet) it waits until the session has
+    /// been unlocked with it. With a confirmed absent PIN there is nothing to
+    /// wait for.
+    static func mayStartRestore(pinPresence: PinPresence, sessionUnlocked: Bool) -> Bool {
+        pinPresence == .absent || sessionUnlocked
     }
 
     // MARK: - Starting a new wallet
