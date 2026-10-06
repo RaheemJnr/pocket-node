@@ -435,10 +435,23 @@ class GatewayRepositoryResyncStrategyTest {
         }
 
     /**
+     * Since #539 the set is computed under the registration lock, after the
+     * node and tip waits, so a set computed for A can no longer exist by
+     * the time the lock is taken: the re-registration recomputes for the
+     * live wallet B. Whatever reaches the light client must keep laggard B.
+     */
+    private fun assertOnlyLiveSetsLanded() {
+        assertEquals("one set, recomputed for the live wallet", 1, bridge.setScriptsCalls.size)
+        bridge.setScriptsCalls.forEach { (payload, _) ->
+            val args = json.decodeFromString<List<JniScriptStatus>>(payload).map { it.script.args }
+            assertTrue("no set computed for A (dropping laggard B) may land", otherScript.args in args)
+        }
+    }
+
+    /**
      * Review S2: every all-wallet registration re-checks the live active
      * wallet under the lock. A poller-driven BALANCED re-registration
-     * computed for A must not land after a switch to laggard B, and the
-     * abort is a quiet no-op.
+     * computed for A must not land after a switch to laggard B.
      */
     @Test
     fun `a BALANCED re-registration computed for A does not land after a switch to laggard B`() = runBlocking {
@@ -470,7 +483,7 @@ class GatewayRepositoryResyncStrategyTest {
             ),
         )
 
-        assertTrue("the stale set must not reach the light client", bridge.setScriptsCalls.isEmpty())
+        assertOnlyLiveSetsLanded()
     }
 
     /**
@@ -509,7 +522,7 @@ class GatewayRepositoryResyncStrategyTest {
             ),
         )
 
-        assertTrue("the stale set must not reach the light client", bridge.setScriptsCalls.isEmpty())
+        assertOnlyLiveSetsLanded()
     }
 
     /** Review S3: an ACTIVE_ONLY resync that fails puts the wallet's saved progress back. */

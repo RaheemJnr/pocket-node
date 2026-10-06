@@ -16,6 +16,7 @@ import com.rjnr.pocketnode.data.gateway.models.getCheckpoint
 import com.rjnr.pocketnode.data.gateway.models.toFromBlock
 import com.rjnr.pocketnode.data.wallet.KeyManager
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.coroutineScope
@@ -262,10 +263,104 @@ class SyncCoordinator @Inject constructor(
          * certain to land (#431).
          */
         val syncModeOverride: (walletId: String) -> Pair<SyncMode, Long?>? = { null },
+        /**
+         * Runs under the registration lock when the set did NOT land: the
+         * staleness check or [beforeSetScripts] threw, or the light client
+         * refused or threw before taking the set. Never runs once the set
+         * landed, whatever fails afterwards. A resync undoes what its
+         * [beforeSetScripts] persisted here, before any other registration
+         * or a sync poll can read the half-written state (#539).
+         */
+        val onSetScriptsNotLanded: suspend () -> Unit = {},
+        /**
+         * Skip the registration when the last set that landed was already
+         * computed for the live active wallet. Lets a "make sure the active
+         * wallet is registered" retry be a no-op when another registration
+         * got there first (#539).
+         */
+        val skipIfActiveRegistered: Boolean = false,
     )
 
-    /** Serialises every script registration; see [setScriptsAndRecord]. */
+    /**
+     * Serialises every script registration and the sync poll's progress
+     * writes; see [setScriptsAndRecord], [withRegistrationLock] and
+     * [tryWithRegistrationLock].
+     *
+     * Lock order: this mutex is a leaf. Nothing that holds it takes another
+     * coroutine Mutex or waits for the node or the tip (those waits run
+     * before it is taken). Callers may already hold `gapLimitScanMutex`
+     * (GatewayRepository), never the other way round. The sync poll only
+     * ever uses tryLock, so it never queues behind a registration.
+     */
     private val registrationMutex = Mutex()
+
+    /**
+     * The active wallet the last landed CMD_SET_SCRIPTS_ALL was computed
+     * for, or null before the first one (#539). Written under
+     * [registrationMutex]; read by the "is the active wallet registered"
+     * checks.
+     */
+    @Volatile
+    var registeredActiveWalletId: String? = null
+        private set
+
+    /** True while a registration or a poll's progress write holds the lock. Test seam. */
+    internal val isRegistrationLocked: Boolean get() = registrationMutex.isLocked
+
+    /**
+     * Handle a [withRegistrationLock] block uses to set scripts while it
+     * already holds the lock (the public [setScriptsAndRecord] would
+     * deadlock: the mutex is not reentrant).
+     */
+    inner class LockedRegistration internal constructor() {
+        /** @see SyncCoordinator.registeredActiveWalletId */
+        val registeredActiveWalletId: String? get() = this@SyncCoordinator.registeredActiveWalletId
+
+        /**
+         * [setScriptsAndRecord] without taking the lock. [onLanded] runs the
+         * moment the light client accepted the set, before the bookkeeping
+         * writes, so a caller can tell "refused" from "landed, then a write
+         * failed". [forActiveWallet] is the active wallet a
+         * CMD_SET_SCRIPTS_ALL set was computed for.
+         */
+        suspend fun setScriptsLocked(
+            statuses: List<JniScriptStatus>,
+            walletIds: List<String>,
+            cmd: Int,
+            network: NetworkType,
+            forActiveWallet: String? = null,
+            onLanded: () -> Unit = {},
+        ): Boolean = setScriptsAndRecordLocked(
+            statuses, walletIds, cmd, network, allowRewind = false,
+            onLanded = onLanded, forActiveWallet = forActiveWallet,
+        )
+    }
+
+    /**
+     * Run [block] holding the registration lock, queueing behind any
+     * registration in flight. For registrations whose inputs (wallet set,
+     * saved progress, prefs) must be read under the lock so a queued call
+     * never applies a set computed before the one ahead of it landed (#539).
+     * [block] must not wait for the node or the tip, and must not call a
+     * registration path that takes the lock itself.
+     */
+    suspend fun <T> withRegistrationLock(block: suspend LockedRegistration.() -> T): T =
+        registrationMutex.withLock { LockedRegistration().block() }
+
+    /**
+     * Run [block] under the registration lock only if it is free right now;
+     * returns null without running it when a registration holds it. For
+     * the sync poll, which must never queue behind a registration and
+     * simply skips that tick (#539). [block] should return non-null.
+     */
+    suspend fun <T : Any> tryWithRegistrationLock(block: suspend () -> T): T? {
+        if (!registrationMutex.tryLock()) return null
+        try {
+            return block()
+        } finally {
+            registrationMutex.unlock()
+        }
+    }
 
     @Volatile
     private var scriptArgsToWalletId: Map<String, String> = emptyMap()
@@ -313,6 +408,8 @@ class SyncCoordinator @Inject constructor(
         cmd: Int,
         network: NetworkType,
         allowRewind: Boolean,
+        onLanded: () -> Unit = {},
+        forActiveWallet: String? = null,
     ): Boolean {
         require(statuses.size == walletIds.size) {
             "setScriptsAndRecord: statuses (${statuses.size}) and walletIds (${walletIds.size}) must be parallel"
@@ -358,6 +455,12 @@ class SyncCoordinator @Inject constructor(
         if (!ok) {
             logger.w(TAG, "setScripts cmd=$cmd returned false — light client refused registration")
             return false
+        }
+        // The set has landed: from here on a failure must not be treated as
+        // "nothing registered" (no rollback, #539).
+        onLanded()
+        if (cmd == LightClientNative.CMD_SET_SCRIPTS_ALL) {
+            registeredActiveWalletId = forActiveWallet
         }
 
         val now = System.currentTimeMillis()
@@ -496,8 +599,13 @@ class SyncCoordinator @Inject constructor(
     ): List<WalletEntity> {
         if (wallets.size <= 1) return wallets
 
-        val rows = syncProgressDao.getAllForNetwork(network.name)
-            .associateBy { it.walletId }
+        // The bulk read is only needed when the caller supplies no progress
+        // of its own (#539: it was dead work on every registration).
+        val rows = if (progressOf == null) {
+            syncProgressDao.getAllForNetwork(network.name).associateBy { it.walletId }
+        } else {
+            emptyMap()
+        }
         val progress = wallets.associate { wallet ->
             wallet.walletId to (
                 progressOf?.invoke(wallet.walletId)
@@ -524,11 +632,15 @@ class SyncCoordinator @Inject constructor(
      * Cheap BALANCED re-evaluation: compute the eligible set, compare to
      * [lastBalancedEligibleSet]; only re-issue setScripts when it changed.
      * Caller must already be on a coroutine context.
+     *
+     * The comparison here is only a cheap pre-check. The registration itself
+     * recomputes the set under the registration lock and compares again
+     * there, so a registration that landed in between (or a wallet switch)
+     * is never overwritten by this snapshot (#539).
      */
     suspend fun maybeReregisterBalanced(ctx: SyncContext) {
         val allWallets = walletDao.getAll().sortedByDescending { it.lastActiveAt }
-        val filteredFor = ctx.liveActiveWalletId()
-        val filtered = applyBalancedFilter(allWallets, filteredFor, ctx.network)
+        val filtered = applyBalancedFilter(allWallets, ctx.liveActiveWalletId(), ctx.network)
         val newSet = filtered.map { it.walletId }.toSet()
 
         if (newSet == lastBalancedEligibleSet) return
@@ -537,17 +649,8 @@ class SyncCoordinator @Inject constructor(
             TAG,
             "BALANCED set changed (was=$lastBalancedEligibleSet, now=$newSet): re-registering"
         )
-        // Pass through the snapshot we just computed so registerAllWalletScripts
-        // doesn't re-fetch + re-filter (avoids double I/O and a snapshot race
-        // where wallet add/delete between calls would update the cache against
-        // a different set than the comparison was made on).
         try {
-            registerAllWalletScripts(
-                ctx,
-                preFetchedWallets = allWallets,
-                preFilteredCandidates = filtered,
-                preFilteredFor = filteredFor,
-            )
+            registerAllWalletScripts(ctx, onlyIfBalancedSetChanged = true)
         } catch (e: ActiveWalletChangedException) {
             // The switch's own registration supersedes this one.
             logger.d(TAG, "BALANCED re-registration skipped: ${e.message}")
@@ -560,15 +663,18 @@ class SyncCoordinator @Inject constructor(
      *
      * Capped at the [MAX_CONCURRENT_WALLET_SCRIPTS] most-recently-active
      * wallets to bound resource usage.
+     *
+     * The node and tip waits run first, outside the registration lock.
+     * Everything the set is computed from (wallets, strategy, active wallet,
+     * BALANCED filter, saved progress, sync prefs, candidates) is read under
+     * the lock, so a registration that queued behind another applies a set
+     * computed after that one landed, never a stale one (#539).
      */
     suspend fun registerAllWalletScripts(
         ctx: SyncContext,
-        preFetchedWallets: List<WalletEntity>? = null,
-        preFilteredCandidates: List<WalletEntity>? = null,
-        // The active wallet [preFilteredCandidates] was computed for. The
-        // under-lock check compares against it, so a switch between that
-        // filter and this registration aborts the stale set (#431).
-        preFilteredFor: String? = null,
+        // maybeReregisterBalanced: skip when the set computed under the lock
+        // equals the one that last landed (another registration got there).
+        onlyIfBalancedSetChanged: Boolean = false,
     ) = withContext(Dispatchers.IO) {
         // Force IO dispatcher for the whole body — JNI calls (nativeGetTipHeader,
         // nativeSetScripts via setScriptsAndRecord) block the UI thread otherwise.
@@ -580,55 +686,33 @@ class SyncCoordinator @Inject constructor(
             throw Exception("Node initialization failed")
         }
 
-        val allWallets = preFetchedWallets
-            ?: walletDao.getAll().sortedByDescending { it.lastActiveAt }
-        val strategy = syncPreferences.getSyncStrategy()
-        // Read after the node wait: the wallet the user is on now is the one
-        // the filter and the cap must keep. A caller-supplied filtered set
-        // stays tied to the wallet it was computed for.
-        val activeWalletId = if (preFilteredCandidates != null && preFilteredFor != null) {
-            preFilteredFor
-        } else {
-            ctx.liveActiveWalletId()
-        }
+        val tipHeight = awaitTipHeight()
 
-        // Step 1: BALANCED filter runs BEFORE the cap (Q2=A in design).
-        val candidateWallets = preFilteredCandidates ?: when (strategy) {
-            SyncStrategy.BALANCED -> applyBalancedFilter(
-                allWallets, activeWalletId, ctx.network, progressOf = ctx.getWalletSyncBlock,
-            )
-            else -> allWallets
+        logger.d(TAG, "Registering wallet scripts with light client (waiting for the registration lock)")
+        withRegistrationLock {
+            registerAllWalletScriptsLocked(ctx, tipHeight, onlyIfBalancedSetChanged)
         }
-        // Step 2: Cap (unchanged behavior for ALL_WALLETS). The active wallet
-        // goes first so the cap can never drop it, whatever its lastActiveAt
-        // (stable sort: the rest keep their recency order).
-        val wallets = candidateWallets
-            .sortedByDescending { it.walletId == activeWalletId }
-            .take(MAX_CONCURRENT_WALLET_SCRIPTS)
-        if (candidateWallets.size > wallets.size) {
-            val keptIds = wallets.map { it.walletId }.toSet()
-            val droppedIds = candidateWallets.map { it.walletId }.filterNot { it in keptIds }
-            logger.i(
-                TAG,
-                "${strategy.name}: syncing top-${wallets.size} of ${candidateWallets.size} wallets " +
-                    "(dropped: $droppedIds)"
-            )
-        }
+    }
 
-        // Bounded tip-wait: awaitNodeReady() only guarantees init success, not
-        // that a tip header has arrived from peers. On a fresh wallet boot the
-        // light client can be up but tip is still null for several seconds
-        // while it handshakes with peers. If we read tipHeight = 0 in that
-        // window, toFromBlock(NEW_WALLET, ...) falls back to the hardcoded
-        // mainnet checkpoint (~18.3M from the v1.6.0 cut), which by 2026-05
-        // is hundreds of thousands of blocks stale — the user perceives a
-        // "syncing from a million blocks ago" experience instead of the
-        // instant sync NEW_WALLET should deliver.
-        //
-        // Poll the tip header for up to TIP_WAIT_BUDGET_MS before computing
-        // fromBlock; if the budget expires we still fall through to the
-        // checkpoint path so the wallet doesn't hang waiting for peers.
-        // matt (Telegram, 2026-05-28) reported the symptom.
+    /**
+     * Bounded tip-wait: awaitNodeReady() only guarantees init success, not
+     * that a tip header has arrived from peers. On a fresh wallet boot the
+     * light client can be up but tip is still null for several seconds
+     * while it handshakes with peers. If we read tipHeight = 0 in that
+     * window, toFromBlock(NEW_WALLET, ...) falls back to the hardcoded
+     * mainnet checkpoint (~18.3M from the v1.6.0 cut), which by 2026-05
+     * is hundreds of thousands of blocks stale, so the user perceives a
+     * "syncing from a million blocks ago" experience instead of the
+     * instant sync NEW_WALLET should deliver.
+     *
+     * Poll the tip header for up to TIP_WAIT_BUDGET_MS before computing
+     * fromBlock; if the budget expires we still fall through to the
+     * checkpoint path so the wallet doesn't hang waiting for peers.
+     * matt (Telegram, 2026-05-28) reported the symptom.
+     *
+     * Never called under [registrationMutex] (#539).
+     */
+    private suspend fun awaitTipHeight(): Long {
         val tipDeadline = System.currentTimeMillis() + TIP_WAIT_BUDGET_MS
         var tipHeight = 0L
         var tipPolls = 0
@@ -655,6 +739,53 @@ class SyncCoordinator @Inject constructor(
             )
         } else if (tipPolls > 0) {
             logger.i(TAG, "tip resolved after $tipPolls poll(s): $tipHeight")
+        }
+        return tipHeight
+    }
+
+    private suspend fun LockedRegistration.registerAllWalletScriptsLocked(
+        ctx: SyncContext,
+        tipHeight: Long,
+        onlyIfBalancedSetChanged: Boolean,
+    ) {
+        // The wallet the user is on now is the one the filter and the cap
+        // must keep; read under the lock.
+        val activeWalletId = ctx.liveActiveWalletId()
+        if (ctx.skipIfActiveRegistered && registeredActiveWalletId == activeWalletId) {
+            logger.d(TAG, "registerAllWalletScripts: active wallet already registered, skipping")
+            return
+        }
+
+        val allWallets = walletDao.getAll().sortedByDescending { it.lastActiveAt }
+        val strategy = syncPreferences.getSyncStrategy()
+
+        // Step 1: BALANCED filter runs BEFORE the cap (Q2=A in design).
+        val candidateWallets = when (strategy) {
+            SyncStrategy.BALANCED -> applyBalancedFilter(
+                allWallets, activeWalletId, ctx.network, progressOf = ctx.getWalletSyncBlock,
+            )
+            else -> allWallets
+        }
+        if (onlyIfBalancedSetChanged && strategy == SyncStrategy.BALANCED &&
+            candidateWallets.map { it.walletId }.toSet() == lastBalancedEligibleSet
+        ) {
+            logger.d(TAG, "BALANCED set already registered, skipping re-registration")
+            return
+        }
+        // Step 2: Cap (unchanged behavior for ALL_WALLETS). The active wallet
+        // goes first so the cap can never drop it, whatever its lastActiveAt
+        // (stable sort: the rest keep their recency order).
+        val wallets = candidateWallets
+            .sortedByDescending { it.walletId == activeWalletId }
+            .take(MAX_CONCURRENT_WALLET_SCRIPTS)
+        if (candidateWallets.size > wallets.size) {
+            val keptIds = wallets.map { it.walletId }.toSet()
+            val droppedIds = candidateWallets.map { it.walletId }.filterNot { it in keptIds }
+            logger.i(
+                TAG,
+                "${strategy.name}: syncing top-${wallets.size} of ${candidateWallets.size} wallets " +
+                    "(dropped: $droppedIds)"
+            )
         }
 
         // Per-wallet lock-script recovery. Address-only path — V2 wallets
@@ -723,23 +854,29 @@ class SyncCoordinator @Inject constructor(
 
         if (pairs.isEmpty()) {
             logger.w(TAG, "registerAllWalletScripts: no scripts to register")
-            return@withContext
+            return
         }
 
         val scriptStatuses = pairs.map { it.second }
         val walletIds = pairs.map { it.first }
-        logger.d(TAG, "Registering ${scriptStatuses.size} wallet scripts with light client")
-        val result = setScriptsAndRecord(
-            scriptStatuses, walletIds, LightClientNative.CMD_SET_SCRIPTS_ALL, ctx.network,
-            // Under the registration mutex, atomically with the set: a set
-            // computed for one active wallet must not land after a switch
-            // to another (#431); the switch's own registration stands.
-            beforeSet = {
-                if (ctx.liveActiveWalletId() != activeWalletId) throw ActiveWalletChangedException()
-                ctx.beforeSetScripts()
-            },
-        )
-        if (!result) throw Exception("Failed to set scripts for all wallets")
+        logger.d(TAG, "Setting ${scriptStatuses.size} wallet scripts on the light client")
+        var landed = false
+        try {
+            // A set computed for one active wallet must not land after a
+            // switch to another (#431); the switch's own registration stands.
+            if (ctx.liveActiveWalletId() != activeWalletId) throw ActiveWalletChangedException()
+            ctx.beforeSetScripts()
+            val ok = setScriptsLocked(
+                scriptStatuses, walletIds, LightClientNative.CMD_SET_SCRIPTS_ALL, ctx.network,
+                forActiveWallet = activeWalletId,
+                onLanded = { landed = true },
+            )
+            if (!ok) throw Exception("Failed to set scripts for all wallets")
+        } finally {
+            // Still under the lock: no other registration or poll write can
+            // see what beforeSetScripts wrote before it is undone (#539).
+            if (!landed) withContext(NonCancellable) { ctx.onSetScriptsNotLanded() }
+        }
         // Only a set that actually landed defines the eligible set the next
         // maybeReregisterBalanced compares against.
         if (strategy == SyncStrategy.BALANCED) {
