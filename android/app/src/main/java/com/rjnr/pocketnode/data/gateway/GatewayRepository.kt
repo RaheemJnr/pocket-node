@@ -2607,7 +2607,7 @@ class GatewayRepository @Inject constructor(
         val pendingUnlocks = readPendingUnlocks(deduped)
         val merged = mergeWithCachedDaoDeposits(deduped, pendingUnlocks)
         applyPendingUnlockOverlay(applyPendingWithdrawOverlay(merged), pendingUnlocks)
-    }
+    }.onFailure { if (it is CancellationException) throw it }
 
     /**
      * #347: overlay in-flight phase-1 withdraws onto the deposit list. The
@@ -2934,14 +2934,19 @@ class GatewayRepository @Inject constructor(
     private suspend fun withFreshCompensation(
         entity: com.rjnr.pocketnode.data.database.entity.DaoCellEntity,
     ): com.rjnr.pocketnode.data.database.entity.DaoCellEntity {
-        val fresh = runCatching {
+        val fresh = try {
             daoDepositReader.recomputeCachedCompensation(entity) { hash ->
                 daoSyncManager.getCachedHeader(hash)?.dao
             }
-        }.getOrNull() ?: return entity
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            logger.w(TAG, "DAO compensation recompute failed: ${e.message}")
+            null
+        } ?: return entity
         if (fresh == entity.compensation) return entity
-        runCatching { daoSyncManager.updateCompensation(entity, fresh) }
-            .onFailure { logger.w(TAG, "DAO compensation write-back failed: ${it.message}") }
+        // Logs its own failures and rethrows cancellation.
+        daoSyncManager.updateCompensation(entity, fresh)
         return entity.copy(compensation = fresh)
     }
 
