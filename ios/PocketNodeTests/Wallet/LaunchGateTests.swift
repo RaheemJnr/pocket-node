@@ -210,6 +210,84 @@ final class LaunchGateTests: XCTestCase {
         XCTAssertEqual(destination, .onboarding(.welcome))
     }
 
+    // MARK: - The provisional wallet behind the lock
+
+    func testTheProvisionalWalletDecision() {
+        XCTAssertEqual(LaunchGate.provisionalWalletCheck(metadataExists: false, envelope: .absent), .startOver)
+        XCTAssertEqual(LaunchGate.provisionalWalletCheck(metadataExists: false, envelope: .present), .stay)
+        XCTAssertEqual(LaunchGate.provisionalWalletCheck(metadataExists: false, envelope: .unknown), .stay)
+        XCTAssertEqual(LaunchGate.provisionalWalletCheck(metadataExists: true, envelope: .absent), .stay)
+    }
+
+    /// The launch could not look the envelope up and went behind the lock.
+    /// After the unlock the lookup answers that there is none: the device
+    /// starts over as a cold launch would, clearing the orphaned PIN and
+    /// landing on Welcome, instead of an empty wallet shell.
+    func testAnEnvelopeThatTurnsOutAbsentAfterTheUnlockStartsOver() async throws {
+        try await storeOldPin()
+        let flaky = UnreadableKeyValueStore(service: keyService)
+        let gate = makeGate(keyStore: flaky)
+        let atLaunch = await gate.launchDestination
+        XCTAssertEqual(atLaunch, .wallet)
+        let unlocked = await gate.auth.unlock(pin: "111111")
+        XCTAssertTrue(unlocked)
+
+        flaky.failReads(nil)
+        let reroute = await gate.reroute()
+
+        XCTAssertEqual(reroute, .onboarding(.welcome))
+        XCTAssertEqual(gate.pinService.pinPresence, .absent, "the orphaned PIN is cleared")
+        XCTAssertEqual(gate.auth.state, .noPin)
+        let allowed = await gate.prepareNewWallet()
+        XCTAssertTrue(allowed, "and a new wallet may be started")
+    }
+
+    /// Still unreadable after the unlock: stay, keep the PIN, ask again.
+    func testAnEnvelopeThatStaysUnknownStaysAndKeepsThePin() async throws {
+        try await storeOldPin()
+        let gate = makeGate(keyStore: UnreadableKeyValueStore(service: keyService))
+        _ = await gate.launchDestination
+        _ = await gate.auth.unlock(pin: "111111")
+
+        let reroute = await gate.reroute()
+
+        XCTAssertNil(reroute)
+        XCTAssertEqual(gate.pinService.pinPresence, .present)
+        XCTAssertEqual(gate.auth.state, .unlocked)
+    }
+
+    /// Keys with no metadata stay as they were: a wallet is there.
+    func testAnEnvelopeThatTurnsOutPresentStays() async throws {
+        try await importWallet()
+        try walletStore.delete()
+        try await storeOldPin()
+        let gate = makeGate()
+        _ = await gate.auth.unlock(pin: "111111")
+
+        let reroute = await gate.reroute()
+
+        XCTAssertNil(reroute)
+        XCTAssertEqual(gate.pinService.pinPresence, .present)
+    }
+
+    /// Metadata that is on disk but cannot be read is not an absence, even
+    /// with the envelope confirmed absent: the PIN in front of it stays.
+    func testUnreadableMetadataIsNotAnAbsenceAndKeepsThePin() async throws {
+        try Data("{}".utf8).write(to: walletFile)
+        try FileManager.default.setAttributes([.posixPermissions: 0o000], ofItemAtPath: walletFile.path)
+        defer { try? FileManager.default.setAttributes([.posixPermissions: 0o644], ofItemAtPath: walletFile.path) }
+        try await storeOldPin()
+        let gate = makeGate()
+        XCTAssertEqual(gate.pinService.pinPresence, .present, "the launch cleanup left it too")
+        _ = await gate.auth.unlock(pin: "111111")
+
+        let reroute = await gate.reroute()
+
+        XCTAssertNil(reroute)
+        XCTAssertEqual(gate.pinService.pinPresence, .present)
+        XCTAssertTrue(walletStore.hasWallet)
+    }
+
     func testTheSkipHookOpensTheShell() async throws {
         try walletStore.save(
             WalletRecord(

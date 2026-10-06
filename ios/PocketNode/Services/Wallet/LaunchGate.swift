@@ -110,11 +110,64 @@ final class LaunchGate {
 
     /// Where the wallet phase should go instead, or nil to stay. Called when
     /// the session changes while the wallet shell (or its blank stand-in) is
-    /// up. Re-reads the PIN first, so a stale session cannot hold the shell
-    /// on a blank screen.
+    /// up, and when the app comes back to the front. Re-reads the PIN first,
+    /// so a stale session cannot hold the shell on a blank screen.
+    ///
+    /// The provisional wallet is checked first: a launch that found no
+    /// metadata and a key envelope it could not look up went behind the lock
+    /// on the chance a wallet is there (``launchDestination``). Once the
+    /// lookup answers that there is none, the device starts over the way a
+    /// cold launch would, instead of leaving an unlocked user on an empty
+    /// wallet shell until the next restart.
     func reroute() async -> OnboardingViewModel.LaunchDestination? {
+        if let startOver = await startOverIfNoWalletAfterAll() { return startOver }
         await auth.refresh()
         guard needsSecuritySetup else { return nil }
+        let destination = await launchDestination
+        return destination == .wallet ? nil : destination
+    }
+
+    /// What to do with a wallet phase that has no metadata behind it.
+    enum ProvisionalWalletCheck: Equatable {
+        /// Keep the wallet phase: there is metadata (readable or not), the
+        /// key envelope is there (keys without metadata, as before), or the
+        /// lookup still cannot answer and is asked again next time.
+        case stay
+        /// No metadata and no envelope, both confirmed: there is no wallet.
+        case startOver
+    }
+
+    /// The decision on its own, from what the stores answered.
+    ///
+    /// - Parameters:
+    ///   - metadataExists: whether `wallet.json` is on disk. A file that is
+    ///     there but cannot be read counts as existing: a failed read is not
+    ///     an absence.
+    ///   - envelope: the key envelope lookup.
+    static func provisionalWalletCheck(metadataExists: Bool, envelope: KeyMaterialPresence) -> ProvisionalWalletCheck {
+        guard !metadataExists, envelope == .absent else { return .stay }
+        return .startOver
+    }
+
+    /// Carries out ``provisionalWalletCheck(metadataExists:envelope:)``. On
+    /// ``ProvisionalWalletCheck/startOver`` it does what a cold launch does
+    /// for no wallet: the orphaned PIN cleanup (which itself deletes only on
+    /// a confirmed absent envelope and absent metadata), then the launch
+    /// decision, which lands on Welcome. If the PIN cannot be cleared,
+    /// Welcome says so when a wallet is started, as at launch.
+    private func startOverIfNoWalletAfterAll() async -> OnboardingViewModel.LaunchDestination? {
+        guard !skipsOnboarding else { return nil }
+        let check = Self.provisionalWalletCheck(
+            metadataExists: walletStore.hasWallet,
+            envelope: await walletKeyStore.envelopePresence
+        )
+        guard check == .startOver else { return nil }
+        OrphanedPin.removeIfOrphaned(
+            walletMetadataExists: walletStore.hasWallet,
+            keyKeychain: keyKeychain,
+            pinKeychain: pinKeychain,
+            preferences: preferences
+        )
         let destination = await launchDestination
         return destination == .wallet ? nil : destination
     }
