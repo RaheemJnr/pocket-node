@@ -12,7 +12,7 @@ import os
 /// case-insensitive, so there the two names are one folder: `WalletStore` runs
 /// first in `AppContainer.init` and creates it, then the light client's
 /// `mkdir` of the other spelling collides with it and throws, `bootstrap()`
-/// gives up before `initLightClient`, and nothing ever syncs (#22).
+/// gives up before `initLightClient`, and nothing ever syncs.
 ///
 /// Hence a single spelling, plus a migration for the installs that already have
 /// light client data under the old one.
@@ -21,9 +21,10 @@ enum AppDirectories {
     /// `wallet.json` under it, and wallet metadata is the half worth not moving.
     static let directoryName = "PocketNode"
 
-    /// What `LightClientService` used before #22. Case-sensitive installs (real
-    /// devices) still have their `store.db` under it, so it is migrated rather
-    /// than abandoned: abandoning it would silently cost a full resync.
+    /// What `LightClientService` used before the two were unified.
+    /// Case-sensitive installs (real devices) still have their `store.db`
+    /// under it, so it is migrated rather than abandoned: abandoning it would
+    /// silently cost a full resync.
     static let legacyLightClientDirectoryName = "pocketnode"
 
     private static let logger = Logger(subsystem: "com.rjnr.pocketnode", category: "AppDirectories")
@@ -39,7 +40,8 @@ enum AppDirectories {
     }
 
     /// `Library/Application Support/PocketNode`, created if missing, with any
-    /// pre-#22 light client data moved in from the old spelling first.
+    /// light client data from before the unified spelling moved in from the
+    /// old spelling first.
     ///
     /// Throws instead of falling back to another directory. An earlier version
     /// of this helper fell back to `temporaryDirectory`, which put `store.db`
@@ -95,9 +97,15 @@ enum AppDirectories {
     /// progress, balance cache, transactions, pending broadcasts) is derived
     /// from the chain too, so a restored device resyncs and re-derives them;
     /// backing them up costs the user backup space for nothing, and App
-    /// Review rejects apps that back up this kind of regenerable cache. Only
-    /// the network subdirectory is marked, never `PocketNode/` itself, so
-    /// `wallet.json` stays backed up.
+    /// Review rejects apps that back up this kind of regenerable cache.
+    ///
+    /// This marks only the network subdirectory, but the whole `PocketNode/`
+    /// folder, `wallet.json` included, is excluded anyway, by
+    /// `WalletStore.excludeFromBackup` (at launch and on every save). That is
+    /// deliberate: the wallet's keys are `ThisDeviceOnly` Keychain items that
+    /// never leave the phone, so backing up the metadata alone would only
+    /// restore a key-less wallet onto a new phone. The flag here keeps the
+    /// chain data excluded on its own regardless.
     ///
     /// Best-effort: called on every `dataDirectory` (safe, setting the flag
     /// again is a no-op), and a failure here is logged, not thrown, because

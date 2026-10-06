@@ -178,6 +178,40 @@ final class OnboardingUITests: XCTestCase {
         XCTAssertEqual(address.label, Self.testTestnetAddress)
     }
 
+    /// A wallet is stored before the PIN is set, so quitting on the PIN step
+    /// used to leave a wallet that opened with no PIN on the next launch. The
+    /// relaunch must land back on the PIN step, not on Home.
+    func testQuittingBeforeThePinIsSetResumesAtThePinStep() throws {
+        let app = XCUIApplication()
+        app.launchEnvironment["POCKETNODE_RESET_STATE"] = "1"
+        app.launchEnvironment["POCKETNODE_UITEST_ALLOW_CAPTURE"] = "1"
+        app.launch()
+
+        XCTAssertTrue(app.buttons["onboarding.import"].waitForExistence(timeout: 20))
+        app.buttons["onboarding.import"].firstMatch.tap()
+
+        let keyMode = app.segmentedControls["import.mode"].buttons["Private key"]
+        XCTAssertTrue(keyMode.waitForExistence(timeout: 10))
+        keyMode.tap()
+        let keyField = app.secureTextFields["import.privateKey"]
+        XCTAssertTrue(keyField.waitForExistence(timeout: 10))
+        keyField.tap()
+        keyField.typeText(Self.testPrivateKeyHex)
+        app.buttons["import.submit"].firstMatch.tap()
+
+        XCTAssertTrue(app.staticTexts["Create PIN"].waitForExistence(timeout: 10))
+        app.terminate()
+
+        // Relaunch without the reset: the wallet from the run above is still
+        // stored, and it has no PIN.
+        let relaunched = XCUIApplication()
+        relaunched.launchEnvironment["POCKETNODE_UITEST_ALLOW_CAPTURE"] = "1"
+        relaunched.launch()
+
+        XCTAssertTrue(relaunched.staticTexts["Create PIN"].waitForExistence(timeout: 20))
+        XCTAssertFalse(relaunched.buttons["home.receive"].exists, "the wallet must not open without a PIN")
+    }
+
     // MARK: - The pinned cross-platform vector
 
     /// The standard all-"abandon" BIP-39 test phrase. Its `m/44'/309'/0'/0/0`
@@ -187,6 +221,8 @@ final class OnboardingUITests: XCTestCase {
     /// `:shared:iosSimulatorArm64Test`); this is the one place all three meet
     /// through the real UI.
     private static let testPhrase = Array(repeating: "abandon", count: 11) + ["about"]
+    /// The phrase's `m/44'/309'/0'/0/0` key, pinned in `WalletCreatorTests`.
+    private static let testPrivateKeyHex = "b217d9a18ff657c99872cc11a2fa2aa3e970cef8c6faa7d6e424bf057cb3707b"
     private static let testTestnetAddress =
         "ckt1qzda0cr08m85hc8jlnfp3zer7xulejywt49kt2rr0vthywaa50xwsqgedakp7g0hm0cdlq298xuyqpvl4ja0cfqenlarn"
 

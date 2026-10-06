@@ -27,34 +27,51 @@ struct ImportWalletView: View {
     @State private var pasteFailed = false
     @FocusState private var focusedWord: Int?
 
-    init(model: OnboardingViewModel, initialMode: Mode = .phrase) {
+    init(model: OnboardingViewModel, initialMode: Mode? = nil) {
         self.model = model
-        self._mode = State(initialValue: initialMode)
+        // A restore opens on whichever half matches the wallet being restored.
+        let restoringKey = model.restoringRecord?.type == WalletCreator.typeRawKey
+        self._mode = State(initialValue: initialMode ?? (restoringKey ? .privateKey : .phrase))
     }
 
     var body: some View {
+        if let record = model.restoringRecord, model.isUnsupportedRestore {
+            unsupportedRestore(record)
+        } else {
+            form
+        }
+    }
+
+    private var form: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 24) {
-                Picker("What are you importing", selection: $mode) {
-                    Text("Recovery phrase").tag(Mode.phrase)
-                    Text("Private key").tag(Mode.privateKey)
+                if let record = model.restoringRecord {
+                    restoreHeader(record)
+                } else {
+                    Picker("What are you importing", selection: $mode) {
+                        Text("Recovery phrase").tag(Mode.phrase)
+                        Text("Private key").tag(Mode.privateKey)
+                    }
+                    .pickerStyle(.segmented)
+                    .accessibilityIdentifier("import.mode")
                 }
-                .pickerStyle(.segmented)
-                .accessibilityIdentifier("import.mode")
 
                 switch mode {
                 case .phrase: phraseSection
                 case .privateKey: privateKeySection
                 }
 
-                VStack(alignment: .leading, spacing: 8) {
-                    Text("Wallet name")
-                        .font(.headline)
-                    TextField("Imported Wallet", text: $name)
-                        .textFieldStyle(.roundedBorder)
-                        .autocorrectionDisabled()
-                        .textInputAutocapitalization(.words)
-                        .accessibilityIdentifier("import.name")
+                // A restore keeps the wallet's own name.
+                if !model.isRestoring {
+                    VStack(alignment: .leading, spacing: 8) {
+                        Text("Wallet name")
+                            .font(.headline)
+                        TextField("Imported Wallet", text: $name)
+                            .textFieldStyle(.roundedBorder)
+                            .autocorrectionDisabled()
+                            .textInputAutocapitalization(.words)
+                            .accessibilityIdentifier("import.name")
+                    }
                 }
 
                 if let message = model.errorMessage {
@@ -65,7 +82,7 @@ struct ImportWalletView: View {
                     if model.isBusy {
                         ProgressView().frame(maxWidth: .infinity)
                     } else {
-                        Text("Import wallet").frame(maxWidth: .infinity)
+                        Text(model.isRestoring ? "Restore wallet" : "Import wallet").frame(maxWidth: .infinity)
                     }
                 }
                 .buttonStyle(.borderedProminent)
@@ -77,7 +94,56 @@ struct ImportWalletView: View {
         }
         .scrollDismissesKeyboard(.interactively)
         .privacySensitive()
-        .navigationTitle("Import wallet")
+        .navigationTitle(model.isRestoring ? "Restore wallet" : "Import wallet")
+        .navigationBarTitleDisplayMode(.inline)
+    }
+
+    // MARK: - Restore
+
+    /// Why a restore is being asked for, and which wallet it is for. The keys
+    /// stay on the phone they were made on, so a backup restored onto this one
+    /// brought the wallet's address across but not the means to spend from it.
+    private func restoreHeader(_ record: WalletRecord) -> some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text("Restore \(record.name)")
+                .font(.headline)
+            Text(
+                record.type == WalletCreator.typeRawKey
+                    ? "This wallet's keys stay on the device they were created on and did not come across with your backup. Enter its private key to use it here."
+                    : "This wallet's keys stay on the device they were created on and did not come across with your backup. Enter its recovery phrase to use it here."
+            )
+            .font(.subheadline)
+            .foregroundStyle(.secondary)
+            Text("If it is lost, this wallet cannot be restored here. The only way to start over is to delete the app and install it again.")
+                .font(.subheadline)
+                .foregroundStyle(.secondary)
+            Text(HomeViewModel.shortened(record.mainnetAddress))
+                .font(.footnote.monospaced())
+                .foregroundStyle(.secondary)
+                .accessibilityIdentifier("import.restoreAddress")
+        }
+        .accessibilityElement(children: .contain)
+        .accessibilityIdentifier("import.restore")
+    }
+
+    /// A wallet type this version cannot restore: a plain explanation and
+    /// no fields. The way out is on the toolbar (`OnboardingView`).
+    private func unsupportedRestore(_ record: WalletRecord) -> some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text("Restore \(record.name)")
+                .font(.headline)
+            Text("This wallet's keys did not come across with your backup, and this version of Pocket Node cannot restore this kind of wallet. Update the app and try again.")
+                .font(.subheadline)
+                .foregroundStyle(.secondary)
+            Text("The only way to start over is to delete the app and install it again.")
+                .font(.subheadline)
+                .foregroundStyle(.secondary)
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(24)
+        .accessibilityElement(children: .contain)
+        .accessibilityIdentifier("import.unsupportedRestore")
+        .navigationTitle("Restore wallet")
         .navigationBarTitleDisplayMode(.inline)
     }
 

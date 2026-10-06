@@ -47,11 +47,68 @@ final class StubBiometrics: BiometricAuthenticating, @unchecked Sendable {
         _result = result
     }
 
+    /// How long the "prompt" stays up before answering, like a real sensor
+    /// sheet. Zero answers at once.
+    var promptDuration: Duration {
+        get {
+            lock.lock()
+            defer { lock.unlock() }
+            return _promptDuration
+        }
+        set {
+            lock.lock()
+            defer { lock.unlock() }
+            _promptDuration = newValue
+        }
+    }
+
+    private var _promptDuration: Duration = .zero
+    private var _isHolding = false
+    private var _held: [CheckedContinuation<Void, Never>] = []
+
+    /// Keeps every prompt up until ``releasePrompt()``, so a test can change
+    /// what is stored while the sheet is still on screen. More than one
+    /// prompt can be held; the release answers them all.
+    func holdPrompt() {
+        lock.lock()
+        defer { lock.unlock() }
+        _isHolding = true
+    }
+
+    /// Answers every prompt held by ``holdPrompt()``.
+    func releasePrompt() {
+        lock.lock()
+        _isHolding = false
+        let held = _held
+        _held = []
+        lock.unlock()
+        held.forEach { $0.resume() }
+    }
+
     func authenticate(reason: String) async -> Result<Void, BiometricError> {
-        // Taken through a synchronous helper: `NSLock.lock()` is unavailable
+        // Taken through synchronous helpers: `NSLock.lock()` is unavailable
         // from an async context, since holding one across a suspension would
         // block the cooperative pool.
-        recordPromptAndAnswer()
+        let result = recordPromptAndAnswer()
+        await withCheckedContinuation { continuation in
+            parkIfHolding(continuation)
+        }
+        let duration = promptDuration
+        if duration > .zero {
+            try? await Task.sleep(for: duration)
+        }
+        return result
+    }
+
+    private func parkIfHolding(_ continuation: CheckedContinuation<Void, Never>) {
+        lock.lock()
+        guard _isHolding else {
+            lock.unlock()
+            continuation.resume()
+            return
+        }
+        _held.append(continuation)
+        lock.unlock()
     }
 
     private func recordPromptAndAnswer() -> Result<Void, BiometricError> {

@@ -1,6 +1,13 @@
 import Foundation
 import SwiftUI
 
+/// Why ``AuthService`` refused a PIN operation outright.
+enum AuthServiceError: Error, Equatable {
+    /// ``AuthService/setPin(_:)`` was asked to set a PIN while one is stored
+    /// (or may be) and the session has not proved it knows it.
+    case pinAlreadySet
+}
+
 /// A request for the user to prove who they are before something sensitive
 /// happens, raised by ``AuthService/requireAuth(reason:)``. The root view
 /// presents it as a sheet; answering it resumes the caller.
@@ -45,6 +52,15 @@ final class AuthService {
 
     private(set) var state: State
 
+    /// Bumped on every ``lock()`` call, including one that finds nothing to
+    /// lock. Anything that reveals a secret after an await (the recovery
+    /// phrase reveal) records it first and drops its result if it moved, so a
+    /// secret never comes back behind the lock screen. The iOS side of
+    /// Android's `ReauthLockEvents`.
+    /// Not observed: no view reads it, and a bump on every background would
+    /// otherwise invalidate whatever happened to read it.
+    @ObservationIgnored private(set) var lockGeneration = 0
+
     /// Outstanding ``requireAuth(reason:)`` request, if any.
     private(set) var challenge: AuthChallenge?
 
@@ -61,6 +77,9 @@ final class AuthService {
     let biometrics: any BiometricAuthenticating
 
     private let preferences: UserDefaultsPreferences
+    /// Set while ``unlockWithBiometrics()`` is running, so the lock screen's
+    /// automatic prompt and a tap on its button cannot both raise one.
+    private var isPromptingBiometrics = false
     private var challengeContinuation: CheckedContinuation<Bool, Never>?
 
     /// Whether the user has opted into unlocking with Face ID or Touch ID.
@@ -89,8 +108,19 @@ final class AuthService {
     /// it would hand the whole escalation schedule back to anyone holding the
     /// phone. A *temporary* lockout still allows biometrics, matching Android,
     /// because that one is about slowing PIN guessing.
+    ///
+    /// False until the PIN's failure state has actually been read
+    /// (``PinService/hasLoadedState``). On a cold start the permanent-lock
+    /// flag starts as a placeholder `false`, and reading it before the first
+    /// refresh would offer a face to a wallet that is permanently locked. The
+    /// same goes for a refresh whose Keychain reads failed, and for a PIN that
+    /// is not confirmed present.
     var canUseBiometrics: Bool {
-        isBiometricEnabled && biometrics.availability.canPrompt && !pin.isPermanentlyLocked
+        isBiometricEnabled
+            && pin.pinPresence == .present
+            && pin.hasLoadedState
+            && biometrics.availability.canPrompt
+            && !pin.isPermanentlyLocked
     }
 
     init(
@@ -136,6 +166,7 @@ final class AuthService {
 
     /// Locks the session. A no-op when there is no PIN to unlock with.
     func lock() {
+        lockGeneration += 1
         guard state == .unlocked else { return }
         state = .locked
         biometricMessage = nil
@@ -177,10 +208,30 @@ final class AuthService {
     /// to and nothing to report for a deliberate dismissal.
     @discardableResult
     func unlockWithBiometrics() async -> Bool {
+        guard state == .locked, !isPromptingBiometrics else { return false }
+        isPromptingBiometrics = true
+        defer { isPromptingBiometrics = false }
+        // Re-read first so the decision is made on what is stored, not on
+        // whatever the lock screen last saw: a tap on its first frame, or one
+        // after the permanent lock was reached elsewhere, must not prompt.
+        await pin.refresh()
         guard canUseBiometrics, state == .locked else { return false }
         biometricMessage = nil
         switch await biometrics.authenticate(reason: Self.unlockReason) {
         case .success:
+            // The prompt can stay up for a while, and the PIN can reach the
+            // permanent lock elsewhere in that time. A face does not open a
+            // permanently locked wallet, so the state is read again, and a
+            // read that does not come back clean is not proof it is unlocked.
+            await pin.refresh()
+            guard pin.hasLoadedState else {
+                // Not the user's doing: the face matched, the store did not
+                // answer. Said the same way as a PIN attempt it could not
+                // record, in the line the lock screen shows for biometrics.
+                biometricMessage = Self.storeUnavailableMessage
+                return false
+            }
+            guard !pin.isPermanentlyLocked, state == .locked else { return false }
             markUnlocked()
             return true
         case .failure(let error):
@@ -194,8 +245,11 @@ final class AuthService {
     /// on Android.
     ///
     /// A store that cannot record the attempt leaves the session locked and
-    /// sets ``storeMessage`` rather than reporting a wrong PIN: nothing was
-    /// hashed, and the user has not used up a try.
+    /// sets ``storeMessage`` rather than reporting a wrong PIN. A store that
+    /// cannot be read or written cleanly (the PIN, its salt, the failure
+    /// counter or the lockout) is refused before anything is hashed, so the
+    /// user has not used up a try. A write that fails after the comparison is
+    /// reported the same way; that attempt may already have been counted.
     @discardableResult
     func unlock(pin entered: String) async -> Bool {
         storeMessage = nil
@@ -218,7 +272,18 @@ final class AuthService {
     /// than left optimistic: if `PinService`'s cleanup could not remove a
     /// partially written PIN, the app locks behind it instead of believing
     /// there is none.
+    ///
+    /// - Throws: ``AuthServiceError/pinAlreadySet`` before writing anything
+    ///   unless the session is unlocked or the store, read again here,
+    ///   confirms there is no PIN. Onboarding reaches this on the strength of
+    ///   a launch-time read; if that read was stale, setting a PIN would
+    ///   replace one the user never proved they know.
     func setPin(_ value: String) async throws {
+        await pin.refresh()
+        guard state == .unlocked || pin.pinPresence == .absent else {
+            if state == .noPin { state = .locked }
+            throw AuthServiceError.pinAlreadySet
+        }
         do {
             try await pin.setPin(value)
         } catch {
@@ -236,6 +301,10 @@ final class AuthService {
     ///   stored in both outcomes, so a PIN that survived the attempt still
     ///   gates the app, and the biometric opt-in is only dropped once there is
     ///   really no PIN left for it to stand in for.
+    ///
+    /// Leaving a stored wallet with no PIN is not a state the wallet shell
+    /// accepts: `RootView` sees ``State/noPin`` and sends the user back to
+    /// onboarding's PIN step (`OnboardingViewModel.launchDestination`).
     func removePin() async throws {
         defer { state = pin.pinPresence == .absent ? .noPin : .locked }
         try await pin.removePin()
@@ -264,7 +333,15 @@ final class AuthService {
         if canUseBiometrics {
             switch await biometrics.authenticate(reason: reason) {
             case .success:
-                return true
+                // As for the unlock: the permanent lock can be reached while
+                // the prompt is up, and a face does not get past it. A read
+                // that does not come back clean proves nothing either way, so
+                // the request falls through to the PIN challenge below, which
+                // fails closed on its own.
+                await pin.refresh()
+                if pin.hasLoadedState {
+                    return !pin.isPermanentlyLocked
+                }
             case .failure(.cancelled):
                 return false
             case .failure:

@@ -82,11 +82,22 @@ struct OnboardingView: View {
 
     @ToolbarContentBuilder
     private var toolbar: some ToolbarContent {
-        if model.step == .create || model.step == .importWallet {
+        if (model.step == .create || model.step == .importWallet) && !model.isRestoring {
             ToolbarItem(placement: .topBarLeading) {
                 Button("Back") { model.backToWelcome() }
                     .disabled(model.isBusy)
                     .accessibilityIdentifier("onboarding.back")
+            }
+        }
+        // A restore that cannot go ahead offers a way back behind the lock
+        // when a PIN stands in front of the wallet. With no PIN there is
+        // nowhere to go back to: welcome would only offer a create that the
+        // existing wallet refuses, so the screen's own copy (reinstall) is
+        // the way out.
+        if model.step == .importWallet && model.isUnsupportedRestore && auth.state == .unlocked {
+            ToolbarItem(placement: .topBarLeading) {
+                Button("Lock") { auth.lock() }
+                    .accessibilityIdentifier("onboarding.lock")
             }
         }
     }

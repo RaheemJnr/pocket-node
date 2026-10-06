@@ -161,6 +161,170 @@ final class OnboardingViewModelTests: XCTestCase {
         XCTAssertNil(model.errorMessage)
     }
 
+    // MARK: - Resuming an interrupted onboarding
+
+    /// The wallet is stored before the backup and PIN steps run, so a process
+    /// killed in between leaves a wallet on disk and no PIN. The next launch
+    /// must land back on the unfinished step, never on the wallet.
+    func testAWalletCreatedButNotBackedUpResumesAtTheBackupStepOnRelaunch() async {
+        await model.createWallet(wordCount: 12, name: "Main")
+        XCTAssertEqual(model.step, .backup)
+
+        // The app is killed here. A relaunch sees only what was stored.
+        XCTAssertEqual(
+            OnboardingViewModel.launchDestination(
+                hasWallet: walletStore.hasWallet,
+                pinPresence: .absent,
+                record: walletStore.load()
+            ),
+            .onboarding(.backup)
+        )
+    }
+
+    func testAWalletBackedUpButWithoutAPinResumesAtThePinStepOnRelaunch() async throws {
+        await model.createWallet(wordCount: 12, name: "Main")
+        let record = try XCTUnwrap(walletStore.load())
+        try walletStore.save(
+            WalletRecord(
+                id: record.id,
+                name: record.name,
+                type: record.type,
+                derivationPath: record.derivationPath,
+                mainnetAddress: record.mainnetAddress,
+                testnetAddress: record.testnetAddress,
+                mnemonicBackedUp: true,
+                createdAt: record.createdAt
+            )
+        )
+
+        XCTAssertEqual(
+            OnboardingViewModel.launchDestination(
+                hasWallet: walletStore.hasWallet,
+                pinPresence: .absent,
+                record: walletStore.load()
+            ),
+            .onboarding(.pinSetup)
+        )
+    }
+
+    func testAnImportedWalletWithoutAPinResumesAtThePinStepOnRelaunch() async {
+        await model.importMnemonic(words: WalletCreatorTests.testPhrase, name: "Restored")
+        XCTAssertEqual(model.step, .pinSetup)
+
+        XCTAssertEqual(
+            OnboardingViewModel.launchDestination(
+                hasWallet: walletStore.hasWallet,
+                pinPresence: .absent,
+                record: walletStore.load()
+            ),
+            .onboarding(.pinSetup)
+        )
+    }
+
+    /// End to end over the real PIN store: until a PIN is stored the launch
+    /// resumes onboarding, and once one is the wallet opens (behind the lock).
+    func testOnlyAStoredPinLetsALaunchReachTheWallet() async throws {
+        let pinKeychain = KeychainStore(service: "\(service).pin")
+        try? pinKeychain.deleteAll()
+        defer { try? pinKeychain.deleteAll() }
+
+        await model.importPrivateKey(hex: WalletCreatorTests.testPrivateKeyHex, name: "Key")
+
+        let beforePin = PinService(keychain: pinKeychain, cost: .testing)
+        XCTAssertEqual(
+            OnboardingViewModel.launchDestination(
+                hasWallet: walletStore.hasWallet,
+                pinPresence: beforePin.pinPresence,
+                record: walletStore.load()
+            ),
+            .onboarding(.pinSetup),
+            "a wallet with no PIN must not open"
+        )
+
+        try await beforePin.setPin("123456")
+
+        // A cold start: a new service over the same Keychain.
+        let afterPin = PinService(keychain: pinKeychain, cost: .testing)
+        XCTAssertEqual(
+            OnboardingViewModel.launchDestination(
+                hasWallet: walletStore.hasWallet,
+                pinPresence: afterPin.pinPresence,
+                record: walletStore.load()
+            ),
+            .wallet
+        )
+    }
+
+    func testLaunchDestinationRules() {
+        let created = Self.record(type: WalletCreator.typeMnemonic, backedUp: false)
+
+        XCTAssertEqual(
+            OnboardingViewModel.launchDestination(hasWallet: false, pinPresence: .absent, record: nil),
+            .onboarding(.welcome)
+        )
+        XCTAssertEqual(
+            OnboardingViewModel.launchDestination(hasWallet: true, pinPresence: .present, record: created),
+            .wallet,
+            "a PIN exists, so the lock screen guards the wallet"
+        )
+        XCTAssertEqual(
+            OnboardingViewModel.launchDestination(hasWallet: true, pinPresence: .unknown, record: created),
+            .wallet,
+            "an unreadable PIN store locks rather than offering to replace the PIN"
+        )
+        XCTAssertEqual(
+            OnboardingViewModel.launchDestination(hasWallet: true, pinPresence: .absent, record: created),
+            .onboarding(.backup)
+        )
+    }
+
+    func testResumeStepFollowsTheRecord() {
+        XCTAssertEqual(
+            OnboardingViewModel.resumeStep(for: Self.record(type: WalletCreator.typeMnemonic, backedUp: false)),
+            .backup
+        )
+        XCTAssertEqual(
+            OnboardingViewModel.resumeStep(for: Self.record(type: WalletCreator.typeMnemonic, backedUp: true)),
+            .pinSetup
+        )
+        XCTAssertEqual(
+            OnboardingViewModel.resumeStep(for: Self.record(type: WalletCreator.typeRawKey, backedUp: false)),
+            .pinSetup,
+            "a raw key has no phrase to back up"
+        )
+        XCTAssertEqual(
+            OnboardingViewModel.resumeStep(for: nil),
+            .backup,
+            "an unreadable record must not skip the backup of a phrase that may never have been written down"
+        )
+    }
+
+    func testAResumedFlowCarriesOnFromTheStepItWasGiven() {
+        let resumed = OnboardingViewModel(
+            creator: WalletCreator(keyStore: keyStore, walletStore: walletStore),
+            resumingAt: .backup
+        )
+        XCTAssertEqual(resumed.step, .backup)
+
+        resumed.finishBackup()
+        XCTAssertEqual(resumed.step, .pinSetup)
+
+        resumed.finishPinSetup()
+        XCTAssertEqual(resumed.step, .done)
+    }
+
+    private static func record(type: String, backedUp: Bool) -> WalletRecord {
+        WalletRecord(
+            id: "resume-test",
+            name: "Main",
+            type: type,
+            mainnetAddress: "ckb1",
+            testnetAddress: "ckt1",
+            mnemonicBackedUp: backedUp,
+            createdAt: 0
+        )
+    }
+
     // MARK: - Error copy
 
     func testEveryFailureMapsToSomethingAUserCanRead() {

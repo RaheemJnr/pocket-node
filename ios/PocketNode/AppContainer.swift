@@ -56,6 +56,9 @@ final class AppContainer {
     /// the sync stack, the key store and the auth gate.
     let send: SendService
 
+    /// The launch decisions about the wallet and its PIN (see ``LaunchGate``).
+    let launchGate: LaunchGate
+
     /// Kept in sync with the system color scheme by `RootView`.
     var theme: Theme = .light
 
@@ -65,6 +68,10 @@ final class AppContainer {
         self.preferences = UserDefaultsPreferences()
         Self.applyNetworkOverrideForTestingIfPresent(preferences: preferences)
         self.walletStore = WalletStore()
+        // Installs that saved `wallet.json` before it was excluded from
+        // backups get the flag on their next launch (`WalletStore.save` sets
+        // it on every write from now on).
+        walletStore.excludeFromBackup()
         self.lightClient = LightClientService(network: preferences.getSelectedNetwork())
         self.lightClientApi = UniffiLightClientApi()
         self.sync = SyncService(
@@ -94,14 +101,24 @@ final class AppContainer {
             try? pinKeychain.deleteAll()
         }
 
-        self.biometrics = BiometricService()
-        let pinService = PinService(keychain: pinKeychain)
-        self.pinService = pinService
-        self.auth = AuthService(
-            pin: pinService,
-            biometrics: self.biometrics,
-            preferences: self.preferences
+        // That delete is not retried if it fails (the marker is already
+        // recorded). `LaunchGate` clears any PIN left with no wallet, and sets
+        // aside an undecodable `wallet.json` with no keys, before the session
+        // reads the PIN store.
+        let biometrics = BiometricService()
+        self.biometrics = biometrics
+        let launchGate = LaunchGate(
+            walletStore: walletStore,
+            walletKeyStore: walletKeyStore,
+            keyKeychain: keychain,
+            pinKeychain: pinKeychain,
+            preferences: preferences,
+            biometrics: biometrics,
+            skipsOnboarding: Self.skipsOnboardingForTesting
         )
+        self.launchGate = launchGate
+        self.pinService = launchGate.pinService
+        self.auth = launchGate.auth
         self.walletCreator = WalletCreator(keyStore: self.walletKeyStore, walletStore: self.walletStore)
         self.send = SendService(
             sync: self.sync,
@@ -221,21 +238,18 @@ final class AppContainer {
     /// The id ``seedWalletForTestingIfRequested(walletStore:)`` writes.
     static let seededTestWalletId = "ui-test-wallet"
 
-    /// Whether onboarding has already been completed.
-    ///
-    /// Both halves are consulted: the Keychain envelope is the wallet, and
-    /// `wallet.json` is what the UI reads. A device with only one of them is
-    /// mid-failure rather than fresh, and sending it back through onboarding
-    /// would refuse at ``WalletCreator/createWallet(wordCount:name:)`` anyway,
-    /// so the honest answer is that a wallet is there.
-    var hasWallet: Bool {
-        get async {
-            // Spelled out rather than written with `||`: the short-circuit
-            // operator takes its right side as an autoclosure, which cannot
-            // carry the `await` the actor hop needs.
-            if walletStore.hasWallet { return true }
-            return await walletKeyStore.hasWallet
-        }
+    /// `POCKETNODE_SKIP_ONBOARDING` (below) seeds a metadata-only wallet with
+    /// no PIN and no keys for the UI tests that drive the wallet shell. Those
+    /// tests need the shell, not the PIN step onboarding would otherwise
+    /// resume at, nor the restore flow a key-less wallet would get. The one
+    /// place that hook is read; always false in release builds, which always
+    /// enforce the PIN and the restore.
+    private static var skipsOnboardingForTesting: Bool {
+        #if DEBUG
+        return ProcessInfo.processInfo.environment["POCKETNODE_SKIP_ONBOARDING"] == "1"
+        #else
+        return false
+        #endif
     }
 
     /// `PocketNodeNetwork`'s `NodeStatusUITests` exercises the light client,
@@ -250,7 +264,7 @@ final class AppContainer {
     /// Debug-only, and a no-op on every other launch.
     private static func seedWalletForTestingIfRequested(walletStore: WalletStore) {
         #if DEBUG
-        guard ProcessInfo.processInfo.environment["POCKETNODE_SKIP_ONBOARDING"] == "1",
+        guard Self.skipsOnboardingForTesting,
               !walletStore.hasWallet else { return }
         try? walletStore.save(
             WalletRecord(

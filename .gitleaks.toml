@@ -11,7 +11,14 @@
 useDefault = true
 
 [allowlist]
-description = "The ignore file itself holds fingerprints that look like keys"
+description = "The ignore file itself, and the private key of the public all-abandon BIP-39 test vector"
 paths = [
     '''^\.gitleaksignore$''',
+]
+# m/44'/309'/0'/0/0 private key of the standard all-"abandon ... about" BIP-39
+# test phrase. Anyone can derive it from the public phrase; tests pin it on
+# purpose. Matched by exact value so it is allowed in any file and any commit
+# (a fingerprint would break on squash merges), and nothing else is.
+regexes = [
+    '''^b217d9a18ff657c99872cc11a2fa2aa3e970cef8c6faa7d6e424bf057cb3707b$''',
 ]

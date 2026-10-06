@@ -2,8 +2,9 @@ import XCTest
 
 @testable import PocketNode
 
-/// Covers #22: the light client asked for `Application Support/pocketnode`
-/// while the wallet store had already made `Application Support/PocketNode`.
+/// Covers the folder name collision: the light client asked for
+/// `Application Support/pocketnode` while the wallet store had already made
+/// `Application Support/PocketNode`.
 /// On the simulator, whose container sits on the Mac's case-insensitive APFS
 /// volume, those are one folder, so the second `mkdir` failed and the node
 /// never initialised.
@@ -77,26 +78,41 @@ final class AppDirectoriesTests: XCTestCase {
         )
     }
 
-    // MARK: - Backup exclusion (#24)
+    // MARK: - Backup exclusion
 
-    /// The light client's per-network directory holds only regenerable chain
-    /// data (`store.db`, `network/`), so it must be excluded from iCloud and
-    /// iTunes backups. `wallet.json` lives one level up in `PocketNode/` and
-    /// has to stay backed up, so only the network subdirectory is marked.
-    /// Calling `dataDirectory` twice proves setting the flag again is a no-op,
-    /// not an error.
-    func testDataDirectoryIsExcludedFromBackupButItsParentIsNot() throws {
-        let dataDir = try AppDirectories.dataDirectory(in: support, network: "testnet", fileManager: fileManager)
-        let dataDirAgain = try AppDirectories.dataDirectory(in: support, network: "testnet", fileManager: fileManager)
-        XCTAssertEqual(dataDir, dataDirAgain)
+    /// The effective policy: nothing in `PocketNode/` is backed up. The
+    /// wallet's keys are `ThisDeviceOnly` and never leave the phone, so
+    /// backing up `wallet.json` would only restore a key-less wallet onto a
+    /// new one, and the light client's per-network stores are chain data the
+    /// node rebuilds. Driven through the same calls the app makes, in the
+    /// order it makes them: `AppDirectories.ensure` names the folder,
+    /// `WalletStore` saves into it and marks it (as `AppContainer` does at
+    /// launch), then the light client asks for its data directories. Calling
+    /// `dataDirectory` twice proves setting the flag again is a no-op, not an
+    /// error.
+    func testTheWholeAppFolderIsExcludedFromBackup() throws {
+        let folder = try AppDirectories.ensure(in: support, fileManager: fileManager)
+        let walletStore = WalletStore(directory: folder, fileManager: fileManager)
+        try walletStore.save(
+            WalletRecord(
+                id: "w", name: "n", type: "mnemonic",
+                mainnetAddress: "ckb1", testnetAddress: "ckt1", createdAt: 0
+            )
+        )
+        walletStore.excludeFromBackup()
+        let testnet = try AppDirectories.dataDirectory(in: support, network: "testnet", fileManager: fileManager)
+        let testnetAgain = try AppDirectories.dataDirectory(in: support, network: "testnet", fileManager: fileManager)
+        let mainnet = try AppDirectories.dataDirectory(in: support, network: "mainnet", fileManager: fileManager)
+        XCTAssertEqual(testnet, testnetAgain)
 
-        let values = try dataDir.resourceValues(forKeys: [.isExcludedFromBackupKey])
-        XCTAssertEqual(values.isExcludedFromBackup, true)
-
-        let walletFolder = support.appendingPathComponent(AppDirectories.directoryName, isDirectory: true)
-        let walletValues = try walletFolder.resourceValues(forKeys: [.isExcludedFromBackupKey])
-        XCTAssertNotNil(values.isExcludedFromBackup, "the key must resolve on the network directory")
-        XCTAssertFalse(walletValues.isExcludedFromBackup ?? false)
+        func isExcluded(_ url: URL) throws -> Bool? {
+            try url.resourceValues(forKeys: [.isExcludedFromBackupKey]).isExcludedFromBackup
+        }
+        XCTAssertEqual(walletStore.fileURL.deletingLastPathComponent().standardizedFileURL, folder.standardizedFileURL)
+        XCTAssertEqual(try isExcluded(folder), true, "PocketNode/ itself")
+        XCTAssertEqual(try isExcluded(walletStore.fileURL), true, "wallet.json")
+        XCTAssertEqual(try isExcluded(testnet), true, "the testnet store")
+        XCTAssertEqual(try isExcluded(mainnet), true, "the mainnet store")
     }
 
     // MARK: - Migration
