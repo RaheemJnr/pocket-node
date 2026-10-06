@@ -499,11 +499,29 @@ class RegistrationLockTest {
         val b = db.walletDao().getById(OTHER)!!
         bridge.results.addLast(false)
 
-        runCatching { repository.onActiveWalletChanged(b) }
+        // Codex P2 on 7faee4c8: the retry landed, so the switch succeeded and
+        // must not surface the first attempt's error to the caller.
+        val result = runCatching { repository.onActiveWalletChanged(b) }
 
+        assertTrue("switch reported as failed: ${result.exceptionOrNull()}", result.isSuccess)
         assertEquals("refused, then the retry", 2, bridge.setScriptsCalls.size)
         assertEquals(1, bridge.landed.size)
         assertEquals(OTHER, coordinator.registeredActiveWalletId)
+    }
+
+    @Test
+    fun `a switch whose registration and retry are both refused reports the failure`() = runBlocking {
+        build()
+        walletPreferences.setSyncStrategy(SyncStrategy.ALL_WALLETS)
+        val b = db.walletDao().getById(OTHER)!!
+        bridge.results.addLast(false)
+        bridge.results.addLast(false)
+
+        val result = runCatching { repository.onActiveWalletChanged(b) }
+
+        assertEquals("Failed to set scripts for all wallets", result.exceptionOrNull()?.message)
+        assertEquals(2, bridge.setScriptsCalls.size)
+        assertTrue(bridge.landed.isEmpty())
     }
 
     /** ACTIVE_ONLY: same guarantee through the single-wallet path. */
@@ -550,13 +568,14 @@ class RegistrationLockTest {
     }
 
     /**
-     * S4: under ACTIVE_ONLY the single-wallet path registers _walletInfo's
-     * script under activeWalletId. A reassignment outside a switch leaves
-     * _walletInfo on the previous wallet, so the follow-up must not
-     * register A's script as B.
+     * S4 + Codex P2 on 7faee4c8: under ACTIVE_ONLY the single-wallet path
+     * registers _walletInfo's script under activeWalletId. A reassignment
+     * outside a switch leaves _walletInfo on the previous wallet, so the
+     * follow-up adopts the active wallet (switch path): B's own script is
+     * registered under B, and _walletInfo describes B.
      */
     @Test
-    fun `an ACTIVE_ONLY reassignment never registers the previous wallet's script under the new id`() = runBlocking {
+    fun `an ACTIVE_ONLY reassignment adopts the active wallet and registers its own script`() = runBlocking {
         build()
         walletPreferences.setSyncStrategy(SyncStrategy.ACTIVE_ONLY)
         repository.registerAccountWithStrategy(savePreference = false).getOrThrow()
@@ -567,8 +586,11 @@ class RegistrationLockTest {
         repository.needsMnemonicBackup()
         assertNotNullJob().join()
 
-        assertEquals("no set for B built from A's info", 1, bridge.landed.size)
-        assertEquals(ACTIVE, coordinator.registeredActiveWalletId)
+        assertEquals("one follow-up set", 2, bridge.landed.size)
+        assertEquals("B's own script, never A's under B", setOf(otherScript.args), argsOf(bridge.landed.last()))
+        assertEquals(OTHER, coordinator.registeredActiveWalletId)
+        assertEquals(otherScript, repository.walletInfo.value?.script)
+        assertTrue(repository.isRegistered.value)
     }
 
     @Test
