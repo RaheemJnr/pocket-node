@@ -36,6 +36,8 @@ struct RootView: View {
     /// front of it: the restore flow names the wallet and shows its address,
     /// so it waits for the unlock (``LaunchGate/RestoreRoute/hold(_:)``).
     @State private var pendingRestore: WalletRecord?
+    /// How many times the stand-in has asked again about the held restore.
+    @State private var heldRestoreRetries = 0
 
     private var auth: AuthService { container.auth }
     private var gate: LaunchGate { container.launchGate }
@@ -84,18 +86,32 @@ struct RootView: View {
                     // A held restore whose key lookup keeps failing has
                     // nothing else to move it on, so it is asked again every
                     // two seconds while it is held.
+                    // After about ten seconds of that the user is told what
+                    // to do, rather than left watching a spinner.
                     ZStack {
                         Color(uiColor: .systemBackground)
                             .ignoresSafeArea()
-                        ProgressView()
-                            .accessibilityLabel("Loading")
+                        VStack(spacing: 16) {
+                            ProgressView()
+                                .accessibilityLabel("Loading")
+                            if pendingRestore != nil && heldRestoreRetries >= 5 {
+                                Text("Could not read your wallet keys. Close the app and open it again.")
+                                    .font(.subheadline)
+                                    .foregroundStyle(.secondary)
+                                    .multilineTextAlignment(.center)
+                                    .padding(.horizontal, 32)
+                                    .accessibilityIdentifier("root.keysUnreadable")
+                            }
+                        }
                     }
                     .task(id: pendingRestore?.id) {
-                        reroute()
+                        heldRestoreRetries = 0
+                        await reroute()
                         while pendingRestore != nil, !Task.isCancelled {
                             try? await Task.sleep(for: .seconds(2))
                             guard !Task.isCancelled else { return }
-                            reroute()
+                            heldRestoreRetries += 1
+                            await reroute()
                         }
                     }
                 } else {
@@ -129,11 +145,11 @@ struct RootView: View {
         // that could not be read may turn out to have no keys, and an unlock
         // is what lets a restore held behind the lock screen go ahead.
         .onChange(of: auth.state) { _, _ in
-            reroute()
+            Task { await reroute() }
         }
         .onChange(of: scenePhase) { _, newScenePhase in
             guard newScenePhase == .active else { return }
-            reroute()
+            Task { await reroute() }
         }
         .onChange(of: colorScheme, initial: true) {
             container.theme = Theme.forScheme(colorScheme)
@@ -193,14 +209,15 @@ struct RootView: View {
     /// phase is checked again after each await: another trigger may have
     /// routed already, and a second route would build a second onboarding
     /// view model over the first.
-    private func reroute() {
+    ///
+    /// Async so the stand-in's retry loop waits for each attempt instead of
+    /// piling them up; the `onChange` callers wrap it in a `Task`.
+    private func reroute() async {
         guard phase == .wallet else { return }
-        Task {
-            let restoreRoute = await gate.restoreRoute(pending: pendingRestore)
-            guard phase == .wallet, apply(restoreRoute) else { return }
-            guard let destination = await gate.reroute(), phase == .wallet else { return }
-            route(to: destination)
-        }
+        let restoreRoute = await gate.restoreRoute(pending: pendingRestore)
+        guard phase == .wallet, apply(restoreRoute) else { return }
+        guard let destination = await gate.reroute(), phase == .wallet else { return }
+        route(to: destination)
     }
 
     private func route(to destination: OnboardingViewModel.LaunchDestination) {

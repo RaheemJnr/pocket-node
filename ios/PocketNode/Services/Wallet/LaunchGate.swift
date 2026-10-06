@@ -130,7 +130,9 @@ final class LaunchGate {
     /// ``WalletCreator`` would refuse to import it again because a wallet is
     /// "already there", so `RootView` sends it to the restore flow instead of
     /// the wallet shell. A Keychain that cannot be read yet (a launch before
-    /// the first device unlock) is not an absence and does not count.
+    /// the first device unlock) is not an absence and does not count. Now
+    /// that `wallet.json` is excluded from backups, only a backup made before
+    /// that exclusion (or by an older build) can produce metadata without keys.
     enum RestoreRoute: Equatable {
         /// Open the restore flow for this wallet now.
         case restore(WalletRecord)
