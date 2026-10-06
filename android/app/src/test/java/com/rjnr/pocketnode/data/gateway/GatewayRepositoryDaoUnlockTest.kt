@@ -305,6 +305,44 @@ class GatewayRepositoryDaoUnlockTest {
     }
 
     @Test
+    fun `compensation write-back cannot resurrect a row retired while it was recomputed`() = runTest {
+        // #550 x #529: the merge reads the cached row, recomputes its
+        // compensation, then writes it back. If the unlock's retirement lands
+        // in between, the write-back must not restore the old status.
+        seedCachedWithdrawingRow()
+        markUnlockInFlight(txStatus = "PENDING")
+        coEvery { depositReader.list(any(), any(), any()) } returns emptyList()
+        coEvery { depositReader.recomputeCachedCompensation(any(), any()) } coAnswers {
+            daoSyncManager.updateStatus(
+                withdrawingOutPoint.txHash, withdrawingOutPoint.index, DaoCellStatus.COMPLETED.name,
+            )
+            5_000L
+        }
+
+        repository.getDaoDeposits().getOrThrow()
+
+        val row = daoSyncManager.getByOutPoint(withdrawingOutPoint.txHash, withdrawingOutPoint.index)
+        assertEquals(DaoCellStatus.COMPLETED.name, row?.status)
+        assertEquals("a retired row keeps its stored compensation", 0L, row?.compensation)
+    }
+
+    @Test
+    fun `compensation of a cached-only row is recomputed and written back`() = runTest {
+        // Outside the sync window, no unlock in flight: the stored amount
+        // (computed before #550 with 61 CKB occupied) is replaced.
+        seedCachedWithdrawingRow()
+        coEvery { depositReader.list(any(), any(), any()) } returns emptyList()
+        coEvery { depositReader.recomputeCachedCompensation(any(), any()) } returns 7_000L
+
+        val deposits = repository.getDaoDeposits().getOrThrow()
+
+        assertEquals(7_000L, deposits.single().compensation)
+        val row = daoSyncManager.getByOutPoint(withdrawingOutPoint.txHash, withdrawingOutPoint.index)
+        assertEquals(7_000L, row?.compensation)
+        assertEquals(DaoCellStatus.UNLOCKABLE.name, row?.status)
+    }
+
+    @Test
     fun `an unlock that later fails hands back a cell the light client cannot see`() = runTest {
         // The dangerous case: out-of-window cell, so absence proves nothing.
         seedCachedWithdrawingRow()

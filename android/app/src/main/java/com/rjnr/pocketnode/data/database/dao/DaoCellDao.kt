@@ -24,6 +24,24 @@ interface DaoCellDao {
     @Query("UPDATE dao_cells SET status = :status, lastUpdatedAt = :updatedAt WHERE txHash = :txHash AND `index` = :index")
     suspend fun updateStatus(txHash: String, index: String, status: String, updatedAt: Long = System.currentTimeMillis())
 
+    /**
+     * Rewrites only the compensation of one row (#550). Never touches status
+     * and skips a COMPLETED row, so a write-back racing #529's retirement
+     * cannot bring a claimed deposit back. Returns the rows changed.
+     */
+    @Query(
+        "UPDATE dao_cells SET compensation = :compensation " +
+            "WHERE txHash = :txHash AND `index` = :index AND network = :network " +
+            "AND walletId = :walletId AND status != 'COMPLETED'"
+    )
+    suspend fun updateCompensation(
+        txHash: String,
+        index: String,
+        network: String,
+        walletId: String,
+        compensation: Long,
+    ): Int
+
     @Query("DELETE FROM dao_cells WHERE network = :network")
     suspend fun deleteByNetwork(network: String)
 
