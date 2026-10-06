@@ -708,14 +708,21 @@ class DaoUnlockShadowLightClientNative {
     @Implementation
     fun nativeGetScripts(): String? = scripts
 
-    /** Deposit plus a fixed compensation, enough for the unlock path to build. */
+    /**
+     * Deposit plus a fixed compensation, enough for the unlock path to build.
+     * Every call is recorded in [maxWithdrawCalls] so #550's
+     * DaoDepositReaderCompensationTest can check the occupied capacity passed.
+     */
     @Implementation
     fun nativeCalculateMaxWithdraw(
-        @Suppress("UNUSED_PARAMETER") depositHeaderDaoHex: String,
-        @Suppress("UNUSED_PARAMETER") withdrawHeaderDaoHex: String,
+        depositHeaderDaoHex: String,
+        withdrawHeaderDaoHex: String,
         depositCapacity: Long,
-        @Suppress("UNUSED_PARAMETER") occupiedCapacity: Long,
-    ): Long = depositCapacity + 1_000L
+        occupiedCapacity: Long,
+    ): Long {
+        maxWithdrawCalls += MaxWithdrawCall(depositHeaderDaoHex, withdrawHeaderDaoHex, occupiedCapacity)
+        return depositCapacity + FIXED_COMPENSATION
+    }
 
     @Implementation
     fun nativeCalculateUnlockEpoch(
@@ -728,8 +735,8 @@ class DaoUnlockShadowLightClientNative {
      * bridge's own answer when the node does not know the transaction.
      */
     @Implementation
-    fun nativeGetTransaction(hash: String): String? =
-        chainStatus.also { transactionQueries += hash }?.let {
+    fun nativeGetTransaction(hash: String): String? = transactionOverride?.also { transactionQueries += hash }
+        ?: chainStatus.also { transactionQueries += hash }?.let {
             Json.encodeToString(
                 JniTransactionWithStatus(
                     txStatus = JniTxStatus(
@@ -754,11 +761,35 @@ class DaoUnlockShadowLightClientNative {
         @Suppress("UNUSED_PARAMETER") cursor: String?,
     ): String? = transactionsPage
 
+    /** A raw JNI cells page, for DaoDepositReaderCompensationTest (#550). Null elsewhere. */
+    @Implementation
+    fun nativeGetCells(
+        @Suppress("UNUSED_PARAMETER") searchKeyJson: String,
+        @Suppress("UNUSED_PARAMETER") order: String,
+        @Suppress("UNUSED_PARAMETER") limit: Int,
+        @Suppress("UNUSED_PARAMETER") cursor: String?,
+    ): String? = cellsPage
+
+    data class MaxWithdrawCall(val depositDao: String, val endDao: String, val occupied: Long)
+
     companion object {
+        const val FIXED_COMPENSATION = 1_000L
+
         var tipHeader: String? = null
         var scripts: String? = null
         var chainStatus: String? = null
         var transactionsPage: String? = null
+        var cellsPage: String? = null
+
+        /**
+         * When set, nativeGetTransaction answers every hash with this JSON
+         * instead of the [chainStatus]-built one (#550 needs a phase-1 tx
+         * carrying header_deps). Null elsewhere.
+         */
+        var transactionOverride: String? = null
+
+        /** Every max-withdraw calculation asked of the bridge. */
+        val maxWithdrawCalls = mutableListOf<MaxWithdrawCall>()
 
         /** Every transaction the repository asked the chain about. */
         val transactionQueries = mutableListOf<String>()
