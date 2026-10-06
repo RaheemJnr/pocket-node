@@ -313,7 +313,7 @@ final class WalletRestoreTests: XCTestCase {
 
         let fresh = makeAuth()
         XCTAssertTrue(
-            OnboardingViewModel.mayStartRestore(
+            LaunchGate.mayStartRestore(
                 pinPresence: fresh.pin.pinPresence,
                 sessionUnlocked: fresh.state == .unlocked
             ),
@@ -324,7 +324,7 @@ final class WalletRestoreTests: XCTestCase {
         let cold = makeAuth()
         XCTAssertEqual(cold.state, .locked)
         XCTAssertFalse(
-            OnboardingViewModel.mayStartRestore(
+            LaunchGate.mayStartRestore(
                 pinPresence: cold.pin.pinPresence,
                 sessionUnlocked: cold.state == .unlocked
             ),
@@ -334,14 +334,14 @@ final class WalletRestoreTests: XCTestCase {
         let unlocked = await cold.unlock(pin: "123456")
         XCTAssertTrue(unlocked)
         XCTAssertTrue(
-            OnboardingViewModel.mayStartRestore(
+            LaunchGate.mayStartRestore(
                 pinPresence: cold.pin.pinPresence,
                 sessionUnlocked: cold.state == .unlocked
             )
         )
 
         XCTAssertFalse(
-            OnboardingViewModel.mayStartRestore(pinPresence: .unknown, sessionUnlocked: false),
+            LaunchGate.mayStartRestore(pinPresence: .unknown, sessionUnlocked: false),
             "an unreadable PIN store waits too"
         )
     }
