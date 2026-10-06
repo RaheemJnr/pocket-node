@@ -97,9 +97,15 @@ enum AppDirectories {
     /// progress, balance cache, transactions, pending broadcasts) is derived
     /// from the chain too, so a restored device resyncs and re-derives them;
     /// backing them up costs the user backup space for nothing, and App
-    /// Review rejects apps that back up this kind of regenerable cache. Only
-    /// the network subdirectory is marked, never `PocketNode/` itself, so
-    /// `wallet.json` stays backed up.
+    /// Review rejects apps that back up this kind of regenerable cache.
+    ///
+    /// This marks only the network subdirectory, but the whole `PocketNode/`
+    /// folder, `wallet.json` included, is excluded anyway, by
+    /// `WalletStore.excludeFromBackup` (at launch and on every save). That is
+    /// deliberate: the wallet's keys are `ThisDeviceOnly` Keychain items that
+    /// never leave the phone, so backing up the metadata alone would only
+    /// restore a key-less wallet onto a new phone. The flag here keeps the
+    /// chain data excluded on its own regardless.
     ///
     /// Best-effort: called on every `dataDirectory` (safe, setting the flag
     /// again is a no-op), and a failure here is logged, not thrown, because
