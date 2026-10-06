@@ -32,10 +32,10 @@ final class AppContainer {
     /// Session state and the lock gate. `RootView` reads it.
     let auth: AuthService
 
-    /// The shared `LightClientApi` seam, bound to the UniFFI bridge. Nothing
-    /// consumes it yet; the M3 sync and send engines in `shared` take it as a
-    /// constructor parameter, the way `di/SharedModule.kt` hands them the
-    /// Android binding.
+    /// The shared `LightClientApi` seam, bound to the UniFFI bridge.
+    /// ``SyncService`` takes it as a constructor parameter and hands it to the
+    /// shared sync engine, and ``SendService`` reaches it through the sync
+    /// stack, the way `di/SharedModule.kt` hands them the Android binding.
     ///
     /// This container is `@MainActor`, so the property is main-actor isolated
     /// even though the object it holds is not. Every call on it blocks, some
@@ -48,7 +48,9 @@ final class AppContainer {
 
     /// Chain sync for the one wallet: the shared `SingleWalletSyncService`, the
     /// Room KMP database behind its checkpoints, and the state Home draws.
-    /// `RootView` activates it once the wallet shell has a wallet.
+    /// `RootView` activates it when it lands in the wallet phase and
+    /// ``LaunchGate/maySync(pendingRestore:)`` allows it, which can be behind
+    /// the lock screen: sync reads no key material.
     let sync: SyncService
 
     /// The send path: the shared `SendPipeline`, the Face ID step-up in front
@@ -213,9 +215,12 @@ final class AppContainer {
 
     /// Hands the sync layer this device's wallet, if there is one.
     ///
-    /// Called by `RootView` when the wallet shell appears, and again after
-    /// onboarding stores a wallet. `SyncService.activate` ignores a repeat for
-    /// the same wallet, so both call sites can fire freely.
+    /// Called by `RootView` whenever it lands in, or stays in, the wallet
+    /// phase (launch, onboarding finished, every reroute) and
+    /// ``LaunchGate/maySync(pendingRestore:)`` says the wallet is really
+    /// there. `SyncService.activate` ignores a repeat for the same wallet, so
+    /// every one of those calls can fire freely. A record that cannot be read
+    /// yet returns early here, and the next reroute asks again.
     func activateSync() {
         guard let record = walletStore.load() else { return }
         sync.activate(wallet: record)

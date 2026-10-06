@@ -17,6 +17,10 @@ protocol AuthGating: AnyObject {
     func requireAuth(reason: String) async -> Bool
     /// Bumped on every session lock. A reveal records it before prompting and
     /// drops its result if it moved, so a phrase never lands behind the lock.
+    ///
+    /// `SendService` does not check it, on purpose: a send the user approved
+    /// should finish even if the app is backgrounded and locks while it signs
+    /// and broadcasts, and it puts no secret on screen for the lock to hide.
     var lockGeneration: Int { get }
 }
 

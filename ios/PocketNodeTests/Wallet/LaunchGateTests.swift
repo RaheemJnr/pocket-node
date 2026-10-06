@@ -343,6 +343,148 @@ final class LaunchGateTests: XCTestCase {
         XCTAssertEqual(reroute, .onboarding(.pinSetup))
     }
 
+    // MARK: - Starting sync
+
+    /// Every combination of the four inputs: only a readable record, with its
+    /// envelope confirmed present, no security setup pending and no restore
+    /// held, may start sync.
+    func testMaySyncOnlyForAWalletThatIsReallyThere() {
+        let record = WalletRecord(
+            id: "w", name: "n", type: WalletCreator.typeMnemonic,
+            mainnetAddress: "ckb1", testnetAddress: "ckt1", createdAt: 0
+        )
+        let envelopes: [KeyMaterialPresence] = [.present, .absent, .unknown]
+        var allowed = 0
+        for candidate in [record, nil] as [WalletRecord?] {
+            for envelope in envelopes {
+                for needsSecuritySetup in [false, true] {
+                    for pendingRestore in [false, true] {
+                        let result = LaunchGate.maySync(
+                            record: candidate,
+                            envelope: envelope,
+                            needsSecuritySetup: needsSecuritySetup,
+                            pendingRestore: pendingRestore
+                        )
+                        let expected = candidate != nil && envelope == .present && !needsSecuritySetup && !pendingRestore
+                        XCTAssertEqual(
+                            result, expected,
+                            "record \(candidate != nil) envelope \(envelope) setup \(needsSecuritySetup) restore \(pendingRestore)"
+                        )
+                        if result { allowed += 1 }
+                    }
+                }
+            }
+        }
+        XCTAssertEqual(allowed, 1, "exactly one of the 24 combinations")
+    }
+
+    /// Sync starts behind the lock screen: it reads no keys, and the PIN only
+    /// has to exist, not be answered.
+    func testAWalletWithKeysAndAPinMaySyncWhileLocked() async throws {
+        try await importWallet()
+        try await storeOldPin()
+        let gate = makeGate()
+        XCTAssertTrue(gate.auth.isGated)
+
+        let allowed = await gate.maySync(pendingRestore: false)
+
+        XCTAssertTrue(allowed)
+    }
+
+    /// A held restore keeps sync off even for a wallet whose keys are there;
+    /// once `RootView` clears it, the same wallet may sync.
+    func testAHeldRestoreKeepsSyncOff() async throws {
+        try await importWallet()
+        try await storeOldPin()
+        let gate = makeGate()
+
+        let whileHeld = await gate.maySync(pendingRestore: true)
+        let afterwards = await gate.maySync(pendingRestore: false)
+
+        XCTAssertFalse(whileHeld)
+        XCTAssertTrue(afterwards)
+    }
+
+    /// An onboarding cut short before the PIN: not until the PIN is set.
+    func testAWalletWithNoPinMayNotSyncUntilThePinIsSet() async throws {
+        try await importWallet()
+        let gate = makeGate()
+        XCTAssertTrue(gate.needsSecuritySetup)
+
+        let before = await gate.maySync(pendingRestore: false)
+        try await gate.auth.setPin("222222")
+        let after = await gate.maySync(pendingRestore: false)
+
+        XCTAssertFalse(before)
+        XCTAssertTrue(after)
+    }
+
+    /// Metadata whose keys did not come across with a device backup.
+    func testAKeylessWalletMayNotSync() async throws {
+        try walletStore.save(keylessRecord)
+        try await storeOldPin()
+
+        let allowed = await makeGate().maySync(pendingRestore: false)
+
+        XCTAssertFalse(allowed)
+    }
+
+    /// Keys with no metadata: there is no record to register.
+    func testKeysWithNoRecordMayNotSync() async throws {
+        try await importWallet()
+        try walletStore.delete()
+        try await storeOldPin()
+
+        let allowed = await makeGate().maySync(pendingRestore: false)
+
+        XCTAssertFalse(allowed)
+    }
+
+    /// A launch before the first device unlock cannot look the envelope up.
+    /// No sync then; once the lookup answers, the same wallet may sync, which
+    /// is what the next reroute asks.
+    func testAnUnreadableEnvelopeWaitsAndThenSyncs() async throws {
+        try await importWallet()
+        try await storeOldPin()
+        let flaky = UnreadableKeyValueStore(service: keyService)
+        let gate = makeGate(keyStore: flaky)
+
+        let whileUnreadable = await gate.maySync(pendingRestore: false)
+        flaky.failReads(nil)
+        let afterwards = await gate.maySync(pendingRestore: false)
+
+        XCTAssertFalse(whileUnreadable)
+        XCTAssertTrue(afterwards)
+    }
+
+    /// A `wallet.json` that data protection keeps unreadable at launch: no
+    /// sync, then sync once it can be read.
+    func testAnUnreadableRecordWaitsAndThenSyncs() async throws {
+        try await importWallet()
+        try await storeOldPin()
+        let gate = makeGate()
+        try FileManager.default.setAttributes([.posixPermissions: 0o000], ofItemAtPath: walletFile.path)
+        defer { try? FileManager.default.setAttributes([.posixPermissions: 0o644], ofItemAtPath: walletFile.path) }
+
+        let whileUnreadable = await gate.maySync(pendingRestore: false)
+        try FileManager.default.setAttributes([.posixPermissions: 0o644], ofItemAtPath: walletFile.path)
+        let afterwards = await gate.maySync(pendingRestore: false)
+
+        XCTAssertFalse(whileUnreadable)
+        XCTAssertTrue(afterwards)
+    }
+
+    /// The UI tests' seeded wallet has no keys and no PIN on purpose and
+    /// still needs sync; with no record there is nothing to sync.
+    func testTheSkipHookSyncsAnyReadableRecord() async throws {
+        let empty = await makeGate(skipsOnboarding: true).maySync(pendingRestore: false)
+        XCTAssertFalse(empty)
+
+        try walletStore.save(keylessRecord)
+        let seeded = await makeGate(skipsOnboarding: true).maySync(pendingRestore: false)
+        XCTAssertTrue(seeded)
+    }
+
     // MARK: - Restoring missing keys
 
     private var keylessRecord: WalletRecord {

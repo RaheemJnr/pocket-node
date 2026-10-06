@@ -347,8 +347,8 @@ derivation) and `importPrivateKey` (validates the scalar range directly in
 Swift, since a Kotlin `IllegalArgumentException` would terminate the process
 rather than reach a `catch`). Key material is stored before metadata; a failed
 metadata write rolls the key material back rather than leaving an orphaned
-wallet `AppContainer.hasWallet` would send straight to the wallet shell with no
-way back into onboarding. `CreateWalletView.swift` and `ImportWalletView.swift`
+envelope that `LaunchGate.hasWallet` would count as a wallet on the next launch,
+with no metadata and no way back to a fresh start. `CreateWalletView.swift` and `ImportWalletView.swift`
 are the two entry screens; `PinSetupView` (see Authentication above) is what
 `Step/pinSetup` shows.
 

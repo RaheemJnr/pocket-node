@@ -70,7 +70,7 @@ struct RootView: View {
                             phase = .wallet
                             // The wallet exists only now, so this is the first
                             // moment the sync layer can be pointed at it.
-                            container.activateSync()
+                            Task { await activateSyncIfAllowed() }
                         }
                     }
                 }
@@ -234,23 +234,46 @@ struct RootView: View {
         guard phase == .wallet else { return }
         let restoreRoute = await gate.restoreRoute(pending: pendingRestore)
         guard phase == .wallet, apply(restoreRoute) else { return }
-        guard let destination = await gate.reroute(), phase == .wallet else { return }
-        route(to: destination)
+        if let destination = await gate.reroute() {
+            guard phase == .wallet else { return }
+            route(to: destination)
+            return
+        }
+        // Staying in the wallet phase. A held restore that has just cleared,
+        // or a wallet that could not be read when the phase was first
+        // entered, has not started sync yet, and nothing else would start it
+        // before the next launch.
+        await activateSyncIfAllowed()
+    }
+
+    /// Points the sync layer at the wallet if ``LaunchGate/maySync(pendingRestore:)``
+    /// allows it. Called whenever the root lands in, or stays in, the wallet
+    /// phase. `activateSync` ignores a repeat for the same wallet, so every
+    /// one of those can call it.
+    ///
+    /// Sync starts behind the lock screen on purpose: catching the chain up
+    /// does not read key material, and making the user unlock before the
+    /// node starts would waste the first minute of every launch. Android
+    /// starts its poll from the repository for the same reason.
+    ///
+    /// Once started it is not stopped if a later reroute leaves the wallet
+    /// phase: `SyncService` has no deactivate short of `shutdown()`, which
+    /// closes its database for good, and a running sync reads no keys.
+    private func activateSyncIfAllowed() async {
+        guard phase == .wallet else { return }
+        let allowed = await gate.maySync(pendingRestore: pendingRestore != nil)
+        guard allowed, phase == .wallet, pendingRestore == nil else { return }
+        container.activateSync()
     }
 
     private func route(to destination: OnboardingViewModel.LaunchDestination) {
         switch destination {
         case .wallet:
             phase = .wallet
-            // Sync starts behind the lock screen on purpose: catching the
-            // chain up does not read key material, and making the user unlock
-            // before the node starts would waste the first minute of every
-            // launch. Android starts its poll from the repository for the same
-            // reason. Only a wallet that is really there gets here: a
-            // key-less one waiting for its restore, or one whose onboarding
-            // was cut short, routes elsewhere. `activateSync` ignores a repeat,
-            // so every reroute that lands here can call it.
-            container.activateSync()
+            // A launch whose PIN or key lookup could not answer lands here
+            // too, on its way to the lock screen, so this asks rather than
+            // starting sync outright.
+            Task { await activateSyncIfAllowed() }
         case .onboarding(let step):
             let gate = gate
             // A reroute can come from a pushed screen. Onboarding replaces the

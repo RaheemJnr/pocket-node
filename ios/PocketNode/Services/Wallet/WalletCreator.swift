@@ -263,9 +263,10 @@ final class WalletCreator {
     /// Key material goes first because metadata with no envelope would be a
     /// wallet the app believes in and can never spend from. But a half-written
     /// wallet is not something to leave behind either: an orphan envelope makes
-    /// ``refuseIfWalletExists`` refuse every retry, and `AppContainer.hasWallet`
-    /// sends the next launch to the wallet shell, so the user is stuck outside
-    /// onboarding with no wallet and no way back in. So a failed metadata write
+    /// ``refuseIfWalletExists`` refuse every retry, and `LaunchGate.hasWallet`
+    /// counts it as a wallet on the next launch, so the user is stuck with a
+    /// wallet that has no metadata and no way back to a fresh start. So a
+    /// failed metadata write
     /// deletes the envelope it just wrote and reports the failure, leaving the
     /// device exactly as it was before the attempt.
     private func persist(

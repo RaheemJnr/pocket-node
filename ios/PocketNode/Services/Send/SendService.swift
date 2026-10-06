@@ -318,6 +318,9 @@ final class SendService: SendServicing {
         guard let context = makeContext() else {
             return .failure(SendError(message: "Wallet not initialized"))
         }
+        // No `lockGeneration` check around this, unlike the phrase reveal: the
+        // user approved this send, so it finishes even if the app locks while
+        // it runs, and nothing it shows is a secret (see `AuthGating`).
         guard await auth.requireAuth(reason: Self.authReason) else {
             return .failure(.cancelled)
         }

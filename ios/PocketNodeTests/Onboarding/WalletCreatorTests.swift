@@ -319,9 +319,9 @@ final class WalletCreatorTests: XCTestCase {
     /// A metadata write that fails must not leave the key envelope behind.
     ///
     /// An orphan envelope is not a cosmetic leak: `refuseIfWalletExists` would
-    /// refuse every retry and `AppContainer.hasWallet` would route the next
-    /// launch to the wallet shell, leaving the user outside onboarding with no
-    /// wallet and no way back in.
+    /// refuse every retry and `LaunchGate.hasWallet` would count it as a
+    /// wallet on the next launch, leaving the user with a wallet that has no
+    /// metadata and no way back to a fresh start.
     ///
     /// The failure is staged by putting a regular file where the metadata
     /// directory belongs, which is what `WalletStore.save` fails on.

@@ -451,8 +451,9 @@ final class SyncService: SyncStatusProviding {
 
     /// Point the sync layer at this device's wallet and get it running.
     ///
-    /// Idempotent per wallet: `RootView` calls it whenever the wallet shell
-    /// appears, and onboarding calls it again once a wallet exists.
+    /// Idempotent per wallet: `RootView` calls it (through
+    /// `AppContainer.activateSync`) whenever it lands in or stays in the
+    /// wallet phase and `LaunchGate.maySync` allows it.
     ///
     /// The order is Android's. The wallet is set first so the poll loop knows
     /// whose numbers it is reporting. Registration waits for the node, because
