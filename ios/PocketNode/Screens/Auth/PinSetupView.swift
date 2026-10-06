@@ -127,7 +127,7 @@ struct PinSetupView: View {
     }
 
     static let pinAlreadySetMessage =
-        "Could not check your PIN. Close the app and open it again."
+        "Could not check your PIN. Close the app, open it again and unlock if asked."
 
     private func save(_ pin: String) async {
         isSaving = true

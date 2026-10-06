@@ -227,8 +227,8 @@ final class AuthService {
             guard pin.hasLoadedState else {
                 // Not the user's doing: the face matched, the store did not
                 // answer. Said the same way as a PIN attempt it could not
-                // record.
-                storeMessage = Self.storeUnavailableMessage
+                // record, in the line the lock screen shows for biometrics.
+                biometricMessage = Self.storeUnavailableMessage
                 return false
             }
             guard !pin.isPermanentlyLocked, state == .locked else { return false }
@@ -245,8 +245,11 @@ final class AuthService {
     /// on Android.
     ///
     /// A store that cannot record the attempt leaves the session locked and
-    /// sets ``storeMessage`` rather than reporting a wrong PIN: nothing was
-    /// hashed, and the user has not used up a try.
+    /// sets ``storeMessage`` rather than reporting a wrong PIN. A store that
+    /// cannot be read or written cleanly (the PIN, its salt, the failure
+    /// counter or the lockout) is refused before anything is hashed, so the
+    /// user has not used up a try. A write that fails after the comparison is
+    /// reported the same way; that attempt may already have been counted.
     @discardableResult
     func unlock(pin entered: String) async -> Bool {
         storeMessage = nil
@@ -331,10 +334,14 @@ final class AuthService {
             switch await biometrics.authenticate(reason: reason) {
             case .success:
                 // As for the unlock: the permanent lock can be reached while
-                // the prompt is up, and a face does not get past it.
+                // the prompt is up, and a face does not get past it. A read
+                // that does not come back clean proves nothing either way, so
+                // the request falls through to the PIN challenge below, which
+                // fails closed on its own.
                 await pin.refresh()
-                guard pin.hasLoadedState, !pin.isPermanentlyLocked else { return false }
-                return true
+                if pin.hasLoadedState {
+                    return !pin.isPermanentlyLocked
+                }
             case .failure(.cancelled):
                 return false
             case .failure:

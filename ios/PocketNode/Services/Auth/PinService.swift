@@ -130,9 +130,13 @@ actor PinPolicyActor {
     ///   2. **Writability.** A store that takes reads but refuses writes would
     ///      let every failed attempt go unrecorded, so the counter would never
     ///      reach a lockout and the guessing would be unlimited.
-    ///   3. **Readability of the hash and salt.** A transient failure on the
-    ///      salt alone is the worst of the three: the policy would mint a
-    ///      replacement and destroy the only salt the stored hash matches.
+    ///   3. **Readability of the hash, salt, failure counter and lockout.** A
+    ///      transient failure on the salt is the worst: the policy would mint a
+    ///      replacement and destroy the only salt the stored hash matches. A
+    ///      damaged counter or lockout reads as "no failures, not locked", and
+    ///      the policy would then hash the PIN and write fresh failure state
+    ///      over it: a reset counter for a wrong PIN, and a match oracle for a
+    ///      right one, on a wallet that may be permanently locked.
     ///
     ///   A refused write after the comparison is surfaced the same way, even
     ///   for a PIN that matched, because an attempt that was not recorded is
@@ -190,7 +194,12 @@ actor PinPolicyActor {
             remainingAttempts: policy.getRemainingAttempts(),
             isLockedOut: policy.isLockedOut(),
             lockoutRemainingMs: policy.getLockoutRemainingMs(),
+            // The lockout the policy writes at the permanent lock is
+            // `Long.MAX_VALUE`, which still reads cleanly when the counter
+            // beside it does not; without this a permanently locked wallet
+            // would show a countdown of billions of seconds instead.
             isPermanentlyLocked: policy.isPermanentlyLocked()
+                || store.getLockoutUntil()?.int64Value == Int64.max
         )
         state.isReadClean = store.takeFailure() == nil
         return state

@@ -183,7 +183,7 @@ final class KeychainPinStore: NSObject, PocketNodeCore.PinStore {
     /// lockout. Probing costs two Keychain operations and turns that into a
     /// refusal to check at all.
     ///
-    /// Whether the two fields a verification depends on can actually be read.
+    /// Whether the fields a verification depends on can actually be read.
     ///
     /// The hash is obvious. The salt is the subtle one: the shared policy's
     /// `getOrCreateSalt` treats a `nil` salt as "none has been generated yet"
@@ -193,12 +193,19 @@ final class KeychainPinStore: NSObject, PocketNodeCore.PinStore {
     /// again, on this launch or any later one. Checking first turns that
     /// permanent loss into a retryable error.
     ///
-    /// - Returns: the failure, or nil when both fields read cleanly. A field
+    /// The failure counter and the lockout are the other two. Their getters
+    /// report a damaged or unreadable value as "no failures" and "no lockout",
+    /// so the policy would hash the PIN against a lockout it cannot see and
+    /// then overwrite the real failure state with its own.
+    ///
+    /// - Returns: the failure, or nil when every field read cleanly. A field
     ///   that is genuinely absent is not a failure.
     func probeCriticalReads() -> KeychainError? {
         clearFailure()
         _ = getPinHash()
         _ = getSalt()
+        _ = getFailedAttempts()
+        _ = getLockoutUntil()
         return takeFailure()
     }
 
