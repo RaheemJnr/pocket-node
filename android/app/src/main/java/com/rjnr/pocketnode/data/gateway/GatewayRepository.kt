@@ -277,27 +277,45 @@ class GatewayRepository @Inject constructor(
             walletPreferences.getCustomBlockHeight(walletId = wallet.walletId)
         } else null
 
+        var registrationFailure: Exception? = null
         try {
-            when (walletPreferences.getSyncStrategy()) {
-                // BALANCED reads per-wallet syncMode/customBlockHeight inside the loop
-                // (registerAllWalletScripts at L1749), so the locals above are unused here.
-                SyncStrategy.ALL_WALLETS, SyncStrategy.BALANCED -> registerAllWalletsQuietlyIfSuperseded()
-                SyncStrategy.ACTIVE_ONLY -> registerAccount(
-                    syncMode = walletSyncMode,
-                    customBlockHeight = walletCustomHeight,
-                    savePreference = false
-                )
+            try {
+                when (walletPreferences.getSyncStrategy()) {
+                    // BALANCED reads per-wallet syncMode/customBlockHeight inside the loop
+                    // (registerAllWalletScripts at L1749), so the locals above are unused here.
+                    SyncStrategy.ALL_WALLETS, SyncStrategy.BALANCED -> registerAllWalletsQuietlyIfSuperseded()
+                    SyncStrategy.ACTIVE_ONLY -> registerAccount(
+                        syncMode = walletSyncMode,
+                        customBlockHeight = walletCustomHeight,
+                        savePreference = false
+                    )
+                }
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                registrationFailure = e
             }
         } finally {
             // If this switch's set did not land (superseded by a newer switch,
             // or it failed), whichever wallet is active now must still end up
             // registered. No-op when its set already landed (#539). A caller
             // cancelled mid-switch (the user left the screen) cannot run it
-            // itself, so it runs on the repository scope instead.
+            // itself, so it runs on the repository scope instead. This is the
+            // switch path itself: the follow-up never re-adopts a wallet.
             if (currentCoroutineContext().isActive) {
-                ensureActiveWalletRegistered()
+                ensureActiveWalletRegistered(allowAdopt = false)
             } else {
-                ensureRegistration = scope.launch { ensureActiveWalletRegistered() }
+                ensureRegistration = scope.launch { ensureActiveWalletRegistered(allowAdopt = false) }
+            }
+        }
+        registrationFailure?.let { failure ->
+            // The retry above landed a set for the wallet we switched to: the
+            // switch succeeded, so callers must not report it as failed or
+            // skip their post-switch refresh. Otherwise the error stands.
+            if (syncCoordinator.registeredActiveWalletId == wallet.walletId) {
+                logger.w(TAG, "Switch registration failed, the retry registered the wallet: ${failure.message}")
+            } else {
+                throw failure
             }
         }
 
@@ -3473,7 +3491,7 @@ class GatewayRepository @Inject constructor(
      * path. The registration re-checks under the lock and is a no-op when
      * another registration got there first. Never throws.
      */
-    private suspend fun ensureActiveWalletRegistered() {
+    private suspend fun ensureActiveWalletRegistered(allowAdopt: Boolean = true) {
         val active = activeWalletId
         if (active.isEmpty() || syncCoordinator.registeredActiveWalletId == active) return
         if (!currentCoroutineContext().isActive) return
@@ -3487,12 +3505,25 @@ class GatewayRepository @Inject constructor(
                     // activeWalletId. After a reassignment outside a switch
                     // (startup, resolveActiveWalletType) _walletInfo may
                     // still hold the previous wallet: registering then would
-                    // put that wallet's script under this id. Skip; the
-                    // switch that loads this wallet's info registers it.
+                    // put that wallet's script under this id. Adopt the
+                    // active wallet through the normal switch path instead,
+                    // so the displayed wallet and the registered script are
+                    // both the active wallet's (#539). That path's own
+                    // follow-up passes allowAdopt = false, so this runs at
+                    // most once and cannot loop.
                     val entity = walletDao.getById(active)
-                    val expectedScript = entity?.let { keyManager.deriveWalletInfoFromEntity(it).script }
-                    if (expectedScript == null || _walletInfo.value?.script != expectedScript) {
-                        logger.w(TAG, "Active wallet's info is not loaded; not registering it here (#539)")
+                    if (entity == null) {
+                        logger.w(TAG, "Active wallet $active has no entity; not registering it (#539)")
+                        return
+                    }
+                    val expectedScript = keyManager.deriveWalletInfoFromEntity(entity).script
+                    if (_walletInfo.value?.script != expectedScript) {
+                        if (!allowAdopt) {
+                            logger.w(TAG, "Active wallet's info is not loaded; not registering it here (#539)")
+                            return
+                        }
+                        logger.i(TAG, "Loaded wallet info is not the active wallet's; adopting it (#539)")
+                        onActiveWalletChanged(entity)
                         return
                     }
                     val mode = walletPreferences.getSyncMode(walletId = active)
