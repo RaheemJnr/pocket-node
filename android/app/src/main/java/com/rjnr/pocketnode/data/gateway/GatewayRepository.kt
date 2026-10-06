@@ -2908,14 +2908,41 @@ class GatewayRepository @Inject constructor(
                 // "Confirming…" (the overlay paints it) rather than vanishing
                 // or, worse, reappearing as an unlockable outside-window row
                 // for the minutes between broadcast and the tx being scored.
-                CachedDaoCellFate.UNLOCK_IN_FLIGHT -> confirming += entity.toCachedDeposit()
-                CachedDaoCellFate.OUTSIDE_WINDOW -> outsideWindow += entity.toOutsideWindowDeposit()
+                CachedDaoCellFate.UNLOCK_IN_FLIGHT ->
+                    confirming += withFreshCompensation(entity).toCachedDeposit()
+                CachedDaoCellFate.OUTSIDE_WINDOW ->
+                    outsideWindow += withFreshCompensation(entity).toOutsideWindowDeposit()
             }
         }
         if (outsideWindow.isNotEmpty()) {
             logger.i(TAG, "DAO merge: ${outsideWindow.size} cached deposit(s) predate sync window (start=$windowStart)")
         }
         return live + confirming + outsideWindow
+    }
+
+    /**
+     * #550: a cached-only DAO row with its compensation recomputed from cached
+     * headers, written back when it changed. Live rows are recomputed by every
+     * scan; a row the scan no longer returns would otherwise keep whatever was
+     * stored, including amounts from before the occupied-capacity fix. When the
+     * headers are not cached the stored row is returned unchanged.
+     *
+     * The write-back updates the compensation column alone and skips a
+     * COMPLETED row. A whole-row upsert of [entity] (read earlier in the merge)
+     * would race #529's retirement and restore a claimed deposit's old status.
+     */
+    private suspend fun withFreshCompensation(
+        entity: com.rjnr.pocketnode.data.database.entity.DaoCellEntity,
+    ): com.rjnr.pocketnode.data.database.entity.DaoCellEntity {
+        val fresh = runCatching {
+            daoDepositReader.recomputeCachedCompensation(entity) { hash ->
+                daoSyncManager.getCachedHeader(hash)?.dao
+            }
+        }.getOrNull() ?: return entity
+        if (fresh == entity.compensation) return entity
+        runCatching { daoSyncManager.updateCompensation(entity, fresh) }
+            .onFailure { logger.w(TAG, "DAO compensation write-back failed: ${it.message}") }
+        return entity.copy(compensation = fresh)
     }
 
     /**
