@@ -241,6 +241,108 @@ final class BackupViewModelTests: XCTestCase {
         XCTAssertEqual(vm.step, .success, "success is terminal; backgrounding must not re-arm the gate")
     }
 
+    // MARK: - A reveal that outlives the screen
+
+    /// The key read suspends on a Face ID or passcode prompt. If the app goes
+    /// to the background meanwhile, `onBackgrounded` finds the gate step and
+    /// has nothing to wipe, so the read landing afterwards must be dropped
+    /// rather than put the phrase back on screen.
+    func testARevealThatFinishesAfterBackgroundingIsDropped() async {
+        let (vm, reader, _) = makeViewModel(isOnboarding: true, hasPin: { false })
+        reader.whileLoading = { @MainActor in vm.onBackgrounded() }
+
+        await vm.reveal()
+
+        XCTAssertEqual(reader.loadCount, 1)
+        XCTAssertEqual(vm.step, .gate)
+        XCTAssertTrue(vm.words.isEmpty, "the phrase never reaches the view model")
+        XCTAssertTrue(vm.quiz.isEmpty)
+        XCTAssertFalse(vm.isRevealing)
+    }
+
+    /// Same race through the session lock rather than the screen's own
+    /// background hook: the lock replaces the screen, so only the lock
+    /// generation can tell the reveal it is stale.
+    func testARevealThatFinishesAfterASessionLockIsDropped() async {
+        let gate = StubAuthGate()
+        let (vm, reader, _) = makeViewModel(auth: gate)
+        reader.whileLoading = { @MainActor in gate.lockGeneration += 1 }
+
+        await vm.reveal()
+
+        XCTAssertEqual(vm.step, .gate)
+        XCTAssertTrue(vm.words.isEmpty)
+        XCTAssertTrue(vm.quiz.isEmpty)
+    }
+
+    /// A grant that arrives after the app went to the background (a biometric
+    /// success racing the scene change) must not go on to decrypt at all.
+    func testAGrantThatArrivesAfterBackgroundingDoesNotReadTheKey() async {
+        let gate = StubAuthGate()
+        let (vm, reader, _) = makeViewModel(auth: gate)
+        gate.whilePrompting = { vm.onBackgrounded() }
+
+        await vm.reveal()
+
+        XCTAssertEqual(gate.requestCount, 1)
+        XCTAssertEqual(reader.loadCount, 0, "nothing is decrypted for a stale grant")
+        XCTAssertEqual(vm.step, .gate)
+        XCTAssertTrue(vm.words.isEmpty)
+    }
+
+    func testAGrantThatArrivesAfterASessionLockDoesNotReadTheKey() async {
+        let gate = StubAuthGate()
+        let (vm, reader, _) = makeViewModel(auth: gate)
+        gate.whilePrompting = { gate.lockGeneration += 1 }
+
+        await vm.reveal()
+
+        XCTAssertEqual(reader.loadCount, 0)
+        XCTAssertEqual(vm.step, .gate)
+    }
+
+    /// Only events during the reveal count: a background that came and went
+    /// before the user tapped Reveal leaves the next reveal working.
+    func testARevealStartedAfterAnEarlierBackgroundStillShows() async {
+        let gate = StubAuthGate()
+        let (vm, _, _) = makeViewModel(auth: gate)
+        vm.onBackgrounded()
+        gate.lockGeneration += 1
+
+        await vm.reveal()
+
+        XCTAssertEqual(vm.step, .display)
+        XCTAssertEqual(vm.words.count, 12)
+    }
+
+    /// A dropped reveal leaves the gate usable: tapping Reveal again works.
+    func testARevealCanBeRetriedAfterOneWasDropped() async {
+        let (vm, reader, _) = makeViewModel(isOnboarding: true, hasPin: { false })
+        reader.whileLoading = { @MainActor in vm.onBackgrounded() }
+        await vm.reveal()
+        XCTAssertEqual(vm.step, .gate)
+
+        reader.whileLoading = nil
+        await vm.reveal()
+
+        XCTAssertEqual(vm.step, .display)
+        XCTAssertEqual(vm.words.count, 12)
+    }
+
+    /// A read that fails after the app went to the background is just as
+    /// stale as one that succeeds: the user comes back to a clean gate, not an
+    /// error about a reveal they are no longer looking at.
+    func testAFailedReadAfterBackgroundingSetsNoError() async {
+        let (vm, reader, _) = makeViewModel(isOnboarding: true, hasPin: { false })
+        reader.set(result: .failure(StubWalletKeyReaderError.unreadable))
+        reader.whileLoading = { @MainActor in vm.onBackgrounded() }
+
+        await vm.reveal()
+
+        XCTAssertEqual(vm.step, .gate)
+        XCTAssertNil(vm.errorMessage)
+    }
+
     // MARK: - Screenshot mitigation (M1)
 
     func testOnScreenshotTakenWipesWordsReturnsToGateAndSetsAnInfoMessage() async {

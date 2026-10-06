@@ -1,6 +1,7 @@
 package com.rjnr.pocketnode.data.gateway
 
 import com.nervosnetwork.ckblightclient.LightClientNative
+import com.rjnr.pocketnode.data.database.entity.DaoCellEntity
 import com.rjnr.pocketnode.core.log.Logger
 import com.rjnr.pocketnode.data.gateway.models.DaoCellStatus
 import com.rjnr.pocketnode.data.gateway.models.DaoConstants
@@ -239,10 +240,8 @@ class DaoDepositReader @Inject constructor(
                     depositBlockHash = origDepositHeader.hash
                     depositEpoch = EpochInfo.fromHex(origDepositHeader.epoch)
                     depositTimestampMs = origDepositHeader.timestamp.removePrefix("0x").toLong(16)
-                    val maxWithdraw = LightClientNative.nativeCalculateMaxWithdraw(
-                        origDepositHeader.dao, cellBlockHeader.dao, capacityShannons, 61_00000000L
-                    )
-                    if (maxWithdraw >= 0) compensation = maxWithdraw - capacityShannons
+                    compensationFor(origDepositHeader.dao, cellBlockHeader.dao, capacityShannons)
+                        ?.let { compensation = it }
                     val sinceHex = LightClientNative.nativeCalculateUnlockEpoch(
                         origDepositHeader.epoch, cellBlockHeader.epoch
                     )
@@ -259,10 +258,8 @@ class DaoDepositReader @Inject constructor(
                 val tipJson = LightClientNative.nativeGetTipHeader()
                 if (tipJson != null) {
                     val tipHeader = json.decodeFromString<JniHeaderView>(tipJson)
-                    val maxWithdraw = LightClientNative.nativeCalculateMaxWithdraw(
-                        cellBlockHeader.dao, tipHeader.dao, capacityShannons, 61_00000000L
-                    )
-                    if (maxWithdraw >= 0) compensation = maxWithdraw - capacityShannons
+                    compensationFor(cellBlockHeader.dao, tipHeader.dao, capacityShannons)
+                        ?.let { compensation = it }
                 }
             }
         } else {
@@ -358,6 +355,55 @@ class DaoDepositReader @Inject constructor(
             apc = apc,
             consumedDepositOutPoints = consumedDepositOutPoints,
         )
+    }
+
+    /**
+     * Compensation a deposit of [capacityShannons] earns between the block
+     * whose DAO field is [depositDao] and the one whose DAO field is [endDao],
+     * or null when the bridge refuses the inputs.
+     *
+     * The occupied part is [DaoConstants.DEPOSIT_OCCUPIED_SHANNONS], the 102 CKB
+     * a deposit cell takes up (#550). It earns no compensation, so passing the
+     * 61 CKB of a plain secp256k1 cell here overstated every amount by
+     * (C - 61) / (C - 102). The unlock transaction already used 102.
+     */
+    private fun compensationFor(depositDao: String, endDao: String, capacityShannons: Long): Long? {
+        val maxWithdraw = LightClientNative.nativeCalculateMaxWithdraw(
+            depositDao, endDao, capacityShannons, DaoConstants.DEPOSIT_OCCUPIED_SHANNONS
+        )
+        return if (maxWithdraw >= 0) maxWithdraw - capacityShannons else null
+    }
+
+    /**
+     * Fresh compensation for a cached dao_cells row the live scan no longer
+     * returns (outside the sync window, or mid-unlock), or null when it cannot
+     * be worked out without the network.
+     *
+     * Rows written before #550 carry an amount computed with the wrong occupied
+     * capacity, and a cached-only row is never rewritten by a scan, so without
+     * this a withdrawing position would show the inflated figure for good.
+     * Headers come from [cachedDao] only (the header cache the original scan
+     * filled), so this never waits on peers. A withdrawing row is measured to
+     * its withdraw block, a deposited row to the current tip, the same ends the
+     * live scan uses.
+     */
+    suspend fun recomputeCachedCompensation(
+        entity: DaoCellEntity,
+        cachedDao: suspend (blockHash: String) -> String?,
+    ): Long? {
+        if (entity.depositBlockHash.isEmpty()) return null
+        val depositDao = cachedDao(entity.depositBlockHash) ?: return null
+        val withdrawHash = entity.withdrawBlockHash
+        val endDao = when {
+            withdrawHash != null -> cachedDao(withdrawHash) ?: return null
+            // Withdrawing, but its header was never resolved: the tip would be
+            // the wrong end, so leave the stored value alone.
+            entity.withdrawBlockNumber != null -> return null
+            else -> LightClientNative.nativeGetTipHeader()
+                ?.let { json.decodeFromString<JniHeaderView>(it).dao }
+                ?: return null
+        }
+        return compensationFor(depositDao, endDao, entity.capacity)?.coerceAtLeast(0L)
     }
 
     companion object {

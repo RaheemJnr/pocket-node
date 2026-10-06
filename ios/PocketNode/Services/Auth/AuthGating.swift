@@ -15,6 +15,9 @@ import Foundation
 @MainActor
 protocol AuthGating: AnyObject {
     func requireAuth(reason: String) async -> Bool
+    /// Bumped on every session lock. A reveal records it before prompting and
+    /// drops its result if it moved, so a phrase never lands behind the lock.
+    var lockGeneration: Int { get }
 }
 
 extension AuthService: AuthGating {}

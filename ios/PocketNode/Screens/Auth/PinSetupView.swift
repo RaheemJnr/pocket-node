@@ -116,6 +116,19 @@ struct PinSetupView: View {
         }
     }
 
+    /// A refused write can be retried. `pinAlreadySet` is also what a PIN
+    /// store that cannot be read yet produces, so its copy does not claim a
+    /// PIN exists, and points at the relaunch that reads the store again.
+    static func message(for error: Error) -> String {
+        if error as? AuthServiceError == .pinAlreadySet {
+            return pinAlreadySetMessage
+        }
+        return "Could not save your PIN. Try again."
+    }
+
+    static let pinAlreadySetMessage =
+        "Could not check your PIN. Close the app, open it again and unlock if asked."
+
     private func save(_ pin: String) async {
         isSaving = true
         defer { isSaving = false }
@@ -125,7 +138,7 @@ struct PinSetupView: View {
             first = ""
             digits = ""
             errorToken += 1
-            errorMessage = "Could not save your PIN. Try again."
+            errorMessage = Self.message(for: error)
             step = .create
             return
         }

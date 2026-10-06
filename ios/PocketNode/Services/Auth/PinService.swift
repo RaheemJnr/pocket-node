@@ -47,6 +47,11 @@ struct PinState: Equatable, Sendable {
     var isLockedOut: Bool
     var lockoutRemainingMs: Int64
     var isPermanentlyLocked: Bool
+    /// False when any Keychain read behind this snapshot failed. The lockout
+    /// getters report a failed read as "no failures" (the shared store's
+    /// contract has no error channel), so a dirty snapshot can say "not
+    /// locked" about a wallet that is permanently locked.
+    var isReadClean: Bool = true
 
     /// True only when a PIN is known to be stored. An unreadable store is not
     /// "no PIN", so callers deciding whether to gate must use ``presence``.
@@ -141,9 +146,13 @@ actor PinPolicyActor {
     ///   2. **Writability.** A store that takes reads but refuses writes would
     ///      let every failed attempt go unrecorded, so the counter would never
     ///      reach a lockout and the guessing would be unlimited.
-    ///   3. **Readability of the hash and salt.** A transient failure on the
-    ///      salt alone is the worst of the three: the policy would mint a
-    ///      replacement and destroy the only salt the stored hash matches.
+    ///   3. **Readability of the hash, salt, failure counter and lockout.** A
+    ///      transient failure on the salt is the worst: the policy would mint a
+    ///      replacement and destroy the only salt the stored hash matches. A
+    ///      damaged counter or lockout reads as "no failures, not locked", and
+    ///      the policy would then hash the PIN and write fresh failure state
+    ///      over it: a reset counter for a wrong PIN, and a match oracle for a
+    ///      right one, on a wallet that may be permanently locked.
     ///
     ///   A refused write after the comparison is surfaced the same way, even
     ///   for a PIN that matched, because an attempt that was not recorded is
@@ -195,13 +204,21 @@ actor PinPolicyActor {
     }
 
     func snapshot() -> PinState {
-        PinState(
+        store.clearFailure()
+        var state = PinState(
             presence: store.presence(),
             remainingAttempts: policy.getRemainingAttempts(),
             isLockedOut: policy.isLockedOut(),
             lockoutRemainingMs: policy.getLockoutRemainingMs(),
+            // The lockout the policy writes at the permanent lock is
+            // `Long.MAX_VALUE`, which still reads cleanly when the counter
+            // beside it does not; without this a permanently locked wallet
+            // would show a countdown of billions of seconds instead.
             isPermanentlyLocked: policy.isPermanentlyLocked()
+                || store.getLockoutUntil()?.int64Value == Int64.max
         )
+        state.isReadClean = store.takeFailure() == nil
+        return state
     }
 }
 
@@ -227,6 +244,15 @@ final class PinService {
     /// Latest known failure state. Refreshed after every operation, and by
     /// ``refresh()`` while a lockout countdown is on screen.
     private(set) var state: PinState
+
+    /// True only while the latest ``refresh()`` read the failure state
+    /// cleanly. Before the first one, ``state``'s lockout fields are the
+    /// placeholder the initializer seeds (no failures, not locked); after a
+    /// read the Keychain refused, they are whatever the getters fell back to,
+    /// which is also "no failures". Neither is what is stored, so anything
+    /// that relaxes a gate on them, such as offering biometrics, must wait for
+    /// this.
+    private(set) var hasLoadedState = false
 
     private let policy: PinPolicyActor
 
@@ -255,7 +281,9 @@ final class PinService {
         self.policy = PinPolicyActor(keychain: keychain, cost: cost, clock: clock)
         // Seeded synchronously from a non-prompting Keychain lookup so the lock
         // gate knows on the first frame whether to gate, instead of flashing
-        // the wallet while an async read lands.
+        // the wallet while an async read lands. Only the presence is real
+        // here: the lockout fields are placeholders until the first
+        // `refresh()`, which is what `hasLoadedState` records.
         self.state = PinState(
             presence: KeychainPinStore.pinPresence(keychain: keychain),
             remainingAttempts: PinPolicy.companion.MAX_ATTEMPTS,
@@ -269,6 +297,7 @@ final class PinService {
     /// lockout countdown can call it on a timer.
     func refresh() async {
         state = await policy.snapshot()
+        hasLoadedState = state.isReadClean
     }
 
     /// Stores `pin`, clearing any previous failure state.

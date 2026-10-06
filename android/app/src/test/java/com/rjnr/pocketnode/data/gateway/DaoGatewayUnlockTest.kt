@@ -11,6 +11,8 @@ import com.rjnr.pocketnode.data.database.entity.TransactionEntity
 import com.rjnr.pocketnode.data.gateway.models.DaoCellStatus
 import com.rjnr.pocketnode.data.gateway.models.DaoDeposit
 import com.rjnr.pocketnode.data.gateway.models.JniHeaderView
+import com.rjnr.pocketnode.data.gateway.models.JniTransactionWithStatus
+import com.rjnr.pocketnode.data.gateway.models.JniTxStatus
 import com.rjnr.pocketnode.data.gateway.models.NetworkType
 import com.rjnr.pocketnode.data.gateway.models.OutPoint
 import com.rjnr.pocketnode.data.gateway.models.Script
@@ -271,6 +273,44 @@ class DaoGatewayUnlockTest {
             "the marker must survive to carry a later verdict",
             db.pendingDaoUnlockDao().getByWalletAndNetwork(walletId, network.name).isEmpty(),
         )
+    }
+
+    @Test
+    fun `compensation write-back cannot resurrect a row retired while it was recomputed`() = runTest {
+        // #550 x #529: the merge reads the cached row, recomputes its
+        // compensation, then writes it back. If the unlock's retirement lands
+        // in between, the write-back must not restore the old status.
+        seedCachedWithdrawingRow()
+        markUnlockInFlight(txStatus = "PENDING")
+        coEvery { depositReader.list(any(), any(), any()) } returns emptyList()
+        coEvery { depositReader.recomputeCachedCompensation(any(), any()) } coAnswers {
+            daoSyncManager.updateStatus(
+                withdrawingOutPoint.txHash, withdrawingOutPoint.index, DaoCellStatus.COMPLETED.name,
+            )
+            5_000L
+        }
+
+        gateway.getDaoDeposits(ctx()).getOrThrow()
+
+        val row = daoSyncManager.getByOutPoint(withdrawingOutPoint.txHash, withdrawingOutPoint.index)
+        assertEquals(DaoCellStatus.COMPLETED.name, row?.status)
+        assertEquals("a retired row keeps its stored compensation", 0L, row?.compensation)
+    }
+
+    @Test
+    fun `compensation of a cached-only row is recomputed and written back`() = runTest {
+        // Outside the sync window, no unlock in flight: the stored amount
+        // (computed before #550 with 61 CKB occupied) is replaced.
+        seedCachedWithdrawingRow()
+        coEvery { depositReader.list(any(), any(), any()) } returns emptyList()
+        coEvery { depositReader.recomputeCachedCompensation(any(), any()) } returns 7_000L
+
+        val deposits = gateway.getDaoDeposits(ctx()).getOrThrow()
+
+        assertEquals(7_000L, deposits.single().compensation)
+        val row = daoSyncManager.getByOutPoint(withdrawingOutPoint.txHash, withdrawingOutPoint.index)
+        assertEquals(7_000L, row?.compensation)
+        assertEquals(DaoCellStatus.UNLOCKABLE.name, row?.status)
     }
 
     @Test
@@ -679,25 +719,88 @@ class DaoGatewayUnlockTest {
 }
 
 /**
- * Stands in for the two static natives the unlock path calls directly on
- * [LightClientNative] in [DaoGatewayUnlockTest]. Every native not named here
- * keeps Robolectric's default (null / 0).
+ * Stands in for the static natives [DaoGatewayUnlockTest] and
+ * [DaoDepositReaderCompensationTest] reach on [LightClientNative] directly.
+ * Every native not named here keeps Robolectric's default (null / 0).
+ *
+ * LightClientNative is a Kotlin `object`, so Robolectric binds its shadow once
+ * per sandbox: both suites share this one class rather than each declaring a
+ * second `@Implements(LightClientNative::class)`.
  */
 @Implements(LightClientNative::class)
 class DaoUnlockShadowLightClientNative {
 
-    /** Deposit plus a fixed compensation, enough for the unlock path to build. */
+    @Implementation
+    fun nativeGetTipHeader(): String? = tipHeader
+
+    /**
+     * Deposit plus a fixed compensation, enough for the unlock path to build.
+     * Every call is recorded in [maxWithdrawCalls] so #550's
+     * DaoDepositReaderCompensationTest can check the occupied capacity passed.
+     */
     @Implementation
     fun nativeCalculateMaxWithdraw(
-        @Suppress("UNUSED_PARAMETER") depositHeaderDaoHex: String,
-        @Suppress("UNUSED_PARAMETER") withdrawHeaderDaoHex: String,
+        depositHeaderDaoHex: String,
+        withdrawHeaderDaoHex: String,
         depositCapacity: Long,
-        @Suppress("UNUSED_PARAMETER") occupiedCapacity: Long,
-    ): Long = depositCapacity + 1_000L
+        occupiedCapacity: Long,
+    ): Long {
+        maxWithdrawCalls += MaxWithdrawCall(depositHeaderDaoHex, withdrawHeaderDaoHex, occupiedCapacity)
+        return depositCapacity + FIXED_COMPENSATION
+    }
 
     @Implementation
     fun nativeCalculateUnlockEpoch(
         @Suppress("UNUSED_PARAMETER") depositEpochHex: String,
         @Suppress("UNUSED_PARAMETER") withdrawEpochHex: String,
     ): String? = "0x20000000000000"
+
+    /**
+     * The transaction as the chain reports it, or null, which is the bridge's
+     * own answer when the node does not know the transaction.
+     */
+    @Implementation
+    fun nativeGetTransaction(hash: String): String? = transactionOverride?.also { transactionQueries += hash }
+        ?: chainStatus.also { transactionQueries += hash }?.let {
+            Json.encodeToString(
+                JniTransactionWithStatus(
+                    txStatus = JniTxStatus(
+                        status = it,
+                        blockHash = if (it == "committed") "0x" + "ee".repeat(32) else null,
+                    )
+                )
+            )
+        }
+
+    /** A raw JNI cells page, for DaoDepositReaderCompensationTest (#550). Null elsewhere. */
+    @Implementation
+    fun nativeGetCells(
+        @Suppress("UNUSED_PARAMETER") searchKeyJson: String,
+        @Suppress("UNUSED_PARAMETER") order: String,
+        @Suppress("UNUSED_PARAMETER") limit: Int,
+        @Suppress("UNUSED_PARAMETER") cursor: String?,
+    ): String? = cellsPage
+
+    data class MaxWithdrawCall(val depositDao: String, val endDao: String, val occupied: Long)
+
+    companion object {
+        const val FIXED_COMPENSATION = 1_000L
+
+        var tipHeader: String? = null
+        var chainStatus: String? = null
+        var cellsPage: String? = null
+
+        /**
+         * When set, nativeGetTransaction answers every hash with this JSON
+         * instead of the [chainStatus]-built one (#550 needs a phase-1 tx
+         * carrying header_deps). Null elsewhere.
+         */
+        var transactionOverride: String? = null
+
+        /** Every max-withdraw calculation asked of the bridge. */
+        val maxWithdrawCalls = mutableListOf<MaxWithdrawCall>()
+
+        /** Every transaction asked of the chain. */
+        val transactionQueries = mutableListOf<String>()
+    }
 }

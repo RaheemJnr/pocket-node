@@ -30,7 +30,7 @@ export default function PrivacyPage() {
             Privacy Policy
           </h1>
           <p className="mt-4 font-doto text-sm font-semibold uppercase tracking-wide text-white/60">
-            Last updated: 2026-05-21
+            Last updated: 2026-09-30
           </p>
         </div>
       </header>
@@ -77,8 +77,8 @@ export default function PrivacyPage() {
 
         <Section title="Network communications">
           <p>
-            The App communicates only with the decentralized Nervos CKB
-            peer-to-peer network via the embedded light client. This is
+            All blockchain traffic goes directly to the decentralized Nervos
+            CKB peer-to-peer network via the embedded light client. This is
             necessary to:
           </p>
           <ul>
@@ -93,6 +93,32 @@ export default function PrivacyPage() {
             data). Your IP address may be visible to CKB network peers, as is
             standard for any peer-to-peer blockchain client.
           </p>
+        </Section>
+
+        <Section title="Optional network services">
+          <p>
+            Apart from the CKB network, the App can contact two outside
+            services. Both are listed in Settings under Network services, and
+            each has its own switch. They are on by default and you can turn
+            either off at any time.
+          </p>
+          <ul>
+            <li>
+              <strong>Fiat price (CoinGecko and Binance):</strong> fetches the
+              CKB price so your balance can be shown in USD. The request
+              contains no wallet data. These providers see your IP address.
+              With the switch off, no request is made and your balance is
+              shown in CKB only.
+            </li>
+            <li>
+              <strong>Update checks (GitHub):</strong> checks for a new
+              release when the App opens. The request contains no wallet data.
+              GitHub sees your IP address and the standard details your phone
+              sends with any web request. This check is only in the version
+              downloaded from GitHub or pocket-node.com; the Google Play version
+              updates through the Play Store and does not make it.
+            </li>
+          </ul>
         </Section>
 
         <Section title="Permissions">
@@ -160,9 +186,9 @@ export default function PrivacyPage() {
             <li>Social media SDKs</li>
           </ul>
           <p>
-            The only external network communication is with the decentralized
-            CKB peer-to-peer network, which is a core requirement for the
-            wallet to function.
+            Apart from the CKB peer-to-peer network, which the wallet needs to
+            function, the only outside services the App contacts are the two
+            optional ones described under Optional network services above.
           </p>
         </Section>
 

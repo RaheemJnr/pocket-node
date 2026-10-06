@@ -89,6 +89,72 @@ final class WalletStore {
             withIntermediateDirectories: true
         )
         try data.write(to: fileURL, options: [.atomic, .completeFileProtection])
+        // An atomic write replaces the file, dropping the flag with the old
+        // one, so it is set again after every save.
+        excludeFromBackup()
+    }
+
+    /// Keeps `wallet.json` out of iCloud and Finder backups.
+    ///
+    /// The key material it describes is `ThisDeviceOnly` and never leaves the
+    /// device, so a backup restored onto another phone would bring the address
+    /// back without the keys: a wallet the app shows but cannot use. Leaving
+    /// the metadata out makes a restored device start from onboarding instead.
+    /// Backups taken before this existed still carry the file, which is why
+    /// `LaunchGate` also detects a wallet whose keys are missing.
+    ///
+    /// The flag goes on the directory as well as the file, and unlike the file
+    /// the directory is never replaced, so its flag survives every atomic
+    /// save; the file's own flag is belt and braces. The directory is the
+    /// app's own folder (`AppDirectories`), so the flag covers everything in
+    /// it: the wallet metadata (`wallet.json`, and a set-aside
+    /// `wallet.unreadable.json` if there ever was one) and the light client's
+    /// per-network stores, which are chain data the node rebuilds and which
+    /// `AppDirectories` excludes on their own as well. Called at launch too,
+    /// so existing installs are covered before their next save.
+    ///
+    /// Best effort: a failure only means the file may be backed up, which is
+    /// the state it was already in, and the key-less check covers that case.
+    func excludeFromBackup() {
+        var values = URLResourceValues()
+        values.isExcludedFromBackup = true
+        var directory = fileURL.deletingLastPathComponent()
+        try? directory.setResourceValues(values)
+        guard fileManager.fileExists(atPath: fileURL.path) else { return }
+        var url = fileURL
+        try? url.setResourceValues(values)
+    }
+
+    /// Whether `wallet.json` is currently excluded from backups. For tests.
+    var isExcludedFromBackup: Bool {
+        (try? fileURL.resourceValues(forKeys: [.isExcludedFromBackupKey]))?.isExcludedFromBackup ?? false
+    }
+
+    /// True when `wallet.json` can be read but does not decode as a record:
+    /// corrupt rather than merely locked. A file the data-protection class
+    /// keeps unreadable (a launch while the device is locked) does not count,
+    /// since nothing is known about its contents.
+    var hasUndecodableRecord: Bool {
+        guard let data = try? Data(contentsOf: fileURL) else { return false }
+        return (try? JSONDecoder().decode(WalletRecord.self, from: data)) == nil
+    }
+
+    /// Moves an undecodable `wallet.json` aside as `wallet.unreadable.json`,
+    /// replacing any earlier one, so the device reads as having no wallet
+    /// metadata. Kept rather than deleted, for diagnosis. Callers decide when
+    /// this is safe (see `LaunchGate`).
+    func setAsideUndecodableRecord() throws {
+        let aside = fileURL.deletingLastPathComponent().appendingPathComponent("wallet.unreadable.json")
+        if fileManager.fileExists(atPath: aside.path) {
+            try fileManager.removeItem(at: aside)
+        }
+        try fileManager.moveItem(at: fileURL, to: aside)
+    }
+
+    /// Whether the directory holding `wallet.json` is excluded. For tests.
+    var isDirectoryExcludedFromBackup: Bool {
+        let directory = fileURL.deletingLastPathComponent()
+        return (try? directory.resourceValues(forKeys: [.isExcludedFromBackupKey]))?.isExcludedFromBackup ?? false
     }
 
     func delete() throws {
