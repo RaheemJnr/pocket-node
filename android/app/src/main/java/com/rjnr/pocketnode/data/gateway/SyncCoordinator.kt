@@ -304,8 +304,12 @@ class SyncCoordinator @Inject constructor(
     var registeredActiveWalletId: String? = null
         private set
 
-    /** True while a registration or a poll's progress write holds the lock. Test seam. */
-    internal val isRegistrationLocked: Boolean get() = registrationMutex.isLocked
+    /**
+     * True while a registration or a poll's progress write holds the lock.
+     * Visible for testing only (public so app tests can read it once this
+     * class lives in :shared); production code must not branch on it.
+     */
+    val isRegistrationLocked: Boolean get() = registrationMutex.isLocked
 
     /**
      * Handle a [withRegistrationLock] block uses to set scripts while it
@@ -869,7 +873,12 @@ class SyncCoordinator @Inject constructor(
             val ok = setScriptsLocked(
                 scriptStatuses, walletIds, LightClientNative.CMD_SET_SCRIPTS_ALL, ctx.network,
                 forActiveWallet = activeWalletId,
-                onLanded = { landed = true },
+                // At the moment the set lands, before any bookkeeping write
+                // that may throw or be cancelled (#539).
+                onLanded = {
+                    landed = true
+                    ctx.onScriptsRegistered()
+                },
             )
             if (!ok) throw Exception("Failed to set scripts for all wallets")
         } finally {
@@ -886,8 +895,6 @@ class SyncCoordinator @Inject constructor(
         // #382: persist each candidate's scan-from block so the reconciler's
         // EMPTY coverage gate can actually pass (it is inert at 0).
         recordCandidateRegistrations(registrations)
-
-        ctx.onScriptsRegistered()
     }
 
     companion object {

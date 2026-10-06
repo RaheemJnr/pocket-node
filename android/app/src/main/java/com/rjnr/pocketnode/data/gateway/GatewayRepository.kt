@@ -163,6 +163,7 @@ class GatewayRepository @Inject constructor(
         logger.e(TAG, "Uncaught exception in GatewayRepository scope; suppressed to avoid process crash", e)
     }
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO + coroutineExceptionHandler)
+    @Volatile
     private var activeWalletId: String = walletPreferences.getActiveWalletId() ?: ""
     private var activeWalletType: String = KeyManager.WALLET_TYPE_MNEMONIC
 
@@ -290,8 +291,14 @@ class GatewayRepository @Inject constructor(
         } finally {
             // If this switch's set did not land (superseded by a newer switch,
             // or it failed), whichever wallet is active now must still end up
-            // registered. No-op when its set already landed (#539).
-            ensureActiveWalletRegistered()
+            // registered. No-op when its set already landed (#539). A caller
+            // cancelled mid-switch (the user left the screen) cannot run it
+            // itself, so it runs on the repository scope instead.
+            if (currentCoroutineContext().isActive) {
+                ensureActiveWalletRegistered()
+            } else {
+                ensureRegistration = scope.launch { ensureActiveWalletRegistered() }
+            }
         }
 
         // Emit cached data immediately
@@ -604,7 +611,21 @@ class GatewayRepository @Inject constructor(
                 LightClientNative.CMD_SET_SCRIPTS_ALL,
                 currentNetwork,
                 forActiveWallet = walletId,
-                onLanded = { landed = true },
+                // The moment the light client took the set (non-suspending,
+                // before any bookkeeping write that may throw or be
+                // cancelled): the prefs must describe what it now runs (#539).
+                onLanded = {
+                    landed = true
+                    _isRegistered.value = true
+                    if (savePreference) {
+                        val wId = walletId.ifEmpty { null }
+                        walletPreferences.setSyncMode(syncMode, walletId = wId)
+                        if (syncMode == SyncMode.CUSTOM) {
+                            walletPreferences.setCustomBlockHeight(customBlockHeight, walletId = wId)
+                        }
+                        walletPreferences.setInitialSyncCompleted(true, walletId = wId)
+                    }
+                },
             )
             if (!result) throw Exception("Failed to set scripts")
         } finally {
@@ -614,16 +635,6 @@ class GatewayRepository @Inject constructor(
         // #382: record each candidate's scan-from block — the reconciler's
         // EMPTY coverage gate stays inert while registeredFromBlock is 0.
         syncCoordinator.recordCandidateRegistrations(candidateRegistrations)
-
-        _isRegistered.value = true
-        if (savePreference) {
-            val wId = walletId.ifEmpty { null }
-            walletPreferences.setSyncMode(syncMode, walletId = wId)
-            if (syncMode == SyncMode.CUSTOM) {
-                walletPreferences.setCustomBlockHeight(customBlockHeight, walletId = wId)
-            }
-            walletPreferences.setInitialSyncCompleted(true, walletId = wId)
-        }
         }  // end withRegistrationLock
         }  // end withContext(Dispatchers.IO)
     }
@@ -682,14 +693,17 @@ class GatewayRepository @Inject constructor(
                             // the choice atomically with the set.
                             beforeSetScripts = {
                                 if (activeWalletId != walletId) throw ActiveWalletChangedException()
+                                // Snapshot, then flag, then write: a write
+                                // that throws or is cancelled midway is still
+                                // undone (the rollback is idempotent).
                                 previousSyncBlock = getWalletSyncBlock(walletId)
+                                persisted = true
                                 setWalletSyncBlock(walletId, 0L)
                                 walletPreferences.setSyncMode(syncMode, walletId = wId)
                                 if (syncMode == SyncMode.CUSTOM) {
                                     walletPreferences.setCustomBlockHeight(customBlockHeight, walletId = wId)
                                 }
                                 walletPreferences.setInitialSyncCompleted(true, walletId = wId)
-                                persisted = true
                             },
                             // Still under the mutex, and only when the set
                             // did not land: undo the writes above before any
@@ -721,9 +735,10 @@ class GatewayRepository @Inject constructor(
                     syncMode, customBlockHeight, savePreference = true, forceResync = true,
                     expectedWalletId = walletId,
                     beforeSet = {
+                        // Snapshot, then flag, then write (see above).
                         previousSyncBlock = getWalletSyncBlock(walletId)
-                        setWalletSyncBlock(walletId, 0L)
                         zeroed = true
+                        setWalletSyncBlock(walletId, 0L)
                     },
                     onNotLanded = {
                         if (zeroed) setWalletSyncBlock(walletId, previousSyncBlock)
@@ -1063,17 +1078,6 @@ class GatewayRepository @Inject constructor(
         }
     }
     
-    suspend fun forceResetSync(): Result<Unit> = runCatching {
-        logger.w(TAG, "Forcing sync reset...")
-        // Only clear sync-related preferences for the active wallet, not all preferences
-        setWalletSyncBlock(activeWalletId, 0L)
-        walletPreferences.setInitialSyncCompleted(false, walletId = activeWalletId.ifEmpty { null })
-        _isRegistered.value = false
-        _balance.value = null
-        registerAccount(SyncMode.RECENT)
-        logger.i(TAG, "Sync reset complete. Registered as RECENT.")
-    }
-
     suspend fun refreshBalance(address: String? = null): Result<BalanceResponse> = runCatching {
         val addr = address ?: getCurrentAddress() ?: throw Exception("Wallet not initialized")
         val info = _walletInfo.value ?: throw Exception("No wallet")
@@ -3474,6 +3478,18 @@ class GatewayRepository @Inject constructor(
                 SyncStrategy.ALL_WALLETS, SyncStrategy.BALANCED ->
                     registerAllWalletsQuietlyIfSuperseded(skipIfActiveRegistered = true)
                 SyncStrategy.ACTIVE_ONLY -> {
+                    // registerAccount registers _walletInfo's script under
+                    // activeWalletId. After a reassignment outside a switch
+                    // (startup, resolveActiveWalletType) _walletInfo may
+                    // still hold the previous wallet: registering then would
+                    // put that wallet's script under this id. Skip; the
+                    // switch that loads this wallet's info registers it.
+                    val entity = walletDao.getById(active)
+                    val expectedScript = entity?.let { keyManager.deriveWalletInfoFromEntity(it).script }
+                    if (expectedScript == null || _walletInfo.value?.script != expectedScript) {
+                        logger.w(TAG, "Active wallet's info is not loaded; not registering it here (#539)")
+                        return
+                    }
                     val mode = walletPreferences.getSyncMode(walletId = active)
                     registerAccount(
                         syncMode = mode,
@@ -3493,9 +3509,11 @@ class GatewayRepository @Inject constructor(
     }
 
     /**
-     * The registration [reassignActiveWallet] launched, if any. Test seam.
+     * The last "make sure the active wallet is registered" pass launched on
+     * the repository scope ([reassignActiveWallet], or a cancelled
+     * [onActiveWalletChanged]), if any. Test seam.
      */
-    internal var reassignRegistration: Job? = null
+    internal var ensureRegistration: Job? = null
         private set
 
     /**
@@ -3512,7 +3530,7 @@ class GatewayRepository @Inject constructor(
         activeWalletId = walletId
         if (walletId == previous || walletId.isEmpty()) return
         if (previous.isEmpty() && syncCoordinator.registeredActiveWalletId == null) return
-        reassignRegistration = scope.launch { ensureActiveWalletRegistered() }
+        ensureRegistration = scope.launch { ensureActiveWalletRegistered() }
     }
 
     // ========================================
