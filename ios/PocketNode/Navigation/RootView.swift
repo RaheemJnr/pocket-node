@@ -171,6 +171,11 @@ struct RootView: View {
             guard newScenePhase == .active else { return }
             Task { await reroute() }
         }
+        // A decrypt that proved the keys unusable (the phrase reveal) sends
+        // the wallet to the restore for invalidated keys.
+        .onChange(of: container.keysUnusableSignal) { _, _ in
+            Task { await reroute() }
+        }
         .onChange(of: colorScheme, initial: true) {
             container.theme = Theme.forScheme(colorScheme)
         }
@@ -261,7 +266,8 @@ struct RootView: View {
             failure = error
         }
         isRebuilding = false
-        switch LaunchGate.rebuildOutcome(error: failure) {
+        let outcome = await gate.rebuildOutcome(error: failure)
+        switch outcome {
         case .rebuilt:
             pendingRecovery = nil
             if phase == .wallet {

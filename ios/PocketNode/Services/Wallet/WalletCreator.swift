@@ -164,7 +164,7 @@ final class WalletCreator {
     ///
     /// Also the way back for a wallet whose envelope is still here but can
     /// never be decrypted again (``KeyHealth/invalidated``: its Secure Enclave
-    /// key is gone, for example after a change to Face ID or the passcode).
+    /// key is gone or is not the key it was made with).
     /// The same exact-address check applies, and the new key material then
     /// replaces the unusable envelope in place
     /// (``WalletKeyStore/replaceUnusableKeys(with:)``). Refused for keys that
@@ -285,7 +285,11 @@ final class WalletCreator {
 
     /// Keys first (replacing the unusable envelope), then the record.
     ///
-    /// A record that cannot be saved does not roll the keys back: the old
+    /// An undecodable `wallet.json` that cannot be set aside is never written
+    /// over: that is ``WalletCreationError/metadataStorageFailed``, with the
+    /// new keys in place (the launch gate then rebuilds the record from them
+    /// once the file can be moved). A record that cannot be saved does not
+    /// roll the keys back either: the old
     /// ones could decrypt nothing, and deleting the new ones would only put
     /// the device back where it was. The launch gate then finds usable keys
     /// with no metadata and rebuilds the record from them
@@ -304,7 +308,8 @@ final class WalletCreator {
         }
 
         let record = makeRecord(derived, name: name, type: type, backedUp: backedUp)
-        saveReplacingUndecodable(record)
+        try setAsideUndecodableRecordIfAny()
+        try? walletStore.save(record)
         return record
     }
 
@@ -323,7 +328,9 @@ final class WalletCreator {
     /// backup reminder shows again for a phrase. Addresses for both networks
     /// are always recorded, so the app's current network needs no input.
     /// An undecodable `wallet.json` is set aside first, as the launch gate
-    /// does for one with no keys.
+    /// does for one with no keys; if it cannot be, nothing is written over it.
+    /// The metadata is checked again after the prompt, so a record that
+    /// appeared meanwhile is never overwritten.
     ///
     /// Refused unless the keys are ``KeyHealth/usable`` and there is no
     /// readable record. A failure to read the keys is
@@ -342,6 +349,9 @@ final class WalletCreator {
             throw WalletCreationError.keyReadFailed(error)
         }
         guard var bytes = Self.decodePrivateKey(bundle.privateKeyHex) else {
+            // The bundle decrypted but holds no usable key: as unusable as a
+            // ciphertext that does not authenticate.
+            await keyStore.markUnusable()
             throw WalletCreationError.keyReadFailed(.corrupt)
         }
         let privateKey = KotlinByteArray.from(bytes)
@@ -356,9 +366,12 @@ final class WalletCreator {
             type: words == nil ? Self.typeRawKey : Self.typeMnemonic,
             backedUp: false
         )
-        if walletStore.hasUndecodableRecord {
-            try? walletStore.setAsideUndecodableRecord()
+        // The prompt can stay up for a while: a record written meanwhile
+        // (another path, or a restore) is never overwritten.
+        guard metadataIsMissingOrUndecodable else {
+            throw WalletCreationError.walletAlreadyExists
         }
+        try setAsideUndecodableRecordIfAny()
         do {
             try walletStore.save(record)
         } catch {
@@ -474,13 +487,16 @@ final class WalletCreator {
         )
     }
 
-    /// Saves `record` over a missing or undecodable `wallet.json`, setting an
-    /// undecodable one aside first. Best effort, see ``persistReplacing``.
-    private func saveReplacingUndecodable(_ record: WalletRecord) {
-        if walletStore.hasUndecodableRecord {
-            try? walletStore.setAsideUndecodableRecord()
+    /// Moves an undecodable `wallet.json` aside before a new record is
+    /// written. If it cannot be moved, nothing may be written over it, so
+    /// that is ``WalletCreationError/metadataStorageFailed``.
+    private func setAsideUndecodableRecordIfAny() throws {
+        guard walletStore.hasUndecodableRecord else { return }
+        do {
+            try walletStore.setAsideUndecodableRecord()
+        } catch {
+            throw WalletCreationError.metadataStorageFailed
         }
-        try? walletStore.save(record)
     }
 
     private func storeKeys(_ derived: Derived) async throws {

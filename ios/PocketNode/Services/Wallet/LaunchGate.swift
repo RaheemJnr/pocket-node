@@ -319,9 +319,10 @@ final class LaunchGate {
     enum RebuildOutcome: Equatable {
         /// `wallet.json` is back; carry on with the PIN routing.
         case rebuilt
-        /// The keys turned out never to decrypt (a wrapping key whose access
-        /// control can no longer be met, or a ciphertext that does not
-        /// authenticate): replace them, as for ``Recovery/replaceKeys``.
+        /// The decrypt proved the keys unusable (any failure except a
+        /// dismissed or failed prompt, or a locked device), and the key
+        /// store now reads them as ``KeyHealth/invalidated``: replace them,
+        /// as for ``Recovery/replaceKeys``.
         case keysUnusable
         /// The prompt was dismissed or failed, or a write failed. Worth
         /// another try, but only when the user asks: retrying on a timer
@@ -329,16 +330,25 @@ final class LaunchGate {
         case retryOnRequest
     }
 
-    /// Classifies the result of ``WalletCreator/rebuildMetadata(reason:)``:
-    /// nil for success, otherwise the error it threw.
-    static func rebuildOutcome(error: Error?) -> RebuildOutcome {
-        guard let error else { return .rebuilt }
-        if let creation = error as? WalletCreationError,
-           case .keyReadFailed(let reason) = creation,
-           reason == .keyInvalidated || reason == .corrupt {
-            return .keysUnusable
-        }
-        return .retryOnRequest
+    /// Classifies the result of ``WalletCreator/rebuildMetadata(reason:)``
+    /// (nil for success, otherwise the error it threw) by what the key store
+    /// reports right after it.
+    ///
+    /// Keyed on the health rather than on the error alone, so the route can
+    /// never disagree with what the replacement will accept: the store marks
+    /// the keys invalidated on exactly the failures that prove them
+    /// unusable, and ``WalletCreator/replaceUnusableKeys(words:name:)``
+    /// requires that same health. A failure the store does not count (a
+    /// dismissed prompt) stays a retry.
+    static func rebuildOutcome(error: Error?, healthAfter: KeyHealth) -> RebuildOutcome {
+        guard error != nil else { return .rebuilt }
+        return healthAfter == .invalidated ? .keysUnusable : .retryOnRequest
+    }
+
+    /// ``rebuildOutcome(error:healthAfter:)`` with the health read now.
+    func rebuildOutcome(error: Error?) async -> RebuildOutcome {
+        let health = await walletKeyStore.keyHealth
+        return Self.rebuildOutcome(error: error, healthAfter: health)
     }
 
     /// Whether a restore may open now or must wait behind the lock screen.
