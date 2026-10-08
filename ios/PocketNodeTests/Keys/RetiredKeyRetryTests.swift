@@ -506,4 +506,72 @@ final class RetiredKeyRetryTests: XCTestCase {
         XCTAssertFalse(OnboardingViewModel.showsReinstallHint(failedAttempts: 2))
         XCTAssertTrue(OnboardingViewModel.showsReinstallHint(failedAttempts: 3))
     }
+
+    // MARK: - Codex review on #557
+
+    /// P1: the wrap during a replacement fails after it created the fresh
+    /// key. The state must not read usable, the restore is still offered,
+    /// and the fresh key is removed.
+    func testAWrapThatFailsAfterCreatingTheKeyLeavesARestorableState() async throws {
+        for suspended in [false, true] {
+            try? keyKeychain.deleteAll()
+            try? wrapper.deleteKey()
+            try? walletStore.delete()
+            let record = try await phraseWallet()
+            let stub = StubKeyWrapper(tag: tag)
+            let store = WalletKeyStore(keychain: keyKeychain, wrapper: stub)
+            if suspended {
+                await suspend(store, stub)
+            } else {
+                try wrapper.deleteKey()
+            }
+            stub.failAfterCreatingKey = .operationFailed("ECIES encryption is unsupported on this key")
+
+            do {
+                try await WalletCreator(keyStore: store, walletStore: walletStore)
+                    .restoreMnemonic(words: WalletCreatorTests.testPhrase, replacing: record)
+                XCTFail("the wrap failed")
+            } catch {}
+
+            XCTAssertFalse(wrapper.hasKey, "the fresh key is removed (suspended: \(suspended))")
+            let health = await store.keyHealth
+            XCTAssertNotEqual(health, .usable, "suspended: \(suspended)")
+            let route = await gate(store).restoreRoute()
+            XCTAssertEqual(route, .restore(.keysInvalidated(record)), "suspended: \(suspended)")
+
+            stub.failAfterCreatingKey = nil
+            try await WalletCreator(keyStore: store, walletStore: walletStore)
+                .restoreMnemonic(words: WalletCreatorTests.testPhrase, replacing: record)
+            let bundle = try await store.load(reason: "test")
+            XCTAssertEqual(bundle.privateKeyHex, WalletCreatorTests.testPrivateKeyHex)
+        }
+    }
+
+    /// P2: the import over dead keys stores the keys but the record save
+    /// fails. The flow finishes (the keys are good), and the gate, which
+    /// `RootView` now asks right after onboarding finishes, sends the wallet
+    /// to the rebuild rather than an empty shell; the rebuild writes the
+    /// record.
+    func testAnImportWhoseRecordSaveFailsIsRebuiltNotAnEmptyShell() async throws {
+        try await phraseWallet()
+        try walletStore.delete()
+        try wrapper.deleteKey()
+        let store = WalletKeyStore(keychain: keyKeychain, wrapper: wrapper)
+        let fileManager = FileManager.default
+        try fileManager.setAttributes([.posixPermissions: 0o555], ofItemAtPath: directory.path)
+
+        let model = OnboardingViewModel.replacingUnusableKeys(
+            creator: WalletCreator(keyStore: store, walletStore: walletStore),
+            hasPin: { true }
+        )
+        await model.importMnemonic(words: Self.otherPhrase, name: "Fresh")
+        try fileManager.setAttributes([.posixPermissions: 0o755], ofItemAtPath: directory.path)
+
+        XCTAssertEqual(model.step, .done)
+        XCTAssertFalse(walletStore.hasWallet, "the record did not land")
+        let route = await gate(store).restoreRoute()
+        XCTAssertEqual(route, .restore(.rebuildMetadata), "not an empty shell")
+        let rebuilt = try await WalletCreator(keyStore: store, walletStore: walletStore).rebuildMetadata(reason: "test")
+        XCTAssertEqual(walletStore.load(), rebuilt)
+    }
 }

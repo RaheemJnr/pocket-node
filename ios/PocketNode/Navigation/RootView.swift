@@ -75,6 +75,12 @@ struct RootView: View {
                             makeBackupViewModel: { container.makeBackupViewModel(isOnboarding: true) }
                         ) {
                             phase = .wallet
+                            // Asked again at once rather than on the next
+                            // trigger: a recovery that stored the keys but not
+                            // the metadata (a failed save) is a wallet with no
+                            // record, which the gate sends to the rebuild
+                            // instead of an empty shell.
+                            Task { await reroute() }
                         }
                     }
                 }
