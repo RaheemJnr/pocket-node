@@ -1005,6 +1005,173 @@ final class AuthServiceTests: XCTestCase {
         XCTAssertTrue(backup.words.isEmpty)
     }
 
+    // MARK: - An unlock that finishes after the background (M2 re-review P1-2)
+
+    /// A service over a store that can park the next verify, with a PIN set
+    /// and the session locked again, as on a cold start.
+    private func makeHoldableAuth() async throws -> (AuthService, HoldingKeyValueStore) {
+        let store = HoldingKeyValueStore(service: keychainService)
+        let auth = AuthService(
+            pin: PinService(keychain: store, cost: .testing, clock: clock.source),
+            biometrics: biometrics,
+            preferences: preferences
+        )
+        try await auth.setPin("123456")
+        auth.lock()
+        XCTAssertEqual(auth.state, .locked)
+        return (auth, store)
+    }
+
+    /// The right PIN is entered, the app goes to the background while the KDF
+    /// is still running, and the verify lands afterwards. Whoever opens the
+    /// app next must meet the lock screen, not the wallet.
+    func testAPinUnlockThatFinishesAfterTheBackgroundDoesNotUnlock() async throws {
+        let (auth, store) = try await makeHoldableAuth()
+        store.holdNextVerify()
+
+        let attempt = Task { await auth.unlock(pin: "123456") }
+        try await waitForParkedVerify(on: store)
+        auth.handleScenePhase(.background)
+        store.release()
+        let unlocked = await attempt.value
+
+        XCTAssertFalse(unlocked)
+        XCTAssertEqual(auth.state, .locked)
+        XCTAssertTrue(auth.isGated)
+        XCTAssertNil(auth.storeMessage, "nothing went wrong with the store")
+        XCTAssertEqual(auth.pin.remainingAttempts, PinService.maxAttempts, "the right PIN is not counted as a failure")
+    }
+
+    /// Control: the same parked verify, released with no background in
+    /// between, unlocks.
+    func testAPinUnlockThatIsOnlySlowStillUnlocks() async throws {
+        let (auth, store) = try await makeHoldableAuth()
+        store.holdNextVerify()
+
+        let attempt = Task { await auth.unlock(pin: "123456") }
+        try await waitForParkedVerify(on: store)
+        auth.handleScenePhase(.inactive)
+        store.release()
+        let unlocked = await attempt.value
+
+        XCTAssertTrue(unlocked)
+        XCTAssertEqual(auth.state, .unlocked)
+    }
+
+    /// The same race for the face: the prompt is answered after the app went
+    /// to the background.
+    func testABiometricUnlockThatFinishesAfterTheBackgroundDoesNotUnlock() async throws {
+        let first = makeAuth()
+        try await first.setPin("123456")
+        first.isBiometricEnabled = true
+        let cold = makeAuth()
+        await cold.refresh()
+        XCTAssertTrue(cold.canUseBiometrics)
+        biometrics.holdPrompt()
+
+        let attempt = Task { await cold.unlockWithBiometrics() }
+        try await waitForPrompt()
+        cold.handleScenePhase(.background)
+        biometrics.releasePrompt()
+        let unlocked = await attempt.value
+
+        XCTAssertFalse(unlocked)
+        XCTAssertEqual(cold.state, .locked)
+    }
+
+    /// Control: a held prompt answered with no background in between unlocks.
+    func testABiometricUnlockThatIsOnlySlowStillUnlocks() async throws {
+        let first = makeAuth()
+        try await first.setPin("123456")
+        first.isBiometricEnabled = true
+        let cold = makeAuth()
+        await cold.refresh()
+        biometrics.holdPrompt()
+
+        let attempt = Task { await cold.unlockWithBiometrics() }
+        try await waitForPrompt()
+        biometrics.releasePrompt()
+        let unlocked = await attempt.value
+
+        XCTAssertTrue(unlocked)
+        XCTAssertEqual(cold.state, .unlocked)
+    }
+
+    /// Step-up auth: a face that answers after the app locked does not grant
+    /// the request it was raised for.
+    func testRequireAuthIsNotGrantedByAPromptAnsweredAfterTheBackground() async throws {
+        let auth = makeAuth()
+        try await auth.setPin("123456")
+        auth.isBiometricEnabled = true
+        await auth.refresh()
+        XCTAssertTrue(auth.canUseBiometrics)
+        biometrics.holdPrompt()
+
+        let request = Task { await auth.requireAuth(reason: "Reveal your recovery phrase") }
+        try await waitForPrompt()
+        auth.handleScenePhase(.background)
+        biometrics.releasePrompt()
+        let granted = await request.value
+
+        XCTAssertFalse(granted)
+        XCTAssertEqual(auth.state, .locked)
+        XCTAssertNil(auth.challenge, "no PIN sheet is raised behind the lock screen")
+    }
+
+    /// A PIN typed into a challenge sheet whose verify lands after a lock
+    /// must not answer whatever challenge is open by then. The lock refuses
+    /// the first request; after an unlock a second one is raised, and the
+    /// stale verify must leave it open.
+    func testAChallengePinThatFinishesAfterTheBackgroundGrantsNothing() async throws {
+        let (auth, store) = try await makeHoldableAuth()
+        _ = await auth.unlock(pin: "123456")
+        XCTAssertEqual(auth.state, .unlocked)
+
+        let first = Task { await auth.requireAuth(reason: "Reveal your recovery phrase") }
+        try await waitForChallenge(on: auth)
+        store.holdNextVerify()
+        let answer = Task { await auth.answerChallenge(pin: "123456") }
+        try await waitForParkedVerify(on: store)
+
+        auth.handleScenePhase(.background)
+        let firstGranted = await first.value
+        XCTAssertFalse(firstGranted, "the lock refuses the open request")
+
+        // The user comes back and unlocks, and something asks again. Unlocked
+        // directly: a real PIN unlock would queue behind the parked verify.
+        auth.markUnlocked()
+        let second = Task { await auth.requireAuth(reason: "Confirm this send") }
+        try await waitForChallenge(on: auth)
+
+        store.release()
+        let answered = await answer.value
+        XCTAssertFalse(answered)
+        XCTAssertNotNil(auth.challenge, "the new request is still waiting for its own answer")
+
+        auth.resolveChallenge(granted: false)
+        let secondGranted = await second.value
+        XCTAssertFalse(secondGranted)
+    }
+
+    /// Control: a challenge answered by a slow verify with no lock in between
+    /// is granted.
+    func testAChallengePinThatIsOnlySlowStillGrants() async throws {
+        let (auth, store) = try await makeHoldableAuth()
+        _ = await auth.unlock(pin: "123456")
+
+        let request = Task { await auth.requireAuth(reason: "Reveal your recovery phrase") }
+        try await waitForChallenge(on: auth)
+        store.holdNextVerify()
+        let answer = Task { await auth.answerChallenge(pin: "123456") }
+        try await waitForParkedVerify(on: store)
+        store.release()
+
+        let answered = await answer.value
+        let granted = await request.value
+        XCTAssertTrue(answered)
+        XCTAssertTrue(granted)
+    }
+
     // MARK: - Preferences
 
     func testTheBiometricOptInPersistsUnderTheAndroidKeyName() {
@@ -1046,6 +1213,15 @@ final class AuthServiceTests: XCTestCase {
             try await Task.sleep(for: .milliseconds(10))
         }
         XCTFail("no prompt was raised", file: file, line: line)
+    }
+
+    /// Waits for a verify to reach the store's write probe and park there.
+    private func waitForParkedVerify(on store: HoldingKeyValueStore, file: StaticString = #filePath, line: UInt = #line) async throws {
+        for _ in 0..<500 {
+            if store.isParked { return }
+            try await Task.sleep(for: .milliseconds(10))
+        }
+        XCTFail("no verify reached the store", file: file, line: line)
     }
 
     /// `requireAuth` publishes the challenge from inside a suspended task, so

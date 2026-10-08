@@ -61,6 +61,15 @@ final class AuthService {
     /// otherwise invalidate whatever happened to read it.
     @ObservationIgnored private(set) var lockGeneration = 0
 
+    /// True if no ``lock()`` has happened since `generation` was read. Every
+    /// path that grants access after an await (a KDF, a biometric prompt)
+    /// checks it before granting: the app may have gone to the background
+    /// while it was suspended, and a proof that lands behind the lock must not
+    /// open the wallet for whoever picks the phone up next.
+    private func isCurrent(_ generation: Int) -> Bool {
+        generation == lockGeneration
+    }
+
     /// Outstanding ``requireAuth(reason:)`` request, if any.
     private(set) var challenge: AuthChallenge?
 
@@ -209,6 +218,7 @@ final class AuthService {
     @discardableResult
     func unlockWithBiometrics() async -> Bool {
         guard state == .locked, !isPromptingBiometrics else { return false }
+        let generation = lockGeneration
         isPromptingBiometrics = true
         defer { isPromptingBiometrics = false }
         // Re-read first so the decision is made on what is stored, not on
@@ -231,7 +241,7 @@ final class AuthService {
                 biometricMessage = Self.storeUnavailableMessage
                 return false
             }
-            guard !pin.isPermanentlyLocked, state == .locked else { return false }
+            guard !pin.isPermanentlyLocked, state == .locked, isCurrent(generation) else { return false }
             markUnlocked()
             return true
         case .failure(let error):
@@ -250,15 +260,22 @@ final class AuthService {
     /// counter or the lockout) is refused before anything is hashed, so the
     /// user has not used up a try. A write that fails after the comparison is
     /// reported the same way; that attempt may already have been counted.
+    ///
+    /// A match that lands after the app went to the background returns false
+    /// and leaves the session locked. The attempt still counts as verified
+    /// (the failure counter is cleared); the user just meets the lock screen
+    /// again when they come back.
     @discardableResult
     func unlock(pin entered: String) async -> Bool {
         storeMessage = nil
+        let generation = lockGeneration
         do {
             guard try await pin.verify(entered) else { return false }
         } catch {
             storeMessage = Self.storeUnavailableMessage
             return false
         }
+        guard isCurrent(generation) else { return false }
         markUnlocked()
         return true
     }
@@ -330,6 +347,7 @@ final class AuthService {
         // `PinService.verify`.
         guard pin.pinPresence != .absent else { return true }
 
+        let generation = lockGeneration
         if canUseBiometrics {
             switch await biometrics.authenticate(reason: reason) {
             case .success:
@@ -338,7 +356,10 @@ final class AuthService {
                 // that does not come back clean proves nothing either way, so
                 // the request falls through to the PIN challenge below, which
                 // fails closed on its own.
+                // A face that answers after the app locked grants nothing,
+                // and no PIN sheet is raised behind the lock screen either.
                 await pin.refresh()
+                guard isCurrent(generation) else { return false }
                 if pin.hasLoadedState {
                     return !pin.isPermanentlyLocked
                 }
@@ -372,9 +393,14 @@ final class AuthService {
     /// A store failure leaves the challenge open with ``storeMessage`` set, the
     /// same as ``unlock(pin:)``: the user may retry, and the caller is not told
     /// anything was approved.
+    ///
+    /// A match that lands after a ``lock()`` grants nothing. The lock already
+    /// refused the challenge this PIN was typed for, and the open one, if any,
+    /// was raised later and must get its own answer.
     @discardableResult
     func answerChallenge(pin entered: String) async -> Bool {
         storeMessage = nil
+        let generation = lockGeneration
         let matched: Bool
         do {
             matched = try await pin.verify(entered)
@@ -382,8 +408,9 @@ final class AuthService {
             storeMessage = Self.storeUnavailableMessage
             return false
         }
-        if matched { resolveChallenge(granted: true) }
-        return matched
+        guard matched, isCurrent(generation) else { return false }
+        resolveChallenge(granted: true)
+        return true
     }
 
     // MARK: - Copy

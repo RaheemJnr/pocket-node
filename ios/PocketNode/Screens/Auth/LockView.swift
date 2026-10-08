@@ -162,12 +162,21 @@ struct LockView: View {
         guard !isVerifying else { return }
         isVerifying = true
         errorMessage = nil
+        let generation = auth.lockGeneration
         let unlocked = await auth.unlock(pin: entered)
         isVerifying = false
         digits = ""
 
         guard !unlocked else {
             stopTicker()
+            return
+        }
+        // The app went to the background while the PIN was being checked, so
+        // the session stayed locked whatever the result. Show the plain lock
+        // screen rather than an error, but keep the countdown running in case
+        // that attempt started a lockout.
+        guard auth.lockGeneration == generation else {
+            startTickerIfNeeded()
             return
         }
 
