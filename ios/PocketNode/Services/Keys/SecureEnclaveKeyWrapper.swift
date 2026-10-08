@@ -19,6 +19,24 @@ enum KeyWrapperError: Error, Equatable {
     case deleteFailed(OSStatus)
     /// Anything else the Security framework reported.
     case operationFailed(String)
+    /// The key was found and used, and the ECIES decrypt itself refused the
+    /// wrapped data key: `errSecDecode`, or `errSecParam`, which is what an
+    /// AES-GCM tag mismatch inside ECIES reports when the key is not the one
+    /// that wrapped it (deterministic: the same inputs fail the same way,
+    /// see `UnusableKeyProofTests`). This, and only this, of the decrypt's
+    /// failures says the key and the envelope do not belong together.
+    case decryptionFailed(OSStatus)
+}
+
+/// The wrapping key's identity as a prompt-free lookup sees it.
+enum WrappingKeyLabel: Equatable, Sendable {
+    /// The key is there, with this `kSecAttrApplicationLabel` (for a P-256
+    /// key, a hash of its public half).
+    case label(Data)
+    /// The Keychain answered and holds no key.
+    case absent
+    /// The Keychain refused the lookup, or the key carries no label.
+    case unknown
 }
 
 /// Wraps and unwraps a symmetric data key with a hardware key.
@@ -33,6 +51,17 @@ protocol KeyWrapping: Sendable {
     /// Whether a wrapping key exists at all. Never prompts: it only looks the
     /// key up, it does not use it.
     var hasKey: Bool { get }
+
+    /// Whether a wrapping key exists, keeping a lookup the Keychain refused
+    /// apart from a confirmed absence. ``hasKey`` folds both into false. An
+    /// existence query only: no key reference, no private-key use, and an
+    /// authentication context that forbids any UI, so it can never prompt.
+    var keyPresence: KeyMaterialPresence { get }
+
+    /// The wrapping key's label, read the same prompt-free way as
+    /// ``keyPresence`` (attributes only, never the key itself). The envelope
+    /// records it so a different key under the same tag can be recognised.
+    var keyLabel: WrappingKeyLabel { get }
 
     /// Encrypts `dataKey` to the wrapping key's public half, creating the key
     /// pair on first use. Never prompts: the public key is not access
@@ -94,6 +123,61 @@ final class SecureEnclaveKeyWrapper: KeyWrapping {
         (try? loadKey(context: nil)) != nil
     }
 
+    /// The query asks for no reference, data or attributes, only whether the
+    /// private key item matches, and carries an `LAContext` with
+    /// `interactionNotAllowed`. Looking a Secure Enclave key up never needs
+    /// authentication (only using its private half does), and if the system
+    /// ever wanted UI for this lookup it fails with
+    /// `errSecInteractionNotAllowed` instead of prompting, which lands on
+    /// `.unknown` like every other status that is not success or not found.
+    var keyPresence: KeyMaterialPresence {
+        var query = baseQuery()
+        query[kSecAttrKeyClass as String] = kSecAttrKeyClassPrivate
+        query[kSecMatchLimit as String] = kSecMatchLimitOne
+        let context = LAContext()
+        context.interactionNotAllowed = true
+        query[kSecUseAuthenticationContext as String] = context
+
+        let status = SecItemCopyMatching(query as CFDictionary, nil)
+        switch status {
+        case errSecSuccess:
+            return .present
+        case errSecItemNotFound:
+            return .absent
+        default:
+            return .unknown
+        }
+    }
+
+    /// Attributes only: `kSecReturnAttributes`, never `kSecReturnRef` or
+    /// data, under the same `interactionNotAllowed` context as
+    /// ``keyPresence``. Reading an item's attributes needs no authentication
+    /// even when its private half is access controlled.
+    var keyLabel: WrappingKeyLabel {
+        var query = baseQuery()
+        query[kSecAttrKeyClass as String] = kSecAttrKeyClassPrivate
+        query[kSecMatchLimit as String] = kSecMatchLimitOne
+        query[kSecReturnAttributes as String] = true
+        let context = LAContext()
+        context.interactionNotAllowed = true
+        query[kSecUseAuthenticationContext as String] = context
+
+        var result: CFTypeRef?
+        let status = SecItemCopyMatching(query as CFDictionary, &result)
+        switch status {
+        case errSecSuccess:
+            guard let attributes = result as? [String: Any],
+                  let label = attributes[kSecAttrApplicationLabel as String] as? Data,
+                  !label.isEmpty
+            else { return .unknown }
+            return .label(label)
+        case errSecItemNotFound:
+            return .absent
+        default:
+            return .unknown
+        }
+    }
+
     func wrap(_ dataKey: Data) throws -> Data {
         let privateKey = try loadKey(context: nil) ?? createKey()
         guard let publicKey = SecKeyCopyPublicKey(privateKey) else {
@@ -123,16 +207,32 @@ final class SecureEnclaveKeyWrapper: KeyWrapping {
             throw KeyWrapperError.keyNotFound
         }
 
-        var error: Unmanaged<CFError>?
-        guard let dataKey = SecKeyCreateDecryptedData(
-            privateKey,
-            Self.algorithm,
-            wrapped as CFData,
-            &error
-        ) as Data? else {
-            throw Self.classify(error?.takeRetainedValue())
+        // A refused decrypt is tried once more with the same key reference,
+        // which carries the same already-evaluated `LAContext`, so the retry
+        // asks for nothing new. Only a refusal that repeats is reported.
+        return try Self.retryingDecryptionFailureOnce {
+            var error: Unmanaged<CFError>?
+            guard let dataKey = SecKeyCreateDecryptedData(
+                privateKey,
+                Self.algorithm,
+                wrapped as CFData,
+                &error
+            ) as Data? else {
+                throw Self.classifyDecryption(error?.takeRetainedValue())
+            }
+            return dataKey
         }
-        return dataKey
+    }
+
+    /// Runs `attempt`, and once more if it fails with
+    /// ``KeyWrapperError/decryptionFailed(_:)``: a refusal counts as one only
+    /// if it repeats. Any other failure is thrown at once, untried.
+    static func retryingDecryptionFailureOnce(_ attempt: () throws -> Data) throws -> Data {
+        do {
+            return try attempt()
+        } catch KeyWrapperError.decryptionFailed {
+            return try attempt()
+        }
     }
 
     func deleteKey() throws {
@@ -181,8 +281,12 @@ final class SecureEnclaveKeyWrapper: KeyWrapping {
             return key
         case errSecItemNotFound:
             return nil
+        // The same mapping ``classify(_:)`` gives these statuses, so a lookup
+        // refused for authentication reads as that, not as a Keychain fault.
         case errSecUserCanceled:
             throw KeyWrapperError.authenticationCancelled
+        case errSecAuthFailed, errSecInteractionNotAllowed:
+            throw KeyWrapperError.authenticationFailed
         default:
             throw KeyWrapperError.keyCreationFailed(status)
         }
@@ -230,6 +334,23 @@ final class SecureEnclaveKeyWrapper: KeyWrapping {
     #endif
 
     // MARK: - Error classification
+
+    /// ``classify(_:)`` for a failure of the decrypt itself, after the key
+    /// was found: `errSecDecode` and `errSecParam` there mean the key cannot
+    /// unwrap this data key (``KeyWrapperError/decryptionFailed(_:)``).
+    /// Everything else is classified as any other failure.
+    private static func classifyDecryption(_ error: CFError?) -> KeyWrapperError {
+        if let error {
+            let nsError = error as Error as NSError
+            if nsError.domain == NSOSStatusErrorDomain {
+                let status = OSStatus(nsError.code)
+                if status == errSecDecode || status == errSecParam {
+                    return .decryptionFailed(status)
+                }
+            }
+        }
+        return classify(error)
+    }
 
     /// Turns a `CFError` from the Security or LocalAuthentication frameworks
     /// into a case the store can act on. Cancellation has to stay

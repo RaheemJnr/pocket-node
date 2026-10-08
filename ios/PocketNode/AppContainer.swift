@@ -38,6 +38,11 @@ final class AppContainer {
     /// Kept in sync with the system color scheme by `RootView`.
     var theme: Theme = .light
 
+    /// Bumped whenever a decrypt in the wallet phase proves the keys unusable
+    /// (today: the recovery phrase reveal). `RootView` reroutes on it, which
+    /// lands on the restore for invalidated keys.
+    private(set) var keysUnusableSignal = 0
+
     init() {
         Self.resetStateForTestingIfRequested()
 
@@ -109,7 +114,8 @@ final class AppContainer {
             walletStore: walletStore,
             auth: auth,
             isOnboarding: isOnboarding,
-            hasPin: { [pinService] in pinService.pinPresence == .present }
+            hasPin: { [pinService] in pinService.pinPresence == .present },
+            onKeysUnusable: { [weak self] in self?.keysUnusableSignal += 1 }
         )
     }
 

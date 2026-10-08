@@ -27,6 +27,11 @@ enum WalletCreationError: Error, Equatable {
     /// the wallet being restored: it derives a different address, or it is a
     /// phrase for a raw-key wallet (or the reverse).
     case doesNotMatchWallet
+    /// Rebuilding the metadata could not read the key material. Carries why,
+    /// so the caller can tell keys that will never decrypt again
+    /// (`.keyInvalidated`, `.corrupt`) from a prompt that was dismissed or
+    /// failed and is worth another try.
+    case keyReadFailed(WalletKeyStoreError)
 }
 
 /// A wallet that has just been created or imported.
@@ -155,8 +160,16 @@ final class WalletCreator {
     /// of `record`'s addresses, so a restore can never swap in a different
     /// wallet under the old name. The record keeps its id, name, addresses
     /// and creation time; `mnemonicBackedUp` becomes true, since the user has
-    /// just typed the phrase in. Refused unless the envelope is confirmed
-    /// absent, so this can never overwrite keys that are still there.
+    /// just typed the phrase in.
+    ///
+    /// Also the way back for a wallet whose envelope is still here but can
+    /// never be decrypted again (``KeyHealth/invalidated``: its Secure Enclave
+    /// key is gone or is not the key it was made with).
+    /// The same exact-address check applies, and the new key material then
+    /// replaces the unusable envelope in place
+    /// (``WalletKeyStore/replaceUnusableKeys(with:)``). Refused for keys that
+    /// are usable or that the Keychain cannot read, so this can never
+    /// overwrite keys that still work.
     @discardableResult
     func restoreMnemonic(words: [String], replacing record: WalletRecord) async throws -> CreatedWallet {
         let normalised = Self.normalise(words)
@@ -166,10 +179,10 @@ final class WalletCreator {
         guard record.type == Self.typeMnemonic else {
             throw WalletCreationError.doesNotMatchWallet
         }
-        try await refuseUnlessKeysAreMissing()
+        let health = try await keyHealthAllowingRestore()
 
         let derived = await Self.derive(words: normalised)
-        return try await persistRestored(derived, replacing: record, backedUp: true)
+        return try await persistRestored(derived, replacing: record, backedUp: true, health: health)
     }
 
     /// ``restoreMnemonic(words:replacing:)`` for a raw-key wallet.
@@ -185,25 +198,233 @@ final class WalletCreator {
         guard record.type == Self.typeRawKey else {
             throw WalletCreationError.doesNotMatchWallet
         }
-        try await refuseUnlessKeysAreMissing()
+        let health = try await keyHealthAllowingRestore()
 
         let derived = Self.describe(privateKey: privateKey, mnemonic: nil)
-        return try await persistRestored(derived, replacing: record, backedUp: record.mnemonicBackedUp)
+        return try await persistRestored(
+            derived,
+            replacing: record,
+            backedUp: record.mnemonicBackedUp,
+            health: health
+        )
     }
 
-    /// The stored wallet, if its metadata is here and its key envelope is
-    /// confirmed absent: the state a backup restored onto a new device leaves.
-    /// A Keychain that cannot be read is not an absence, so it answers nil.
+    /// The stored wallet, if its metadata is here and its key material is
+    /// confirmed absent (the state a backup restored onto a new device
+    /// leaves), unusable or suspended. A Keychain that cannot be read is
+    /// none of those, so it answers nil.
     func walletNeedingRestore() async -> WalletRecord? {
         guard let record = walletStore.load() else { return nil }
-        guard await keyStore.envelopePresence == .absent else { return nil }
+        let health = await keyStore.keyHealth
+        guard Self.allowsRestore(health) else { return nil }
         return record
     }
 
-    private func refuseUnlessKeysAreMissing() async throws {
-        guard await keyStore.envelopePresence == .absent else {
+    /// The key health a restore for a known wallet may go ahead on: absent,
+    /// invalidated, or suspended. Safe for suspended keys because the
+    /// phrase must derive this wallet's own addresses.
+    private func keyHealthAllowingRestore() async throws -> KeyHealth {
+        let health = await keyStore.keyHealth
+        guard Self.allowsRestore(health) else {
             throw WalletCreationError.walletAlreadyExists
         }
+        return health
+    }
+
+    private static func allowsRestore(_ health: KeyHealth) -> Bool {
+        health == .absent || health == .invalidated || health == .suspended
+    }
+
+    // MARK: - Trying the keys again
+
+    /// Decrypts the keys once more, for a wallet whose envelope is
+    /// ``KeyHealth/suspended`` (retired after a refusal that may not
+    /// repeat). A decrypt that works binds the envelope back to its key
+    /// (``WalletKeyStore/load(reason:)``).
+    ///
+    /// Success is reported only if the keys then read as
+    /// ``KeyHealth/usable`` (the re-bind landed) and they derive `record`'s
+    /// own addresses. Otherwise this throws and the restore screen stays:
+    /// ``WalletCreationError/keyReadFailed(_:)`` for a decrypt that failed or
+    /// keys that still do not read usable, ``WalletCreationError/doesNotMatchWallet``
+    /// for keys that belong to another wallet.
+    func retryUnlock(reason: String, matching record: WalletRecord) async throws {
+        let bundle: WalletKeyBundle
+        do {
+            bundle = try await keyStore.load(reason: reason)
+        } catch let error as WalletKeyStoreError {
+            throw WalletCreationError.keyReadFailed(error)
+        }
+        let health = await keyStore.keyHealth
+        guard health == .usable else {
+            throw WalletCreationError.keyReadFailed(.keyRefused)
+        }
+        guard var bytes = Self.decodePrivateKey(bundle.privateKeyHex) else {
+            throw WalletCreationError.keyReadFailed(.corrupt)
+        }
+        let privateKey = KotlinByteArray.from(bytes)
+        bytes.wipe()
+        defer { privateKey.zeroOut() }
+        let derived = Self.describe(privateKey: privateKey, mnemonic: nil)
+        guard derived.mainnetAddress == record.mainnetAddress,
+              derived.testnetAddress == record.testnetAddress
+        else {
+            throw WalletCreationError.doesNotMatchWallet
+        }
+    }
+
+    // MARK: - Unusable keys with no metadata
+
+    /// Imports any phrase over key material that can never be decrypted
+    /// again, on a device whose metadata is missing or undecodable. With no
+    /// record there is no address to check a phrase against, so whatever the
+    /// user enters becomes the wallet; the old envelope is replaced in place
+    /// (``WalletKeyStore/replaceUnusableKeys(with:)``) and the PIN is not
+    /// touched. Refused unless the keys are confirmed
+    /// ``KeyHealth/invalidated`` and no readable record exists, so it can
+    /// never swap a working wallet or a wallet with a record for another one.
+    @discardableResult
+    func replaceUnusableKeys(words: [String], name: String) async throws -> CreatedWallet {
+        let normalised = Self.normalise(words)
+        guard Bip39.shared.validate(words: normalised) else {
+            throw WalletCreationError.invalidMnemonic
+        }
+        try await refuseUnlessUnusableWithoutMetadata()
+
+        let derived = await Self.derive(words: normalised)
+        let record = try await persistReplacing(derived, name: name, type: Self.typeMnemonic, backedUp: true)
+        return CreatedWallet(record: record, mnemonic: [])
+    }
+
+    /// ``replaceUnusableKeys(words:name:)`` for a raw private key.
+    @discardableResult
+    func replaceUnusableKeys(privateKeyHex hex: String, name: String) async throws -> CreatedWallet {
+        guard var bytes = Self.decodePrivateKey(hex) else {
+            throw WalletCreationError.invalidPrivateKey
+        }
+        let privateKey = KotlinByteArray.from(bytes)
+        bytes.wipe()
+        defer { privateKey.zeroOut() }
+
+        try await refuseUnlessUnusableWithoutMetadata()
+
+        let derived = Self.describe(privateKey: privateKey, mnemonic: nil)
+        let record = try await persistReplacing(derived, name: name, type: Self.typeRawKey, backedUp: false)
+        return CreatedWallet(record: record, mnemonic: [])
+    }
+
+    private func refuseUnlessUnusableWithoutMetadata() async throws {
+        let health = await keyStore.keyHealth
+        guard health == .invalidated, metadataIsMissingOrUndecodable else {
+            throw WalletCreationError.walletAlreadyExists
+        }
+    }
+
+    /// No `wallet.json`, or one that reads but does not decode. A file the
+    /// data protection class keeps unreadable is neither: nothing is known
+    /// about it.
+    private var metadataIsMissingOrUndecodable: Bool {
+        !walletStore.hasWallet || walletStore.hasUndecodableRecord
+    }
+
+    /// Keys first (replacing the unusable envelope), then the record.
+    ///
+    /// An undecodable `wallet.json` that cannot be set aside is never written
+    /// over: that is ``WalletCreationError/metadataStorageFailed``, with the
+    /// new keys in place (the launch gate then rebuilds the record from them
+    /// once the file can be moved). A record that cannot be saved does not
+    /// roll the keys back either: the old
+    /// ones could decrypt nothing, and deleting the new ones would only put
+    /// the device back where it was. The launch gate then finds usable keys
+    /// with no metadata and rebuilds the record from them
+    /// (``rebuildMetadata(reason:)``), so the import still counts.
+    private func persistReplacing(
+        _ derived: Derived,
+        name: String,
+        type: String,
+        backedUp: Bool
+    ) async throws -> WalletRecord {
+        let bundle = WalletKeyBundle(privateKeyHex: derived.privateKeyHex, mnemonic: derived.mnemonic)
+        do {
+            try await keyStore.replaceUnusableKeys(with: bundle)
+        } catch let error as WalletKeyStoreError {
+            throw WalletCreationError.keyStorageFailed(error)
+        }
+
+        let record = makeRecord(derived, name: name, type: type, backedUp: backedUp)
+        try setAsideUndecodableRecordIfAny()
+        try? walletStore.save(record)
+        return record
+    }
+
+    // MARK: - Usable keys with no metadata
+
+    /// Writes `wallet.json` again from the key material, for usable keys
+    /// whose metadata is missing or does not decode. Nothing is asked of the
+    /// user beyond the system prompt `reason` labels (decrypting the bundle
+    /// needs Face ID, Touch ID or the passcode on a device), which is why the
+    /// launch gate runs this only once a PIN in front of the wallet has been
+    /// answered.
+    ///
+    /// The record gets a new id, ``defaultName``, the type the bundle implies
+    /// (a phrase means `mnemonic`, none means `raw_key`), the addresses
+    /// derived from the private key, and `mnemonicBackedUp = false`, so the
+    /// backup reminder shows again for a phrase. Addresses for both networks
+    /// are always recorded, so the app's current network needs no input.
+    /// An undecodable `wallet.json` is set aside first, as the launch gate
+    /// does for one with no keys; if it cannot be, nothing is written over it.
+    /// The metadata is checked again after the prompt, so a record that
+    /// appeared meanwhile is never overwritten.
+    ///
+    /// Refused unless the keys are ``KeyHealth/usable`` or
+    /// ``KeyHealth/suspended`` (the rebuild is then the retry: a decrypt
+    /// that works binds the envelope back) and there is no readable record.
+    /// A failure to read the keys is ``WalletCreationError/keyReadFailed(_:)``.
+    @discardableResult
+    func rebuildMetadata(reason: String) async throws -> WalletRecord {
+        let health = await keyStore.keyHealth
+        guard health == .usable || health == .suspended, metadataIsMissingOrUndecodable else {
+            throw WalletCreationError.walletAlreadyExists
+        }
+
+        let bundle: WalletKeyBundle
+        let opened: Data
+        do {
+            (bundle, opened) = try await keyStore.loadWithEnvelope(reason: reason)
+        } catch let error as WalletKeyStoreError {
+            throw WalletCreationError.keyReadFailed(error)
+        }
+        guard var bytes = Self.decodePrivateKey(bundle.privateKeyHex) else {
+            // The bundle decrypted but holds no usable key: as unusable as a
+            // ciphertext that does not authenticate. Only the envelope that
+            // was opened is retired, if it is still the one stored.
+            await keyStore.retireUnusableBundle(ifStill: opened)
+            throw WalletCreationError.keyReadFailed(.corrupt)
+        }
+        let privateKey = KotlinByteArray.from(bytes)
+        bytes.wipe()
+        defer { privateKey.zeroOut() }
+
+        let words = bundle.mnemonic.map { $0.split(separator: " ").map(String.init) }
+        let derived = Self.describe(privateKey: privateKey, mnemonic: words)
+        let record = makeRecord(
+            derived,
+            name: Self.defaultName,
+            type: words == nil ? Self.typeRawKey : Self.typeMnemonic,
+            backedUp: false
+        )
+        // The prompt can stay up for a while: a record written meanwhile
+        // (another path, or a restore) is never overwritten.
+        guard metadataIsMissingOrUndecodable else {
+            throw WalletCreationError.walletAlreadyExists
+        }
+        try setAsideUndecodableRecordIfAny()
+        do {
+            try walletStore.save(record)
+        } catch {
+            throw WalletCreationError.metadataStorageFailed
+        }
+        return record
     }
 
     /// The restore counterpart of ``persist(_:name:type:backedUp:)``: the
@@ -221,7 +442,8 @@ final class WalletCreator {
     private func persistRestored(
         _ derived: Derived,
         replacing record: WalletRecord,
-        backedUp: Bool
+        backedUp: Bool,
+        health: KeyHealth
     ) async throws -> CreatedWallet {
         guard derived.mainnetAddress == record.mainnetAddress,
               derived.testnetAddress == record.testnetAddress
@@ -229,7 +451,19 @@ final class WalletCreator {
             throw WalletCreationError.doesNotMatchWallet
         }
 
-        try await storeKeys(derived)
+        if health == .invalidated || health == .suspended {
+            let bundle = WalletKeyBundle(privateKeyHex: derived.privateKeyHex, mnemonic: derived.mnemonic)
+            do {
+                // The phrase has derived this wallet's addresses, so a
+                // suspended envelope may be replaced here (never in the
+                // import with no record).
+                try await keyStore.replaceUnusableKeys(with: bundle, allowingSuspended: true)
+            } catch let error as WalletKeyStoreError {
+                throw WalletCreationError.keyStorageFailed(error)
+            }
+        } else {
+            try await storeKeys(derived)
+        }
 
         let restored = WalletRecord(
             id: record.id,
@@ -276,16 +510,7 @@ final class WalletCreator {
     ) async throws -> WalletRecord {
         try await storeKeys(derived)
 
-        let record = WalletRecord(
-            id: UUID().uuidString,
-            name: Self.sanitise(name),
-            type: type,
-            derivationPath: type == Self.typeRawKey ? nil : Self.derivationPath,
-            mainnetAddress: derived.mainnetAddress,
-            testnetAddress: derived.testnetAddress,
-            mnemonicBackedUp: backedUp,
-            createdAt: now()
-        )
+        let record = makeRecord(derived, name: name, type: type, backedUp: backedUp)
         do {
             try walletStore.save(record)
         } catch {
@@ -297,6 +522,31 @@ final class WalletCreator {
             throw WalletCreationError.metadataStorageFailed
         }
         return record
+    }
+
+    private func makeRecord(_ derived: Derived, name: String, type: String, backedUp: Bool) -> WalletRecord {
+        WalletRecord(
+            id: UUID().uuidString,
+            name: Self.sanitise(name),
+            type: type,
+            derivationPath: type == Self.typeRawKey ? nil : Self.derivationPath,
+            mainnetAddress: derived.mainnetAddress,
+            testnetAddress: derived.testnetAddress,
+            mnemonicBackedUp: backedUp,
+            createdAt: now()
+        )
+    }
+
+    /// Moves an undecodable `wallet.json` aside before a new record is
+    /// written. If it cannot be moved, nothing may be written over it, so
+    /// that is ``WalletCreationError/metadataStorageFailed``.
+    private func setAsideUndecodableRecordIfAny() throws {
+        guard walletStore.hasUndecodableRecord else { return }
+        do {
+            try walletStore.setAsideUndecodableRecord()
+        } catch {
+            throw WalletCreationError.metadataStorageFailed
+        }
     }
 
     private func storeKeys(_ derived: Derived) async throws {

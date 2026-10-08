@@ -10,11 +10,60 @@ final class StubKeyWrapper: KeyWrapping, @unchecked Sendable {
     /// this from its actor's executor.
     private let lock = NSLock()
     private var failure: KeyWrapperError?
+    private var queuedDecryptFailures: [KeyWrapperError] = []
+    private var _decryptAttempts = 0
     private var pretendKeyIsMissing = false
+    private var presenceOverride: KeyMaterialPresence?
+    private var _beforeUnwrap: (@Sendable () -> Void)?
+    private var _afterWrap: (@Sendable () -> Void)?
+    private var _failAfterCreatingKey: KeyWrapperError?
+
+    /// When set, `wrap` lets the real wrapper create the key and wrap, then
+    /// throws this: a wrap that failed after the key was made.
+    var failAfterCreatingKey: KeyWrapperError? {
+        get { lock.lock(); defer { lock.unlock() }; return _failAfterCreatingKey }
+        set { lock.lock(); defer { lock.unlock() }; _failAfterCreatingKey = newValue }
+    }
+
+    /// Runs inside `unwrap`, before the real one: stands in for whatever
+    /// happens while the system prompt is up.
+    var beforeUnwrap: (@Sendable () -> Void)? {
+        get { lock.lock(); defer { lock.unlock() }; return _beforeUnwrap }
+        set { lock.lock(); defer { lock.unlock() }; _beforeUnwrap = newValue }
+    }
+
+    /// Runs right after a successful `wrap`.
+    var afterWrap: (@Sendable () -> Void)? {
+        get { lock.lock(); defer { lock.unlock() }; return _afterWrap }
+        set { lock.lock(); defer { lock.unlock() }; _afterWrap = newValue }
+    }
     private let real: SecureEnclaveKeyWrapper
 
     init(tag: String) {
         self.real = SecureEnclaveKeyWrapper(tag: tag)
+    }
+
+    /// The next decrypt attempts fail with these, one each, before the real
+    /// decrypt runs again. Each counts as one attempt of the retry in
+    /// ``SecureEnclaveKeyWrapper/retryingDecryptionFailureOnce(_:)``.
+    func failNextDecrypts(_ failures: [KeyWrapperError]) {
+        lock.lock()
+        defer { lock.unlock() }
+        queuedDecryptFailures = failures
+    }
+
+    /// How many decrypt attempts `unwrap` has made.
+    var decryptAttempts: Int {
+        lock.lock()
+        defer { lock.unlock() }
+        return _decryptAttempts
+    }
+
+    private func nextDecryptFailure() -> KeyWrapperError? {
+        lock.lock()
+        defer { lock.unlock() }
+        _decryptAttempts += 1
+        return queuedDecryptFailures.isEmpty ? nil : queuedDecryptFailures.removeFirst()
     }
 
     func fail(with error: KeyWrapperError?) {
@@ -30,6 +79,20 @@ final class StubKeyWrapper: KeyWrapping, @unchecked Sendable {
         defer { lock.unlock() }
         pretendKeyIsMissing = missing
         failure = missing ? .keyNotFound : nil
+    }
+
+    /// Forces what ``keyPresence`` answers, for a lookup the Keychain refuses.
+    /// Nil goes back to the real key.
+    func overridePresence(_ presence: KeyMaterialPresence?) {
+        lock.lock()
+        defer { lock.unlock() }
+        presenceOverride = presence
+    }
+
+    private var currentPresenceOverride: KeyMaterialPresence? {
+        lock.lock()
+        defer { lock.unlock() }
+        return presenceOverride
     }
 
     private var currentFailure: KeyWrapperError? {
@@ -48,14 +111,39 @@ final class StubKeyWrapper: KeyWrapping, @unchecked Sendable {
 
     var hasKey: Bool { keyIsMissing ? false : real.hasKey }
 
-    func wrap(_ dataKey: Data) throws -> Data {
-        if let currentFailure { throw currentFailure }
-        return try real.wrap(dataKey)
+    var keyPresence: KeyMaterialPresence {
+        if let currentPresenceOverride { return currentPresenceOverride }
+        return keyIsMissing ? .absent : real.keyPresence
     }
 
-    func unwrap(_ wrapped: Data, reason: String) throws -> Data {
+    var keyLabel: WrappingKeyLabel {
+        if let currentPresenceOverride {
+            switch currentPresenceOverride {
+            case .absent: return .absent
+            case .unknown: return .unknown
+            case .present: break
+            }
+        }
+        return keyIsMissing ? .absent : real.keyLabel
+    }
+
+    func wrap(_ dataKey: Data) throws -> Data {
         if let currentFailure { throw currentFailure }
-        return try real.unwrap(wrapped, reason: reason)
+        let wrapped = try real.wrap(dataKey)
+        if let failAfterCreatingKey { throw failAfterCreatingKey }
+        afterWrap?()
+        return wrapped
+    }
+
+    /// Goes through the same retry the real wrapper uses, so a failure that
+    /// does not repeat is absorbed exactly as on a device.
+    func unwrap(_ wrapped: Data, reason: String) throws -> Data {
+        beforeUnwrap?()
+        return try SecureEnclaveKeyWrapper.retryingDecryptionFailureOnce {
+            if let queued = nextDecryptFailure() { throw queued }
+            if let currentFailure { throw currentFailure }
+            return try real.unwrap(wrapped, reason: reason)
+        }
     }
 
     func deleteKey() throws {

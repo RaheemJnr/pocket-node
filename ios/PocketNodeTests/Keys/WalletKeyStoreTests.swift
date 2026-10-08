@@ -165,7 +165,8 @@ final class WalletKeyStoreTests: XCTestCase {
         try await store.store(WalletKeyBundle(privateKeyHex: "aabb"))
 
         var envelope = try XCTUnwrap(try keychain.get(account: WalletKeyAccount.envelope))
-        envelope[0] = 0x02
+        // 0x01 and 0x02 (with the wrapping key's label, #557) are known.
+        envelope[0] = 0x03
         try keychain.set(envelope, account: WalletKeyAccount.envelope)
 
         await assertThrows(.corrupt) { _ = try await self.store.load(reason: "Unlock your wallet") }
