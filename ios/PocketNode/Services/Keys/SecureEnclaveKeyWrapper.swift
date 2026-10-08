@@ -21,6 +21,17 @@ enum KeyWrapperError: Error, Equatable {
     case operationFailed(String)
 }
 
+/// The wrapping key's identity as a prompt-free lookup sees it.
+enum WrappingKeyLabel: Equatable, Sendable {
+    /// The key is there, with this `kSecAttrApplicationLabel` (for a P-256
+    /// key, a hash of its public half).
+    case label(Data)
+    /// The Keychain answered and holds no key.
+    case absent
+    /// The Keychain refused the lookup, or the key carries no label.
+    case unknown
+}
+
 /// Wraps and unwraps a symmetric data key with a hardware key.
 ///
 /// The indirection exists for the simulator, which has no Secure Enclave, and
@@ -39,6 +50,11 @@ protocol KeyWrapping: Sendable {
     /// existence query only: no key reference, no private-key use, and an
     /// authentication context that forbids any UI, so it can never prompt.
     var keyPresence: KeyMaterialPresence { get }
+
+    /// The wrapping key's label, read the same prompt-free way as
+    /// ``keyPresence`` (attributes only, never the key itself). The envelope
+    /// records it so a different key under the same tag can be recognised.
+    var keyLabel: WrappingKeyLabel { get }
 
     /// Encrypts `dataKey` to the wrapping key's public half, creating the key
     /// pair on first use. Never prompts: the public key is not access
@@ -119,6 +135,35 @@ final class SecureEnclaveKeyWrapper: KeyWrapping {
         switch status {
         case errSecSuccess:
             return .present
+        case errSecItemNotFound:
+            return .absent
+        default:
+            return .unknown
+        }
+    }
+
+    /// Attributes only: `kSecReturnAttributes`, never `kSecReturnRef` or
+    /// data, under the same `interactionNotAllowed` context as
+    /// ``keyPresence``. Reading an item's attributes needs no authentication
+    /// even when its private half is access controlled.
+    var keyLabel: WrappingKeyLabel {
+        var query = baseQuery()
+        query[kSecAttrKeyClass as String] = kSecAttrKeyClassPrivate
+        query[kSecMatchLimit as String] = kSecMatchLimitOne
+        query[kSecReturnAttributes as String] = true
+        let context = LAContext()
+        context.interactionNotAllowed = true
+        query[kSecUseAuthenticationContext as String] = context
+
+        var result: CFTypeRef?
+        let status = SecItemCopyMatching(query as CFDictionary, &result)
+        switch status {
+        case errSecSuccess:
+            guard let attributes = result as? [String: Any],
+                  let label = attributes[kSecAttrApplicationLabel as String] as? Data,
+                  !label.isEmpty
+            else { return .unknown }
+            return .label(label)
         case errSecItemNotFound:
             return .absent
         default:

@@ -12,6 +12,21 @@ final class StubKeyWrapper: KeyWrapping, @unchecked Sendable {
     private var failure: KeyWrapperError?
     private var pretendKeyIsMissing = false
     private var presenceOverride: KeyMaterialPresence?
+    private var _beforeUnwrap: (@Sendable () -> Void)?
+    private var _afterWrap: (@Sendable () -> Void)?
+
+    /// Runs inside `unwrap`, before the real one: stands in for whatever
+    /// happens while the system prompt is up.
+    var beforeUnwrap: (@Sendable () -> Void)? {
+        get { lock.lock(); defer { lock.unlock() }; return _beforeUnwrap }
+        set { lock.lock(); defer { lock.unlock() }; _beforeUnwrap = newValue }
+    }
+
+    /// Runs right after a successful `wrap`.
+    var afterWrap: (@Sendable () -> Void)? {
+        get { lock.lock(); defer { lock.unlock() }; return _afterWrap }
+        set { lock.lock(); defer { lock.unlock() }; _afterWrap = newValue }
+    }
     private let real: SecureEnclaveKeyWrapper
 
     init(tag: String) {
@@ -68,12 +83,26 @@ final class StubKeyWrapper: KeyWrapping, @unchecked Sendable {
         return keyIsMissing ? .absent : real.keyPresence
     }
 
+    var keyLabel: WrappingKeyLabel {
+        if let currentPresenceOverride {
+            switch currentPresenceOverride {
+            case .absent: return .absent
+            case .unknown: return .unknown
+            case .present: break
+            }
+        }
+        return keyIsMissing ? .absent : real.keyLabel
+    }
+
     func wrap(_ dataKey: Data) throws -> Data {
         if let currentFailure { throw currentFailure }
-        return try real.wrap(dataKey)
+        let wrapped = try real.wrap(dataKey)
+        afterWrap?()
+        return wrapped
     }
 
     func unwrap(_ wrapped: Data, reason: String) throws -> Data {
+        beforeUnwrap?()
         if let currentFailure { throw currentFailure }
         return try real.unwrap(wrapped, reason: reason)
     }
