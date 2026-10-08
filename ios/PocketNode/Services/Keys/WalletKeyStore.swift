@@ -245,17 +245,26 @@ actor WalletKeyStore {
     /// of the key that just opened it (version 1, or one retired by mistake)
     /// is rewritten in place with that label, read prompt-free. Only when the
     /// label reads; on any other answer it is left as it is.
-    private func rebindIfNeeded(_ stored: Data) {
+    ///
+    /// Returns the envelope as stored afterwards: the rebound bytes if the
+    /// write landed, otherwise `stored`, so a caller comparing against the
+    /// stored envelope later compares against what is really there.
+    private func rebindIfNeeded(_ stored: Data) -> Data {
         guard let decoded = try? WalletKeyEnvelope.decode(stored),
               case .label(let current) = wrapper.keyLabel,
               decoded.keyLabel != current
-        else { return }
+        else { return stored }
         let rebound = WalletKeyEnvelope.encode(
             wrappedDataKey: decoded.wrappedDataKey,
             ciphertext: decoded.ciphertext,
             keyLabel: current
         )
-        try? keychain.set(rebound, account: WalletKeyAccount.envelope)
+        do {
+            try keychain.set(rebound, account: WalletKeyAccount.envelope)
+            return rebound
+        } catch {
+            return stored
+        }
     }
 
     /// Replaces key material that ``keyHealth`` confirms is
@@ -275,10 +284,13 @@ actor WalletKeyStore {
     /// 4. The new envelope, carrying the fresh key's label, overwrites the
     ///    retired one in a single Keychain update.
     ///
-    /// Stopping after 1, 2 or 3 leaves the retired (or unparseable) envelope:
-    /// invalidated, whatever key is under the tag, so the restore is offered
-    /// again. A failed write at 4 deletes the fresh key as well, best effort;
-    /// the retired envelope reads as invalidated even if that delete fails.
+    /// Stopping after 1, 2 or 3 leaves the retired (or unparseable) envelope,
+    /// so the restore is offered again: a structural state is retired as
+    /// structural and reads as invalidated whatever key is under the tag; a
+    /// suspended one keeps its key-refused (or unrecorded) reason and reads
+    /// as suspended while a key is present, invalidated once it is gone. A
+    /// failed write at 4 deletes the fresh key as well, best effort; the
+    /// retired envelope reads the same way even if that delete fails.
     ///
     /// Only on structural invalidation (key absent, a real label mismatch, a
     /// structural retirement, or an envelope that does not parse), re-checked
@@ -406,11 +418,11 @@ actor WalletKeyStore {
     /// Decrypts and returns the stored wallet, prompting for biometrics or the
     /// device passcode with `reason` as the system prompt's text.
     ///
-    /// A failure that proves the keys unusable
-    /// (``WalletKeyStoreError/provesKeysUnusable``, an allowlist) retires the
-    /// envelope in place, so ``keyHealth`` reads ``KeyHealth/invalidated``
-    /// from storage and the launch gate offers the restore. Any other
-    /// failure changes nothing. A success binds a version 1 (or retired)
+    /// A ciphertext or bundle that fails after a good unwrap retires the
+    /// envelope as structural, and a repeated decrypt refusal as key refused,
+    /// so ``keyHealth`` reads the proof from storage and the launch gate
+    /// offers the restore. An absent key is left to ``keyHealth``'s live
+    /// check. Any other failure changes nothing. A success binds a version 1 (or retired)
     /// envelope to the key that just opened it.
     func load(reason: String) throws -> WalletKeyBundle {
         try loadWithEnvelope(reason: reason).bundle
@@ -427,13 +439,22 @@ actor WalletKeyStore {
         do {
             bundle = try decrypt(stored, reason: reason)
         } catch let error as WalletKeyStoreError {
-            if error.provesKeysUnusable {
-                retire(stored, reason: error == .keyRefused ? .keyRefused : .structural)
+            // Only what a stored mark adds anything to is retired. An absent
+            // key (`keyInvalidated`) is not: ``keyHealth`` already reads a
+            // key that is really gone as invalidated, live, and a lookup that
+            // missed once must not mark a working key's envelope for good.
+            switch error {
+            case .corrupt:
+                retire(stored, reason: .structural)
+            case .keyRefused:
+                retire(stored, reason: .keyRefused)
+            default:
+                break
             }
             throw error
         }
-        rebindIfNeeded(stored)
-        return (bundle, stored)
+        let current = rebindIfNeeded(stored)
+        return (bundle, current)
     }
 
     private func decrypt(_ stored: Data, reason: String) throws -> WalletKeyBundle {
