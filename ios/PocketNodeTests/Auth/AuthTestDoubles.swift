@@ -386,3 +386,71 @@ extension Argon2Cost {
     /// starts from an empty throwaway Keychain service.
     static let testing = Argon2Cost(iterations: 1, memoryKib: 8, parallelism: 1, tagLength: 32)
 }
+
+/// A store that can park the next PIN verification part way through, so a
+/// test can background the app while the KDF would still be running.
+///
+/// `PinPolicyActor.verify` opens with a write probe, and nothing else writes
+/// that account, so holding the probe holds exactly one verify. The probe is
+/// parked on a semaphore: the store is synchronous, and the thread it blocks
+/// is the policy actor's, not the main actor the test runs on.
+final class HoldingKeyValueStore: KeyValueStoring, @unchecked Sendable {
+    private let lock = NSLock()
+    private let real: KeychainStore
+    private let gate = DispatchSemaphore(value: 0)
+    private var _isHolding = false
+    private var _isParked = false
+
+    init(service: String) {
+        self.real = KeychainStore(service: service)
+    }
+
+    /// Parks the next verify at its write probe until ``release()``.
+    func holdNextVerify() {
+        lock.lock()
+        defer { lock.unlock() }
+        _isHolding = true
+    }
+
+    /// True once a verify is parked.
+    var isParked: Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        return _isParked
+    }
+
+    /// Lets the parked verify carry on.
+    func release() {
+        gate.signal()
+    }
+
+    private func shouldPark(_ account: String) -> Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        guard _isHolding, account == PinAccount.writeProbe else { return false }
+        _isHolding = false
+        _isParked = true
+        return true
+    }
+
+    func set(_ data: Data, account: String) throws {
+        if shouldPark(account) { gate.wait() }
+        try real.set(data, account: account)
+    }
+
+    func get(account: String) throws -> Data? {
+        try real.get(account: account)
+    }
+
+    func contains(account: String) throws -> Bool {
+        try real.contains(account: account)
+    }
+
+    func delete(account: String) throws {
+        try real.delete(account: account)
+    }
+
+    func deleteAll() throws {
+        try real.deleteAll()
+    }
+}
