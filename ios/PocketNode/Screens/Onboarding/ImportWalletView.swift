@@ -48,6 +48,9 @@ struct ImportWalletView: View {
                 if let record = model.restoringRecord {
                     restoreHeader(record)
                 } else {
+                    if model.replacesUnusableKeys {
+                        replaceHeader
+                    }
                     Picker("What are you importing", selection: $mode) {
                         Text("Recovery phrase").tag(Mode.phrase)
                         Text("Private key").tag(Mode.privateKey)
@@ -61,8 +64,9 @@ struct ImportWalletView: View {
                 case .privateKey: privateKeySection
                 }
 
-                // A restore keeps the wallet's own name.
-                if !model.isRestoring {
+                // A restore keeps the wallet's own name. The import over
+                // unusable keys has no name left to keep, so it asks.
+                if model.restoringRecord == nil {
                     VStack(alignment: .leading, spacing: 8) {
                         Text("Wallet name")
                             .font(.headline)
@@ -107,11 +111,7 @@ struct ImportWalletView: View {
         VStack(alignment: .leading, spacing: 8) {
             Text("Restore \(record.name)")
                 .font(.headline)
-            Text(
-                record.type == WalletCreator.typeRawKey
-                    ? "This wallet's keys stay on the device they were created on and did not come across with your backup. Enter its private key to use it here."
-                    : "This wallet's keys stay on the device they were created on and did not come across with your backup. Enter its recovery phrase to use it here."
-            )
+            Text(restoreExplanation(record))
             .font(.subheadline)
             .foregroundStyle(.secondary)
             Text("If it is lost, this wallet cannot be restored here. The only way to start over is to delete the app and install it again.")
@@ -124,6 +124,32 @@ struct ImportWalletView: View {
         }
         .accessibilityElement(children: .contain)
         .accessibilityIdentifier("import.restore")
+    }
+
+    private func restoreExplanation(_ record: WalletRecord) -> String {
+        let rawKey = record.type == WalletCreator.typeRawKey
+        if model.restoresInvalidatedKeys {
+            return rawKey
+                ? OnboardingViewModel.invalidatedKeyRestoreMessage
+                : OnboardingViewModel.invalidatedPhraseRestoreMessage
+        }
+        return rawKey
+            ? "This wallet's keys stay on the device they were created on and did not come across with your backup. Enter its private key to use it here."
+            : "This wallet's keys stay on the device they were created on and did not come across with your backup. Enter its recovery phrase to use it here."
+    }
+
+    /// The import over keys this device can no longer decrypt, with no
+    /// wallet left to name: any phrase or key restores a wallet here.
+    private var replaceHeader: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text("Restore a wallet")
+                .font(.headline)
+            Text(OnboardingViewModel.replaceUnusableKeysMessage)
+                .font(.subheadline)
+                .foregroundStyle(.secondary)
+        }
+        .accessibilityElement(children: .contain)
+        .accessibilityIdentifier("import.replaceKeys")
     }
 
     /// A wallet type this version cannot restore: a plain explanation and

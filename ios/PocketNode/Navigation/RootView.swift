@@ -32,12 +32,20 @@ struct RootView: View {
     @State private var phase: Phase = .undecided
     @State private var onboarding: OnboardingViewModel?
     @State private var home: HomeViewModel?
-    /// A wallet waiting for its keys to be restored while a PIN stands in
-    /// front of it: the restore flow names the wallet and shows its address,
-    /// so it waits for the unlock (``LaunchGate/RestoreRoute/hold(_:)``).
-    @State private var pendingRestore: WalletRecord?
-    /// How many times the stand-in has asked again about the held restore.
+    /// A recovery waiting while a PIN stands in front of the wallet: the
+    /// restore flows name the wallet and show its address, and rebuilding the
+    /// metadata decrypts the keys, so they wait for the unlock
+    /// (``LaunchGate/RestoreRoute/hold(_:)``). Also set while a metadata
+    /// rebuild runs, so the stand-in covers it.
+    @State private var pendingRecovery: LaunchGate.Recovery?
+    /// How many times the stand-in has asked again about the held recovery.
     @State private var heldRestoreRetries = 0
+    /// A metadata rebuild is running.
+    @State private var isRebuilding = false
+    /// The last metadata rebuild failed in a way worth retrying (a dismissed
+    /// prompt, say). The next one waits for the user's tap rather than the
+    /// retry timer, which would put the system prompt up every two seconds.
+    @State private var rebuildNeedsRetry = false
 
     private var auth: AuthService { container.auth }
     private var gate: LaunchGate { container.launchGate }
@@ -76,7 +84,7 @@ struct RootView: View {
                 // here, and `reroute()` sends them where they belong.
                 if auth.isGated {
                     LockView(auth: auth)
-                } else if gate.needsSecuritySetup || pendingRestore != nil {
+                } else if gate.needsSecuritySetup || pendingRecovery != nil {
                     // Nothing else is guaranteed to change the session from
                     // here, so this re-reads it and routes on, rather than
                     // waiting on an `onChange` that may never fire. Keyed on
@@ -94,7 +102,19 @@ struct RootView: View {
                         VStack(spacing: 16) {
                             ProgressView()
                                 .accessibilityLabel("Loading")
-                            if pendingRestore != nil && heldRestoreRetries >= 5 {
+                            if rebuildNeedsRetry {
+                                Text("Could not read your wallet keys to restore its details.")
+                                    .font(.subheadline)
+                                    .foregroundStyle(.secondary)
+                                    .multilineTextAlignment(.center)
+                                    .padding(.horizontal, 32)
+                                    .accessibilityIdentifier("root.rebuildFailed")
+                                Button("Try again") {
+                                    rebuildNeedsRetry = false
+                                    Task { await rebuildMetadata() }
+                                }
+                                .accessibilityIdentifier("root.rebuildRetry")
+                            } else if pendingRecovery != nil && heldRestoreRetries >= 5 {
                                 Text("Could not read your wallet keys. Close the app and open it again.")
                                     .font(.subheadline)
                                     .foregroundStyle(.secondary)
@@ -104,10 +124,10 @@ struct RootView: View {
                             }
                         }
                     }
-                    .task(id: pendingRestore?.id) {
+                    .task(id: pendingRecovery?.id) {
                         heldRestoreRetries = 0
                         await reroute()
-                        while pendingRestore != nil, !Task.isCancelled {
+                        while pendingRecovery != nil, !Task.isCancelled {
                             try? await Task.sleep(for: .seconds(2))
                             guard !Task.isCancelled else { return }
                             heldRestoreRetries += 1
@@ -177,31 +197,81 @@ struct RootView: View {
     /// no restore to deal with and the PIN routing should go on.
     private func apply(_ restoreRoute: LaunchGate.RestoreRoute) -> Bool {
         switch restoreRoute {
-        case .restore(let record):
-            startRestore(record)
+        case .restore(let recovery):
+            start(recovery)
             return false
-        case .hold(let record):
-            // The wallet phase shows the lock screen first, and the restore
+        case .hold(let recovery):
+            // The wallet phase shows the lock screen first, and the recovery
             // starts once the session is unlocked.
-            pendingRestore = record
+            pendingRecovery = recovery
             phase = .wallet
             return false
         case .none:
-            pendingRestore = nil
+            pendingRecovery = nil
+            rebuildNeedsRetry = false
             return true
         }
     }
 
-    private func startRestore(_ record: WalletRecord) {
+    private func start(_ recovery: LaunchGate.Recovery) {
         let pinService = container.pinService
+        let hasPin = { pinService.pinPresence != .absent }
+        switch recovery {
+        case .keysMissing(let record):
+            startOnboarding(OnboardingViewModel(creator: container.walletCreator, restoring: record, hasPin: hasPin))
+        case .keysInvalidated(let record):
+            startOnboarding(
+                OnboardingViewModel(
+                    creator: container.walletCreator,
+                    restoring: record,
+                    keysInvalidated: true,
+                    hasPin: hasPin
+                )
+            )
+        case .replaceKeys:
+            startOnboarding(.replacingUnusableKeys(creator: container.walletCreator, hasPin: hasPin))
+        case .rebuildMetadata:
+            // Behind the stand-in while it runs. A failure worth retrying
+            // waits for the user's tap instead of the stand-in's timer.
+            pendingRecovery = .rebuildMetadata
+            phase = .wallet
+            guard !isRebuilding, !rebuildNeedsRetry else { return }
+            Task { await rebuildMetadata() }
+        }
+    }
+
+    private func startOnboarding(_ model: OnboardingViewModel) {
         path = NavigationPath()
-        pendingRestore = nil
-        onboarding = OnboardingViewModel(
-            creator: container.walletCreator,
-            restoring: record,
-            hasPin: { pinService.pinPresence != .absent }
-        )
+        pendingRecovery = nil
+        rebuildNeedsRetry = false
+        onboarding = model
         phase = .onboarding
+    }
+
+    /// Writes `wallet.json` again from usable keys, then routes on: to the
+    /// PIN routing when it is back, to the import over unusable keys when
+    /// the keys turn out not to decrypt, or to a "Try again" button.
+    private func rebuildMetadata() async {
+        guard !isRebuilding else { return }
+        isRebuilding = true
+        var failure: Error?
+        do {
+            try await container.walletCreator.rebuildMetadata(reason: "Unlock your wallet keys to restore its details")
+        } catch {
+            failure = error
+        }
+        isRebuilding = false
+        switch LaunchGate.rebuildOutcome(error: failure) {
+        case .rebuilt:
+            pendingRecovery = nil
+            if phase == .wallet {
+                await reroute()
+            }
+        case .keysUnusable:
+            start(.replaceKeys)
+        case .retryOnRequest:
+            rebuildNeedsRetry = true
+        }
     }
 
     /// Asks where the wallet phase should go instead, if anywhere: the
@@ -214,7 +284,7 @@ struct RootView: View {
     /// piling them up; the `onChange` callers wrap it in a `Task`.
     private func reroute() async {
         guard phase == .wallet else { return }
-        let restoreRoute = await gate.restoreRoute(pending: pendingRestore)
+        let restoreRoute = await gate.restoreRoute(pending: pendingRecovery)
         guard phase == .wallet, apply(restoreRoute) else { return }
         guard let destination = await gate.reroute(), phase == .wallet else { return }
         route(to: destination)
