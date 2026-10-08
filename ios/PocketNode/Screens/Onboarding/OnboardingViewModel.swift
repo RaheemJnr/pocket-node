@@ -98,6 +98,48 @@ final class OnboardingViewModel {
     /// The action's title.
     static let retryUnlockTitle = "Try unlocking again"
 
+    /// How many "Try unlocking again" attempts have failed in this session.
+    /// A dismissed prompt is not a failed attempt.
+    private(set) var failedRetryUnlocks = 0
+
+    /// True once enough attempts have failed that the way out is worth
+    /// saying (``reinstallHint``).
+    var showsReinstallHint: Bool { Self.showsReinstallHint(failedAttempts: failedRetryUnlocks) }
+
+    /// After three failed attempts.
+    static func showsReinstallHint(failedAttempts: Int) -> Bool {
+        failedAttempts >= 3
+    }
+
+    /// The extra line shown after repeated failures. True: a fresh install
+    /// wipes the Keychain items (`InstallMarker`).
+    static let reinstallHint =
+        "If this keeps failing, delete Pocket Node, install it again and restore with your recovery phrase."
+
+    /// The explanation the restore screen opens with, for this flow's
+    /// record: suspended keys (a retry is offered), invalidated keys, or
+    /// missing keys. Nil when this is not a restore for a known wallet.
+    var restoreExplanation: String? {
+        guard let record = restoringRecord else { return nil }
+        let rawKey = record.type == WalletCreator.typeRawKey
+        if canRetryUnlock {
+            return rawKey ? Self.suspendedKeyRestoreMessage : Self.suspendedPhraseRestoreMessage
+        }
+        if restoresInvalidatedKeys {
+            return rawKey ? Self.invalidatedKeyRestoreMessage : Self.invalidatedPhraseRestoreMessage
+        }
+        return rawKey ? Self.missingKeyRestoreMessage : Self.missingPhraseRestoreMessage
+    }
+
+    /// For keys that are suspended: they may still unlock, so the screen
+    /// does not say the device "can no longer" unlock them.
+    static let suspendedPhraseRestoreMessage =
+        "Your wallet keys could not be unlocked. Try unlocking again, or enter the recovery phrase to restore it."
+
+    /// ``suspendedPhraseRestoreMessage`` for a raw-key wallet.
+    static let suspendedKeyRestoreMessage =
+        "Your wallet keys could not be unlocked. Try unlocking again, or enter the private key to restore it."
+
     /// - Parameter step: where the flow starts. ``Step/welcome`` for a device
     ///   with no wallet; ``resumeStep(for:)`` for one whose onboarding was cut
     ///   short after the wallet was stored (see ``launchDestination(hasWallet:pinPresence:record:)``).
@@ -367,7 +409,12 @@ final class OnboardingViewModel {
     func retryUnlock() async {
         guard let retryUnlockAction else { return }
         await run {
-            try await retryUnlockAction()
+            do {
+                try await retryUnlockAction()
+            } catch {
+                if Self.message(for: error) != nil { self.failedRetryUnlocks += 1 }
+                throw error
+            }
             self.step = self.hasPin() ? .done : .pinSetup
         }
     }
@@ -437,8 +484,9 @@ final class OnboardingViewModel {
             return "Could not save your wallet. Try again."
         case .doesNotMatchWallet:
             return "That does not match this wallet. Enter the recovery phrase or private key for the address shown."
-        case .keyReadFailed:
-            return "Could not read your wallet keys. Try again."
+        case .keyReadFailed(let reason):
+            // Dismissing the prompt is silent here as on every other path.
+            return reason == .authenticationCancelled ? nil : "Could not read your wallet keys. Try again."
         }
     }
 }

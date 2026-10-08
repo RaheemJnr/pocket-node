@@ -46,6 +46,9 @@ struct RootView: View {
     /// prompt, say). The next one waits for the user's tap rather than the
     /// retry timer, which would put the system prompt up every two seconds.
     @State private var rebuildNeedsRetry = false
+    /// Rebuild attempts that failed in this session (a dismissed prompt not
+    /// counted), for the reinstall hint after three.
+    @State private var failedRebuilds = 0
 
     private var auth: AuthService { container.auth }
     private var gate: LaunchGate { container.launchGate }
@@ -114,6 +117,14 @@ struct RootView: View {
                                     Task { await rebuildMetadata() }
                                 }
                                 .accessibilityIdentifier("root.rebuildRetry")
+                                if OnboardingViewModel.showsReinstallHint(failedAttempts: failedRebuilds) {
+                                    Text(OnboardingViewModel.reinstallHint)
+                                        .font(.subheadline)
+                                        .foregroundStyle(.secondary)
+                                        .multilineTextAlignment(.center)
+                                        .padding(.horizontal, 32)
+                                        .accessibilityIdentifier("root.reinstallHint")
+                                }
                             } else if pendingRecovery != nil && heldRestoreRetries >= 5 {
                                 Text("Could not read your wallet keys. Close the app and open it again.")
                                     .font(.subheadline)
@@ -239,9 +250,8 @@ struct RootView: View {
                 OnboardingViewModel(
                     creator: creator,
                     restoring: record,
-                    keysInvalidated: true,
                     hasPin: hasPin,
-                    retryUnlock: { try await creator.retryUnlock(reason: "Unlock your wallet keys") }
+                    retryUnlock: { try await creator.retryUnlock(reason: "Unlock your wallet keys", matching: record) }
                 )
             )
         case .replaceKeys:
@@ -287,6 +297,9 @@ struct RootView: View {
         case .keysUnusable:
             start(.replaceKeys)
         case .retryOnRequest:
+            if OnboardingViewModel.message(for: failure ?? WalletCreationError.metadataStorageFailed) != nil {
+                failedRebuilds += 1
+            }
             rebuildNeedsRetry = true
         }
     }

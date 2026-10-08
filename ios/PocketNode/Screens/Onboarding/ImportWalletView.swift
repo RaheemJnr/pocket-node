@@ -82,6 +82,13 @@ struct ImportWalletView: View {
                     OnboardingErrorBanner(message: message)
                 }
 
+                if model.canRetryUnlock && model.showsReinstallHint {
+                    Text(OnboardingViewModel.reinstallHint)
+                        .font(.subheadline)
+                        .foregroundStyle(.secondary)
+                        .accessibilityIdentifier("import.reinstallHint")
+                }
+
                 Button(action: submit) {
                     if model.isBusy {
                         ProgressView().frame(maxWidth: .infinity)
@@ -125,7 +132,7 @@ struct ImportWalletView: View {
         VStack(alignment: .leading, spacing: 8) {
             Text("Restore \(record.name)")
                 .font(.headline)
-            Text(restoreExplanation(record))
+            Text(model.restoreExplanation ?? "")
             .font(.subheadline)
             .foregroundStyle(.secondary)
             Text("If it is lost, this wallet cannot be restored here.")
@@ -138,18 +145,6 @@ struct ImportWalletView: View {
         }
         .accessibilityElement(children: .contain)
         .accessibilityIdentifier("import.restore")
-    }
-
-    private func restoreExplanation(_ record: WalletRecord) -> String {
-        let rawKey = record.type == WalletCreator.typeRawKey
-        if model.restoresInvalidatedKeys {
-            return rawKey
-                ? OnboardingViewModel.invalidatedKeyRestoreMessage
-                : OnboardingViewModel.invalidatedPhraseRestoreMessage
-        }
-        return rawKey
-            ? OnboardingViewModel.missingKeyRestoreMessage
-            : OnboardingViewModel.missingPhraseRestoreMessage
     }
 
     /// The import over keys this device can no longer decrypt, with no

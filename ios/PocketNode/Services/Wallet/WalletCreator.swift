@@ -240,14 +240,36 @@ final class WalletCreator {
     /// Decrypts the keys once more, for a wallet whose envelope is
     /// ``KeyHealth/suspended`` (retired after a refusal that may not
     /// repeat). A decrypt that works binds the envelope back to its key
-    /// (``WalletKeyStore/load(reason:)``) and the wallet is usable again; a
-    /// failure is ``WalletCreationError/keyReadFailed(_:)`` and changes
-    /// nothing else.
-    func retryUnlock(reason: String) async throws {
+    /// (``WalletKeyStore/load(reason:)``).
+    ///
+    /// Success is reported only if the keys then read as
+    /// ``KeyHealth/usable`` (the re-bind landed) and they derive `record`'s
+    /// own addresses. Otherwise this throws and the restore screen stays:
+    /// ``WalletCreationError/keyReadFailed(_:)`` for a decrypt that failed or
+    /// keys that still do not read usable, ``WalletCreationError/doesNotMatchWallet``
+    /// for keys that belong to another wallet.
+    func retryUnlock(reason: String, matching record: WalletRecord) async throws {
+        let bundle: WalletKeyBundle
         do {
-            _ = try await keyStore.load(reason: reason)
+            bundle = try await keyStore.load(reason: reason)
         } catch let error as WalletKeyStoreError {
             throw WalletCreationError.keyReadFailed(error)
+        }
+        let health = await keyStore.keyHealth
+        guard health == .usable else {
+            throw WalletCreationError.keyReadFailed(.keyRefused)
+        }
+        guard var bytes = Self.decodePrivateKey(bundle.privateKeyHex) else {
+            throw WalletCreationError.keyReadFailed(.corrupt)
+        }
+        let privateKey = KotlinByteArray.from(bytes)
+        bytes.wipe()
+        defer { privateKey.zeroOut() }
+        let derived = Self.describe(privateKey: privateKey, mnemonic: nil)
+        guard derived.mainnetAddress == record.mainnetAddress,
+              derived.testnetAddress == record.testnetAddress
+        else {
+            throw WalletCreationError.doesNotMatchWallet
         }
     }
 
