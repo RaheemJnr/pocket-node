@@ -182,15 +182,17 @@ final class KeyHealthRecoveryTests: XCTestCase {
         XCTAssertEqual(decide(.record(record), .absent), .recover(.keysMissing(record)))
         XCTAssertEqual(decide(.record(record), .invalidated), .recover(.keysInvalidated(record)))
         XCTAssertEqual(decide(.record(record), .unknown), .wait)
+        XCTAssertEqual(decide(.record(record), .suspended), .recover(.keysSuspended(record)))
 
         for metadata in [LaunchGate.MetadataState.missing, .undecodable] {
             XCTAssertEqual(decide(metadata, .usable), .recover(.rebuildMetadata))
             XCTAssertEqual(decide(metadata, .absent), .none)
             XCTAssertEqual(decide(metadata, .invalidated), .recover(.replaceKeys))
             XCTAssertEqual(decide(metadata, .unknown), .wait)
+            XCTAssertEqual(decide(metadata, .suspended), .recover(.rebuildMetadata), "never the import")
         }
 
-        for health in [KeyHealth.usable, .absent, .invalidated, .unknown] {
+        for health in [KeyHealth.usable, .absent, .invalidated, .suspended, .unknown] {
             XCTAssertEqual(decide(.unreadable, health), .wait)
         }
     }
@@ -637,8 +639,10 @@ final class KeyHealthRecoveryTests: XCTestCase {
             XCTAssertTrue(error.provesKeysUnusable)
         }
 
+        // A refused decrypt only suspends the keys (round 3): the restore
+        // with this wallet's phrase, plus a retry.
         let after = await gate.restoreRoute()
-        XCTAssertEqual(after, .restore(.keysInvalidated(record)))
+        XCTAssertEqual(after, .restore(.keysSuspended(record)))
         try await creator(store).restoreMnemonic(words: WalletCreatorTests.testPhrase, replacing: record)
         let health = await store.keyHealth
         XCTAssertEqual(health, .usable, "a successful replacement clears the evidence")
@@ -718,7 +722,7 @@ final class KeyHealthRecoveryTests: XCTestCase {
         }
 
         let after = try WalletKeyEnvelope.decode(try XCTUnwrap(envelope))
-        XCTAssertEqual(after.keyLabel, WalletKeyEnvelope.retiredKeyLabel)
+        XCTAssertEqual(after.keyLabel, WalletKeyEnvelope.retiredLabel(.structural), "a ciphertext that fails after a good unwrap is structural")
         XCTAssertEqual(after.wrappedDataKey, before.wrappedDataKey, "the original data is kept")
         XCTAssertEqual(after.ciphertext, before.ciphertext)
         let health = await keyStore().keyHealth
@@ -732,7 +736,7 @@ final class KeyHealthRecoveryTests: XCTestCase {
         let retired = try XCTUnwrap(WalletKeyEnvelope.retired(try XCTUnwrap(envelope)))
         try keyKeychain.set(retired, account: WalletKeyAccount.envelope)
         var health = await keyStore().keyHealth
-        XCTAssertEqual(health, .invalidated)
+        XCTAssertEqual(health, .suspended, "retired for no recorded reason, key present: the safe side")
 
         let bundle = try await keyStore().load(reason: "test")
 
@@ -1021,7 +1025,7 @@ final class KeyHealthRecoveryTests: XCTestCase {
         let now = try WalletKeyEnvelope.decode(try XCTUnwrap(envelope))
         XCTAssertEqual(now.wrappedDataKey, old.wrappedDataKey)
         XCTAssertEqual(now.ciphertext, old.ciphertext)
-        XCTAssertEqual(now.keyLabel, WalletKeyEnvelope.retiredKeyLabel)
+        XCTAssertEqual(now.keyLabel, WalletKeyEnvelope.retiredLabel(.structural), "the key was absent: structural")
         let after = await store.keyHealth
         XCTAssertEqual(after, .invalidated)
     }

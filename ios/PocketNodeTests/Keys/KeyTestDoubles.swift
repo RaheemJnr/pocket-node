@@ -10,6 +10,8 @@ final class StubKeyWrapper: KeyWrapping, @unchecked Sendable {
     /// this from its actor's executor.
     private let lock = NSLock()
     private var failure: KeyWrapperError?
+    private var queuedDecryptFailures: [KeyWrapperError] = []
+    private var _decryptAttempts = 0
     private var pretendKeyIsMissing = false
     private var presenceOverride: KeyMaterialPresence?
     private var _beforeUnwrap: (@Sendable () -> Void)?
@@ -31,6 +33,29 @@ final class StubKeyWrapper: KeyWrapping, @unchecked Sendable {
 
     init(tag: String) {
         self.real = SecureEnclaveKeyWrapper(tag: tag)
+    }
+
+    /// The next decrypt attempts fail with these, one each, before the real
+    /// decrypt runs again. Each counts as one attempt of the retry in
+    /// ``SecureEnclaveKeyWrapper/retryingDecryptionFailureOnce(_:)``.
+    func failNextDecrypts(_ failures: [KeyWrapperError]) {
+        lock.lock()
+        defer { lock.unlock() }
+        queuedDecryptFailures = failures
+    }
+
+    /// How many decrypt attempts `unwrap` has made.
+    var decryptAttempts: Int {
+        lock.lock()
+        defer { lock.unlock() }
+        return _decryptAttempts
+    }
+
+    private func nextDecryptFailure() -> KeyWrapperError? {
+        lock.lock()
+        defer { lock.unlock() }
+        _decryptAttempts += 1
+        return queuedDecryptFailures.isEmpty ? nil : queuedDecryptFailures.removeFirst()
     }
 
     func fail(with error: KeyWrapperError?) {
@@ -101,10 +126,15 @@ final class StubKeyWrapper: KeyWrapping, @unchecked Sendable {
         return wrapped
     }
 
+    /// Goes through the same retry the real wrapper uses, so a failure that
+    /// does not repeat is absorbed exactly as on a device.
     func unwrap(_ wrapped: Data, reason: String) throws -> Data {
         beforeUnwrap?()
-        if let currentFailure { throw currentFailure }
-        return try real.unwrap(wrapped, reason: reason)
+        return try SecureEnclaveKeyWrapper.retryingDecryptionFailureOnce {
+            if let queued = nextDecryptFailure() { throw queued }
+            if let currentFailure { throw currentFailure }
+            return try real.unwrap(wrapped, reason: reason)
+        }
     }
 
     func deleteKey() throws {
