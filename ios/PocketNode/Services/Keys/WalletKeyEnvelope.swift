@@ -35,12 +35,38 @@ enum WalletKeyEnvelope {
     /// The version 2 layout, with the wrapping key's label.
     static let versionWithKeyLabel: UInt8 = 0x02
 
-    /// The label written over a version 2 envelope's own while its keys are
-    /// being replaced (``WalletKeyStore/replaceUnusableKeys(with:)``). A real
-    /// `kSecAttrApplicationLabel` is a 20-byte hash, so this one byte can
-    /// never match a key, and an envelope carrying it reads as invalidated
-    /// whatever key sits under the tag.
-    static let retiredKeyLabel = Data([0x00])
+    /// Why an envelope was retired, kept as the single byte of its retired
+    /// label. A real `kSecAttrApplicationLabel` is a 20-byte hash, so a
+    /// one-byte label can never match a key.
+    enum RetireReason: UInt8, Sendable {
+        /// Written before reasons existed (#557 round 2), or a reason this
+        /// build does not know. Read as ``keyRefused``: the safe side.
+        case unspecified = 0x00
+        /// The key is there and the ECIES decrypt refused the wrapped data
+        /// key twice. It may not repeat, so it never allows replacing the
+        /// keys without a record, and a retry that works heals it.
+        case keyRefused = 0x01
+        /// The keys cannot work whatever is retried: the data key came out
+        /// but the ciphertext or bundle failed, the key is absent, or the
+        /// replacement of structurally unusable keys is under way.
+        case structural = 0x02
+    }
+
+    /// The label of an envelope retired for no recorded reason; kept for the
+    /// envelopes round 2 wrote.
+    static let retiredKeyLabel = retiredLabel(.unspecified)
+
+    /// The one-byte label that marks an envelope retired for `reason`.
+    static func retiredLabel(_ reason: RetireReason) -> Data {
+        Data([reason.rawValue])
+    }
+
+    /// Why `label` marks its envelope retired, or nil for a real key label
+    /// (or none). An unknown one-byte value reads as ``RetireReason/unspecified``.
+    static func retireReason(of label: Data?) -> RetireReason? {
+        guard let label, label.count == 1, let byte = label.first else { return nil }
+        return RetireReason(rawValue: byte) ?? .unspecified
+    }
 
     /// 1 version byte + 4 length bytes.
     private static let headerSize = 5
@@ -112,12 +138,16 @@ enum WalletKeyEnvelope {
         }
     }
 
-    /// The same envelope with its key label replaced by
-    /// ``retiredKeyLabel``, so it reads as invalidated while a replacement
-    /// is under way. Nil for a buffer that does not parse.
-    static func retired(_ data: Data) -> Data? {
+    /// The same envelope with its key label replaced by the retired label
+    /// for `reason`, keeping the wrapped key and the ciphertext. Nil for a
+    /// buffer that does not parse.
+    static func retired(_ data: Data, reason: RetireReason = .unspecified) -> Data? {
         guard let decoded = try? decode(data) else { return nil }
-        return encode(wrappedDataKey: decoded.wrappedDataKey, ciphertext: decoded.ciphertext, keyLabel: retiredKeyLabel)
+        return encode(
+            wrappedDataKey: decoded.wrappedDataKey,
+            ciphertext: decoded.ciphertext,
+            keyLabel: retiredLabel(reason)
+        )
     }
 
     // MARK: - Internals

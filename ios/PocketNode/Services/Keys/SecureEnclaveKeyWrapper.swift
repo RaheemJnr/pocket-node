@@ -207,16 +207,32 @@ final class SecureEnclaveKeyWrapper: KeyWrapping {
             throw KeyWrapperError.keyNotFound
         }
 
-        var error: Unmanaged<CFError>?
-        guard let dataKey = SecKeyCreateDecryptedData(
-            privateKey,
-            Self.algorithm,
-            wrapped as CFData,
-            &error
-        ) as Data? else {
-            throw Self.classifyDecryption(error?.takeRetainedValue())
+        // A refused decrypt is tried once more with the same key reference,
+        // which carries the same already-evaluated `LAContext`, so the retry
+        // asks for nothing new. Only a refusal that repeats is reported.
+        return try Self.retryingDecryptionFailureOnce {
+            var error: Unmanaged<CFError>?
+            guard let dataKey = SecKeyCreateDecryptedData(
+                privateKey,
+                Self.algorithm,
+                wrapped as CFData,
+                &error
+            ) as Data? else {
+                throw Self.classifyDecryption(error?.takeRetainedValue())
+            }
+            return dataKey
         }
-        return dataKey
+    }
+
+    /// Runs `attempt`, and once more if it fails with
+    /// ``KeyWrapperError/decryptionFailed(_:)``: a refusal counts as one only
+    /// if it repeats. Any other failure is thrown at once, untried.
+    static func retryingDecryptionFailureOnce(_ attempt: () throws -> Data) throws -> Data {
+        do {
+            return try attempt()
+        } catch KeyWrapperError.decryptionFailed {
+            return try attempt()
+        }
     }
 
     func deleteKey() throws {
