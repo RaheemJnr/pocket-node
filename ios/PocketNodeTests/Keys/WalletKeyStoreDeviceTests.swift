@@ -113,6 +113,10 @@ final class WalletKeyStoreDeviceTests: XCTestCase {
     /// (`biometryCurrentSet OR devicePasscode`), so each unwrap with B and the
     /// final unwrap with A can ask for Face ID or the passcode. Run it with the
     /// device unlocked and Face ID or the passcode available.
+    ///
+    /// `@MainActor` because `XCTContext.runActivity` is main-actor isolated in
+    /// the Xcode 16 SDK CI builds with (Xcode 26 relaxed it).
+    @MainActor
     func testAWrongSecureEnclaveKeyFailsDecryptTheSameWayEveryTime() throws {
         let keyA = SecureEnclaveKeyWrapper(tag: tagA)
         let keyB = SecureEnclaveKeyWrapper(tag: tagB)
