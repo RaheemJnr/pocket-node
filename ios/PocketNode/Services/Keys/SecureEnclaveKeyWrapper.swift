@@ -19,6 +19,13 @@ enum KeyWrapperError: Error, Equatable {
     case deleteFailed(OSStatus)
     /// Anything else the Security framework reported.
     case operationFailed(String)
+    /// The key was found and used, and the ECIES decrypt itself refused the
+    /// wrapped data key: `errSecDecode`, or `errSecParam`, which is what an
+    /// AES-GCM tag mismatch inside ECIES reports when the key is not the one
+    /// that wrapped it (deterministic: the same inputs fail the same way,
+    /// see `UnusableKeyProofTests`). This, and only this, of the decrypt's
+    /// failures says the key and the envelope do not belong together.
+    case decryptionFailed(OSStatus)
 }
 
 /// The wrapping key's identity as a prompt-free lookup sees it.
@@ -207,7 +214,7 @@ final class SecureEnclaveKeyWrapper: KeyWrapping {
             wrapped as CFData,
             &error
         ) as Data? else {
-            throw Self.classify(error?.takeRetainedValue())
+            throw Self.classifyDecryption(error?.takeRetainedValue())
         }
         return dataKey
     }
@@ -258,8 +265,12 @@ final class SecureEnclaveKeyWrapper: KeyWrapping {
             return key
         case errSecItemNotFound:
             return nil
+        // The same mapping ``classify(_:)`` gives these statuses, so a lookup
+        // refused for authentication reads as that, not as a Keychain fault.
         case errSecUserCanceled:
             throw KeyWrapperError.authenticationCancelled
+        case errSecAuthFailed, errSecInteractionNotAllowed:
+            throw KeyWrapperError.authenticationFailed
         default:
             throw KeyWrapperError.keyCreationFailed(status)
         }
@@ -307,6 +318,23 @@ final class SecureEnclaveKeyWrapper: KeyWrapping {
     #endif
 
     // MARK: - Error classification
+
+    /// ``classify(_:)`` for a failure of the decrypt itself, after the key
+    /// was found: `errSecDecode` and `errSecParam` there mean the key cannot
+    /// unwrap this data key (``KeyWrapperError/decryptionFailed(_:)``).
+    /// Everything else is classified as any other failure.
+    private static func classifyDecryption(_ error: CFError?) -> KeyWrapperError {
+        if let error {
+            let nsError = error as Error as NSError
+            if nsError.domain == NSOSStatusErrorDomain {
+                let status = OSStatus(nsError.code)
+                if status == errSecDecode || status == errSecParam {
+                    return .decryptionFailed(status)
+                }
+            }
+        }
+        return classify(error)
+    }
 
     /// Turns a `CFError` from the Security or LocalAuthentication frameworks
     /// into a case the store can act on. Cancellation has to stay

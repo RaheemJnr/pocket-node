@@ -35,19 +35,25 @@ enum WalletKeyStoreError: Error, Equatable {
 }
 
 extension WalletKeyStoreError {
-    /// Whether this failure, from decrypting the envelope, shows the keys
-    /// will never decrypt on this device: everything except a prompt that
-    /// was dismissed or failed (worth another try), a Keychain that refused
-    /// interaction (the device is locked; nothing is known), and the cases
-    /// that are not about decrypting at all.
+    /// Whether this failure, from decrypting the envelope, proves the keys
+    /// will never decrypt on this device. An allowlist:
+    /// - ``keyInvalidated``: the wrapping key is confirmed absent
+    ///   (`errSecItemNotFound` while the envelope exists), or the ECIES
+    ///   decrypt refused the wrapped data key
+    ///   (``KeyWrapperError/decryptionFailed(_:)``).
+    /// - ``corrupt``: the envelope does not parse, or the data key came out
+    ///   but the AES-GCM box did not authenticate or the bundle did not
+    ///   decode.
+    ///
+    /// Nothing else is proof: no other Keychain status, no error from
+    /// another domain (CryptoTokenKit, say), no `LAError`, no cancellation,
+    /// no refused interaction. Those are worth another try.
     var provesKeysUnusable: Bool {
         switch self {
-        case .authenticationCancelled, .authenticationFailed, .notFound, .notReplaceable:
-            return false
-        case .keychain(let status):
-            return status != errSecInteractionNotAllowed
-        case .keyInvalidated, .corrupt, .wrapping:
+        case .keyInvalidated, .corrupt:
             return true
+        case .notFound, .authenticationFailed, .authenticationCancelled, .notReplaceable, .keychain, .wrapping:
+            return false
         }
     }
 }
@@ -64,12 +70,13 @@ enum KeyMaterialPresence: Equatable, Sendable {
 /// What a prompt-free look at the stored key material says about it.
 ///
 /// Read by ``WalletKeyStore/keyHealth`` without decrypting or signing
-/// anything, so it never asks for Face ID, Touch ID or the passcode. Two
-/// layers: the envelope records its wrapping key's label, so a different key
-/// under the same tag reads as ``invalidated`` at once; and a decrypt that
-/// has already failed for good in this process is remembered, which catches
-/// what no attribute can show (a key whose access control can no longer be
-/// met, or a ciphertext that does not authenticate).
+/// anything, so it never asks for Face ID, Touch ID or the passcode, and
+/// only from what is stored: the envelope records its wrapping key's label,
+/// so a different key under the same tag reads as ``invalidated`` at once;
+/// and a decrypt that proves the keys unusable
+/// (``WalletKeyStoreError/provesKeysUnusable``) retires the envelope in
+/// place, so that proof reads as ``invalidated`` from storage, across
+/// launches, with the original data kept.
 enum KeyHealth: Equatable, Sendable {
     /// The envelope is there and parses, and its Secure Enclave wrapping key
     /// is there too.
@@ -78,7 +85,8 @@ enum KeyHealth: Equatable, Sendable {
     case absent
     /// The envelope is there but can never be decrypted again: its wrapping
     /// key is confirmed gone or is not the key it was made with, the
-    /// envelope does not parse, or a decrypt of it has failed for good.
+    /// envelope does not parse, or it was retired (a decrypt proved it
+    /// unusable, or a replacement is under way).
     case invalidated
     /// The Keychain refused a lookup (for example before the first device
     /// unlock), so nothing is known either way. Never treated as absent or
@@ -104,14 +112,6 @@ enum KeyHealth: Equatable, Sendable {
 actor WalletKeyStore {
     private let keychain: any KeyValueStoring
     private let wrapper: any KeyWrapping
-
-    /// Set when a decrypt fails in a way that proves the keys unusable
-    /// (``WalletKeyStoreError/provesKeysUnusable``), and read by
-    /// ``keyHealth`` as ``KeyHealth/invalidated`` while an envelope is
-    /// there. Cleared by every successful store, replacement or delete.
-    /// In memory only: the next launch looks again, and the first decrypt
-    /// sets it again.
-    private var confirmedUnusable = false
 
     /// The points in ``replaceUnusableKeys(with:)`` where a test can make
     /// the process "die": the replacement stops there with no rollback.
@@ -168,9 +168,8 @@ actor WalletKeyStore {
     /// |---|---|---|
     /// | none | any | absent |
     /// | does not parse | any | invalidated |
-    /// | parses, a decrypt already failed for good | any | invalidated |
     /// | version 2, label L | label L | usable |
-    /// | version 2, label L | another label | invalidated |
+    /// | version 2, label L | another label, incl. retired | invalidated |
     /// | version 1 (no label) | present | usable |
     /// | any that parses | absent | invalidated |
     /// | any that parses | lookup refused | unknown |
@@ -183,7 +182,6 @@ actor WalletKeyStore {
         }
         guard let stored else { return .absent }
         guard let envelope = try? WalletKeyEnvelope.decode(stored) else { return .invalidated }
-        if confirmedUnusable { return .invalidated }
         switch wrapper.keyLabel {
         case .absent:
             return .invalidated
@@ -198,10 +196,38 @@ actor WalletKeyStore {
         }
     }
 
-    /// Records that the keys proved unusable outside ``load(reason:)``, for
-    /// a caller that decrypted them and found the bundle unusable.
-    func markUnusable() {
-        confirmedUnusable = true
+    /// Retires the envelope for a caller that decrypted it and found the
+    /// bundle unusable (no valid private key in it): the same proof as a
+    /// bundle that does not decode inside ``load(reason:)``.
+    func retireUnusableBundle() {
+        guard let stored = try? keychain.get(account: WalletKeyAccount.envelope) else { return }
+        retire(stored)
+    }
+
+    /// Rewrites `stored` in place under ``WalletKeyEnvelope/retiredKeyLabel``,
+    /// keeping its wrapped key and ciphertext. Best effort: an envelope that
+    /// does not parse already reads as invalidated, and a failed write leaves
+    /// the state as it was (a retry, never a replace).
+    private func retire(_ stored: Data) {
+        guard let retired = WalletKeyEnvelope.retired(stored), retired != stored else { return }
+        try? keychain.set(retired, account: WalletKeyAccount.envelope)
+    }
+
+    /// After a successful decrypt: an envelope that does not carry the label
+    /// of the key that just opened it (version 1, or one retired by mistake)
+    /// is rewritten in place with that label, read prompt-free. Only when the
+    /// label reads; on any other answer it is left as it is.
+    private func rebindIfNeeded(_ stored: Data) {
+        guard let decoded = try? WalletKeyEnvelope.decode(stored),
+              case .label(let current) = wrapper.keyLabel,
+              decoded.keyLabel != current
+        else { return }
+        let rebound = WalletKeyEnvelope.encode(
+            wrappedDataKey: decoded.wrappedDataKey,
+            ciphertext: decoded.ciphertext,
+            keyLabel: current
+        )
+        try? keychain.set(rebound, account: WalletKeyAccount.envelope)
     }
 
     /// Replaces key material that ``keyHealth`` confirms is
@@ -225,6 +251,10 @@ actor WalletKeyStore {
     /// invalidated, whatever key is under the tag, so the restore is offered
     /// again. A failed write at 4 deletes the fresh key as well, best effort;
     /// the retired envelope reads as invalidated even if that delete fails.
+    ///
+    /// Only on structural invalidation (key absent, label mismatch, retired
+    /// envelope, or one that does not parse), re-checked here inside the
+    /// actor: ``keyHealth`` reads nothing else.
     func replaceUnusableKeys(with bundle: WalletKeyBundle) throws {
         guard keyHealth == .invalidated else { throw WalletKeyStoreError.notReplaceable }
 
@@ -264,7 +294,6 @@ actor WalletKeyStore {
             try? wrapper.deleteKey()
             throw Self.map(error)
         }
-        confirmedUnusable = false
     }
 
     /// Where ``simulateKill(after:)`` stops a replacement. A no-op outside
@@ -297,6 +326,16 @@ actor WalletKeyStore {
         if !wrapper.hasKey && hasWallet {
             throw WalletKeyStoreError.keyInvalidated
         }
+        // With no envelope, a wrapping key under the tag belongs to nothing
+        // (left over from an earlier wallet, or a write that never landed).
+        // A new wallet gets a key of its own rather than inheriting it.
+        if envelopePresence == .absent {
+            do {
+                try wrapper.deleteKey()
+            } catch {
+                throw Self.map(error)
+            }
+        }
 
         var dataKey = try Self.randomDataKey()
         defer { dataKey.secureZero() }
@@ -318,26 +357,30 @@ actor WalletKeyStore {
         } catch {
             throw Self.map(error)
         }
-        confirmedUnusable = false
     }
 
     /// Decrypts and returns the stored wallet, prompting for biometrics or the
     /// device passcode with `reason` as the system prompt's text.
     ///
-    /// A failure past reading the envelope that proves the keys unusable
-    /// (``WalletKeyStoreError/provesKeysUnusable``) is remembered, so
-    /// ``keyHealth`` reports ``KeyHealth/invalidated`` from then on and the
-    /// launch gate can offer the restore.
+    /// A failure that proves the keys unusable
+    /// (``WalletKeyStoreError/provesKeysUnusable``, an allowlist) retires the
+    /// envelope in place, so ``keyHealth`` reads ``KeyHealth/invalidated``
+    /// from storage and the launch gate offers the restore. Any other
+    /// failure changes nothing. A success binds a version 1 (or retired)
+    /// envelope to the key that just opened it.
     func load(reason: String) throws -> WalletKeyBundle {
         guard let stored = try read(WalletKeyAccount.envelope) else {
             throw WalletKeyStoreError.notFound
         }
+        let bundle: WalletKeyBundle
         do {
-            return try decrypt(stored, reason: reason)
+            bundle = try decrypt(stored, reason: reason)
         } catch let error as WalletKeyStoreError {
-            if error.provesKeysUnusable { confirmedUnusable = true }
+            if error.provesKeysUnusable { retire(stored) }
             throw error
         }
+        rebindIfNeeded(stored)
+        return bundle
     }
 
     private func decrypt(_ stored: Data, reason: String) throws -> WalletKeyBundle {
@@ -376,7 +419,6 @@ actor WalletKeyStore {
         } catch {
             throw Self.map(error)
         }
-        confirmedUnusable = false
     }
 
     #if DEBUG
@@ -454,6 +496,9 @@ actor WalletKeyStore {
             case .keyNotFound:
                 // A wrapping key is only ever looked for because a wallet needs
                 // it, so its absence is a stranded wallet, not an absent one.
+                return .keyInvalidated
+            case .decryptionFailed:
+                // The key is there and cannot unwrap this envelope.
                 return .keyInvalidated
             case .authenticationCancelled:
                 return .authenticationCancelled

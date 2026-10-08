@@ -351,7 +351,7 @@ final class WalletCreator {
         guard var bytes = Self.decodePrivateKey(bundle.privateKeyHex) else {
             // The bundle decrypted but holds no usable key: as unusable as a
             // ciphertext that does not authenticate.
-            await keyStore.markUnusable()
+            await keyStore.retireUnusableBundle()
             throw WalletCreationError.keyReadFailed(.corrupt)
         }
         let privateKey = KotlinByteArray.from(bytes)
