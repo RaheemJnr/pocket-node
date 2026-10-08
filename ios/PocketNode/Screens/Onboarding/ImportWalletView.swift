@@ -93,6 +93,20 @@ struct ImportWalletView: View {
                 .controlSize(.large)
                 .disabled(model.isBusy || !canSubmit)
                 .accessibilityIdentifier("import.submit")
+
+                // Keys that are only suspended may still open: a decrypt
+                // refusal does not always repeat.
+                if model.canRetryUnlock {
+                    Button {
+                        Task { await model.retryUnlock() }
+                    } label: {
+                        Text(OnboardingViewModel.retryUnlockTitle).frame(maxWidth: .infinity)
+                    }
+                    .buttonStyle(.bordered)
+                    .controlSize(.large)
+                    .disabled(model.isBusy)
+                    .accessibilityIdentifier("import.retryUnlock")
+                }
             }
             .padding(24)
         }

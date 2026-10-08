@@ -211,22 +211,44 @@ final class WalletCreator {
 
     /// The stored wallet, if its metadata is here and its key material is
     /// confirmed absent (the state a backup restored onto a new device
-    /// leaves) or confirmed unusable. A Keychain that cannot be read is
-    /// neither, so it answers nil.
+    /// leaves), unusable or suspended. A Keychain that cannot be read is
+    /// none of those, so it answers nil.
     func walletNeedingRestore() async -> WalletRecord? {
         guard let record = walletStore.load() else { return nil }
         let health = await keyStore.keyHealth
-        guard health == .absent || health == .invalidated else { return nil }
+        guard Self.allowsRestore(health) else { return nil }
         return record
     }
 
-    /// The key health a restore may go ahead on: absent or invalidated.
+    /// The key health a restore for a known wallet may go ahead on: absent,
+    /// invalidated, or suspended. Safe for suspended keys because the
+    /// phrase must derive this wallet's own addresses.
     private func keyHealthAllowingRestore() async throws -> KeyHealth {
         let health = await keyStore.keyHealth
-        guard health == .absent || health == .invalidated else {
+        guard Self.allowsRestore(health) else {
             throw WalletCreationError.walletAlreadyExists
         }
         return health
+    }
+
+    private static func allowsRestore(_ health: KeyHealth) -> Bool {
+        health == .absent || health == .invalidated || health == .suspended
+    }
+
+    // MARK: - Trying the keys again
+
+    /// Decrypts the keys once more, for a wallet whose envelope is
+    /// ``KeyHealth/suspended`` (retired after a refusal that may not
+    /// repeat). A decrypt that works binds the envelope back to its key
+    /// (``WalletKeyStore/load(reason:)``) and the wallet is usable again; a
+    /// failure is ``WalletCreationError/keyReadFailed(_:)`` and changes
+    /// nothing else.
+    func retryUnlock(reason: String) async throws {
+        do {
+            _ = try await keyStore.load(reason: reason)
+        } catch let error as WalletKeyStoreError {
+            throw WalletCreationError.keyReadFailed(error)
+        }
     }
 
     // MARK: - Unusable keys with no metadata
@@ -332,26 +354,29 @@ final class WalletCreator {
     /// The metadata is checked again after the prompt, so a record that
     /// appeared meanwhile is never overwritten.
     ///
-    /// Refused unless the keys are ``KeyHealth/usable`` and there is no
-    /// readable record. A failure to read the keys is
-    /// ``WalletCreationError/keyReadFailed(_:)``.
+    /// Refused unless the keys are ``KeyHealth/usable`` or
+    /// ``KeyHealth/suspended`` (the rebuild is then the retry: a decrypt
+    /// that works binds the envelope back) and there is no readable record.
+    /// A failure to read the keys is ``WalletCreationError/keyReadFailed(_:)``.
     @discardableResult
     func rebuildMetadata(reason: String) async throws -> WalletRecord {
         let health = await keyStore.keyHealth
-        guard health == .usable, metadataIsMissingOrUndecodable else {
+        guard health == .usable || health == .suspended, metadataIsMissingOrUndecodable else {
             throw WalletCreationError.walletAlreadyExists
         }
 
         let bundle: WalletKeyBundle
+        let opened: Data
         do {
-            bundle = try await keyStore.load(reason: reason)
+            (bundle, opened) = try await keyStore.loadWithEnvelope(reason: reason)
         } catch let error as WalletKeyStoreError {
             throw WalletCreationError.keyReadFailed(error)
         }
         guard var bytes = Self.decodePrivateKey(bundle.privateKeyHex) else {
             // The bundle decrypted but holds no usable key: as unusable as a
-            // ciphertext that does not authenticate.
-            await keyStore.retireUnusableBundle()
+            // ciphertext that does not authenticate. Only the envelope that
+            // was opened is retired, if it is still the one stored.
+            await keyStore.retireUnusableBundle(ifStill: opened)
             throw WalletCreationError.keyReadFailed(.corrupt)
         }
         let privateKey = KotlinByteArray.from(bytes)
@@ -404,10 +429,13 @@ final class WalletCreator {
             throw WalletCreationError.doesNotMatchWallet
         }
 
-        if health == .invalidated {
+        if health == .invalidated || health == .suspended {
             let bundle = WalletKeyBundle(privateKeyHex: derived.privateKeyHex, mnemonic: derived.mnemonic)
             do {
-                try await keyStore.replaceUnusableKeys(with: bundle)
+                // The phrase has derived this wallet's addresses, so a
+                // suspended envelope may be replaced here (never in the
+                // import with no record).
+                try await keyStore.replaceUnusableKeys(with: bundle, allowingSuspended: true)
             } catch let error as WalletKeyStoreError {
                 throw WalletCreationError.keyStorageFailed(error)
             }

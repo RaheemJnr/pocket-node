@@ -109,7 +109,7 @@ struct RootView: View {
                                     .multilineTextAlignment(.center)
                                     .padding(.horizontal, 32)
                                     .accessibilityIdentifier("root.rebuildFailed")
-                                Button("Try again") {
+                                Button(OnboardingViewModel.retryUnlockTitle) {
                                     rebuildNeedsRetry = false
                                     Task { await rebuildMetadata() }
                                 }
@@ -231,6 +231,17 @@ struct RootView: View {
                     restoring: record,
                     keysInvalidated: true,
                     hasPin: hasPin
+                )
+            )
+        case .keysSuspended(let record):
+            let creator = container.walletCreator
+            startOnboarding(
+                OnboardingViewModel(
+                    creator: creator,
+                    restoring: record,
+                    keysInvalidated: true,
+                    hasPin: hasPin,
+                    retryUnlock: { try await creator.retryUnlock(reason: "Unlock your wallet keys") }
                 )
             )
         case .replaceKeys:

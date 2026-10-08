@@ -87,6 +87,17 @@ final class OnboardingViewModel {
     /// letting the restore replace it without knowing it.
     private let hasPin: () -> Bool
 
+    /// Decrypts the keys once more, for a restore whose envelope was only
+    /// suspended (``KeyHealth/suspended``). Nil when there is nothing to
+    /// retry, which hides the action.
+    private let retryUnlockAction: (@MainActor () async throws -> Void)?
+
+    /// True when the restore screen offers "Try unlocking again".
+    var canRetryUnlock: Bool { retryUnlockAction != nil }
+
+    /// The action's title.
+    static let retryUnlockTitle = "Try unlocking again"
+
     /// - Parameter step: where the flow starts. ``Step/welcome`` for a device
     ///   with no wallet; ``resumeStep(for:)`` for one whose onboarding was cut
     ///   short after the wallet was stored (see ``launchDestination(hasWallet:pinPresence:record:)``).
@@ -99,6 +110,7 @@ final class OnboardingViewModel {
         self.prepareNewWallet = prepareNewWallet
         self.keyRecovery = nil
         self.hasPin = { false }
+        self.retryUnlockAction = nil
         self.step = step
     }
 
@@ -113,13 +125,23 @@ final class OnboardingViewModel {
     /// `keysInvalidated` is the same restore for an envelope that is still
     /// here but that this device can no longer decrypt (a change to Face ID
     /// or the passcode, say); only the screen's explanation differs.
+    ///
+    /// `retryUnlock`, for keys that are only suspended, adds "Try unlocking
+    /// again": it decrypts once more, and if that works the wallet opens as
+    /// it was (``retryUnlock()``).
     convenience init(
         creator: WalletCreator,
         restoring record: WalletRecord,
         keysInvalidated: Bool = false,
-        hasPin: @escaping () -> Bool
+        hasPin: @escaping () -> Bool,
+        retryUnlock: (@MainActor () async throws -> Void)? = nil
     ) {
-        self.init(creator: creator, keyRecovery: .restore(record, keysInvalidated: keysInvalidated), hasPin: hasPin)
+        self.init(
+            creator: creator,
+            keyRecovery: .restore(record, keysInvalidated: keysInvalidated),
+            hasPin: hasPin,
+            retryUnlock: retryUnlock
+        )
     }
 
     /// An import over key material this device can no longer decrypt, with
@@ -129,7 +151,13 @@ final class OnboardingViewModel {
         OnboardingViewModel(creator: creator, keyRecovery: .replaceUnusableKeys, hasPin: hasPin)
     }
 
-    private init(creator: WalletCreator, keyRecovery: KeyRecovery, hasPin: @escaping () -> Bool) {
+    private init(
+        creator: WalletCreator,
+        keyRecovery: KeyRecovery,
+        hasPin: @escaping () -> Bool,
+        retryUnlock: (@MainActor () async throws -> Void)? = nil
+    ) {
+        self.retryUnlockAction = retryUnlock
         self.creator = creator
         // A recovery puts keys back on a device that already has a wallet's
         // key material; it never starts a new one from nothing, so there is
@@ -329,6 +357,18 @@ final class OnboardingViewModel {
             try await self.requireCleanStart()
             try await self.creator.importPrivateKey(hex: hex, name: name)
             self.step = .pinSetup
+        }
+    }
+
+    /// "Try unlocking again": decrypts the keys once more. If it works the
+    /// envelope is bound back to its key and the restore is over, as after a
+    /// phrase (the PIN step only when there is no PIN). If it fails the
+    /// screen stays, with the failure's message.
+    func retryUnlock() async {
+        guard let retryUnlockAction else { return }
+        await run {
+            try await retryUnlockAction()
+            self.step = self.hasPin() ? .done : .pinSetup
         }
     }
 

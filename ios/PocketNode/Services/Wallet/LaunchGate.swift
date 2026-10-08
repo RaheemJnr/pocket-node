@@ -199,7 +199,13 @@ final class LaunchGate {
         case rebuildMetadata
         /// Unusable keys with missing or undecodable metadata: nothing to
         /// check a phrase against, so import any phrase over the dead keys.
+        /// Only on structural invalidation, never for suspended keys.
         case replaceKeys
+        /// Metadata, and an envelope retired after a refusal that may not
+        /// repeat (``KeyHealth/suspended``): the same restore as
+        /// ``keysInvalidated(_:)``, plus "Try unlocking again", which
+        /// decrypts once more and brings the wallet back if it works.
+        case keysSuspended(WalletRecord)
 
         /// Stable while the same recovery stays pending, for `RootView`'s
         /// retry task.
@@ -209,6 +215,7 @@ final class LaunchGate {
             case .keysInvalidated(let record): return "invalidated-\(record.id)"
             case .rebuildMetadata: return "rebuild"
             case .replaceKeys: return "replace"
+            case .keysSuspended(let record): return "suspended-\(record.id)"
             }
         }
     }
@@ -252,6 +259,7 @@ final class LaunchGate {
     /// | usable          | none               | rebuildMetadata       | wait       |
     /// | absent          | keysMissing        | none (walletless)     | wait       |
     /// | invalidated     | keysInvalidated    | replaceKeys           | wait       |
+    /// | suspended       | keysSuspended      | rebuildMetadata       | wait       |
     /// | unknown         | wait               | wait                  | wait       |
     ///
     /// An unknown key health is never read as absent or invalidated, so a
@@ -267,10 +275,15 @@ final class LaunchGate {
             case .usable, .unknown: return .none
             case .absent: return .recover(.keysMissing(record))
             case .invalidated: return .recover(.keysInvalidated(record))
+            case .suspended: return .recover(.keysSuspended(record))
             }
         case .missing, .undecodable:
             switch health {
             case .usable: return .recover(.rebuildMetadata)
+            // The rebuild decrypts once more: a decrypt that works binds the
+            // envelope back and writes the record. The import over the keys
+            // is never offered for a refusal that may not repeat.
+            case .suspended: return .recover(.rebuildMetadata)
             case .invalidated: return .recover(.replaceKeys)
             case .absent, .unknown: return .none
             }
@@ -319,10 +332,12 @@ final class LaunchGate {
     enum RebuildOutcome: Equatable {
         /// `wallet.json` is back; carry on with the PIN routing.
         case rebuilt
-        /// The decrypt proved the keys unusable (any failure except a
-        /// dismissed or failed prompt, or a locked device), and the key
-        /// store now reads them as ``KeyHealth/invalidated``: replace them,
-        /// as for ``Recovery/replaceKeys``.
+        /// The decrypt failed with a structural proof on the allowlist
+        /// (``WalletKeyStoreError/provesKeysUnusable``: the key absent, or a
+        /// ciphertext or bundle that fails after a good unwrap), and the key
+        /// store now reads the keys as ``KeyHealth/invalidated``: replace
+        /// them, as for ``Recovery/replaceKeys``. A refused decrypt only
+        /// suspends the keys and is a retry.
         case keysUnusable
         /// The prompt was dismissed or failed, or a write failed. Worth
         /// another try, but only when the user asks: retrying on a timer
