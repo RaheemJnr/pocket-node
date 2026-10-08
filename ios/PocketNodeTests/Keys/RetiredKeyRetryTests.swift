@@ -199,7 +199,7 @@ final class RetiredKeyRetryTests: XCTestCase {
             restoring: record,
             keysInvalidated: true,
             hasPin: { true },
-            retryUnlock: { try await creator.retryUnlock(reason: "test") }
+            retryUnlock: { try await creator.retryUnlock(reason: "test", matching: record) }
         )
         XCTAssertTrue(model.canRetryUnlock)
         XCTAssertEqual(OnboardingViewModel.retryUnlockTitle, "Try unlocking again")
@@ -326,5 +326,184 @@ final class RetiredKeyRetryTests: XCTestCase {
     private func phraseWalletReplacingEnvelope() async throws {
         let store = WalletKeyStore(keychain: keyKeychain, wrapper: wrapper)
         try await store.store(WalletKeyBundle(privateKeyHex: WalletCreatorTests.testPrivateKeyHex, mnemonic: nil))
+    }
+
+    // MARK: - Final review (#557)
+
+    /// Two refusals in a row: the envelope is suspended.
+    private func suspend(_ store: WalletKeyStore, _ stub: StubKeyWrapper) async {
+        stub.failNextDecrypts([.decryptionFailed(errSecParam), .decryptionFailed(errSecParam)])
+        _ = try? await store.load(reason: "test")
+    }
+
+    private func suspendedModel(
+        record: WalletRecord,
+        creator: WalletCreator,
+        matching: WalletRecord? = nil
+    ) -> OnboardingViewModel {
+        let target = matching ?? record
+        return OnboardingViewModel(
+            creator: creator,
+            restoring: record,
+            hasPin: { true },
+            retryUnlock: { try await creator.retryUnlock(reason: "test", matching: target) }
+        )
+    }
+
+    /// 1. A key lookup that misses once does not mark a working key's
+    /// envelope: nothing is retired, health stays usable, and with no
+    /// metadata the import that would replace the keys stays out of reach.
+    func testAMissedKeyLookupDoesNotRetireTheEnvelope() async throws {
+        try await phraseWallet()
+        try walletStore.delete()
+        let before = try XCTUnwrap(envelope)
+        let keyBefore = wrapper.keyLabel
+        let stub = StubKeyWrapper(tag: tag)
+        let store = WalletKeyStore(keychain: keyKeychain, wrapper: stub)
+        stub.fail(with: .keyNotFound)
+
+        do {
+            _ = try await store.load(reason: "test")
+            XCTFail("the lookup missed")
+        } catch let error as WalletKeyStoreError {
+            XCTAssertEqual(error, .keyInvalidated)
+        }
+        stub.fail(with: nil)
+
+        XCTAssertEqual(envelope, before, "nothing retired")
+        let health = await store.keyHealth
+        XCTAssertEqual(health, .usable, "the live check finds the key")
+        let route = await gate(store).restoreRoute()
+        XCTAssertEqual(route, .restore(.rebuildMetadata))
+        do {
+            try await WalletCreator(keyStore: store, walletStore: walletStore)
+                .replaceUnusableKeys(words: Self.otherPhrase, name: "Other")
+            XCTFail("working keys are never replaced")
+        } catch {}
+        XCTAssertEqual(wrapper.keyLabel, keyBefore, "the working key is not deleted")
+    }
+
+    /// 2. A bundle with no valid key inside a version 1 envelope: the load
+    /// re-binds the envelope, and the retire must still find it (it compares
+    /// against what is stored after the re-bind).
+    func testABadBundleIsRetiredEvenAfterTheLoadRebindsTheEnvelope() async throws {
+        let store = WalletKeyStore(keychain: keyKeychain, wrapper: wrapper)
+        try await store.store(WalletKeyBundle(privateKeyHex: "not a key"))
+        let decoded = try WalletKeyEnvelope.decode(try XCTUnwrap(envelope))
+        try keyKeychain.set(
+            WalletKeyEnvelope.encode(wrappedDataKey: decoded.wrappedDataKey, ciphertext: decoded.ciphertext),
+            account: WalletKeyAccount.envelope
+        )
+
+        do {
+            try await WalletCreator(keyStore: store, walletStore: walletStore).rebuildMetadata(reason: "test")
+            XCTFail("the bundle holds no key")
+        } catch let error as WalletCreationError {
+            XCTAssertEqual(error, .keyReadFailed(.corrupt))
+        }
+
+        let health = await store.keyHealth
+        XCTAssertEqual(health, .invalidated, "retired as structural, so the rebuild does not loop")
+        XCTAssertEqual(try WalletKeyEnvelope.decode(try XCTUnwrap(envelope)).keyLabel, WalletKeyEnvelope.retiredLabel(.structural))
+    }
+
+    /// 3. A retry reports success only when the keys then read usable and
+    /// derive the record's own addresses.
+    func testTryUnlockingAgainNeedsUsableKeysForThisWallet() async throws {
+        let record = try await phraseWallet()
+        let stub = StubKeyWrapper(tag: tag)
+        let store = WalletKeyStore(keychain: keyKeychain, wrapper: stub)
+        let creator = WalletCreator(keyStore: store, walletStore: walletStore)
+        await suspend(store, stub)
+
+        // The decrypt works but the label cannot be read, so the envelope is
+        // not bound back and the keys do not read usable.
+        stub.overridePresence(.unknown)
+        let unreadable = suspendedModel(record: record, creator: creator)
+        await unreadable.retryUnlock()
+        XCTAssertEqual(unreadable.step, .importWallet, "not finished")
+        XCTAssertNotNil(unreadable.errorMessage)
+        stub.overridePresence(nil)
+
+        // The keys open, but they are another wallet's.
+        let other = WalletRecord(
+            id: record.id, name: record.name, type: record.type, derivationPath: record.derivationPath,
+            mainnetAddress: "ckb1other", testnetAddress: "ckt1other", createdAt: record.createdAt
+        )
+        let mismatched = suspendedModel(record: other, creator: creator)
+        await mismatched.retryUnlock()
+        XCTAssertEqual(mismatched.step, .importWallet, "not finished for another wallet's keys")
+        XCTAssertEqual(
+            mismatched.errorMessage,
+            "That does not match this wallet. Enter the recovery phrase or private key for the address shown."
+        )
+    }
+
+    /// 4. Dismissing the prompt during a retry says nothing and is not a
+    /// failed attempt.
+    func testADismissedRetryShowsNoMessage() async throws {
+        let record = try await phraseWallet()
+        let stub = StubKeyWrapper(tag: tag)
+        let store = WalletKeyStore(keychain: keyKeychain, wrapper: stub)
+        await suspend(store, stub)
+        let model = suspendedModel(record: record, creator: WalletCreator(keyStore: store, walletStore: walletStore))
+
+        stub.fail(with: .authenticationCancelled)
+        await model.retryUnlock()
+
+        XCTAssertNil(model.errorMessage)
+        XCTAssertEqual(model.failedRetryUnlocks, 0)
+        XCTAssertNil(OnboardingViewModel.message(for: WalletCreationError.keyReadFailed(.authenticationCancelled)))
+    }
+
+    /// 5. Suspended keys get their own explanation: they may still unlock.
+    func testSuspendedKeysHaveTheirOwnExplanation() async throws {
+        let record = try await phraseWallet()
+        let creator = WalletCreator(keyStore: WalletKeyStore(keychain: keyKeychain, wrapper: wrapper), walletStore: walletStore)
+
+        XCTAssertEqual(
+            suspendedModel(record: record, creator: creator).restoreExplanation,
+            "Your wallet keys could not be unlocked. Try unlocking again, or enter the recovery phrase to restore it."
+        )
+        XCTAssertEqual(
+            OnboardingViewModel(creator: creator, restoring: record, keysInvalidated: true, hasPin: { true }).restoreExplanation,
+            OnboardingViewModel.invalidatedPhraseRestoreMessage
+        )
+        XCTAssertEqual(
+            OnboardingViewModel(creator: creator, restoring: record, hasPin: { true }).restoreExplanation,
+            OnboardingViewModel.missingPhraseRestoreMessage
+        )
+        let rawRecord = WalletRecord(
+            id: "k", name: "Key", type: WalletCreator.typeRawKey,
+            mainnetAddress: "ckb1", testnetAddress: "ckt1", createdAt: 0
+        )
+        XCTAssertEqual(
+            suspendedModel(record: rawRecord, creator: creator).restoreExplanation,
+            OnboardingViewModel.suspendedKeyRestoreMessage
+        )
+    }
+
+    /// 7. After three failed retries in a session, the way out is said.
+    func testTheReinstallHintFollowsThreeFailedRetries() async throws {
+        let record = try await phraseWallet()
+        let stub = StubKeyWrapper(tag: tag)
+        let store = WalletKeyStore(keychain: keyKeychain, wrapper: stub)
+        await suspend(store, stub)
+        let model = suspendedModel(record: record, creator: WalletCreator(keyStore: store, walletStore: walletStore))
+
+        stub.fail(with: .authenticationCancelled)
+        await model.retryUnlock()
+        stub.fail(with: .decryptionFailed(errSecParam))
+        await model.retryUnlock()
+        await model.retryUnlock()
+        XCTAssertFalse(model.showsReinstallHint, "two failures, and a dismissal that does not count")
+        await model.retryUnlock()
+        XCTAssertTrue(model.showsReinstallHint)
+        XCTAssertEqual(
+            OnboardingViewModel.reinstallHint,
+            "If this keeps failing, delete Pocket Node, install it again and restore with your recovery phrase."
+        )
+        XCTAssertFalse(OnboardingViewModel.showsReinstallHint(failedAttempts: 2))
+        XCTAssertTrue(OnboardingViewModel.showsReinstallHint(failedAttempts: 3))
     }
 }
