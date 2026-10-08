@@ -16,6 +16,14 @@ final class StubKeyWrapper: KeyWrapping, @unchecked Sendable {
     private var presenceOverride: KeyMaterialPresence?
     private var _beforeUnwrap: (@Sendable () -> Void)?
     private var _afterWrap: (@Sendable () -> Void)?
+    private var _failAfterCreatingKey: KeyWrapperError?
+
+    /// When set, `wrap` lets the real wrapper create the key and wrap, then
+    /// throws this: a wrap that failed after the key was made.
+    var failAfterCreatingKey: KeyWrapperError? {
+        get { lock.lock(); defer { lock.unlock() }; return _failAfterCreatingKey }
+        set { lock.lock(); defer { lock.unlock() }; _failAfterCreatingKey = newValue }
+    }
 
     /// Runs inside `unwrap`, before the real one: stands in for whatever
     /// happens while the system prompt is up.
@@ -122,6 +130,7 @@ final class StubKeyWrapper: KeyWrapping, @unchecked Sendable {
     func wrap(_ dataKey: Data) throws -> Data {
         if let currentFailure { throw currentFailure }
         let wrapped = try real.wrap(dataKey)
+        if let failAfterCreatingKey { throw failAfterCreatingKey }
         afterWrap?()
         return wrapped
     }

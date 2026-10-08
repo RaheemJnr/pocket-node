@@ -330,7 +330,17 @@ actor WalletKeyStore {
         }
         try checkpoint(.oldKeyDeleted)
 
-        let wrappedDataKey = try Self.mapWrapperErrors { try wrapper.wrap(dataKey) }
+        // `wrap` creates the fresh key before it encrypts, so it can fail with
+        // the key already made (no public half, encryption refused). The
+        // retired envelope reads as not usable whatever key is there, and
+        // the fresh key is removed as well, best effort.
+        let wrappedDataKey: Data
+        do {
+            wrappedDataKey = try Self.mapWrapperErrors { try wrapper.wrap(dataKey) }
+        } catch {
+            try? wrapper.deleteKey()
+            throw error
+        }
         try checkpoint(.wrapped)
         let envelope = WalletKeyEnvelope.encode(
             wrappedDataKey: wrappedDataKey,
