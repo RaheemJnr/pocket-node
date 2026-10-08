@@ -88,6 +88,9 @@ final class WalletKeyStoreDeviceTests: XCTestCase {
             return XCTFail("the label must read without UI")
         }
         XCTAssertEqual(label.count, 20)
+        let stored = try XCTUnwrap(try keychain.get(account: WalletKeyAccount.envelope))
+        XCTAssertEqual(stored.first, WalletKeyEnvelope.versionWithKeyLabel, "a fresh store writes version 2")
+        XCTAssertEqual(try WalletKeyEnvelope.decode(stored).keyLabel, label, "the envelope records this key's label")
         let health = await store.keyHealth
         XCTAssertEqual(health, .usable)
     }

@@ -203,14 +203,17 @@ final class KeyHealthRecoveryTests: XCTestCase {
         XCTAssertEqual(LaunchGate.rebuildOutcome(error: anyError, healthAfter: .unknown), .retryOnRequest)
     }
 
-    /// Which decrypt failures count as proof the keys are unusable: all but
-    /// a dismissed or failed prompt and a locked device.
+    /// Which decrypt failures count as proof the keys are unusable: an
+    /// allowlist of a confirmed-absent or refusing key and a ciphertext or
+    /// bundle that fails after the unwrap. Nothing else.
     func testWhichFailuresProveTheKeysUnusable() {
         XCTAssertTrue(WalletKeyStoreError.keyInvalidated.provesKeysUnusable)
         XCTAssertTrue(WalletKeyStoreError.corrupt.provesKeysUnusable)
-        XCTAssertTrue(WalletKeyStoreError.wrapping("x").provesKeysUnusable)
-        XCTAssertTrue(WalletKeyStoreError.keychain(-50).provesKeysUnusable)
+        XCTAssertFalse(WalletKeyStoreError.wrapping("x").provesKeysUnusable)
+        XCTAssertFalse(WalletKeyStoreError.keychain(-50).provesKeysUnusable)
+        XCTAssertFalse(WalletKeyStoreError.keychain(errSecAuthFailed).provesKeysUnusable)
         XCTAssertFalse(WalletKeyStoreError.keychain(errSecInteractionNotAllowed).provesKeysUnusable)
+        XCTAssertFalse(WalletKeyStoreError.notReplaceable.provesKeysUnusable)
         XCTAssertFalse(WalletKeyStoreError.authenticationCancelled.provesKeysUnusable)
         XCTAssertFalse(WalletKeyStoreError.authenticationFailed.provesKeysUnusable)
         XCTAssertFalse(WalletKeyStoreError.notFound.provesKeysUnusable)
@@ -686,7 +689,149 @@ final class KeyHealthRecoveryTests: XCTestCase {
         stub.fail(with: .operationFailed("unwrap refused"))
         _ = try? await store.load(reason: "test")
         health = await store.keyHealth
+        XCTAssertEqual(health, .usable, "an unclassified failure is not proof")
+
+        // A ciphertext that does not authenticate after a good unwrap is.
+        stub.fail(with: nil)
+        var bytes = try XCTUnwrap(envelope)
+        bytes[bytes.count - 1] ^= 0xFF
+        try keyKeychain.set(bytes, account: WalletKeyAccount.envelope)
+        _ = try? await store.load(reason: "test")
+        health = await store.keyHealth
         XCTAssertEqual(health, .invalidated)
+    }
+
+    /// The proof is stored, not remembered: the envelope is retired in place
+    /// with its data kept, so a fresh launch (a new store) reads it too.
+    func testAProofRetiresTheEnvelopeAndSurvivesALaunch() async throws {
+        try await phraseWallet()
+        var bytes = try XCTUnwrap(envelope)
+        bytes[bytes.count - 1] ^= 0xFF
+        try keyKeychain.set(bytes, account: WalletKeyAccount.envelope)
+        let before = try WalletKeyEnvelope.decode(bytes)
+
+        do {
+            _ = try await keyStore().load(reason: "test")
+            XCTFail("the ciphertext does not authenticate")
+        } catch let error as WalletKeyStoreError {
+            XCTAssertEqual(error, .corrupt)
+        }
+
+        let after = try WalletKeyEnvelope.decode(try XCTUnwrap(envelope))
+        XCTAssertEqual(after.keyLabel, WalletKeyEnvelope.retiredKeyLabel)
+        XCTAssertEqual(after.wrappedDataKey, before.wrappedDataKey, "the original data is kept")
+        XCTAssertEqual(after.ciphertext, before.ciphertext)
+        let health = await keyStore().keyHealth
+        XCTAssertEqual(health, .invalidated, "read from storage on the next launch")
+    }
+
+    /// An envelope retired by mistake heals: a decrypt that works binds it
+    /// back to the key that opened it.
+    func testARetiredEnvelopeThatDecryptsIsBoundBack() async throws {
+        try await phraseWallet()
+        let retired = try XCTUnwrap(WalletKeyEnvelope.retired(try XCTUnwrap(envelope)))
+        try keyKeychain.set(retired, account: WalletKeyAccount.envelope)
+        var health = await keyStore().keyHealth
+        XCTAssertEqual(health, .invalidated)
+
+        let bundle = try await keyStore().load(reason: "test")
+
+        XCTAssertEqual(bundle.privateKeyHex, WalletCreatorTests.testPrivateKeyHex)
+        health = await keyStore().keyHealth
+        XCTAssertEqual(health, .usable)
+    }
+
+    /// A key that is not the one that wrapped the data key makes the ECIES
+    /// decrypt fail with `errSecParam` every time: deterministic, so it is
+    /// counted as proof. The right key still opens it.
+    func testAWrongKeyDecryptFailsTheSameWayEveryTime() throws {
+        let dataKey = Data(repeating: 5, count: 32)
+        let wrapped = try wrapper.wrap(dataKey)
+        XCTAssertEqual(try wrapper.unwrap(wrapped, reason: "test"), dataKey)
+
+        try wrapper.deleteKey()
+        _ = try wrapper.wrap(Data(repeating: 6, count: 32))
+        for _ in 0..<5 {
+            XCTAssertThrowsError(try wrapper.unwrap(wrapped, reason: "test")) { error in
+                XCTAssertEqual(error as? KeyWrapperError, .decryptionFailed(errSecParam))
+            }
+        }
+    }
+
+    // MARK: - Version 1 upgrade and a fresh key per wallet (review round 2)
+
+    func testASuccessfulLoadUpgradesAVersion1EnvelopeToVersion2() async throws {
+        try await phraseWallet()
+        try downgradeEnvelopeToVersion1()
+        guard case .label(let label) = wrapper.keyLabel else { return XCTFail("no label") }
+
+        _ = try await keyStore().load(reason: "test")
+
+        let upgraded = try XCTUnwrap(envelope)
+        XCTAssertEqual(upgraded.first, WalletKeyEnvelope.versionWithKeyLabel)
+        XCTAssertEqual(try WalletKeyEnvelope.decode(upgraded).keyLabel, label)
+        let bundle = try await keyStore().load(reason: "test")
+        XCTAssertEqual(bundle.privateKeyHex, WalletCreatorTests.testPrivateKeyHex)
+    }
+
+    func testAVersion1EnvelopeStaysWhenTheLabelCannotBeRead() async throws {
+        try await phraseWallet()
+        try downgradeEnvelopeToVersion1()
+        let stub = StubKeyWrapper(tag: tag)
+        stub.overridePresence(.unknown)
+
+        _ = try await keyStore(wrapper: stub).load(reason: "test")
+
+        XCTAssertEqual(try XCTUnwrap(envelope).first, WalletKeyEnvelope.version)
+    }
+
+    /// A wrapping key left under the tag with no envelope is not inherited
+    /// by the next wallet.
+    func testANewWalletGetsAFreshKeyRatherThanAnOrphan() async throws {
+        _ = try wrapper.wrap(Data(repeating: 8, count: 32))
+        guard case .label(let orphan) = wrapper.keyLabel else { return XCTFail("no orphan key") }
+
+        try await phraseWallet()
+
+        guard case .label(let current) = wrapper.keyLabel else { return XCTFail("no key") }
+        XCTAssertNotEqual(current, orphan)
+        XCTAssertEqual(try WalletKeyEnvelope.decode(try XCTUnwrap(envelope)).keyLabel, current)
+        let bundle = try await keyStore().load(reason: "test")
+        XCTAssertEqual(bundle.privateKeyHex, WalletCreatorTests.testPrivateKeyHex)
+    }
+
+    /// No metadata and a transient failure during the rebuild: a retry,
+    /// never the import that would replace the keys, and the key stays.
+    func testATransientRebuildFailureIsARetryNotAReplace() async throws {
+        try await phraseWallet()
+        try walletStore.delete()
+        let keyBefore = wrapper.keyLabel
+        let stub = StubKeyWrapper(tag: tag)
+        let store = keyStore(wrapper: stub)
+        let gate = LaunchGate(
+            walletStore: walletStore,
+            walletKeyStore: store,
+            keyKeychain: keyKeychain,
+            pinKeychain: pinKeychain,
+            preferences: preferences,
+            biometrics: StubBiometrics(availability: .unavailable),
+            pinCost: .testing
+        )
+
+        for failure: KeyWrapperError in [.keyCreationFailed(errSecAuthFailed), .operationFailed("token"), .keyCreationFailed(errSecIO)] {
+            stub.fail(with: failure)
+            var thrown: Error?
+            do { try await creator(store).rebuildMetadata(reason: "test") } catch { thrown = error }
+            let outcome = await gate.rebuildOutcome(error: thrown)
+            XCTAssertEqual(outcome, .retryOnRequest, "\(failure)")
+            let route = await gate.restoreRoute()
+            XCTAssertEqual(route, .restore(.rebuildMetadata), "\(failure)")
+        }
+
+        XCTAssertEqual(wrapper.keyLabel, keyBefore, "the working key is untouched")
+        stub.fail(with: nil)
+        let rebuilt = try await creator(store).rebuildMetadata(reason: "test")
+        XCTAssertEqual(rebuilt.mainnetAddress, WalletCreatorTests.testMainnetAddress)
     }
 
     /// The phrase reveal is the decrypt the wallet phase does today: one that
@@ -707,9 +852,14 @@ final class KeyHealthRecoveryTests: XCTestCase {
         await model.reveal()
         XCTAssertEqual(reports, 1)
 
-        reader.set(result: .failure(WalletKeyStoreError.authenticationCancelled))
-        await model.reveal()
-        XCTAssertEqual(reports, 1, "a dismissed prompt is not reported")
+        for transient: WalletKeyStoreError in [
+            .authenticationCancelled, .authenticationFailed, .keychain(errSecAuthFailed),
+            .keychain(errSecMissingEntitlement), .wrapping("token"),
+        ] {
+            reader.set(result: .failure(transient))
+            await model.reveal()
+        }
+        XCTAssertEqual(reports, 1, "a transient failure does not reroute")
     }
 
     // MARK: - (c) A replacement killed part way
