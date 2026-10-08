@@ -73,4 +73,22 @@ final class WalletKeyStoreDeviceTests: XCTestCase {
         let loaded = try await store.load(reason: "Unlock your Pocket Node wallet")
         XCTAssertEqual(loaded, bundle)
     }
+
+    /// The prompt-free probe on a real Enclave key. Both lookups carry an
+    /// `LAContext` with `interactionNotAllowed`, so a lookup that wanted UI
+    /// would come back `.unknown` instead of showing it: `.present` and a
+    /// label are the proof that none was needed. No sheet should appear
+    /// while this runs.
+    func testKeyPresenceAndLabelReadWithoutUI() async throws {
+        try await store.store(WalletKeyBundle(privateKeyHex: String(repeating: "1", count: 64)))
+        XCTAssertTrue(wrapper.isHardwareBacked)
+
+        XCTAssertEqual(wrapper.keyPresence, .present)
+        guard case .label(let label) = wrapper.keyLabel else {
+            return XCTFail("the label must read without UI")
+        }
+        XCTAssertEqual(label.count, 20)
+        let health = await store.keyHealth
+        XCTAssertEqual(health, .usable)
+    }
 }

@@ -196,12 +196,24 @@ final class KeyHealthRecoveryTests: XCTestCase {
     }
 
     func testTheRebuildOutcomes() {
-        XCTAssertEqual(LaunchGate.rebuildOutcome(error: nil), .rebuilt)
-        XCTAssertEqual(LaunchGate.rebuildOutcome(error: WalletCreationError.keyReadFailed(.keyInvalidated)), .keysUnusable)
-        XCTAssertEqual(LaunchGate.rebuildOutcome(error: WalletCreationError.keyReadFailed(.corrupt)), .keysUnusable)
-        XCTAssertEqual(LaunchGate.rebuildOutcome(error: WalletCreationError.keyReadFailed(.authenticationCancelled)), .retryOnRequest)
-        XCTAssertEqual(LaunchGate.rebuildOutcome(error: WalletCreationError.keyReadFailed(.authenticationFailed)), .retryOnRequest)
-        XCTAssertEqual(LaunchGate.rebuildOutcome(error: WalletCreationError.metadataStorageFailed), .retryOnRequest)
+        let anyError = WalletCreationError.keyReadFailed(.corrupt)
+        XCTAssertEqual(LaunchGate.rebuildOutcome(error: nil, healthAfter: .usable), .rebuilt)
+        XCTAssertEqual(LaunchGate.rebuildOutcome(error: anyError, healthAfter: .invalidated), .keysUnusable)
+        XCTAssertEqual(LaunchGate.rebuildOutcome(error: anyError, healthAfter: .usable), .retryOnRequest)
+        XCTAssertEqual(LaunchGate.rebuildOutcome(error: anyError, healthAfter: .unknown), .retryOnRequest)
+    }
+
+    /// Which decrypt failures count as proof the keys are unusable: all but
+    /// a dismissed or failed prompt and a locked device.
+    func testWhichFailuresProveTheKeysUnusable() {
+        XCTAssertTrue(WalletKeyStoreError.keyInvalidated.provesKeysUnusable)
+        XCTAssertTrue(WalletKeyStoreError.corrupt.provesKeysUnusable)
+        XCTAssertTrue(WalletKeyStoreError.wrapping("x").provesKeysUnusable)
+        XCTAssertTrue(WalletKeyStoreError.keychain(-50).provesKeysUnusable)
+        XCTAssertFalse(WalletKeyStoreError.keychain(errSecInteractionNotAllowed).provesKeysUnusable)
+        XCTAssertFalse(WalletKeyStoreError.authenticationCancelled.provesKeysUnusable)
+        XCTAssertFalse(WalletKeyStoreError.authenticationFailed.provesKeysUnusable)
+        XCTAssertFalse(WalletKeyStoreError.notFound.provesKeysUnusable)
     }
 
     // MARK: - Invalidated keys with metadata (restore behind the PIN)
@@ -284,12 +296,24 @@ final class KeyHealthRecoveryTests: XCTestCase {
     func testTheInvalidatedRestoreScreenSaysWhy() {
         XCTAssertEqual(
             OnboardingViewModel.invalidatedPhraseRestoreMessage,
-            "This device can no longer unlock this wallet's keys, for example after a change to Face ID or the passcode. Enter the recovery phrase to restore it."
+            "This device can no longer unlock this wallet's keys. Enter the recovery phrase to restore it."
         )
         XCTAssertEqual(
             OnboardingViewModel.replaceUnusableKeysMessage,
-            "This device can no longer unlock the wallet that was here. Enter a recovery phrase to restore a wallet."
+            "This device can no longer unlock the wallet that was here. Enter a recovery phrase or private key to restore a wallet."
         )
+        XCTAssertEqual(
+            OnboardingViewModel.missingPhraseRestoreMessage,
+            "This wallet's keys are no longer on this device. Enter the recovery phrase to restore it."
+        )
+        for message in [
+            OnboardingViewModel.missingPhraseRestoreMessage, OnboardingViewModel.missingKeyRestoreMessage,
+            OnboardingViewModel.invalidatedPhraseRestoreMessage, OnboardingViewModel.invalidatedKeyRestoreMessage,
+            OnboardingViewModel.replaceUnusableKeysMessage,
+        ] {
+            XCTAssertFalse(message.contains("Face ID"), "no cause is claimed")
+            XCTAssertFalse(message.contains("delete the app"), "no reinstall advice (#557 review)")
+        }
     }
 
     // MARK: - Usable keys without metadata (rebuild after the unlock)
@@ -477,6 +501,323 @@ final class KeyHealthRecoveryTests: XCTestCase {
         XCTAssertNotNil(envelope)
     }
 
+    // MARK: - Review probes (#557)
+
+    /// The envelope parses and its key is there, but the ciphertext does not
+    /// authenticate. The rebuild finds that out; the import it routes to
+    /// must then accept a phrase instead of refusing as if the keys worked.
+    func testCorruptCiphertextRebuildRoutesToAReplaceThatWorks() async throws {
+        try await phraseWallet()
+        try walletStore.delete()
+        var bytes = try XCTUnwrap(envelope)
+        bytes[bytes.count - 1] ^= 0xFF
+        try keyKeychain.set(bytes, account: WalletKeyAccount.envelope)
+        let store = keyStore()
+        let walletCreator = creator(store)
+        let gate = LaunchGate(
+            walletStore: walletStore,
+            walletKeyStore: store,
+            keyKeychain: keyKeychain,
+            pinKeychain: pinKeychain,
+            preferences: preferences,
+            biometrics: StubBiometrics(availability: .unavailable),
+            pinCost: .testing
+        )
+        let first = await gate.restoreRoute()
+        XCTAssertEqual(first, .restore(.rebuildMetadata))
+
+        var failure: Error?
+        do { try await walletCreator.rebuildMetadata(reason: "test") } catch { failure = error }
+        let outcome = await gate.rebuildOutcome(error: failure)
+        XCTAssertEqual(outcome, .keysUnusable)
+        let next = await gate.restoreRoute()
+        XCTAssertEqual(next, .restore(.replaceKeys), "the routing agrees the keys are unusable")
+
+        let model = OnboardingViewModel.replacingUnusableKeys(creator: walletCreator, hasPin: { false })
+        await model.importMnemonic(words: Self.otherPhrase, name: "Fresh")
+
+        XCTAssertNil(model.errorMessage, "the import must not dead-end")
+        XCTAssertEqual(model.step, .pinSetup)
+        let health = await store.keyHealth
+        XCTAssertEqual(health, .usable)
+        let bundle = try await store.load(reason: "test")
+        XCTAssertEqual(bundle.mnemonic, Self.otherPhrase.joined(separator: " "))
+    }
+
+    /// The process dies after the old key is deleted and the fresh key has
+    /// wrapped, before the envelope is written: the old envelope and a key
+    /// that cannot unwrap it. That must not read as usable.
+    func testCrashBetweenWrapAndEnvelopeWriteLeavesARecoverableState() async throws {
+        let record = try await phraseWallet()
+        try invalidateKeys()
+        try wrapper.deleteKey()
+        _ = try wrapper.wrap(Data(repeating: 1, count: 32))
+
+        let health = await keyStore().keyHealth
+        XCTAssertEqual(health, .invalidated)
+        let route = await makeGate().restoreRoute()
+        XCTAssertEqual(route, .restore(.keysInvalidated(record)))
+        let restored = try await creator().restoreMnemonic(words: WalletCreatorTests.testPhrase, replacing: record)
+        XCTAssertEqual(restored.record.id, record.id)
+        let bundle = try await keyStore().load(reason: "test")
+        XCTAssertEqual(bundle.privateKeyHex, WalletCreatorTests.testPrivateKeyHex)
+    }
+
+    /// A wrapping key under the right tag that is not the one the envelope
+    /// was made with (an erase and an encrypted-backup restore onto the same
+    /// device can leave this): present, but it unwraps nothing.
+    func testPresentButUnusableKeyHasARecoveryRoute() async throws {
+        let record = try await phraseWallet()
+        try wrapper.deleteKey()
+        _ = try wrapper.wrap(Data(repeating: 2, count: 32))
+        XCTAssertTrue(wrapper.hasKey)
+
+        let route = await makeGate().restoreRoute()
+
+        XCTAssertEqual(route, .restore(.keysInvalidated(record)))
+    }
+
+    // MARK: - (a) The key label in the envelope
+
+    /// Every store records the wrapping key's label, read as an attribute
+    /// under a context that forbids UI (on the simulator it answers with no
+    /// prompt; `WalletKeyStoreDeviceTests` covers the Enclave).
+    func testTheStoredEnvelopeRecordsTheWrappingKeysLabel() async throws {
+        try await phraseWallet()
+        guard case .label(let label) = wrapper.keyLabel else { return XCTFail("the label reads without a prompt") }
+        XCTAssertEqual(label.count, 20)
+
+        let decoded = try WalletKeyEnvelope.decode(try XCTUnwrap(envelope))
+
+        XCTAssertEqual(decoded.keyLabel, label)
+        XCTAssertEqual(try XCTUnwrap(envelope).first, WalletKeyEnvelope.versionWithKeyLabel)
+    }
+
+    /// An envelope written before the label existed still parses, loads and
+    /// reads as usable through the existence check.
+    func testALegacyEnvelopeWithoutALabelStillWorks() async throws {
+        try await phraseWallet()
+        try downgradeEnvelopeToVersion1()
+
+        let store = keyStore()
+        let health = await store.keyHealth
+        XCTAssertEqual(health, .usable)
+        let bundle = try await store.load(reason: "test")
+        XCTAssertEqual(bundle.privateKeyHex, WalletCreatorTests.testPrivateKeyHex)
+    }
+
+    /// The legacy envelope has no label to compare, so a different key under
+    /// the tag passes the existence check; the first decrypt proves it
+    /// unusable and the restore is offered from then on.
+    func testALegacyEnvelopeUnderAnotherKeyIsCaughtAtTheFirstDecrypt() async throws {
+        let record = try await phraseWallet()
+        try downgradeEnvelopeToVersion1()
+        try wrapper.deleteKey()
+        _ = try wrapper.wrap(Data(repeating: 3, count: 32))
+        let store = keyStore()
+        let gate = LaunchGate(
+            walletStore: walletStore,
+            walletKeyStore: store,
+            keyKeychain: keyKeychain,
+            pinKeychain: pinKeychain,
+            preferences: preferences,
+            biometrics: StubBiometrics(availability: .unavailable),
+            pinCost: .testing
+        )
+        let before = await gate.restoreRoute()
+        XCTAssertEqual(before, LaunchGate.RestoreRoute.none, "nothing a prompt-free check can see")
+
+        do {
+            _ = try await store.load(reason: "test")
+            XCTFail("another key cannot unwrap this envelope")
+        } catch let error as WalletKeyStoreError {
+            XCTAssertTrue(error.provesKeysUnusable)
+        }
+
+        let after = await gate.restoreRoute()
+        XCTAssertEqual(after, .restore(.keysInvalidated(record)))
+        try await creator(store).restoreMnemonic(words: WalletCreatorTests.testPhrase, replacing: record)
+        let health = await store.keyHealth
+        XCTAssertEqual(health, .usable, "a successful replacement clears the evidence")
+    }
+
+    /// A replaced envelope is bound to the fresh key too, so a later swap of
+    /// that key is caught without a prompt as well.
+    func testAReplacedEnvelopeRecordsTheFreshKeysLabel() async throws {
+        let record = try await phraseWallet()
+        try invalidateKeys()
+        try await creator().restoreMnemonic(words: WalletCreatorTests.testPhrase, replacing: record)
+
+        guard case .label(let label) = wrapper.keyLabel else { return XCTFail("no label") }
+        let decoded = try WalletKeyEnvelope.decode(try XCTUnwrap(envelope))
+        XCTAssertEqual(decoded.keyLabel, label)
+
+        try wrapper.deleteKey()
+        _ = try wrapper.wrap(Data(repeating: 4, count: 32))
+        let health = await keyStore().keyHealth
+        XCTAssertEqual(health, .invalidated)
+    }
+
+    /// Rewrites the stored envelope in the version 1 layout, as a build
+    /// before the label wrote it.
+    private func downgradeEnvelopeToVersion1() throws {
+        let decoded = try WalletKeyEnvelope.decode(try XCTUnwrap(envelope))
+        let legacy = WalletKeyEnvelope.encode(wrappedDataKey: decoded.wrappedDataKey, ciphertext: decoded.ciphertext)
+        try keyKeychain.set(legacy, account: WalletKeyAccount.envelope)
+        XCTAssertEqual(try XCTUnwrap(envelope).first, WalletKeyEnvelope.version)
+    }
+
+    // MARK: - (b) Runtime evidence
+
+    func testADismissedPromptIsNotEvidenceButAFailedDecryptIs() async throws {
+        try await phraseWallet()
+        let stub = StubKeyWrapper(tag: tag)
+        let store = keyStore(wrapper: stub)
+
+        stub.fail(with: .authenticationCancelled)
+        _ = try? await store.load(reason: "test")
+        var health = await store.keyHealth
+        XCTAssertEqual(health, .usable, "a dismissed prompt says nothing about the keys")
+        stub.fail(with: .authenticationFailed)
+        _ = try? await store.load(reason: "test")
+        health = await store.keyHealth
+        XCTAssertEqual(health, .usable)
+
+        stub.fail(with: .operationFailed("unwrap refused"))
+        _ = try? await store.load(reason: "test")
+        health = await store.keyHealth
+        XCTAssertEqual(health, .invalidated)
+    }
+
+    /// The phrase reveal is the decrypt the wallet phase does today: one that
+    /// proves the keys unusable is reported so the root reroutes; a
+    /// dismissed prompt is not.
+    func testARevealThatProvesTheKeysUnusableIsReported() async throws {
+        var reports = 0
+        let reader = StubWalletKeyReader(result: .failure(WalletKeyStoreError.keyInvalidated))
+        let model = BackupViewModel(
+            walletKeyStore: reader,
+            walletStore: walletStore,
+            auth: StubAuthGate(),
+            isOnboarding: false,
+            hasPin: { true },
+            onKeysUnusable: { reports += 1 }
+        )
+
+        await model.reveal()
+        XCTAssertEqual(reports, 1)
+
+        reader.set(result: .failure(WalletKeyStoreError.authenticationCancelled))
+        await model.reveal()
+        XCTAssertEqual(reports, 1, "a dismissed prompt is not reported")
+    }
+
+    // MARK: - (c) A replacement killed part way
+
+    /// The process dies after each step of the replacement, for an envelope
+    /// with a label and for a legacy one: every point reads as invalidated,
+    /// and the restore then completes.
+    func testAReplacementKilledAtAnyStepLeavesARestorableState() async throws {
+        for legacy in [false, true] {
+            for step in [WalletKeyStore.ReplacementStep.retired, .oldKeyDeleted, .wrapped] {
+                try? keyKeychain.deleteAll()
+                try? wrapper.deleteKey()
+                try? walletStore.delete()
+                let record = try await phraseWallet()
+                if legacy { try downgradeEnvelopeToVersion1() }
+                try invalidateKeys()
+                let store = keyStore()
+                await store.simulateKill(after: step)
+
+                do {
+                    try await creator(store).restoreMnemonic(words: WalletCreatorTests.testPhrase, replacing: record)
+                    XCTFail("killed after \(step)")
+                } catch {}
+
+                let freshLaunch = keyStore()
+                let health = await freshLaunch.keyHealth
+                XCTAssertEqual(health, .invalidated, "killed after \(step), legacy \(legacy)")
+                XCTAssertNotNil(envelope, "an envelope is always there")
+                let route = await makeGate().restoreRoute()
+                XCTAssertEqual(route, .restore(.keysInvalidated(record)), "killed after \(step), legacy \(legacy)")
+
+                try await creator(freshLaunch).restoreMnemonic(words: WalletCreatorTests.testPhrase, replacing: record)
+                let bundle = try await freshLaunch.load(reason: "test")
+                XCTAssertEqual(bundle.privateKeyHex, WalletCreatorTests.testPrivateKeyHex)
+            }
+        }
+    }
+
+    /// The envelope write fails and so does the rollback's key delete: the
+    /// retired envelope still reads as invalidated.
+    func testAFailedWriteWhoseRollbackAlsoFailsStillReadsInvalidated() async throws {
+        try await phraseWallet()
+        try invalidateKeys()
+        let failing = FailingKeyValueStore(service: keyService)
+        let stub = StubKeyWrapper(tag: tag)
+        let store = keyStore(keychain: failing, wrapper: stub)
+        stub.afterWrap = {
+            failing.failWrites(true)
+            stub.fail(with: .deleteFailed(errSecIO))
+        }
+
+        do {
+            try await store.replaceUnusableKeys(with: WalletKeyBundle(privateKeyHex: WalletCreatorTests.testPrivateKeyHex))
+            XCTFail("the write was refused")
+        } catch {}
+
+        XCTAssertTrue(wrapper.hasKey, "the fresh key could not be removed")
+        let health = await keyStore().keyHealth
+        XCTAssertEqual(health, .invalidated)
+    }
+
+    // MARK: - Metadata writes (review items 4 and 5)
+
+    /// An undecodable `wallet.json` that cannot be set aside is never
+    /// written over.
+    func testAnUndecodableRecordThatCannotBeSetAsideIsNotOverwritten() async throws {
+        try await phraseWallet()
+        try Data("not json".utf8).write(to: walletFile)
+        let aside = directory.appendingPathComponent("wallet.unreadable.json")
+        try FileManager.default.createDirectory(at: aside, withIntermediateDirectories: true)
+        try Data("x".utf8).write(to: aside.appendingPathComponent("pinned"))
+        try FileManager.default.setAttributes([.posixPermissions: 0o555], ofItemAtPath: aside.path)
+        defer { try? FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: aside.path) }
+
+        do {
+            try await creator().rebuildMetadata(reason: "test")
+            XCTFail("the set-aside failed, so nothing may be written")
+        } catch let error as WalletCreationError {
+            XCTAssertEqual(error, .metadataStorageFailed)
+        }
+
+        XCTAssertEqual(try Data(contentsOf: walletFile), Data("not json".utf8), "the undecodable file is untouched")
+    }
+
+    /// A record written while the rebuild's prompt was up is not
+    /// overwritten.
+    func testARecordWrittenDuringTheRebuildPromptIsNotOverwritten() async throws {
+        try await phraseWallet()
+        try walletStore.delete()
+        let appeared = WalletRecord(
+            id: "appeared", name: "Meanwhile", type: WalletCreator.typeMnemonic,
+            mainnetAddress: "ckb1", testnetAddress: "ckt1", createdAt: 0
+        )
+        let stub = StubKeyWrapper(tag: tag)
+        let file = walletFile
+        let encoded = try JSONEncoder().encode(appeared)
+        stub.beforeUnwrap = { try? encoded.write(to: file) }
+
+        do {
+            try await creator(keyStore(wrapper: stub)).rebuildMetadata(reason: "test")
+            XCTFail("a record is there now")
+        } catch let error as WalletCreationError {
+            XCTAssertEqual(error, .walletAlreadyExists)
+        }
+
+        XCTAssertEqual(walletStore.load(), appeared)
+    }
+
     // MARK: - Replacement failing part way
 
     func testAFailedEnvelopeWriteLeavesTheOldEnvelopeAndStaysInvalidated() async throws {
@@ -524,7 +865,15 @@ final class KeyHealthRecoveryTests: XCTestCase {
             XCTAssertEqual(error, .keychain(errSecIO))
         }
 
-        XCTAssertEqual(envelope, before)
+        // The old envelope is still there, retired: same wrapped key and
+        // ciphertext, a label that matches no key.
+        let old = try WalletKeyEnvelope.decode(before)
+        let now = try WalletKeyEnvelope.decode(try XCTUnwrap(envelope))
+        XCTAssertEqual(now.wrappedDataKey, old.wrappedDataKey)
+        XCTAssertEqual(now.ciphertext, old.ciphertext)
+        XCTAssertEqual(now.keyLabel, WalletKeyEnvelope.retiredKeyLabel)
+        let after = await store.keyHealth
+        XCTAssertEqual(after, .invalidated)
     }
 
     func testACorruptEnvelopeIsReplacedUnderAFreshKey() async throws {
