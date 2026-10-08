@@ -26,6 +26,9 @@ import XCTest
 final class WalletKeyStoreDeviceTests: XCTestCase {
     private let service = "com.rjnr.pocketnode.tests.device.keys"
     private let tag = "com.rjnr.pocketnode.tests.device.wrapper"
+    /// Two more test-only Enclave keys for the wrong-key test.
+    private let tagA = "com.rjnr.pocketnode.tests.device.wrapper.a"
+    private let tagB = "com.rjnr.pocketnode.tests.device.wrapper.b"
 
     private var keychain: KeychainStore!
     private var wrapper: SecureEnclaveKeyWrapper!
@@ -41,12 +44,16 @@ final class WalletKeyStoreDeviceTests: XCTestCase {
         store = WalletKeyStore(keychain: keychain, wrapper: wrapper)
         try? keychain.deleteAll()
         try? wrapper.deleteKey()
+        try? SecureEnclaveKeyWrapper(tag: tagA).deleteKey()
+        try? SecureEnclaveKeyWrapper(tag: tagB).deleteKey()
         #endif
     }
 
     override func tearDown() {
         try? keychain?.deleteAll()
         try? wrapper?.deleteKey()
+        try? SecureEnclaveKeyWrapper(tag: tagA).deleteKey()
+        try? SecureEnclaveKeyWrapper(tag: tagB).deleteKey()
         store = nil
         wrapper = nil
         keychain = nil
@@ -93,5 +100,56 @@ final class WalletKeyStoreDeviceTests: XCTestCase {
         XCTAssertEqual(try WalletKeyEnvelope.decode(stored).keyLabel, label, "the envelope records this key's label")
         let health = await store.keyHealth
         XCTAssertEqual(health, .usable)
+    }
+
+    /// A data key wrapped by Enclave key A, unwrapped with Enclave key B: the
+    /// ECIES decrypt must refuse it the same way every time, and that way must
+    /// be one `classifyDecryption` turns into `.decryptionFailed`
+    /// (`errSecDecode` or `errSecParam`), which is what lets a wrong key count
+    /// as proof the keys are unusable. The raw status of each attempt is
+    /// recorded as an activity so the run shows what the Enclave returns.
+    ///
+    /// Interactive: both keys use the app's real access control
+    /// (`biometryCurrentSet OR devicePasscode`), so each unwrap with B and the
+    /// final unwrap with A can ask for Face ID or the passcode. Run it with the
+    /// device unlocked and Face ID or the passcode available.
+    func testAWrongSecureEnclaveKeyFailsDecryptTheSameWayEveryTime() throws {
+        let keyA = SecureEnclaveKeyWrapper(tag: tagA)
+        let keyB = SecureEnclaveKeyWrapper(tag: tagB)
+        let dataKey = Data((0..<32).map { UInt8($0) })
+
+        let wrappedByA = try keyA.wrap(dataKey)
+        _ = try keyB.wrap(Data(repeating: 0x5A, count: 32))
+        XCTAssertTrue(keyA.isHardwareBacked, "key A is not in the Secure Enclave")
+        XCTAssertTrue(keyB.isHardwareBacked, "key B is not in the Secure Enclave")
+
+        var statuses: [OSStatus] = []
+        for attempt in 1...5 {
+            XCTContext.runActivity(named: "unwrap with key B, attempt \(attempt)") { activity in
+                do {
+                    _ = try keyB.unwrap(wrappedByA, reason: "Pocket Node test: wrong key, attempt \(attempt)")
+                    XCTFail("attempt \(attempt): key B unwrapped a data key wrapped by key A")
+                } catch let error as KeyWrapperError {
+                    let note = XCTAttachment(string: "attempt \(attempt): \(error)")
+                    note.lifetime = .keepAlways
+                    activity.add(note)
+                    print("WRONG-KEY attempt \(attempt): \(error)")
+                    guard case .decryptionFailed(let status) = error else {
+                        XCTFail("attempt \(attempt): \(error) is not decryptionFailed (errSecDecode or errSecParam)")
+                        return
+                    }
+                    statuses.append(status)
+                } catch {
+                    XCTFail("attempt \(attempt): unexpected \(error)")
+                }
+            }
+        }
+
+        XCTAssertEqual(statuses.count, 5, "every attempt must map to decryptionFailed; statuses: \(statuses)")
+        XCTAssertEqual(Set(statuses).count, 1, "the Enclave answered differently across attempts: \(statuses)")
+        print("WRONG-KEY statuses: \(statuses)")
+
+        let unwrapped = try keyA.unwrap(wrappedByA, reason: "Pocket Node test: right key")
+        XCTAssertEqual(unwrapped, dataKey)
     }
 }
