@@ -114,7 +114,7 @@ struct ImportWalletView: View {
             Text(restoreExplanation(record))
             .font(.subheadline)
             .foregroundStyle(.secondary)
-            Text("If it is lost, this wallet cannot be restored here. The only way to start over is to delete the app and install it again.")
+            Text("If it is lost, this wallet cannot be restored here.")
                 .font(.subheadline)
                 .foregroundStyle(.secondary)
             Text(HomeViewModel.shortened(record.mainnetAddress))
@@ -134,8 +134,8 @@ struct ImportWalletView: View {
                 : OnboardingViewModel.invalidatedPhraseRestoreMessage
         }
         return rawKey
-            ? "This wallet's keys stay on the device they were created on and did not come across with your backup. Enter its private key to use it here."
-            : "This wallet's keys stay on the device they were created on and did not come across with your backup. Enter its recovery phrase to use it here."
+            ? OnboardingViewModel.missingKeyRestoreMessage
+            : OnboardingViewModel.missingPhraseRestoreMessage
     }
 
     /// The import over keys this device can no longer decrypt, with no
@@ -158,10 +158,7 @@ struct ImportWalletView: View {
         VStack(alignment: .leading, spacing: 8) {
             Text("Restore \(record.name)")
                 .font(.headline)
-            Text("This wallet's keys did not come across with your backup, and this version of Pocket Node cannot restore this kind of wallet. Update the app and try again.")
-                .font(.subheadline)
-                .foregroundStyle(.secondary)
-            Text("The only way to start over is to delete the app and install it again.")
+            Text("This version of Pocket Node cannot restore this kind of wallet. Update the app and try again.")
                 .font(.subheadline)
                 .foregroundStyle(.secondary)
         }

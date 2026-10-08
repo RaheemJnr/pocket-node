@@ -144,18 +144,28 @@ final class OnboardingViewModel {
     /// import over unusable keys. Neither has a welcome or create step.
     var isRestoring: Bool { keyRecovery != nil }
 
-    /// The explanation the restore screen opens with for a wallet whose
-    /// envelope this device can no longer decrypt.
+    /// The explanation the restore screen opens with for a wallet whose keys
+    /// are not on this device. Neutral about the cause: a backup restored
+    /// onto a new phone is the usual one, not the only one.
+    static let missingPhraseRestoreMessage =
+        "This wallet's keys are no longer on this device. Enter the recovery phrase to restore it."
+
+    /// ``missingPhraseRestoreMessage`` for a raw-key wallet.
+    static let missingKeyRestoreMessage =
+        "This wallet's keys are no longer on this device. Enter the private key to restore it."
+
+    /// The explanation for a wallet whose envelope this device can no longer
+    /// decrypt. No cause is claimed: the app cannot tell which one it was.
     static let invalidatedPhraseRestoreMessage =
-        "This device can no longer unlock this wallet's keys, for example after a change to Face ID or the passcode. Enter the recovery phrase to restore it."
+        "This device can no longer unlock this wallet's keys. Enter the recovery phrase to restore it."
 
     /// ``invalidatedPhraseRestoreMessage`` for a raw-key wallet.
     static let invalidatedKeyRestoreMessage =
-        "This device can no longer unlock this wallet's keys, for example after a change to Face ID or the passcode. Enter the private key to restore it."
+        "This device can no longer unlock this wallet's keys. Enter the private key to restore it."
 
     /// The explanation for the import over unusable keys with no metadata.
     static let replaceUnusableKeysMessage =
-        "This device can no longer unlock the wallet that was here. Enter a recovery phrase to restore a wallet."
+        "This device can no longer unlock the wallet that was here. Enter a recovery phrase or private key to restore a wallet."
 
     /// True for a restore of a wallet type this version cannot restore,
     /// neither a recovery phrase nor a raw private key (a record written by a
