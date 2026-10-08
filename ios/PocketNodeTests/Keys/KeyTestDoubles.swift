@@ -11,6 +11,7 @@ final class StubKeyWrapper: KeyWrapping, @unchecked Sendable {
     private let lock = NSLock()
     private var failure: KeyWrapperError?
     private var pretendKeyIsMissing = false
+    private var presenceOverride: KeyMaterialPresence?
     private let real: SecureEnclaveKeyWrapper
 
     init(tag: String) {
@@ -32,6 +33,20 @@ final class StubKeyWrapper: KeyWrapping, @unchecked Sendable {
         failure = missing ? .keyNotFound : nil
     }
 
+    /// Forces what ``keyPresence`` answers, for a lookup the Keychain refuses.
+    /// Nil goes back to the real key.
+    func overridePresence(_ presence: KeyMaterialPresence?) {
+        lock.lock()
+        defer { lock.unlock() }
+        presenceOverride = presence
+    }
+
+    private var currentPresenceOverride: KeyMaterialPresence? {
+        lock.lock()
+        defer { lock.unlock() }
+        return presenceOverride
+    }
+
     private var currentFailure: KeyWrapperError? {
         lock.lock()
         defer { lock.unlock() }
@@ -47,6 +62,11 @@ final class StubKeyWrapper: KeyWrapping, @unchecked Sendable {
     var isHardwareBacked: Bool { real.isHardwareBacked }
 
     var hasKey: Bool { keyIsMissing ? false : real.hasKey }
+
+    var keyPresence: KeyMaterialPresence {
+        if let currentPresenceOverride { return currentPresenceOverride }
+        return keyIsMissing ? .absent : real.keyPresence
+    }
 
     func wrap(_ dataKey: Data) throws -> Data {
         if let currentFailure { throw currentFailure }

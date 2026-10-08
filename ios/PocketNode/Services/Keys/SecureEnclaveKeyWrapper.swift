@@ -34,6 +34,12 @@ protocol KeyWrapping: Sendable {
     /// key up, it does not use it.
     var hasKey: Bool { get }
 
+    /// Whether a wrapping key exists, keeping a lookup the Keychain refused
+    /// apart from a confirmed absence. ``hasKey`` folds both into false. An
+    /// existence query only: no key reference, no private-key use, and an
+    /// authentication context that forbids any UI, so it can never prompt.
+    var keyPresence: KeyMaterialPresence { get }
+
     /// Encrypts `dataKey` to the wrapping key's public half, creating the key
     /// pair on first use. Never prompts: the public key is not access
     /// controlled.
@@ -92,6 +98,32 @@ final class SecureEnclaveKeyWrapper: KeyWrapping {
 
     var hasKey: Bool {
         (try? loadKey(context: nil)) != nil
+    }
+
+    /// The query asks for no reference, data or attributes, only whether the
+    /// private key item matches, and carries an `LAContext` with
+    /// `interactionNotAllowed`. Looking a Secure Enclave key up never needs
+    /// authentication (only using its private half does), and if the system
+    /// ever wanted UI for this lookup it fails with
+    /// `errSecInteractionNotAllowed` instead of prompting, which lands on
+    /// `.unknown` like every other status that is not success or not found.
+    var keyPresence: KeyMaterialPresence {
+        var query = baseQuery()
+        query[kSecAttrKeyClass as String] = kSecAttrKeyClassPrivate
+        query[kSecMatchLimit as String] = kSecMatchLimitOne
+        let context = LAContext()
+        context.interactionNotAllowed = true
+        query[kSecUseAuthenticationContext as String] = context
+
+        let status = SecItemCopyMatching(query as CFDictionary, nil)
+        switch status {
+        case errSecSuccess:
+            return .present
+        case errSecItemNotFound:
+            return .absent
+        default:
+            return .unknown
+        }
     }
 
     func wrap(_ dataKey: Data) throws -> Data {

@@ -23,6 +23,10 @@ enum WalletKeyStoreError: Error, Equatable {
     /// The envelope is malformed, the ciphertext did not authenticate, or the
     /// decrypted bytes are not a bundle. Tampering and truncation both land here.
     case corrupt
+    /// ``WalletKeyStore/replaceUnusableKeys(with:)`` was asked to replace key
+    /// material that is not confirmed unusable: absent, still usable, or a
+    /// Keychain that could not be read. Nothing was written.
+    case notReplaceable
     /// The Keychain refused an operation.
     case keychain(OSStatus)
     /// The Secure Enclave refused an operation for a reason that is neither
@@ -36,6 +40,28 @@ enum KeyMaterialPresence: Equatable, Sendable {
     /// The Keychain was readable and holds no envelope.
     case absent
     /// The Keychain could not be read, so nothing is known either way.
+    case unknown
+}
+
+/// What a prompt-free look at the stored key material says about it.
+///
+/// Read by ``WalletKeyStore/keyHealth`` without decrypting or signing
+/// anything, so it never asks for Face ID, Touch ID or the passcode. It can
+/// only see what an existence check can see: a wrapping key that is still
+/// there but whose access control can no longer be satisfied reads as
+/// ``usable`` and only shows up at the first decrypt.
+enum KeyHealth: Equatable, Sendable {
+    /// The envelope is there and parses, and its Secure Enclave wrapping key
+    /// is there too.
+    case usable
+    /// The Keychain answered and holds no envelope.
+    case absent
+    /// The envelope is there but can never be decrypted again: its wrapping
+    /// key is confirmed gone, or the envelope itself does not parse.
+    case invalidated
+    /// The Keychain refused a lookup (for example before the first device
+    /// unlock), so nothing is known either way. Never treated as absent or
+    /// invalidated.
     case unknown
 }
 
@@ -83,6 +109,71 @@ actor WalletKeyStore {
         }
     }
 
+    /// The stored key material's state, without a prompt: the envelope is
+    /// read as plain Keychain data (it carries no access control of its own)
+    /// and only parsed, and the wrapping key is only looked up
+    /// (``KeyWrapping/keyPresence``), never used. Any Keychain status other
+    /// than success or not found is ``KeyHealth/unknown``.
+    var keyHealth: KeyHealth {
+        let stored: Data?
+        do {
+            stored = try keychain.get(account: WalletKeyAccount.envelope)
+        } catch {
+            return .unknown
+        }
+        guard let stored else { return .absent }
+        guard (try? WalletKeyEnvelope.decode(stored)) != nil else { return .invalidated }
+        switch wrapper.keyPresence {
+        case .present:
+            return .usable
+        case .absent:
+            return .invalidated
+        case .unknown:
+            return .unknown
+        }
+    }
+
+    /// Replaces key material that ``keyHealth`` confirms is
+    /// ``KeyHealth/invalidated`` with `bundle`, under a fresh wrapping key.
+    ///
+    /// The order keeps an envelope in the Keychain at every step:
+    /// 1. The old wrapping key is deleted. It is either already gone or it
+    ///    belongs to an envelope that does not parse, so it can decrypt
+    ///    nothing, and a second key under the same tag would make every
+    ///    later lookup ambiguous.
+    /// 2. A fresh key is created and wraps the new data key.
+    /// 3. The new envelope overwrites the old one in place, a single Keychain
+    ///    update, so the old envelope is never deleted on its own.
+    ///
+    /// A failure at 1 or 2 leaves the old (unusable) envelope, still
+    /// ``KeyHealth/invalidated``. A failure at 3 also leaves the old envelope,
+    /// and the fresh key is deleted again so the state reads as invalidated
+    /// rather than as a usable pair that cannot decrypt.
+    func replaceUnusableKeys(with bundle: WalletKeyBundle) throws {
+        guard keyHealth == .invalidated else { throw WalletKeyStoreError.notReplaceable }
+
+        var dataKey = try Self.randomDataKey()
+        defer { dataKey.secureZero() }
+        var plaintext = try Self.encode(bundle)
+        defer { plaintext.secureZero() }
+        let ciphertext = try Self.seal(plaintext, with: dataKey)
+
+        do {
+            try wrapper.deleteKey()
+        } catch {
+            throw Self.map(error)
+        }
+        let wrappedDataKey = try Self.mapWrapperErrors { try wrapper.wrap(dataKey) }
+        let envelope = WalletKeyEnvelope.encode(wrappedDataKey: wrappedDataKey, ciphertext: ciphertext)
+
+        do {
+            try keychain.set(envelope, account: WalletKeyAccount.envelope)
+        } catch {
+            try? wrapper.deleteKey()
+            throw Self.map(error)
+        }
+    }
+
     /// Encrypts and stores `bundle`, replacing any wallet already there.
     ///
     /// One Keychain write, so there is no half-stored state to roll back: either
@@ -101,16 +192,7 @@ actor WalletKeyStore {
         var plaintext = try Self.encode(bundle)
         defer { plaintext.secureZero() }
 
-        let ciphertext: Data
-        do {
-            let box = try AES.GCM.seal(plaintext, using: SymmetricKey(data: dataKey), nonce: AES.GCM.Nonce())
-            guard let combined = box.combined else { throw WalletKeyStoreError.corrupt }
-            ciphertext = combined
-        } catch let error as WalletKeyStoreError {
-            throw error
-        } catch {
-            throw WalletKeyStoreError.corrupt
-        }
+        let ciphertext = try Self.seal(plaintext, with: dataKey)
 
         let wrappedDataKey = try Self.mapWrapperErrors { try wrapper.wrap(dataKey) }
         let envelope = WalletKeyEnvelope.encode(wrappedDataKey: wrappedDataKey, ciphertext: ciphertext)
@@ -200,6 +282,18 @@ actor WalletKeyStore {
         // The caller zeroes `key` itself once it is wrapped.
         bytes.resetBytes(in: 0..<bytes.count)
         return key
+    }
+
+    private static func seal(_ plaintext: Data, with dataKey: Data) throws -> Data {
+        do {
+            let box = try AES.GCM.seal(plaintext, using: SymmetricKey(data: dataKey), nonce: AES.GCM.Nonce())
+            guard let combined = box.combined else { throw WalletKeyStoreError.corrupt }
+            return combined
+        } catch let error as WalletKeyStoreError {
+            throw error
+        } catch {
+            throw WalletKeyStoreError.corrupt
+        }
     }
 
     private static func encode(_ bundle: WalletKeyBundle) throws -> Data {
