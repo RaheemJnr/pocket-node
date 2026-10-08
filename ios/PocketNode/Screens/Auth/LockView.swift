@@ -162,6 +162,7 @@ struct LockView: View {
         guard !isVerifying else { return }
         isVerifying = true
         errorMessage = nil
+        let generation = auth.lockGeneration
         let unlocked = await auth.unlock(pin: entered)
         isVerifying = false
         digits = ""
@@ -170,6 +171,10 @@ struct LockView: View {
             stopTicker()
             return
         }
+        // The app went to the background while the PIN was being checked, so
+        // the session stayed locked. That was not a wrong PIN: show the plain
+        // lock screen again rather than an error.
+        guard auth.lockGeneration == generation else { return }
 
         errorToken += 1
         errorMessage = AuthCopy.pinFailure(auth: auth)
