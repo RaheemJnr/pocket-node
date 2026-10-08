@@ -172,9 +172,13 @@ struct LockView: View {
             return
         }
         // The app went to the background while the PIN was being checked, so
-        // the session stayed locked. That was not a wrong PIN: show the plain
-        // lock screen again rather than an error.
-        guard auth.lockGeneration == generation else { return }
+        // the session stayed locked whatever the result. Show the plain lock
+        // screen rather than an error, but keep the countdown running in case
+        // that attempt started a lockout.
+        guard auth.lockGeneration == generation else {
+            startTickerIfNeeded()
+            return
+        }
 
         errorToken += 1
         errorMessage = AuthCopy.pinFailure(auth: auth)
