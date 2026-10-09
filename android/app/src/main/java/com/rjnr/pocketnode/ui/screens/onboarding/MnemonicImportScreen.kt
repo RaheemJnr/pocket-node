@@ -205,14 +205,14 @@ class MnemonicImportViewModel @Inject constructor(
             result.onSuccess { entity ->
                 logger.d(TAG, "Imported wallet entity: ${entity.walletId}")
                 repository.onActiveWalletChanged(entity)
-                holdRestoreHintSecret(entity.walletId) {
-                    withContext(Dispatchers.Default) { RestoreHintSecret.fromMnemonic(words) }
-                }
                 // #431: offer the sync-start picker after every import, on both
                 // networks, it used to be mainnet-only, so a testnet restore
                 // silently kept the RECENT default with no way to widen it here.
                 _uiState.update {
                     it.copy(isImporting = false, showSyncModeDialog = true)
+                }
+                holdRestoreHintSecret(entity.walletId) {
+                    withContext(Dispatchers.Default) { RestoreHintSecret.fromMnemonic(words) }
                 }
             }.onFailure { error ->
                 logger.e(TAG, "Mnemonic import failed", error)
@@ -255,6 +255,10 @@ class MnemonicImportViewModel @Inject constructor(
             result.onSuccess { entity ->
                 logger.d(TAG, "Imported raw key wallet entity: ${entity.walletId}")
                 repository.onActiveWalletChanged(entity)
+                // #431: same as the mnemonic path, always offer the picker.
+                _uiState.update {
+                    it.copy(isImporting = false, showSyncModeDialog = true)
+                }
                 holdRestoreHintSecret(entity.walletId) {
                     val keyBytes = hex.removePrefix("0x").hexToByteArray()
                     try {
@@ -262,10 +266,6 @@ class MnemonicImportViewModel @Inject constructor(
                     } finally {
                         keyBytes.fill(0)
                     }
-                }
-                // #431: same as the mnemonic path, always offer the picker.
-                _uiState.update {
-                    it.copy(isImporting = false, showSyncModeDialog = true)
                 }
             }.onFailure { error ->
                 logger.e(TAG, "Private key import failed", error)
@@ -366,6 +366,12 @@ class MnemonicImportViewModel @Inject constructor(
         } catch (e: Exception) {
             // The hint is optional: without the secret the button stays hidden.
             logger.w(TAG, "Restore hint secret unavailable", e)
+            return
+        }
+        // The user may have resolved the sheet while the seed was derived.
+        val state = _uiState.value
+        if (!state.showSyncModeDialog || state.isApplyingSyncChoice) {
+            secret.wipe()
             return
         }
         restoreHintSecret = secret

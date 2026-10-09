@@ -289,6 +289,12 @@ class AddWalletViewModel @Inject constructor(
             logger.w(TAG, "Restore hint secret unavailable", e)
             return
         }
+        // The user may have resolved the sheet while the seed was derived.
+        val state = _uiState.value
+        if (!state.showSyncModeDialog || state.isApplyingSyncChoice) {
+            secret.wipe()
+            return
+        }
         restoreHintSecret = secret
         _uiState.update { it.copy(canUseRestoreHint = true) }
     }
@@ -597,10 +603,10 @@ class AddWalletViewModel @Inject constructor(
                 gatewayRepository.onActiveWalletChanged(wallet)
                 // #431: hold navigation until the sync-mode sheet resolves.
                 pendingImportedWallet = wallet
+                _uiState.update { it.copy(isLoading = false, showSyncModeDialog = true) }
                 holdRestoreHintSecret {
                     withContext(Dispatchers.Default) { RestoreHintSecret.fromMnemonic(words) }
                 }
-                _uiState.update { it.copy(isLoading = false, showSyncModeDialog = true) }
             }.onFailure { error ->
                 logger.e(TAG, "Mnemonic import failed", error)
                 _uiState.update { it.copy(isLoading = false, error = persistErrorMessage(error)) }
@@ -641,6 +647,7 @@ class AddWalletViewModel @Inject constructor(
                 gatewayRepository.onActiveWalletChanged(wallet)
                 // #431: hold navigation until the sync-mode sheet resolves.
                 pendingImportedWallet = wallet
+                _uiState.update { it.copy(isLoading = false, showSyncModeDialog = true) }
                 holdRestoreHintSecret {
                     val keyBytes = key.hexToByteArray()
                     try {
@@ -649,7 +656,6 @@ class AddWalletViewModel @Inject constructor(
                         keyBytes.fill(0)
                     }
                 }
-                _uiState.update { it.copy(isLoading = false, showSyncModeDialog = true) }
             }.onFailure { error ->
                 logger.e(TAG, "Raw key import failed", error)
                 _uiState.update { it.copy(isLoading = false, error = persistErrorMessage(error)) }
