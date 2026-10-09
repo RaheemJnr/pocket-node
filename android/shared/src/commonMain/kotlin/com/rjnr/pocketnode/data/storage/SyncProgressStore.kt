@@ -18,7 +18,7 @@ data class SyncProgressRecord(
 
 /**
  * The `sync_progress` reads and writes the shared sync code performs, narrowed
- * to the three the registration path needs (M3 #3).
+ * to the three the registration path needs.
  *
  * Android binds it to `SyncProgressDao` through `RoomSyncProgressStore`; iOS
  * will bind it to the shared Room database's `SyncProgressRoomDao`. Keeping

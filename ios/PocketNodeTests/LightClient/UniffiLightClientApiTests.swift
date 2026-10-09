@@ -94,7 +94,7 @@ final class UniffiLightClientApiTests: XCTestCase {
         XCTAssertNil(api.getCellsCapacity(searchKeyJson: "]"))
     }
 
-    /// #27: a rejected broadcast used to collapse to nil, which reached the
+    /// A rejected broadcast used to collapse to nil, which reached the
     /// user as "Send failed - native returned null" with no reason at all. The
     /// binding now answers the shared sentinel plus the bridge's own words, so
     /// `SendPipeline` can strip the prefix and surface what actually happened.
@@ -136,7 +136,7 @@ final class UniffiLightClientApiTests: XCTestCase {
     // The lifecycle paths beyond the one case below are exercised on device,
     // not in this bundle.
 
-    /// #15: `start` before `init` must refuse instead of flipping the process
+    /// `start` before `init` must refuse instead of flipping the process
     /// to RUNNING. Before the fix, `bridge_core::lifecycle::start` only
     /// checked that the state flag read INIT, which is also the flag's
     /// default before `init` ever ran, so calling `start` here used to move

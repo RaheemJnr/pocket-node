@@ -29,7 +29,7 @@ data class WalletRecord(
 )
 
 /**
- * The `wallets` table as the shared sync code sees it (M3 #3).
+ * The `wallets` table as the shared sync code sees it.
  *
  * Android binds it to `WalletDao` through `RoomWalletRegistry`; iOS will bind
  * it to its own wallet store.

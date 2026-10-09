@@ -2,7 +2,7 @@ import AVFoundation
 import SwiftUI
 
 /// Scans a CKB address with the camera, or accepts one pasted in. Presented
-/// by whatever screen needs an address (issue #8, Send); this view knows
+/// by whatever screen needs an address (Send); this view knows
 /// nothing about who is listening, it only drives `viewModel` and lets
 /// `onScanned`, wired at construction, carry the result out.
 struct QrScannerView: View {

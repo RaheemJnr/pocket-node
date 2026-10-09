@@ -5,7 +5,7 @@ import com.rjnr.pocketnode.data.database.entity.SubAccountCandidateEntity
 import javax.inject.Inject
 import javax.inject.Singleton
 
-/** Room binding for the shared [SubAccountCandidateStore] seam (M3 #3). */
+/** Room binding for the shared [SubAccountCandidateStore] seam. */
 @Singleton
 class RoomSubAccountCandidateStore @Inject constructor(
     private val dao: SubAccountCandidateDao,

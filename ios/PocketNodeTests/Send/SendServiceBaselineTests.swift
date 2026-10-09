@@ -2,7 +2,7 @@ import XCTest
 import PocketNodeCore
 @testable import PocketNode
 
-/// The follow-up from the PR #32 review: `SendService.availableShannons`
+/// Found in device-smoke-test review: `SendService.availableShannons`
 /// (`sync.balance.shannons`) can be a cached reading, because `SyncService`
 /// publishes one before the first live balance of a launch or a wallet
 /// switch lands (`publish(_:isCached:)` in `SyncService`). `send()` and

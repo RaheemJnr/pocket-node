@@ -5,7 +5,7 @@ import com.rjnr.pocketnode.data.database.entity.SyncProgressEntity
 import javax.inject.Inject
 import javax.inject.Singleton
 
-/** Room binding for the shared [SyncProgressStore] seam (M3 #3). */
+/** Room binding for the shared [SyncProgressStore] seam. */
 @Singleton
 class RoomSyncProgressStore @Inject constructor(
     private val dao: SyncProgressDao,

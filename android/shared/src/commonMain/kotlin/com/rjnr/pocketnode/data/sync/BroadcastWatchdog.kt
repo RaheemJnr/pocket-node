@@ -29,7 +29,7 @@ import kotlinx.coroutines.launch
  * Phase A is foreground-only by design; cold-start recovery
  * (`StartupReconciler`) handles process death.
  *
- * Moved to `commonMain` in M3 #5. The only Android piece left behind is
+ * Moved to `commonMain` with the send pipeline. The only Android piece left behind is
  * [LifecycleProvider]'s real implementation, which reads
  * `ProcessLifecycleOwner`; iOS supplies its own from the scene phase.
  */

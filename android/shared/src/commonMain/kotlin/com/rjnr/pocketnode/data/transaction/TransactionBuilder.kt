@@ -280,7 +280,7 @@ class TransactionBuilder(
 
     /**
      * Raw-key entry point, kept for the callers that still hold a
-     * `ByteArray` (M3 #5). The key is NOT wiped here: the caller owns it.
+     * `ByteArray`. The key is NOT wiped here: the caller owns it.
      */
     fun buildTransfer(
         fromAddress: String,
@@ -355,7 +355,7 @@ class TransactionBuilder(
 
     /**
      * Raw-key entry point, kept for the callers that still hold a
-     * `ByteArray` (M3 #5). The key is NOT wiped here: the caller owns it.
+     * `ByteArray`. The key is NOT wiped here: the caller owns it.
      */
     fun buildMultiTransfer(
         fromAddress: String,
@@ -523,7 +523,7 @@ class TransactionBuilder(
 
     /**
      * Raw-key entry point, kept for the callers that still hold a
-     * `ByteArray` (M3 #5). The key is NOT wiped here: the caller owns it.
+     * `ByteArray`. The key is NOT wiped here: the caller owns it.
      */
     fun buildDaoDeposit(
         amountShannons: Long,
@@ -608,7 +608,7 @@ class TransactionBuilder(
 
     /**
      * Raw-key entry point, kept for the callers that still hold a
-     * `ByteArray` (M3 #5). The key is NOT wiped here: the caller owns it.
+     * `ByteArray`. The key is NOT wiped here: the caller owns it.
      */
     fun buildDaoWithdraw(
         depositCell: Cell,
@@ -718,7 +718,7 @@ class TransactionBuilder(
 
     /**
      * Raw-key entry point, kept for the callers that still hold a
-     * `ByteArray` (M3 #5). The key is NOT wiped here: the caller owns it.
+     * `ByteArray`. The key is NOT wiped here: the caller owns it.
      */
     fun buildDaoUnlock(
         withdrawingCell: Cell,

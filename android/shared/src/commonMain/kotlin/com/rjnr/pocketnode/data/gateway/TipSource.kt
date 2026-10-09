@@ -8,7 +8,7 @@ import kotlinx.coroutines.flow.StateFlow
  * instantiating a full Repository (whose constructor surface is wide).
  * `GatewayRepository` implements this; tests use a small fake.
  *
- * Moved to `commonMain` with the watchdog (M3 #5), keeping its package, so the
+ * Moved to `commonMain` with the watchdog, keeping its package, so the
  * repository's `: TipSource` needs no import change.
  */
 interface TipSource {

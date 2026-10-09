@@ -19,7 +19,7 @@ import androidx.room.PrimaryKey
  *   BROADCAST    -> CONFIRMED     (the watchdog saw it on chain)
  *   BROADCAST    -> FAILED        (null x 3 past the tip window)
  *
- * [PendingBroadcastRecord] now carries the same ten columns (M3 #5), so the
+ * [PendingBroadcastRecord] now carries the same ten columns, so the
  * mapping in both directions is field for field and nothing outside this file
  * needs to know which of the two it is holding.
  */

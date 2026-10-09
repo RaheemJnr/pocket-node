@@ -72,7 +72,7 @@ object EmptyTransactionStore : TransactionStore {
     override suspend fun updateTransactionStatus(hash: String, status: String) = Unit
 
     /**
-     * The send path's optimistic activity row (M3 #5). Dropped for the same
+     * The send path's optimistic activity row. Dropped for the same
      * reason the other writes are: there is no table to write it to, and
      * `CacheManager`, which Android binds here, swallows its own failures
      * anyway, so a caller never depended on this landing.

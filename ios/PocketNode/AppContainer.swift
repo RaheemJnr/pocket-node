@@ -54,7 +54,7 @@ final class AppContainer {
     let sync: SyncService
 
     /// The send path: the shared `SendPipeline`, the Face ID step-up in front
-    /// of it and the status poll behind it (#8). Built last, because it needs
+    /// of it and the status poll behind it. Built last, because it needs
     /// the sync stack, the key store and the auth gate.
     let send: SendService
 
@@ -204,7 +204,7 @@ final class AppContainer {
     /// second one would open a second connection to the same file.
     ///
     /// `onRetry` re-broadcasts the failed transaction's ORIGINAL signed bytes
-    /// through `SendPipeline.retryBroadcast` (#8). It deliberately does not
+    /// through `SendPipeline.retryBroadcast`. It deliberately does not
     /// prefill a fresh send: a FAILED state is a heuristic, the original could
     /// still be alive in a remote mempool, and a retry that selected different
     /// inputs could pay the recipient twice.

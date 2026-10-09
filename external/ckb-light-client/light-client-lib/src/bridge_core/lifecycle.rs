@@ -705,7 +705,7 @@ mod tests {
     /// RUNNING: `STATE`'s default value happens to equal `STATE_INIT`, the
     /// same value `init` leaves it at on success, so a state-only check
     /// cannot tell "never initialized" apart from "initialized and not yet
-    /// started" (#15). The guard checks `STORAGE_WITH_DATA` instead, which
+    /// started". The guard checks `STORAGE_WITH_DATA` instead, which
     /// only `init` ever publishes.
     ///
     /// Like the `stop` test above, this depends on nothing else in the

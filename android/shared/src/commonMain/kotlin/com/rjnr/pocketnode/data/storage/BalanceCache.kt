@@ -3,7 +3,7 @@ package com.rjnr.pocketnode.data.storage
 import com.rjnr.pocketnode.data.gateway.models.BalanceResponse
 
 /**
- * The cached-balance read and write the shared read path performs (M3 #4).
+ * The cached-balance read and write the shared read path performs.
  *
  * One row per (walletId, network): the last spendable balance computed for
  * that wallet, so the Home screen and the account switcher can paint a number

@@ -60,7 +60,7 @@ class GatewayRepository @Inject constructor(
     private val walletDao: WalletDao,
     private val appDatabase: AppDatabase,
     private val syncProgressDao: SyncProgressDao,
-    // The shared send path (M3 #5): preview, build, reserve, broadcast, retry.
+    // The shared send path: preview, build, reserve, broadcast, retry.
     private val sendPipeline: SendPipeline,
     private val syncCoordinator: SyncCoordinator,
     // The DAO surface (#460): deposits, rescan, deposit/withdraw/unlock.
@@ -68,7 +68,7 @@ class GatewayRepository @Inject constructor(
     // Gap-limit recovery (#382): banner, deep scan, sweep.
     private val gapLimitGateway: GapLimitGateway,
     private val lightClient: LightClientReadOnly,
-    // The shared read path (M3 #4): balance, cells, history, tx status.
+    // The shared read path: balance, cells, history, tx status.
     private val ledgerReader: LedgerReader,
     private val subAccountReconciler: com.rjnr.pocketnode.data.wallet.SubAccountReconciler,
     private val syncServiceCommands: SyncServiceCommands,
@@ -81,7 +81,7 @@ class GatewayRepository @Inject constructor(
     /**
      * Sender identity for one send, snapshotted here and handed to
      * [SendPipeline] so nothing inside the send mutex re-reads a field a
-     * wallet switch could move underneath it (M3 #5).
+     * wallet switch could move underneath it.
      */
     private fun sendContext(): SendContext = SendContext(
         network = currentNetwork,
@@ -883,7 +883,7 @@ class GatewayRepository @Inject constructor(
         val addr = getCurrentAddress() ?: throw Exception("No wallet")
         
         // Tip header plus the status of ALL registered scripts, read and
-        // decoded by the shared engine (M3 #2). Same two bridge calls,
+        // decoded by the shared sync engine. Same two bridge calls,
         // same hex parsing, same null-degrades-to-empty contract.
 
         //
@@ -943,7 +943,7 @@ class GatewayRepository @Inject constructor(
         }
 
         // Active wallet's block, its progress percentage and the +-10-block
-        // isSynced window, all derived by the shared engine (M3 #2). The
+        // isSynced window, all derived by the shared sync engine. The
         // per-wallet bookkeeping above stays here: it is Android-only.
         val snapshot = syncEngine.computeStatus(state, _walletInfo.value?.script?.args)
         val scriptBlockNumber = snapshot.scriptBlockNumber
@@ -978,7 +978,7 @@ class GatewayRepository @Inject constructor(
     private suspend fun currentTipNumberOrZero(): Long = lightClient.currentTipNumberOrZero()
 
     // ========================================
-    // Send (delegated to the shared [SendPipeline], M3 #5)
+    // Send (delegated to the shared [SendPipeline])
     // ========================================
     //
     // The pipeline owns the send mutex, the session-broadcast set, cell
@@ -1313,7 +1313,7 @@ class GatewayRepository @Inject constructor(
     private val balanceRescanAttempted =
         java.util.Collections.synchronizedSet(mutableSetOf<String>())
 
-    // The session-broadcast set moved to SendPipeline with the send path (M3 #5).
+    // The session-broadcast set moved to SendPipeline with the send path.
 
     /** @see SyncEngine.start */
     fun startSyncPolling() = syncEngine.start(scope, this)
@@ -1357,7 +1357,7 @@ class GatewayRepository @Inject constructor(
     companion object {
         private const val TAG = "GatewayRepository"
 
-        // BROADCAST_ERROR_PREFIX moved to SendPipeline with the send path (M3 #5).
+        // BROADCAST_ERROR_PREFIX moved to SendPipeline with the send path.
 
         // MAX_CONCURRENT_WALLET_SCRIPTS + BALANCED_LAG_THRESHOLD moved to
         // SyncCoordinator (#106). Tests now import SyncCoordinator.BALANCED_LAG_THRESHOLD

@@ -5,7 +5,7 @@ import com.rjnr.pocketnode.data.database.entity.WalletEntity
 import javax.inject.Inject
 import javax.inject.Singleton
 
-/** Room binding for the shared [WalletRegistry] seam (M3 #3). */
+/** Room binding for the shared [WalletRegistry] seam. */
 @Singleton
 class RoomWalletRegistry @Inject constructor(
     private val dao: WalletDao,

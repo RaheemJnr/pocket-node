@@ -5,7 +5,7 @@ import com.rjnr.pocketnode.data.gateway.models.JniHeaderView
 import com.rjnr.pocketnode.data.gateway.models.TransactionRecord
 
 /**
- * In-memory bindings for the storage seams (M3 #3, widened in #4).
+ * In-memory bindings for the storage seams.
  *
  * They hold the same semantics the Room queries behind them do: the
  * `updateLightStart` row count, the candidate keep-min on

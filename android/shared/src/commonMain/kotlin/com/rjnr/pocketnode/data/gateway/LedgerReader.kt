@@ -37,7 +37,7 @@ import kotlin.coroutines.CoroutineContext
 
 /**
  * The wallet's read path, extracted from `GatewayRepository` into the shared
- * core (M3 #4): spendable balance, live cells, transaction history and the
+ * core: spendable balance, live cells, transaction history and the
  * status of a single transaction.
  *
  * Everything here is a READ. Nothing mutates the light client's filter scripts

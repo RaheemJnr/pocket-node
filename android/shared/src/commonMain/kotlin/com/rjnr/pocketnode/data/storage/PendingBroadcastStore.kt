@@ -4,8 +4,8 @@ package com.rjnr.pocketnode.data.storage
  * An in-flight, recently-failed or freshly-inserted broadcast.
  *
  * Carries every column the Android `PendingBroadcastEntity` declares. The
- * read path (M3 #4) only ever touched four of them; the send path and the
- * broadcast watchdog (M3 #5) own the bookkeeping columns too
+ * read path only ever touched four of them; the send path and the
+ * broadcast watchdog own the bookkeeping columns too
  * ([submittedAtTipBlock], [nullCount], [createdAt], [lastCheckedAt]), so the
  * record now mirrors the row one-for-one and the Room adapter is a pure
  * field-for-field mapping in both directions.
@@ -43,7 +43,7 @@ data class PendingBroadcastRecord(
 
 /**
  * The `pending_broadcasts` reads and writes the shared send path and broadcast
- * watchdog perform (M3 #4, widened in M3 #5).
+ * watchdog perform.
  *
  * Android binds it to `PendingBroadcastDao` through `RoomPendingBroadcastStore`.
  * The observable Flows the activity UI collects stay on the Room DAO: they are

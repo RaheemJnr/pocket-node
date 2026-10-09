@@ -14,7 +14,7 @@ securityCrypto = "1.1.0"
 secp256k1 = "0.21.0"
 room = "2.8.4"
 # Room 2.8.4 resolves androidx.sqlite 2.6.2; `sqlite-bundled` ships its own
-# SQLite build so Kotlin/Native does not link the system library (#6 spike).
+# SQLite build so Kotlin/Native does not link the system library (Room KMP spike).
 androidxSqlite = "2.6.2"
 ksp = "2.3.10"
 # KotlinCrypto: BLAKE2b for CKB hashing, SHA-256 + HMAC-SHA-512 for BIP-39 (#507).

@@ -17,7 +17,7 @@ import kotlin.test.assertNotNull
  *
  * v2 adds three tables and changes nothing about `sync_progress`, so Room
  * generates the migration from the two exported schema JSONs. What this proves
- * is the part the generator cannot: that a device which installed the M3 #6
+ * is the part the generator cannot: that a device which installed the v1
  * build opens the upgraded database with its checkpoints intact instead of
  * being thrown back to its sync mode's start block, and that the three new
  * tables are usable immediately afterwards.

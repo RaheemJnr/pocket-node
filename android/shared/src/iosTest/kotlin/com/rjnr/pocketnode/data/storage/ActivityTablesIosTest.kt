@@ -17,7 +17,7 @@ import kotlin.test.assertNull
 import kotlin.test.assertTrue
 
 /**
- * The three tables #9 added, against a real database on the simulator.
+ * The three tables the activity read path added, against a real database on the simulator.
  *
  * What an in-memory fake cannot prove is here and nowhere else: the SQL of the
  * pending-first sort with its `rowid` tie-break (which is what makes offset

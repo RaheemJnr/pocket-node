@@ -82,7 +82,7 @@ object SharedModule {
     fun provideNativeLightClient(impl: JniLightClient): NativeLightClient = impl
 
     /**
-     * The shared sync engine (M3 #2): the poll loop, the progress tracker and
+     * The shared sync engine: the poll loop, the progress tracker and
      * the account-status derivation, all in `commonMain`. It constructs its own
      * [com.rjnr.pocketnode.data.gateway.SyncPoller], so nothing else provides
      * one. The clock is left at its `SystemClock` default; only tests inject.
@@ -108,7 +108,7 @@ object SharedModule {
         queryContext = Dispatchers.IO,
     )
 
-    // --- Storage seams (M3 #3) ---
+    // --- Storage seams ---
     // Four narrow interfaces over the app's Room DAOs, so the shared sync code
     // can read and write the same tables without a Room dependency of its own.
     // iOS binds them in a later M3 issue; nothing in AppContainer.swift
@@ -132,7 +132,7 @@ object SharedModule {
     @Singleton
     fun provideTransactionStore(impl: RoomTransactionStore): TransactionStore = impl
 
-    // --- Storage seams (M3 #4) ---
+    // --- Storage seams, continued ---
     // Three more, for the balance cache, the header cache and the broadcast
     // state the read path and the cold-start reconcile consult.
 
@@ -151,7 +151,7 @@ object SharedModule {
     ): PendingBroadcastStore = impl
 
     /**
-     * The shared read path (M3 #4): balance, live cells, history and the
+     * The shared read path: balance, live cells, history and the
      * status of one transaction, all in `commonMain` over the seams above.
      *
      * `queryContext` is passed explicitly for the same reason
@@ -187,7 +187,7 @@ object SharedModule {
     )
 
     /**
-     * The shared cold-start reconcile (M3 #4). It used to carry `@Singleton`
+     * The shared cold-start reconcile. It used to carry `@Singleton`
      * and `@Inject` itself; in `commonMain` it carries neither, so the binding
      * moves here.
      */
@@ -200,7 +200,7 @@ object SharedModule {
     ): StartupReconciler = StartupReconciler(pendingBroadcasts, transactions, logger)
 
     /**
-     * The shared send path (M3 #5): preview, build, reserve, broadcast, retry.
+     * The shared send path: preview, build, reserve, broadcast, retry.
      *
      * It owns the send mutex and the session-broadcast set, so there must be
      * exactly one of these per process — a second instance would reintroduce
@@ -238,7 +238,7 @@ object SharedModule {
     )
 
     /**
-     * The shared broadcast watchdog (M3 #5). It used to carry `@Singleton` and
+     * The shared broadcast watchdog. It used to carry `@Singleton` and
      * a second `@Inject` constructor that filled in `Dispatchers.IO`; in
      * `commonMain` it carries neither, so both move here.
      */
@@ -262,7 +262,7 @@ object SharedModule {
     )
 
     /**
-     * The shared multi-wallet script registration (M3 #3): the BALANCED
+     * The shared multi-wallet script registration: the BALANCED
      * filter, the per-wallet start blocks and the gap-limit candidate
      * registration, all in `commonMain` over the four storage seams above.
      *

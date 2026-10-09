@@ -22,7 +22,7 @@ fun interface TransactionStatusSource {
 
 /**
  * Cold-start pending-transaction reconciliation extracted from
- * [GatewayRepository] (#460 part 2), moved to the shared core in M3 #4.
+ * [GatewayRepository] (#460 part 2), moved to the shared core with the read path.
  *
  * Runs once per process, immediately after the embedded node starts, and
  * does two things:

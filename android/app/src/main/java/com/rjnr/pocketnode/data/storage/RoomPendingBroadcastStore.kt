@@ -6,8 +6,8 @@ import javax.inject.Inject
 import javax.inject.Singleton
 
 /**
- * Room binding for the shared [PendingBroadcastStore] seam (M3 #4, widened in
- * #5 with the send path's and the watchdog's writes).
+ * Room binding for the shared [PendingBroadcastStore] seam, widened with the
+ * send path's and the watchdog's writes.
  *
  * A pure field-for-field mapping in both directions: the record carries every
  * column the entity does, so nothing is defaulted or dropped on the way

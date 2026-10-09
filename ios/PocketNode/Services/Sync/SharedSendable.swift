@@ -55,7 +55,7 @@ extension ActivityItem: @retroactive @unchecked Sendable {}
 extension SyncMode: @retroactive @unchecked Sendable {}
 extension KotlinLong: @retroactive @unchecked Sendable {}
 extension KotlinBoolean: @retroactive @unchecked Sendable {}
-/// The send path (#8), on the same terms as the rest of this file.
+/// The send path, on the same terms as the rest of this file.
 ///
 /// - `SendPipeline` is the money path and is the most carefully guarded type
 ///   in the shared core: everything that can race is behind its `sendMutex`

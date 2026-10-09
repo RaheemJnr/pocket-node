@@ -7,7 +7,7 @@ import javax.inject.Inject
 import javax.inject.Singleton
 
 /**
- * Room binding for the shared [TransactionStore] seam (M3 #3, widened in #4).
+ * Room binding for the shared [TransactionStore] seam, widened for the read path.
  *
  * Every member but [getBlockNumbers] forwards to [CacheManager] rather than
  * reimplement its fee-carry-forward, its swallow-and-log reads and writes, and

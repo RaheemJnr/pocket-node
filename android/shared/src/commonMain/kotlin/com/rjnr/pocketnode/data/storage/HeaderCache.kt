@@ -4,7 +4,7 @@ import com.rjnr.pocketnode.data.gateway.models.JniHeaderView
 
 /**
  * The block-header cache the shared history read consults before it asks the
- * light client (M3 #4).
+ * light client.
  *
  * A 50-transaction page used to cost 50 `get_header` round trips even when the
  * same headers had been resolved seconds earlier; this is the table that makes

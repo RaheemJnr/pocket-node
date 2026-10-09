@@ -122,7 +122,7 @@ enum ActivityCopy {
     static let submitted = "Submitted"
     static let feePending = "Pending"
 
-    /// Shown under the Retry button until the send path is wired to it (#5).
+    /// Shown under the Retry button until the send path is wired to it.
     static let retryUnavailable = "Retry needs the send path, which arrives with the next update."
 
     // MARK: - Type labels

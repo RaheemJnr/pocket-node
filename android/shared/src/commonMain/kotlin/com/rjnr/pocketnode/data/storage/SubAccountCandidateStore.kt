@@ -30,8 +30,8 @@ data class SubAccountCandidateRecord(
 }
 
 /**
- * The `sub_account_candidates` reads and writes the registration path performs
- * (M3 #3), narrowed to the two it needs.
+ * The `sub_account_candidates` reads and writes the registration path performs,
+ * narrowed to the two it needs.
  *
  * Android binds it to `SubAccountCandidateDao` through
  * `RoomSubAccountCandidateStore`.
@@ -54,7 +54,7 @@ interface SubAccountCandidateStore {
 
     /**
      * Lock-script args of every candidate on record, across all parents and
-     * all lifecycle states (M3 #4). The gap-limit signature check treats them
+     * all lifecycle states. The gap-limit signature check treats them
      * as scripts we know, so a change output landing on one is not a missing
      * change leg.
      */

@@ -5,7 +5,7 @@ import kotlinx.coroutines.flow.StateFlow
 
 /**
  * [TipSource] over the single-wallet sync service, so iOS can run the shared
- * [BroadcastWatchdog] (M3 #8).
+ * [BroadcastWatchdog].
  *
  * On Android the repository implements `TipSource` itself, because it is the
  * thing that already holds the tip flow and the active wallet. iOS has no

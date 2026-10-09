@@ -55,7 +55,7 @@ data class SendProgress(
 
 /**
  * The post-broadcast status machine, lifted out of Android's
- * `SendViewModel.startPollingTransactionStatus` (M3 #8).
+ * `SendViewModel.startPollingTransactionStatus`.
  *
  * It is the whole of the send screen's status vocabulary: the pre-broadcast
  * markers ([markBuilding], [markBroadcasting], [markFailed]) as well as the

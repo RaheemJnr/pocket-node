@@ -33,7 +33,7 @@ import org.robolectric.RobolectricTestRunner
  * persistence pattern (insert under sendMutex, CAS on success, delete
  * on null/exception) directly against an in-memory Room DB. The
  * broadcast call itself is a local lambda fake (the BroadcastClient
- * indirection moved to LightClientApi with the send path, M3 #5).
+ * indirection moved to LightClientApi with the send path).
  *
  * If the persistence logic in GatewayRepository diverges from this
  * pattern, the integration must be re-validated by hand or via an

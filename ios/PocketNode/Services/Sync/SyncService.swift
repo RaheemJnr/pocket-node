@@ -135,7 +135,7 @@ final class SyncService: SyncStatusProviding {
     private let service: SingleWalletSyncService
 
     /// The pieces of the shared stack the send path has to share rather than
-    /// rebuild (#8).
+    /// rebuild.
     ///
     /// `SendPipeline` takes all five, and every one of them has to be the
     /// instance this object already owns. A second `LedgerReader` would open a
@@ -177,7 +177,7 @@ final class SyncService: SyncStatusProviding {
     /// second concurrent walk would duplicate that work for the same answer.
     @ObservationIgnored private nonisolated(unsafe) var balanceRead: Task<Void, Never>?
 
-    /// Drives `pending_broadcasts` rows to a terminal state (#8).
+    /// Drives `pending_broadcasts` rows to a terminal state.
     ///
     /// Built here rather than in `SendService` because it needs the same
     /// stores and the same tip stream, and because it has to run whether or
@@ -239,7 +239,7 @@ final class SyncService: SyncStatusProviding {
         )
         let progressStore = RoomKmpSyncProgressStore(dao: database.syncProgress())
         let registry = InMemoryWalletRegistry()
-        // The three tables #9 added. `transactionStore` is what used to be
+        // The three tables the activity read path added. `transactionStore` is what used to be
         // `EmptyTransactionStore`: the coordinator reads cached block numbers
         // from it to anchor a candidate scan, and now there are some.
         let transactionStore = RoomKmpTransactionStore(
@@ -683,7 +683,7 @@ final class SyncService: SyncStatusProviding {
     /// per-network folder the light client keeps its `store.db` in.
     ///
     /// Through `AppDirectories` rather than spelled out here, which is the
-    /// whole point of #22: this used to say `pocketnode`, `WalletStore` said
+    /// whole point of the fix: this used to say `pocketnode`, `WalletStore` said
     /// `PocketNode`, and on the Mac's case-insensitive volume the second
     /// `mkdir` collided with the first and answered `ENOTDIR`. One spelling,
     /// one owner.

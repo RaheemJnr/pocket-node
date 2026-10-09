@@ -29,7 +29,7 @@ final class SendCopyTests: XCTestCase {
         )
     }
 
-    /// The #27 path end to end at the copy level: the bridge now hands the
+    /// The rejection-reason path end to end at the copy level: the bridge now hands the
     /// pipeline a real reason, the pipeline raises it as "Broadcast rejected",
     /// and this is what the user reads instead of "native returned null".
     func testABareNullAndARealReasonReadDifferently() {

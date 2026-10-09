@@ -5,9 +5,9 @@ import SwiftUI
 enum Route: Hashable {
     case nodeStatus
     case receive
-    /// The send form, its review sheet and its status sheet (#8).
+    /// The send form, its review sheet and its status sheet.
     case send
-    /// The wallet's transaction history (#9).
+    /// The wallet's transaction history.
     case activity
     /// The recovery-phrase backup flow outside onboarding, so behind the
     /// re-auth gate. Onboarding shows the same screen inside its own flow.

@@ -4,7 +4,7 @@ import javax.inject.Inject
 
 /**
  * Android [LifecycleProvider]: the one piece of the broadcast watchdog that
- * could not move to `commonMain` (M3 #5), because it reads
+ * could not move to `commonMain`, because it reads
  * [androidx.lifecycle.ProcessLifecycleOwner].
  */
 class ProcessLifecycleProvider @Inject constructor() : LifecycleProvider {

@@ -348,7 +348,7 @@ class SendStatusPollerTest {
      * looking up, so failing must not throw it away.
      */
     /**
-     * #8 review: `finish()` cleared `job` unconditionally, so a poll that ended
+     * Found in review: `finish()` cleared `job` unconditionally, so a poll that ended
      * after a newer one had started left the newer loop unstoppable.
      */
     @Test

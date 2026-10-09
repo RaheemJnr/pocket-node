@@ -23,7 +23,7 @@ import org.junit.runner.RunWith
 import org.robolectric.RobolectricTestRunner
 
 /**
- * Round trips for the Room bindings of the shared storage seams (M3 #3, #4).
+ * Round trips for the Room bindings of the shared storage seams.
  *
  * The seams are what `SyncCoordinator` now reads and writes through, so an
  * entity-to-record mapping that drops or transposes a column would show up as

@@ -23,7 +23,7 @@ import kotlin.test.assertNull
 import kotlin.test.assertTrue
 
 /**
- * The shared read path (M3 #4) over recorded bridge payloads.
+ * The shared read path over recorded bridge payloads.
  *
  * Every JSON these tests hand the fake client is either a [LightClientFixtures]
  * constant recorded off the chain, or is assembled here from those same

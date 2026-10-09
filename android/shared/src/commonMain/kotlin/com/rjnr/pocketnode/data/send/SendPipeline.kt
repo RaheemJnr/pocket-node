@@ -67,8 +67,8 @@ data class SendContext(
 )
 
 /**
- * The send path, extracted from `GatewayRepository` into the shared core
- * (M3 #5): preview, build, reserve, broadcast, retry.
+ * The send path, extracted from `GatewayRepository` into the shared core:
+ * preview, build, reserve, broadcast, retry.
  *
  * This is the money path, so the members below are the repository's bodies
  * moved rather than rewritten. The ordering, the mutex boundaries, the row
@@ -216,7 +216,7 @@ class SendPipeline(
      * Kotlin/Native exports `Result<T>` as an opaque `Any?` with no way to
      * unwrap it, so every Swift entry point on this class answers a plain
      * value and throws instead. The same arrangement `ActivityFeed` uses for
-     * the read path (#9). Nothing else differs: the work, the ordering and the
+     * the read path. Nothing else differs: the work, the ordering and the
      * mutex are [prepareAndSend]'s.
      */
     @Throws(Throwable::class)

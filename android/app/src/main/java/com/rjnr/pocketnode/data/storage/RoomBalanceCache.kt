@@ -6,7 +6,7 @@ import javax.inject.Inject
 import javax.inject.Singleton
 
 /**
- * Room binding for the shared [BalanceCache] seam (M3 #4).
+ * Room binding for the shared [BalanceCache] seam.
  *
  * Delegates to [CacheManager] rather than to `BalanceCacheDao` directly, so
  * the swallow-and-log behaviour the seam documents lives in exactly one place

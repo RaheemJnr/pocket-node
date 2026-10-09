@@ -7,7 +7,7 @@ import javax.inject.Inject
 import javax.inject.Singleton
 
 /**
- * Room binding for the shared [HeaderCache] seam (M3 #4).
+ * Room binding for the shared [HeaderCache] seam.
  *
  * [put] is deliberately unguarded: every call site in the shared read path
  * already wraps the write in `runCatching`, exactly as the repository code it

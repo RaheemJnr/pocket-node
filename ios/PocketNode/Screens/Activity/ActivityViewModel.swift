@@ -131,7 +131,7 @@ final class ActivityViewModel {
 
     var network: NetworkType { source.network }
 
-    /// Re-sending a failed transaction. Nil until the send path lands (#5), and
+    /// Re-sending a failed transaction. Nil until the send path lands, and
     /// the detail sheet says so rather than offering a button that does nothing.
     let onRetry: ((String) -> Void)?
 

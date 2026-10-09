@@ -16,7 +16,7 @@ import kotlin.test.assertEquals
 import kotlin.test.assertNull
 
 /**
- * Moved from `app/src/test` with the watchdog (M3 #5), from JUnit 4 +
+ * Moved from `app/src/test` with the watchdog, from JUnit 4 +
  * Robolectric onto `kotlin.test` and the shared store fakes. Every assertion
  * is the one it was: the Robolectric runner was only there because the
  * watchdog used to log through `android.util.Log`, and it no longer does.

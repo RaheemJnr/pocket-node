@@ -7,7 +7,7 @@ import com.rjnr.pocketnode.data.wallet.WalletDerivation
  * Produces the 65-byte recoverable secp256k1 signature a CKB witness carries.
  *
  * The seam exists so the send path can be handed the ability to sign without
- * being handed the key (M3 #5). Everything above [TransactionBuilder] already
+ * being handed the key. Everything above [TransactionBuilder] already
  * passed a `ByteArray` through several frames; a Signer narrows that to one
  * object whose only capability is signing, which is what the iOS Secure
  * Enclave and a future hardware signer can also implement.

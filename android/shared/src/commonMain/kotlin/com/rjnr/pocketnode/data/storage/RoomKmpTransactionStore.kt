@@ -17,8 +17,8 @@ import kotlinx.coroutines.CancellationException
  * [updateTransactionStatus] propagates on purpose so a database failure leaves
  * a pending row recoverable for the broadcast watchdog.
  *
- * The members below the interface are the send path's (M3 #5). They are public
- * here ahead of that issue so its merge only has to add `override`.
+ * The members below the interface are the send path's. They are public
+ * here ahead of that work so its merge only has to add `override`.
  */
 class RoomKmpTransactionStore(
     private val dao: TransactionRoomDao,

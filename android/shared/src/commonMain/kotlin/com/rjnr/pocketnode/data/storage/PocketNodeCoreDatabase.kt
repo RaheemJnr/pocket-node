@@ -14,13 +14,13 @@ import androidx.room.RoomDatabaseConstructor
  *
  * ## Versions
  *
- * v1: `sync_progress` only (M3 #6).
+ * v1: `sync_progress` only (the Room KMP spike).
  *
- * v2: adds `transactions`, `pending_broadcasts` and `balance_cache` (M3 #9), the three tables
+ * v2: adds `transactions`, `pending_broadcasts` and `balance_cache`, the three tables
  * the activity list and the balance read work from. Three pure additions with no change to
  * `sync_progress`, so an `@AutoMigration` covers it: Room generates the three `CREATE TABLE`
  * statements and their indices from the exported v1 and v2 schema JSON. A device that
- * installed the M3 #6 build keeps the checkpoints it has already recorded rather than
+ * installed the v1 build keeps the checkpoints it has already recorded rather than
  * resyncing from its mode's start block.
  */
 @Database(

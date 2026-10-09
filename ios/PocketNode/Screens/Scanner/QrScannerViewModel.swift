@@ -9,8 +9,8 @@ import PocketNodeCore
 ///
 /// `ObservableObject`/`@Published` rather than the `@Observable` macro used
 /// elsewhere in this app (see `ReceiveViewModel`): this view model needs to
-/// be handed a plain reference by whatever screen presents it (issue #8,
-/// Send), and is exercised here with no SwiftUI view at all, so the older,
+/// be handed a plain reference by whatever screen presents it (Send), and
+/// is exercised here with no SwiftUI view at all, so the older,
 /// more explicit publishing model keeps the test surface simple.
 @MainActor
 final class QrScannerViewModel: ObservableObject {

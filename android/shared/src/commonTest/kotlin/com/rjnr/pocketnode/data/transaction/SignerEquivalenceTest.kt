@@ -17,8 +17,7 @@ import kotlin.test.assertFailsWith
 import kotlin.test.assertTrue
 
 /**
- * The Signer seam must not change a single byte of what goes on the wire
- * (M3 #5).
+ * The Signer seam must not change a single byte of what goes on the wire.
  *
  * Two kinds of test live here, and the second is the one that has teeth. The
  * equivalence tests compare the raw-key entry points against the [Signer] ones,

@@ -50,7 +50,7 @@ import kotlin.test.assertNull
 import kotlin.test.assertTrue
 
 /**
- * The shared send path (M3 #5) over a scripted bridge.
+ * The shared send path over a scripted bridge.
  *
  * What these pin is the money path's observable behaviour, which is the part
  * that must not drift when the code moves: which cells a send is allowed to

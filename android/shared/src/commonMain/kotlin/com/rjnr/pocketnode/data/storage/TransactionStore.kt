@@ -4,7 +4,7 @@ import com.rjnr.pocketnode.data.gateway.models.TransactionRecord
 
 /**
  * The cached-transaction reads and writes the shared sync and read paths
- * perform (M3 #3, widened in M3 #4).
+ * perform.
  *
  * Android binds it to `TransactionDao` and `CacheManager` through
  * `RoomTransactionStore`, and the members do NOT share one failure contract:
@@ -63,7 +63,7 @@ interface TransactionStore {
 
     /**
      * Write the optimistic activity row for a broadcast that has just been
-     * (or is about to be) submitted (M3 #5).
+     * (or is about to be) submitted.
      *
      * [balanceChange] and [fee] are POSITIVE `0x`-prefixed hex; [direction]
      * ("in" / "out") carries the sign for the UI. [feeShannons] is the planned

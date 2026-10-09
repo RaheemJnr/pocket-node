@@ -53,7 +53,7 @@ class SendCopyTest {
     }
 
     /**
-     * The four branches #27 exists for. Before the bridge returned a reason
+     * The four branches the rejection-reason fix exists for. Before the bridge returned a reason
      * these all collapsed into one "could not send" line, which sent users
      * looking for a network problem that was not there.
      */

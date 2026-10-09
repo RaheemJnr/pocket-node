@@ -32,7 +32,7 @@ struct TransactionDetailSheet: View {
     /// Re-derived on the screen's ticker, so a sheet left open ages its badge.
     let elapsed: ElapsedBucket?
 
-    /// Nil until the send path is wired up (#5); the button then says why it
+    /// Nil until the send path is wired up; the button then says why it
     /// cannot run rather than silently doing nothing.
     let onRetry: ((String) -> Void)?
 
