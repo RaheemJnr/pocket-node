@@ -49,6 +49,9 @@ import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
+import com.composables.icons.lucide.FileText
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
@@ -345,6 +348,31 @@ fun SettingsScreen(
         }
     }
 
+    // #559: the exported restore hint waits here while the user picks where to save it.
+    var pendingRestoreHint by remember { mutableStateOf<String?>(null) }
+    val restoreHintSaver = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.CreateDocument("application/json")
+    ) { uri ->
+        val text = pendingRestoreHint
+        pendingRestoreHint = null
+        if (uri != null && text != null) {
+            scope.launch {
+                val saved = withContext(Dispatchers.IO) {
+                    runCatching {
+                        context.contentResolver.openOutputStream(uri)?.use { it.write(text.toByteArray(Charsets.UTF_8)) } != null
+                    }.getOrDefault(false)
+                }
+                viewModel.onRestoreHintSaved(saved)
+            }
+        }
+    }
+    LaunchedEffect(Unit) {
+        viewModel.restoreHintFiles.collect { file ->
+            pendingRestoreHint = file.text
+            restoreHintSaver.launch(file.fileName)
+        }
+    }
+
     SettingsScreenUI(
         snackbarHostState,
         onNavigateToSecuritySettings,
@@ -363,6 +391,7 @@ fun SettingsScreen(
         onCheckForUpdate = { viewModel.checkForUpdate() },
         onVersionTap = { viewModel.onVersionRowTap() },
         onScanOtherAddresses = { (context as? FragmentActivity)?.let { viewModel.runGapLimitScan(it) } },
+        onExportRestoreHint = { (context as? FragmentActivity)?.let { viewModel.exportRestoreHint(it) } },
         onToggleBackgroundSync = { enabled ->
             if (enabled && Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
                 val hasPermission = ContextCompat.checkSelfPermission(
@@ -398,6 +427,7 @@ private fun SettingsScreenUI(
     onCheckForUpdate: () -> Unit = {},
     onVersionTap: () -> Unit = {},
     onScanOtherAddresses: () -> Unit = {},
+    onExportRestoreHint: () -> Unit = {},
     onToggleBackgroundSync: (Boolean) -> Unit = {},
     onTogglePriceService: (Boolean) -> Unit = {},
     onToggleUpdateService: (Boolean) -> Unit = {}
@@ -475,6 +505,25 @@ private fun SettingsScreenUI(
                     icon = Lucide.Wallet,
                     title = stringResource(R.string.settings_scan_other_addresses),
                     onClick = onScanOtherAddresses
+                )
+            }
+
+            // #559: restore hint for a faster phrase restore on a new phone.
+            item {
+                SettingsLinkRow(
+                    icon = Lucide.FileText,
+                    title = stringResource(R.string.restore_hint_export_title),
+                    onClick = onExportRestoreHint
+                )
+            }
+            item {
+                Text(
+                    text = stringResource(R.string.restore_hint_export_explainer),
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier
+                        .padding(horizontal = 16.dp)
+                        .padding(top = 4.dp, bottom = 8.dp)
                 )
             }
 

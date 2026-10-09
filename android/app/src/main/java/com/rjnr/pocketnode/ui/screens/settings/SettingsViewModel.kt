@@ -17,7 +17,13 @@ import com.rjnr.pocketnode.data.wallet.SeedPhraseAuthorizer
 import com.rjnr.pocketnode.data.wallet.WalletPreferences
 import com.rjnr.pocketnode.data.wallet.WalletRepository
 import dagger.hilt.android.lifecycle.HiltViewModel
+import com.rjnr.pocketnode.R
+import com.rjnr.pocketnode.data.restorehint.RestoreHintExporter
+import com.rjnr.pocketnode.ui.util.UiMessage
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.channels.Channel
+import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.receiveAsFlow
 import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -37,6 +43,7 @@ class SettingsViewModel @Inject constructor(
     private val updateRepository: UpdateRepository,
     private val seedPhraseAuthorizer: SeedPhraseAuthorizer,
     private val keyMaterialDao: KeyMaterialDao,
+    private val restoreHintExporter: RestoreHintExporter,
 ) : ViewModel() {
 
     // Founder-only easter egg: tap the Version row 7 times (dev-options style)
@@ -252,6 +259,51 @@ class SettingsViewModel @Inject constructor(
                     }
                 }
                 .onFailure { e -> emitScanFailed(e.message ?: "") }
+        }
+    }
+
+    // -- Restore hint (#559) --
+
+    private val _restoreHintFiles = Channel<RestoreHintExporter.ExportResult.Ready>(Channel.BUFFERED)
+
+    /** Each export ready to save; the screen opens the system "save as" picker for it. */
+    val restoreHintFiles: Flow<RestoreHintExporter.ExportResult.Ready> = _restoreHintFiles.receiveAsFlow()
+
+    private var restoreHintExportJob: Job? = null
+
+    /**
+     * Builds the active wallet's restore hint behind the same authentication
+     * as revealing its recovery phrase, then hands it to the screen to save.
+     */
+    fun exportRestoreHint(activity: FragmentActivity) {
+        if (restoreHintExportJob?.isActive == true) return
+        restoreHintExportJob = viewModelScope.launch {
+            val message = when (val result = restoreHintExporter.export(activity, repository.currentNetwork)) {
+                is RestoreHintExporter.ExportResult.Ready -> {
+                    _restoreHintFiles.send(result)
+                    null
+                }
+                RestoreHintExporter.ExportResult.Cancelled -> null
+                RestoreHintExporter.ExportResult.NeedsScreenLock ->
+                    UiMessage.Resource(R.string.restore_hint_export_needs_lock)
+                RestoreHintExporter.ExportResult.NoTip ->
+                    UiMessage.Resource(R.string.restore_hint_export_no_tip)
+                RestoreHintExporter.ExportResult.KeyInvalidated ->
+                    UiMessage.Resource(R.string.vm_error_biometric_changed_self)
+                is RestoreHintExporter.ExportResult.Failed ->
+                    UiMessage.Resource(R.string.restore_hint_export_failed, listOf(result.reason))
+            }
+            message?.let { msg -> _uiState.update { it.copy(error = msg) } }
+        }
+    }
+
+    fun onRestoreHintSaved(saved: Boolean) {
+        _uiState.update {
+            it.copy(
+                error = UiMessage.Resource(
+                    if (saved) R.string.restore_hint_export_saved else R.string.restore_hint_export_save_failed
+                )
+            )
         }
     }
 
