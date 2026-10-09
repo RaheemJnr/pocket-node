@@ -132,8 +132,10 @@ final class LaunchGate {
     /// What to do with a wallet phase that has no metadata behind it.
     enum ProvisionalWalletCheck: Equatable {
         /// Keep the wallet phase: there is metadata (readable or not), the
-        /// key envelope is there (keys without metadata, as before), or the
-        /// lookup still cannot answer and is asked again next time.
+        /// key envelope is there (keys without metadata are rebuilt or
+        /// replaced through ``LaunchGate/restoreRoute(pending:)``, which runs
+        /// first), or the lookup still cannot answer and is asked again next
+        /// time.
         case stay
         /// No metadata and no envelope, both confirmed: there is no wallet.
         case startOver
@@ -178,34 +180,37 @@ final class LaunchGate {
 
     /// Whether the sync layer may be pointed at the stored wallet now.
     ///
-    /// Only a wallet that is really there: its record can be read, its key
-    /// envelope is confirmed present, its PIN is set and no restore is
+    /// Only a wallet that is really there: its record can be read, its keys
+    /// read as ``KeyHealth/usable``, its PIN is set and no recovery is
     /// waiting for it. Sync reads no key material, so this is not a security
     /// gate. It keeps the node from registering a wallet whose onboarding was
-    /// cut short, or whose keys did not come across with a device backup, on
-    /// the way to the screen that deals with it.
+    /// cut short, whose keys did not come across with a device backup, or
+    /// whose keys were invalidated or suspended, on the way to the screen
+    /// that deals with it.
     ///
     /// - Parameters:
     ///   - record: the stored wallet, or nil when there is none or it cannot
     ///     be read yet (data protection before the first device unlock).
-    ///   - envelope: the key envelope lookup. ``KeyMaterialPresence/unknown``
-    ///     waits for a later call that can answer.
+    ///   - health: the stored keys' ``KeyHealth``. Only ``KeyHealth/usable``
+    ///     syncs; ``KeyHealth/unknown`` waits for a later call that can
+    ///     answer, and ``KeyHealth/suspended`` or ``KeyHealth/invalidated``
+    ///     wait for the recovery `RootView` routes to.
     ///   - needsSecuritySetup: ``needsSecuritySetup``.
-    ///   - pendingRestore: whether `RootView` is holding a restore.
+    ///   - pendingRestore: whether `RootView` is holding a recovery.
     static func maySync(
         record: WalletRecord?,
-        envelope: KeyMaterialPresence,
+        health: KeyHealth,
         needsSecuritySetup: Bool,
         pendingRestore: Bool
     ) -> Bool {
-        record != nil && envelope == .present && !needsSecuritySetup && !pendingRestore
+        record != nil && health == .usable && !needsSecuritySetup && !pendingRestore
     }
 
-    /// Carries out ``maySync(record:envelope:needsSecuritySetup:pendingRestore:)``
+    /// Carries out ``maySync(record:health:needsSecuritySetup:pendingRestore:)``
     /// over the stores. `RootView` asks it whenever it lands in, or stays in,
-    /// the wallet phase: at launch, after onboarding, and on every reroute
-    /// (session change, return to the front), so a wallet that could not be
-    /// read at first starts syncing once it can.
+    /// the wallet phase: at launch, after onboarding, after a recovery, and on
+    /// every reroute (session change, return to the front), so a wallet that
+    /// could not be read at first starts syncing once it can.
     ///
     /// The `POCKETNODE_SKIP_ONBOARDING` wallet has no keys and no PIN on
     /// purpose, and the wallet shell UI tests need it synced, so with that
@@ -216,62 +221,201 @@ final class LaunchGate {
         guard record != nil else { return false }
         return Self.maySync(
             record: record,
-            envelope: await walletKeyStore.envelopePresence,
+            health: await walletKeyStore.keyHealth,
             needsSecuritySetup: needsSecuritySetup,
             pendingRestore: pendingRestore
         )
     }
 
-    // MARK: - Restoring missing keys
+    // MARK: - Recovering keys and metadata
 
-    /// What the root should do about a wallet whose keys may not have come
-    /// across with a device backup.
+    /// What the root should do about a wallet whose keys or metadata cannot
+    /// be used as they are.
     ///
-    /// That is what restoring an iCloud or Finder backup onto a new phone
-    /// leaves: `wallet.json` comes back, the `ThisDeviceOnly` Keychain items
-    /// do not. Such a wallet shows an address it can never spend from, and
-    /// ``WalletCreator`` would refuse to import it again because a wallet is
-    /// "already there", so `RootView` sends it to the restore flow instead of
-    /// the wallet shell. A Keychain that cannot be read yet (a launch before
-    /// the first device unlock) is not an absence and does not count. Now
-    /// that `wallet.json` is excluded from backups, only a backup made before
-    /// that exclusion (or by an older build) can produce metadata without keys.
+    /// A backup restored onto a new phone brings `wallet.json` back without
+    /// the `ThisDeviceOnly` Keychain items; a change to Face ID or the
+    /// passcode can leave the envelope behind without its Secure Enclave key;
+    /// and a crash or a lost file can leave keys with no metadata. Each of
+    /// those would otherwise open a wallet shell that shows an address it can
+    /// never spend from, or none at all.
+    enum Recovery: Equatable {
+        /// Metadata, and key material confirmed absent: restore the keys for
+        /// this wallet (its phrase must derive its addresses).
+        case keysMissing(WalletRecord)
+        /// Metadata, and an envelope that can never be decrypted again:
+        /// restore the keys for this wallet the same way, replacing the
+        /// unusable envelope.
+        case keysInvalidated(WalletRecord)
+        /// Usable keys with missing or undecodable metadata: rebuild
+        /// `wallet.json` from the keys, with no input from the user.
+        case rebuildMetadata
+        /// Unusable keys with missing or undecodable metadata: nothing to
+        /// check a phrase against, so import any phrase over the dead keys.
+        /// Only on structural invalidation, never for suspended keys.
+        case replaceKeys
+        /// Metadata, and an envelope retired after a refusal that may not
+        /// repeat (``KeyHealth/suspended``): the same restore as
+        /// ``keysInvalidated(_:)``, plus "Try unlocking again", which
+        /// decrypts once more and brings the wallet back if it works.
+        case keysSuspended(WalletRecord)
+
+        /// Stable while the same recovery stays pending, for `RootView`'s
+        /// retry task.
+        var id: String {
+            switch self {
+            case .keysMissing(let record): return "missing-\(record.id)"
+            case .keysInvalidated(let record): return "invalidated-\(record.id)"
+            case .rebuildMetadata: return "rebuild"
+            case .replaceKeys: return "replace"
+            case .keysSuspended(let record): return "suspended-\(record.id)"
+            }
+        }
+    }
+
+    /// The routing `RootView` carries out for a ``Recovery``.
     enum RestoreRoute: Equatable {
-        /// Open the restore flow for this wallet now.
-        case restore(WalletRecord)
-        /// Keep this wallet's restore pending: behind the lock screen until
-        /// the session is unlocked, or until the Keychain can say whether its
-        /// keys are there.
-        case hold(WalletRecord)
-        /// Nothing to restore; carry on with the PIN routing.
+        /// Start this recovery now.
+        case restore(Recovery)
+        /// Keep this recovery pending: behind the lock screen until the
+        /// session is unlocked, or until the Keychain can answer again.
+        case hold(Recovery)
+        /// Nothing to recover; carry on with the PIN routing.
         case none
     }
 
-    /// Decides the restore routing from what is stored, for `RootView` to
+    /// What `wallet.json` holds, as far as the launch can tell.
+    enum MetadataState: Equatable {
+        case record(WalletRecord)
+        /// No file.
+        case missing
+        /// A file that reads but does not decode.
+        case undecodable
+        /// A file that cannot be read (data protection while the device is
+        /// locked): nothing is known about it.
+        case unreadable
+    }
+
+    /// The recovery a given state calls for, before the PIN is considered.
+    enum RecoveryDecision: Equatable {
+        case recover(Recovery)
+        /// Nothing is known well enough to act on: keep what is pending, if
+        /// anything, and ask again on the next trigger.
+        case wait
+        case none
+    }
+
+    /// The decision table, from what the stores answered.
+    ///
+    /// | keys \ metadata | record             | missing / undecodable | unreadable |
+    /// |-----------------|--------------------|-----------------------|------------|
+    /// | usable          | none               | rebuildMetadata       | wait       |
+    /// | absent          | keysMissing        | none (walletless)     | wait       |
+    /// | invalidated     | keysInvalidated    | replaceKeys           | wait       |
+    /// | suspended       | keysSuspended      | rebuildMetadata       | wait       |
+    /// | unknown         | wait               | wait                  | wait       |
+    ///
+    /// An unknown key health is never read as absent or invalidated, so a
+    /// Keychain that refuses a lookup never routes to a restore or an import
+    /// and never deletes anything.
+    static func recoveryDecision(metadata: MetadataState, health: KeyHealth) -> RecoveryDecision {
+        if health == .unknown { return .wait }
+        switch metadata {
+        case .unreadable:
+            return .wait
+        case .record(let record):
+            switch health {
+            case .usable, .unknown: return .none
+            case .absent: return .recover(.keysMissing(record))
+            case .invalidated: return .recover(.keysInvalidated(record))
+            case .suspended: return .recover(.keysSuspended(record))
+            }
+        case .missing, .undecodable:
+            switch health {
+            case .usable: return .recover(.rebuildMetadata)
+            // The rebuild decrypts once more: a decrypt that works binds the
+            // envelope back and writes the record. The import over the keys
+            // is never offered for a refusal that may not repeat.
+            case .suspended: return .recover(.rebuildMetadata)
+            case .invalidated: return .recover(.replaceKeys)
+            case .absent, .unknown: return .none
+            }
+        }
+    }
+
+    /// Decides the recovery routing from what is stored, for `RootView` to
     /// carry out. Asked at launch and on every reroute of the wallet phase.
     ///
-    /// - Parameter pending: the restore `RootView` is already holding, if
+    /// Every recovery waits behind the lock screen while a PIN stands in
+    /// front of the wallet (``mayStartRestore(pinPresence:sessionUnlocked:)``):
+    /// the restore screens name the wallet and show its address, and
+    /// rebuilding the metadata decrypts the keys.
+    ///
+    /// - Parameter pending: the recovery `RootView` is already holding, if
     ///   any. A Keychain lookup that fails right after an unlock says nothing
-    ///   about the keys, so it keeps that restore pending rather than dropping
-    ///   it; only an envelope confirmed present (or the metadata gone) ends it.
-    func restoreRoute(pending: WalletRecord? = nil) async -> RestoreRoute {
+    ///   about the keys, so it keeps that recovery pending rather than
+    ///   dropping it; only a state that answers ends it.
+    func restoreRoute(pending: Recovery? = nil) async -> RestoreRoute {
         // The metadata-only wallet `POCKETNODE_SKIP_ONBOARDING` seeds for
         // the wallet shell UI tests has no keys on purpose.
         if skipsOnboarding { return .none }
-        guard let record = walletStore.load() else { return .none }
-        let envelope = await walletKeyStore.envelopePresence
-        switch envelope {
-        case .present:
+        let metadata = metadataState
+        let health = await walletKeyStore.keyHealth
+        switch Self.recoveryDecision(metadata: metadata, health: health) {
+        case .none:
             return .none
-        case .unknown:
+        case .wait:
             return pending.map { .hold($0) } ?? .none
-        case .absent:
+        case .recover(let recovery):
             let mayStart = Self.mayStartRestore(
                 pinPresence: pinService.pinPresence,
                 sessionUnlocked: auth.state == .unlocked
             )
-            return mayStart ? .restore(record) : .hold(record)
+            return mayStart ? .restore(recovery) : .hold(recovery)
         }
+    }
+
+    private var metadataState: MetadataState {
+        if let record = walletStore.load() { return .record(record) }
+        if !walletStore.hasWallet { return .missing }
+        return walletStore.hasUndecodableRecord ? .undecodable : .unreadable
+    }
+
+    /// What follows an attempt to rebuild the metadata.
+    enum RebuildOutcome: Equatable {
+        /// `wallet.json` is back; carry on with the PIN routing.
+        case rebuilt
+        /// The decrypt failed with a structural proof on the allowlist
+        /// (``WalletKeyStoreError/provesKeysUnusable``: the key absent, or a
+        /// ciphertext or bundle that fails after a good unwrap), and the key
+        /// store now reads the keys as ``KeyHealth/invalidated``: replace
+        /// them, as for ``Recovery/replaceKeys``. A refused decrypt only
+        /// suspends the keys and is a retry.
+        case keysUnusable
+        /// The prompt was dismissed or failed, or a write failed. Worth
+        /// another try, but only when the user asks: retrying on a timer
+        /// would put the system prompt up again and again.
+        case retryOnRequest
+    }
+
+    /// Classifies the result of ``WalletCreator/rebuildMetadata(reason:)``
+    /// (nil for success, otherwise the error it threw) by what the key store
+    /// reports right after it.
+    ///
+    /// Keyed on the health rather than on the error alone, so the route can
+    /// never disagree with what the replacement will accept: the store marks
+    /// the keys invalidated on exactly the failures that prove them
+    /// unusable, and ``WalletCreator/replaceUnusableKeys(words:name:)``
+    /// requires that same health. A failure the store does not count (a
+    /// dismissed prompt) stays a retry.
+    static func rebuildOutcome(error: Error?, healthAfter: KeyHealth) -> RebuildOutcome {
+        guard error != nil else { return .rebuilt }
+        return healthAfter == .invalidated ? .keysUnusable : .retryOnRequest
+    }
+
+    /// ``rebuildOutcome(error:healthAfter:)`` with the health read now.
+    func rebuildOutcome(error: Error?) async -> RebuildOutcome {
+        let health = await walletKeyStore.keyHealth
+        return Self.rebuildOutcome(error: error, healthAfter: health)
     }
 
     /// Whether a restore may open now or must wait behind the lock screen.

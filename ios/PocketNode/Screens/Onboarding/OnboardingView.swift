@@ -92,8 +92,8 @@ struct OnboardingView: View {
         // A restore that cannot go ahead offers a way back behind the lock
         // when a PIN stands in front of the wallet. With no PIN there is
         // nowhere to go back to: welcome would only offer a create that the
-        // existing wallet refuses, so the screen's own copy (reinstall) is
-        // the way out.
+        // existing wallet refuses, so the screen's own copy (update the app)
+        // is the way out.
         if model.step == .importWallet && model.isUnsupportedRestore && auth.state == .unlocked {
             ToolbarItem(placement: .topBarLeading) {
                 Button("Lock") { auth.lock() }

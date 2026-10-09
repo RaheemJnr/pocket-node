@@ -256,17 +256,21 @@ final class LaunchGateTests: XCTestCase {
         XCTAssertEqual(gate.auth.state, .unlocked)
     }
 
-    /// Keys with no metadata stay as they were: a wallet is there.
-    func testAnEnvelopeThatTurnsOutPresentStays() async throws {
+    /// Keys with no metadata are a wallet, so the device does not start
+    /// over and the PIN stays. They no longer open an empty wallet shell
+    /// either: the recovery route rebuilds the metadata from the keys first.
+    func testAnEnvelopeThatTurnsOutPresentStaysAndIsRebuiltNotAnEmptyShell() async throws {
         try await importWallet()
         try walletStore.delete()
         try await storeOldPin()
         let gate = makeGate()
         _ = await gate.auth.unlock(pin: "111111")
 
+        let route = await gate.restoreRoute()
         let reroute = await gate.reroute()
 
-        XCTAssertNil(reroute)
+        XCTAssertEqual(route, .restore(.rebuildMetadata), "not the empty shell")
+        XCTAssertNil(reroute, "no start-over: a wallet is there")
         XCTAssertEqual(gate.pinService.pinPresence, .present)
     }
 
@@ -345,37 +349,37 @@ final class LaunchGateTests: XCTestCase {
 
     // MARK: - Starting sync
 
-    /// Every combination of the four inputs: only a readable record, with its
-    /// envelope confirmed present, no security setup pending and no restore
-    /// held, may start sync.
+    /// Every combination of the four inputs: only a readable record, with
+    /// usable keys, no security setup pending and no recovery held, may
+    /// start sync. Suspended, invalidated and unknown keys never do.
     func testMaySyncOnlyForAWalletThatIsReallyThere() {
         let record = WalletRecord(
             id: "w", name: "n", type: WalletCreator.typeMnemonic,
             mainnetAddress: "ckb1", testnetAddress: "ckt1", createdAt: 0
         )
-        let envelopes: [KeyMaterialPresence] = [.present, .absent, .unknown]
+        let healths: [KeyHealth] = [.usable, .absent, .invalidated, .suspended, .unknown]
         var allowed = 0
         for candidate in [record, nil] as [WalletRecord?] {
-            for envelope in envelopes {
+            for health in healths {
                 for needsSecuritySetup in [false, true] {
                     for pendingRestore in [false, true] {
                         let result = LaunchGate.maySync(
                             record: candidate,
-                            envelope: envelope,
+                            health: health,
                             needsSecuritySetup: needsSecuritySetup,
                             pendingRestore: pendingRestore
                         )
-                        let expected = candidate != nil && envelope == .present && !needsSecuritySetup && !pendingRestore
+                        let expected = candidate != nil && health == .usable && !needsSecuritySetup && !pendingRestore
                         XCTAssertEqual(
                             result, expected,
-                            "record \(candidate != nil) envelope \(envelope) setup \(needsSecuritySetup) restore \(pendingRestore)"
+                            "record \(candidate != nil) health \(health) setup \(needsSecuritySetup) restore \(pendingRestore)"
                         )
                         if result { allowed += 1 }
                     }
                 }
             }
         }
-        XCTAssertEqual(allowed, 1, "exactly one of the 24 combinations")
+        XCTAssertEqual(allowed, 1, "exactly one of the 40 combinations")
     }
 
     /// Sync starts behind the lock screen: it reads no keys, and the PIN only
@@ -427,6 +431,24 @@ final class LaunchGateTests: XCTestCase {
         let allowed = await makeGate().maySync(pendingRestore: false)
 
         XCTAssertFalse(allowed)
+    }
+
+    /// A record whose envelope is still there but whose Secure Enclave key is
+    /// gone (a Face ID or passcode change): the keys read as invalidated, so
+    /// no sync until the recovery `RootView` routes to has run.
+    func testAWalletWithInvalidatedKeysMayNotSync() async throws {
+        try await importWallet()
+        try await storeOldPin()
+        let gate = makeGate()
+        let before = await gate.maySync(pendingRestore: false)
+        XCTAssertTrue(before)
+
+        try wrapper.deleteKey()
+        let health = await WalletKeyStore(keychain: keyKeychain, wrapper: wrapper).keyHealth
+        let after = await gate.maySync(pendingRestore: false)
+
+        XCTAssertEqual(health, .invalidated)
+        XCTAssertFalse(after)
     }
 
     /// Keys with no metadata: there is no record to register.
@@ -503,14 +525,14 @@ final class LaunchGateTests: XCTestCase {
         let gate = makeGate()
 
         let atLaunch = await gate.restoreRoute()
-        XCTAssertEqual(atLaunch, .hold(keylessRecord), "the restore screen names the wallet, so it waits")
+        XCTAssertEqual(atLaunch, .hold(.keysMissing(keylessRecord)), "the restore screen names the wallet, so it waits")
         XCTAssertTrue(gate.auth.isGated, "the lock screen is what shows")
 
         let unlocked = await gate.auth.unlock(pin: "111111")
         XCTAssertTrue(unlocked)
-        let afterUnlock = await gate.restoreRoute(pending: keylessRecord)
+        let afterUnlock = await gate.restoreRoute(pending: .keysMissing(keylessRecord))
 
-        XCTAssertEqual(afterUnlock, .restore(keylessRecord))
+        XCTAssertEqual(afterUnlock, .restore(.keysMissing(keylessRecord)))
     }
 
     func testMetadataWithoutKeysAndNoPinRestoresAtOnce() async throws {
@@ -518,7 +540,7 @@ final class LaunchGateTests: XCTestCase {
 
         let route = await makeGate().restoreRoute()
 
-        XCTAssertEqual(route, .restore(keylessRecord))
+        XCTAssertEqual(route, .restore(.keysMissing(keylessRecord)))
     }
 
     /// A Keychain lookup that fails right after the unlock says nothing about
@@ -530,16 +552,16 @@ final class LaunchGateTests: XCTestCase {
         let flaky = UnreadableKeyValueStore(service: keyService, status: nil)
         let gate = makeGate(keyStore: flaky)
         let atLaunch = await gate.restoreRoute()
-        XCTAssertEqual(atLaunch, .hold(keylessRecord))
+        XCTAssertEqual(atLaunch, .hold(.keysMissing(keylessRecord)))
         _ = await gate.auth.unlock(pin: "111111")
 
         flaky.failReads(errSecInteractionNotAllowed)
-        let transient = await gate.restoreRoute(pending: keylessRecord)
-        XCTAssertEqual(transient, .hold(keylessRecord), "only an envelope confirmed present ends a pending restore")
+        let transient = await gate.restoreRoute(pending: .keysMissing(keylessRecord))
+        XCTAssertEqual(transient, .hold(.keysMissing(keylessRecord)), "only an envelope confirmed present ends a pending restore")
 
         flaky.failReads(nil)
-        let recovered = await gate.restoreRoute(pending: keylessRecord)
-        XCTAssertEqual(recovered, .restore(keylessRecord))
+        let recovered = await gate.restoreRoute(pending: .keysMissing(keylessRecord))
+        XCTAssertEqual(recovered, .restore(.keysMissing(keylessRecord)))
     }
 
     /// With no restore pending, an unreadable envelope is not a missing one:
@@ -555,7 +577,7 @@ final class LaunchGateTests: XCTestCase {
         try await importWallet()
         let record = try XCTUnwrap(walletStore.load())
 
-        let route = await makeGate().restoreRoute(pending: record)
+        let route = await makeGate().restoreRoute(pending: .keysMissing(record))
 
         XCTAssertEqual(route, LaunchGate.RestoreRoute.none)
     }

@@ -8,6 +8,7 @@ import com.rjnr.pocketnode.data.send.SendPipeline
 import com.rjnr.pocketnode.data.transaction.TransactionBuilder
 import com.rjnr.pocketnode.data.wallet.WalletInfo
 import com.nervosnetwork.ckblightclient.LightClientNative
+import kotlinx.coroutines.CancellationException
 
 /**
  * The Nervos DAO surface, extracted from [GatewayRepository] (#460).
@@ -84,7 +85,7 @@ class DaoGateway(
         val pendingUnlocks = readPendingUnlocks(ctx, deduped)
         val merged = mergeWithCachedDaoDeposits(ctx, deduped, pendingUnlocks)
         applyPendingUnlockOverlay(ctx, applyPendingWithdrawOverlay(ctx, merged), pendingUnlocks)
-    }
+    }.onFailure { if (it is CancellationException) throw it }
 
     /**
      * #347: overlay in-flight phase-1 withdraws onto the deposit list. The
@@ -414,14 +415,19 @@ class DaoGateway(
     private suspend fun withFreshCompensation(
         entity: com.rjnr.pocketnode.data.database.entity.DaoCellEntity,
     ): com.rjnr.pocketnode.data.database.entity.DaoCellEntity {
-        val fresh = runCatching {
+        val fresh = try {
             daoDepositReader.recomputeCachedCompensation(entity) { hash ->
                 daoSyncManager.getCachedHeader(hash)?.dao
             }
-        }.getOrNull() ?: return entity
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            logger.w(TAG, "DAO compensation recompute failed: ${e.message}")
+            null
+        } ?: return entity
         if (fresh == entity.compensation) return entity
-        runCatching { daoSyncManager.updateCompensation(entity, fresh) }
-            .onFailure { logger.w(TAG, "DAO compensation write-back failed: ${it.message}") }
+        // Logs its own failures and rethrows cancellation.
+        daoSyncManager.updateCompensation(entity, fresh)
         return entity.copy(compensation = fresh)
     }
 
