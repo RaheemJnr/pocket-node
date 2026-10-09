@@ -33,7 +33,7 @@ class RestoreHintCodecTest {
             tipHash = "0x" + "11".repeat(32),
             kind = kind,
             accounts = listOf(
-                RestoreHintAccount(index = 0, coverageStart = 18_000_000L, firstActivity = 18_123_456L, syncMode = "CUSTOM"),
+                RestoreHintAccount(index = 0, coverageStart = 18_000_000L, firstActivity = 18_120_000L, syncMode = "CUSTOM"),
                 RestoreHintAccount(index = 1, coverageStart = 18_500_000L, firstActivity = null, syncMode = "RECENT"),
             ),
             discovery = RestoreHintDiscovery(found = listOf(1, 3), highestScanned = 10),
@@ -46,7 +46,7 @@ class RestoreHintCodecTest {
     private val katPayloadJson =
         """{"v":1,"network":"TESTNET","createdAtMs":1760000000000,"tipHeight":19000000,""" +
             """"tipHash":"0x1111111111111111111111111111111111111111111111111111111111111111",""" +
-            """"kind":"mnemonic","accounts":[{"index":0,"coverageStart":18000000,"firstActivity":18123456,""" +
+            """"kind":"mnemonic","accounts":[{"index":0,"coverageStart":18000000,"firstActivity":18120000,""" +
             """"syncMode":"CUSTOM"},{"index":1,"coverageStart":18500000,"firstActivity":null,"syncMode":"RECENT"}],""" +
             """"discovery":{"found":[1,3],"highestScanned":10}}"""
 
@@ -63,7 +63,7 @@ class RestoreHintCodecTest {
             RestoreHintCodec.authKey(secret, NetworkType.TESTNET).toHexStringNoPrefix(),
         )
         assertEquals(
-            "adaac38b68e992cf6d29c59e258a03635d6958cb70c202812bca59004b4c09d6",
+            "53a69a5572012030254563a7272ade108afd4521a5a50e42c631f7de572e2e2a",
             RestoreHintCodec.mac(secret, NetworkType.TESTNET, katPayloadJson.encodeToByteArray()).toHexStringNoPrefix(),
         )
     }
@@ -85,7 +85,7 @@ class RestoreHintCodecTest {
         assertEquals("1", envelope["v"]!!.jsonPrimitive.content)
         assertEquals(katPayloadJson, Base64.Default.decode(envelope["payload"]!!.jsonPrimitive.content).decodeToString())
         assertEquals(
-            "adaac38b68e992cf6d29c59e258a03635d6958cb70c202812bca59004b4c09d6",
+            "53a69a5572012030254563a7272ade108afd4521a5a50e42c631f7de572e2e2a",
             envelope["mac"]!!.jsonPrimitive.content,
         )
     }
@@ -255,6 +255,48 @@ class RestoreHintCodecTest {
                 RestoreHintCodec.open(case, seed(), NetworkType.TESTNET),
                 "input: ${case.take(40)}",
             )
+        }
+    }
+
+    @Test
+    fun macMustBeExactly64LowercaseHexChars() {
+        val good = Json.decodeFromString(RestoreHintEnvelope.serializer(), RestoreHintCodec.seal(payload(), seed()))
+        // Each of these decodes to the right 32 bytes, so before the strict
+        // check they verified; iOS must accept exactly the same set of files.
+        val variants = listOf(good.mac.uppercase(), "0x" + good.mac, good.mac + " ", " " + good.mac)
+        for (mac in variants) {
+            val file = Json.encodeToString(RestoreHintEnvelope.serializer(), good.copy(mac = mac))
+            assertEquals(
+                RestoreHintOpenResult.Rejected(RestoreHintError.MALFORMED),
+                RestoreHintCodec.open(file, seed(), NetworkType.TESTNET),
+                "mac: '$mac'",
+            )
+        }
+        assertIs<RestoreHintOpenResult.Valid>(
+            RestoreHintCodec.open(Json.encodeToString(RestoreHintEnvelope.serializer(), good), seed(), NetworkType.TESTNET)
+        )
+    }
+
+    @Test
+    fun aWipedSecretRefusesToBeUsed() {
+        val secret = seed()
+        secret.wipe()
+        assertFailsWith<IllegalStateException> { RestoreHintCodec.authKey(secret, NetworkType.TESTNET) }
+        assertFailsWith<IllegalStateException> { secret.copySeed() }
+        assertFailsWith<IllegalStateException> { RestoreHintCodec.seal(payload(), secret) }
+    }
+
+    @Test
+    fun heightsCoarsenDownToTheGranularity() {
+        assertEquals(10_000L, RestoreHintFormat.HEIGHT_GRANULARITY)
+        assertEquals(18_120_000L, RestoreHintFormat.coarsen(18_123_456L))
+        assertEquals(18_120_000L, RestoreHintFormat.coarsen(18_120_000L))
+        assertEquals(0L, RestoreHintFormat.coarsen(9_999L))
+        assertEquals(0L, RestoreHintFormat.coarsen(0L))
+        assertEquals(0L, RestoreHintFormat.coarsen(-5L))
+        for (h in listOf(1L, 9_999L, 10_001L, 18_123_456L, Long.MAX_VALUE)) {
+            val c = RestoreHintFormat.coarsen(h)
+            assertTrue(c <= h && h - c < RestoreHintFormat.HEIGHT_GRANULARITY && c % RestoreHintFormat.HEIGHT_GRANULARITY == 0L)
         }
     }
 

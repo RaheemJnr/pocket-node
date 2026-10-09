@@ -31,7 +31,6 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.ModalBottomSheetProperties
 import androidx.compose.material3.SheetValue
-import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
@@ -55,7 +54,6 @@ import androidx.compose.ui.unit.dp
 import com.composables.icons.lucide.CircleHelp
 import com.composables.icons.lucide.Clock
 import com.composables.icons.lucide.ExternalLink
-import com.composables.icons.lucide.FileText
 import com.composables.icons.lucide.History
 import com.composables.icons.lucide.Lucide
 import com.composables.icons.lucide.SlidersHorizontal
@@ -84,8 +82,6 @@ internal fun SyncOptionsSheet(
     isApplying: Boolean = false,
     /** A failed Apply, shown inline: a screen snackbar would sit under the sheet's window (#431). */
     errorText: String? = null,
-    /** #559: post-import only. Non-null shows "Use a restore hint file", which opens the file picker. */
-    onUseRestoreHint: (() -> Unit)? = null,
 ) {
     val initialMode = remember(currentMode, availableModes) {
         currentMode.takeIf { it in availableModes } ?: availableModes.firstOrNull() ?: currentMode
@@ -220,19 +216,6 @@ internal fun SyncOptionsSheet(
                             color = MaterialTheme.colorScheme.onErrorContainer,
                         )
                     }
-                }
-            }
-
-            if (onUseRestoreHint != null) {
-                Spacer(Modifier.height(4.dp))
-                OutlinedButton(
-                    onClick = onUseRestoreHint,
-                    enabled = !isApplying,
-                    modifier = Modifier.fillMaxWidth().uaTestTag("sync-sheet-restore-hint"),
-                ) {
-                    Icon(Lucide.FileText, contentDescription = null, modifier = Modifier.size(18.dp))
-                    Spacer(Modifier.width(8.dp))
-                    Text(stringResource(R.string.restore_hint_use_file))
                 }
             }
 

@@ -21,17 +21,29 @@ class RestoreHintSecret private constructor(
     val kind: String,
     private val bytes: ByteArray,
 ) {
-    internal fun key(): ByteArray = bytes
+    private var wiped = false
+
+    /** @throws IllegalStateException after [wipe]: a zeroed key must never MAC anything. */
+    internal fun key(): ByteArray {
+        check(!wiped) { "restore hint secret was wiped" }
+        return bytes
+    }
 
     /**
      * A copy of the BIP-39 seed, for deriving the sub-account candidates a
      * hint seeds; null for a raw-key secret. The caller wipes the copy.
+     *
+     * @throws IllegalStateException after [wipe].
      */
-    fun copySeed(): ByteArray? = if (kind == RestoreHintKind.MNEMONIC) bytes.copyOf() else null
+    fun copySeed(): ByteArray? {
+        check(!wiped) { "restore hint secret was wiped" }
+        return if (kind == RestoreHintKind.MNEMONIC) bytes.copyOf() else null
+    }
 
     /** Overwrites the held secret. The instance is unusable afterwards. */
     fun wipe() {
         bytes.fill(0)
+        wiped = true
     }
 
     companion object {
@@ -71,17 +83,22 @@ sealed interface RestoreHintOpenResult {
  * (raw-key wallets) and `<NETWORK>` is `MAINNET` or `TESTNET`. Binding the
  * network into the key means a file can never be replayed across networks.
  *
- * There is no encryption: the payload carries nothing that identifies the
- * wallet (no keys, addresses, script args, amounts or tx hashes), so only its
- * integrity and origin need protecting. A file is all-or-nothing: any failure
+ * There is no encryption. The payload holds no keys, addresses, script args,
+ * amounts or tx hashes, only coarse heights (see [RestoreHintPayload] and
+ * [RestoreHintFormat.HEIGHT_GRANULARITY]), indices, mode names and the tip it
+ * was made at, so the codec protects integrity and origin, not secrecy; the
+ * file is still the user's private data. A file is all-or-nothing: any failure
  * rejects it with a typed [RestoreHintError] and none of it is used.
+ *
+ * The `mac` field must be exactly 64 lowercase hex characters; anything else
+ * is MALFORMED, so every implementation accepts the same set of files.
  */
 object RestoreHintCodec {
 
     /** Larger than any real hint by two orders of magnitude; refuse anything bigger unread. */
     const val MAX_FILE_CHARS: Int = 64 * 1024
 
-    private const val MAC_LENGTH = 32
+    private val MAC_HEX = Regex("^[0-9a-f]{64}$")
     private const val MAX_ACCOUNTS = 1_000
 
     /** Canonical encoder: declaration order, defaults and nulls written out, no whitespace. */
@@ -151,6 +168,7 @@ object RestoreHintCodec {
         if (envelope.format != RestoreHintFormat.FORMAT) return rejected(RestoreHintError.MALFORMED)
         if (envelope.v != RestoreHintFormat.VERSION) return rejected(RestoreHintError.UNSUPPORTED_VERSION)
 
+        if (!MAC_HEX.matches(envelope.mac)) return rejected(RestoreHintError.MALFORMED)
         val payloadBytes: ByteArray
         val givenMac: ByteArray
         try {
@@ -159,7 +177,6 @@ object RestoreHintCodec {
         } catch (e: IllegalArgumentException) {
             return rejected(RestoreHintError.MALFORMED)
         }
-        if (givenMac.size != MAC_LENGTH) return rejected(RestoreHintError.MALFORMED)
 
         if (!constantTimeEquals(mac(secret, expectedNetwork, payloadBytes), givenMac)) {
             val other = NetworkType.entries.first { it != expectedNetwork }

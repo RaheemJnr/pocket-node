@@ -17,11 +17,14 @@ import kotlinx.serialization.Serializable
  * [RestoreHintPayload]; `mac` is HMAC-SHA256 over exactly those bytes under a
  * key derived from the wallet's secret (see [RestoreHintCodec]).
  *
- * The payload is deliberately not encrypted: it carries no keys, addresses,
- * script args, amounts or transaction hashes, only block heights, derivation
- * indices and sync-mode names. The MAC is what matters: it proves the file was
- * made by someone holding the same recovery phrase (or private key) and that
- * nobody edited it since.
+ * The payload is not encrypted. It carries no keys, addresses, script args,
+ * amounts or transaction hashes. It does carry coarse per-account heights
+ * (rounded down to [RestoreHintFormat.HEIGHT_GRANULARITY] blocks), derivation
+ * indices, sync-mode names, and the tip and time the file was made. That is
+ * not nothing: someone holding the file learns roughly when each account
+ * became active, though not which addresses it uses. Treat the file as
+ * private, not as public. The MAC proves it was made by someone holding the
+ * same recovery phrase (or private key) and that nobody edited it since.
  */
 @Serializable
 data class RestoreHintEnvelope(
@@ -57,10 +60,11 @@ data class RestoreHintPayload(
  *
  * @property index the BIP44 account index (m/44'/309'/index'/0/0); 0 for the
  *   main account and for a raw-key wallet.
- * @property coverageStart the source wallet's light-client start block for
- *   this account (`sync_progress.lightStartBlockNumber`).
+ * @property coverageStart the earliest block the source covered for this
+ *   account: the lower of its light-client start and its mode-derived
+ *   historical start, rounded down to [RestoreHintFormat.HEIGHT_GRANULARITY].
  * @property firstActivity the lowest block number among this account's cached
- *   transactions, or null when it has none.
+ *   transactions, rounded down the same way, or null when it has none.
  * @property syncMode the source's [com.rjnr.pocketnode.data.gateway.models.SyncMode]
  *   name, informational only.
  */
@@ -92,6 +96,17 @@ object RestoreHintKind {
 object RestoreHintFormat {
     const val FORMAT = "pocket-node-restore-hint"
     const val VERSION = 1
+
+    /**
+     * Account heights are exported rounded DOWN to a multiple of this many
+     * blocks. Rounding down only moves a restore's start earlier, so it costs
+     * a little sync time and never coverage, and it keeps the file coarse.
+     */
+    const val HEIGHT_GRANULARITY: Long = 10_000L
+
+    /** [height] rounded down to [HEIGHT_GRANULARITY]; negative inputs clamp to 0. */
+    fun coarsen(height: Long): Long =
+        if (height <= 0L) 0L else height - height % HEIGHT_GRANULARITY
 
     /** SAF suggested file name, e.g. `pocket-node-restore-hint-testnet.json`. */
     fun fileName(network: String): String = "$FORMAT-${network.lowercase()}.json"
