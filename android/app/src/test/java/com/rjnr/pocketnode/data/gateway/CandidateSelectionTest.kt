@@ -1,6 +1,6 @@
 package com.rjnr.pocketnode.data.gateway
 
-import com.rjnr.pocketnode.data.database.entity.SubAccountCandidateEntity
+import com.rjnr.pocketnode.data.storage.SubAccountCandidateRecord
 import com.rjnr.pocketnode.data.wallet.SubAccountDiscovery
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
@@ -16,24 +16,22 @@ import org.junit.Test
  */
 class CandidateSelectionTest {
 
-    private fun account(index: Int, state: String = SubAccountCandidateEntity.STATE_PENDING) =
-        SubAccountCandidateEntity(
+    private fun account(index: Int, state: String = SubAccountCandidateRecord.STATE_PENDING) =
+        SubAccountCandidateRecord(
             parentWalletId = "p",
             derivationPath = SubAccountDiscovery.accountPath(index),
             accountIndex = index,
             scriptArgs = "0xa$index",
             state = state,
-            createdAt = 1L,
         )
 
-    private fun chain(chainIdx: Int, addrIdx: Int, state: String = SubAccountCandidateEntity.STATE_PENDING) =
-        SubAccountCandidateEntity(
+    private fun chain(chainIdx: Int, addrIdx: Int, state: String = SubAccountCandidateRecord.STATE_PENDING) =
+        SubAccountCandidateRecord(
             parentWalletId = "p",
             derivationPath = SubAccountDiscovery.chainPath(chainIdx, addrIdx),
             accountIndex = 0,
             scriptArgs = "0xc$chainIdx$addrIdx",
             state = state,
-            createdAt = 1L,
         )
 
     @Test
@@ -65,11 +63,11 @@ class CandidateSelectionTest {
         // that register properly on their own.
         val selected = selectCandidatesForRegistration(
             listOf(
-                account(1, SubAccountCandidateEntity.STATE_FOUND),
-                account(2, SubAccountCandidateEntity.STATE_EMPTY),
-                account(3, SubAccountCandidateEntity.STATE_RESTORED),
-                chain(1, 0, SubAccountCandidateEntity.STATE_FOUND),
-                chain(1, 2, SubAccountCandidateEntity.STATE_EMPTY),
+                account(1, SubAccountCandidateRecord.STATE_FOUND),
+                account(2, SubAccountCandidateRecord.STATE_EMPTY),
+                account(3, SubAccountCandidateRecord.STATE_RESTORED),
+                chain(1, 0, SubAccountCandidateRecord.STATE_FOUND),
+                chain(1, 2, SubAccountCandidateRecord.STATE_EMPTY),
                 chain(1, 1),
             ),
             accountAxisCap = 5,

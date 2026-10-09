@@ -1,10 +1,14 @@
 import SwiftUI
 
 /// Routes mirror the Android `NavGraph.kt` names so the two apps stay readable
-/// side by side. Send, activity and DAO arrive with M3 and M4.
+/// side by side. DAO and multi-wallet arrive with M4.
 enum Route: Hashable {
     case nodeStatus
     case receive
+    /// The send form, its review sheet and its status sheet.
+    case send
+    /// The wallet's transaction history.
+    case activity
     /// The recovery-phrase backup flow outside onboarding, so behind the
     /// re-auth gate. Onboarding shows the same screen inside its own flow.
     case backup
@@ -79,7 +83,10 @@ struct RootView: View {
                             // trigger: a recovery that stored the keys but not
                             // the metadata (a failed save) is a wallet with no
                             // record, which the gate sends to the rebuild
-                            // instead of an empty shell.
+                            // instead of an empty shell. The wallet exists only
+                            // now, so this is also the first moment the sync
+                            // layer can be pointed at it: a reroute that stays
+                            // in the wallet phase ends in activateSyncIfAllowed.
                             Task { await reroute() }
                         }
                     }
@@ -199,8 +206,19 @@ struct RootView: View {
         // The lock-on-background rule. `.background` only: `.inactive` also
         // fires for a notification banner or a control centre pull, and the app
         // switcher preview itself, none of which should throw the user out.
-        .onChange(of: scenePhase) { _, newScenePhase in
+        // `initial: true` because a cold launch begins in `.active` and never
+        // changes phase: without it the watchdog would not start until the
+        // user backgrounded the app and came back.
+        .onChange(of: scenePhase, initial: true) { _, newScenePhase in
             auth.handleScenePhase(newScenePhase)
+            // The broadcast watchdog is foreground-only: its fallback timer
+            // would be suspended in the background anyway, and Android gates
+            // its own on `ProcessLifecycleOwner` for the same reason.
+            if newScenePhase == .active {
+                container.sync.startWatchdog()
+            } else if newScenePhase == .background {
+                container.sync.stopWatchdog()
+            }
         }
         // Step-up auth for a single action (`AuthService.requireAuth`), used by
         // the recovery phrase reveal and later by send confirmation. Dismissing
@@ -322,14 +340,47 @@ struct RootView: View {
         guard phase == .wallet else { return }
         let restoreRoute = await gate.restoreRoute(pending: pendingRecovery)
         guard phase == .wallet, apply(restoreRoute) else { return }
-        guard let destination = await gate.reroute(), phase == .wallet else { return }
-        route(to: destination)
+        if let destination = await gate.reroute() {
+            guard phase == .wallet else { return }
+            route(to: destination)
+            return
+        }
+        // Staying in the wallet phase. A held recovery that has just cleared
+        // (a restore, a rebuilt `wallet.json`, "Try unlocking again"), a
+        // finished onboarding, or a wallet that could not be read when the
+        // phase was first entered, has not started sync yet, and nothing else
+        // would start it before the next launch.
+        await activateSyncIfAllowed()
+    }
+
+    /// Points the sync layer at the wallet if ``LaunchGate/maySync(pendingRestore:)``
+    /// allows it. Called whenever the root lands in, or stays in, the wallet
+    /// phase. `activateSync` ignores a repeat for the same wallet, so every
+    /// one of those can call it.
+    ///
+    /// Sync starts behind the lock screen on purpose: catching the chain up
+    /// does not read key material, and making the user unlock before the
+    /// node starts would waste the first minute of every launch. Android
+    /// starts its poll from the repository for the same reason.
+    ///
+    /// Once started it is not stopped if a later reroute leaves the wallet
+    /// phase: `SyncService` has no deactivate short of `shutdown()`, which
+    /// closes its database for good, and a running sync reads no keys.
+    private func activateSyncIfAllowed() async {
+        guard phase == .wallet else { return }
+        let allowed = await gate.maySync(pendingRestore: pendingRecovery != nil)
+        guard allowed, phase == .wallet, pendingRecovery == nil else { return }
+        container.activateSync()
     }
 
     private func route(to destination: OnboardingViewModel.LaunchDestination) {
         switch destination {
         case .wallet:
             phase = .wallet
+            // A launch whose PIN or key lookup could not answer lands here
+            // too, on its way to the lock screen, so this asks rather than
+            // starting sync outright.
+            Task { await activateSyncIfAllowed() }
         case .onboarding(let step):
             let gate = gate
             // A reroute can come from a pushed screen. Onboarding replaces the
@@ -373,7 +424,32 @@ struct RootView: View {
                 .navigationDestination(for: Route.self) { route in
                     destination(for: route)
                 }
+                .onAppear(perform: pushStartRouteForTestingIfRequested)
         }
+    }
+
+    /// Pushes the screen named by `POCKETNODE_START_ROUTE` on the first
+    /// appearance of the wallet shell.
+    ///
+    /// Debug-only, and a no-op on every other launch. It exists because a
+    /// screenshot or acceptance run on a simulator cannot tap: driving the UI
+    /// from outside the app needs assistive access, which a CI machine and a
+    /// headless local run do not have. The same reason
+    /// `POCKETNODE_SKIP_ONBOARDING` exists in `AppContainer`.
+    private func pushStartRouteForTestingIfRequested() {
+        #if DEBUG
+        guard path.isEmpty,
+              let name = ProcessInfo.processInfo.environment["POCKETNODE_START_ROUTE"]
+        else { return }
+        switch name {
+        case "activity": path.append(Route.activity)
+        case "receive": path.append(Route.receive)
+        case "send": path.append(Route.send)
+        case "nodeStatus": path.append(Route.nodeStatus)
+        case "settings": path.append(Route.settings)
+        default: break
+        }
+        #endif
     }
 
     @ViewBuilder
@@ -383,6 +459,8 @@ struct RootView: View {
                 model: home,
                 theme: container.theme,
                 onReceive: { path.append(Route.receive) },
+                onSend: { path.append(Route.send) },
+                onActivity: { path.append(Route.activity) },
                 onBackUp: { path.append(Route.backup) }
             )
         } else {
@@ -399,6 +477,10 @@ struct RootView: View {
             NodeStatusView()
         case .receive:
             ReceiveRoute(onBackUp: { path.append(Route.backup) })
+        case .send:
+            SendRoute(onFinished: { path.removeLast(path.count) })
+        case .activity:
+            ActivityRoute()
         case .backup:
             BackupRoute()
         case .settings:
@@ -433,6 +515,69 @@ private struct ReceiveRoute: View {
         .onAppear {
             guard viewModel == nil else { return }
             viewModel = container.makeReceiveViewModel(onBackUp: onBackUp)
+        }
+    }
+}
+
+/// Holds the Send screen's view model for as long as the screen is pushed.
+///
+/// The same `@State` arrangement `ReceiveRoute` uses, and for a sharper
+/// reason here: a `navigationDestination` closure runs again on every
+/// re-render, and a view model rebuilt mid-send would throw away the typed
+/// amount and the review the user was looking at.
+private struct SendRoute: View {
+    @Environment(AppContainer.self) private var container
+
+    /// Pops back to Home once a confirmed send has been dismissed.
+    let onFinished: () -> Void
+
+    @State private var viewModel: SendViewModel?
+
+    var body: some View {
+        Group {
+            if let viewModel {
+                SendView(
+                    model: viewModel,
+                    theme: container.theme,
+                    makeScanner: { onScanned in
+                        container.makeQrScannerViewModel(onScanned: onScanned)
+                    },
+                    onFinished: onFinished,
+                    isSeededTestWallet: container.isSeededTestWallet
+                )
+            } else {
+                Color(uiColor: .systemBackground)
+            }
+        }
+        .onAppear {
+            guard viewModel == nil else { return }
+            viewModel = container.makeSendViewModel()
+        }
+    }
+}
+
+/// Holds the activity list's view model for as long as the screen is pushed,
+/// for the same reason `ReceiveRoute` does: a `navigationDestination` closure
+/// runs again on every re-render, and a view model rebuilt each time would
+/// throw the list back to page 0 and lose the scroll position.
+private struct ActivityRoute: View {
+    @Environment(AppContainer.self) private var container
+
+    @State private var viewModel: ActivityViewModel?
+
+    var body: some View {
+        Group {
+            if let viewModel {
+                ActivityView(model: viewModel, theme: container.theme)
+            } else {
+                // Nil only when no wallet is loaded, which the wallet shell
+                // cannot be reached without.
+                Color(uiColor: .systemBackground)
+            }
+        }
+        .onAppear {
+            guard viewModel == nil else { return }
+            viewModel = container.makeActivityViewModel()
         }
     }
 }

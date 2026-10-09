@@ -266,17 +266,37 @@ class TransactionBuilder(
         toAddress: String,
         amountShannons: Long,
         availableCells: List<Cell>,
-        privateKey: ByteArray,
+        signer: Signer,
         network: NetworkType
     ): Transaction {
         return buildMultiTransfer(
             fromAddress = fromAddress,
             recipients = listOf(RecipientOutput(toAddress, amountShannons)),
             availableCells = availableCells,
-            privateKey = privateKey,
+            signer = signer,
             network = network,
         )
     }
+
+    /**
+     * Raw-key entry point, kept for the callers that still hold a
+     * `ByteArray`. The key is NOT wiped here: the caller owns it.
+     */
+    fun buildTransfer(
+        fromAddress: String,
+        toAddress: String,
+        amountShannons: Long,
+        availableCells: List<Cell>,
+        privateKey: ByteArray,
+        network: NetworkType
+    ): Transaction = buildTransfer(
+        fromAddress = fromAddress,
+        toAddress = toAddress,
+        amountShannons = amountShannons,
+        availableCells = availableCells,
+        signer = PrivateKeySigner(privateKey),
+        network = network,
+    )
 
     /**
      * Cell selection, fee and change for a transfer, with no signing and no
@@ -333,11 +353,29 @@ class TransactionBuilder(
         )
     }
 
+    /**
+     * Raw-key entry point, kept for the callers that still hold a
+     * `ByteArray`. The key is NOT wiped here: the caller owns it.
+     */
     fun buildMultiTransfer(
         fromAddress: String,
         recipients: List<RecipientOutput>,
         availableCells: List<Cell>,
         privateKey: ByteArray,
+        network: NetworkType
+    ): Transaction = buildMultiTransfer(
+        fromAddress = fromAddress,
+        recipients = recipients,
+        availableCells = availableCells,
+        signer = PrivateKeySigner(privateKey),
+        network = network,
+    )
+
+    fun buildMultiTransfer(
+        fromAddress: String,
+        recipients: List<RecipientOutput>,
+        availableCells: List<Cell>,
+        signer: Signer,
         network: NetworkType
     ): Transaction {
         logger.d(TAG, "🔨 Building transfer transaction")
@@ -476,18 +514,36 @@ class TransactionBuilder(
         }
 
         logger.d(TAG, "  Signing transaction with ${inputs.size} inputs, ${outputs.size} outputs (est. ${estimatedSize} bytes)")
-        return signTransaction(unsignedTx, privateKey, selectedCells.size)
+        return signTransaction(unsignedTx, signer, selectedCells.size)
     }
 
     // ========================================
     // DAO Transaction Builders
     // ========================================
 
+    /**
+     * Raw-key entry point, kept for the callers that still hold a
+     * `ByteArray`. The key is NOT wiped here: the caller owns it.
+     */
     fun buildDaoDeposit(
         amountShannons: Long,
         availableCells: List<Cell>,
         senderScript: Script,
         privateKey: ByteArray,
+        network: NetworkType
+    ): Transaction = buildDaoDeposit(
+        amountShannons = amountShannons,
+        availableCells = availableCells,
+        senderScript = senderScript,
+        signer = PrivateKeySigner(privateKey),
+        network = network,
+    )
+
+    fun buildDaoDeposit(
+        amountShannons: Long,
+        availableCells: List<Cell>,
+        senderScript: Script,
+        signer: Signer,
         network: NetworkType
     ): Transaction {
         require(amountShannons >= DaoConstants.MIN_DEPOSIT_SHANNONS) {
@@ -547,15 +603,37 @@ class TransactionBuilder(
             witnesses = inputs.map { "0x" }
         )
 
-        return signTransaction(unsignedTx, privateKey, inputs.size)
+        return signTransaction(unsignedTx, signer, inputs.size)
     }
 
+    /**
+     * Raw-key entry point, kept for the callers that still hold a
+     * `ByteArray`. The key is NOT wiped here: the caller owns it.
+     */
     fun buildDaoWithdraw(
         depositCell: Cell,
         depositBlockNumber: Long,
         depositBlockHash: String,
         senderScript: Script,
         privateKey: ByteArray,
+        network: NetworkType,
+        availableCells: List<Cell>
+    ): Transaction = buildDaoWithdraw(
+        depositCell = depositCell,
+        depositBlockNumber = depositBlockNumber,
+        depositBlockHash = depositBlockHash,
+        senderScript = senderScript,
+        signer = PrivateKeySigner(privateKey),
+        network = network,
+        availableCells = availableCells,
+    )
+
+    fun buildDaoWithdraw(
+        depositCell: Cell,
+        depositBlockNumber: Long,
+        depositBlockHash: String,
+        senderScript: Script,
+        signer: Signer,
         network: NetworkType,
         availableCells: List<Cell>
     ): Transaction {
@@ -635,9 +713,13 @@ class TransactionBuilder(
             witnesses = inputs.map { "0x" }
         )
 
-        return signTransaction(unsignedTx, privateKey, inputs.size)
+        return signTransaction(unsignedTx, signer, inputs.size)
     }
 
+    /**
+     * Raw-key entry point, kept for the callers that still hold a
+     * `ByteArray`. The key is NOT wiped here: the caller owns it.
+     */
     fun buildDaoUnlock(
         withdrawingCell: Cell,
         maxWithdraw: Long,
@@ -646,6 +728,26 @@ class TransactionBuilder(
         withdrawBlockHash: String,
         senderScript: Script,
         privateKey: ByteArray,
+        network: NetworkType
+    ): Transaction = buildDaoUnlock(
+        withdrawingCell = withdrawingCell,
+        maxWithdraw = maxWithdraw,
+        sinceValue = sinceValue,
+        depositBlockHash = depositBlockHash,
+        withdrawBlockHash = withdrawBlockHash,
+        senderScript = senderScript,
+        signer = PrivateKeySigner(privateKey),
+        network = network,
+    )
+
+    fun buildDaoUnlock(
+        withdrawingCell: Cell,
+        maxWithdraw: Long,
+        sinceValue: String,
+        depositBlockHash: String,
+        withdrawBlockHash: String,
+        senderScript: Script,
+        signer: Signer,
         network: NetworkType
     ): Transaction {
         // Same dynamic pricing as the withdraw above (#490). The unlock spends
@@ -689,7 +791,7 @@ class TransactionBuilder(
             witnesses = listOf("0x")
         )
 
-        return signTransaction(unsignedTx, privateKey, 1, witnessInputType = depositHeaderIndex)
+        return signTransaction(unsignedTx, signer, 1, witnessInputType = depositHeaderIndex)
     }
 
     /**
@@ -797,6 +899,18 @@ class TransactionBuilder(
         privateKey: ByteArray,
         inputCount: Int,
         witnessInputType: ByteArray? = null
+    ): Transaction = signTransaction(
+        tx = tx,
+        signer = PrivateKeySigner(privateKey),
+        inputCount = inputCount,
+        witnessInputType = witnessInputType,
+    )
+
+    internal fun signTransaction(
+        tx: Transaction,
+        signer: Signer,
+        inputCount: Int,
+        witnessInputType: ByteArray? = null
     ): Transaction {
         // 1. Serialize the raw transaction and compute its hash
         val rawTxBytes = serializeRawTransaction(tx)
@@ -820,7 +934,7 @@ class TransactionBuilder(
         val message = blake2b.doFinal()
 
         // 4. Sign the message
-        val signature = Secp256k1Signer.signRecoverable(message, privateKey)
+        val signature = signer.signRecoverable(message)
 
         // 5. Create signed witness
         val signedWitnessArgs = serializeWitnessArgs(signature, witnessInputType, null)

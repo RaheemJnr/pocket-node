@@ -270,13 +270,13 @@ class AddWalletViewModelImportSyncTest {
         walletPreferences.setSyncStrategy(com.rjnr.pocketnode.core.prefs.SyncStrategy.ACTIVE_ONLY)
         val nodeLifecycle = mockk<com.rjnr.pocketnode.data.gateway.NodeLifecycle>(relaxed = true)
         coEvery { nodeLifecycle.awaitNodeReady() } returns false
-        val syncPoller = mockk<com.rjnr.pocketnode.data.gateway.SyncPoller>(relaxed = true)
-        every { syncPoller.syncProgress } returns MutableStateFlow(SyncProgress())
+        val syncEngine = mockk<com.rjnr.pocketnode.data.sync.SyncEngine>(relaxed = true)
+        every { syncEngine.syncProgress } returns MutableStateFlow(SyncProgress())
         val realGateway = com.rjnr.pocketnode.data.gateway.testGatewayRepository(
             db = db,
             walletPreferences = walletPreferences,
             nodeLifecycle = nodeLifecycle,
-            syncPoller = syncPoller,
+            syncEngine = syncEngine,
         )
         // Sanity: the repository really returns a failure, not a throw.
         assertTrue(realGateway.resyncAccount(SyncMode.RECENT, null).isFailure)

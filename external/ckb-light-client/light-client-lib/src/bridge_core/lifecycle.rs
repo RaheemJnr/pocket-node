@@ -351,6 +351,17 @@ pub fn start() -> Result<(), BridgeError> {
         return Err(BridgeError::Stopped);
     }
 
+    // `STATE` defaults to `STATE_INIT` (0), the same value `init` leaves it at
+    // on success, so `is_state(STATE_INIT)` alone cannot tell "never
+    // initialized" apart from "initialized and not yet started". Check the
+    // OnceLock `init` publishes last instead: if it is still empty, `init`
+    // never ran (or never finished), so refuse without touching `STATE` or
+    // notifying the status listener.
+    if STORAGE_WITH_DATA.get().is_none() {
+        error!("Cannot start: init was never called");
+        return Err(BridgeError::NotInitialized);
+    }
+
     // Check if initialized
     if !is_state(STATE_INIT) {
         error!("Not in INIT state! Current state: {}", get_state());
@@ -687,6 +698,45 @@ mod tests {
             began.elapsed() < Duration::from_secs(1),
             "stop blocked for {:?}",
             began.elapsed()
+        );
+    }
+
+    /// `start` before `init` must refuse instead of flipping `STATE` to
+    /// RUNNING: `STATE`'s default value happens to equal `STATE_INIT`, the
+    /// same value `init` leaves it at on success, so a state-only check
+    /// cannot tell "never initialized" apart from "initialized and not yet
+    /// started". The guard checks `STORAGE_WITH_DATA` instead, which
+    /// only `init` ever publishes.
+    ///
+    /// Like the `stop` test above, this depends on nothing else in the
+    /// binary having called `init` yet. The only other test that does is the
+    /// `#[ignore]`d end-to-end test below, which is excluded from a normal
+    /// `cargo test` run, so this holds under `cargo test -p
+    /// ckb-light-client-lib --lib`. If `STORAGE_WITH_DATA` is already
+    /// published (for example because someone ran the ignored test in the
+    /// same process), skip rather than assert on a state this test does not
+    /// control.
+    #[test]
+    fn start_without_init_reports_not_initialized() {
+        if STORAGE_WITH_DATA.get().is_some() {
+            eprintln!(
+                "skipping start_without_init_reports_not_initialized: \
+                 STORAGE_WITH_DATA already published by another test"
+            );
+            return;
+        }
+
+        let state_before = get_state();
+        let result = start();
+
+        assert!(
+            matches!(result, Err(BridgeError::NotInitialized)),
+            "expected NotInitialized, got {result:?}"
+        );
+        assert_eq!(
+            get_state(),
+            state_before,
+            "start must not change STATE when init never ran"
         );
     }
 

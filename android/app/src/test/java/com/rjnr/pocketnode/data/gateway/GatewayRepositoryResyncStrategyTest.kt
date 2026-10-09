@@ -13,6 +13,10 @@ import com.rjnr.pocketnode.data.gateway.models.JniScriptStatus
 import com.rjnr.pocketnode.data.gateway.models.NetworkType
 import com.rjnr.pocketnode.data.gateway.models.Script
 import com.rjnr.pocketnode.data.gateway.models.SyncMode
+import com.rjnr.pocketnode.data.storage.RoomSubAccountCandidateStore
+import com.rjnr.pocketnode.data.storage.RoomSyncProgressStore
+import com.rjnr.pocketnode.data.storage.RoomTransactionStore
+import com.rjnr.pocketnode.data.storage.RoomWalletRegistry
 import com.rjnr.pocketnode.data.wallet.AddressUtils
 import com.rjnr.pocketnode.data.wallet.KeyManager
 import com.rjnr.pocketnode.data.wallet.MnemonicManager
@@ -20,6 +24,7 @@ import com.rjnr.pocketnode.data.wallet.WalletPreferences
 import io.mockk.coEvery
 import io.mockk.every
 import io.mockk.mockk
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
 import kotlinx.serialization.json.Json
@@ -40,8 +45,13 @@ import org.robolectric.annotation.Config
  * every other wallet stopped syncing on each sync-mode change.
  *
  * Real [GatewayRepository] + real [SyncCoordinator] (Room in-memory,
- * real [WalletPreferences]); only the JNI surface ([LightClientBridge]) and
- * the unrelated collaborators are faked.
+ * real [WalletPreferences]); only the light-client surface ([LightClientApi])
+ * and the unrelated collaborators are faked.
+ *
+ * ios/m3 port: the coordinator lives in the shared core behind
+ * [LightClientApi], whose calls are blocking, so the fake runs its suspend
+ * hooks under runBlocking. The coordinator runs on Dispatchers.IO, as
+ * SharedModule wires it on Android.
  */
 @RunWith(RobolectricTestRunner::class)
 @Config(sdk = [28], manifest = Config.NONE)
@@ -57,26 +67,28 @@ class GatewayRepositoryResyncStrategyTest {
     private val network = NetworkType.TESTNET
     private val tip = 20_000_000L
 
-    private class FakeBridge(private val tipJson: String) : LightClientBridge {
-        val setScriptsCalls = mutableListOf<Pair<String, Int>>()
+    private class FakeBridge(
+        private val tipJson: String,
+    ) : LightClientApi by mockk<LightClientApi>(relaxed = true) {
+        val setScriptsCalls = java.util.Collections.synchronizedList(mutableListOf<Pair<String, Int>>())
         /** Runs while the coordinator waits for the tip, i.e. mid-registration. */
-        var onTipRead: suspend () -> Unit = {}
-        var setScriptsReturn = true
+        @Volatile var onTipRead: suspend () -> Unit = {}
+        @Volatile var setScriptsReturn = true
         /** Runs inside setScripts before the call is recorded (i.e. takes effect). */
-        var onSetScripts: suspend () -> Unit = {}
+        @Volatile var onSetScripts: suspend () -> Unit = {}
 
-        override suspend fun setScripts(scriptsJson: String, command: Int): Boolean {
-            onSetScripts()
+        override fun setScripts(scriptsJson: String, command: Int): Boolean {
+            runBlocking { onSetScripts() }
             setScriptsCalls += scriptsJson to command
             return setScriptsReturn
         }
 
-        override suspend fun getTipHeaderRaw(): String {
-            onTipRead()
+        override fun getTipHeader(): String {
+            runBlocking { onTipRead() }
             return tipJson
         }
 
-        override suspend fun getScriptsRaw(): String? = null
+        override fun getScripts(): String? = null
     }
 
     /** Lets a test observe the coordinator reaching "Registering N scripts" (just before the lock). */
@@ -114,17 +126,7 @@ class GatewayRepositoryResyncStrategyTest {
         walletPreferences.setActiveWalletId(ACTIVE)
         bridge = FakeBridge(tipJson(tip))
 
-        val coordinator = SyncCoordinator(
-            walletDao = db.walletDao(),
-            syncProgressDao = db.syncProgressDao(),
-            syncPreferences = walletPreferences,
-            keyManager = KeyManager(ctx, MnemonicManager(), NoopLogger),
-            json = json,
-            lightClient = bridge,
-            subAccountCandidateDao = db.subAccountCandidateDao(),
-            transactionDao = db.transactionDao(),
-            logger = coordinatorLogger,
-        )
+        val coordinator = newCoordinator(coordinatorLogger)
 
         nodeLifecycle = mockk(relaxed = true)
         every { nodeLifecycle.currentNetwork } returns network
@@ -166,6 +168,21 @@ class GatewayRepositoryResyncStrategyTest {
         walletPreferences.setSyncMode(SyncMode.RECENT, walletId = ACTIVE)
         walletPreferences.setSyncMode(SyncMode.RECENT, walletId = OTHER)
     }
+
+    private fun newCoordinator(logger: com.rjnr.pocketnode.core.log.Logger) = SyncCoordinator(
+        RoomWalletRegistry(db.walletDao()),
+        RoomSyncProgressStore(db.syncProgressDao()),
+        RoomSubAccountCandidateStore(db.subAccountCandidateDao()),
+        RoomTransactionStore(
+            db.transactionDao(),
+            CacheManager(db.transactionDao(), db.balanceCacheDao(), NoopLogger),
+        ),
+        bridge,
+        walletPreferences,
+        json,
+        logger,
+        queryContext = Dispatchers.IO,
+    )
 
     @After
     fun tearDown() {
@@ -458,17 +475,7 @@ class GatewayRepositoryResyncStrategyTest {
         walletPreferences.setSyncStrategy(SyncStrategy.BALANCED)
         seedProgress(OTHER, 1_000_000L) // B lags A (19.5M) far beyond the threshold
         var live = ACTIVE
-        val coordinator = SyncCoordinator(
-            walletDao = db.walletDao(),
-            syncProgressDao = db.syncProgressDao(),
-            syncPreferences = walletPreferences,
-            keyManager = KeyManager(ApplicationProvider.getApplicationContext(), MnemonicManager(), NoopLogger),
-            json = json,
-            lightClient = bridge,
-            subAccountCandidateDao = db.subAccountCandidateDao(),
-            transactionDao = db.transactionDao(),
-            logger = NoopLogger,
-        )
+        val coordinator = newCoordinator(NoopLogger)
         // The switch lands while the re-registration waits for the tip.
         bridge.onTipRead = { bridge.onTipRead = {}; live = OTHER }
 
@@ -497,17 +504,7 @@ class GatewayRepositoryResyncStrategyTest {
         walletPreferences.setSyncStrategy(SyncStrategy.BALANCED)
         seedProgress(OTHER, 1_000_000L) // B lags A (19.5M) far beyond the threshold
         var live = ACTIVE
-        val coordinator = SyncCoordinator(
-            walletDao = db.walletDao(),
-            syncProgressDao = db.syncProgressDao(),
-            syncPreferences = walletPreferences,
-            keyManager = KeyManager(ApplicationProvider.getApplicationContext(), MnemonicManager(), NoopLogger),
-            json = json,
-            lightClient = bridge,
-            subAccountCandidateDao = db.subAccountCandidateDao(),
-            transactionDao = db.transactionDao(),
-            logger = NoopLogger,
-        )
+        val coordinator = newCoordinator(NoopLogger)
 
         coordinator.maybeReregisterBalanced(
             SyncCoordinator.SyncContext(
@@ -542,17 +539,7 @@ class GatewayRepositoryResyncStrategyTest {
     fun `BALANCED keeps the live active wallet even when the context snapshot names another`() = runBlocking {
         walletPreferences.setSyncStrategy(SyncStrategy.BALANCED)
         seedProgress(OTHER, 1_000_000L) // lags ACTIVE (19.5M) by far more than the threshold
-        val coordinator = SyncCoordinator(
-            walletDao = db.walletDao(),
-            syncProgressDao = db.syncProgressDao(),
-            syncPreferences = walletPreferences,
-            keyManager = KeyManager(ApplicationProvider.getApplicationContext(), MnemonicManager(), NoopLogger),
-            json = json,
-            lightClient = bridge,
-            subAccountCandidateDao = db.subAccountCandidateDao(),
-            transactionDao = db.transactionDao(),
-            logger = NoopLogger,
-        )
+        val coordinator = newCoordinator(NoopLogger)
 
         coordinator.registerAllWalletScripts(
             SyncCoordinator.SyncContext(

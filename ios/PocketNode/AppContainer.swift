@@ -32,6 +32,32 @@ final class AppContainer {
     /// Session state and the lock gate. `RootView` reads it.
     let auth: AuthService
 
+    /// The shared `LightClientApi` seam, bound to the UniFFI bridge.
+    /// ``SyncService`` takes it as a constructor parameter and hands it to the
+    /// shared sync engine, and ``SendService`` reaches it through the sync
+    /// stack, the way `di/SharedModule.kt` hands them the Android binding.
+    ///
+    /// This container is `@MainActor`, so the property is main-actor isolated
+    /// even though the object it holds is not. Every call on it blocks, some
+    /// for seconds, and none of them may run on the main actor: read the
+    /// property once on the main actor and hand the reference to whatever
+    /// background context will use it. That is safe because
+    /// `UniffiLightClientApi` is `@unchecked Sendable` - it owns nothing but a
+    /// logger, and the Rust side is internally synchronised.
+    let lightClientApi: UniffiLightClientApi
+
+    /// Chain sync for the one wallet: the shared `SingleWalletSyncService`, the
+    /// Room KMP database behind its checkpoints, and the state Home draws.
+    /// `RootView` activates it when it lands in the wallet phase and
+    /// ``LaunchGate/maySync(pendingRestore:)`` allows it, which can be behind
+    /// the lock screen: sync reads no key material.
+    let sync: SyncService
+
+    /// The send path: the shared `SendPipeline`, the Face ID step-up in front
+    /// of it and the status poll behind it. Built last, because it needs
+    /// the sync stack, the key store and the auth gate.
+    let send: SendService
+
     /// The launch decisions about the wallet and its PIN (see ``LaunchGate``).
     let launchGate: LaunchGate
 
@@ -39,8 +65,8 @@ final class AppContainer {
     var theme: Theme = .light
 
     /// Bumped whenever a decrypt in the wallet phase proves the keys unusable
-    /// (today: the recovery phrase reveal). `RootView` reroutes on it, which
-    /// lands on the restore for invalidated keys.
+    /// (today: the recovery phrase reveal and a send's key read). `RootView`
+    /// reroutes on it, which lands on the restore for invalidated keys.
     private(set) var keysUnusableSignal = 0
 
     init() {
@@ -54,6 +80,12 @@ final class AppContainer {
         // it on every write from now on).
         walletStore.excludeFromBackup()
         self.lightClient = LightClientService(network: preferences.getSelectedNetwork())
+        self.lightClientApi = UniffiLightClientApi()
+        self.sync = SyncService(
+            lightClient: self.lightClient,
+            api: self.lightClientApi,
+            preferences: self.preferences
+        )
 
         let keychain = KeychainStore()
         let wrapper = SecureEnclaveKeyWrapper()
@@ -95,6 +127,17 @@ final class AppContainer {
         self.pinService = launchGate.pinService
         self.auth = launchGate.auth
         self.walletCreator = WalletCreator(keyStore: self.walletKeyStore, walletStore: self.walletStore)
+        self.send = SendService(
+            sync: self.sync,
+            walletStore: self.walletStore,
+            walletKeyStore: self.walletKeyStore,
+            auth: self.auth,
+            preferences: self.preferences
+        )
+        // A send whose key read proves the keys unusable reroutes the same way
+        // a phrase reveal does (see `makeBackupViewModel`). Set here, once
+        // every stored property is, because the closure captures `self`.
+        self.send.onKeysUnusable = { [weak self] in self?.keysUnusableSignal += 1 }
 
         Self.seedWalletForTestingIfRequested(walletStore: self.walletStore)
     }
@@ -134,8 +177,89 @@ final class AppContainer {
 
     /// Backs the wallet shell's first screen.
     func makeHomeViewModel() -> HomeViewModel {
-        HomeViewModel(walletStore: walletStore, preferences: preferences)
+        HomeViewModel(walletStore: walletStore, preferences: preferences, sync: sync)
     }
+
+    /// Backs the Send screen.
+    func makeSendViewModel() -> SendViewModel {
+        SendViewModel(service: send)
+    }
+
+    /// The QR scanner, wherever it is presented from. `onScanned` is what
+    /// decides where the address goes; the scanner itself knows nothing about
+    /// the screen that raised it.
+    func makeQrScannerViewModel(onScanned: @escaping (String) -> Void) -> QrScannerViewModel {
+        QrScannerViewModel(
+            scanner: AVFoundationQrScanner(),
+            preferences: preferences,
+            onScanned: onScanned
+        )
+    }
+
+    /// Backs the activity list.
+    ///
+    /// Nil with no wallet stored, which the wallet shell cannot be reached
+    /// without. The feed comes off `SyncService` rather than being built here:
+    /// it shares that object's database, coordinator and sync engine, and a
+    /// second one would open a second connection to the same file.
+    ///
+    /// `onRetry` re-broadcasts the failed transaction's ORIGINAL signed bytes
+    /// through `SendPipeline.retryBroadcast`. It deliberately does not
+    /// prefill a fresh send: a FAILED state is a heuristic, the original could
+    /// still be alive in a remote mempool, and a retry that selected different
+    /// inputs could pay the recipient twice.
+    func makeActivityViewModel() -> ActivityViewModel? {
+        guard let record = walletStore.load() else { return nil }
+        let network = preferences.getSelectedNetwork()
+        let address = network == .mainnet ? record.mainnetAddress : record.testnetAddress
+        let service = ActivityService(
+            feed: sync.activity,
+            walletId: record.id,
+            script: AddressUtils.shared.parseAddress(address: address),
+            network: network
+        )
+        return ActivityViewModel(source: service, onRetry: { [send] hash in
+            // The outcome goes back to the list, which raises an alert for a
+            // retry that did not go out. A dismissed auth prompt is an answer,
+            // not a failure, and stays silent as it does on the Send screen.
+            switch await send.retry(txHash: hash) {
+            case .success:
+                return nil
+            case .failure(let error):
+                return error.isCancellation ? nil : error.message
+            }
+        })
+    }
+
+    /// Hands the sync layer this device's wallet, if there is one.
+    ///
+    /// Called by `RootView` whenever it lands in, or stays in, the wallet
+    /// phase (launch, onboarding finished, every reroute) and
+    /// ``LaunchGate/maySync(pendingRestore:)`` says the wallet is really
+    /// there. `SyncService.activate` ignores a repeat for the same wallet, so
+    /// every one of those calls can fire freely. A record that cannot be read
+    /// yet returns early here, and the next reroute asks again.
+    func activateSync() {
+        guard let record = walletStore.load() else { return }
+        sync.activate(wallet: record)
+        // Idempotent, and the second of the two call sites the watchdog's own
+        // doc names. The scene-phase handler is the first; this one covers the
+        // wallet arriving after the phase did, which is what onboarding does.
+        sync.startWatchdog()
+    }
+
+    /// True only when the wallet on this device is the throwaway one
+    /// ``seedWalletForTestingIfRequested(walletStore:)`` writes.
+    ///
+    /// The Send screen's debug drive hooks require it. `POCKETNODE_SKIP_ONBOARDING`
+    /// on its own is not enough: the seed is a no-op when a wallet already
+    /// exists, so the flag says nothing about whose wallet is open.
+    var isSeededTestWallet: Bool {
+        walletStore.load()?.id == Self.seededTestWalletId
+    }
+
+    /// The id ``seedWalletForTestingIfRequested(walletStore:)`` writes.
+    static let seededTestWalletId = "ui-test-wallet"
 
     /// `POCKETNODE_SKIP_ONBOARDING` (below) seeds a metadata-only wallet with
     /// no PIN and no keys for the UI tests that drive the wallet shell. Those
@@ -167,7 +291,7 @@ final class AppContainer {
               !walletStore.hasWallet else { return }
         try? walletStore.save(
             WalletRecord(
-                id: "ui-test-wallet",
+                id: Self.seededTestWalletId,
                 name: "UI Test Wallet",
                 type: WalletCreator.typeMnemonic,
                 derivationPath: WalletCreator.derivationPath,

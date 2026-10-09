@@ -11,7 +11,6 @@ import com.rjnr.pocketnode.data.database.entity.TransactionEntity
 import com.rjnr.pocketnode.data.database.entity.WalletEntity
 import com.rjnr.pocketnode.data.gateway.models.CellInput
 import com.rjnr.pocketnode.data.gateway.models.CellOutput
-import com.rjnr.pocketnode.data.gateway.models.JniHeaderView
 import com.rjnr.pocketnode.data.gateway.models.JniPagination
 import com.rjnr.pocketnode.data.gateway.models.JniTransactionView
 import com.rjnr.pocketnode.data.gateway.models.JniTxWithCell
@@ -19,8 +18,16 @@ import com.rjnr.pocketnode.data.gateway.models.NetworkType
 import com.rjnr.pocketnode.data.gateway.models.OutPoint
 import com.rjnr.pocketnode.data.gateway.models.Script
 import com.rjnr.pocketnode.data.gateway.models.Transaction
+import com.rjnr.pocketnode.data.send.SendPipeline
+import com.rjnr.pocketnode.data.storage.RoomBalanceCache
+import com.rjnr.pocketnode.data.storage.RoomHeaderCache
+import com.rjnr.pocketnode.data.storage.RoomPendingBroadcastStore
+import com.rjnr.pocketnode.data.storage.RoomSubAccountCandidateStore
+import com.rjnr.pocketnode.data.storage.RoomTransactionStore
+import com.rjnr.pocketnode.data.storage.RoomWalletRegistry
 import com.rjnr.pocketnode.data.transaction.TransactionBuilder
 import com.rjnr.pocketnode.data.validation.NetworkValidator
+import com.rjnr.pocketnode.data.wallet.AddressUtils
 import com.rjnr.pocketnode.data.wallet.KeyManager
 import com.rjnr.pocketnode.data.wallet.WalletInfo
 import com.rjnr.pocketnode.data.wallet.WalletPreferences
@@ -40,40 +47,22 @@ import org.junit.Before
 import org.junit.Test
 import org.junit.runner.RunWith
 import org.robolectric.RobolectricTestRunner
-import org.robolectric.annotation.Config
 
 /**
  * #538 review, "wiring untested": the pure functions in SelfTransferSignature.kt
  * (isSelfTransferSignature, sendTransactionPendingAmount, retryPendingOverride,
  * sweepRowDisplay, activeSelfTransferCandidateArgs) are unit-tested directly in
- * SelfTransferSignatureTest.kt, but nothing proved the ACTUAL call sites in
- * GatewayRepository.kt invoke them correctly. This suite calls the real
- * GatewayRepository methods (sendTransaction, retryBroadcast,
- * selfWalletLockArgsFor, getTransactions) against a real in-memory AppDatabase
- * and real WalletPreferences/CacheManager/TransactionBuilder, with only the
- * JNI-touching surface faked: BroadcastClient (a fake, same shape as
- * GatewayRepositorySendTransactionTest) for sendTransaction/retryBroadcast, and
- * a Robolectric shadow of LightClientNative for getTransactions's own direct
- * native calls (MockK cannot stub `external fun`, which is why
- * sendTransaction/retryBroadcast route their tip read through the injectable
- * LightClientReadOnly instead and getTransactions does not). This reuses
- * #529's GatewayRepositoryDaoUnlockTest's DaoUnlockShadowLightClientNative
- * (extended with nativeGetTransactions) rather than declaring a second
- * `@Implements(LightClientNative::class)` shadow: LightClientNative is a
- * Kotlin `object`, so Robolectric binds its shadow once per sandbox, and two
- * test classes sharing a sandbox (same sdk, same instrumentedPackages) with
- * two different shadow classes get a ClassCastException on whichever runs
- * second, not a merge of both.
+ * SelfTransferSignatureTest.kt; this suite proves the call sites use them.
  *
- * Every test here was verified to fail when the production call site it pins
- * is reverted, then to pass again once restored; see this file's sibling
- * report for the exact revert used and the failure each one produced.
+ * ios/m3 port of public main's suite. The call sites live in the shared core
+ * here (LedgerReader for the confirmed row, SendPipeline for the pending row
+ * and the retry), so this drives a real [GatewayRepository] over a real
+ * LedgerReader and SendPipeline, a real in-memory AppDatabase through the Room
+ * store bindings, real WalletPreferences and a real TransactionBuilder. Only
+ * the light client ([LightClientApi]) is faked, which also makes public
+ * main's Robolectric shadow of LightClientNative unnecessary for this suite.
  */
 @RunWith(RobolectricTestRunner::class)
-@Config(
-    shadows = [DaoUnlockShadowLightClientNative::class],
-    instrumentedPackages = ["com.nervosnetwork.ckblightclient"],
-)
 class GatewayRepositorySelfTransferWiringTest {
 
     private lateinit var db: AppDatabase
@@ -88,6 +77,9 @@ class GatewayRepositorySelfTransferWiringTest {
     private val script = Script(Script.SECP256K1_CODE_HASH, "type", "0x" + "11".repeat(20))
     private val ckb = 100_000_000L
 
+    /** The raw transactions page the fake light client answers with, or null. */
+    private var transactionsPage: String? = null
+
     @Before
     fun setup() {
         val context = ApplicationProvider.getApplicationContext<Context>()
@@ -96,8 +88,6 @@ class GatewayRepositorySelfTransferWiringTest {
             .build()
         cacheManager = CacheManager(db.transactionDao(), db.balanceCacheDao(), NoopLogger)
         transactionBuilder = TransactionBuilder(NetworkValidator())
-
-        DaoUnlockShadowLightClientNative.transactionsPage = null
 
         walletPreferences = WalletPreferences(context, NoopLogger)
         walletPreferences.setActiveWalletId(walletId)
@@ -109,45 +99,66 @@ class GatewayRepositorySelfTransferWiringTest {
         val keyManager = mockk<KeyManager>(relaxed = true)
         coEvery { keyManager.hasWallet() } returns true
         every { keyManager.deriveWalletInfoFromEntity(any()) } returns
-            WalletInfo("0xpub", script, "ckt1active", "ckb1active")
-        // Test 3 (selfWalletLockArgsFor) needs a real, different Script back
-        // for the "other wallet" address so the exclusion is genuinely
-        // exercised, not just whatever a relaxed mock's default happens to be.
-        every { keyManager.deriveLockScriptFromAddress("ckt1other") } returns
-            Script(Script.SECP256K1_CODE_HASH, "type", otherWalletArgs)
+            WalletInfo("0xpub", script, activeTestnetAddress, "ckb1active")
 
         // The fake recomputes the hash from whatever tx it is handed (via the
         // same real TransactionBuilder), so it always echoes back the CORRECT
         // hash regardless of which test's transaction is broadcast, avoiding
         // sendTransaction's hash-mismatch re-key path.
-        val fakeBroadcast = BroadcastClient { rawJson ->
-            val tx = json.decodeFromString<Transaction>(rawJson)
+        val api = mockk<LightClientApi>(relaxed = true)
+        every { api.getTipHeader() } returns null
+        every { api.getTransaction(any()) } returns null
+        every { api.sendTransaction(any()) } answers {
+            val tx = json.decodeFromString<Transaction>(firstArg())
             "\"${transactionBuilder.computeTxHash(tx)}\""
         }
+        every { api.getTransactions(any(), any(), any(), any()) } answers { transactionsPage }
+
+        val transactionStore = RoomTransactionStore(db.transactionDao(), cacheManager)
+        val ledgerReader = LedgerReader(
+            api,
+            RoomBalanceCache(cacheManager),
+            transactionStore,
+            RoomHeaderCache(db.headerCacheDao()),
+            RoomWalletRegistry(db.walletDao()),
+            RoomSubAccountCandidateStore(db.subAccountCandidateDao()),
+            walletPreferences,
+            walletPreferences,
+            json,
+            NoopLogger,
+        )
+        val sendPipeline = SendPipeline(
+            api,
+            transactionBuilder,
+            ledgerReader,
+            RoomPendingBroadcastStore(db.pendingBroadcastDao()),
+            transactionStore,
+            mockk(relaxed = true),
+            mockk(relaxed = true),
+            walletPreferences,
+            json,
+            NoopLogger,
+        )
 
         repository = GatewayRepository(
             keyManager = keyManager,
             walletPreferences = walletPreferences,
             json = json,
-            transactionBuilder = transactionBuilder,
             cacheManager = cacheManager,
-            daoSyncManager = mockk(relaxed = true),
             walletMigrationHelper = mockk(relaxed = true),
             walletDao = db.walletDao(),
             appDatabase = db,
-            headerCacheDao = db.headerCacheDao(),
             syncProgressDao = db.syncProgressDao(),
-            pendingBroadcastDao = db.pendingBroadcastDao(),
-            broadcastClient = fakeBroadcast,
+            sendPipeline = sendPipeline,
             syncCoordinator = mockk(relaxed = true),
-            daoHeaderResolver = mockk(relaxed = true),
-            daoDepositReader = mockk(relaxed = true),
-            lightClient = LightClientReadOnly(json, NoopLogger),
+            daoGateway = mockk(relaxed = true),
+            gapLimitGateway = mockk(relaxed = true),
+            lightClient = LightClientReadOnly(api, json, NoopLogger),
+            ledgerReader = ledgerReader,
             subAccountReconciler = mockk(relaxed = true),
-            subAccountDiscovery = mockk(relaxed = true),
             syncServiceCommands = mockk(relaxed = true),
             nodeLifecycle = nodeLifecycle,
-            syncPoller = mockk(relaxed = true),
+            syncEngine = mockk(relaxed = true),
             startupReconciler = mockk(relaxed = true),
             logger = NoopLogger,
         )
@@ -157,7 +168,7 @@ class GatewayRepositorySelfTransferWiringTest {
                 WalletEntity(
                     walletId = walletId, name = walletId, type = KeyManager.WALLET_TYPE_MNEMONIC,
                     derivationPath = "m/44'/309'/0'/0/0", parentWalletId = null, accountIndex = 0,
-                    mainnetAddress = "ckb1active", testnetAddress = "ckt1active",
+                    mainnetAddress = "ckb1active", testnetAddress = activeTestnetAddress,
                     isActive = true, createdAt = 0L, lastActiveAt = 0L,
                 )
             )
@@ -165,9 +176,15 @@ class GatewayRepositorySelfTransferWiringTest {
         }
     }
 
+    private val activeTestnetAddress: String get() = AddressUtils.encode(script, NetworkType.TESTNET)
+
+    /** Wallet 2's real testnet address, so the shared derivation decodes it to [otherWalletArgs]. */
+    private val otherTestnetAddress: String
+        get() = AddressUtils.encode(Script(Script.SECP256K1_CODE_HASH, "type", otherWalletArgs), NetworkType.TESTNET)
+
     @After
     fun teardown() {
-        DaoUnlockShadowLightClientNative.transactionsPage = null
+        transactionsPage = null
         db.close()
     }
 
@@ -189,7 +206,7 @@ class GatewayRepositorySelfTransferWiringTest {
     // sweep transaction (its candidate-script cell selection is JNI, out of
     // scope for this seam).
     //
-    // Probe performed: in GatewayRepository.sendTransaction, changed
+    // Probe performed: in SendPipeline.sendTransaction (public main: GatewayRepository), changed
     //   val balanceChangeHex = "0x${sendTransactionPendingAmount(pendingDirection, pendingFeeShannons, recipientAmount).toString(16)}"
     // to
     //   val balanceChangeHex = "0x${recipientAmount.toString(16)}"
@@ -219,7 +236,7 @@ class GatewayRepositorySelfTransferWiringTest {
     // its cached direction/fee before deleting the row and thread them back
     // through to sendTransaction.
     //
-    // Probe performed: in GatewayRepository.retryBroadcast, changed
+    // Probe performed: in SendPipeline.retryBroadcast (public main: GatewayRepository), changed
     //   val override = retryPendingOverride(cached?.direction, cached?.feeShannons)
     //   if (override != null) { sendTransaction(tx, pendingDirection = override.first, pendingFeeShannons = override.second).getOrThrow() }
     //   else { sendTransaction(tx).getOrThrow() }
@@ -273,7 +290,7 @@ class GatewayRepositorySelfTransferWiringTest {
     // models that directly, so removing the filter alone (leaving the
     // subtraction) would NOT catch it, only removing the subtraction does.
     //
-    // Probe (a) performed: in GatewayRepository.selfWalletLockArgsFor,
+    // Probe (a) performed: in LedgerReader.selfWalletLockArgsFor (public main: GatewayRepository),
     // changed `selfArgs - otherWalletLockArgs` to `selfArgs` (dropping the
     // subtraction). Result: this test failed with
     //   java.lang.AssertionError: RESTORED-but-stale-state candidate must still be excluded (defence in depth)
@@ -299,7 +316,7 @@ class GatewayRepositorySelfTransferWiringTest {
             WalletEntity(
                 walletId = "wallet-2", name = "wallet-2", type = KeyManager.WALLET_TYPE_MNEMONIC,
                 derivationPath = "m/44'/309'/0'/0/0", parentWalletId = null, accountIndex = 0,
-                mainnetAddress = "ckb1other", testnetAddress = "ckt1other",
+                mainnetAddress = "ckb1other", testnetAddress = otherTestnetAddress,
                 isActive = false, createdAt = 0L, lastActiveAt = 0L,
             )
         )
@@ -342,7 +359,7 @@ class GatewayRepositorySelfTransferWiringTest {
     // read as "Received") unless the WalletPreferences sweep marker (and the
     // fresh isSelfTransferSignature re-check) reclassify it.
     //
-    // Probe performed: in GatewayRepository.getTransactions, forced
+    // Probe performed: in LedgerReader.getTransactions (public main: GatewayRepository), forced
     //   val sweepDisplay = sweepRowDisplay(...)
     // to
     //   val sweepDisplay: PendingTransferDisplay? = null
@@ -367,7 +384,7 @@ class GatewayRepositorySelfTransferWiringTest {
             outputsData = listOf("0x"),
             witnesses = emptyList(),
         )
-        DaoUnlockShadowLightClientNative.transactionsPage = json.encodeToString(
+        transactionsPage = json.encodeToString(
             JniPagination(
                 objects = listOf(
                     JniTxWithCell(

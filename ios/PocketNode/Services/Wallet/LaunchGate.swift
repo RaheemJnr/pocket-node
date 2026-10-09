@@ -62,7 +62,8 @@ final class LaunchGate {
 
     /// Whether onboarding has already been completed: metadata or a key
     /// envelope. A device with only one of them is mid-failure rather than
-    /// fresh (see `AppContainer.hasWallet`).
+    /// fresh: ``launchDestination`` resumes its onboarding rather than
+    /// starting over at Welcome.
     var hasWallet: Bool {
         get async {
             if walletStore.hasWallet { return true }
@@ -173,6 +174,57 @@ final class LaunchGate {
         )
         let destination = await launchDestination
         return destination == .wallet ? nil : destination
+    }
+
+    // MARK: - Starting sync
+
+    /// Whether the sync layer may be pointed at the stored wallet now.
+    ///
+    /// Only a wallet that is really there: its record can be read, its keys
+    /// read as ``KeyHealth/usable``, its PIN is set and no recovery is
+    /// waiting for it. Sync reads no key material, so this is not a security
+    /// gate. It keeps the node from registering a wallet whose onboarding was
+    /// cut short, whose keys did not come across with a device backup, or
+    /// whose keys were invalidated or suspended, on the way to the screen
+    /// that deals with it.
+    ///
+    /// - Parameters:
+    ///   - record: the stored wallet, or nil when there is none or it cannot
+    ///     be read yet (data protection before the first device unlock).
+    ///   - health: the stored keys' ``KeyHealth``. Only ``KeyHealth/usable``
+    ///     syncs; ``KeyHealth/unknown`` waits for a later call that can
+    ///     answer, and ``KeyHealth/suspended`` or ``KeyHealth/invalidated``
+    ///     wait for the recovery `RootView` routes to.
+    ///   - needsSecuritySetup: ``needsSecuritySetup``.
+    ///   - pendingRestore: whether `RootView` is holding a recovery.
+    static func maySync(
+        record: WalletRecord?,
+        health: KeyHealth,
+        needsSecuritySetup: Bool,
+        pendingRestore: Bool
+    ) -> Bool {
+        record != nil && health == .usable && !needsSecuritySetup && !pendingRestore
+    }
+
+    /// Carries out ``maySync(record:health:needsSecuritySetup:pendingRestore:)``
+    /// over the stores. `RootView` asks it whenever it lands in, or stays in,
+    /// the wallet phase: at launch, after onboarding, after a recovery, and on
+    /// every reroute (session change, return to the front), so a wallet that
+    /// could not be read at first starts syncing once it can.
+    ///
+    /// The `POCKETNODE_SKIP_ONBOARDING` wallet has no keys and no PIN on
+    /// purpose, and the wallet shell UI tests need it synced, so with that
+    /// hook a readable record is enough.
+    func maySync(pendingRestore: Bool) async -> Bool {
+        let record = walletStore.load()
+        if skipsOnboarding { return record != nil }
+        guard record != nil else { return false }
+        return Self.maySync(
+            record: record,
+            health: await walletKeyStore.keyHealth,
+            needsSecuritySetup: needsSecuritySetup,
+            pendingRestore: pendingRestore
+        )
     }
 
     // MARK: - Recovering keys and metadata

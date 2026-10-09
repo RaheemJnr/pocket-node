@@ -35,8 +35,15 @@ object Bip39 {
     /** Every BIP-39 word encodes 11 bits, hence a 2048-word list. */
     private const val BITS_PER_WORD = 11
 
-    /** The official English wordlist, in index order. */
-    val WORDLIST: List<String> = BIP39_ENGLISH_WORDLIST.asList()
+    /**
+     * The official English wordlist, in index order.
+     *
+     * A copy, not `asList()`: that returns a view onto the backing array, and a
+     * caller who cast it back to `MutableList` and wrote through it would
+     * reorder the list whose ORDER IS THE CHECKSUM, changing every mnemonic the
+     * app derives from that point on.
+     */
+    val WORDLIST: List<String> = BIP39_ENGLISH_WORDLIST.toList()
 
     private val wordIndex: Map<String, Int> =
         BIP39_ENGLISH_WORDLIST.withIndex().associate { (index, word) -> word to index }

@@ -1,0 +1,316 @@
+{
+  "formatVersion": 1,
+  "database": {
+    "version": 2,
+    "identityHash": "2e6dd568a3a3c20f6e31c521885b8efe",
+    "entities": [
+      {
+        "tableName": "sync_progress",
+        "createSql": "CREATE TABLE IF NOT EXISTS `${TABLE_NAME}` (`walletId` TEXT NOT NULL, `network` TEXT NOT NULL, `lightStartBlockNumber` INTEGER NOT NULL, `localSavedBlockNumber` INTEGER NOT NULL, `updatedAt` INTEGER NOT NULL, PRIMARY KEY(`walletId`, `network`))",
+        "fields": [
+          {
+            "fieldPath": "walletId",
+            "columnName": "walletId",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "network",
+            "columnName": "network",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "lightStartBlockNumber",
+            "columnName": "lightStartBlockNumber",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "localSavedBlockNumber",
+            "columnName": "localSavedBlockNumber",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "updatedAt",
+            "columnName": "updatedAt",
+            "affinity": "INTEGER",
+            "notNull": true
+          }
+        ],
+        "primaryKey": {
+          "autoGenerate": false,
+          "columnNames": [
+            "walletId",
+            "network"
+          ]
+        }
+      },
+      {
+        "tableName": "transactions",
+        "createSql": "CREATE TABLE IF NOT EXISTS `${TABLE_NAME}` (`txHash` TEXT NOT NULL, `blockNumber` TEXT NOT NULL, `blockHash` TEXT NOT NULL, `timestamp` INTEGER NOT NULL, `balanceChange` TEXT NOT NULL, `direction` TEXT NOT NULL, `fee` TEXT NOT NULL, `confirmations` INTEGER NOT NULL, `blockTimestampHex` TEXT, `network` TEXT NOT NULL, `status` TEXT NOT NULL, `isLocal` INTEGER NOT NULL, `cachedAt` INTEGER NOT NULL, `walletId` TEXT NOT NULL DEFAULT '', `fee_shannons` INTEGER, PRIMARY KEY(`txHash`, `network`))",
+        "fields": [
+          {
+            "fieldPath": "txHash",
+            "columnName": "txHash",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "blockNumber",
+            "columnName": "blockNumber",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "blockHash",
+            "columnName": "blockHash",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "timestamp",
+            "columnName": "timestamp",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "balanceChange",
+            "columnName": "balanceChange",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "direction",
+            "columnName": "direction",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "fee",
+            "columnName": "fee",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "confirmations",
+            "columnName": "confirmations",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "blockTimestampHex",
+            "columnName": "blockTimestampHex",
+            "affinity": "TEXT"
+          },
+          {
+            "fieldPath": "network",
+            "columnName": "network",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "status",
+            "columnName": "status",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "isLocal",
+            "columnName": "isLocal",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "cachedAt",
+            "columnName": "cachedAt",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "walletId",
+            "columnName": "walletId",
+            "affinity": "TEXT",
+            "notNull": true,
+            "defaultValue": "''"
+          },
+          {
+            "fieldPath": "feeShannons",
+            "columnName": "fee_shannons",
+            "affinity": "INTEGER"
+          }
+        ],
+        "primaryKey": {
+          "autoGenerate": false,
+          "columnNames": [
+            "txHash",
+            "network"
+          ]
+        },
+        "indices": [
+          {
+            "name": "idx_tx_wallet_network_time",
+            "unique": false,
+            "columnNames": [
+              "walletId",
+              "network",
+              "timestamp"
+            ],
+            "orders": [
+              "ASC",
+              "ASC",
+              "DESC"
+            ],
+            "createSql": "CREATE INDEX IF NOT EXISTS `idx_tx_wallet_network_time` ON `${TABLE_NAME}` (`walletId` ASC, `network` ASC, `timestamp` DESC)"
+          }
+        ]
+      },
+      {
+        "tableName": "pending_broadcasts",
+        "createSql": "CREATE TABLE IF NOT EXISTS `${TABLE_NAME}` (`txHash` TEXT NOT NULL, `walletId` TEXT NOT NULL, `network` TEXT NOT NULL, `signedTxJson` TEXT NOT NULL, `reservedInputs` TEXT NOT NULL, `state` TEXT NOT NULL, `submittedAtTipBlock` INTEGER NOT NULL, `nullCount` INTEGER NOT NULL, `createdAt` INTEGER NOT NULL, `lastCheckedAt` INTEGER NOT NULL, PRIMARY KEY(`txHash`))",
+        "fields": [
+          {
+            "fieldPath": "txHash",
+            "columnName": "txHash",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "walletId",
+            "columnName": "walletId",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "network",
+            "columnName": "network",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "signedTxJson",
+            "columnName": "signedTxJson",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "reservedInputs",
+            "columnName": "reservedInputs",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "state",
+            "columnName": "state",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "submittedAtTipBlock",
+            "columnName": "submittedAtTipBlock",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "nullCount",
+            "columnName": "nullCount",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "createdAt",
+            "columnName": "createdAt",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "lastCheckedAt",
+            "columnName": "lastCheckedAt",
+            "affinity": "INTEGER",
+            "notNull": true
+          }
+        ],
+        "primaryKey": {
+          "autoGenerate": false,
+          "columnNames": [
+            "txHash"
+          ]
+        },
+        "indices": [
+          {
+            "name": "idx_pb_wallet_net_state",
+            "unique": false,
+            "columnNames": [
+              "walletId",
+              "network",
+              "state"
+            ],
+            "orders": [],
+            "createSql": "CREATE INDEX IF NOT EXISTS `idx_pb_wallet_net_state` ON `${TABLE_NAME}` (`walletId`, `network`, `state`)"
+          }
+        ]
+      },
+      {
+        "tableName": "balance_cache",
+        "createSql": "CREATE TABLE IF NOT EXISTS `${TABLE_NAME}` (`walletId` TEXT NOT NULL DEFAULT '', `network` TEXT NOT NULL, `address` TEXT NOT NULL, `capacity` TEXT NOT NULL, `capacityCkb` TEXT NOT NULL, `blockNumber` TEXT NOT NULL, `cachedAt` INTEGER NOT NULL, PRIMARY KEY(`walletId`, `network`))",
+        "fields": [
+          {
+            "fieldPath": "walletId",
+            "columnName": "walletId",
+            "affinity": "TEXT",
+            "notNull": true,
+            "defaultValue": "''"
+          },
+          {
+            "fieldPath": "network",
+            "columnName": "network",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "address",
+            "columnName": "address",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "capacity",
+            "columnName": "capacity",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "capacityCkb",
+            "columnName": "capacityCkb",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "blockNumber",
+            "columnName": "blockNumber",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "cachedAt",
+            "columnName": "cachedAt",
+            "affinity": "INTEGER",
+            "notNull": true
+          }
+        ],
+        "primaryKey": {
+          "autoGenerate": false,
+          "columnNames": [
+            "walletId",
+            "network"
+          ]
+        }
+      }
+    ],
+    "setupQueries": [
+      "CREATE TABLE IF NOT EXISTS room_master_table (id INTEGER PRIMARY KEY,identity_hash TEXT)",
+      "INSERT OR REPLACE INTO room_master_table (id,identity_hash) VALUES(42, '2e6dd568a3a3c20f6e31c521885b8efe')"
+    ]
+  }
+}

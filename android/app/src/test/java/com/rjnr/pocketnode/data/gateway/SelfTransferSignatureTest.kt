@@ -1,6 +1,6 @@
 package com.rjnr.pocketnode.data.gateway
 
-import com.rjnr.pocketnode.data.database.entity.SubAccountCandidateEntity
+import com.rjnr.pocketnode.data.storage.SubAccountCandidateRecord
 import com.rjnr.pocketnode.data.gateway.models.CellOutput
 import com.rjnr.pocketnode.data.gateway.models.Script
 import org.junit.Assert.assertEquals
@@ -274,21 +274,20 @@ class SelfTransferSignatureTest {
 
     // --- activeSelfTransferCandidateArgs (#538 review) ---
 
-    private fun candidate(scriptArgs: String, state: String, accountIndex: Int = 1) = SubAccountCandidateEntity(
+    private fun candidate(scriptArgs: String, state: String, accountIndex: Int = 1) = SubAccountCandidateRecord(
         parentWalletId = "parent-wallet",
         derivationPath = "m/44'/309'/$accountIndex'/0/0",
         accountIndex = accountIndex,
         scriptArgs = scriptArgs,
         state = state,
-        createdAt = 0L,
     )
 
     @Test
     fun `RESTORED candidates are excluded from the self-transfer scope`() {
         val args = activeSelfTransferCandidateArgs(
             listOf(
-                candidate(derivedArgs, SubAccountCandidateEntity.STATE_PENDING),
-                candidate(foreignArgs, SubAccountCandidateEntity.STATE_RESTORED),
+                candidate(derivedArgs, SubAccountCandidateRecord.STATE_PENDING),
+                candidate(foreignArgs, SubAccountCandidateRecord.STATE_RESTORED),
             )
         )
         assertEquals(listOf(derivedArgs), args)
@@ -298,9 +297,9 @@ class SelfTransferSignatureTest {
     fun `non-RESTORED states are still included`() {
         val args = activeSelfTransferCandidateArgs(
             listOf(
-                candidate(derivedArgs, SubAccountCandidateEntity.STATE_PENDING),
-                candidate(foreignArgs, SubAccountCandidateEntity.STATE_FOUND),
-                candidate(otherWalletArgs, SubAccountCandidateEntity.STATE_EMPTY),
+                candidate(derivedArgs, SubAccountCandidateRecord.STATE_PENDING),
+                candidate(foreignArgs, SubAccountCandidateRecord.STATE_FOUND),
+                candidate(otherWalletArgs, SubAccountCandidateRecord.STATE_EMPTY),
             )
         )
         assertEquals(setOf(derivedArgs, foreignArgs, otherWalletArgs), args.toSet())
@@ -317,7 +316,7 @@ class SelfTransferSignatureTest {
             add(mainArgs)
             addAll(
                 activeSelfTransferCandidateArgs(
-                    listOf(candidate(restoredChildArgs, SubAccountCandidateEntity.STATE_RESTORED))
+                    listOf(candidate(restoredChildArgs, SubAccountCandidateRecord.STATE_RESTORED))
                 )
             )
         }

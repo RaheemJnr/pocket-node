@@ -2,6 +2,9 @@ plugins {
     alias(libs.plugins.kotlin.multiplatform)
     alias(libs.plugins.android.kotlin.multiplatform.library)
     alias(libs.plugins.kotlin.serialization)
+    alias(libs.plugins.ksp)
+    alias(libs.plugins.androidx.room)
+    alias(libs.plugins.skie)
 }
 
 kotlin {
@@ -26,8 +29,21 @@ kotlin {
         }
     }
 
+    // Room generates the `actual object` for @ConstructedBy, so the module unavoidably has an
+    // expect/actual class. Kotlin still flags those as Beta (KT-61573); this is the suppression
+    // Room's own KMP setup guide prescribes.
+    compilerOptions {
+        freeCompilerArgs.add("-Xexpect-actual-classes")
+    }
+
     sourceSets {
         commonMain.dependencies {
+            // Room KMP: one database compiled for Android, iOS device and iOS simulator.
+            // This brings the common `androidx.sqlite` API, including SQLiteDriver, but
+            // deliberately no driver implementation: each platform supplies its own.
+            implementation(libs.room.runtime)
+            // Room needs a CoroutineContext for its query dispatcher.
+            implementation(libs.kotlinx.coroutines.core)
             implementation(libs.secp256k1.kmp)
             implementation(libs.kotlincrypto.blake2)
             // SHA-256 for the BIP-39 checksum, HMAC-SHA-512 for PBKDF2 (#507).
@@ -37,10 +53,19 @@ kotlin {
         }
         commonTest.dependencies {
             implementation(kotlin("test"))
+            // runTest, for the suspending Room DAO round trip in iosTest.
+            implementation(libs.kotlinx.coroutines.test)
         }
         androidMain.dependencies {
             // JNI bindings + .so payload for the Android ABIs.
             implementation(libs.secp256k1.kmp.jni.android)
+        }
+        iosMain.dependencies {
+            // The bundled SQLite driver is iOS-only on purpose. Kotlin/Native has no
+            // framework SQLite to fall back on, whereas Android does, and putting this in
+            // commonMain pushed ~2.5 MB of libsqliteJni.so into the APK for a database the
+            // Android app does not open. Android will pass AndroidSQLiteDriver instead.
+            implementation(libs.androidx.sqlite.bundled)
         }
         getByName("androidHostTest").dependencies {
             // JVM JNI payload so host-side unit tests can call libsecp256k1.
@@ -66,6 +91,55 @@ kotlin {
             // dependency for now (the BIP-32 code still uses it) but must never reach
             // the shared module's production classpath (#509).
             implementation(libs.bouncycastle.difftest)
+        }
+    }
+}
+
+/**
+ * Room's annotation processor has to run once per compilation target: the generated
+ * `RoomDatabaseConstructor` actual and the DAO implementations are platform artifacts,
+ * not common ones. `kspAndroid` is the configuration the `androidLibrary` target of the
+ * `com.android.kotlin.multiplatform.library` plugin creates.
+ */
+dependencies {
+    add("kspAndroid", libs.room.compiler)
+    add("kspIosArm64", libs.room.compiler)
+    add("kspIosSimulatorArm64", libs.room.compiler)
+}
+
+room {
+    schemaDirectory("$projectDir/schemas")
+}
+
+/**
+ * SKIE's Flow bridging is what the M3 engines want; its enum rewriting and its
+ * telemetry are not.
+ *
+ * Analytics are off. SKIE collects and uploads a build profile by default:
+ * `build/skie/**/analytics/` was found holding the machine and chip model, the
+ * repository's commit and contributor counts, and the Gradle and compiler
+ * environment. None of that leaves a contributor's machine for this project.
+ *
+ * `EnumInterop` republishes Kotlin enums as Swift enums, which drops `entries`
+ * and renames every case, breaking the M2 preferences code that reads
+ * `SyncMode.entries` and `.theNewWallet`. Turned off so the existing Swift keeps
+ * compiling; sealed-class interop is off for the same reason, since nothing on
+ * the Swift side asks for it yet.
+ */
+skie {
+    analytics {
+        enabled.set(false)
+    }
+
+    features {
+        group {
+            co.touchlab.skie.configuration.EnumInterop.Enabled(false)
+            // Inert while enum interop is disabled above, and kept only so that
+            // turning it back on cannot silently rename every case: it is what
+            // holds `SyncMode.theNewWallet` to its Kotlin/Native spelling
+            // instead of SKIE's `.newWallet`.
+            co.touchlab.skie.configuration.EnumInterop.LegacyCaseName(true)
+            co.touchlab.skie.configuration.SealedInterop.Enabled(false)
         }
     }
 }

@@ -4,6 +4,7 @@ import com.rjnr.pocketnode.core.log.NoopLogger
 import com.rjnr.pocketnode.data.database.AppDatabase
 import com.rjnr.pocketnode.data.database.dao.SyncProgressDao
 import com.rjnr.pocketnode.data.migration.WalletMigrationHelper
+import com.rjnr.pocketnode.data.sync.SyncEngine
 import com.rjnr.pocketnode.data.wallet.KeyManager
 import com.rjnr.pocketnode.data.wallet.WalletPreferences
 import io.mockk.mockk
@@ -18,7 +19,7 @@ import kotlinx.serialization.json.Json
  *
  * Nothing here loads the JNI library as long as the code path under test
  * stays on the injected seams ([NodeLifecycle], [LightClientReadOnly],
- * [SyncCoordinator]'s [LightClientBridge]).
+ * [SyncCoordinator]'s [LightClientApi]).
  */
 internal fun testGatewayRepository(
     db: AppDatabase,
@@ -27,7 +28,9 @@ internal fun testGatewayRepository(
     syncCoordinator: SyncCoordinator = mockk(relaxed = true),
     keyManager: KeyManager = mockk(relaxed = true),
     lightClient: LightClientReadOnly = mockk(relaxed = true),
-    syncPoller: SyncPoller = mockk(relaxed = true),
+    syncEngine: SyncEngine = mockk(relaxed = true),
+    daoGateway: DaoGateway = mockk(relaxed = true),
+    ledgerReader: LedgerReader = mockk(relaxed = true),
     json: Json = Json { ignoreUnknownKeys = true; encodeDefaults = true },
     syncProgressDao: SyncProgressDao = db.syncProgressDao(),
     walletMigrationHelper: WalletMigrationHelper = mockk(relaxed = true),
@@ -35,25 +38,21 @@ internal fun testGatewayRepository(
     keyManager = keyManager,
     walletPreferences = walletPreferences,
     json = json,
-    transactionBuilder = mockk(relaxed = true),
     cacheManager = mockk(relaxed = true),
-    daoSyncManager = mockk(relaxed = true),
     walletMigrationHelper = walletMigrationHelper,
     walletDao = db.walletDao(),
     appDatabase = mockk(relaxed = true),
-    headerCacheDao = mockk(relaxed = true),
     syncProgressDao = syncProgressDao,
-    pendingBroadcastDao = mockk(relaxed = true),
-    broadcastClient = mockk(relaxed = true),
+    sendPipeline = mockk(relaxed = true),
     syncCoordinator = syncCoordinator,
-    daoHeaderResolver = mockk(relaxed = true),
-    daoDepositReader = mockk(relaxed = true),
+    daoGateway = daoGateway,
+    gapLimitGateway = mockk(relaxed = true),
     lightClient = lightClient,
+    ledgerReader = ledgerReader,
     subAccountReconciler = mockk(relaxed = true),
-    subAccountDiscovery = mockk(relaxed = true),
     syncServiceCommands = mockk(relaxed = true),
     nodeLifecycle = nodeLifecycle,
-    syncPoller = syncPoller,
+    syncEngine = syncEngine,
     startupReconciler = mockk(relaxed = true),
     logger = NoopLogger,
 )

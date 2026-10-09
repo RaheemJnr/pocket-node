@@ -36,22 +36,30 @@ targets:
       path: PocketNode/Info.plist
       properties:
         CFBundleDisplayName: Pocket Node
-        CFBundleShortVersionString: "1.0.0"
-        CFBundleVersion: "1"
+        CFBundleShortVersionString: $(MARKETING_VERSION)
+        CFBundleVersion: $(CURRENT_PROJECT_VERSION)
         # Unwrapping the wallet's data key raises a Face ID prompt; without this
         # string iOS kills the app instead of showing it.
         NSFaceIDUsageDescription: Pocket Node uses Face ID to unlock your wallet keys.
+        NSCameraUsageDescription: Pocket Node uses the camera to scan CKB addresses.
         UILaunchScreen: {}
         UIApplicationSceneManifest:
           UIApplicationSupportsMultipleScenes: false
         UISupportedInterfaceOrientations:
           - UIInterfaceOrientationPortrait
+        # Suppresses the export-compliance prompt on every TestFlight upload:
+        # the app only uses standard iOS crypto (no custom/non-exempt encryption).
+        ITSAppUsesNonExemptEncryption: false
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.rjnr.pocketnode
         TARGETED_DEVICE_FAMILY: "1"
         SWIFT_VERSION: "6.0"
         GENERATE_INFOPLIST_FILE: NO
+        MARKETING_VERSION: "0.1.0"
+        CURRENT_PROJECT_VERSION: "1"
+        DEVELOPMENT_TEAM: ARF4H4N5CV
+        CODE_SIGN_STYLE: Automatic
         FRAMEWORK_SEARCH_PATHS: $(inherited) $(SRCROOT)/../android/shared/build/xcode-frameworks/$(CONFIGURATION)/$(SDK_NAME)
         OTHER_LDFLAGS: $(inherited) -framework PocketNodeCore
         ENABLE_USER_SCRIPT_SANDBOXING: NO
@@ -74,6 +82,14 @@ targets:
       base:
         SWIFT_VERSION: "6.0"
         GENERATE_INFOPLIST_FILE: YES
+        # Only signed on a device run; the simulator never asks. The app
+        # target sets the same team above.
+        DEVELOPMENT_TEAM: ARF4H4N5CV
+        CODE_SIGN_STYLE: Automatic
+        # The tests import PocketNodeCore for the shared protocols. Only the
+        # module map is needed here: the framework is static and already linked
+        # into the host app, which the bundle loads its symbols from.
+        FRAMEWORK_SEARCH_PATHS: $(inherited) $(SRCROOT)/../android/shared/build/xcode-frameworks/$(CONFIGURATION)/$(SDK_NAME)
 
   PocketNodeUITests:
     type: bundle.ui-testing
@@ -87,6 +103,8 @@ targets:
       base:
         SWIFT_VERSION: "6.0"
         GENERATE_INFOPLIST_FILE: YES
+        DEVELOPMENT_TEAM: ARF4H4N5CV
+        CODE_SIGN_STYLE: Automatic
         TEST_TARGET_NAME: PocketNode
 
 schemes:
@@ -121,3 +139,27 @@ schemes:
         - PocketNodeUITests
       environmentVariables:
         POCKETNODE_NETWORK_TESTS: "1"
+
+  # The by-hand device smoke (`DeviceSmokeUITests`). It claims from the testnet
+  # faucet and broadcasts a real transfer, so it is not something either of the
+  # schemes above should be able to trigger: the test needs BOTH variables and
+  # only this scheme sets the second one. Run it on a physical iPhone with a
+  # person holding it, because signing raises system Face ID that XCUITest
+  # cannot answer. Never wired into CI.
+  # Only the smoke class runs here. The other UI suites reset the phone's
+  # wallet on launch, so letting them run after the smoke would wipe the
+  # funded wallet it just proved, and the attended-only onboarding case would
+  # fail with nobody expecting its Face ID prompt.
+  PocketNodeDeviceSmoke:
+    build:
+      targets:
+        PocketNode: all
+    test:
+      config: Debug
+      targets:
+        - name: PocketNodeUITests
+          selectedTests:
+            - DeviceSmokeUITests
+      environmentVariables:
+        POCKETNODE_NETWORK_TESTS: "1"
+        POCKETNODE_DEVICE_SMOKE: "1"

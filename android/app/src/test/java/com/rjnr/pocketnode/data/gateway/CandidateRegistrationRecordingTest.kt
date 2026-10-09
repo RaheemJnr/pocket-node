@@ -8,10 +8,14 @@ import com.rjnr.pocketnode.data.database.AppDatabase
 import com.rjnr.pocketnode.data.database.entity.SubAccountCandidateEntity
 import com.rjnr.pocketnode.data.gateway.models.JniScriptStatus
 import com.rjnr.pocketnode.data.gateway.models.Script
-import com.rjnr.pocketnode.data.wallet.KeyManager
-import com.rjnr.pocketnode.data.wallet.MnemonicManager
+import com.rjnr.pocketnode.data.storage.RoomSubAccountCandidateStore
+import com.rjnr.pocketnode.data.storage.RoomSyncProgressStore
+import com.rjnr.pocketnode.data.storage.RoomTransactionStore
+import com.rjnr.pocketnode.data.storage.RoomWalletRegistry
+import com.rjnr.pocketnode.data.storage.SubAccountCandidateRecord
 import com.rjnr.pocketnode.data.wallet.SubAccountDiscovery
 import com.rjnr.pocketnode.data.wallet.WalletPreferences
+import io.mockk.mockk
 import kotlinx.coroutines.test.runTest
 import kotlinx.serialization.json.Json
 import org.junit.After
@@ -44,21 +48,17 @@ class CandidateRegistrationRecordingTest {
         db = Room.inMemoryDatabaseBuilder(context, AppDatabase::class.java)
             .allowMainThreadQueries()
             .build()
-        val mnemonicManager = MnemonicManager()
-        val fakeBridge = object : LightClientBridge {
-            override suspend fun setScripts(scriptsJson: String, command: Int) = true
-            override suspend fun getTipHeaderRaw(): String? = null
-            override suspend fun getScriptsRaw(): String? = null
-        }
         coordinator = SyncCoordinator(
-            db.walletDao(),
-            db.syncProgressDao(),
+            RoomWalletRegistry(db.walletDao()),
+            RoomSyncProgressStore(db.syncProgressDao()),
+            RoomSubAccountCandidateStore(db.subAccountCandidateDao()),
+            RoomTransactionStore(
+                db.transactionDao(),
+                CacheManager(db.transactionDao(), db.balanceCacheDao(), NoopLogger),
+            ),
+            mockk(relaxed = true),
             WalletPreferences(context, NoopLogger),
-            KeyManager(context, mnemonicManager, NoopLogger),
             Json { ignoreUnknownKeys = true },
-            fakeBridge,
-            db.subAccountCandidateDao(),
-            db.transactionDao(),
             NoopLogger,
         )
     }
@@ -81,12 +81,11 @@ class CandidateRegistrationRecordingTest {
     }
 
     private fun registration(fromBlockHex: String) = SyncCoordinator.CandidateRegistration(
-        candidate = SubAccountCandidateEntity(
+        candidate = SubAccountCandidateRecord(
             parentWalletId = parent,
             derivationPath = path,
             accountIndex = 0,
             scriptArgs = "0xcc",
-            createdAt = 1L,
         ),
         status = JniScriptStatus(
             script = Script(Script.SECP256K1_CODE_HASH, "type", "0xcc"),

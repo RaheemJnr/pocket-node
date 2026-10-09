@@ -16,6 +16,12 @@ import com.rjnr.pocketnode.data.gateway.models.NetworkType
 import com.rjnr.pocketnode.data.gateway.models.Script
 import com.rjnr.pocketnode.data.gateway.models.SyncMode
 import com.rjnr.pocketnode.data.migration.WalletMigrationHelper
+import com.rjnr.pocketnode.data.storage.RoomSubAccountCandidateStore
+import com.rjnr.pocketnode.data.storage.RoomSyncProgressStore
+import com.rjnr.pocketnode.data.storage.RoomTransactionStore
+import com.rjnr.pocketnode.data.storage.RoomWalletRegistry
+import com.rjnr.pocketnode.data.storage.SyncProgressStore
+import com.rjnr.pocketnode.data.sync.SyncEngine
 import com.rjnr.pocketnode.data.wallet.AddressUtils
 import com.rjnr.pocketnode.data.wallet.KeyManager
 import com.rjnr.pocketnode.data.wallet.MnemonicManager
@@ -26,8 +32,6 @@ import io.mockk.every
 import io.mockk.mockk
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CompletableDeferred
-import kotlinx.coroutines.awaitCancellation
-import kotlinx.coroutines.cancelAndJoin
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
@@ -50,10 +54,17 @@ import java.util.Collections
  * #539: the rest of script registration runs under the registration lock.
  *
  * Real [GatewayRepository] + real [SyncCoordinator] over Room in-memory and
- * real [WalletPreferences]; only the JNI surface ([LightClientBridge],
+ * real [WalletPreferences]; only the light-client surface ([LightClientApi],
  * [LightClientReadOnly]) and unrelated collaborators are faked. Every race
  * is forced with hooks inside the fake light client and deferreds, never
  * with sleeps.
+ *
+ * ios/m3 port: the coordinator lives in the shared core behind
+ * [LightClientApi], whose calls are blocking, so the fake runs its suspend
+ * hooks under runBlocking, and the coordinator runs on Dispatchers.IO as
+ * SharedModule wires it. The sync poll reads the node through the shared
+ * [SyncEngine], built here over the same fake so a poll tick sees
+ * [reportedScripts].
  */
 @RunWith(RobolectricTestRunner::class)
 @Config(sdk = [28], manifest = Config.NONE)
@@ -76,29 +87,32 @@ class RegistrationLockTest {
     @Volatile
     private var reportedScripts: String? = null
 
-    private class FakeBridge(private val tipJson: String) : LightClientBridge {
+    private class FakeBridge(
+        private val tipJson: String,
+        private val scripts: () -> String?,
+    ) : LightClientApi by mockk<LightClientApi>(relaxed = true) {
         val setScriptsCalls: MutableList<Pair<String, Int>> = Collections.synchronizedList(mutableListOf())
         /** Payloads of the sets the light client accepted. */
         val landed: MutableList<String> = Collections.synchronizedList(mutableListOf())
         /** Results for the next setScripts calls, then true. */
         val results = ArrayDeque<Boolean>()
-        var onTipRead: suspend () -> Unit = {}
-        var onSetScripts: suspend () -> Unit = {}
+        @Volatile var onTipRead: suspend () -> Unit = {}
+        @Volatile var onSetScripts: suspend () -> Unit = {}
 
-        override suspend fun setScripts(scriptsJson: String, command: Int): Boolean {
-            onSetScripts()
+        override fun setScripts(scriptsJson: String, command: Int): Boolean {
+            runBlocking { onSetScripts() }
             val ok = synchronized(results) { results.removeFirstOrNull() } ?: true
             setScriptsCalls += scriptsJson to command
             if (ok) landed += scriptsJson
             return ok
         }
 
-        override suspend fun getTipHeaderRaw(): String {
-            onTipRead()
+        override fun getTipHeader(): String {
+            runBlocking { onTipRead() }
             return tipJson
         }
 
-        override suspend fun getScriptsRaw(): String? = null
+        override fun getScripts(): String? = scripts()
     }
 
     private class SignalLogger : Logger {
@@ -135,7 +149,7 @@ class RegistrationLockTest {
             .build()
         walletPreferences = WalletPreferences(ctx, NoopLogger)
         walletPreferences.setActiveWalletId(ACTIVE)
-        bridge = FakeBridge(tipJson(tip))
+        bridge = FakeBridge(tipJson(tip)) { reportedScripts }
 
         nodeLifecycle = mockk(relaxed = true)
         every { nodeLifecycle.currentNetwork } returns network
@@ -178,17 +192,7 @@ class RegistrationLockTest {
         walletMigrationHelper: WalletMigrationHelper = mockk(relaxed = true),
         awaitStartup: Boolean = true,
     ): CompletableDeferred<Unit> {
-        coordinator = SyncCoordinator(
-            walletDao = db.walletDao(),
-            syncProgressDao = coordinatorDao,
-            syncPreferences = walletPreferences,
-            keyManager = KeyManager(ApplicationProvider.getApplicationContext(), MnemonicManager(), NoopLogger),
-            json = json,
-            lightClient = bridge,
-            subAccountCandidateDao = db.subAccountCandidateDao(),
-            transactionDao = db.transactionDao(),
-            logger = coordinatorLogger,
-        )
+        coordinator = newCoordinator(RoomSyncProgressStore(coordinatorDao), coordinatorLogger)
         val startupReachedNode = CompletableDeferred<Unit>()
         coEvery { nodeLifecycle.initializeNode(any(), any()) } answers { startupReachedNode.complete(Unit) }
         repository = testGatewayRepository(
@@ -198,6 +202,7 @@ class RegistrationLockTest {
             syncCoordinator = coordinator,
             keyManager = keyManager,
             lightClient = lightClient,
+            syncEngine = SyncEngine(bridge, walletPreferences, json, NoopLogger, queryContext = Dispatchers.IO),
             json = json,
             syncProgressDao = repositoryDao,
             walletMigrationHelper = walletMigrationHelper,
@@ -208,6 +213,21 @@ class RegistrationLockTest {
         }
         return startupReachedNode
     }
+
+    private fun newCoordinator(store: SyncProgressStore, logger: Logger) = SyncCoordinator(
+        RoomWalletRegistry(db.walletDao()),
+        store,
+        RoomSubAccountCandidateStore(db.subAccountCandidateDao()),
+        RoomTransactionStore(
+            db.transactionDao(),
+            CacheManager(db.transactionDao(), db.balanceCacheDao(), NoopLogger),
+        ),
+        bridge,
+        walletPreferences,
+        json,
+        logger,
+        queryContext = Dispatchers.IO,
+    )
 
     private suspend fun seedWallet(id: String, script: Script, lastActiveAt: Long) {
         db.walletDao().insert(
@@ -437,29 +457,19 @@ class RegistrationLockTest {
     /** The bulk sync_progress read is dead work when the caller supplies the progress. */
     @Test
     fun `applyBalancedFilter skips the bulk progress read when progressOf is supplied`() = runBlocking {
-        val dao = mockk<SyncProgressDao>(relaxed = true)
-        val c = SyncCoordinator(
-            walletDao = db.walletDao(),
-            syncProgressDao = dao,
-            syncPreferences = walletPreferences,
-            keyManager = keyManager,
-            json = json,
-            lightClient = bridge,
-            subAccountCandidateDao = db.subAccountCandidateDao(),
-            transactionDao = db.transactionDao(),
-            logger = NoopLogger,
-        )
-        val wallets = db.walletDao().getAll()
+        val store = mockk<SyncProgressStore>(relaxed = true)
+        val c = newCoordinator(store, NoopLogger)
+        val wallets = RoomWalletRegistry(db.walletDao()).allWallets()
 
         val kept = c.applyBalancedFilter(wallets, ACTIVE, network, progressOf = { id ->
             if (id == ACTIVE) ACTIVE_PROGRESS else 1_000L
         })
 
-        coVerify(exactly = 0) { dao.getAllForNetwork(any()) }
+        coVerify(exactly = 0) { store.getAllForNetwork(any()) }
         assertEquals("OTHER lags far beyond the threshold", listOf(ACTIVE), kept.map { it.walletId })
 
         c.applyBalancedFilter(wallets, ACTIVE, network)
-        coVerify(exactly = 1) { dao.getAllForNetwork(network.name) }
+        coVerify(exactly = 1) { store.getAllForNetwork(network.name) }
     }
 
     // ------------------------------------------------------------------
@@ -550,15 +560,21 @@ class RegistrationLockTest {
         walletPreferences.setSyncStrategy(SyncStrategy.ALL_WALLETS)
         val b = db.walletDao().getById(OTHER)!!
         val atTip = CompletableDeferred<Unit>()
+        val cancelled = CompletableDeferred<Unit>()
         bridge.onTipRead = {
             bridge.onTipRead = {}
             atTip.complete(Unit)
-            awaitCancellation()
+            // The bridge call blocks, so it cannot see the cancellation
+            // itself: wait for it, then surface it as a cancellable read would.
+            cancelled.await()
+            throw CancellationException("user left the screen")
         }
 
         val switch = launch(Dispatchers.IO) { repository.onActiveWalletChanged(b) }
         withTimeout(10_000) { atTip.await() }
-        switch.cancelAndJoin()
+        switch.cancel()
+        cancelled.complete(Unit)
+        switch.join()
         val ensure = repository.ensureRegistration
         assertNotNull("the cancelled switch must hand the registration to the repository", ensure)
         ensure!!.join()

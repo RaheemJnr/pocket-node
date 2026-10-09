@@ -32,8 +32,8 @@ import org.robolectric.RobolectricTestRunner
  * adding little signal beyond what we get by exercising the exact
  * persistence pattern (insert under sendMutex, CAS on success, delete
  * on null/exception) directly against an in-memory Room DB. The
- * BroadcastClient indirection (introduced in this task) is also
- * exercised here via fake implementations.
+ * broadcast call itself is a local lambda fake (the BroadcastClient
+ * indirection moved to LightClientApi with the send path).
  *
  * If the persistence logic in GatewayRepository diverges from this
  * pattern, the integration must be re-validated by hand or via an
@@ -114,7 +114,7 @@ class GatewayRepositorySendTransactionTest {
     @Test
     fun `happy path - rows persist and CAS to BROADCAST`() = runTest {
         val balanceChangeHex = "-0x" + 6_100_000_000L.toString(16)
-        val fakeBroadcast = BroadcastClient { _ -> "\"$txHash\"" }
+        val fakeBroadcast: (String) -> String? = { _ -> "\"$txHash\"" }
 
         // Pre-broadcast insert
         preBroadcastInsert(balanceChangeHex)
@@ -136,7 +136,7 @@ class GatewayRepositorySendTransactionTest {
         assertEquals("out", txBefore.direction)
 
         // Broadcast (outside mutex) — JNI returns matching hash.
-        val raw = fakeBroadcast.sendRaw(signedJson)
+        val raw = fakeBroadcast(signedJson)
         val returnedHash = raw!!.trim('"')
         assertEquals(txHash, returnedHash)
 
@@ -158,13 +158,13 @@ class GatewayRepositorySendTransactionTest {
     @Test
     fun `JNI null - both rows deleted`() = runTest {
         val balanceChangeHex = "-0x" + 6_100_000_000L.toString(16)
-        val fakeBroadcast = BroadcastClient { _ -> null }
+        val fakeBroadcast: (String) -> String? = { _ -> null }
 
         preBroadcastInsert(balanceChangeHex)
         assertEquals(1, db.pendingBroadcastDao().getActive(walletId, network).size)
         assertNotNull(db.transactionDao().getByTxHash(txHash))
 
-        val raw = fakeBroadcast.sendRaw(signedJson)
+        val raw = fakeBroadcast(signedJson)
         if (raw == null) {
             db.pendingBroadcastDao().delete(txHash)
             cacheManager.deleteTransaction(txHash)
@@ -177,14 +177,14 @@ class GatewayRepositorySendTransactionTest {
     @Test
     fun `JNI throws - both rows deleted`() = runTest {
         val balanceChangeHex = "-0x" + 6_100_000_000L.toString(16)
-        val fakeBroadcast = BroadcastClient { _ -> throw RuntimeException("boom") }
+        val fakeBroadcast: (String) -> String? = { _ -> throw RuntimeException("boom") }
 
         preBroadcastInsert(balanceChangeHex)
         assertEquals(1, db.pendingBroadcastDao().getActive(walletId, network).size)
         assertNotNull(db.transactionDao().getByTxHash(txHash))
 
         try {
-            fakeBroadcast.sendRaw(signedJson)
+            fakeBroadcast(signedJson)
             error("should have thrown")
         } catch (e: RuntimeException) {
             db.pendingBroadcastDao().delete(txHash)
@@ -234,11 +234,11 @@ class GatewayRepositorySendTransactionTest {
     fun `hash mismatch path - re-key under returned hash`() = runTest {
         val balanceChangeHex = "-0x" + 6_100_000_000L.toString(16)
         val returnedHash = "0x" + "cd".repeat(32)
-        val fakeBroadcast = BroadcastClient { _ -> "\"$returnedHash\"" }
+        val fakeBroadcast: (String) -> String? = { _ -> "\"$returnedHash\"" }
 
         preBroadcastInsert(balanceChangeHex)
 
-        val raw = fakeBroadcast.sendRaw(signedJson)!!
+        val raw = fakeBroadcast(signedJson)!!
         val rh = raw.trim('"')
         assertTrue(rh.lowercase() != txHash.lowercase())
 

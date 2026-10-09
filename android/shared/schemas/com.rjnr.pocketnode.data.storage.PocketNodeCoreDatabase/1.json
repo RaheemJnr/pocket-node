@@ -1,0 +1,56 @@
+{
+  "formatVersion": 1,
+  "database": {
+    "version": 1,
+    "identityHash": "57ec7c6cc6d526c6c9dd53222857e7e8",
+    "entities": [
+      {
+        "tableName": "sync_progress",
+        "createSql": "CREATE TABLE IF NOT EXISTS `${TABLE_NAME}` (`walletId` TEXT NOT NULL, `network` TEXT NOT NULL, `lightStartBlockNumber` INTEGER NOT NULL, `localSavedBlockNumber` INTEGER NOT NULL, `updatedAt` INTEGER NOT NULL, PRIMARY KEY(`walletId`, `network`))",
+        "fields": [
+          {
+            "fieldPath": "walletId",
+            "columnName": "walletId",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "network",
+            "columnName": "network",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "lightStartBlockNumber",
+            "columnName": "lightStartBlockNumber",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "localSavedBlockNumber",
+            "columnName": "localSavedBlockNumber",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "updatedAt",
+            "columnName": "updatedAt",
+            "affinity": "INTEGER",
+            "notNull": true
+          }
+        ],
+        "primaryKey": {
+          "autoGenerate": false,
+          "columnNames": [
+            "walletId",
+            "network"
+          ]
+        }
+      }
+    ],
+    "setupQueries": [
+      "CREATE TABLE IF NOT EXISTS room_master_table (id INTEGER PRIMARY KEY,identity_hash TEXT)",
+      "INSERT OR REPLACE INTO room_master_table (id,identity_hash) VALUES(42, '57ec7c6cc6d526c6c9dd53222857e7e8')"
+    ]
+  }
+}

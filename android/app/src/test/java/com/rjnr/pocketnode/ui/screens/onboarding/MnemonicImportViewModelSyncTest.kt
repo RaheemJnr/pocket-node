@@ -8,7 +8,7 @@ import com.rjnr.pocketnode.core.prefs.SyncStrategy
 import com.rjnr.pocketnode.data.database.AppDatabase
 import com.rjnr.pocketnode.data.gateway.GatewayRepository
 import com.rjnr.pocketnode.data.gateway.NodeLifecycle
-import com.rjnr.pocketnode.data.gateway.SyncPoller
+import com.rjnr.pocketnode.data.sync.SyncEngine
 import com.rjnr.pocketnode.data.gateway.SyncProgress
 import com.rjnr.pocketnode.data.gateway.models.SyncMode
 import com.rjnr.pocketnode.data.gateway.testGatewayRepository
@@ -79,13 +79,13 @@ class MnemonicImportViewModelSyncTest {
         walletPreferences.setSyncStrategy(SyncStrategy.ACTIVE_ONLY)
         val nodeLifecycle = mockk<NodeLifecycle>(relaxed = true)
         coEvery { nodeLifecycle.awaitNodeReady() } returns false
-        val syncPoller = mockk<SyncPoller>(relaxed = true)
-        every { syncPoller.syncProgress } returns MutableStateFlow(SyncProgress())
+        val syncEngine = mockk<SyncEngine>(relaxed = true)
+        every { syncEngine.syncProgress } returns MutableStateFlow(SyncProgress())
         val repository = testGatewayRepository(
             db = db,
             walletPreferences = walletPreferences,
             nodeLifecycle = nodeLifecycle,
-            syncPoller = syncPoller,
+            syncEngine = syncEngine,
         )
         val vm = newViewModel(repository)
 

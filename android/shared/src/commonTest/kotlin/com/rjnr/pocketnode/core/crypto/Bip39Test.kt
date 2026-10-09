@@ -227,6 +227,18 @@ class Bip39Test {
     }
 
     @Test
+    fun toSeed_does_not_validate_the_checksum() {
+        // Deliberate: BIP-39 defines a seed for any string, and a wallet written
+        // by a tool with a broken checksum must still be recoverable. The
+        // validating entry point is MnemonicManager.mnemonicToSeed, which is
+        // where every in-app caller goes. Moving the check down here would make
+        // that recovery impossible, so this test pins the split.
+        val broken = ("abandon ".repeat(11) + "abandon").split(" ")
+        assertFalse(Bip39.validate(broken))
+        assertEquals(64, Bip39.toSeed(broken).size)
+    }
+
+    @Test
     fun toSeed_passphrase_changes_the_seed() {
         val words = ("abandon ".repeat(11) + "about").split(" ")
         assertFalse(Bip39.toSeed(words).contentEquals(Bip39.toSeed(words, "TREZOR")))
