@@ -10,6 +10,7 @@ import XCTest
 /// mapping rather than a second copy of it, which is the whole point of
 /// putting it in `commonMain`. The exhaustive branch coverage lives in
 /// `SendCopyTest.kt`.
+@MainActor
 final class SendCopyTests: XCTestCase {
 
     private let ckb: Int64 = 100_000_000
