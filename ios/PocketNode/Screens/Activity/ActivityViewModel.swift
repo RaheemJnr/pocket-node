@@ -133,7 +133,21 @@ final class ActivityViewModel {
 
     /// Re-sending a failed transaction. Nil until the send path lands, and
     /// the detail sheet says so rather than offering a button that does nothing.
-    let onRetry: ((String) -> Void)?
+    ///
+    /// Answers the user-facing reason the retry did not go out, or nil when it
+    /// did (or the user cancelled, which is an answer rather than a failure).
+    /// The detail sheet is gone by the time this returns, so the answer is
+    /// the only way a rejected retry reaches the screen; see [retryError].
+    let onRetry: RetryHandler?
+
+    typealias RetryHandler = @MainActor (String) async -> String?
+
+    /// Why the last retry from this screen did not go out, or nil. What the
+    /// screen's retry alert shows; cleared by ``dismissRetryError()``.
+    private(set) var retryError: String?
+
+    /// Whether the detail sheet may offer Retry at all.
+    var canRetry: Bool { onRetry != nil }
 
     private let source: any ActivityPaging
     private let retryDelay: Duration
@@ -156,7 +170,7 @@ final class ActivityViewModel {
     ///   node to start.
     init(
         source: any ActivityPaging,
-        onRetry: ((String) -> Void)? = nil,
+        onRetry: RetryHandler? = nil,
         retryDelay: Duration = ActivityViewModel.defaultRetryDelay
     ) {
         self.source = source
@@ -256,6 +270,31 @@ final class ActivityViewModel {
         load(pageIndex: nextPageIndex, replacing: false)
     }
 
+    // MARK: - Retry
+
+    /// Re-broadcast a failed transaction and report the outcome.
+    ///
+    /// The detail sheet dismisses itself as soon as Retry is tapped, so a
+    /// failure here (the row is gone, the database refused, the network
+    /// rejected the bytes) would otherwise vanish without a word. It lands in
+    /// [retryError] instead. A retry that went out moves its row through the
+    /// broadcast flow, which re-reads the list on its own.
+    func retry(txHash: String) {
+        guard let onRetry else { return }
+        retryError = nil
+        Task { [weak self] in
+            let failure = await onRetry(txHash)
+            guard let self else { return }
+            if let failure {
+                self.retryError = failure.isEmpty ? ActivityCopy.retryFailed : failure
+            }
+        }
+    }
+
+    func dismissRetryError() {
+        retryError = nil
+    }
+
     // MARK: - Internals
 
     /// Drop everything and read page 0 again. What a filter change, a refresh
@@ -272,23 +311,43 @@ final class ActivityViewModel {
 
     /// Re-read exactly the pages that are already on screen, keeping the
     /// scroll position's worth of rows. Used when a broadcast row changes.
+    ///
+    /// A `loadMore()` still in flight is cancelled by this, and a cancelled
+    /// load leaves its spinner to whoever replaced it. So the replacement
+    /// takes the page that load was after into its own read, and clears
+    /// [isLoadingMore] when it ends. Without that the trailing spinner stuck
+    /// and every later `loadMore()` returned at its guard.
     private func reloadLoadedPages() {
         let pagesLoaded = nextPageIndex
         guard pagesLoaded > 0 else { return }
+        let absorbsLoadMore = isLoadingMore
+        let pagesToRead = absorbsLoadMore ? pagesLoaded + 1 : pagesLoaded
         loadTask?.cancel()
         let currentFilter = filter
         loadTask = Task { [weak self] in
             guard let self else { return }
+            // Same rule as `load`: only the task that is still current owns
+            // the spinner. A newer reload re-absorbs the page; a `startOver`
+            // clears the flag itself.
+            defer {
+                if !Task.isCancelled { self.isLoadingMore = false }
+            }
             var rebuilt: [ActivityItem] = []
-            for index in 0..<pagesLoaded {
+            var lastPageCount = 0
+            for index in 0..<pagesToRead {
                 guard let page = try? await self.source.page(
                     filter: currentFilter,
                     pageIndex: index
                 ) else { return }
                 rebuilt.append(contentsOf: page)
+                lastPageCount = page.count
             }
             guard !Task.isCancelled, self.filter == currentFilter else { return }
             self.setItems(rebuilt)
+            if absorbsLoadMore {
+                self.nextPageIndex = pagesToRead
+                self.hasMore = lastPageCount >= Self.pageSize
+            }
         }
     }
 

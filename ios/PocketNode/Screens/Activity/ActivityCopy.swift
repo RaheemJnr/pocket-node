@@ -118,6 +118,12 @@ enum ActivityCopy {
     static let loadFailed = "Failed to load transactions"
     static let retry = "Retry"
     static let retryTransaction = "Retry Transaction"
+
+    /// The alert a retry that did not go out raises over the list.
+    static let retryFailedTitle = "Retry failed"
+    /// Its message when the send path gave no reason of its own.
+    static let retryFailed = "The transaction could not be sent again. Check Activity and try later."
+    static let ok = "OK"
     static let notInABlock = "Not in a block yet"
     static let submitted = "Submitted"
     static let feePending = "Pending"

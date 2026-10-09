@@ -120,8 +120,26 @@ final class FakeActivityPaging: ActivityPaging {
         if let refreshError { throw refreshError }
     }
 
+    /// The next read of this page index suspends until ``releaseHeldPage()``.
+    /// One-shot: a second read of the same index answers straight away, which
+    /// is what lets a test hold a `loadMore()` while a reload runs past it.
+    var holdPageIndex: Int?
+    private var heldPage: CheckedContinuation<Void, Never>?
+
+    /// True while a read is parked by ``holdPageIndex``.
+    var isHoldingPage: Bool { heldPage != nil }
+
+    func releaseHeldPage() {
+        heldPage?.resume()
+        heldPage = nil
+    }
+
     func page(filter: ActivityFilter, pageIndex: Int) async throws -> [ActivityItem] {
         requestedPages.append((filter, pageIndex))
+        if holdPageIndex == pageIndex {
+            holdPageIndex = nil
+            await withCheckedContinuation { heldPage = $0 }
+        }
         if let pageError { throw pageError }
         let all = rows[filter] ?? []
         let start = pageIndex * ActivityViewModel.pageSize

@@ -581,6 +581,26 @@ final class SendViewModelTests: XCTestCase {
         XCTAssertTrue(model.isFinished)
     }
 
+    /// A poll that ran out of time is over for the sheet: Close finishes with
+    /// it, the form's "in progress" row goes, and the screen stays put (the
+    /// transaction lives on in Activity, not here).
+    func testATimedOutSendCanBeClosedAndLeavesNoRowBehind() {
+        service.status = SendStatus(
+            phase: .timedOut,
+            message: SendStatusPoller.companion.TIMED_OUT,
+            txHash: SendFixtures.txHash
+        )
+        XCTAssertTrue(model.status.isSettled)
+        XCTAssertTrue(model.showsStatusSheet)
+
+        model.dismissStatus()
+
+        XCTAssertEqual(service.dismissCalls, 1)
+        XCTAssertFalse(model.isFinished, "only a confirmed send pops the screen")
+        XCTAssertFalse(model.hasWatchedTransaction)
+        XCTAssertFalse(model.showsStatusSheet)
+    }
+
     /// "Hide" puts the sheet away and nothing else. A send the user has walked
     /// away from still has to reach a terminal state, so the poll must survive
     /// it, and the sheet must be reachable again.

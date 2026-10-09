@@ -37,6 +37,16 @@ enum class SendState {
 
     /** Terminal failure. */
     FAILED,
+
+    /**
+     * Terminal, outcome unknown: the poll ran out of attempts without an
+     * answer either way. The send is over as far as the status sheet is
+     * concerned (it can be closed), but the transaction is not: its pending
+     * broadcast row stays in Activity, where the broadcast watchdog and the
+     * startup reconciler keep resolving it, so a later confirmation still
+     * shows up there.
+     */
+    TIMED_OUT,
 }
 
 /**
@@ -76,7 +86,8 @@ data class SendProgress(
  *    taken as the confirmation;
  *  - running out of attempts with more than [TIMEOUT_UNKNOWN_THRESHOLD]
  *    unknowns is read the same way, while running out with a handful is
- *    reported honestly as "may still confirm" rather than as either outcome.
+ *    reported honestly as [SendState.TIMED_OUT] rather than as either
+ *    outcome: terminal for the sheet, still tracked in Activity.
  *
  * ## The balance callback
  *
@@ -263,9 +274,18 @@ class SendStatusPoller(
                 state = SendState.CONFIRMED,
                 statusMessage = SENT_SUCCESSFULLY,
             )
-        } else {
-            _state.value = _state.value.copy(statusMessage = TIMED_OUT)
+        } else if (_state.value.state != SendState.CONFIRMED) {
+            // Settled from the sheet's point of view, unknown from the
+            // chain's. Leaving it PENDING kept the sheet and the form waiting
+            // on a poll that had already stopped.
+            _state.value = _state.value.copy(
+                state = SendState.TIMED_OUT,
+                statusMessage = TIMED_OUT,
+            )
         }
+        // A transaction already committed with fewer than
+        // [REQUIRED_CONFIRMATIONS] is on chain: its confirmation count stays
+        // on screen rather than being replaced by "could not confirm".
         finish(epoch, startedAt, attempts)
     }
 
@@ -366,6 +386,6 @@ class SendStatusPoller(
         const val CONFIRMED = "Transaction confirmed"
         const val SENT_SUCCESSFULLY = "Transaction sent successfully"
         const val FAILED = "Transaction failed"
-        const val TIMED_OUT = "Status check timed out. Transaction may still confirm."
+        const val TIMED_OUT = "We could not confirm this transaction yet. Check Activity for its status."
     }
 }

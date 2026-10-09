@@ -113,6 +113,8 @@ final class SendCopyTests: XCTestCase {
         XCTAssertEqual(SendStatusSheet.title(for: .confirmed), "Transaction Confirmed!")
         XCTAssertEqual(SendStatusSheet.title(for: .failed), "Transaction Failed")
         XCTAssertEqual(SendStatusSheet.title(for: .idle), "Transaction Submitted")
+        // iOS only: Android's own loop has no timed-out state.
+        XCTAssertEqual(SendStatusSheet.title(for: .timedOut), "Not Confirmed Yet")
     }
 
     /// Only "Hide" leaves anything running, which is why the other two are
@@ -120,6 +122,7 @@ final class SendCopyTests: XCTestCase {
     func testTheDismissButtonSaysWhatItDoes() {
         XCTAssertEqual(SendStatusSheet.dismissLabel(for: .confirmed), "Done")
         XCTAssertEqual(SendStatusSheet.dismissLabel(for: .failed), "Close")
+        XCTAssertEqual(SendStatusSheet.dismissLabel(for: .timedOut), "Close")
         XCTAssertEqual(SendStatusSheet.dismissLabel(for: .pending), "Hide")
         XCTAssertEqual(SendStatusSheet.dismissLabel(for: .sending), "Hide")
     }
@@ -131,6 +134,9 @@ final class SendCopyTests: XCTestCase {
         XCTAssertFalse(SendStatus(phase: .proposed).isSettled)
         XCTAssertTrue(SendStatus(phase: .confirmed).isSettled)
         XCTAssertTrue(SendStatus(phase: .failed).isSettled)
+        // The poll gave up: nothing is watching it here any more, so the
+        // sheet must not be stuck on Hide over a poll that has stopped.
+        XCTAssertTrue(SendStatus(phase: .timedOut).isSettled)
     }
 
     // MARK: - The Kotlin bridge
@@ -142,6 +148,7 @@ final class SendCopyTests: XCTestCase {
         XCTAssertEqual(SendPhase(SendState.proposed), .proposed)
         XCTAssertEqual(SendPhase(SendState.confirmed), .confirmed)
         XCTAssertEqual(SendPhase(SendState.failed), .failed)
+        XCTAssertEqual(SendPhase(SendState.timedOut), .timedOut)
     }
 
     func testAKotlinProgressBecomesASwiftStatus() {

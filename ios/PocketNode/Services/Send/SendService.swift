@@ -39,8 +39,9 @@ struct SendStatus: Equatable {
 
     /// Only a finished send may be finished with: while a transaction is in
     /// flight the sheet offers "Hide", which puts the sheet away and leaves
-    /// the poll running.
-    var isSettled: Bool { phase == .confirmed || phase == .failed }
+    /// the poll running. A poll that ran out of time is finished too: nothing
+    /// is watching it any more, and Activity is where it goes on being tracked.
+    var isSettled: Bool { phase == .confirmed || phase == .failed || phase == .timedOut }
 }
 
 /// The Swift half of the shared `SendState`.
@@ -51,6 +52,9 @@ enum SendPhase: Equatable {
     case proposed
     case confirmed
     case failed
+    /// The poll ended without an answer either way. Settled for the sheet,
+    /// not for the transaction, which Activity keeps tracking.
+    case timedOut
 
     init(_ state: SendState) {
         switch state {
@@ -59,6 +63,7 @@ enum SendPhase: Equatable {
         case SendState.proposed: self = .proposed
         case SendState.confirmed: self = .confirmed
         case SendState.failed: self = .failed
+        case SendState.timedOut: self = .timedOut
         default: self = .idle
         }
     }

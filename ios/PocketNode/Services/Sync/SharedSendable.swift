@@ -16,6 +16,16 @@ import PocketNodeCore
 ///   shared core already relies on.
 /// - `SyncMode` is an enum constant: four process-wide singletons with no state.
 /// - `KotlinLong` and `KotlinBoolean` are immutable boxes around a primitive.
+/// - `SyncProgress` is a Kotlin `data class` with `val` properties only
+///   (Booleans, Longs, a Double, a String and a nullable Long), so it is an
+///   immutable value. It is the element type of `syncProgress`, and the
+///   `for await` that mirrors it onto `SyncService` pulls each element out of
+///   SKIE's iterator, whose `next()` is nonisolated, into a main-actor task.
+///   Xcode 16's compiler rejects that hand-over for a non-`Sendable` element
+///   ("non-sendable result type cannot be sent from nonisolated context")
+///   while Xcode 26's accepts it, so only CI caught it. Every other Kotlin
+///   element type observed that way (`KotlinBoolean`, `BalanceResponse`,
+///   `PendingBroadcastRecord`, `SendProgress`) is already declared here.
 ///
 /// The same reasoning `UniffiLightClientApi` is declared `@unchecked Sendable`
 /// under. Do not widen this list without the same kind of argument: a Kotlin
@@ -53,6 +63,7 @@ extension TransactionRecord: @retroactive @unchecked Sendable {}
 extension PendingBroadcastRecord: @retroactive @unchecked Sendable {}
 extension ActivityItem: @retroactive @unchecked Sendable {}
 extension SyncMode: @retroactive @unchecked Sendable {}
+extension SyncProgress: @retroactive @unchecked Sendable {}
 extension KotlinLong: @retroactive @unchecked Sendable {}
 extension KotlinBoolean: @retroactive @unchecked Sendable {}
 /// The send path, on the same terms as the rest of this file.

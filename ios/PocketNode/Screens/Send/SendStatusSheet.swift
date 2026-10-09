@@ -6,9 +6,10 @@ import PocketNodeCore
 ///
 /// The sheet cannot be finished with while the transaction is in flight: it
 /// offers "Hide" instead, which puts the sheet away, leaves the poll running
-/// and leaves the form a row to reopen it from. Only a confirmed or failed
-/// send gets "Done" / "Close", which are what actually stop the poll, and
-/// dismissing a confirmed one pops back to Home.
+/// and leaves the form a row to reopen it from. Only a confirmed, failed or
+/// timed-out send gets "Done" / "Close", which are what actually stop the
+/// poll, and dismissing a confirmed one pops back to Home. A timed-out one
+/// stays in Activity, which keeps resolving it.
 struct SendStatusSheet: View {
     let status: SendStatus
     let network: NetworkType
@@ -83,6 +84,10 @@ struct SendStatusSheet: View {
             Image(systemName: "xmark.circle.fill")
                 .font(.system(size: 48))
                 .foregroundStyle(Theme.errorRed)
+        case .timedOut:
+            Image(systemName: "clock.badge.questionmark")
+                .font(.system(size: 48))
+                .foregroundStyle(Theme.pendingAmber)
         default:
             ProgressView()
                 .controlSize(.large)
@@ -138,6 +143,7 @@ struct SendStatusSheet: View {
         switch phase {
         case .confirmed: return "Transaction Confirmed!"
         case .failed: return "Transaction Failed"
+        case .timedOut: return "Not Confirmed Yet"
         case .sending: return "Sending..."
         case .pending: return "Waiting for Confirmation"
         case .proposed: return "Processing..."
@@ -145,13 +151,14 @@ struct SendStatusSheet: View {
         }
     }
 
-    /// "Done" once it worked, "Close" once it did not, "Hide" while it is
+    /// "Done" once it worked, "Close" once it did not (or the poll gave up
+    /// without knowing), "Hide" while it is
     /// still happening. Only the last of those leaves the poll running, and it
     /// is the only one that can be tapped before there is an outcome.
     static func dismissLabel(for phase: SendPhase) -> String {
         switch phase {
         case .confirmed: return "Done"
-        case .failed: return "Close"
+        case .failed, .timedOut: return "Close"
         default: return "Hide"
         }
     }

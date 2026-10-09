@@ -255,10 +255,68 @@ class SendStatusPollerTest {
         poller.start(txHash, this)
         advanceTimeBy(tick * (SendStatusPoller.MAX_POLLING_ATTEMPTS + 1))
 
-        assertEquals(SendState.PENDING, poller.state.value.state)
+        // Terminal for the sheet: a PENDING left here kept the sheet and the
+        // form waiting on a poll that had already stopped.
+        assertEquals(SendState.TIMED_OUT, poller.state.value.state)
         assertEquals(SendStatusPoller.TIMED_OUT, poller.state.value.statusMessage)
+        assertEquals(txHash, poller.state.value.txHash)
         assertEquals(0, balanceChecks)
         assertEquals(SendStatusPoller.MAX_POLLING_ATTEMPTS, api.callsTo("getTransaction").size)
+
+        // And it is the end of the poll: nothing reads after it.
+        advanceTimeBy(tick * 10)
+        assertEquals(SendStatusPoller.MAX_POLLING_ATTEMPTS, api.callsTo("getTransaction").size)
+    }
+
+    /** A proposal that never commits within the window is no more known than a pending one. */
+    @Test
+    fun runningOutOfAttemptsOnAProposalReportsATimeout() = runTest {
+        val api = FakeLightClientApi().enqueue("getTransaction", statusJson("proposed"))
+        val poller = pollerOver(api)
+
+        poller.start(txHash, this)
+        advanceTimeBy(tick * (SendStatusPoller.MAX_POLLING_ATTEMPTS + 1))
+
+        assertEquals(SendState.TIMED_OUT, poller.state.value.state)
+        assertEquals(SendStatusPoller.TIMED_OUT, poller.state.value.statusMessage)
+    }
+
+    /**
+     * Every read failing is not an answer either: the poll still ends in the
+     * terminal-but-uncertain state rather than spinning on PENDING.
+     */
+    @Test
+    fun runningOutOfAttemptsOnFailedReadsReportsATimeout() = runTest {
+        val api = FakeLightClientApi().enqueue("getTransaction", "not json")
+        var balanceChecks = 0
+        val poller = pollerOver(api) { balanceChecks++; true }
+
+        poller.start(txHash, this)
+        advanceTimeBy(tick * (SendStatusPoller.MAX_POLLING_ATTEMPTS + 1))
+
+        assertEquals(SendState.TIMED_OUT, poller.state.value.state)
+        assertEquals(SendStatusPoller.TIMED_OUT, poller.state.value.statusMessage)
+        assertEquals(0, balanceChecks)
+    }
+
+    /**
+     * Committed but short of three confirmations when the window closes: it
+     * is on chain, so the sheet keeps saying so instead of "could not confirm".
+     */
+    @Test
+    fun runningOutOfAttemptsAfterACommitKeepsTheConfirmation() = runTest {
+        val api = FakeLightClientApi()
+            .enqueue("getTransaction", statusJson("committed", blockHash = "0xbb"))
+            .enqueue("getTipHeader", headerJson(100))
+            .enqueue("getHeader", headerJson(100))
+        val poller = pollerOver(api)
+
+        poller.start(txHash, this)
+        advanceTimeBy(tick * (SendStatusPoller.MAX_POLLING_ATTEMPTS + 1))
+
+        assertEquals(SendState.CONFIRMED, poller.state.value.state)
+        assertEquals(1, poller.state.value.confirmations)
+        assertEquals("1 confirmation (waiting for 2 more)...", poller.state.value.statusMessage)
     }
 
     /**

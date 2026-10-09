@@ -47,8 +47,21 @@ struct ActivityView: View {
                 network: model.network,
                 theme: theme,
                 elapsed: elapsed(for: item),
-                onRetry: model.onRetry
+                onRetry: model.canRetry ? { model.retry(txHash: $0) } : nil
             )
+        }
+        // The detail sheet is already gone when a retry comes back, so a
+        // retry that did not go out is reported here, over the list.
+        .alert(
+            ActivityCopy.retryFailedTitle,
+            isPresented: Binding(
+                get: { model.retryError != nil },
+                set: { presented in if !presented { model.dismissRetryError() } }
+            )
+        ) {
+            Button(ActivityCopy.ok, role: .cancel) { model.dismissRetryError() }
+        } message: {
+            Text(model.retryError ?? "")
         }
         .accessibilityElement(children: .contain)
         .accessibilityIdentifier("activity.root")

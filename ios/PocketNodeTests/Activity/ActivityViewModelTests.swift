@@ -168,10 +168,117 @@ final class ActivityViewModelTests: XCTestCase {
     /// The loads are fire-and-forget `Task`s rather than `async` methods, which
     /// is what lets a SwiftUI button call them; a few main-actor hops is enough
     /// for a fake that never suspends on real work.
+    /// A broadcast row changing while `loadMore()` waits on its page used to
+    /// cancel that load, whose spinner cleanup only runs when it is still
+    /// current, and the reload that replaced it never cleared the spinner
+    /// either. The trailing spinner stuck and every later `loadMore()`
+    /// returned at its guard.
+    func testABroadcastChangeDuringLoadMoreDoesNotStrandTheSpinner() async {
+        let source = FakeActivityPaging()
+        source.rows[ActivityFilter.all] = items(ActivityViewModel.pageSize * 2 + 4)
+        let model = ActivityViewModel(source: source)
+
+        model.onAppear()
+        await settle(model)
+        XCTAssertEqual(model.rows.count, ActivityViewModel.pageSize)
+
+        source.holdPageIndex = 1
+        model.loadMore()
+        await settle(model)
+        XCTAssertTrue(source.isHoldingPage)
+        XCTAssertTrue(model.isLoadingMore)
+
+        source.emitBroadcastChange()
+        await settle(model)
+
+        XCTAssertFalse(model.isLoadingMore, "the reload that replaced the load cleared its spinner")
+        XCTAssertEqual(
+            model.rows.count,
+            ActivityViewModel.pageSize * 2,
+            "the page the cancelled load was after was read by the reload, not lost"
+        )
+        XCTAssertTrue(model.hasMore)
+
+        // The superseded read finally answering changes nothing.
+        source.releaseHeldPage()
+        await settle(model)
+        XCTAssertFalse(model.isLoadingMore)
+        XCTAssertEqual(model.rows.count, ActivityViewModel.pageSize * 2)
+
+        // And paging still works: the guard is not stuck shut.
+        model.loadMore()
+        await settle(model)
+        XCTAssertEqual(model.rows.count, ActivityViewModel.pageSize * 2 + 4)
+        XCTAssertFalse(model.hasMore)
+        XCTAssertFalse(model.isLoadingMore)
+    }
+
+    // MARK: - Retry
+
+    private func failedItem() -> ActivityItem {
+        ActivityFixtures.item(
+            record: ActivityFixtures.record(txHash: "0xfail", status: "FAILED")
+        )
+    }
+
+    func testARetryThatDidNotGoOutRaisesItsReason() async {
+        let source = FakeActivityPaging()
+        // A main-actor class rather than a captured `var`: the handler is a
+        // `@MainActor` function type, which is Sendable, and older compilers
+        // reject a Sendable closure that mutates a captured local.
+        let asked = RetryRecorder()
+        let model = ActivityViewModel(source: source, onRetry: { hash in
+            asked.hashes.append(hash)
+            return "The network rejected the transaction"
+        })
+
+        XCTAssertTrue(model.canRetry)
+        model.retry(txHash: failedItem().record.txHash)
+        await settle(model)
+
+        XCTAssertEqual(asked.hashes, ["0xfail"])
+        XCTAssertEqual(model.retryError, "The network rejected the transaction")
+
+        model.dismissRetryError()
+        XCTAssertNil(model.retryError)
+    }
+
+    func testARetryWithNoReasonStillSaysItFailed() async {
+        let model = ActivityViewModel(source: FakeActivityPaging(), onRetry: { _ in "" })
+
+        model.retry(txHash: "0xfail")
+        await settle(model)
+
+        XCTAssertEqual(model.retryError, ActivityCopy.retryFailed)
+    }
+
+    func testARetryThatWentOutRaisesNothing() async {
+        let model = ActivityViewModel(source: FakeActivityPaging(), onRetry: { _ in nil })
+
+        model.retry(txHash: "0xfail")
+        await settle(model)
+
+        XCTAssertNil(model.retryError)
+    }
+
+    func testNoRetryHandlerMeansNoRetry() async {
+        let model = ActivityViewModel(source: FakeActivityPaging())
+
+        XCTAssertFalse(model.canRetry)
+        model.retry(txHash: "0xfail")
+        await settle(model)
+        XCTAssertNil(model.retryError)
+    }
+
     private func settle(_ model: ActivityViewModel) async {
         for _ in 0..<20 {
             await Task.yield()
         }
         _ = model
     }
+}
+
+@MainActor
+private final class RetryRecorder {
+    var hashes: [String] = []
 }

@@ -219,7 +219,15 @@ final class AppContainer {
             network: network
         )
         return ActivityViewModel(source: service, onRetry: { [send] hash in
-            Task { _ = await send.retry(txHash: hash) }
+            // The outcome goes back to the list, which raises an alert for a
+            // retry that did not go out. A dismissed auth prompt is an answer,
+            // not a failure, and stays silent as it does on the Send screen.
+            switch await send.retry(txHash: hash) {
+            case .success:
+                return nil
+            case .failure(let error):
+                return error.isCancellation ? nil : error.message
+            }
         })
     }
 
