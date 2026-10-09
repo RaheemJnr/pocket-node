@@ -13,6 +13,7 @@ import com.rjnr.pocketnode.data.database.dao.WalletDao
 import com.rjnr.pocketnode.data.database.entity.SubAccountCandidateEntity
 import com.rjnr.pocketnode.data.database.entity.WalletEntity
 import com.rjnr.pocketnode.data.gateway.LightClientReadOnly
+import com.rjnr.pocketnode.data.gateway.historicalStartBlock
 import com.rjnr.pocketnode.data.gateway.models.JniHeaderView
 import com.rjnr.pocketnode.data.gateway.models.NetworkType
 import com.rjnr.pocketnode.data.wallet.KeyManager
@@ -62,6 +63,10 @@ class RestoreHintExporter @Inject constructor(
         /** The light client has no tip yet, so the file would have no anchor. */
         object NoTip : ExportResult
         object KeyInvalidated : ExportResult
+        /**
+         * Anything else. [reason] is for logs and tests only; the user sees a
+         * generic message, never internal text such as a missing-row reason.
+         */
         data class Failed(val reason: String) : ExportResult
     }
 
@@ -76,23 +81,40 @@ class RestoreHintExporter @Inject constructor(
 
         val kdf = runCatching { keyMaterialDao.getKdfVersion(root.walletId) }.getOrNull()
         // V2: the BiometricPrompt inside readKeyMaterial is the gate.
-        if (kdf != 2) deviceAuthGate(activity)?.let { return it }
+        if (kdf != 2) {
+            val gate = try {
+                deviceAuthGate(activity)
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                logger.e(TAG, "Restore hint auth prompt failed", e)
+                ExportResult.Failed("auth prompt threw ${e::class.simpleName}")
+            }
+            gate?.let { return it }
+        }
 
-        val material = walletKeyReader.readKeyMaterial(
-            activity = activity,
-            walletId = root.walletId,
-            promptTitle = PROMPT_TITLE,
-            promptSubtitle = PROMPT_SUBTITLE,
-        )
+        val material = try {
+            walletKeyReader.readKeyMaterial(
+                activity = activity,
+                walletId = root.walletId,
+                promptTitle = PROMPT_TITLE,
+                promptSubtitle = PROMPT_SUBTITLE,
+            )
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            logger.e(TAG, "Restore hint key read failed", e)
+            return ExportResult.Failed("key read threw ${e::class.simpleName}")
+        }
         val secret = when (material) {
             is WalletKeyReader.MaterialResult.Success -> try {
-                secretFor(root, material) ?: return ExportResult.Failed("Recovery phrase unavailable for this wallet")
+                secretFor(root, material) ?: return ExportResult.Failed("recovery phrase unavailable")
             } finally {
                 material.privateKey.fill(0)
             }
             is WalletKeyReader.MaterialResult.Cancelled -> return ExportResult.Cancelled
             is WalletKeyReader.MaterialResult.KeyInvalidated -> return ExportResult.KeyInvalidated
-            is WalletKeyReader.MaterialResult.AuthError -> return ExportResult.Failed(material.message.toString())
+            is WalletKeyReader.MaterialResult.AuthError -> return ExportResult.Failed("auth error ${material.errorCode}")
             is WalletKeyReader.MaterialResult.NotAvailable -> return ExportResult.Failed(material.reason)
         }
 
@@ -103,18 +125,25 @@ class RestoreHintExporter @Inject constructor(
             throw e
         } catch (e: Exception) {
             logger.e(TAG, "Restore hint export failed", e)
-            ExportResult.Failed(e.message ?: "export failed")
+            ExportResult.Failed("build threw ${e::class.simpleName}")
         } finally {
             secret.wipe()
         }
     }
 
     /**
-     * The payload for [root] on [network], read from Room. Sub-accounts the
-     * source never synced on this network are left out: the source covered
-     * nothing for them, and the restore never has to cover more than the
-     * source did. The root is always present; with no progress row its
-     * coverage is 0, the conservative answer.
+     * The payload for [root] on [network], read from Room and the per-wallet
+     * sync prefs.
+     *
+     * Coverage is NOT just `sync_progress.lightStartBlockNumber`: every
+     * registration rewrites that column to the block it resumed from, so
+     * after a restart it sits near the tip. Each account's coverage is the
+     * lower of that column and the start its own sync mode implies
+     * ([historicalStartBlock], FULL_HISTORY = 0). A sub-account with no mode
+     * of its own falls back to its root's mode-derived start, and a root with
+     * none to 0. Heights are then rounded down to
+     * [RestoreHintFormat.HEIGHT_GRANULARITY]; every step only moves a start
+     * earlier.
      */
     suspend fun buildPayload(
         root: WalletEntity,
@@ -126,14 +155,12 @@ class RestoreHintExporter @Inject constructor(
         val isMnemonic = root.type == KeyManager.WALLET_TYPE_MNEMONIC
         val subAccounts = if (isMnemonic) walletDao.getSubAccountsList(root.walletId) else emptyList()
 
+        val rootModeStart = modeDerivedStart(root.walletId, network, tipHeight)
         val accounts = buildList {
-            add(accountFor(root, index = 0, network) ?: RestoreHintAccount(
-                index = 0,
-                coverageStart = 0L,
-                firstActivity = earliestActivity(root.walletId, network),
-                syncMode = syncPreferences.getSyncMode(network, root.walletId).name,
-            ))
-            subAccounts.forEach { sub -> accountFor(sub, sub.accountIndex, network)?.let(::add) }
+            add(accountFor(root, index = 0, network, tipHeight, fallbackModeStart = 0L))
+            subAccounts.forEach { sub ->
+                add(accountFor(sub, sub.accountIndex, network, tipHeight, fallbackModeStart = rootModeStart ?: 0L))
+            }
         }
 
         val discovery = if (isMnemonic) {
@@ -166,14 +193,33 @@ class RestoreHintExporter @Inject constructor(
         )
     }
 
-    private suspend fun accountFor(wallet: WalletEntity, index: Int, network: NetworkType): RestoreHintAccount? {
-        val progress = syncProgressDao.get(wallet.walletId, network.name) ?: return null
+    private suspend fun accountFor(
+        wallet: WalletEntity,
+        index: Int,
+        network: NetworkType,
+        tipHeight: Long,
+        fallbackModeStart: Long,
+    ): RestoreHintAccount {
+        val registeredFrom = syncProgressDao.get(wallet.walletId, network.name)?.lightStartBlockNumber
+        val modeStart = modeDerivedStart(wallet.walletId, network, tipHeight) ?: fallbackModeStart
+        val coverage = minOf(registeredFrom ?: Long.MAX_VALUE, modeStart).coerceAtLeast(0L)
         return RestoreHintAccount(
             index = index,
-            coverageStart = progress.lightStartBlockNumber.coerceAtLeast(0L),
-            firstActivity = earliestActivity(wallet.walletId, network),
+            coverageStart = RestoreHintFormat.coarsen(coverage),
+            firstActivity = earliestActivity(wallet.walletId, network)?.let(RestoreHintFormat::coarsen),
             syncMode = syncPreferences.getSyncMode(network, wallet.walletId).name,
         )
+    }
+
+    /** The start this wallet's own saved sync mode implies, or null when it has none on [network]. */
+    private fun modeDerivedStart(walletId: String, network: NetworkType, tipHeight: Long): Long? {
+        val mode = syncPreferences.getSyncModeOrNull(network, walletId) ?: return null
+        return historicalStartBlock(
+            mode,
+            syncPreferences.getCustomBlockHeight(network, walletId),
+            tipHeight,
+            network,
+        ).coerceAtLeast(0L)
     }
 
     private suspend fun earliestActivity(walletId: String, network: NetworkType): Long? =

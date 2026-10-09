@@ -27,6 +27,7 @@ import kotlinx.coroutines.test.runTest
 import kotlinx.serialization.json.Json
 import org.junit.After
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Before
 import org.junit.Test
@@ -102,19 +103,21 @@ class RestoreHintExporterTest {
     )
 
     @Test
-    fun `a mnemonic wallet exports its root, synced sub-accounts and discovery`() = runTest {
+    fun `a mnemonic wallet exports its root, sub-accounts and discovery`() = runTest {
         val root = wallet("root", active = true)
         db.walletDao().insert(root)
         db.walletDao().insert(wallet("sub2", parent = "root", index = 2))
-        db.walletDao().insert(wallet("sub3", parent = "root", index = 3)) // never synced here
+        db.walletDao().insert(wallet("sub3", parent = "root", index = 3)) // never synced, no prefs
         progress("root", 18_000_000L)
         progress("root", 1L, NetworkType.MAINNET) // other network, ignored
         progress("sub2", 18_400_000L)
         db.transactionDao().insert(tx("0x01", "root", 18_300_000L))
-        db.transactionDao().insert(tx("0x02", "root", 18_100_000L))
+        db.transactionDao().insert(tx("0x02", "root", 18_123_456L))
         db.transactionDao().insert(tx("0x03", "root", 5L, NetworkType.MAINNET)) // other network
         db.transactionDao().insert(tx("0x04", "root", 0L)) // pending, no block
+        db.transactionDao().insert(tx("0x05", "sub2", 18_412_345L))
         prefs.setSyncMode(SyncMode.CUSTOM, network, "root")
+        prefs.setCustomBlockHeight(17_505_000L, network, "root")
         prefs.setSyncMode(SyncMode.RECENT, network, "sub2")
         db.subAccountCandidateDao().insertAll(
             listOf(
@@ -137,8 +140,12 @@ class RestoreHintExporterTest {
                 tipHash = "0xabc",
                 kind = RestoreHintKind.MNEMONIC,
                 accounts = listOf(
-                    RestoreHintAccount(0, 18_000_000L, 18_100_000L, "CUSTOM"),
-                    RestoreHintAccount(2, 18_400_000L, null, "RECENT"),
+                    // min(light start 18,000,000, CUSTOM 17,505,000), rounded down.
+                    RestoreHintAccount(0, 17_500_000L, 18_120_000L, "CUSTOM"),
+                    // RECENT from tip is 18,674,368, so the light start wins.
+                    RestoreHintAccount(2, 18_400_000L, 18_410_000L, "RECENT"),
+                    // No progress and no mode of its own: the root's mode-derived start.
+                    RestoreHintAccount(3, 17_500_000L, null, "NEW_WALLET"),
                 ),
                 discovery = RestoreHintDiscovery(found = listOf(2, 4), highestScanned = 6),
             ),
@@ -151,13 +158,59 @@ class RestoreHintExporterTest {
         val root = wallet("raw", type = KeyManager.WALLET_TYPE_RAW_KEY, active = true)
         db.walletDao().insert(root)
         progress("raw", 17_000_000L)
+        prefs.setSyncMode(SyncMode.RECENT, network, "raw")
         db.transactionDao().insert(tx("0x01", "raw", 16_500_000L))
 
-        val payload = exporter().buildPayload(root, network, 1L, "0x1", 0L)
+        val payload = exporter().buildPayload(root, network, 19_000_000L, "0x1", 0L)
 
         assertEquals(RestoreHintKind.RAW_KEY, payload.kind)
-        assertEquals(listOf(RestoreHintAccount(0, 17_000_000L, 16_500_000L, prefs.getSyncMode(network, "raw").name)), payload.accounts)
+        assertEquals(listOf(RestoreHintAccount(0, 17_000_000L, 16_500_000L, "RECENT")), payload.accounts)
         assertEquals(RestoreHintDiscovery(), payload.discovery)
+    }
+
+    @Test
+    fun `coverage is the mode-derived start when registration rewrote the light start to the resume block`() = runTest {
+        // #561 review F1: every registration rewrites lightStartBlockNumber to
+        // the block it resumed from, so after a restart it sits near the tip.
+        val root = wallet("root", active = true)
+        db.walletDao().insert(root)
+        db.walletDao().insert(wallet("sub1", parent = "root", index = 1))
+        progress("root", 10_000_000L)
+        progress("sub1", 11_990_000L) // never opened, empty tx cache
+        prefs.setSyncMode(SyncMode.CUSTOM, network, "root")
+        prefs.setCustomBlockHeight(5_000_000L, network, "root")
+        prefs.setSyncMode(SyncMode.FULL_HISTORY, network, "sub1")
+
+        val payload = exporter().buildPayload(root, network, 12_000_000L, "0x1", 0L)
+
+        assertEquals(listOf(5_000_000L, 0L), payload.accounts.map { it.coverageStart })
+    }
+
+    @Test
+    fun `exported heights are rounded down to the granularity`() = runTest {
+        val root = wallet("root", active = true)
+        db.walletDao().insert(root)
+        progress("root", 18_123_456L)
+        prefs.setSyncMode(SyncMode.NEW_WALLET, network, "root")
+        db.transactionDao().insert(tx("0x01", "root", 18_129_999L))
+
+        val account = exporter().buildPayload(root, network, 18_200_000L, "0x1", 0L).accounts.single()
+
+        assertEquals(18_120_000L, account.coverageStart)
+        assertEquals(18_120_000L, account.firstActivity)
+    }
+
+    @Test
+    fun `a key read that throws fails the export with no internal text`() = runTest {
+        db.walletDao().insert(wallet("root", active = true))
+        coEvery { keyMaterialDao.getKdfVersion("root") } returns 2
+        coEvery { walletKeyReader.readKeyMaterial(activity, "root", any(), any()) } throws
+            IllegalStateException("no key_material row for root")
+
+        val result = exporter().export(activity, network)
+
+        assertTrue(result is RestoreHintExporter.ExportResult.Failed)
+        assertFalse((result as RestoreHintExporter.ExportResult.Failed).reason.contains("key_material"))
     }
 
     @Test
