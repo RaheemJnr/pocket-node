@@ -46,6 +46,7 @@ class MnemonicImportViewModelLockTest {
             walletKeyWriter = mockk(relaxed = true),
             authManager = mockk(relaxed = true),
             logger = NoopLogger,
+            restoreHintImporter = mockk(relaxed = true),
         )
     }
 

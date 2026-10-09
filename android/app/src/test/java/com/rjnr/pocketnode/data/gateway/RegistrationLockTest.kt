@@ -295,6 +295,28 @@ class RegistrationLockTest {
         assertEquals(OTHER_PROGRESS + 10, repository.getWalletSyncBlock(OTHER))
     }
 
+    /**
+     * Pins the column semantics the #559 restore hint export relies on (#561
+     * review F1): `lightStartBlockNumber` is the block the LAST registration
+     * started from, rewritten to the resume block on every registration, not
+     * the wallet's historical coverage. The exporter must therefore take the
+     * lower of it and the mode-derived start.
+     */
+    @Test
+    fun `a re-registration rewrites lightStartBlockNumber to the resume block`() = runBlocking {
+        build()
+        walletPreferences.setSyncStrategy(SyncStrategy.ALL_WALLETS)
+        repository.registerAccountWithStrategy(savePreference = false).getOrThrow()
+        repository.resyncAccount(SyncMode.CUSTOM, 5_000_000L).getOrThrow()
+        reportedScripts = statusesJson(activeScript to 10_000_000L, otherScript to OTHER_PROGRESS)
+        repository.getAccountStatus().getOrThrow() // the poll saves the progress
+
+        repository.registerAccountWithStrategy(savePreference = false).getOrThrow()
+
+        assertEquals(10_000_000L, db.syncProgressDao().get(ACTIVE, network.name)!!.lightStartBlockNumber)
+        assertEquals(5_000_000L, walletPreferences.getCustomBlockHeight(walletId = ACTIVE))
+    }
+
     // ------------------------------------------------------------------
     // Rollback: under the lock, and never after a landed set
     // ------------------------------------------------------------------

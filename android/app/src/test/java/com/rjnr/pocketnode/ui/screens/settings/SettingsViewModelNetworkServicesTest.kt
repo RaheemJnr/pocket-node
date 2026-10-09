@@ -123,6 +123,7 @@ class SettingsViewModelNetworkServicesTest {
         updateRepository = updateRepository,
         seedPhraseAuthorizer = mockk<SeedPhraseAuthorizer>(relaxed = true),
         keyMaterialDao = mockk<KeyMaterialDao>(relaxed = true),
+        restoreHintExporter = mockk(relaxed = true),
     )
 
     @Test
