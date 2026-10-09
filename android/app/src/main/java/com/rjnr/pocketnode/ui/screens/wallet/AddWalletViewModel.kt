@@ -18,7 +18,13 @@ import com.rjnr.pocketnode.data.wallet.WalletRepository
 import com.rjnr.pocketnode.ui.util.Bip39WordList
 import com.rjnr.pocketnode.ui.util.UiMessage
 import dagger.hilt.android.lifecycle.HiltViewModel
+import com.rjnr.pocketnode.core.crypto.hexToByteArray
+import com.rjnr.pocketnode.data.restorehint.RestoreHintImporter
+import com.rjnr.pocketnode.data.restorehint.RestoreHintPlan
+import com.rjnr.pocketnode.data.restorehint.RestoreHintSecret
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -53,6 +59,12 @@ data class AddWalletUiState(
      * would sit under the sheet's window). Cleared on the next Apply. */
     val syncChoiceError: UiMessage? = null,
     val tipBlockNumber: Long = 0L,
+    /** #559: a restore hint verified against the just-imported secret, awaiting confirmation. */
+    val restoreHintPlan: RestoreHintPlan? = null,
+    /** #559: why the picked restore hint file was rejected, shown inside the sheet. */
+    val restoreHintError: RestoreHintImporter.Reason? = null,
+    /** #559: true once the imported secret is held for verifying a hint. */
+    val canUseRestoreHint: Boolean = false,
 )
 
 @HiltViewModel
@@ -65,6 +77,7 @@ class AddWalletViewModel @Inject constructor(
     private val walletKeyWriter: WalletKeyWriter,
     private val authManager: com.rjnr.pocketnode.data.auth.AuthManager,
     private val logger: Logger,
+    private val restoreHintImporter: RestoreHintImporter,
 ) : ViewModel() {
 
     /**
@@ -153,9 +166,18 @@ class AddWalletViewModel @Inject constructor(
     // sheet resolves, either an explicit pick or a dismiss.
     private var pendingImportedWallet: WalletEntity? = null
 
+    /**
+     * #559: the just-imported wallet's secret (BIP-39 seed or private key),
+     * held only while the post-import sync sheet is open so a restore hint
+     * can be verified against it. Wiped when the sheet resolves, on a lock
+     * and when the ViewModel is cleared.
+     */
+    private var restoreHintSecret: RestoreHintSecret? = null
+
     init {
         // #524: a typed recovery phrase or private key never survives a lock.
         viewModelScope.onEachReauthLock {
+            releaseRestoreHintSecret()
             _uiState.update {
                 it.copy(
                     importWords = List(12) { "" },
@@ -192,7 +214,13 @@ class AddWalletViewModel @Inject constructor(
      * (RECENT included), the wallet may have imported at a different
      * default, so short-circuiting RECENT can silently drop the choice.
      */
-    fun onSyncModeSelected(mode: SyncMode, customHeight: Long?) {
+    fun onSyncModeSelected(mode: SyncMode, customHeight: Long?) = applySyncChoice(mode, customHeight)
+
+    private fun applySyncChoice(
+        mode: SyncMode,
+        customHeight: Long?,
+        beforeResync: suspend () -> Unit = {},
+    ) {
         // A second Apply tap while the first is in flight must not launch a
         // second resync: each would publish createdWallet, and a later one
         // could publish null over the first and strand navigation.
@@ -200,8 +228,11 @@ class AddWalletViewModel @Inject constructor(
         // Taken once here. Null only if the sheet shows without a pending
         // import; the choice is then still applied and the sheet closes.
         val wallet = pendingImportedWallet
-        _uiState.update { it.copy(isApplyingSyncChoice = true, syncChoiceError = null) }
+        _uiState.update {
+            it.copy(isApplyingSyncChoice = true, syncChoiceError = null, restoreHintError = null)
+        }
         viewModelScope.launch {
+            beforeResync()
             // resyncAccount reports failure through its Result; the catch is
             // a backstop so an unexpected throw still clears the in-flight
             // flag instead of leaving Apply disabled for good.
@@ -214,6 +245,7 @@ class AddWalletViewModel @Inject constructor(
             }
             if (failure == null) {
                 pendingImportedWallet = null
+                releaseRestoreHintSecret()
                 _uiState.update {
                     it.copy(isApplyingSyncChoice = false, showSyncModeDialog = false, createdWallet = wallet)
                 }
@@ -240,7 +272,73 @@ class AddWalletViewModel @Inject constructor(
         if (_uiState.value.isApplyingSyncChoice) return
         val wallet = pendingImportedWallet
         pendingImportedWallet = null
+        releaseRestoreHintSecret()
         _uiState.update { it.copy(showSyncModeDialog = false, syncChoiceError = null, createdWallet = wallet) }
+    }
+
+    // -- Restore hint (#559) --
+
+    private suspend fun holdRestoreHintSecret(make: suspend () -> RestoreHintSecret) {
+        releaseRestoreHintSecret()
+        val secret = try {
+            make()
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            // The hint is optional: without the secret the button stays hidden.
+            logger.w(TAG, "Restore hint secret unavailable", e)
+            return
+        }
+        restoreHintSecret = secret
+        _uiState.update { it.copy(canUseRestoreHint = true) }
+    }
+
+    private fun releaseRestoreHintSecret() {
+        restoreHintSecret?.wipe()
+        restoreHintSecret = null
+        _uiState.update {
+            it.copy(canUseRestoreHint = false, restoreHintPlan = null, restoreHintError = null)
+        }
+    }
+
+    /** The picked file's text, or null when it could not be read. */
+    fun onRestoreHintPicked(fileText: String?) {
+        val secret = restoreHintSecret
+        if (_uiState.value.isApplyingSyncChoice || secret == null) return
+        val verification = if (fileText == null) {
+            RestoreHintImporter.Verification.Rejected(RestoreHintImporter.Reason.UNREADABLE)
+        } else {
+            restoreHintImporter.verify(fileText, secret, gatewayRepository.currentNetwork)
+        }
+        _uiState.update {
+            when (verification) {
+                is RestoreHintImporter.Verification.Ready ->
+                    it.copy(restoreHintPlan = verification.plan, restoreHintError = null, syncChoiceError = null)
+                is RestoreHintImporter.Verification.Rejected ->
+                    it.copy(restoreHintPlan = null, restoreHintError = verification.reason)
+            }
+        }
+    }
+
+    /** Applies the verified hint: seeds discovery, then the ordinary post-import resync at its start. */
+    fun confirmRestoreHint() {
+        val plan = _uiState.value.restoreHintPlan ?: return
+        val secret = restoreHintSecret ?: return
+        val walletId = pendingImportedWallet?.walletId ?: return
+        _uiState.update { it.copy(restoreHintPlan = null) }
+        applySyncChoice(plan.syncMode, plan.customHeight) {
+            restoreHintImporter.prepare(walletId, plan, secret)
+        }
+    }
+
+    fun dismissRestoreHint() {
+        _uiState.update { it.copy(restoreHintPlan = null) }
+    }
+
+    override fun onCleared() {
+        restoreHintSecret?.wipe()
+        restoreHintSecret = null
+        super.onCleared()
     }
 
     fun selectParent(walletId: String) {
@@ -499,6 +597,9 @@ class AddWalletViewModel @Inject constructor(
                 gatewayRepository.onActiveWalletChanged(wallet)
                 // #431: hold navigation until the sync-mode sheet resolves.
                 pendingImportedWallet = wallet
+                holdRestoreHintSecret {
+                    withContext(Dispatchers.Default) { RestoreHintSecret.fromMnemonic(words) }
+                }
                 _uiState.update { it.copy(isLoading = false, showSyncModeDialog = true) }
             }.onFailure { error ->
                 logger.e(TAG, "Mnemonic import failed", error)
@@ -540,6 +641,14 @@ class AddWalletViewModel @Inject constructor(
                 gatewayRepository.onActiveWalletChanged(wallet)
                 // #431: hold navigation until the sync-mode sheet resolves.
                 pendingImportedWallet = wallet
+                holdRestoreHintSecret {
+                    val keyBytes = key.hexToByteArray()
+                    try {
+                        RestoreHintSecret.fromPrivateKey(keyBytes)
+                    } finally {
+                        keyBytes.fill(0)
+                    }
+                }
                 _uiState.update { it.copy(isLoading = false, showSyncModeDialog = true) }
             }.onFailure { error ->
                 logger.e(TAG, "Raw key import failed", error)

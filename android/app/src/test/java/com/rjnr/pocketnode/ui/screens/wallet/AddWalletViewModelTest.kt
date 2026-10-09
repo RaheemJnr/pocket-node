@@ -88,6 +88,7 @@ class AddWalletViewModelTest {
         walletKeyWriter = walletKeyWriter,
         authManager = authManager,
         logger = NoopLogger,
+        restoreHintImporter = mockk(relaxed = true),
     )
 
     @Test

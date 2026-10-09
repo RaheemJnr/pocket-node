@@ -147,6 +147,7 @@ class AddWalletViewModelImportSyncTest {
         walletKeyWriter = walletKeyWriter,
         authManager = authManager,
         logger = NoopLogger,
+        restoreHintImporter = mockk(relaxed = true),
     )
 
     private fun kotlinx.coroutines.test.TestScope.advanceUntil(condition: () -> Boolean) {

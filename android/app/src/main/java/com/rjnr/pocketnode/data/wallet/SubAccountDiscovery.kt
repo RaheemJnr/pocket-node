@@ -92,6 +92,21 @@ class SubAccountDiscovery @Inject constructor(
         }
     }
 
+    /**
+     * #559: account-axis candidates for explicit [indices] (each >= 1), from a
+     * seed already in hand. A verified restore hint uses this to seed indices
+     * beyond [CANDIDATE_WINDOW] that the old phone found active. Does not wipe
+     * [seed]; the caller owns it.
+     */
+    fun deriveCandidatesFromSeed(seed: ByteArray, indices: Collection<Int>): List<Candidate> =
+        indices.filter { it >= 1 }.distinct().sorted().map { index ->
+            Candidate(
+                accountIndex = index,
+                scriptArgs = argsFor(seed, accountIndex = index, chainIndex = 0, addressIndex = 0),
+                derivationPath = accountPath(index),
+            )
+        }
+
     private fun argsFor(seed: ByteArray, accountIndex: Int, chainIndex: Int, addressIndex: Int): String {
         val privateKey = mnemonicManager.derivePrivateKey(
             seed, accountIndex = accountIndex, chainIndex = chainIndex, addressIndex = addressIndex

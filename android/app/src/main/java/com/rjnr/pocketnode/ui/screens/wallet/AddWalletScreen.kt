@@ -65,6 +65,7 @@ import com.rjnr.pocketnode.R
 import com.rjnr.pocketnode.data.gateway.models.SyncMode
 import com.rjnr.pocketnode.ui.components.MnemonicWordInput
 import com.rjnr.pocketnode.ui.components.SyncOptionsSheet
+import com.rjnr.pocketnode.ui.components.messageRes
 import com.rjnr.pocketnode.ui.util.resolveString
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -131,7 +132,19 @@ fun AddWalletScreen(
 
     // #431: post-import sync-start picker, shown after a mnemonic or raw-key
     // import completes, same sheet and copy as the onboarding import path.
-    if (uiState.showSyncModeDialog) {
+    // #559: a verified restore hint replaces the sheet until confirmed or dismissed.
+    val pickRestoreHint = com.rjnr.pocketnode.ui.components.rememberRestoreHintPicker { text ->
+        viewModel.onRestoreHintPicked(text)
+    }
+    val hintPlan = uiState.restoreHintPlan
+    if (uiState.showSyncModeDialog && hintPlan != null) {
+        com.rjnr.pocketnode.ui.components.RestoreHintReadyDialog(
+            plan = hintPlan,
+            onConfirm = { viewModel.confirmRestoreHint() },
+            onDismiss = { viewModel.dismissRestoreHint() },
+        )
+    }
+    if (uiState.showSyncModeDialog && hintPlan == null) {
         SyncOptionsSheet(
             currentMode = SyncMode.RECENT,
             title = stringResource(R.string.home_post_import_sync_title),
@@ -145,7 +158,9 @@ fun AddWalletScreen(
             showHelpIcons = false,
             tipBlockNumber = uiState.tipBlockNumber,
             isApplying = uiState.isApplyingSyncChoice,
-            errorText = uiState.syncChoiceError?.resolveString(context),
+            errorText = uiState.syncChoiceError?.resolveString(context)
+                ?: uiState.restoreHintError?.let { stringResource(it.messageRes()) },
+            onUseRestoreHint = if (uiState.canUseRestoreHint) pickRestoreHint else null,
         )
     }
 
