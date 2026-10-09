@@ -5,7 +5,23 @@ import android.net.Uri
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.annotation.StringRes
+import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.width
 import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.Icon
+import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.OutlinedButton
+import androidx.compose.ui.Alignment
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.unit.dp
+import com.composables.icons.lucide.FileText
+import com.composables.icons.lucide.Lucide
+import com.rjnr.pocketnode.ui.util.uaTestTag
 import androidx.compose.material3.Button
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
@@ -73,7 +89,15 @@ fun RestoreHintReadyDialog(
     AlertDialog(
         onDismissRequest = onDismiss,
         title = { Text(stringResource(R.string.restore_hint_ready_title)) },
-        text = { Text(stringResource(R.string.restore_hint_ready, plan.startBlock, plan.sourceCoverageStart)) },
+        text = {
+            Text(
+                stringResource(
+                    R.string.restore_hint_ready,
+                    formatBlockHeight(plan.startBlock),
+                    formatBlockHeight(plan.sourceCoverageStart),
+                )
+            )
+        },
         confirmButton = {
             Button(onClick = onConfirm) { Text(stringResource(R.string.restore_hint_start_restore)) }
         },
@@ -81,4 +105,54 @@ fun RestoreHintReadyDialog(
             TextButton(onClick = onDismiss) { Text(stringResource(R.string.common_cancel)) }
         },
     )
+}
+
+/** A block height with the locale's digit grouping, e.g. 18,120,000. */
+fun formatBlockHeight(height: Long): String = java.text.NumberFormat.getIntegerInstance().format(height)
+
+/**
+ * #559: "Use a restore hint file" on an import screen, or the picked file with
+ * a Remove action. Shown before Import so the picker never opens while a
+ * secret is held. [error] is a rejection to show under it.
+ */
+@Composable
+fun RestoreHintFileRow(
+    hasFile: Boolean,
+    error: RestoreHintImporter.Reason?,
+    onPick: () -> Unit,
+    onRemove: () -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    Column(modifier = modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+        if (hasFile) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Icon(Lucide.FileText, contentDescription = null, modifier = Modifier.size(18.dp))
+                Spacer(Modifier.width(8.dp))
+                Text(
+                    stringResource(R.string.restore_hint_file_added),
+                    style = MaterialTheme.typography.bodyMedium,
+                    modifier = Modifier.weight(1f),
+                )
+                TextButton(onClick = onRemove) { Text(stringResource(R.string.restore_hint_remove)) }
+            }
+        } else {
+            OutlinedButton(onClick = onPick, modifier = Modifier.fillMaxWidth().uaTestTag("import-restore-hint")) {
+                Icon(Lucide.FileText, contentDescription = null, modifier = Modifier.size(18.dp))
+                Spacer(Modifier.width(8.dp))
+                Text(stringResource(R.string.restore_hint_use_file))
+            }
+            Text(
+                stringResource(R.string.restore_hint_pick_first),
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+        }
+        if (error != null) {
+            Text(
+                stringResource(error.messageRes()),
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.error,
+            )
+        }
+    }
 }

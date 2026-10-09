@@ -7,17 +7,23 @@ import com.rjnr.pocketnode.data.database.entity.SubAccountCandidateEntity
 import com.rjnr.pocketnode.data.gateway.models.NetworkType
 import com.rjnr.pocketnode.data.wallet.SubAccountDiscovery
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.CoroutineDispatcher
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
 import javax.inject.Inject
 import javax.inject.Singleton
 
 /**
  * Uses a restore hint file during a phrase or private-key import (#559).
  *
- * [verify] checks the file against the secret the user just entered and turns
- * it into a [RestoreHintPlan]. [prepare] then seeds sub-account discovery and
- * re-arms the zero-cell rescue rescan; the caller applies the plan's start
- * through the ordinary post-import sync choice (`resyncAccount`), exactly as
- * if the user had typed that custom height.
+ * The file is picked on the import screen, before any secret exists, and
+ * only its text is held. Once the import has derived the secret, [verify]
+ * checks the file against it, turns it into a [RestoreHintPlan], and derives
+ * the lock args of the sub-accounts it seeds, so the secret can be wiped
+ * straight after. [prepare] then writes those candidates and re-arms the
+ * zero-cell rescue rescan; the caller applies the plan's start through the
+ * ordinary post-import sync choice (`resyncAccount`), exactly as if the user
+ * had typed that custom height.
  *
  * What a hint never does: copy any flag or progress from the old phone,
  * mark initial sync or the zero-cell rescan as done, or claim a sub-account
@@ -32,8 +38,19 @@ class RestoreHintImporter @Inject constructor(
     private val logger: Logger,
 ) {
 
+    /** Where the MAC check and the candidate derivation run; a test seam. */
+    internal var computeDispatcher: CoroutineDispatcher = Dispatchers.Default
+
     sealed interface Verification {
-        data class Ready(val plan: RestoreHintPlan) : Verification
+        /**
+         * A usable hint. [seeds] are the plan's sub-account candidates, public
+         * lock args only, already derived so no secret outlives [verify].
+         */
+        data class Ready(
+            val plan: RestoreHintPlan,
+            val seeds: List<SubAccountDiscovery.Candidate>,
+        ) : Verification
+
         data class Rejected(val reason: Reason) : Verification
     }
 
@@ -48,39 +65,59 @@ class RestoreHintImporter @Inject constructor(
         UNREADABLE,
     }
 
-    fun verify(fileText: String, secret: RestoreHintSecret, network: NetworkType): Verification =
-        when (val opened = RestoreHintCodec.open(fileText, secret, network)) {
-            is RestoreHintOpenResult.Valid ->
-                RestoreHintPlanner.plan(opened.payload, secret.kind)
-                    ?.let { Verification.Ready(it) }
-                    ?: Verification.Rejected(Reason.UNREADABLE)
-            is RestoreHintOpenResult.Rejected -> Verification.Rejected(
-                when (opened.error) {
-                    RestoreHintError.BAD_MAC -> Reason.NOT_THIS_WALLET
-                    RestoreHintError.WRONG_NETWORK -> Reason.OTHER_NETWORK
-                    RestoreHintError.MALFORMED, RestoreHintError.UNSUPPORTED_VERSION -> Reason.UNREADABLE
+    /** Verifies [fileText] against [secret]. Does not wipe [secret]; the caller owns it. */
+    suspend fun verify(fileText: String, secret: RestoreHintSecret, network: NetworkType): Verification =
+        withContext(computeDispatcher) {
+            when (val opened = RestoreHintCodec.open(fileText, secret, network)) {
+                is RestoreHintOpenResult.Valid -> {
+                    val plan = RestoreHintPlanner.plan(opened.payload, secret.kind)
+                    if (plan == null) {
+                        Verification.Rejected(Reason.UNREADABLE)
+                    } else {
+                        Verification.Ready(plan, seedCandidates(plan, secret))
+                    }
                 }
-            )
+                is RestoreHintOpenResult.Rejected -> Verification.Rejected(
+                    when (opened.error) {
+                        RestoreHintError.BAD_MAC -> Reason.NOT_THIS_WALLET
+                        RestoreHintError.WRONG_NETWORK -> Reason.OTHER_NETWORK
+                        RestoreHintError.MALFORMED, RestoreHintError.UNSUPPORTED_VERSION -> Reason.UNREADABLE
+                    }
+                )
+            }
         }
 
+    private fun seedCandidates(plan: RestoreHintPlan, secret: RestoreHintSecret): List<SubAccountDiscovery.Candidate> {
+        if (plan.seedIndices.isEmpty()) return emptyList()
+        val seed = secret.copySeed() ?: return emptyList()
+        return try {
+            subAccountDiscovery.deriveCandidatesFromSeed(seed, plan.seedIndices)
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            // Seeding is an enhancement; the start height is the product.
+            logger.w(TAG, "Restore hint candidate derivation failed (non-fatal)", e)
+            emptyList()
+        } finally {
+            seed.fill(0)
+        }
+    }
+
     /**
-     * Seeds the plan's sub-account indices for [walletId] (mnemonic secrets
-     * only) and re-arms the wallet's zero-cell rescan. Seeding is best effort:
-     * the start height is the product, discovery an enhancement.
+     * Re-arms [walletId]'s zero-cell rescan and seeds the verified hint's
+     * sub-account candidates (best effort). No secret involved.
      */
-    suspend fun prepare(walletId: String, plan: RestoreHintPlan, secret: RestoreHintSecret) {
+    suspend fun prepare(walletId: String, ready: Verification.Ready) {
         // Belt and braces: resyncAccount re-arms this too. A hint must never
         // leave the rescue rescan disarmed.
         syncPreferences.clearZeroCellRescanDone(walletId)
-        if (plan.seedIndices.isEmpty()) return
-        val seed = secret.copySeed() ?: return
+        if (ready.seeds.isEmpty()) return
         try {
             val now = System.currentTimeMillis()
-            val candidates = subAccountDiscovery.deriveCandidatesFromSeed(seed, plan.seedIndices)
             // IGNORE on conflict: indices already in the import window keep
             // their row and state.
             subAccountCandidateDao.insertAll(
-                candidates.map {
+                ready.seeds.map {
                     SubAccountCandidateEntity(
                         parentWalletId = walletId,
                         derivationPath = it.derivationPath,
@@ -94,8 +131,6 @@ class RestoreHintImporter @Inject constructor(
             throw e
         } catch (e: Exception) {
             logger.w(TAG, "Restore hint discovery seeding failed (non-fatal)", e)
-        } finally {
-            seed.fill(0)
         }
     }
 

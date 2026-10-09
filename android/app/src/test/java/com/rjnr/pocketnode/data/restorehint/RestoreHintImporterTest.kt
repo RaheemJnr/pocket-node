@@ -12,6 +12,7 @@ import com.rjnr.pocketnode.data.wallet.KeyManager
 import com.rjnr.pocketnode.data.wallet.MnemonicManager
 import com.rjnr.pocketnode.data.wallet.SubAccountDiscovery
 import com.rjnr.pocketnode.data.wallet.WalletPreferences
+import kotlinx.coroutines.asCoroutineDispatcher
 import kotlinx.coroutines.test.runTest
 import org.junit.After
 import org.junit.Assert.assertEquals
@@ -41,6 +42,7 @@ class RestoreHintImporterTest {
         val mnemonicManager = MnemonicManager()
         discovery = SubAccountDiscovery(mnemonicManager, KeyManager(context, mnemonicManager, NoopLogger))
         importer = RestoreHintImporter(db.subAccountCandidateDao(), discovery, prefs, NoopLogger)
+        importer.computeDispatcher = kotlinx.coroutines.Dispatchers.Unconfined
     }
 
     @After
@@ -63,9 +65,12 @@ class RestoreHintImporterTest {
     private fun file(p: RestoreHintPayload = payload()) = RestoreHintCodec.seal(p, RestoreHintSecret.fromMnemonic(words))
 
     @Test
-    fun `a hint made with the same phrase is ready with the safe start`() {
+    fun `a hint made with the same phrase is ready with the safe start`() = runTest {
         val v = importer.verify(file(), RestoreHintSecret.fromMnemonic(words), NetworkType.TESTNET)
-        val plan = (v as RestoreHintImporter.Verification.Ready).plan
+        val ready = v as RestoreHintImporter.Verification.Ready
+        val plan = ready.plan
+        // The seeds are derived during verify, so no secret outlives it.
+        assertEquals(listOf(3, 12), ready.seeds.map { it.accountIndex })
         assertEquals(17_999_000L, plan.startBlock)
         assertEquals(18_000_000L, plan.sourceCoverageStart)
         assertEquals(SyncMode.CUSTOM, plan.syncMode)
@@ -73,7 +78,7 @@ class RestoreHintImporterTest {
     }
 
     @Test
-    fun `rejections map to the three user messages`() {
+    fun `rejections map to the three user messages`() = runTest {
         assertEquals(
             RestoreHintImporter.Verification.Rejected(RestoreHintImporter.Reason.NOT_THIS_WALLET),
             importer.verify(file(), RestoreHintSecret.fromMnemonic(otherWords), NetworkType.TESTNET),
@@ -112,9 +117,11 @@ class RestoreHintImporterTest {
         )
         prefs.setZeroCellRescanDone(walletId)
         val secret = RestoreHintSecret.fromMnemonic(words)
-        val plan = (importer.verify(file(), secret, NetworkType.TESTNET) as RestoreHintImporter.Verification.Ready).plan
+        val ready = importer.verify(file(), secret, NetworkType.TESTNET) as RestoreHintImporter.Verification.Ready
+        val seedCopy = secret.copySeed()!!
+        secret.wipe()
 
-        importer.prepare(walletId, plan, secret)
+        importer.prepare(walletId, ready)
 
         val rows = db.subAccountCandidateDao().getForParent(walletId).associateBy { it.accountIndex }
         assertEquals(setOf(3, 12), rows.keys)
@@ -122,11 +129,32 @@ class RestoreHintImporterTest {
         assertEquals(SubAccountCandidateEntity.STATE_PENDING, rows.getValue(12).state)
         assertEquals(0L, rows.getValue(12).registeredFromBlock)
         assertEquals(
-            discovery.deriveCandidatesFromSeed(secret.copySeed()!!, listOf(12)).single().scriptArgs,
+            discovery.deriveCandidatesFromSeed(seedCopy, listOf(12)).single().scriptArgs,
             rows.getValue(12).scriptArgs,
         )
         assertFalse("rescue rescan re-armed", prefs.isZeroCellRescanDone(walletId))
         assertFalse("initial sync not marked complete", prefs.hasCompletedInitialSync(walletId = walletId))
+    }
+
+    @Test
+    fun `verification and candidate derivation run on the compute dispatcher`() = runTest {
+        // #561 review F9: the seed derivation must not run on the caller's (main) thread.
+        val executor = java.util.concurrent.Executors.newSingleThreadExecutor { Thread(it, "hint-compute") }
+        try {
+            importer.computeDispatcher = executor.asCoroutineDispatcher()
+            var derivedOn: String? = null
+            val spy = io.mockk.spyk(discovery)
+            io.mockk.every { spy.deriveCandidatesFromSeed(any(), any()) } answers {
+                derivedOn = Thread.currentThread().name
+                callOriginal()
+            }
+            val local = RestoreHintImporter(db.subAccountCandidateDao(), spy, prefs, NoopLogger)
+            local.computeDispatcher = importer.computeDispatcher
+            local.verify(file(), RestoreHintSecret.fromMnemonic(words), NetworkType.TESTNET)
+            assertEquals("hint-compute", derivedOn)
+        } finally {
+            executor.shutdown()
+        }
     }
 
     @Test
@@ -137,10 +165,10 @@ class RestoreHintImporterTest {
             accounts = listOf(RestoreHintAccount(0, 100_000L, null, "RECENT")),
         )
         val secret = RestoreHintSecret.fromPrivateKey(key)
-        val plan = (importer.verify(RestoreHintCodec.seal(p, secret), secret, NetworkType.TESTNET)
-            as RestoreHintImporter.Verification.Ready).plan
-        importer.prepare("raw", plan, secret)
+        val ready = importer.verify(RestoreHintCodec.seal(p, secret), secret, NetworkType.TESTNET)
+            as RestoreHintImporter.Verification.Ready
+        importer.prepare("raw", ready)
         assertEquals(emptyList<SubAccountCandidateEntity>(), db.subAccountCandidateDao().getForParent("raw"))
-        assertEquals(99_000L, plan.startBlock)
+        assertEquals(99_000L, ready.plan.startBlock)
     }
 }

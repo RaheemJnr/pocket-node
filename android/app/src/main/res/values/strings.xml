@@ -581,10 +581,14 @@
     <string name="restore_hint_export_save_failed">Could not save the restore hint file.</string>
     <string name="restore_hint_export_needs_lock">Set a screen lock on this phone to export a restore hint.</string>
     <string name="restore_hint_export_no_tip">The node has not synced a block yet. Try again in a moment.</string>
-    <string name="restore_hint_export_failed">Could not export the restore hint: %1$s</string>
+    <string name="restore_hint_export_failed">Could not export the restore hint. Try again.</string>
+    <string name="restore_hint_export_not_saved">The restore hint was not saved. Try again.</string>
     <string name="restore_hint_use_file">Use a restore hint file</string>
     <string name="restore_hint_ready_title">Restore hint</string>
-    <string name="restore_hint_ready">Restore will start at block %1$d (the old phone synced from block %2$d).</string>
+    <string name="restore_hint_ready">Restore will start at block %1$s (the old phone synced from block %2$s).</string>
+    <string name="restore_hint_file_added">Restore hint file added</string>
+    <string name="restore_hint_remove">Remove</string>
+    <string name="restore_hint_pick_first">Optional. Add the file from your old phone before you enter your phrase or key.</string>
     <string name="restore_hint_start_restore">Start restore</string>
     <string name="restore_hint_not_this_wallet">This file does not belong to this recovery phrase.</string>
     <string name="restore_hint_other_network">This file is for the other network.</string>

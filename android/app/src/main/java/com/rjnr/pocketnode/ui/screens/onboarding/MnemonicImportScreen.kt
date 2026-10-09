@@ -19,6 +19,7 @@ import androidx.fragment.app.FragmentActivity
 import androidx.hilt.lifecycle.viewmodel.compose.hiltViewModel
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
+import com.rjnr.pocketnode.ui.screens.auth.ReauthLockEvents
 import com.rjnr.pocketnode.ui.screens.auth.onEachReauthLock
 import com.rjnr.pocketnode.core.log.Logger
 import com.rjnr.pocketnode.data.gateway.GatewayRepository
@@ -35,6 +36,7 @@ import com.rjnr.pocketnode.core.crypto.hexToByteArray
 import com.rjnr.pocketnode.data.restorehint.RestoreHintImporter
 import com.rjnr.pocketnode.data.restorehint.RestoreHintPlan
 import com.rjnr.pocketnode.data.restorehint.RestoreHintSecret
+import com.rjnr.pocketnode.ui.components.RestoreHintFileRow
 import com.rjnr.pocketnode.ui.components.RestoreHintReadyDialog
 import com.rjnr.pocketnode.ui.components.messageRes
 import com.rjnr.pocketnode.ui.components.rememberRestoreHintPicker
@@ -66,10 +68,10 @@ data class MnemonicImportUiState(
     val error: String? = null,
     /** #559: a restore hint verified against the just-imported secret, awaiting confirmation. */
     val restoreHintPlan: RestoreHintPlan? = null,
-    /** #559: why the picked restore hint file was rejected, shown inside the sheet. */
+    /** #559: why the restore hint file was rejected, shown on the screen and in the sheet. */
     val restoreHintError: RestoreHintImporter.Reason? = null,
-    /** #559: true once the imported secret is held for verifying a hint. */
-    val canUseRestoreHint: Boolean = false,
+    /** #559: a restore hint file was picked on this screen and will be checked after import. */
+    val hasRestoreHintFile: Boolean = false,
 )
 
 private const val TAG = "MnemonicImportVM"
@@ -89,18 +91,25 @@ class MnemonicImportViewModel @Inject constructor(
     val uiState: StateFlow<MnemonicImportUiState> = _uiState.asStateFlow()
 
     /**
-     * #559: the just-imported wallet's secret (BIP-39 seed or private key),
-     * held only while the post-import sync sheet is open so a restore hint
-     * can be verified against it. Wiped when the sheet resolves, on a lock
-     * and when the ViewModel is cleared.
+     * #559: the restore hint picked on this screen, as text. It is picked
+     * BEFORE the import so no secret is ever held while the file picker is
+     * open (opening it can trigger the re-auth lock). Not secret, and kept
+     * across a lock for that reason.
      */
-    private var restoreHintSecret: RestoreHintSecret? = null
+    private var restoreHintFileText: String? = null
+
+    /** #559: the verified hint awaiting confirmation; public data only. */
+    private var pendingRestoreHint: RestoreHintImporter.Verification.Ready? = null
     private var importedWalletId: String? = null
+
+    /** Seed derivation for hint verification, off the main thread; a test seam. */
+    internal var deriveMnemonicHintSecret: suspend (List<String>) -> RestoreHintSecret = { words ->
+        withContext(Dispatchers.Default) { RestoreHintSecret.fromMnemonic(words) }
+    }
 
     init {
         // #524: a typed recovery phrase never survives a lock.
         viewModelScope.onEachReauthLock {
-            releaseRestoreHintSecret()
             _uiState.update {
                 it.copy(words = List(12) { "" }, suggestions = emptyMap(), wordErrors = emptySet())
             }
@@ -211,8 +220,8 @@ class MnemonicImportViewModel @Inject constructor(
                 _uiState.update {
                     it.copy(isImporting = false, showSyncModeDialog = true)
                 }
-                holdRestoreHintSecret(entity.walletId) {
-                    withContext(Dispatchers.Default) { RestoreHintSecret.fromMnemonic(words) }
+                verifyRestoreHint(entity.walletId) {
+                    deriveMnemonicHintSecret(words)
                 }
             }.onFailure { error ->
                 logger.e(TAG, "Mnemonic import failed", error)
@@ -259,7 +268,7 @@ class MnemonicImportViewModel @Inject constructor(
                 _uiState.update {
                     it.copy(isImporting = false, showSyncModeDialog = true)
                 }
-                holdRestoreHintSecret(entity.walletId) {
+                verifyRestoreHint(entity.walletId) {
                     val keyBytes = hex.removePrefix("0x").hexToByteArray()
                     try {
                         RestoreHintSecret.fromPrivateKey(keyBytes)
@@ -334,7 +343,7 @@ class MnemonicImportViewModel @Inject constructor(
                 e
             }
             if (failure == null) {
-                releaseRestoreHintSecret()
+                clearRestoreHint()
                 _uiState.update {
                     it.copy(isApplyingSyncChoice = false, showSyncModeDialog = false, importSuccess = true)
                 }
@@ -351,81 +360,83 @@ class MnemonicImportViewModel @Inject constructor(
 
     fun skipSyncSelection() {
         if (_uiState.value.isApplyingSyncChoice) return
-        releaseRestoreHintSecret()
+        clearRestoreHint()
         _uiState.update { it.copy(showSyncModeDialog = false, syncChoiceError = null, importSuccess = true) }
     }
 
     // -- Restore hint (#559) --
 
-    private suspend fun holdRestoreHintSecret(walletId: String, make: suspend () -> RestoreHintSecret) {
-        releaseRestoreHintSecret()
+    /** The picked file's text, or null when it could not be read. */
+    fun onRestoreHintFilePicked(fileText: String?) {
+        restoreHintFileText = fileText
+        _uiState.update {
+            it.copy(
+                hasRestoreHintFile = fileText != null,
+                restoreHintError = if (fileText == null) RestoreHintImporter.Reason.UNREADABLE else null,
+            )
+        }
+    }
+
+    fun removeRestoreHintFile() = clearRestoreHint()
+
+    private fun clearRestoreHint() {
+        restoreHintFileText = null
+        pendingRestoreHint = null
+        importedWalletId = null
+        _uiState.update { it.copy(hasRestoreHintFile = false, restoreHintPlan = null, restoreHintError = null) }
+    }
+
+    /**
+     * Checks the picked hint against the secret the import just derived, and
+     * wipes the secret before returning. A re-auth lock while the secret
+     * existed discards the result: the lock is meant to end its life.
+     */
+    private suspend fun verifyRestoreHint(walletId: String, makeSecret: suspend () -> RestoreHintSecret) {
+        val text = restoreHintFileText ?: return
+        val locksAtStart = ReauthLockEvents.locks.value
         val secret = try {
-            make()
+            makeSecret()
         } catch (e: CancellationException) {
             throw e
         } catch (e: Exception) {
-            // The hint is optional: without the secret the button stays hidden.
             logger.w(TAG, "Restore hint secret unavailable", e)
             return
         }
-        // The user may have resolved the sheet while the seed was derived.
-        val state = _uiState.value
-        if (!state.showSyncModeDialog || state.isApplyingSyncChoice) {
+        val verification = try {
+            if (ReauthLockEvents.locks.value != locksAtStart) return
+            restoreHintImporter.verify(text, secret, repository.currentNetwork)
+        } finally {
             secret.wipe()
+        }
+        val state = _uiState.value
+        if (ReauthLockEvents.locks.value != locksAtStart || !state.showSyncModeDialog || state.isApplyingSyncChoice) {
             return
         }
-        restoreHintSecret = secret
         importedWalletId = walletId
-        _uiState.update { it.copy(canUseRestoreHint = true) }
-    }
-
-    private fun releaseRestoreHintSecret() {
-        restoreHintSecret?.wipe()
-        restoreHintSecret = null
-        importedWalletId = null
-        _uiState.update {
-            it.copy(canUseRestoreHint = false, restoreHintPlan = null, restoreHintError = null)
-        }
-    }
-
-    /** The picked file's text, or null when it could not be read. */
-    fun onRestoreHintPicked(fileText: String?) {
-        val secret = restoreHintSecret
-        if (_uiState.value.isApplyingSyncChoice || secret == null) return
-        val verification = if (fileText == null) {
-            RestoreHintImporter.Verification.Rejected(RestoreHintImporter.Reason.UNREADABLE)
-        } else {
-            restoreHintImporter.verify(fileText, secret, repository.currentNetwork)
-        }
-        _uiState.update {
-            when (verification) {
-                is RestoreHintImporter.Verification.Ready ->
-                    it.copy(restoreHintPlan = verification.plan, restoreHintError = null, syncChoiceError = null)
-                is RestoreHintImporter.Verification.Rejected ->
-                    it.copy(restoreHintPlan = null, restoreHintError = verification.reason)
+        when (verification) {
+            is RestoreHintImporter.Verification.Ready -> {
+                pendingRestoreHint = verification
+                _uiState.update { it.copy(restoreHintPlan = verification.plan, restoreHintError = null) }
             }
+            is RestoreHintImporter.Verification.Rejected ->
+                _uiState.update { it.copy(restoreHintPlan = null, restoreHintError = verification.reason) }
         }
     }
 
     /** Applies the verified hint: seeds discovery, then the ordinary post-import resync at its start. */
     fun confirmRestoreHint() {
-        val plan = _uiState.value.restoreHintPlan ?: return
-        val secret = restoreHintSecret ?: return
+        val ready = pendingRestoreHint ?: return
         val walletId = importedWalletId ?: return
         _uiState.update { it.copy(restoreHintPlan = null) }
-        applySyncChoice(plan.syncMode, plan.customHeight) {
-            restoreHintImporter.prepare(walletId, plan, secret)
+        applySyncChoice(ready.plan.syncMode, ready.plan.customHeight) {
+            restoreHintImporter.prepare(walletId, ready)
         }
     }
 
+    /** Back to the normal sync choices; the hint is not used. */
     fun dismissRestoreHint() {
+        pendingRestoreHint = null
         _uiState.update { it.copy(restoreHintPlan = null) }
-    }
-
-    override fun onCleared() {
-        restoreHintSecret?.wipe()
-        restoreHintSecret = null
-        super.onCleared()
     }
 
     fun clearError() {
@@ -483,7 +494,7 @@ fun MnemonicImportScreen(
         )
     }
 
-    val pickRestoreHint = rememberRestoreHintPicker { text -> viewModel.onRestoreHintPicked(text) }
+    val pickRestoreHint = rememberRestoreHintPicker { text -> viewModel.onRestoreHintFilePicked(text) }
     val hintPlan = uiState.restoreHintPlan
     if (uiState.showSyncModeDialog && hintPlan != null) {
         RestoreHintReadyDialog(
@@ -514,7 +525,6 @@ fun MnemonicImportScreen(
             isApplying = uiState.isApplyingSyncChoice,
             errorText = uiState.syncChoiceError
                 ?: uiState.restoreHintError?.let { stringResource(it.messageRes()) },
-            onUseRestoreHint = if (uiState.canUseRestoreHint) pickRestoreHint else null,
         )
     }
 
@@ -546,6 +556,15 @@ fun MnemonicImportScreen(
                 "Enter your 12-word recovery phrase to restore your wallet.",
                 style = MaterialTheme.typography.bodyMedium,
                 color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
+
+            // #559: picked before Import, so no secret is held while the
+            // file picker (and the re-auth lock it can trigger) is open.
+            RestoreHintFileRow(
+                hasFile = uiState.hasRestoreHintFile,
+                error = uiState.restoreHintError.takeIf { !uiState.showSyncModeDialog },
+                onPick = pickRestoreHint,
+                onRemove = { viewModel.removeRestoreHintFile() },
             )
 
             // Paste button

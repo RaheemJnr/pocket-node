@@ -134,7 +134,7 @@ fun AddWalletScreen(
     // import completes, same sheet and copy as the onboarding import path.
     // #559: a verified restore hint replaces the sheet until confirmed or dismissed.
     val pickRestoreHint = com.rjnr.pocketnode.ui.components.rememberRestoreHintPicker { text ->
-        viewModel.onRestoreHintPicked(text)
+        viewModel.onRestoreHintFilePicked(text)
     }
     val hintPlan = uiState.restoreHintPlan
     if (uiState.showSyncModeDialog && hintPlan != null) {
@@ -160,7 +160,6 @@ fun AddWalletScreen(
             isApplying = uiState.isApplyingSyncChoice,
             errorText = uiState.syncChoiceError?.resolveString(context)
                 ?: uiState.restoreHintError?.let { stringResource(it.messageRes()) },
-            onUseRestoreHint = if (uiState.canUseRestoreHint) pickRestoreHint else null,
         )
     }
 
@@ -220,8 +219,8 @@ fun AddWalletScreen(
                 }
 
                 1 -> NewWalletForm(uiState, viewModel, activity)
-                2 -> ImportMnemonicForm(uiState, viewModel, activity)
-                3 -> ImportKeyForm(uiState, viewModel, activity)
+                2 -> ImportMnemonicForm(uiState, viewModel, activity, pickRestoreHint)
+                3 -> ImportKeyForm(uiState, viewModel, activity, pickRestoreHint)
                 4 -> SubAccountForm(uiState, viewModel, activity)
             }
         }
@@ -293,6 +292,7 @@ private fun ImportMnemonicForm(
     uiState: AddWalletUiState,
     viewModel: AddWalletViewModel,
     activity: androidx.fragment.app.FragmentActivity,
+    onPickRestoreHint: () -> Unit,
 ) {
     val clipboardManager = LocalClipboardManager.current
 
@@ -302,6 +302,15 @@ private fun ImportMnemonicForm(
         label = { Text(stringResource(R.string.add_wallet_name_label)) },
         modifier = Modifier.fillMaxWidth(),
         singleLine = true
+    )
+    Spacer(Modifier.height(12.dp))
+    // #559: picked before Import, so no secret is held while the file
+    // picker (and the re-auth lock it can trigger) is open.
+    com.rjnr.pocketnode.ui.components.RestoreHintFileRow(
+        hasFile = uiState.hasRestoreHintFile,
+        error = uiState.restoreHintError.takeIf { !uiState.showSyncModeDialog },
+        onPick = onPickRestoreHint,
+        onRemove = { viewModel.removeRestoreHintFile() },
     )
     Spacer(Modifier.height(12.dp))
 
@@ -355,6 +364,7 @@ private fun ImportKeyForm(
     uiState: AddWalletUiState,
     viewModel: AddWalletViewModel,
     activity: androidx.fragment.app.FragmentActivity,
+    onPickRestoreHint: () -> Unit,
 ) {
     OutlinedTextField(
         value = uiState.name,
@@ -362,6 +372,15 @@ private fun ImportKeyForm(
         label = { Text(stringResource(R.string.add_wallet_name_label)) },
         modifier = Modifier.fillMaxWidth(),
         singleLine = true
+    )
+    Spacer(Modifier.height(8.dp))
+    // #559: picked before Import, so no secret is held while the file
+    // picker (and the re-auth lock it can trigger) is open.
+    com.rjnr.pocketnode.ui.components.RestoreHintFileRow(
+        hasFile = uiState.hasRestoreHintFile,
+        error = uiState.restoreHintError.takeIf { !uiState.showSyncModeDialog },
+        onPick = onPickRestoreHint,
+        onRemove = { viewModel.removeRestoreHintFile() },
     )
     Spacer(Modifier.height(8.dp))
     OutlinedTextField(
