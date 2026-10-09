@@ -20,7 +20,13 @@ import dagger.hilt.android.lifecycle.HiltViewModel
 import com.rjnr.pocketnode.R
 import com.rjnr.pocketnode.data.restorehint.RestoreHintExporter
 import com.rjnr.pocketnode.ui.util.UiMessage
+import android.content.ContentResolver
+import android.net.Uri
+import android.provider.DocumentsContract
+import kotlinx.coroutines.CoroutineDispatcher
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.withContext
 import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.receiveAsFlow
@@ -264,12 +270,26 @@ class SettingsViewModel @Inject constructor(
 
     // -- Restore hint (#559) --
 
-    private val _restoreHintFiles = Channel<RestoreHintExporter.ExportResult.Ready>(Channel.BUFFERED)
+    private val _restoreHintFiles = Channel<String>(Channel.BUFFERED)
 
-    /** Each export ready to save; the screen opens the system "save as" picker for it. */
-    val restoreHintFiles: Flow<RestoreHintExporter.ExportResult.Ready> = _restoreHintFiles.receiveAsFlow()
+    /**
+     * The suggested file name of each export ready to save; the screen opens
+     * the system "save as" picker with it and reports the chosen document to
+     * [onRestoreHintDocumentChosen].
+     */
+    val restoreHintFiles: Flow<String> = _restoreHintFiles.receiveAsFlow()
+
+    /**
+     * The export waiting for its document. Held here, not in the screen: the
+     * re-auth gate can take the screen out of composition while the picker is
+     * open, and a `remember` there came back empty and wrote a 0-byte file.
+     */
+    private var pendingRestoreHint: String? = null
 
     private var restoreHintExportJob: Job? = null
+
+    /** Where the document write runs; a test seam. */
+    internal var restoreHintIo: CoroutineDispatcher = Dispatchers.IO
 
     /**
      * Builds the active wallet's restore hint behind the same authentication
@@ -280,7 +300,8 @@ class SettingsViewModel @Inject constructor(
         restoreHintExportJob = viewModelScope.launch {
             val message = when (val result = restoreHintExporter.export(activity, repository.currentNetwork)) {
                 is RestoreHintExporter.ExportResult.Ready -> {
-                    _restoreHintFiles.send(result)
+                    pendingRestoreHint = result.text
+                    _restoreHintFiles.send(result.fileName)
                     null
                 }
                 RestoreHintExporter.ExportResult.Cancelled -> null
@@ -290,20 +311,41 @@ class SettingsViewModel @Inject constructor(
                     UiMessage.Resource(R.string.restore_hint_export_no_tip)
                 RestoreHintExporter.ExportResult.KeyInvalidated ->
                     UiMessage.Resource(R.string.vm_error_biometric_changed_self)
+                // Generic on purpose: the reason is internal text.
                 is RestoreHintExporter.ExportResult.Failed ->
-                    UiMessage.Resource(R.string.restore_hint_export_failed, listOf(result.reason))
+                    UiMessage.Resource(R.string.restore_hint_export_failed)
             }
             message?.let { msg -> _uiState.update { it.copy(error = msg) } }
         }
     }
 
-    fun onRestoreHintSaved(saved: Boolean) {
-        _uiState.update {
-            it.copy(
-                error = UiMessage.Resource(
-                    if (saved) R.string.restore_hint_export_saved else R.string.restore_hint_export_save_failed
-                )
-            )
+    /**
+     * The "save as" picker returned. Null [uri]: the user backed out. A
+     * document but nothing pending (the export was lost, e.g. the ViewModel
+     * was recreated): delete the empty document, best effort, and say so.
+     */
+    fun onRestoreHintDocumentChosen(uri: Uri?, resolver: ContentResolver) {
+        val text = pendingRestoreHint
+        pendingRestoreHint = null
+        if (uri == null) return
+        viewModelScope.launch {
+            val message = withContext(restoreHintIo) {
+                if (text == null) {
+                    runCatching { DocumentsContract.deleteDocument(resolver, uri) }
+                    R.string.restore_hint_export_not_saved
+                } else {
+                    val written = runCatching {
+                        resolver.openOutputStream(uri)?.use { it.write(text.toByteArray(Charsets.UTF_8)) } != null
+                    }.getOrDefault(false)
+                    if (written) {
+                        R.string.restore_hint_export_saved
+                    } else {
+                        runCatching { DocumentsContract.deleteDocument(resolver, uri) }
+                        R.string.restore_hint_export_save_failed
+                    }
+                }
+            }
+            _uiState.update { it.copy(error = UiMessage.Resource(message)) }
         }
     }
 

@@ -49,8 +49,6 @@ import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import kotlinx.coroutines.launch
-import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.withContext
 import com.composables.icons.lucide.FileText
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -348,29 +346,13 @@ fun SettingsScreen(
         }
     }
 
-    // #559: the exported restore hint waits here while the user picks where to save it.
-    var pendingRestoreHint by remember { mutableStateOf<String?>(null) }
+    // #559: the export itself waits in the ViewModel, which also writes it,
+    // so the re-auth gate hiding this screen mid-picker cannot lose it.
     val restoreHintSaver = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.CreateDocument("application/json")
-    ) { uri ->
-        val text = pendingRestoreHint
-        pendingRestoreHint = null
-        if (uri != null && text != null) {
-            scope.launch {
-                val saved = withContext(Dispatchers.IO) {
-                    runCatching {
-                        context.contentResolver.openOutputStream(uri)?.use { it.write(text.toByteArray(Charsets.UTF_8)) } != null
-                    }.getOrDefault(false)
-                }
-                viewModel.onRestoreHintSaved(saved)
-            }
-        }
-    }
+    ) { uri -> viewModel.onRestoreHintDocumentChosen(uri, context.contentResolver) }
     LaunchedEffect(Unit) {
-        viewModel.restoreHintFiles.collect { file ->
-            pendingRestoreHint = file.text
-            restoreHintSaver.launch(file.fileName)
-        }
+        viewModel.restoreHintFiles.collect { fileName -> restoreHintSaver.launch(fileName) }
     }
 
     SettingsScreenUI(
