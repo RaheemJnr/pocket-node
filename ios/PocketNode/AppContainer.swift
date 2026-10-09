@@ -65,8 +65,8 @@ final class AppContainer {
     var theme: Theme = .light
 
     /// Bumped whenever a decrypt in the wallet phase proves the keys unusable
-    /// (today: the recovery phrase reveal). `RootView` reroutes on it, which
-    /// lands on the restore for invalidated keys.
+    /// (today: the recovery phrase reveal and a send's key read). `RootView`
+    /// reroutes on it, which lands on the restore for invalidated keys.
     private(set) var keysUnusableSignal = 0
 
     init() {
@@ -134,6 +134,10 @@ final class AppContainer {
             auth: self.auth,
             preferences: self.preferences
         )
+        // A send whose key read proves the keys unusable reroutes the same way
+        // a phrase reveal does (see `makeBackupViewModel`). Set here, once
+        // every stored property is, because the closure captures `self`.
+        self.send.onKeysUnusable = { [weak self] in self?.keysUnusableSignal += 1 }
 
         Self.seedWalletForTestingIfRequested(walletStore: self.walletStore)
     }

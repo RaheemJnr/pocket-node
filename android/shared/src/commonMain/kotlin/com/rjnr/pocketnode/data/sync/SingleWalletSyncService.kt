@@ -19,11 +19,13 @@ import com.rjnr.pocketnode.data.storage.WalletRecord
 import com.rjnr.pocketnode.data.wallet.WalletDerivation
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.withContext
 import kotlin.concurrent.Volatile
 import kotlin.coroutines.CoroutineContext
 
@@ -178,8 +180,7 @@ class SingleWalletSyncService(
         customBlockHeight: Long?,
         nodeReady: () -> Boolean,
     ): Boolean {
-        val wallet = activeWallet
-        if (wallet == null) {
+        if (activeWallet == null) {
             logger.w(TAG, "registerWallet: no active wallet")
             return false
         }
@@ -188,69 +189,20 @@ class SingleWalletSyncService(
             return false
         }
 
+        // The tip read is a bridge round-trip, so it stays OUTSIDE the
+        // registration lock (the lock is a leaf: nothing under it waits for
+        // the node or the tip).
         val tipHeight = engine.readChainSyncState().tipNumber
-        val startBlock = startBlockFor(mode, customBlockHeight, tipHeight)
-        val blockNumberHex = "0x${startBlock.toString(16)}"
-        logger.i(
-            TAG,
-            "registerWallet mode=$mode tip=$tipHeight startBlock=$startBlock ($blockNumberHex)"
-        )
 
-        val status = JniScriptStatus(
-            script = WalletDerivation.lockScriptFromAddress(wallet.address),
-            scriptType = "lock",
-            blockNumber = blockNumberHex,
-        )
-
-        val ok = coordinator.setScriptsAndRecord(
-            listOf(status),
-            listOf(walletId),
-            SyncCoordinator.CMD_SET_SCRIPTS_ALL,
-            network,
-        )
-        if (!ok) {
-            logger.w(TAG, "registerWallet: light client refused the registration")
-            return false
-        }
-
-        // Invalidate any poll already in flight. Its `readChainSyncState` ran
-        // against the previous registration, so the block it is carrying
-        // describes the old range; landing after the upsert below it would
-        // write that block over the reset row, and the higher-only guard in
-        // `recordProgress` would then keep it there forever.
-        registrationEpoch++
-
-        // `setScriptsAndRecord` wrote the row through `updateLightStart`, which
-        // deliberately preserves `localSavedBlockNumber` so a concurrent poll
-        // write is not clobbered. That is right for a re-registration and wrong
-        // for this one: picking a new mode means the old progress no longer
-        // describes anything, and leaving it would have the next launch's
-        // `reregisterFromSavedProgress` resume from the block the PREVIOUS mode
-        // reached. Changing RECENT to All history would then silently stay
-        // RECENT. Android avoids it by zeroing the row first
-        // (`resyncAccount` -> `setWalletSyncBlock(id, 0)` -> `registerAccount(forceResync)`);
-        // replacing it here is the same thing in one write.
-        syncProgressStore.upsert(
-            SyncProgressRecord(
-                walletId = walletId,
-                network = network.name,
-                lightStartBlockNumber = startBlock,
-                localSavedBlockNumber = startBlock,
-                updatedAt = clock.nowMs(),
-            )
-        )
-
-        // Written with a null network, which means "the currently selected
-        // one": the same key an explicit network produces today, written the
-        // way Android's `registerAccount` writes it. Null is what keeps the
-        // writer aligned with the reader (`registerAllWalletScripts` calls
-        // `getSyncMode(walletId = ...)` with the network defaulted) if the
-        // selected network ever changes under a live service.
-        syncPreferences.setSyncMode(mode, walletId = walletId)
-        if (mode == SyncMode.CUSTOM) {
-            syncPreferences.setCustomBlockHeight(customBlockHeight, walletId = walletId)
-        }
-        syncPreferences.setInitialSyncCompleted(true, walletId = walletId)
+        // The set, the epoch bump, the progress reset and the prefs all run
+        // under the coordinator's registration lock, the one every other
+        // registration and the poll's progress write take (#539). They used
+        // to be written after the set released it: a poll could then write an
+        // old-range block over the reset row, and a queued re-registration
+        // could compute its set from the old progress and the old mode.
+        val startBlock = coordinator.withRegistrationLock {
+            registerWalletLocked(mode, customBlockHeight, tipHeight)
+        } ?: return false
         _isRegistered.value = true
 
         // The percentage is measured from where this wallet started, not from
@@ -264,11 +216,127 @@ class SingleWalletSyncService(
     }
 
     /**
+     * The half of [registerWallet] that holds the registration lock. Answers
+     * the registered start block, or null when the set did not land.
+     *
+     * The wallet, its id and the network are read here, under the lock, so a
+     * [setWallet] between the tip read and the lock cannot have this register
+     * one wallet and record progress for another.
+     *
+     * Nothing is written before the set, so a refused or failed set has
+     * nothing to roll back. Every write follows the set landing: the epoch
+     * bump and the prefs in `onLanded` (the moment the light client accepted,
+     * before the coordinator's own bookkeeping can throw), and the progress
+     * reset in a `finally` under [NonCancellable], so a cancellation or a
+     * failed bookkeeping write after the set still leaves the row agreeing
+     * with what the light client has.
+     */
+    private suspend fun SyncCoordinator.LockedRegistration.registerWalletLocked(
+        mode: SyncMode,
+        customBlockHeight: Long?,
+        tipHeight: Long,
+    ): Long? {
+        val wallet = activeWallet ?: run {
+            logger.w(TAG, "registerWallet: no active wallet under the lock")
+            return null
+        }
+        val id = walletId
+        val net = network
+
+        val startBlock = startBlockFor(mode, customBlockHeight, tipHeight, net)
+        val blockNumberHex = "0x${startBlock.toString(16)}"
+        logger.i(
+            TAG,
+            "registerWallet mode=$mode tip=$tipHeight startBlock=$startBlock ($blockNumberHex)"
+        )
+
+        val status = JniScriptStatus(
+            script = WalletDerivation.lockScriptFromAddress(wallet.address),
+            scriptType = "lock",
+            blockNumber = blockNumberHex,
+        )
+
+        var landed = false
+        try {
+            val ok = setScriptsLocked(
+                listOf(status),
+                listOf(id),
+                SyncCoordinator.CMD_SET_SCRIPTS_ALL,
+                net,
+                // Records whose set this is, so the "is the active wallet
+                // registered" checks see it (the public setScriptsAndRecord
+                // leaves registeredActiveWalletId null).
+                forActiveWallet = id,
+                onLanded = {
+                    landed = true
+                    // Invalidate any poll already in flight. Its
+                    // `readChainSyncState` ran against the previous
+                    // registration, so the block it carries describes the old
+                    // range; written over the reset row below, the higher-only
+                    // guard in `recordProgress` would keep it there forever.
+                    // The poll's write takes this same lock, so it either ran
+                    // before this set or checks the epoch after this bump.
+                    registrationEpoch++
+                    // Written with a null network, which means "the currently
+                    // selected one": the same key an explicit network produces
+                    // today, written the way Android's `registerAccount`
+                    // writes it. Null is what keeps the writer aligned with
+                    // the reader (`registerAllWalletScripts` calls
+                    // `getSyncMode(walletId = ...)` with the network
+                    // defaulted) if the selected network ever changes under a
+                    // live service.
+                    syncPreferences.setSyncMode(mode, walletId = id)
+                    if (mode == SyncMode.CUSTOM) {
+                        syncPreferences.setCustomBlockHeight(customBlockHeight, walletId = id)
+                    }
+                    syncPreferences.setInitialSyncCompleted(true, walletId = id)
+                },
+            )
+            if (!ok) {
+                logger.w(TAG, "registerWallet: light client refused the registration")
+                return null
+            }
+        } finally {
+            if (landed) {
+                // `setScriptsLocked` wrote the row through `updateLightStart`,
+                // which deliberately preserves `localSavedBlockNumber` so a
+                // concurrent poll write is not clobbered. That is right for a
+                // re-registration and wrong for this one: picking a new mode
+                // means the old progress no longer describes anything, and
+                // leaving it would have the next launch's
+                // `reregisterFromSavedProgress` resume from the block the
+                // PREVIOUS mode reached. Changing RECENT to All history would
+                // then silently stay RECENT. Android avoids it by zeroing the
+                // row first (`resyncAccount` -> `setWalletSyncBlock(id, 0)` ->
+                // `registerAccount(forceResync)`); replacing it here is the
+                // same thing in one write.
+                withContext(NonCancellable) {
+                    syncProgressStore.upsert(
+                        SyncProgressRecord(
+                            walletId = id,
+                            network = net.name,
+                            lightStartBlockNumber = startBlock,
+                            localSavedBlockNumber = startBlock,
+                            updatedAt = clock.nowMs(),
+                        )
+                    )
+                }
+            }
+        }
+        return startBlock
+    }
+
+    /**
      * The start block for [mode], with the two safety clamps
      * `GatewayRepository.registerAccount` applies after `toFromBlock`. The rule
      * itself is [clampStartBlock]; only the logging is here.
      */
-    private fun startBlockFor(mode: SyncMode, customBlockHeight: Long?, tipHeight: Long): Long {
+    private fun startBlockFor(
+        mode: SyncMode,
+        customBlockHeight: Long?,
+        tipHeight: Long,
+        network: NetworkType,
+    ): Long {
         val calculated = engine
             .startBlockFor(mode, network, tipHeight, customBlockHeight)
             .toLongOrNull() ?: 0L
@@ -402,8 +470,21 @@ class SingleWalletSyncService(
      * guard would make it permanent.
      */
     internal suspend fun recordProgress(block: Long, epoch: Long) {
+        if (block <= 0L) return
+        // tryLock, never a queue: a poll that finds a registration in flight
+        // skips this tick, and the next one reads against the new
+        // registration (#539). Holding the lock across the read and the write
+        // is what makes the epoch check below hold: no registration can land
+        // between the check and the write.
+        val ran = coordinator.tryWithRegistrationLock { recordProgressLocked(block, epoch) }
+        if (ran == null) {
+            logger.d(TAG, "a registration holds the lock; skipping this poll's progress write")
+        }
+    }
+
+    private suspend fun recordProgressLocked(block: Long, epoch: Long) {
         val id = walletId
-        if (id.isEmpty() || block <= 0L) return
+        if (id.isEmpty()) return
         if (epoch != registrationEpoch) {
             logger.d(TAG, "dropping a poll from before the last registration (block $block)")
             return

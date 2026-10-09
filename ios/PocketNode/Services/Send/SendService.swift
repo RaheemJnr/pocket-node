@@ -207,6 +207,17 @@ final class SendService: SendServicing {
     /// slower of the two cadences on a wallet that is already caught up.
     @ObservationIgnored private nonisolated(unsafe) var balanceTicker: Task<Void, Never>?
 
+    /// Told when the key read proves the keys unusable on this device
+    /// (``WalletKeyStoreError/provesKeysUnusable``), so the root can route to
+    /// the restore now rather than at the next reroute. The same hook
+    /// `BackupViewModel` takes.
+    ///
+    /// Assigned after construction rather than passed to `init` because its
+    /// owner, `AppContainer`, holds this object in a `let` and cannot capture
+    /// itself until every one of its stored properties, this one included,
+    /// is set.
+    @ObservationIgnored var onKeysUnusable: @MainActor () -> Void = {}
+
     init(
         sync: SyncService,
         walletStore: WalletStore,
@@ -343,7 +354,7 @@ final class SendService: SendServicing {
             return .failure(.cancelled)
         } catch {
             poller.markFailed()
-            return .failure(Self.keyFailure(error))
+            return .failure(Self.keyLoadFailure(error, onKeysUnusable: onKeysUnusable))
         }
 
         guard var keyBytes = decoded else {
@@ -573,6 +584,23 @@ final class SendService: SendServicing {
         let copied = KotlinByteArray.from(bytes)
         bytes.wipe()
         return copied
+    }
+
+    /// A failed key read in `send`, reported and mapped.
+    ///
+    /// A failure that proves the keys unusable has already retired the
+    /// envelope inside the key store, so the root is told at once (the same
+    /// way `BackupViewModel` tells it) and routes to the restore, instead of
+    /// the user meeting it only at the next reroute. Everything else is only
+    /// mapped: an auth failure or a Keychain hiccup is worth another try.
+    ///
+    /// Static, like ``moveKeyBytes(_:)``, so it can be tested without the
+    /// Keychain and the live pipeline `send` needs.
+    static func keyLoadFailure(_ error: Error, onKeysUnusable: @MainActor () -> Void) -> SendError {
+        if let keyError = error as? WalletKeyStoreError, keyError.provesKeysUnusable {
+            onKeysUnusable()
+        }
+        return keyFailure(error)
     }
 
     /// A key-store failure, in words that say what the user can do.
