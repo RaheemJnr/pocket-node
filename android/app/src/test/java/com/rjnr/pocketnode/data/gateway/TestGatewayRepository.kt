@@ -2,6 +2,8 @@ package com.rjnr.pocketnode.data.gateway
 
 import com.rjnr.pocketnode.core.log.NoopLogger
 import com.rjnr.pocketnode.data.database.AppDatabase
+import com.rjnr.pocketnode.data.database.dao.SyncProgressDao
+import com.rjnr.pocketnode.data.migration.WalletMigrationHelper
 import com.rjnr.pocketnode.data.sync.SyncEngine
 import com.rjnr.pocketnode.data.wallet.KeyManager
 import com.rjnr.pocketnode.data.wallet.WalletPreferences
@@ -30,15 +32,17 @@ internal fun testGatewayRepository(
     daoGateway: DaoGateway = mockk(relaxed = true),
     ledgerReader: LedgerReader = mockk(relaxed = true),
     json: Json = Json { ignoreUnknownKeys = true; encodeDefaults = true },
+    syncProgressDao: SyncProgressDao = db.syncProgressDao(),
+    walletMigrationHelper: WalletMigrationHelper = mockk(relaxed = true),
 ): GatewayRepository = GatewayRepository(
     keyManager = keyManager,
     walletPreferences = walletPreferences,
     json = json,
     cacheManager = mockk(relaxed = true),
-    walletMigrationHelper = mockk(relaxed = true),
+    walletMigrationHelper = walletMigrationHelper,
     walletDao = db.walletDao(),
     appDatabase = mockk(relaxed = true),
-    syncProgressDao = db.syncProgressDao(),
+    syncProgressDao = syncProgressDao,
     sendPipeline = mockk(relaxed = true),
     syncCoordinator = syncCoordinator,
     daoGateway = daoGateway,

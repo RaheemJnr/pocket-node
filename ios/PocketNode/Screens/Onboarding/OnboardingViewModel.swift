@@ -52,13 +52,93 @@ final class OnboardingViewModel {
     /// would refuse to replace, so nothing is created.
     private let prepareNewWallet: @MainActor () async -> Bool
 
-    /// The wallet whose keys are missing, when this flow is a restore rather
-    /// than a first run (see ``init(creator:restoring:hasPin:)``).
-    let restoringRecord: WalletRecord?
+    /// Which key recovery this flow is, when it is not a first run.
+    enum KeyRecovery: Equatable {
+        /// Put keys back under `record`: missing keys (a backup restored onto
+        /// a new phone) or, with `keysInvalidated`, an envelope this device
+        /// can no longer decrypt. Only the phrase or key for `record` is
+        /// accepted.
+        case restore(WalletRecord, keysInvalidated: Bool)
+        /// Unusable keys with no metadata to check against: any phrase or
+        /// key replaces them.
+        case replaceUnusableKeys
+    }
+
+    /// The recovery this flow runs, or nil for a first run.
+    let keyRecovery: KeyRecovery?
+
+    /// The wallet whose keys are being restored, when this flow is a restore
+    /// for a known wallet (see ``init(creator:restoring:keysInvalidated:hasPin:)``).
+    var restoringRecord: WalletRecord? {
+        guard case .restore(let record, _) = keyRecovery else { return nil }
+        return record
+    }
+
+    /// True for a restore whose old envelope is still here but unusable.
+    var restoresInvalidatedKeys: Bool {
+        guard case .restore(_, let invalidated) = keyRecovery else { return false }
+        return invalidated
+    }
+
+    /// True for the import over unusable keys with no metadata.
+    var replacesUnusableKeys: Bool { keyRecovery == .replaceUnusableKeys }
 
     /// Re-read after a restore: a PIN that survived is left alone, rather than
     /// letting the restore replace it without knowing it.
     private let hasPin: () -> Bool
+
+    /// Decrypts the keys once more, for a restore whose envelope was only
+    /// suspended (``KeyHealth/suspended``). Nil when there is nothing to
+    /// retry, which hides the action.
+    private let retryUnlockAction: (@MainActor () async throws -> Void)?
+
+    /// True when the restore screen offers "Try unlocking again".
+    var canRetryUnlock: Bool { retryUnlockAction != nil }
+
+    /// The action's title.
+    static let retryUnlockTitle = "Try unlocking again"
+
+    /// How many "Try unlocking again" attempts have failed in this session.
+    /// A dismissed prompt is not a failed attempt.
+    private(set) var failedRetryUnlocks = 0
+
+    /// True once enough attempts have failed that the way out is worth
+    /// saying (``reinstallHint``).
+    var showsReinstallHint: Bool { Self.showsReinstallHint(failedAttempts: failedRetryUnlocks) }
+
+    /// After three failed attempts.
+    static func showsReinstallHint(failedAttempts: Int) -> Bool {
+        failedAttempts >= 3
+    }
+
+    /// The extra line shown after repeated failures. True: a fresh install
+    /// wipes the Keychain items (`InstallMarker`).
+    static let reinstallHint =
+        "If this keeps failing, delete Pocket Node, install it again and restore with your recovery phrase."
+
+    /// The explanation the restore screen opens with, for this flow's
+    /// record: suspended keys (a retry is offered), invalidated keys, or
+    /// missing keys. Nil when this is not a restore for a known wallet.
+    var restoreExplanation: String? {
+        guard let record = restoringRecord else { return nil }
+        let rawKey = record.type == WalletCreator.typeRawKey
+        if canRetryUnlock {
+            return rawKey ? Self.suspendedKeyRestoreMessage : Self.suspendedPhraseRestoreMessage
+        }
+        if restoresInvalidatedKeys {
+            return rawKey ? Self.invalidatedKeyRestoreMessage : Self.invalidatedPhraseRestoreMessage
+        }
+        return rawKey ? Self.missingKeyRestoreMessage : Self.missingPhraseRestoreMessage
+    }
+
+    /// For keys that are suspended: they may still unlock, so the screen
+    /// does not say the device "can no longer" unlock them.
+    static let suspendedPhraseRestoreMessage =
+        "Your wallet keys could not be unlocked. Try unlocking again, or enter the recovery phrase to restore it."
+
+    /// ``suspendedPhraseRestoreMessage`` for a raw-key wallet.
+    static let suspendedKeyRestoreMessage =
+        "Your wallet keys could not be unlocked. Try unlocking again, or enter the private key to restore it."
 
     /// - Parameter step: where the flow starts. ``Step/welcome`` for a device
     ///   with no wallet; ``resumeStep(for:)`` for one whose onboarding was cut
@@ -70,8 +150,9 @@ final class OnboardingViewModel {
     ) {
         self.creator = creator
         self.prepareNewWallet = prepareNewWallet
-        self.restoringRecord = nil
+        self.keyRecovery = nil
         self.hasPin = { false }
+        self.retryUnlockAction = nil
         self.step = step
     }
 
@@ -82,18 +163,79 @@ final class OnboardingViewModel {
     /// is the one for `record`; it then replaces the key-less entry under the
     /// same id and address. There is no way back to the welcome step: the
     /// device already has this wallet, so creating another would be refused.
-    init(creator: WalletCreator, restoring record: WalletRecord, hasPin: @escaping () -> Bool) {
+    ///
+    /// `keysInvalidated` is the same restore for an envelope that is still
+    /// here but that this device can no longer decrypt (a change to Face ID
+    /// or the passcode, say); only the screen's explanation differs.
+    ///
+    /// `retryUnlock`, for keys that are only suspended, adds "Try unlocking
+    /// again": it decrypts once more, and if that works the wallet opens as
+    /// it was (``retryUnlock()``).
+    convenience init(
+        creator: WalletCreator,
+        restoring record: WalletRecord,
+        keysInvalidated: Bool = false,
+        hasPin: @escaping () -> Bool,
+        retryUnlock: (@MainActor () async throws -> Void)? = nil
+    ) {
+        self.init(
+            creator: creator,
+            keyRecovery: .restore(record, keysInvalidated: keysInvalidated),
+            hasPin: hasPin,
+            retryUnlock: retryUnlock
+        )
+    }
+
+    /// An import over key material this device can no longer decrypt, with
+    /// no metadata left to say which wallet it was. Any phrase or key is
+    /// accepted and replaces the unusable keys; a PIN that is there stays.
+    static func replacingUnusableKeys(creator: WalletCreator, hasPin: @escaping () -> Bool) -> OnboardingViewModel {
+        OnboardingViewModel(creator: creator, keyRecovery: .replaceUnusableKeys, hasPin: hasPin)
+    }
+
+    private init(
+        creator: WalletCreator,
+        keyRecovery: KeyRecovery,
+        hasPin: @escaping () -> Bool,
+        retryUnlock: (@MainActor () async throws -> Void)? = nil
+    ) {
+        self.retryUnlockAction = retryUnlock
         self.creator = creator
-        // A restore puts keys back under an existing wallet; it never starts a
-        // new one, so there is no orphaned PIN to clear first.
+        // A recovery puts keys back on a device that already has a wallet's
+        // key material; it never starts a new one from nothing, so there is
+        // no orphaned PIN to clear first.
         self.prepareNewWallet = { true }
-        self.restoringRecord = record
+        self.keyRecovery = keyRecovery
         self.hasPin = hasPin
         self.step = .importWallet
     }
 
-    /// True for the restore flow.
-    var isRestoring: Bool { restoringRecord != nil }
+    /// True for every recovery flow: a restore for a known wallet, or the
+    /// import over unusable keys. Neither has a welcome or create step.
+    var isRestoring: Bool { keyRecovery != nil }
+
+    /// The explanation the restore screen opens with for a wallet whose keys
+    /// are not on this device. Neutral about the cause: a backup restored
+    /// onto a new phone is the usual one, not the only one.
+    static let missingPhraseRestoreMessage =
+        "This wallet's keys are no longer on this device. Enter the recovery phrase to restore it."
+
+    /// ``missingPhraseRestoreMessage`` for a raw-key wallet.
+    static let missingKeyRestoreMessage =
+        "This wallet's keys are no longer on this device. Enter the private key to restore it."
+
+    /// The explanation for a wallet whose envelope this device can no longer
+    /// decrypt. No cause is claimed: the app cannot tell which one it was.
+    static let invalidatedPhraseRestoreMessage =
+        "This device can no longer unlock this wallet's keys. Enter the recovery phrase to restore it."
+
+    /// ``invalidatedPhraseRestoreMessage`` for a raw-key wallet.
+    static let invalidatedKeyRestoreMessage =
+        "This device can no longer unlock this wallet's keys. Enter the private key to restore it."
+
+    /// The explanation for the import over unusable keys with no metadata.
+    static let replaceUnusableKeysMessage =
+        "This device can no longer unlock the wallet that was here. Enter a recovery phrase or private key to restore a wallet."
 
     /// True for a restore of a wallet type this version cannot restore,
     /// neither a recovery phrase nor a raw private key (a record written by a
@@ -223,6 +365,13 @@ final class OnboardingViewModel {
             }
             return
         }
+        if replacesUnusableKeys {
+            await run {
+                try await self.creator.replaceUnusableKeys(words: words, name: name)
+                self.step = self.hasPin() ? .done : .pinSetup
+            }
+            return
+        }
         await run {
             try await self.requireCleanStart()
             try await self.creator.importMnemonic(words: words, name: name)
@@ -239,10 +388,34 @@ final class OnboardingViewModel {
             }
             return
         }
+        if replacesUnusableKeys {
+            await run {
+                try await self.creator.replaceUnusableKeys(privateKeyHex: hex, name: name)
+                self.step = self.hasPin() ? .done : .pinSetup
+            }
+            return
+        }
         await run {
             try await self.requireCleanStart()
             try await self.creator.importPrivateKey(hex: hex, name: name)
             self.step = .pinSetup
+        }
+    }
+
+    /// "Try unlocking again": decrypts the keys once more. If it works the
+    /// envelope is bound back to its key and the restore is over, as after a
+    /// phrase (the PIN step only when there is no PIN). If it fails the
+    /// screen stays, with the failure's message.
+    func retryUnlock() async {
+        guard let retryUnlockAction else { return }
+        await run {
+            do {
+                try await retryUnlockAction()
+            } catch {
+                if Self.message(for: error) != nil { self.failedRetryUnlocks += 1 }
+                throw error
+            }
+            self.step = self.hasPin() ? .done : .pinSetup
         }
     }
 
@@ -311,6 +484,9 @@ final class OnboardingViewModel {
             return "Could not save your wallet. Try again."
         case .doesNotMatchWallet:
             return "That does not match this wallet. Enter the recovery phrase or private key for the address shown."
+        case .keyReadFailed(let reason):
+            // Dismissing the prompt is silent here as on every other path.
+            return reason == .authenticationCancelled ? nil : "Could not read your wallet keys. Try again."
         }
     }
 }

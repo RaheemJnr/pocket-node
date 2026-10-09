@@ -48,6 +48,9 @@ struct ImportWalletView: View {
                 if let record = model.restoringRecord {
                     restoreHeader(record)
                 } else {
+                    if model.replacesUnusableKeys {
+                        replaceHeader
+                    }
                     Picker("What are you importing", selection: $mode) {
                         Text("Recovery phrase").tag(Mode.phrase)
                         Text("Private key").tag(Mode.privateKey)
@@ -61,8 +64,9 @@ struct ImportWalletView: View {
                 case .privateKey: privateKeySection
                 }
 
-                // A restore keeps the wallet's own name.
-                if !model.isRestoring {
+                // A restore keeps the wallet's own name. The import over
+                // unusable keys has no name left to keep, so it asks.
+                if model.restoringRecord == nil {
                     VStack(alignment: .leading, spacing: 8) {
                         Text("Wallet name")
                             .font(.headline)
@@ -78,6 +82,13 @@ struct ImportWalletView: View {
                     OnboardingErrorBanner(message: message)
                 }
 
+                if model.canRetryUnlock && model.showsReinstallHint {
+                    Text(OnboardingViewModel.reinstallHint)
+                        .font(.subheadline)
+                        .foregroundStyle(.secondary)
+                        .accessibilityIdentifier("import.reinstallHint")
+                }
+
                 Button(action: submit) {
                     if model.isBusy {
                         ProgressView().frame(maxWidth: .infinity)
@@ -89,6 +100,20 @@ struct ImportWalletView: View {
                 .controlSize(.large)
                 .disabled(model.isBusy || !canSubmit)
                 .accessibilityIdentifier("import.submit")
+
+                // Keys that are only suspended may still open: a decrypt
+                // refusal does not always repeat.
+                if model.canRetryUnlock {
+                    Button {
+                        Task { await model.retryUnlock() }
+                    } label: {
+                        Text(OnboardingViewModel.retryUnlockTitle).frame(maxWidth: .infinity)
+                    }
+                    .buttonStyle(.bordered)
+                    .controlSize(.large)
+                    .disabled(model.isBusy)
+                    .accessibilityIdentifier("import.retryUnlock")
+                }
             }
             .padding(24)
         }
@@ -107,14 +132,10 @@ struct ImportWalletView: View {
         VStack(alignment: .leading, spacing: 8) {
             Text("Restore \(record.name)")
                 .font(.headline)
-            Text(
-                record.type == WalletCreator.typeRawKey
-                    ? "This wallet's keys stay on the device they were created on and did not come across with your backup. Enter its private key to use it here."
-                    : "This wallet's keys stay on the device they were created on and did not come across with your backup. Enter its recovery phrase to use it here."
-            )
+            Text(model.restoreExplanation ?? "")
             .font(.subheadline)
             .foregroundStyle(.secondary)
-            Text("If it is lost, this wallet cannot be restored here. The only way to start over is to delete the app and install it again.")
+            Text("If it is lost, this wallet cannot be restored here.")
                 .font(.subheadline)
                 .foregroundStyle(.secondary)
             Text(HomeViewModel.shortened(record.mainnetAddress))
@@ -126,16 +147,27 @@ struct ImportWalletView: View {
         .accessibilityIdentifier("import.restore")
     }
 
+    /// The import over keys this device can no longer decrypt, with no
+    /// wallet left to name: any phrase or key restores a wallet here.
+    private var replaceHeader: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text("Restore a wallet")
+                .font(.headline)
+            Text(OnboardingViewModel.replaceUnusableKeysMessage)
+                .font(.subheadline)
+                .foregroundStyle(.secondary)
+        }
+        .accessibilityElement(children: .contain)
+        .accessibilityIdentifier("import.replaceKeys")
+    }
+
     /// A wallet type this version cannot restore: a plain explanation and
     /// no fields. The way out is on the toolbar (`OnboardingView`).
     private func unsupportedRestore(_ record: WalletRecord) -> some View {
         VStack(alignment: .leading, spacing: 8) {
             Text("Restore \(record.name)")
                 .font(.headline)
-            Text("This wallet's keys did not come across with your backup, and this version of Pocket Node cannot restore this kind of wallet. Update the app and try again.")
-                .font(.subheadline)
-                .foregroundStyle(.secondary)
-            Text("The only way to start over is to delete the app and install it again.")
+            Text("This version of Pocket Node cannot restore this kind of wallet. Update the app and try again.")
                 .font(.subheadline)
                 .foregroundStyle(.secondary)
         }

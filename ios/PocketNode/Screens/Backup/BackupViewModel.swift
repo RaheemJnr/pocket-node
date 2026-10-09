@@ -50,6 +50,10 @@ final class BackupViewModel {
     private let isOnboarding: Bool
     private let hasPin: () -> Bool
     private var rng: any RandomNumberGenerator
+    /// Told when a reveal's decrypt proves the keys unusable on this device
+    /// (``WalletKeyStoreError/provesKeysUnusable``), so the root can route to
+    /// the restore instead of leaving the user on an error.
+    private let onKeysUnusable: @MainActor () -> Void
 
     /// Bumped on every ``onBackgrounded()``. With ``AuthGating/lockGeneration``
     /// it makes up the generation a reveal records before it prompts or reads
@@ -71,8 +75,10 @@ final class BackupViewModel {
         auth: any AuthGating,
         isOnboarding: Bool,
         hasPin: @escaping () -> Bool,
-        rng: any RandomNumberGenerator = SystemRandomNumberGenerator()
+        rng: any RandomNumberGenerator = SystemRandomNumberGenerator(),
+        onKeysUnusable: @escaping @MainActor () -> Void = {}
     ) {
+        self.onKeysUnusable = onKeysUnusable
         self.walletKeyStore = walletKeyStore
         self.walletStore = walletStore
         self.auth = auth
@@ -125,6 +131,11 @@ final class BackupViewModel {
             selections = [:]
             step = .display
         } catch {
+            // Reported even when the reveal itself has gone stale: the keys
+            // are unusable either way, and the root decides where to go.
+            if let keyError = error as? WalletKeyStoreError, keyError.provesKeysUnusable {
+                onKeysUnusable()
+            }
             // A failure that lands after a background or lock is as stale as
             // a success: say nothing about a reveal nobody is watching.
             guard generation == currentGeneration else { return }
