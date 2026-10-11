@@ -137,6 +137,33 @@ final class RestoreHintInteropTests: XCTestCase {
         XCTAssertTrue(secret.isWiped)
     }
 
+    func testTheCallersPrivateKeyBufferIsZeroedOnceTheSecretIsBuilt() throws {
+        let key = RestoreHintKeyBytes([UInt8](repeating: 7, count: 32))
+
+        let secret = try XCTUnwrap(RestoreHintVerifier.makeSecret(.privateKey(key)))
+        defer { secret.wipe() }
+
+        XCTAssertTrue(key.isWiped)
+        XCTAssertTrue(key.isZeroed, "the caller's own buffer, not a copy of it")
+    }
+
+    @MainActor
+    func testTheCallersPrivateKeyBufferIsZeroedAfterTheAsyncCheck() async throws {
+        let text = try RestoreHintFixtures.text(RestoreHintFixtures.androidExport)
+        let key = RestoreHintKeyBytes(try XCTUnwrap(WalletCreator.decodePrivateKey(WalletCreatorTests.testPrivateKeyHex)))
+
+        _ = await RestoreHintVerifier.verify(fileText: text, material: .privateKey(key), network: .testnet)
+
+        XCTAssertTrue(key.isZeroed)
+    }
+
+    func testAWrongLengthKeyIsRefusedAndStillZeroed() {
+        let key = RestoreHintKeyBytes([UInt8](repeating: 9, count: 31))
+
+        XCTAssertNil(RestoreHintVerifier.makeSecret(.privateKey(key)))
+        XCTAssertTrue(key.isZeroed)
+    }
+
     // MARK: - Known-answer vector (the shared one, from Swift)
 
     /// The fixed payload from the shared `RestoreHintCodecTest`.
@@ -194,7 +221,7 @@ final class RestoreHintInteropTests: XCTestCase {
     }
 
     func testTheRawKeyKnownAnswerAuthKeyHoldsFromSwift() throws {
-        let secret = try XCTUnwrap(RestoreHintVerifier.makeSecret(.privateKey([UInt8](repeating: 1, count: 32))))
+        let secret = try XCTUnwrap(RestoreHintVerifier.makeSecret(.privateKey(RestoreHintKeyBytes([UInt8](repeating: 1, count: 32)))))
         defer { secret.wipe() }
 
         XCTAssertEqual(

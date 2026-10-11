@@ -25,8 +25,18 @@ final class StubRestoreHintSources: RestoreHintSources {
     }
 
     func restoreHintTip() async -> RestoreHintTip? { tip }
-    func restoreHintLightStart(walletId: String) async -> Int64? { lightStart }
-    func restoreHintBlockNumbers(walletId: String) async -> [String] { blockNumbers }
+    private(set) var lightStartReads = 0
+    private(set) var blockNumberReads = 0
+
+    func restoreHintLightStart(walletId: String) async -> Int64? {
+        lightStartReads += 1
+        return lightStart
+    }
+
+    func restoreHintBlockNumbers(walletId: String) async -> [String] {
+        blockNumberReads += 1
+        return blockNumbers
+    }
 }
 
 /// The interop fixtures and the public test vectors.

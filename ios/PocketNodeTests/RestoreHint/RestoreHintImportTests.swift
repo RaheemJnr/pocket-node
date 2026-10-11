@@ -138,12 +138,8 @@ final class RestoreHintImportTests: XCTestCase {
     }
 
     func testALockDuringVerificationDiscardsTheResult() async throws {
-        var reads = 0
-        let model = makeModel(lockGeneration: {
-            reads += 1
-            // Unchanged when the check starts, moved by the time it ends.
-            return reads > 1 ? 1 : 0
-        })
+        let lock = LockGenerationScript()
+        let model = makeModel(lockGeneration: { lock.next() })
         model.setRestoreHint(text: try RestoreHintFixtures.text(RestoreHintFixtures.androidExport))
 
         await model.importMnemonic(words: RestoreHintFixtures.abandonWords, name: "Restored")
@@ -186,6 +182,22 @@ final class RestoreHintImportTests: XCTestCase {
         let url = directory.appendingPathComponent("huge.json")
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
         try Data(repeating: 0x61, count: RestoreHintFile.maxChars * 4 + 1).write(to: url)
+        let model = makeModel()
+
+        model.pickRestoreHint(.success(url))
+
+        XCTAssertNil(model.restoreHintText)
+        XCTAssertEqual(model.restoreHintPickError, "This file could not be read.")
+    }
+
+    func testThePickCapCountsUtf16UnitsLikeTheSharedCodec() throws {
+        // Each emoji is one Swift character but two UTF-16 units, so this is
+        // under the cap by `count` and over it by Kotlin's `length`.
+        let url = directory.appendingPathComponent("emoji.json")
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        let text = String(repeating: "\u{1F600}", count: RestoreHintFile.maxChars / 2 + 1)
+        XCTAssertLessThanOrEqual(text.count, RestoreHintFile.maxChars)
+        try Data(text.utf8).write(to: url)
         let model = makeModel()
 
         model.pickRestoreHint(.success(url))
@@ -336,5 +348,18 @@ final class RestoreHintImportTests: XCTestCase {
         XCTAssertTrue(applied)
         XCTAssertEqual(sync.chosen.first?.0, .custom)
         XCTAssertEqual(sync.chosen.first?.1, 22_569_000)
+    }
+}
+
+/// A lock generation that is unchanged when the check starts and has moved by
+/// the time it ends. A class rather than a captured `var`, which Swift 6.0
+/// (Xcode 16) is stricter about.
+@MainActor
+final class LockGenerationScript {
+    private(set) var reads = 0
+
+    func next() -> Int {
+        reads += 1
+        return reads > 1 ? 1 : 0
     }
 }

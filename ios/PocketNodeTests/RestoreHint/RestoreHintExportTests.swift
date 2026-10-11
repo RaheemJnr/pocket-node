@@ -152,9 +152,10 @@ final class RestoreHintExportTests: XCTestCase {
         ),
         auth: StubAuthGate = StubAuthGate(),
         sources: StubRestoreHintSources = StubRestoreHintSources(lightStart: 22_690_000),
-        record: WalletRecord? = RestoreHintExportTests.record
+        record: WalletRecord? = RestoreHintExportTests.record,
+        store: StubWalletRecordStore = StubWalletRecordStore(),
+        savedMessageLifetime: Duration = .seconds(4)
     ) -> RestoreHintExportViewModel {
-        let store = StubWalletRecordStore()
         store.recordToLoad = record
         return RestoreHintExportViewModel(
             walletKeyStore: keyReader,
@@ -162,8 +163,77 @@ final class RestoreHintExportTests: XCTestCase {
             auth: auth,
             preferences: preferences,
             sources: sources,
-            now: { 1_790_000_000_000 }
+            now: { 1_790_000_000_000 },
+            savedMessageLifetime: savedMessageLifetime
         )
+    }
+
+    func testEverythingButTheSecretIsReadBeforeTheAuthPrompt() async {
+        let sources = StubRestoreHintSources(lightStart: 22_690_000)
+        let auth = StubAuthGate()
+        let readsAtPrompt = ReadsRecorder()
+        auth.whilePrompting = { readsAtPrompt.values = [sources.lightStartReads, sources.blockNumberReads] }
+        let keyReader = StubWalletKeyReader(
+            result: .success(WalletKeyBundle(privateKeyHex: "00", mnemonic: RestoreHintFixtures.abandonWords.joined(separator: " ")))
+        )
+        let model = makeModel(keyReader: keyReader, auth: auth, sources: sources)
+
+        await model.export()
+
+        XCTAssertEqual(readsAtPrompt.values, [1, 1], "the chain-side inputs were read before the prompt")
+        XCTAssertEqual(sources.lightStartReads, 1)
+        XCTAssertEqual(sources.blockNumberReads, 1)
+        XCTAssertNotNil(model.pendingDocument)
+    }
+
+    func testAFileSealedForAnotherWalletIsDroppedWhenSettingsAppears() async {
+        let store = StubWalletRecordStore()
+        let model = makeModel(store: store)
+        await model.export()
+        XCTAssertNotNil(model.pendingDocument)
+
+        model.screenAppeared()
+        XCTAssertNotNil(model.pendingDocument, "same wallet: the file waits")
+
+        store.recordToLoad = WalletRecord(
+            id: "w2",
+            name: "Other",
+            type: WalletCreator.typeMnemonic,
+            derivationPath: "m/44'/309'/0'/0/0",
+            mainnetAddress: WalletCreatorTests.testMainnetAddress,
+            testnetAddress: WalletCreatorTests.testTestnetAddress,
+            mnemonicBackedUp: true,
+            createdAt: 0
+        )
+        model.screenAppeared()
+
+        XCTAssertNil(model.pendingDocument)
+        XCTAssertFalse(model.isPresentingSaver)
+    }
+
+    func testTheSavedLineIsTransient() async throws {
+        let model = makeModel(savedMessageLifetime: .milliseconds(50))
+        await model.export()
+
+        model.saveSucceeded()
+        XCTAssertEqual(model.message, "Restore hint saved")
+        try await Task.sleep(for: .milliseconds(400))
+
+        XCTAssertNil(model.message)
+    }
+
+    func testTheSavedLineIsClearedOnTheNextVisitButNotSavedStays() async {
+        let model = makeModel()
+        await model.export()
+        model.saveSucceeded()
+
+        model.screenAppeared()
+        XCTAssertNil(model.message)
+
+        await model.export()
+        model.saveDidNotComplete()
+        model.screenAppeared()
+        XCTAssertEqual(model.message, "The restore hint was not saved. Try again.")
     }
 
     func testAnExportAuthenticatesAndHoldsAFileTheSamePhraseVerifies() async throws {
@@ -209,7 +279,7 @@ final class RestoreHintExportTests: XCTestCase {
         await model.export()
 
         let document = try XCTUnwrap(model.pendingDocument)
-        let key = try XCTUnwrap(WalletCreator.decodePrivateKey(WalletCreatorTests.testPrivateKeyHex))
+        let key = RestoreHintKeyBytes(try XCTUnwrap(WalletCreator.decodePrivateKey(WalletCreatorTests.testPrivateKeyHex)))
         let result = await RestoreHintVerifier.verify(fileText: document.text, material: .privateKey(key), network: .testnet)
         guard case .ready = result else { return XCTFail("expected the raw key to verify its own file, got \(result)") }
     }
@@ -309,6 +379,78 @@ final class RestoreHintExportTests: XCTestCase {
         XCTAssertEqual(model.pendingDocument, document)
     }
 
+    /// Drives the real document picker: present it from a hosted Settings
+    /// screen, cancel it the way the system does, and check the file is
+    /// reported as not saved and a second export works.
+    func testCancellingTheRealSavePickerSaysNotSavedAndAllowsAnotherExport() async throws {
+        let model = makeModel()
+        await model.export()
+        XCTAssertNotNil(model.pendingDocument)
+        let auth = AuthService(
+            pin: PinService(keychain: KeychainStore(service: "\(suiteName).pin"), cost: .testing),
+            biometrics: StubBiometrics(availability: .faceID),
+            preferences: preferences
+        )
+
+        let host = UIHostingController(rootView: NavigationStack {
+            SettingsView(auth: auth, restoreHint: model, onBackUp: {})
+        })
+        // Attached to the app's scene: a window with no scene cannot present
+        // the picker.
+        let scene = try XCTUnwrap(
+            UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }.first
+        )
+        let window = UIWindow(windowScene: scene)
+        window.frame = CGRect(x: 0, y: 0, width: 393, height: 852)
+        window.rootViewController = host
+        window.makeKeyAndVisible()
+        defer {
+            window.rootViewController = nil
+            window.isHidden = true
+        }
+
+        let picker = try await presentedPicker(from: host)
+        let delegate = try XCTUnwrap(picker.delegate, "the exporter's picker has a delegate")
+        delegate.documentPickerWasCancelled?(picker)
+        picker.dismiss(animated: false)
+        for _ in 0..<40 where model.pendingDocument != nil {
+            try await Task.sleep(for: .milliseconds(50))
+        }
+
+        XCTAssertNil(model.pendingDocument)
+        XCTAssertFalse(model.isPresentingSaver)
+        XCTAssertEqual(model.message, "The restore hint was not saved. Try again.")
+
+        await model.export()
+        XCTAssertNotNil(model.pendingDocument, "a cancelled save does not block the next export")
+    }
+
+    /// Waits for the `UIDocumentPickerViewController` the exporter presents,
+    /// searching every controller reachable from the host's window (SwiftUI
+    /// presents from whichever child controller hosts the modifier).
+    private func presentedPicker(from host: UIViewController) async throws -> UIDocumentPickerViewController {
+        for _ in 0..<100 {
+            let roots = [host.view.window?.rootViewController, host].compactMap { $0 }
+            for root in roots {
+                if let picker = Self.findPicker(in: root) { return picker }
+            }
+            try await Task.sleep(for: .milliseconds(50))
+        }
+        XCTFail("the document picker was never presented")
+        throw CancellationError()
+    }
+
+    private static func findPicker(in controller: UIViewController) -> UIDocumentPickerViewController? {
+        if let picker = controller as? UIDocumentPickerViewController { return picker }
+        for child in controller.children {
+            if let picker = findPicker(in: child) { return picker }
+        }
+        if let presented = controller.presentedViewController {
+            return findPicker(in: presented)
+        }
+        return nil
+    }
+
     private func host(for view: some View) -> UIHostingController<AnyView> {
         let host = UIHostingController(rootView: AnyView(NavigationStack { view }))
         host.view.frame = CGRect(x: 0, y: 0, width: 393, height: 852)
@@ -320,4 +462,10 @@ final class RestoreHintExportTests: XCTestCase {
         window.rootViewController = nil
         return host
     }
+}
+
+/// Holds what a stub's callback saw, instead of a captured `var`.
+@MainActor
+final class ReadsRecorder {
+    var values: [Int] = []
 }
