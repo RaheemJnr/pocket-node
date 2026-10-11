@@ -82,6 +82,13 @@ internal fun SyncOptionsSheet(
     isApplying: Boolean = false,
     /** A failed Apply, shown inline: a screen snackbar would sit under the sheet's window (#431). */
     errorText: String? = null,
+    /**
+     * #563: what the Cancel button does and says, when it differs from a
+     * plain dismiss (swipe, scrim, back still call [onDismiss]). Null keeps
+     * [onDismiss] and "Cancel".
+     */
+    onCancel: (() -> Unit)? = null,
+    cancelLabel: String? = null,
 ) {
     val initialMode = remember(currentMode, availableModes) {
         currentMode.takeIf { it in availableModes } ?: availableModes.firstOrNull() ?: currentMode
@@ -233,8 +240,8 @@ internal fun SyncOptionsSheet(
                 modifier = Modifier.fillMaxWidth(),
                 horizontalArrangement = Arrangement.End,
             ) {
-                TextButton(onClick = onDismiss, enabled = !isApplying) {
-                    Text(stringResource(R.string.common_cancel))
+                TextButton(onClick = onCancel ?: onDismiss, enabled = !isApplying) {
+                    Text(cancelLabel ?: stringResource(R.string.common_cancel))
                 }
                 Spacer(Modifier.width(8.dp))
                 val parsedHeight = customBlockHeight.toLongOrNull()

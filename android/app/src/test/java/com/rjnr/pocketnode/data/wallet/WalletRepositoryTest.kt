@@ -356,6 +356,74 @@ class WalletRepositoryTest {
     }
 
     @Test
+    fun `deleteWallet clears that wallet's sync progress and discovery slots only`() = runTest {
+        val words = mnemonicManager.generateMnemonic(MnemonicManager.WordCount.TWELVE)
+        val keep = repo.importFromMnemonic(
+            words = mnemonicManager.generateMnemonic(MnemonicManager.WordCount.TWELVE),
+            name = "Keep",
+            persistKeys = { walletId, bundle -> fakePersistV2(walletId, bundle) },
+        ).getOrThrow()
+        val gone = repo.importFromMnemonic(
+            words = words,
+            name = "Gone",
+            persistKeys = { walletId, bundle -> fakePersistV2(walletId, bundle) },
+        ).getOrThrow()
+        for (id in listOf(keep.walletId, gone.walletId)) {
+            db.syncProgressDao().upsert(
+                com.rjnr.pocketnode.data.database.entity.SyncProgressEntity(id, "TESTNET", 1L, 1L, 0L)
+            )
+        }
+        val keepSlots = db.subAccountCandidateDao().getForParent(keep.walletId).size
+        assertTrue(keepSlots > 0)
+        repo.switchActiveWallet(keep.walletId)
+
+        repo.deleteWallet(gone.walletId)
+
+        assertTrue(db.subAccountCandidateDao().getForParent(gone.walletId).isEmpty())
+        assertNull(db.syncProgressDao().get(gone.walletId, "TESTNET"))
+        assertEquals(keepSlots, db.subAccountCandidateDao().getForParent(keep.walletId).size)
+        assertNotNull(db.syncProgressDao().get(keep.walletId, "TESTNET"))
+    }
+
+    @Test
+    fun `rollbackAddedWallet removes only the added wallet and reactivates the previous one`() = runTest {
+        val previous = repo.createWallet(
+            name = "Previous",
+            persistKeys = { walletId, bundle -> fakePersistV2(walletId, bundle) },
+        ).getOrThrow()
+        val added = repo.createWallet(
+            name = "Added",
+            persistKeys = { walletId, bundle -> fakePersistV2(walletId, bundle) },
+        ).getOrThrow()
+        assertEquals(added.walletId, walletDao.getActive()?.walletId)
+
+        val active = repo.rollbackAddedWallet(added.walletId, previous.walletId)
+
+        assertEquals(previous.walletId, active.walletId)
+        assertTrue(active.isActive)
+        assertEquals(previous.walletId, walletDao.getActive()?.walletId)
+        assertEquals(previous.walletId, walletPreferences.getActiveWalletId())
+        assertNull(walletDao.getById(added.walletId))
+        assertNull(db.keyMaterialDao().getByWalletId(added.walletId))
+        assertNotNull(db.keyMaterialDao().getByWalletId(previous.walletId))
+        assertEquals(1, walletDao.count())
+    }
+
+    @Test
+    fun `rollbackAddedWallet with a missing previous wallet changes nothing`() = runTest {
+        val added = repo.createWallet(
+            name = "Added",
+            persistKeys = { walletId, bundle -> fakePersistV2(walletId, bundle) },
+        ).getOrThrow()
+
+        val error = runCatching { repo.rollbackAddedWallet(added.walletId, "no-such-wallet") }.exceptionOrNull()
+
+        assertTrue(error is IllegalStateException)
+        assertEquals(added.walletId, walletDao.getActive()?.walletId)
+        assertNotNull(db.keyMaterialDao().getByWalletId(added.walletId))
+    }
+
+    @Test
     fun `deleteWallet refuses to delete active wallet`() = runTest {
         val wallet1 = repo.createWallet(
             name = "Wallet 1",

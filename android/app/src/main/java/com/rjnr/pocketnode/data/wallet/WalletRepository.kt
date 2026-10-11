@@ -498,6 +498,12 @@ class WalletRepository @Inject constructor(
                 pendingDaoWithdrawDao.deleteByWalletAndNetwork(walletId, network)
                 pendingDaoUnlockDao.deleteByWalletAndNetwork(walletId, network)
             }
+            // #563: its sync progress and the discovery slots recorded on
+            // import are this wallet's rows too. Left behind, a wallet
+            // removed right after import (Cancel on the sync sheet) would
+            // leave them orphaned.
+            appDatabase.syncProgressDao().deleteForWallet(walletId)
+            subAccountCandidateDao.deleteForParent(walletId)
         }
         keyManager.deleteWalletKeys(walletId)
         // #538 review: a deleted wallet's gap-limit sweep markers must not
@@ -508,6 +514,41 @@ class WalletRepository @Inject constructor(
         // when a transaction is open on the same connection.
         DatabaseMaintenanceUtil.vacuum(appDatabase)
         logger.d(TAG, "Deleted wallet and caches: $walletId")
+    }
+
+    /**
+     * #563: undo an Add Wallet whose post-import sync choice was cancelled.
+     * Makes [previousActiveWalletId] active again, then removes only
+     * [addedWalletId] (its rows and its keys) through [deleteWallet]. No
+     * other wallet's data is touched.
+     *
+     * If the delete fails while the added wallet's row still exists, the
+     * added wallet is made active again and the error is rethrown: the
+     * wallet stays added and active, as before the cancel. Returns the
+     * wallet that is active afterwards.
+     */
+    suspend fun rollbackAddedWallet(addedWalletId: String, previousActiveWalletId: String): WalletEntity {
+        require(addedWalletId != previousActiveWalletId) { "Nothing to roll back to" }
+        walletDao.getById(addedWalletId)
+            ?: throw IllegalArgumentException("Wallet not found: $addedWalletId")
+        val previous = walletDao.getById(previousActiveWalletId)
+            ?: throw IllegalStateException("Previous wallet not found: $previousActiveWalletId")
+        switchActiveWallet(previousActiveWalletId)
+        try {
+            deleteWallet(addedWalletId)
+        } catch (e: Throwable) {
+            if (walletDao.getById(addedWalletId) == null) {
+                // The rows are gone (only a later key or VACUUM step failed):
+                // the wallet is removed, the rollback stands.
+                logger.w(TAG, "Rollback of $addedWalletId finished with an error after its rows were deleted", e)
+                return walletDao.getById(previousActiveWalletId) ?: previous
+            }
+            runCatching { switchActiveWallet(addedWalletId) }
+                .onFailure { logger.e(TAG, "Could not re-activate $addedWalletId after a failed rollback", it) }
+            throw e
+        }
+        logger.d(TAG, "Rolled back added wallet $addedWalletId; active again: $previousActiveWalletId")
+        return walletDao.getById(previousActiveWalletId) ?: previous
     }
 
     suspend fun walletCount(): Int = walletDao.count()
