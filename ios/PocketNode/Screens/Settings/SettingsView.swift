@@ -58,19 +58,27 @@ struct SettingsView: View {
         // onto every row, replacing `settings.backup` / `settings.biometrics`.
         .accessibilityElement(children: .contain)
         .accessibilityIdentifier("settings.root")
+        // The iOS 17 overload with `onCancellation`: cancelling the document
+        // picker does not call `onCompletion` at all, it calls this, and
+        // without it the sealed file would stay pending for the launch.
         .fileExporter(
             isPresented: saverBinding,
             document: restoreHint.pendingDocument,
-            contentType: .json,
-            defaultFilename: restoreHint.pendingDocument?.fileName
-        ) { result in
-            // A cancelled sheet reports a failure (`CocoaError.userCancelled`),
-            // so every way the sheet ends lands here.
-            switch result {
-            case .success: restoreHint.saveSucceeded()
-            case .failure: restoreHint.saveDidNotComplete()
+            contentTypes: [.json],
+            defaultFilename: restoreHint.pendingDocument?.fileName,
+            onCompletion: { result in
+                switch result {
+                case .success: restoreHint.saveSucceeded()
+                case .failure: restoreHint.saveDidNotComplete()
+                }
+            },
+            onCancellation: {
+                restoreHint.saveDidNotComplete()
             }
-        }
+        )
+        // Drops a file sealed for a wallet that is no longer this device's,
+        // and a "saved" line left over from an earlier visit.
+        .onAppear { restoreHint.screenAppeared() }
         .onChange(of: scenePhase) { _, phase in
             if phase == .background { restoreHint.onBackgrounded() }
         }
@@ -109,9 +117,9 @@ struct SettingsView: View {
     }
 
     /// Up while a sealed file is waiting. The setter does nothing on purpose:
-    /// the completion callback above is what ends a save,
-    /// and a sheet torn down with the screen (a lock) must leave the file
-    /// waiting so the sheet comes back with the screen.
+    /// the completion and cancellation callbacks above are what end a save,
+    /// and a sheet torn down with the screen (a lock) calls neither, which
+    /// must leave the file waiting so the sheet comes back with the screen.
     private var saverBinding: Binding<Bool> {
         Binding(
             get: { restoreHint.isPresentingSaver },

@@ -381,11 +381,10 @@ final class OnboardingViewModel {
             }
             return
         }
-        let material = RestoreHintMaterial.mnemonic(WalletCreator.normalise(words))
         if replacesUnusableKeys {
             await run {
                 let created = try await self.creator.replaceUnusableKeys(words: words, name: name)
-                await self.useRestoreHint(walletId: created.record.id, material: material)
+                await self.useRestoreHint(walletId: created.record.id, words: words)
                 self.step = self.hasPin() ? .done : .pinSetup
             }
             return
@@ -393,7 +392,7 @@ final class OnboardingViewModel {
         await run {
             try await self.requireCleanStart()
             let created = try await self.creator.importMnemonic(words: words, name: name)
-            await self.useRestoreHint(walletId: created.record.id, material: material)
+            await self.useRestoreHint(walletId: created.record.id, words: words)
             // Nothing to back up: the user supplied the phrase.
             self.step = .pinSetup
         }
@@ -517,13 +516,23 @@ final class OnboardingViewModel {
         restoreHintPickError = nil
     }
 
+    /// Only builds the secret's material when a file is attached: an import
+    /// without one never derives a second copy of anything.
+    private func useRestoreHint(walletId: String, words: [String]) async {
+        guard restoreHintText != nil else { return }
+        await useRestoreHint(walletId: walletId, material: .mnemonic(WalletCreator.normalise(words)))
+    }
+
     private func useRestoreHint(walletId: String, privateKeyHex hex: String) async {
         guard restoreHintText != nil else { return }
-        guard let bytes = WalletCreator.decodePrivateKey(hex) else {
+        guard let key = WalletCreator.decodePrivateKey(hex).map(RestoreHintKeyBytes.init) else {
             restoreHintText = nil
             return
         }
-        await useRestoreHint(walletId: walletId, material: .privateKey(bytes))
+        // The box is shared with the check, so this wipe reaches the bytes it
+        // read (the check also wipes them as soon as it has built the secret).
+        defer { key.wipe() }
+        await useRestoreHint(walletId: walletId, material: .privateKey(key))
     }
 
     /// Checks the held file against the secret just entered, off the main

@@ -88,13 +88,59 @@ enum RestoreHintVerification: Equatable, Sendable {
     case rejected(RestoreHintRejection)
 }
 
-/// The secret a hint is checked with, as plain `Sendable` values so it can be
+/// A private key's bytes, held by reference so a wipe reaches the one buffer
+/// every holder shares. An `[UInt8]` passed by value and then wiped only
+/// zeroes the callee's copy-on-write copy; this box is what lets the caller,
+/// the background check and the secret builder all wipe the same bytes.
+final class RestoreHintKeyBytes: @unchecked Sendable {
+    private let lock = NSLock()
+    private var storage: [UInt8]
+    private var wiped = false
+
+    init(_ bytes: [UInt8]) {
+        storage = bytes
+    }
+
+    /// Reads the bytes, for building the Kotlin buffer.
+    func withBytes<T>(_ body: ([UInt8]) -> T) -> T {
+        lock.lock()
+        defer { lock.unlock() }
+        return body(storage)
+    }
+
+    var isWiped: Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        return wiped
+    }
+
+    /// True when every byte held is zero.
+    var isZeroed: Bool {
+        withBytes { $0.allSatisfy { $0 == 0 } }
+    }
+
+    /// Zeroes the bytes in place. Safe to call more than once.
+    func wipe() {
+        lock.lock()
+        defer { lock.unlock() }
+        storage.wipe()
+        wiped = true
+    }
+}
+
+/// The secret a hint is checked with, as `Sendable` values so it can be
 /// handed to a background task. Built from what the user just typed in.
 enum RestoreHintMaterial: Sendable {
     /// Normalised BIP-39 words. The shared code derives the seed from them.
+    /// Swift strings cannot be wiped; they are released after the check.
     case mnemonic([String])
     /// A 32-byte private key, for a raw-key wallet.
-    case privateKey([UInt8])
+    case privateKey(RestoreHintKeyBytes)
+
+    /// Zeroes the private key's bytes. Nothing to do for words.
+    func wipe() {
+        if case .privateKey(let key) = self { key.wipe() }
+    }
 }
 
 /// Holds a shared `RestoreHintSecret` and records that it was wiped.
@@ -165,13 +211,12 @@ enum RestoreHintVerifier {
         switch material {
         case .mnemonic(let words):
             return RestoreHintSecretBox(RestoreHintSecret.companion.fromMnemonic(words: words, passphrase: ""))
-        case .privateKey(var bytes):
-            guard bytes.count == 32 else {
-                bytes.wipe()
-                return nil
-            }
-            let buffer = KotlinByteArray.from(bytes)
-            bytes.wipe()
+        case .privateKey(let key):
+            // The secret keeps its own copy, so the shared bytes are wiped as
+            // soon as the Kotlin buffer is built, whatever happens next.
+            defer { key.wipe() }
+            guard !key.isWiped, key.withBytes({ $0.count }) == 32 else { return nil }
+            let buffer = key.withBytes { KotlinByteArray.from($0) }
             defer { buffer.zeroOut() }
             return RestoreHintSecretBox(RestoreHintSecret.companion.fromPrivateKey(privateKey: buffer))
         }
@@ -195,7 +240,9 @@ enum RestoreHintFile {
             return nil
         }
         guard let data = try? Data(contentsOf: url), data.count <= maxChars * 4 else { return nil }
-        guard let text = String(data: data, encoding: .utf8), text.count <= maxChars else { return nil }
+        // UTF-16 code units, which is what Kotlin's `String.length` counts, so
+        // this cap and the shared codec's agree on every file.
+        guard let text = String(data: data, encoding: .utf8), text.utf16.count <= maxChars else { return nil }
         return text
     }
 }

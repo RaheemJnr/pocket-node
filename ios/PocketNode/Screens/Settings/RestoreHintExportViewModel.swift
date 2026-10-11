@@ -73,6 +73,9 @@ final class RestoreHintExportViewModel {
     private(set) var isExporting = false
     /// The sealed file waiting for the save sheet. Holds no key material.
     private(set) var pendingDocument: RestoreHintDocument?
+    /// The wallet ``pendingDocument`` was sealed for. A file for any other
+    /// wallet is dropped (``screenAppeared()``).
+    @ObservationIgnored private var pendingWalletId: String?
     /// The last outcome worth a line under the row.
     private(set) var message: String?
 
@@ -86,8 +89,12 @@ final class RestoreHintExportViewModel {
     private let sources: any RestoreHintSources
     private let onKeysUnusable: @MainActor () -> Void
     private let now: () -> Int64
+    /// How long "Restore hint saved" stays up. Transient, like Android's
+    /// snackbar.
+    private let savedMessageLifetime: Duration
 
     @ObservationIgnored private var stopGeneration = 0
+    @ObservationIgnored private var savedMessageExpiry: Task<Void, Never>?
 
     init(
         walletKeyStore: any WalletKeyReading,
@@ -96,8 +103,10 @@ final class RestoreHintExportViewModel {
         preferences: UserDefaultsPreferences,
         sources: any RestoreHintSources,
         onKeysUnusable: @escaping @MainActor () -> Void = {},
-        now: @escaping () -> Int64 = { Int64((Date().timeIntervalSince1970 * 1000).rounded()) }
+        now: @escaping () -> Int64 = { Int64((Date().timeIntervalSince1970 * 1000).rounded()) },
+        savedMessageLifetime: Duration = .seconds(4)
     ) {
+        self.savedMessageLifetime = savedMessageLifetime
         self.walletKeyStore = walletKeyStore
         self.walletStore = walletStore
         self.auth = auth
@@ -107,12 +116,15 @@ final class RestoreHintExportViewModel {
         self.now = now
     }
 
-    /// Authenticates, reads the secret, seals the file and holds it for the
-    /// save sheet. The secret is wiped once the file is sealed.
+    /// Reads the chain-side inputs, authenticates, reads the secret, seals
+    /// the file and holds it for the save sheet.
+    ///
+    /// Everything that is not the secret is read first, so the secret exists
+    /// only from the key read to the seal, and is wiped there.
     func export() async {
         guard !isExporting, pendingDocument == nil else { return }
         isExporting = true
-        message = nil
+        clearMessage()
         defer { isExporting = false }
 
         let generation = currentGeneration
@@ -125,6 +137,17 @@ final class RestoreHintExportViewModel {
             message = RestoreHintCopy.exportNoTip
             return
         }
+        let inputs = ExportInputs(
+            kind: record.type == WalletCreator.typeRawKey ? RestoreHintKind.shared.RAW_KEY : RestoreHintKind.shared.MNEMONIC,
+            network: network,
+            lightStart: await sources.restoreHintLightStart(walletId: record.id),
+            mode: preferences.getSyncModeOrNull(network: network, walletId: record.id),
+            customHeight: preferences.getCustomBlockHeight(network: network, walletId: record.id)?.int64Value,
+            tipHeight: tip.height,
+            tipHash: tip.hash,
+            blockNumbers: await sources.restoreHintBlockNumbers(walletId: record.id),
+            nowMs: now()
+        )
 
         let granted = await auth.requireAuth(reason: RestoreHintCopy.authReason)
         guard granted, generation == currentGeneration else { return }
@@ -146,17 +169,9 @@ final class RestoreHintExportViewModel {
             message = RestoreHintCopy.exportFailed
             return
         }
-        let inputs = ExportInputs(
-            kind: record.type == WalletCreator.typeRawKey ? RestoreHintKind.shared.RAW_KEY : RestoreHintKind.shared.MNEMONIC,
-            network: network,
-            lightStart: await sources.restoreHintLightStart(walletId: record.id),
-            mode: preferences.getSyncModeOrNull(network: network, walletId: record.id),
-            customHeight: preferences.getCustomBlockHeight(network: network, walletId: record.id)?.int64Value,
-            tipHeight: tip.height,
-            tipHash: tip.hash,
-            blockNumbers: await sources.restoreHintBlockNumbers(walletId: record.id),
-            nowMs: now()
-        )
+        // A raw key's bytes sit in a shared box, so this reaches the buffer
+        // the seal read, not a copy of it.
+        defer { material.wipe() }
         let sealed = await Self.seal(inputs, material: material)
         // A lock that landed while the file was sealed: the user is behind the
         // lock screen now, and an export they cannot see is not one to offer.
@@ -165,23 +180,56 @@ final class RestoreHintExportViewModel {
             message = RestoreHintCopy.exportFailed
             return
         }
+        pendingWalletId = record.id
         pendingDocument = RestoreHintDocument(
             text: sealed,
             fileName: RestoreHintPayloadBuilder.fileName(network: network)
         )
     }
 
-    /// The save sheet wrote the file.
+    /// The save sheet wrote the file. The line saying so goes away on its
+    /// own after `savedMessageLifetime`, like Android's snackbar.
     func saveSucceeded() {
-        pendingDocument = nil
+        clearPending()
+        clearMessage()
         message = RestoreHintCopy.exportSaved
+        let lifetime = savedMessageLifetime
+        savedMessageExpiry = Task { [weak self] in
+            try? await Task.sleep(for: lifetime)
+            guard !Task.isCancelled, let self, self.message == RestoreHintCopy.exportSaved else { return }
+            self.message = nil
+        }
     }
 
     /// The save sheet ended without writing: cancelled, or failed.
     func saveDidNotComplete() {
         guard pendingDocument != nil else { return }
-        pendingDocument = nil
+        clearPending()
+        clearMessage()
         message = RestoreHintCopy.exportNotSaved
+    }
+
+    /// Settings appeared. A sealed file for a wallet that is no longer this
+    /// device's is dropped unseen, and a "saved" line from an earlier visit
+    /// is cleared.
+    func screenAppeared() {
+        if pendingDocument != nil, walletStore.load()?.id != pendingWalletId {
+            clearPending()
+        }
+        if message == RestoreHintCopy.exportSaved {
+            clearMessage()
+        }
+    }
+
+    private func clearPending() {
+        pendingDocument = nil
+        pendingWalletId = nil
+    }
+
+    private func clearMessage() {
+        savedMessageExpiry?.cancel()
+        savedMessageExpiry = nil
+        message = nil
     }
 
     /// The scene went to the background. Ends an export still in flight; a
@@ -230,7 +278,7 @@ final class RestoreHintExportViewModel {
     /// key for a raw-key one. Nil when the bundle does not have it.
     static func material(for record: WalletRecord, bundle: WalletKeyBundle) -> RestoreHintMaterial? {
         if record.type == WalletCreator.typeRawKey {
-            return WalletCreator.decodePrivateKey(bundle.privateKeyHex).map { .privateKey($0) }
+            return WalletCreator.decodePrivateKey(bundle.privateKeyHex).map { .privateKey(RestoreHintKeyBytes($0)) }
         }
         guard let mnemonic = bundle.mnemonic else { return nil }
         let words = WalletCreator.splitPhrase(mnemonic)
