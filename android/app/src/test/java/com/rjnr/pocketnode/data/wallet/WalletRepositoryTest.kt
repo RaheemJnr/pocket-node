@@ -720,6 +720,43 @@ class WalletRepositoryTest {
         }
     }
 
+    private val backups by lazy {
+        com.rjnr.pocketnode.data.crypto.KeyBackupManager(
+            java.nio.file.Files.createTempDirectory("reset_backups").toFile(), NoopLogger,
+        ).apply {
+            argon2Iterations = 1
+            argon2MemoryKb = 8
+            argon2Parallelism = 1
+        }
+    }
+
+    /** The legacy single-wallet key store, as plain prefs (no KeyStore in unit tests). */
+    private val legacyPrefs by lazy {
+        val ctx = ApplicationProvider.getApplicationContext<Context>()
+        ctx.getSharedPreferences("test_local_reset_legacy", Context.MODE_PRIVATE).also {
+            it.edit().clear().commit()
+            keyManager.testPrefs = it
+        }
+    }
+
+    private fun localReset(
+        repository: WalletRepository = repo,
+        pinManager: com.rjnr.pocketnode.data.auth.PinManager,
+        cacheManager: com.rjnr.pocketnode.data.gateway.CacheManager = io.mockk.mockk(relaxed = true),
+        daoSyncManager: com.rjnr.pocketnode.data.gateway.DaoSyncManager = io.mockk.mockk(relaxed = true),
+    ): com.rjnr.pocketnode.data.gateway.LocalWalletReset {
+        legacyPrefs
+        return com.rjnr.pocketnode.data.gateway.LocalWalletReset(
+            repository, keyManager, db.keyMaterialDao(), backups, cacheManager, daoSyncManager, pinManager,
+        )
+    }
+
+    private fun backupMaterial() = com.rjnr.pocketnode.data.crypto.KeyMaterial(
+        privateKey = "a".repeat(64),
+        walletType = "raw_key",
+        mnemonicBackedUp = true,
+    )
+
     @Test
     fun `LocalWalletReset removes every wallet's rows and keys, then the PIN`() = runTest {
         val first = repo.importFromMnemonic(
@@ -744,7 +781,8 @@ class WalletRepositoryTest {
         val cacheManager = io.mockk.mockk<com.rjnr.pocketnode.data.gateway.CacheManager>(relaxed = true)
         val daoSyncManager = io.mockk.mockk<com.rjnr.pocketnode.data.gateway.DaoSyncManager>(relaxed = true)
 
-        com.rjnr.pocketnode.data.gateway.LocalWalletReset(repo, cacheManager, daoSyncManager, pinManager).removeAllWalletsAndPin()
+        localReset(pinManager = pinManager, cacheManager = cacheManager, daoSyncManager = daoSyncManager)
+            .removeAllWalletsAndPin()
 
         assertEquals(0, walletDao.count())
         assertEquals(0, db.keyMaterialDao().count())
@@ -755,6 +793,25 @@ class WalletRepositoryTest {
         }
         io.mockk.coVerify { cacheManager.clearAll() }
         io.mockk.coVerify { daoSyncManager.clearAll() }
+        assertFalse(pinManager.hasPin())
+    }
+
+    @Test
+    fun `LocalWalletReset removes every backup file and the legacy key before the PIN`() = runTest {
+        repo.createWallet(
+            name = "Only",
+            persistKeys = { walletId, bundle -> fakePersistV2(walletId, bundle) },
+        ).getOrThrow()
+        backups.writeBackup("default", backupMaterial(), "123456".toCharArray())
+        backups.writeBackup("orphan-backup", backupMaterial(), "123456".toCharArray())
+        legacyPrefs.edit().putString("private_key", "a".repeat(64)).commit()
+        val pinManager = pinManagerWithPin()
+
+        localReset(pinManager = pinManager).removeAllWalletsAndPin()
+
+        assertTrue(backups.listBackupWalletIds().isEmpty())
+        assertFalse(legacyPrefs.contains("private_key"))
+        assertFalse(keyManager.hasWallet())
         assertFalse(pinManager.hasPin())
     }
 
@@ -770,16 +827,75 @@ class WalletRepositoryTest {
         val pinManager = pinManagerWithPin()
 
         val error = runCatching {
-            com.rjnr.pocketnode.data.gateway.LocalWalletReset(
-                newRepo(dao = stuckDao),
-                io.mockk.mockk(relaxed = true),
-                io.mockk.mockk(relaxed = true),
-                pinManager,
-            ).removeAllWalletsAndPin()
+            localReset(repository = newRepo(dao = stuckDao), pinManager = pinManager).removeAllWalletsAndPin()
         }.exceptionOrNull()
 
         assertTrue(error is IllegalStateException)
         assertEquals(1, walletDao.count())
         assertTrue(pinManager.hasPin())
+    }
+
+    @Test
+    fun `LocalWalletReset keeps the PIN when a wallet's keys could not be removed`() = runTest {
+        val stuck = repo.createWallet(
+            name = "Stuck keys",
+            persistKeys = { walletId, bundle -> fakePersistV2(walletId, bundle) },
+        ).getOrThrow()
+        val km = io.mockk.spyk(keyManager)
+        io.mockk.coEvery { km.deleteWalletKeys(any()) } throws IllegalStateException("keystore gone")
+        val pinManager = pinManagerWithPin()
+
+        val error = runCatching {
+            localReset(repository = newRepo(km = km), pinManager = pinManager).removeAllWalletsAndPin()
+        }.exceptionOrNull()
+
+        // The wallet row is gone, its key_material row is not: the PIN stays.
+        assertTrue(error is IllegalStateException)
+        assertEquals(0, walletDao.count())
+        assertNotNull(db.keyMaterialDao().getByWalletId(stuck.walletId))
+        assertTrue(pinManager.hasPin())
+    }
+
+    @Test
+    fun `LocalWalletReset keeps the PIN when a backup file is left`() = runTest {
+        legacyPrefs
+        val stuckBackups = io.mockk.spyk(backups)
+        io.mockk.every { stuckBackups.deleteBackup(any()) } returns Unit
+        backups.writeBackup("default", backupMaterial(), "123456".toCharArray())
+        val pinManager = pinManagerWithPin()
+
+        val error = runCatching {
+            com.rjnr.pocketnode.data.gateway.LocalWalletReset(
+                repo, keyManager, db.keyMaterialDao(), stuckBackups,
+                io.mockk.mockk(relaxed = true), io.mockk.mockk(relaxed = true), pinManager,
+            ).removeAllWalletsAndPin()
+        }.exceptionOrNull()
+
+        assertTrue(error is IllegalStateException)
+        assertTrue(pinManager.hasPin())
+    }
+
+    @Test
+    fun `factoryReset also removes a sub-account whose parent row is gone`() = runTest {
+        val parent = repo.createWallet(
+            name = "Parent",
+            persistKeys = { walletId, bundle -> fakePersistV2(walletId, bundle) },
+        ).getOrThrow()
+        walletDao.insert(
+            com.rjnr.pocketnode.data.database.entity.WalletEntity(
+                walletId = "orphan-sub",
+                name = "Orphan",
+                type = KeyManager.WALLET_TYPE_MNEMONIC,
+                derivationPath = "m/44'/309'/1'/0/0",
+                parentWalletId = "parent-gone",
+                accountIndex = 1,
+            )
+        )
+
+        repo.factoryReset()
+
+        assertNull(walletDao.getById("orphan-sub"))
+        assertNull(walletDao.getById(parent.walletId))
+        assertEquals(0, walletDao.count())
     }
 }

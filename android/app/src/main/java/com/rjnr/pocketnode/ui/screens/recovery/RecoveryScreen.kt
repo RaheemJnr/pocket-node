@@ -47,7 +47,7 @@ fun RecoveryScreen(
     var pinInput by remember { mutableStateOf("") }
 
     // The phrase restore opens only when the ViewModel allows it: after the
-    // app PIN is verified, with no PIN set, or after Start fresh.
+    // app PIN is verified, or with no PIN set. Start fresh restarts the app.
     LaunchedEffect(uiState.phraseRestoreReady) {
         if (uiState.phraseRestoreReady) {
             viewModel.onPhraseRestoreOpened()
@@ -238,8 +238,8 @@ fun RecoveryScreen(
 }
 
 /**
- * Shown when the app PIN can no longer be verified: the phrase restore then
- * starts from a clean app, with the wallets on this phone removed.
+ * Shown when the app PIN is permanently locked: the app removes every wallet
+ * and key on this phone and restarts as a fresh install.
  */
 @Composable
 private fun StartFreshDialog(

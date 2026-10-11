@@ -9,10 +9,12 @@ import com.rjnr.pocketnode.data.crypto.Blake2b
 import com.rjnr.pocketnode.data.crypto.KeyBackupManager
 import com.rjnr.pocketnode.data.crypto.KeyMaterial
 import com.rjnr.pocketnode.data.gateway.LocalWalletReset
+import com.rjnr.pocketnode.util.AppRestarter
 import io.mockk.coEvery
 import io.mockk.coVerify
 import io.mockk.every
 import io.mockk.mockk
+import io.mockk.verify
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.test.StandardTestDispatcher
@@ -57,6 +59,7 @@ class RecoveryViewModelTest {
 
     private lateinit var authManager: AuthManager
     private val localWalletReset = mockk<LocalWalletReset>(relaxed = true)
+    private val appRestarter = mockk<AppRestarter>(relaxed = true)
 
     @Before
     fun setUp() {
@@ -96,7 +99,7 @@ class RecoveryViewModelTest {
         val manager = createBackupManager()
         manager.writeBackup("wallet1", testMaterial(), correctPin)
 
-        val vm = RecoveryViewModel(manager, createPinManager(correctPin), authManager, localWalletReset, testDispatcher)
+        val vm = RecoveryViewModel(manager, createPinManager(correctPin), authManager, localWalletReset, appRestarter, testDispatcher)
 
         assertEquals(RecoveryStage.PIN_ENTRY, vm.uiState.value.stage)
         assertEquals(0, vm.uiState.value.failedAttempts)
@@ -107,7 +110,7 @@ class RecoveryViewModelTest {
     fun `initial state is MnemonicEntry when no backups exist`() {
         val manager = createBackupManager()
 
-        val vm = RecoveryViewModel(manager, createPinManager(correctPin), authManager, localWalletReset, testDispatcher)
+        val vm = RecoveryViewModel(manager, createPinManager(correctPin), authManager, localWalletReset, appRestarter, testDispatcher)
 
         assertEquals(RecoveryStage.MNEMONIC_ENTRY, vm.uiState.value.stage)
     }
@@ -117,7 +120,7 @@ class RecoveryViewModelTest {
         val manager = createBackupManager()
         manager.writeBackup("wallet1", testMaterial(), correctPin)
 
-        val vm = RecoveryViewModel(manager, createPinManager(correctPin), authManager, localWalletReset, testDispatcher)
+        val vm = RecoveryViewModel(manager, createPinManager(correctPin), authManager, localWalletReset, appRestarter, testDispatcher)
         vm.attemptPinRecovery(correctPin)
         advanceUntilIdle()
 
@@ -134,7 +137,7 @@ class RecoveryViewModelTest {
         manager.writeBackup("wallet1", testMaterial(), correctPin)
         val pinManager = createPinManager(correctPin)
 
-        val vm = RecoveryViewModel(manager, pinManager, authManager, localWalletReset, testDispatcher)
+        val vm = RecoveryViewModel(manager, pinManager, authManager, localWalletReset, appRestarter, testDispatcher)
         vm.attemptPinRecovery(wrongPin)
         advanceUntilIdle()
 
@@ -153,7 +156,7 @@ class RecoveryViewModelTest {
         manager.writeBackup("wallet1", testMaterial(), correctPin)
         val pinManager = createPinManager(correctPin)
 
-        val vm = RecoveryViewModel(manager, pinManager, authManager, localWalletReset, testDispatcher)
+        val vm = RecoveryViewModel(manager, pinManager, authManager, localWalletReset, appRestarter, testDispatcher)
         // 5 wrong attempts → PinManager locks out for 30s.
         repeat(5) {
             vm.attemptPinRecovery(wrongPin)
@@ -181,7 +184,7 @@ class RecoveryViewModelTest {
         manager.writeBackup("wallet1", testMaterial(), correctPin)
         val pinManager = createPinManager(correctPin)
 
-        val vm = RecoveryViewModel(manager, pinManager, authManager, localWalletReset, testDispatcher)
+        val vm = RecoveryViewModel(manager, pinManager, authManager, localWalletReset, appRestarter, testDispatcher)
         // Grind to the permanent-lockout threshold (10 failures), advancing time
         // past each escalating lockout window so the next attempt isn't pre-blocked.
         val windows = longArrayOf(0, 0, 0, 0, 31_000, 61_000, 301_000, 1_801_000, 3_601_000, 3_601_000)
@@ -199,7 +202,7 @@ class RecoveryViewModelTest {
         val manager = createBackupManager()
         manager.writeBackup("wallet1", testMaterial(), correctPin)
 
-        val vm = RecoveryViewModel(manager, createPinManager(correctPin), authManager, localWalletReset, testDispatcher)
+        val vm = RecoveryViewModel(manager, createPinManager(correctPin), authManager, localWalletReset, appRestarter, testDispatcher)
         vm.attemptPinRecovery(wrongPin)
         advanceUntilIdle()
 
@@ -220,7 +223,7 @@ class RecoveryViewModelTest {
 
         // The device PIN is pin1, so the verify gate passes and the decrypt
         // loop recovers wallet1 while wallet2 (encrypted under pin2) fails.
-        val vm = RecoveryViewModel(manager, createPinManager(pin1), authManager, localWalletReset, testDispatcher)
+        val vm = RecoveryViewModel(manager, createPinManager(pin1), authManager, localWalletReset, appRestarter, testDispatcher)
         vm.attemptPinRecovery(pin1)
         advanceUntilIdle()
 
@@ -234,7 +237,7 @@ class RecoveryViewModelTest {
     // --- Restore from phrase (the phrase restore keeps the existing wallets) ---
 
     private fun newVm(manager: KeyBackupManager, pinManager: PinManager) =
-        RecoveryViewModel(manager, pinManager, authManager, localWalletReset, testDispatcher)
+        RecoveryViewModel(manager, pinManager, authManager, localWalletReset, appRestarter, testDispatcher)
 
     /** Ten wrong PINs, past each escalating lockout window, to the permanent lockout. */
     private fun lockPermanently(pinManager: PinManager) {
@@ -412,7 +415,7 @@ class RecoveryViewModelTest {
     }
 
     @Test
-    fun `Remove and continue wipes the wallets and the PIN, then opens the phrase restore`() = runTest {
+    fun `Remove and continue wipes the wallets and the PIN, then restarts the app`() = runTest {
         val pinManager = createPinManager(correctPin)
         lockPermanently(pinManager)
         coEvery { localWalletReset.removeAllWalletsAndPin() } coAnswers { pinManager.removePin(force = true) }
@@ -423,9 +426,11 @@ class RecoveryViewModelTest {
         advanceUntilIdle()
 
         coVerify(exactly = 1) { localWalletReset.removeAllWalletsAndPin() }
+        verify(exactly = 1) { appRestarter.restart() }
         assertFalse(pinManager.hasPin())
-        assertTrue(vm.uiState.value.phraseRestoreReady)
-        assertFalse(vm.uiState.value.showStartFreshConfirm)
+        // The restarted process routes to onboarding; nothing opens in this one.
+        assertFalse(vm.uiState.value.phraseRestoreReady)
+        assertTrue(vm.uiState.value.isStartingFresh)
     }
 
     @Test
@@ -443,6 +448,7 @@ class RecoveryViewModelTest {
         assertTrue(vm.uiState.value.showStartFreshConfirm)
         assertTrue(vm.uiState.value.startFreshFailed)
         assertFalse(vm.uiState.value.isStartingFresh)
+        verify(exactly = 0) { appRestarter.restart() }
     }
 
     @Test
@@ -457,15 +463,53 @@ class RecoveryViewModelTest {
     }
 
     @Test
-    fun `a PIN store that cannot be read asks to start fresh`() = runTest {
+    fun `a PIN store that cannot be read asks to retry and never offers start fresh`() = runTest {
         val pinManager = mockk<PinManager>(relaxed = true)
         every { pinManager.hasPin() } throws SecurityException("keystore unavailable")
+        every { pinManager.isLockedOut() } throws SecurityException("keystore unavailable")
         val vm = newVm(createBackupManager(), pinManager)
 
         vm.requestPhraseRestore()
 
-        assertTrue(vm.uiState.value.showStartFreshConfirm)
+        assertFalse(vm.uiState.value.showStartFreshConfirm)
         assertFalse(vm.uiState.value.phraseRestoreReady)
+        assertEquals(RecoveryStage.PHRASE_PIN_ENTRY, vm.uiState.value.stage)
+        assertEquals("Could not check your PIN. Try again.", vm.uiState.value.error)
+
+        // A PIN entered while the store is unreadable is a retry, not a crash.
+        vm.attemptPhrasePin(correctPin.copyOf())
+        advanceUntilIdle()
+
+        assertEquals(RecoveryStage.PHRASE_PIN_ENTRY, vm.uiState.value.stage)
+        assertEquals("Could not check your PIN. Try again.", vm.uiState.value.error)
+        assertFalse(vm.uiState.value.phraseRestoreReady)
+        assertFalse(vm.uiState.value.showStartFreshConfirm)
+        coVerify(exactly = 0) { localWalletReset.removeAllWalletsAndPin() }
+    }
+
+    @Test
+    fun `the backup restore sets the session PIN once the PIN is verified`() = runTest {
+        val manager = createBackupManager()
+        manager.writeBackup("wallet1", testMaterial(), correctPin)
+        val vm = newVm(manager, createPinManager(correctPin))
+
+        vm.attemptPinRecovery(correctPin.copyOf())
+        advanceUntilIdle()
+
+        assertEquals(RecoveryStage.SUCCESS, vm.uiState.value.stage)
+        assertArrayEquals(correctPin, authManager.getSessionPin())
+    }
+
+    @Test
+    fun `a wrong backup PIN sets no session PIN`() = runTest {
+        val manager = createBackupManager()
+        manager.writeBackup("wallet1", testMaterial(), correctPin)
+        val vm = newVm(manager, createPinManager(correctPin))
+
+        vm.attemptPinRecovery(wrongPin)
+        advanceUntilIdle()
+
+        assertNull(authManager.getSessionPin())
     }
 
     @Test

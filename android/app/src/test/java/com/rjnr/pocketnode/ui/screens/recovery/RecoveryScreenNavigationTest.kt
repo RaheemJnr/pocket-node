@@ -17,9 +17,11 @@ import com.rjnr.pocketnode.data.crypto.KeyBackupManager
 import com.rjnr.pocketnode.data.crypto.KeyMaterial
 import com.rjnr.pocketnode.data.gateway.LocalWalletReset
 import com.rjnr.pocketnode.ui.screens.auth.NamedStringsActivity
+import com.rjnr.pocketnode.util.AppRestarter
 import io.mockk.coEvery
 import io.mockk.coVerify
 import io.mockk.mockk
+import io.mockk.verify
 import kotlinx.coroutines.Dispatchers
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
@@ -63,6 +65,7 @@ class RecoveryScreenNavigationTest {
         .around(compose)
 
     private val localWalletReset = mockk<LocalWalletReset>(relaxed = true)
+    private val appRestarter = mockk<AppRestarter>(relaxed = true)
     private var phraseRestores = 0
     private var recoveries = 0
     private var fakeTimeMs = 1_000_000L
@@ -99,6 +102,7 @@ class RecoveryScreenNavigationTest {
             pinManager,
             AuthManager(ApplicationProvider.getApplicationContext()),
             localWalletReset,
+            appRestarter,
             Dispatchers.Unconfined,
         )
         compose.setContent {
@@ -158,7 +162,7 @@ class RecoveryScreenNavigationTest {
     }
 
     @Test
-    fun `with the PIN locked for good the phrase button leaves Recovery only after the wipe`() {
+    fun `with the PIN locked for good the phrase button leaves Recovery only through the wipe and a restart`() {
         val pins = pinManager("123456")
         val windows = longArrayOf(0, 0, 0, 0, 31_000, 61_000, 301_000, 1_801_000, 3_601_000, 3_601_000)
         for (w in windows) {
@@ -182,7 +186,9 @@ class RecoveryScreenNavigationTest {
         compose.onNodeWithText("recovery_start_fresh_confirm").performClick()
         compose.waitForIdle()
 
-        assertEquals(1, phraseRestores)
+        // The app restarts on a clean slate; nothing opens in this process.
+        assertEquals(0, phraseRestores)
+        verify(exactly = 1) { appRestarter.restart() }
         coVerify(exactly = 1) { localWalletReset.removeAllWalletsAndPin() }
         assertFalse(pins.hasPin())
     }
