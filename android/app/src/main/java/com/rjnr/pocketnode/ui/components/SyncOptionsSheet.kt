@@ -44,6 +44,7 @@ import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
@@ -236,28 +237,59 @@ internal fun SyncOptionsSheet(
             }
 
             Spacer(Modifier.height(8.dp))
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.End,
-            ) {
-                TextButton(onClick = onCancel ?: onDismiss, enabled = !isApplying) {
-                    Text(cancelLabel ?: stringResource(R.string.common_cancel))
-                }
-                Spacer(Modifier.width(8.dp))
-                val parsedHeight = customBlockHeight.toLongOrNull()
-                val withinTip = tipBlockNumber <= 0L || parsedHeight == null || parsedHeight <= tipBlockNumber
-                Button(
-                    onClick = {
-                        val custom = if (selectedMode == SyncMode.CUSTOM) parsedHeight else null
-                        onSelectMode(selectedMode, custom)
-                    },
-                    enabled = !isApplying && (selectedMode != SyncMode.CUSTOM ||
-                        (parsedHeight != null && parsedHeight > 0 && withinTip)),
-                    modifier = Modifier.uaTestTag("sync-sheet-apply"),
-                ) {
-                    Text(stringResource(R.string.common_apply))
-                }
-            }
+            val parsedHeight = customBlockHeight.toLongOrNull()
+            val withinTip = tipBlockNumber <= 0L || parsedHeight == null || parsedHeight <= tipBlockNumber
+            SyncSheetActions(
+                cancelLabel = cancelLabel ?: stringResource(R.string.common_cancel),
+                applyLabel = stringResource(R.string.common_apply),
+                onCancel = onCancel ?: onDismiss,
+                onApply = {
+                    val custom = if (selectedMode == SyncMode.CUSTOM) parsedHeight else null
+                    onSelectMode(selectedMode, custom)
+                },
+                cancelEnabled = !isApplying,
+                applyEnabled = !isApplying && (selectedMode != SyncMode.CUSTOM ||
+                    (parsedHeight != null && parsedHeight > 0 && withinTip)),
+            )
+        }
+    }
+}
+
+/**
+ * The sheet's Cancel / Apply row. Apply is measured first and keeps its
+ * size; Cancel takes what is left and wraps (right-aligned) when its label
+ * is long, e.g. "Cancel adding wallet" at a large font scale on a 360dp
+ * screen (#563 review F7).
+ */
+@Composable
+internal fun SyncSheetActions(
+    cancelLabel: String,
+    applyLabel: String,
+    onCancel: () -> Unit,
+    onApply: () -> Unit,
+    cancelEnabled: Boolean,
+    applyEnabled: Boolean,
+) {
+    Row(
+        modifier = Modifier.fillMaxWidth(),
+        horizontalArrangement = Arrangement.End,
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        // weight(fill = false): measured after Apply, never wider than its label.
+        TextButton(
+            onClick = onCancel,
+            enabled = cancelEnabled,
+            modifier = Modifier.weight(1f, fill = false),
+        ) {
+            Text(cancelLabel, textAlign = TextAlign.End)
+        }
+        Spacer(Modifier.width(8.dp))
+        Button(
+            onClick = onApply,
+            enabled = applyEnabled,
+            modifier = Modifier.uaTestTag("sync-sheet-apply"),
+        ) {
+            Text(applyLabel)
         }
     }
 }
