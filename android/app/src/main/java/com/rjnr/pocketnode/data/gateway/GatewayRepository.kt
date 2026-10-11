@@ -206,14 +206,26 @@ class GatewayRepository @Inject constructor(
      * Persist the last fully-processed block for a wallet on a given network.
      * If no sync_progress row exists, creates one (lightStartBlockNumber seeded to `block`).
      * If a row exists, updates only `localSavedBlockNumber` and `updatedAt`.
+     *
+     * [onlyIfWalletExists] (the sync poll): never create a row for a wallet
+     * that is no longer in the wallets table. Until the set without it lands,
+     * the light client still reports a deleted wallet's script, and the poll
+     * would bring its progress row back (#563 review F1). Checked only when
+     * no row exists, so the usual tick costs no extra query.
      */
-    suspend fun setWalletSyncBlock(walletId: String, block: Long, network: NetworkType = currentNetwork) {
+    suspend fun setWalletSyncBlock(
+        walletId: String,
+        block: Long,
+        network: NetworkType = currentNetwork,
+        onlyIfWalletExists: Boolean = false,
+    ) {
         if (walletId.isEmpty()) return
         val now = System.currentTimeMillis()
         // Atomic UPDATE first preserves any concurrently-written lightStartBlockNumber
         // (e.g. setScriptsAndRecord landing between get and upsert).
         val rowsUpdated = syncProgressDao.updateLocalSaved(walletId, network.name, block, now)
         if (rowsUpdated == 0) {
+            if (onlyIfWalletExists && walletDao.getById(walletId) == null) return
             syncProgressDao.upsert(
                 SyncProgressEntity(
                     walletId = walletId,
@@ -324,19 +336,29 @@ class GatewayRepository @Inject constructor(
      *   registered, nothing to do.
      *
      * Must run after the delete commits, so no set includes the deleted wallet.
+     * Afterwards the deleted wallet's progress is removed again under the
+     * registration lock: a poll tick that read the old set before the new
+     * one landed may have written it back (#563 review F1), and no tick can
+     * interleave with the lock held.
      */
     suspend fun onWalletDeleted(deletedWalletId: String) {
-        val active = walletDao.getActive() ?: run {
-            logger.w(TAG, "No active wallet after deleting $deletedWalletId")
-            return
-        }
-        if (deletedWalletId == activeWalletId || active.walletId != activeWalletId) {
-            onActiveWalletChanged(active)
-            return
-        }
-        when (walletPreferences.getSyncStrategy()) {
-            SyncStrategy.ALL_WALLETS, SyncStrategy.BALANCED -> registerAllWalletsQuietlyIfSuperseded()
-            SyncStrategy.ACTIVE_ONLY -> Unit
+        try {
+            val active = walletDao.getActive() ?: run {
+                logger.w(TAG, "No active wallet after deleting $deletedWalletId")
+                return
+            }
+            if (deletedWalletId == activeWalletId || active.walletId != activeWalletId) {
+                onActiveWalletChanged(active)
+                return
+            }
+            when (walletPreferences.getSyncStrategy()) {
+                SyncStrategy.ALL_WALLETS, SyncStrategy.BALANCED -> registerAllWalletsQuietlyIfSuperseded()
+                SyncStrategy.ACTIVE_ONLY -> Unit
+            }
+        } finally {
+            withContext(NonCancellable) {
+                syncCoordinator.withRegistrationLock { syncProgressDao.deleteForWallet(deletedWalletId) }
+            }
         }
     }
 
@@ -937,7 +959,7 @@ class GatewayRepository @Inject constructor(
                 val walletId = syncCoordinator.getWalletIdForScript(script.script.args) ?: return@forEach
                 val block = script.blockNumber.removePrefix("0x").toLongOrNull(16) ?: return@forEach
                 if (block > getWalletSyncBlock(walletId)) {
-                    setWalletSyncBlock(walletId, block)
+                    setWalletSyncBlock(walletId, block, onlyIfWalletExists = true)
                     updated = true
                     if (walletId == activeWalletId) {
                         logger.d(TAG, "💾 Saved sync progress: block $block (wallet=$walletId)")

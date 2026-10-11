@@ -755,6 +755,59 @@ class RegistrationLockTest {
         assertEquals(activeScript, repository.walletInfo.value?.script)
     }
 
+    /**
+     * #563 review F1: a poll tick between the Room delete and the new set
+     * landing still sees the old set, so it wrote the deleted wallet's
+     * progress back (an upsert recreating the row WalletRepository removed).
+     */
+    @Test
+    fun `a poll tick between the delete and the new set does not recreate the deleted wallet's progress`() = runBlocking {
+        build()
+        walletPreferences.setSyncStrategy(SyncStrategy.ALL_WALLETS)
+        repository.registerAccountWithStrategy(savePreference = false).getOrThrow()
+        deleteInRoom(deleted = OTHER, nowActive = ACTIVE)
+        db.syncProgressDao().deleteForWallet(OTHER)
+        reportedScripts = statusesJson(activeScript to ACTIVE_PROGRESS + 10, otherScript to OTHER_PROGRESS + 10)
+        repository.getAccountStatus().getOrThrow()
+
+        repository.onWalletDeleted(OTHER)
+
+        assertEquals(null, db.syncProgressDao().get(OTHER, network.name))
+        assertEquals(ACTIVE_PROGRESS + 10, repository.getWalletSyncBlock(ACTIVE))
+    }
+
+    /** F1, the poll guard: the new set was refused, the old one is still registered, ticks keep coming. */
+    @Test
+    fun `while the old set is still registered the poll never recreates a deleted wallet's progress`() = runBlocking {
+        build()
+        walletPreferences.setSyncStrategy(SyncStrategy.ALL_WALLETS)
+        repository.registerAccountWithStrategy(savePreference = false).getOrThrow()
+        deleteInRoom(deleted = OTHER, nowActive = ACTIVE)
+        db.syncProgressDao().deleteForWallet(OTHER)
+        synchronized(bridge.results) { bridge.results.addLast(false); bridge.results.addLast(false) }
+        runCatching { repository.onWalletDeleted(OTHER) }
+        reportedScripts = statusesJson(activeScript to ACTIVE_PROGRESS + 10, otherScript to OTHER_PROGRESS + 10)
+
+        repository.getAccountStatus().getOrThrow()
+
+        assertEquals(null, db.syncProgressDao().get(OTHER, network.name))
+        assertEquals(ACTIVE_PROGRESS + 10, repository.getWalletSyncBlock(ACTIVE))
+    }
+
+    /** F1, the clean-up under the lock: whatever progress the deleted wallet still has is gone afterwards. */
+    @Test
+    fun `onWalletDeleted removes the deleted wallet's progress`() = runBlocking {
+        build()
+        walletPreferences.setSyncStrategy(SyncStrategy.ALL_WALLETS)
+        repository.registerAccountWithStrategy(savePreference = false).getOrThrow()
+        deleteInRoom(deleted = OTHER, nowActive = ACTIVE)
+
+        repository.onWalletDeleted(OTHER)
+
+        assertEquals(null, db.syncProgressDao().get(OTHER, network.name))
+        assertEquals(ACTIVE_PROGRESS, repository.getWalletSyncBlock(ACTIVE))
+    }
+
     private fun assertNotNullJob(): kotlinx.coroutines.Job {
         val job = repository.ensureRegistration
         assertNotNull("the reassignment must launch a registration", job)
