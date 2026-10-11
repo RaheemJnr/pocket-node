@@ -25,6 +25,10 @@ import com.rjnr.pocketnode.data.storage.PendingBroadcastRow
 import com.rjnr.pocketnode.data.storage.RoomKmpPendingBroadcastStore
 import com.rjnr.pocketnode.data.storage.RoomKmpTransactionStore
 import com.rjnr.pocketnode.data.sync.SyncEngine
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.withContext
+import kotlinx.coroutines.withTimeoutOrNull
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.test.UnconfinedTestDispatcher
 import kotlinx.coroutines.test.runTest
@@ -336,17 +340,17 @@ class ActivityFeedTest {
     /**
      * Drains the feed's broadcast flow until it reports [expected] rows.
      *
-     * The subscription runs on the feed's own scope, which under `runTest` is a
-     * separate dispatcher from the test body, so reading `broadcasts.value`
-     * straight after `observeBroadcasts` is a race. Bounded so a wiring bug
-     * fails the test rather than hanging it.
+     * The subscription runs on the feed's own scope (`Dispatchers.Default`, real
+     * time), while `runTest` skips `delay` in virtual time, so a polling loop of
+     * `delay` calls could give up before the feed's collector ever ran on a slow
+     * runner. Wait for the value on a real dispatcher with a real timeout
+     * instead. Bounded so a wiring bug fails the test rather than hanging it.
      */
     private suspend fun awaitBroadcasts(feed: ActivityFeed, expected: Int) {
-        repeat(200) {
-            if (feed.broadcasts.value.size == expected) return
-            kotlinx.coroutines.delay(5)
+        val reached = withContext(Dispatchers.Default) {
+            withTimeoutOrNull(10_000) { feed.broadcasts.first { it.size == expected } }
         }
-        assertEquals(expected, feed.broadcasts.value.size, "broadcast flow never reported rows")
+        assertEquals(expected, (reached ?: feed.broadcasts.value).size, "broadcast flow never reported rows")
     }
 
     private companion object {
