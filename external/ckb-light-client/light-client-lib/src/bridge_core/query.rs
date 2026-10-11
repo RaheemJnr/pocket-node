@@ -347,17 +347,45 @@ pub fn set_scripts(scripts_str: &str, command: i32) -> Result<(), BridgeError> {
         BridgeError::Storage("storage not initialized".to_owned())
     })?;
 
-    swc.storage().update_filter_scripts(scripts, cmd.into());
+    set_scripts_ordered(
+        || {
+            PEERS.get().cloned().ok_or_else(|| {
+                error!("Peers not initialized");
+                BridgeError::Network("peers not initialized".to_owned())
+            })
+        },
+        || swc.storage().update_filter_scripts(scripts, cmd.into()),
+    )
+}
 
-    // Clear matched blocks when scripts change
-    let peers = PEERS.get().ok_or_else(|| {
-        error!("Peers not initialized");
-        BridgeError::Network("peers not initialized".to_owned())
-    })?;
+/// Core of `set_scripts`: every fallible step runs before the storage write,
+/// so an `Err` always means nothing landed (#555). Previously the storage
+/// write ran before the `PEERS` lookup, so a failed lookup reported "not
+/// landed" even though the new script set was already in storage, and
+/// Kotlin/Swift rolled back state the light client was already running.
+///
+/// `get_peers` and `update_storage` are injected so the ordering can be unit
+/// tested without the process-global `PEERS`/`STORAGE_WITH_DATA` `OnceLock`s,
+/// which cannot be unset once set (see the `tests` module below).
+fn set_scripts_ordered(
+    get_peers: impl FnOnce() -> Result<Arc<crate::protocols::Peers>, BridgeError>,
+    update_storage: impl FnOnce(),
+) -> Result<(), BridgeError> {
+    let peers = get_peers()?;
 
+    update_storage();
+
+    // Clear matched blocks when scripts change.
     // Lock matched_blocks and clear them.
     // `blocking_write` panics inside a tokio runtime context, so this must only
     // ever be called from a plain platform thread (the JNI and UniFFI callers).
+    //
+    // This step runs after the storage write and cannot move ahead of it
+    // (clearing matched blocks for the *new* script set only makes sense once
+    // that set has landed). It cannot itself return an error: `blocking_write`
+    // only panics (a programmer error, not a runtime condition) and
+    // `clear_matched_blocks` is infallible, so it cannot turn a landed write
+    // back into a reported failure.
     let mut matched_blocks = peers.matched_blocks().blocking_write();
     peers.clear_matched_blocks(&mut matched_blocks);
 
@@ -1070,4 +1098,66 @@ pub fn estimate_cycles(_tx_str: &str) -> Result<String, BridgeError> {
     Err(BridgeError::Internal(
         "estimate_cycles is not implemented".to_owned(),
     ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::protocols::Peers;
+    use ckb_types::packed::Byte32;
+    use std::cell::Cell;
+
+    fn test_peers() -> Arc<Peers> {
+        Arc::new(Peers::new(4, 2000, (0, Byte32::zero()), 0))
+    }
+
+    /// The regression this guards against (#555): the storage write used to
+    /// run before the `PEERS` lookup, so a failed lookup reported `Err`
+    /// although the new script set had already landed in storage. If
+    /// `get_peers` fails, `update_storage` must never run.
+    #[test]
+    fn peers_lookup_failure_leaves_storage_untouched() {
+        let storage_written = Cell::new(false);
+
+        let result = set_scripts_ordered(
+            || Err(BridgeError::Network("peers not initialized".to_owned())),
+            || storage_written.set(true),
+        );
+
+        assert!(
+            matches!(result, Err(BridgeError::Network(_))),
+            "expected Network error, got {result:?}"
+        );
+        assert!(
+            !storage_written.get(),
+            "storage must not be written when the peers lookup fails"
+        );
+    }
+
+    /// Happy path: once the peers lookup succeeds, storage is written and the
+    /// matched blocks for the old script set are cleared.
+    #[test]
+    fn peers_lookup_success_writes_storage_and_clears_matched_blocks() {
+        let peers = test_peers();
+        peers
+            .matched_blocks()
+            .blocking_write()
+            .insert(H256::default(), (true, None));
+        let storage_written = Cell::new(false);
+
+        let result = set_scripts_ordered(
+            || Ok(Arc::clone(&peers)),
+            || storage_written.set(true),
+        );
+
+        assert!(result.is_ok(), "expected Ok, got {result:?}");
+        assert!(
+            storage_written.get(),
+            "storage must be written once the peers lookup succeeds"
+        );
+        assert!(
+            peers.matched_blocks().blocking_read().is_empty(),
+            "matched blocks must be cleared on the happy path"
+        );
+    }
 }
