@@ -60,4 +60,41 @@ final class LightClientServiceTests: XCTestCase {
         XCTAssertNil(Hex.parse("0x"))
         XCTAssertNil(Hex.parse("nope"))
     }
+
+    // MARK: - Tip parsing (#567)
+
+    /// The normal case: both fields come back from the one header, so the
+    /// restore-hint export (which reads `tipNumber`/`tipHash` straight off
+    /// `LightClientService`) never has to reach across two different reads.
+    func testParseTipReadsHeightAndHashFromOneHeader() {
+        let json = #"{"number":"0x16e360","hash":"0xaabb"}"#
+
+        let tip = LightClientService.parseTip(json)
+
+        XCTAssertEqual(tip, LightClientService.TipReading(number: 0x16e360, hash: "0xaabb"))
+    }
+
+    /// Before the fix, `refresh()` kept the old hash whenever the hash field
+    /// failed to parse while still adopting the new height, so an exported
+    /// restore hint could carry a fresh height next to a stale hash. Now a
+    /// header that parses only one field parses as nil, and `refresh()`
+    /// leaves both `tipNumber` and `tipHash` at their previous values rather
+    /// than updating just one of them.
+    func testParseTipReturnsNilWhenTheHashFailsToParse() {
+        let json = #"{"number":"0x16e360","hash":null}"#
+
+        XCTAssertNil(LightClientService.parseTip(json))
+    }
+
+    /// Symmetric case: a height that fails to parse must not be paired with
+    /// a hash parsed from the same response either.
+    func testParseTipReturnsNilWhenTheHeightFailsToParse() {
+        let json = #"{"number":"not-hex","hash":"0xaabb"}"#
+
+        XCTAssertNil(LightClientService.parseTip(json))
+    }
+
+    func testParseTipReturnsNilOnMalformedJson() {
+        XCTAssertNil(LightClientService.parseTip("not json"))
+    }
 }
