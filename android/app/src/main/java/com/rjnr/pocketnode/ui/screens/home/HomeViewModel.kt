@@ -214,9 +214,11 @@ class HomeViewModel @Inject constructor(
                         address = repository.getCurrentAddress() ?: ""
                     )
                 }
-                // When wallet changes externally (e.g. from WalletManager), refresh data
+                // When wallet changes externally (e.g. from WalletManager, or a
+                // delete in Wallet Settings, #563), drop the previous wallet's
+                // per-wallet UI state the way switchWallet does, then refresh.
                 if (walletChanged) {
-                    refresh()
+                    onWalletChangedExternally()
                 }
             }
         }
@@ -740,6 +742,29 @@ class HomeViewModel @Inject constructor(
     fun showPostImportSyncDialog() {
         _uiState.update { it.copy(showPostImportSyncDialog = true) }
         savedStateHandle[SAVED_KEY_SHOW_POST_IMPORT_SYNC] = true
+    }
+
+    /**
+     * #563: the loaded wallet changed outside [switchWallet]. Its backup
+     * banner, sync mode, stall banner and rows belong to the previous
+     * wallet; recompute them for the new one, as [switchWallet] does.
+     */
+    private fun onWalletChangedExternally() {
+        syncStallDetector.reset()
+        stallBannerDismissed = false
+        _uiState.update {
+            it.copy(
+                showSyncStallBanner = false,
+                syncStallMinutes = 0L,
+                showGapLimitBanner = false,
+                transactions = emptyList(),
+                currentSyncMode = repository.getSavedSyncMode(),
+                savedCustomBlockHeight = repository.getSavedCustomBlockHeight(),
+            )
+        }
+        checkBackupStatus()
+        refreshSecurityState()
+        refresh()
     }
 
     fun switchWallet(walletId: String) {

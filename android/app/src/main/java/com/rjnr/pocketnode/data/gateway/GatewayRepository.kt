@@ -309,6 +309,38 @@ class GatewayRepository @Inject constructor(
     }
 
     /**
+     * Called after a wallet's rows are gone from Room (#563). The deletion
+     * itself only flips the Room active flag, so without this the repository
+     * kept the deleted wallet loaded: Home showed its balance, address and
+     * catch-up line, and sync-mode reads and writes went to its id.
+     *
+     * - The deleted wallet was the loaded one, or Room's active wallet is
+     *   another one: switch to Room's active wallet through
+     *   [onActiveWalletChanged], which registers it once (#539).
+     * - Another wallet was deleted under ALL_WALLETS / BALANCED: the active
+     *   wallet stays loaded, and the set is registered once so the deleted
+     *   wallet's script leaves it.
+     * - Another wallet was deleted under ACTIVE_ONLY: its script was never
+     *   registered, nothing to do.
+     *
+     * Must run after the delete commits, so no set includes the deleted wallet.
+     */
+    suspend fun onWalletDeleted(deletedWalletId: String) {
+        val active = walletDao.getActive() ?: run {
+            logger.w(TAG, "No active wallet after deleting $deletedWalletId")
+            return
+        }
+        if (deletedWalletId == activeWalletId || active.walletId != activeWalletId) {
+            onActiveWalletChanged(active)
+            return
+        }
+        when (walletPreferences.getSyncStrategy()) {
+            SyncStrategy.ALL_WALLETS, SyncStrategy.BALANCED -> registerAllWalletsQuietlyIfSuperseded()
+            SyncStrategy.ACTIVE_ONLY -> Unit
+        }
+    }
+
+    /**
      * Repository-side work that runs immediately after the embedded node
      * starts, passed to [NodeLifecycle.initializeNode]. The cold-start
      * pending-tx reconciliation itself lives on [StartupReconciler] (#460);

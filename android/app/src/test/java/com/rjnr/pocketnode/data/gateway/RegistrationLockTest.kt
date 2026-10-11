@@ -683,6 +683,78 @@ class RegistrationLockTest {
         assertTrue(bridge.setScriptsCalls.isEmpty())
     }
 
+    // ------------------------------------------------------------------
+    // #563: a wallet deletion re-registers once, without the deleted wallet
+    // ------------------------------------------------------------------
+
+    /** What WalletRepository leaves behind: [deleted] gone, [nowActive] active in Room and prefs. */
+    private suspend fun deleteInRoom(deleted: String, nowActive: String) {
+        db.walletDao().deactivateAll()
+        db.walletDao().activate(nowActive)
+        walletPreferences.setActiveWalletId(nowActive)
+        db.walletDao().delete(deleted)
+    }
+
+    @Test
+    fun `deleting the loaded wallet switches to the active one and lands one set without it`() = runBlocking {
+        build()
+        walletPreferences.setSyncStrategy(SyncStrategy.ALL_WALLETS)
+        repository.registerAccountWithStrategy(savePreference = false).getOrThrow()
+        deleteInRoom(deleted = ACTIVE, nowActive = OTHER)
+
+        repository.onWalletDeleted(ACTIVE)
+
+        assertEquals("one set for the delete", 2, bridge.landed.size)
+        assertEquals(setOf(otherScript.args), argsOf(bridge.landed.last()))
+        assertEquals(OTHER, coordinator.registeredActiveWalletId)
+        assertEquals(otherScript, repository.walletInfo.value?.script)
+        assertEquals(null, repository.ensureRegistration)
+    }
+
+    @Test
+    fun `deleting the loaded wallet under ACTIVE_ONLY registers the new active wallet's own script`() = runBlocking {
+        build()
+        walletPreferences.setSyncStrategy(SyncStrategy.ACTIVE_ONLY)
+        repository.registerAccountWithStrategy(savePreference = false).getOrThrow()
+        deleteInRoom(deleted = ACTIVE, nowActive = OTHER)
+
+        repository.onWalletDeleted(ACTIVE)
+
+        assertEquals(2, bridge.landed.size)
+        assertEquals(setOf(otherScript.args), argsOf(bridge.landed.last()))
+        assertEquals(OTHER, coordinator.registeredActiveWalletId)
+        assertEquals(otherScript, repository.walletInfo.value?.script)
+    }
+
+    @Test
+    fun `deleting another wallet keeps the loaded one and lands one set without the deleted script`() = runBlocking {
+        build()
+        walletPreferences.setSyncStrategy(SyncStrategy.ALL_WALLETS)
+        repository.registerAccountWithStrategy(savePreference = false).getOrThrow()
+        assertEquals(setOf(activeScript.args, otherScript.args), argsOf(bridge.landed.single()))
+        db.walletDao().delete(OTHER)
+
+        repository.onWalletDeleted(OTHER)
+
+        assertEquals(2, bridge.landed.size)
+        assertEquals(setOf(activeScript.args), argsOf(bridge.landed.last()))
+        assertEquals(ACTIVE, coordinator.registeredActiveWalletId)
+        assertEquals(activeScript, repository.walletInfo.value?.script)
+    }
+
+    @Test
+    fun `deleting another wallet under ACTIVE_ONLY registers nothing`() = runBlocking {
+        build()
+        walletPreferences.setSyncStrategy(SyncStrategy.ACTIVE_ONLY)
+        repository.registerAccountWithStrategy(savePreference = false).getOrThrow()
+        db.walletDao().delete(OTHER)
+
+        repository.onWalletDeleted(OTHER)
+
+        assertEquals(1, bridge.landed.size)
+        assertEquals(activeScript, repository.walletInfo.value?.script)
+    }
+
     private fun assertNotNullJob(): kotlinx.coroutines.Job {
         val job = repository.ensureRegistration
         assertNotNull("the reassignment must launch a registration", job)
