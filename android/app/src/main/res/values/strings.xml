@@ -334,6 +334,8 @@
     <string name="vm_error_pin_required_remove_wallets">PIN is required while you have a wallet. Delete all wallets first to remove the PIN.</string>
     <string name="vm_error_pin_required_backups">Cannot remove PIN while encrypted wallet backups exist. Back up your recovery phrase first, then you can remove the PIN.</string>
     <string name="vm_error_sync_mode_change_failed">Sync mode change failed: %1$s</string>
+    <string name="add_wallet_cancel_adding">Cancel adding wallet</string>
+    <string name="add_wallet_rollback_failed">The wallet was added. You can remove it in Manage Wallets.</string>
     <string name="vm_error_network_switch_failed">Network switch failed: %1$s</string>
     <!-- endregion -->
 

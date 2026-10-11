@@ -15,17 +15,20 @@ import com.rjnr.pocketnode.data.database.dao.KeyMaterialDao
 import com.rjnr.pocketnode.data.database.dao.TransactionDao
 import com.rjnr.pocketnode.data.database.dao.WalletDao
 import com.rjnr.pocketnode.data.database.entity.WalletEntity
+import com.rjnr.pocketnode.data.gateway.GatewayRepository
 import com.rjnr.pocketnode.data.gateway.models.NetworkType
 import com.rjnr.pocketnode.data.wallet.KeyManager
 import com.rjnr.pocketnode.data.wallet.WalletKeyReader
 import com.rjnr.pocketnode.data.wallet.WalletKeyWriter
 import com.rjnr.pocketnode.data.wallet.WalletRepository
 import dagger.hilt.android.lifecycle.HiltViewModel
+import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import java.util.Locale
 import javax.inject.Inject
 
@@ -35,6 +38,7 @@ private const val TAG = "WalletSettingsVM"
 class WalletSettingsViewModel @Inject constructor(
     savedStateHandle: SavedStateHandle,
     private val walletRepository: WalletRepository,
+    private val gatewayRepository: GatewayRepository,
     private val walletDao: WalletDao,
     private val keyManager: KeyManager,
     private val pinManager: PinManager,
@@ -189,6 +193,7 @@ class WalletSettingsViewModel @Inject constructor(
                 val isActive = current?.isActive == true ||
                     appStatePreferences.getActiveWalletId() == walletId
 
+                var nextActiveId: String? = null
                 if (isActive) {
                     // Auto-switch to a sibling before delete. The previous
                     // behaviour was to refuse with "Cannot delete the active
@@ -223,10 +228,28 @@ class WalletSettingsViewModel @Inject constructor(
                     // accounts of other parents.
                     val next = candidates.firstOrNull { it.parentWalletId == null }
                         ?: candidates.first()
-                    walletRepository.switchActiveWallet(next.walletId)
+                    nextActiveId = next.walletId
                 }
 
-                walletRepository.deleteWallet(walletId)
+                // #563 review F2: once the switch or the delete commits, the
+                // gateway must follow even if the user leaves the screen
+                // (viewModelScope cancelled) mid-way, or it stays on the
+                // deleted wallet. Hence NonCancellable for the whole sequence.
+                withContext(NonCancellable) {
+                    nextActiveId?.let { walletRepository.switchActiveWallet(it) }
+                    walletRepository.deleteWallet(walletId)
+                    // #563: the switch only changed Room. Move the gateway
+                    // (Home, Settings, sync registration) onto the active
+                    // wallet now, after the delete, so no set includes the
+                    // deleted one. The delete itself succeeded, so a
+                    // registration failure here is logged, not reported as a
+                    // failed delete.
+                    try {
+                        gatewayRepository.onWalletDeleted(walletId)
+                    } catch (e: Exception) {
+                        logger.w(TAG, "Re-registration after deleting $walletId failed", e)
+                    }
+                }
                 _uiState.update { it.copy(showDeleteConfirm = false, deleted = true) }
             } catch (e: Exception) {
                 logger.e(TAG, "Failed to delete wallet", e)

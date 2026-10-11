@@ -153,6 +153,14 @@ fun AddWalletScreen(
                 SyncMode.NEW_WALLET, SyncMode.RECENT, SyncMode.FULL_HISTORY, SyncMode.CUSTOM
             ),
             onDismiss = { viewModel.skipSyncSelection() },
+            // #563: Cancel removes the wallet just added; a swipe or back
+            // still only closes the sheet and keeps it.
+            onCancel = if (uiState.cancelRemovesWallet) {
+                { viewModel.cancelAddedWallet() }
+            } else null,
+            cancelLabel = if (uiState.cancelRemovesWallet) {
+                stringResource(R.string.add_wallet_cancel_adding)
+            } else null,
             onSelectMode = { mode, height -> viewModel.onSyncModeSelected(mode, height) },
             onTopicHelp = {},
             showHelpIcons = false,

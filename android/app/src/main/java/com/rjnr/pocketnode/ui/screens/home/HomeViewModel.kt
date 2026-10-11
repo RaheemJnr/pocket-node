@@ -127,11 +127,19 @@ class HomeViewModel @Inject constructor(
     @OptIn(kotlinx.coroutines.ExperimentalCoroutinesApi::class)
     private fun observeBroadcastStates() {
         viewModelScope.launch {
-            _uiState.map { it.currentNetwork }
+            // Keyed on the network AND the active wallet (Codex P2 on #565):
+            // a wallet change (Home's switch, Wallet Manager, a delete or a
+            // cancelled add) re-subscribes to the new wallet's rows, and the
+            // previous wallet's are cleared at once rather than left showing
+            // until Room answers.
+            combine(
+                _uiState.map { it.currentNetwork }.distinctUntilChanged(),
+                walletRepository.getActiveWallet().map { it?.walletId ?: "" }.distinctUntilChanged(),
+            ) { network, walletId -> network to walletId }
                 .distinctUntilChanged()
-                .flatMapLatest { network ->
-                    val walletId = walletPreferences.getActiveWalletId() ?: ""
+                .flatMapLatest { (network, walletId) ->
                     pendingBroadcastDao.observeAll(walletId, network.name)
+                        .onStart { emit(emptyList()) }
                 }
                 .catch { e -> logger.w(TAG, "broadcast state stream failed: ${e.message}") }
                 .collect { rows ->
@@ -214,9 +222,14 @@ class HomeViewModel @Inject constructor(
                         address = repository.getCurrentAddress() ?: ""
                     )
                 }
-                // When wallet changes externally (e.g. from WalletManager), refresh data
-                if (walletChanged) {
-                    refresh()
+                // When wallet changes externally (e.g. from WalletManager, or a
+                // delete in Wallet Settings, #563), drop the previous wallet's
+                // per-wallet UI state the way switchWallet does, then refresh.
+                // Home's own switch does that itself, so its change is skipped
+                // here whether it arrives during the switch or after it
+                // (#563 review F5: one refresh per switch).
+                if (walletChanged && !ownSwitchInFlight && info !== ownSwitchWalletInfo) {
+                    onWalletChangedExternally()
                 }
             }
         }
@@ -742,8 +755,38 @@ class HomeViewModel @Inject constructor(
         savedStateHandle[SAVED_KEY_SHOW_POST_IMPORT_SYNC] = true
     }
 
+    /**
+     * #563: the loaded wallet changed outside [switchWallet]. Its backup
+     * banner, sync mode, stall banner and rows belong to the previous
+     * wallet; recompute them for the new one, as [switchWallet] does.
+     */
+    private fun onWalletChangedExternally() {
+        syncStallDetector.reset()
+        stallBannerDismissed = false
+        _uiState.update {
+            it.copy(
+                showSyncStallBanner = false,
+                syncStallMinutes = 0L,
+                showGapLimitBanner = false,
+                transactions = emptyList(),
+                currentSyncMode = repository.getSavedSyncMode(),
+                savedCustomBlockHeight = repository.getSavedCustomBlockHeight(),
+            )
+        }
+        checkBackupStatus()
+        refreshSecurityState()
+        refresh()
+    }
+
+    // #563 review F5: Home's own switch in flight, and the wallet info it
+    // produced, so the walletInfo collector does not handle it a second time.
+    // Main-thread only (viewModelScope).
+    private var ownSwitchInFlight = false
+    private var ownSwitchWalletInfo: WalletInfo? = null
+
     fun switchWallet(walletId: String) {
         viewModelScope.launch {
+            ownSwitchInFlight = true
             try {
                 syncStallDetector.reset()
                 stallBannerDismissed = false
@@ -751,6 +794,7 @@ class HomeViewModel @Inject constructor(
                 walletRepository.switchActiveWallet(walletId)
                 val wallet = walletRepository.getById(walletId) ?: return@launch
                 repository.onActiveWalletChanged(wallet)
+                ownSwitchWalletInfo = repository.walletInfo.value
                 // Refresh per-wallet sync preferences for UI
                 val newSyncMode = repository.getSavedSyncMode()
                 val newCustomHeight = repository.getSavedCustomBlockHeight()
@@ -768,6 +812,8 @@ class HomeViewModel @Inject constructor(
             } catch (e: Exception) {
                 logger.e(TAG, "Failed to switch wallet", e)
                 _uiState.update { it.copy(isSwitchingWallet = false, error = com.rjnr.pocketnode.ui.util.UiMessage.Resource(com.rjnr.pocketnode.R.string.vm_error_switch_wallet_failed, listOf(e.message ?: ""))) }
+            } finally {
+                ownSwitchInFlight = false
             }
         }
     }

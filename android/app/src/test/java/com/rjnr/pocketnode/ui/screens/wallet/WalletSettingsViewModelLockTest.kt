@@ -59,6 +59,7 @@ class WalletSettingsViewModelLockTest {
     private fun newViewModel() = WalletSettingsViewModel(
         savedStateHandle = SavedStateHandle(mapOf("walletId" to "wallet-1")),
         walletRepository = mockk(relaxed = true),
+        gatewayRepository = mockk(relaxed = true),
         walletDao = mockk(relaxed = true),
         keyManager = keyManager,
         pinManager = mockk(relaxed = true),

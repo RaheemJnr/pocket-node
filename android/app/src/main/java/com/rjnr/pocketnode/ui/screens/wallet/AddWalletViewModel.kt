@@ -25,6 +25,7 @@ import com.rjnr.pocketnode.data.restorehint.RestoreHintPlan
 import com.rjnr.pocketnode.data.restorehint.RestoreHintSecret
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -66,6 +67,13 @@ data class AddWalletUiState(
     val restoreHintError: RestoreHintImporter.Reason? = null,
     /** #559: a restore hint file was picked on the import form and will be checked after import. */
     val hasRestoreHintFile: Boolean = false,
+    /**
+     * #563: Cancel on the post-import sheet removes the wallet just added and
+     * returns to the previously active one ("Cancel adding wallet"). False
+     * when there is no previous wallet or a rollback already failed; Cancel
+     * then keeps the wallet, as dismissing the sheet does.
+     */
+    val cancelRemovesWallet: Boolean = false,
 )
 
 @HiltViewModel
@@ -167,6 +175,10 @@ class AddWalletViewModel @Inject constructor(
     // sheet resolves, either an explicit pick or a dismiss.
     private var pendingImportedWallet: WalletEntity? = null
 
+    // #563: the wallet that was active before the pending import, restored
+    // if the user cancels the sync choice. Null when there was none.
+    private var previousActiveWalletId: String? = null
+
     /**
      * #559: the restore hint picked on the import form, as text. It is picked
      * BEFORE the import so no secret is ever held while the file picker is
@@ -253,9 +265,15 @@ class AddWalletViewModel @Inject constructor(
             }
             if (failure == null) {
                 pendingImportedWallet = null
+                previousActiveWalletId = null
                 clearRestoreHint()
                 _uiState.update {
-                    it.copy(isApplyingSyncChoice = false, showSyncModeDialog = false, createdWallet = wallet)
+                    it.copy(
+                        isApplyingSyncChoice = false,
+                        showSyncModeDialog = false,
+                        cancelRemovesWallet = false,
+                        createdWallet = wallet,
+                    )
                 }
             } else {
                 // Keep the sheet open and the wallet pending so the user can
@@ -280,8 +298,88 @@ class AddWalletViewModel @Inject constructor(
         if (_uiState.value.isApplyingSyncChoice) return
         val wallet = pendingImportedWallet
         pendingImportedWallet = null
+        previousActiveWalletId = null
         clearRestoreHint()
-        _uiState.update { it.copy(showSyncModeDialog = false, syncChoiceError = null, createdWallet = wallet) }
+        _uiState.update {
+            it.copy(
+                showSyncModeDialog = false,
+                syncChoiceError = null,
+                cancelRemovesWallet = false,
+                createdWallet = wallet,
+            )
+        }
+    }
+
+    /**
+     * #563: Cancel on the post-import sheet. Removes the wallet this import
+     * just added (only its rows and keys) and moves the app back onto the
+     * previously active wallet through the normal switch path. The user stays
+     * on the Add Wallet screen. If the removal fails, the wallet stays added
+     * and the sheet says so; a further Cancel then keeps it.
+     */
+    fun cancelAddedWallet() {
+        if (_uiState.value.isApplyingSyncChoice) return
+        val wallet = pendingImportedWallet
+        val previousId = previousActiveWalletId
+        if (wallet == null || previousId == null || !_uiState.value.cancelRemovesWallet) {
+            skipSyncSelection()
+            return
+        }
+        _uiState.update {
+            it.copy(isApplyingSyncChoice = true, syncChoiceError = null, restoreHintError = null)
+        }
+        viewModelScope.launch {
+            // #563 review F2: once the rollback commits, the gateway must
+            // switch back even if the user leaves the screen
+            // (viewModelScope cancelled), or it stays on the removed wallet.
+            val rolledBack = withContext(NonCancellable) {
+                val removed = try {
+                    walletRepository.rollbackAddedWallet(wallet.walletId, previousId)
+                    true
+                } catch (e: Exception) {
+                    logger.e(TAG, "Rolling back the added wallet failed", e)
+                    false
+                }
+                if (removed) {
+                    // The removed wallet is the loaded one: this switches the
+                    // gateway back to the previous wallet via onActiveWalletChanged.
+                    try {
+                        gatewayRepository.onWalletDeleted(wallet.walletId)
+                    } catch (e: Exception) {
+                        logger.w(TAG, "Re-registration after removing the added wallet failed", e)
+                    }
+                }
+                removed
+            }
+            if (!rolledBack) {
+                _uiState.update {
+                    it.copy(
+                        isApplyingSyncChoice = false,
+                        cancelRemovesWallet = false,
+                        syncChoiceError = UiMessage.Resource(R.string.add_wallet_rollback_failed),
+                    )
+                }
+                return@launch
+            }
+            pendingImportedWallet = null
+            previousActiveWalletId = null
+            clearRestoreHint()
+            // #563 review F6: the add was abandoned, so nothing the user
+            // entered for it stays on screen: name, phrase words, private key.
+            _uiState.update {
+                it.copy(
+                    isApplyingSyncChoice = false,
+                    showSyncModeDialog = false,
+                    syncChoiceError = null,
+                    cancelRemovesWallet = false,
+                    name = "",
+                    importWords = List(12) { "" },
+                    importSuggestions = emptyMap(),
+                    importWordErrors = emptySet(),
+                    importPrivateKey = "",
+                )
+            }
+        }
     }
 
     // -- Restore hint (#559) --
@@ -596,6 +694,7 @@ class AddWalletViewModel @Inject constructor(
 
         viewModelScope.launch {
             _uiState.update { it.copy(isLoading = true, error = null) }
+            val previousActive = walletRepository.getActive()?.walletId
             val result = walletRepository.importFromMnemonic(
                 words = words,
                 name = name,
@@ -613,7 +712,14 @@ class AddWalletViewModel @Inject constructor(
                 gatewayRepository.onActiveWalletChanged(wallet)
                 // #431: hold navigation until the sync-mode sheet resolves.
                 pendingImportedWallet = wallet
-                _uiState.update { it.copy(isLoading = false, showSyncModeDialog = true) }
+                previousActiveWalletId = previousActive?.takeIf { it != wallet.walletId }
+                _uiState.update {
+                    it.copy(
+                        isLoading = false,
+                        showSyncModeDialog = true,
+                        cancelRemovesWallet = previousActiveWalletId != null,
+                    )
+                }
                 verifyRestoreHint {
                     deriveMnemonicHintSecret(words)
                 }
@@ -644,6 +750,7 @@ class AddWalletViewModel @Inject constructor(
 
         viewModelScope.launch {
             _uiState.update { it.copy(isLoading = true, error = null) }
+            val previousActive = walletRepository.getActive()?.walletId
             val result = walletRepository.importRawKey(key, name) { walletId, bundle ->
                 persistWalletKeys(
                     activity = activity,
@@ -657,7 +764,14 @@ class AddWalletViewModel @Inject constructor(
                 gatewayRepository.onActiveWalletChanged(wallet)
                 // #431: hold navigation until the sync-mode sheet resolves.
                 pendingImportedWallet = wallet
-                _uiState.update { it.copy(isLoading = false, showSyncModeDialog = true) }
+                previousActiveWalletId = previousActive?.takeIf { it != wallet.walletId }
+                _uiState.update {
+                    it.copy(
+                        isLoading = false,
+                        showSyncModeDialog = true,
+                        cancelRemovesWallet = previousActiveWalletId != null,
+                    )
+                }
                 verifyRestoreHint {
                     val keyBytes = key.hexToByteArray()
                     try {
