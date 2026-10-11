@@ -388,6 +388,9 @@
     <string name="activity_retry">Retry</string>
     <string name="activity_cancel">Cancel</string>
     <string name="activity_export_csv_cd">Export CSV</string>
+    <!-- #562: the picker result can arrive with nothing pending (re-auth lock, rotation) or fail to write. -->
+    <string name="activity_export_not_saved">The export was not saved. Try again.</string>
+    <string name="activity_export_save_failed">Could not save the export. Try again.</string>
     <string name="activity_copy_tx_cd">Copy TX hash</string>
     <string name="activity_explorer_cd">View on explorer</string>
     <string name="activity_retry_transaction">Retry Transaction</string>

@@ -1,5 +1,8 @@
 package com.rjnr.pocketnode.ui.screens.activity
 
+import android.content.ContentResolver
+import android.net.Uri
+import android.provider.DocumentsContract
 import com.rjnr.pocketnode.core.log.Logger
 import com.rjnr.pocketnode.core.prefs.AppStatePreferences
 import com.rjnr.pocketnode.core.prefs.UiPreferences
@@ -17,21 +20,23 @@ import com.rjnr.pocketnode.data.gateway.GatewayRepository
 import com.rjnr.pocketnode.data.gateway.models.NetworkType
 import com.rjnr.pocketnode.data.gateway.models.TransactionRecord
 import dagger.hilt.android.lifecycle.HiltViewModel
+import kotlinx.coroutines.CoroutineDispatcher
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.flow.Flow
-import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
-import kotlinx.coroutines.flow.SharedFlow
 import kotlinx.coroutines.flow.StateFlow
-import kotlinx.coroutines.flow.asSharedFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.flatMapLatest
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.map
+import kotlinx.coroutines.flow.receiveAsFlow
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import com.rjnr.pocketnode.ui.transaction.BroadcastInfo
 import javax.inject.Inject
 
@@ -59,8 +64,27 @@ class ActivityViewModel @Inject constructor(
     private val _uiState = MutableStateFlow(ActivityUiState())
     val uiState: StateFlow<ActivityUiState> = _uiState.asStateFlow()
 
-    private val _exportEvent = MutableSharedFlow<String>()
-    val exportEvent: SharedFlow<String> = _exportEvent.asSharedFlow()
+    // -- CSV export (#562) --
+
+    private val _exportFiles = Channel<String>(Channel.BUFFERED)
+
+    /**
+     * The suggested file name of the CSV ready to save; the screen opens the
+     * system "save as" picker with it and reports the chosen document to
+     * [onExportDocumentChosen].
+     */
+    val exportEvent: Flow<String> = _exportFiles.receiveAsFlow()
+
+    /**
+     * The CSV waiting for its document. Held here, not in the screen: the
+     * re-auth gate can take the screen out of composition while the picker is
+     * open (and rotation recreates it either way), and a `remember` there
+     * came back empty and wrote a 0-byte file.
+     */
+    private var pendingCsvExport: String? = null
+
+    /** Where the document write runs; a test seam. */
+    internal var exportIo: CoroutineDispatcher = Dispatchers.IO
 
 
     @OptIn(kotlinx.coroutines.ExperimentalCoroutinesApi::class)
@@ -180,7 +204,8 @@ class ActivityViewModel @Inject constructor(
                 val entities = transactionDao.getAllByWalletAndNetwork(walletId, network)
                 TransactionExporter().exportToCsv(entities)
             }.onSuccess { csv ->
-                _exportEvent.emit(csv)
+                pendingCsvExport = csv
+                _exportFiles.send("transactions.csv")
             }.onFailure { error ->
                 logger.e(TAG, "Export failed", error)
                 _uiState.update {
@@ -190,6 +215,44 @@ class ActivityViewModel @Inject constructor(
                             listOf(error.message ?: ""),
                         ),
                     )
+                }
+            }
+        }
+    }
+
+    /**
+     * The "save as" picker returned. Null [uri]: the user backed out. A
+     * document but nothing pending (the export was lost, e.g. the ViewModel
+     * was recreated): delete the empty document, best effort, and say so.
+     */
+    fun onExportDocumentChosen(uri: Uri?, resolver: ContentResolver) {
+        val csv = pendingCsvExport
+        pendingCsvExport = null
+        if (uri == null) return
+        viewModelScope.launch {
+            val message = withContext(exportIo) {
+                if (csv == null) {
+                    runCatching { DocumentsContract.deleteDocument(resolver, uri) }
+                    com.rjnr.pocketnode.R.string.activity_export_not_saved
+                } else {
+                    val written = runCatching {
+                        resolver.openOutputStream(uri)?.use { stream ->
+                            // UTF-8 BOM so Excel on Windows renders non-ASCII wallet/memo data correctly.
+                            stream.write("\uFEFF".toByteArray(Charsets.UTF_8))
+                            stream.write(csv.toByteArray(Charsets.UTF_8))
+                        } != null
+                    }.getOrDefault(false)
+                    if (written) {
+                        null
+                    } else {
+                        runCatching { DocumentsContract.deleteDocument(resolver, uri) }
+                        com.rjnr.pocketnode.R.string.activity_export_save_failed
+                    }
+                }
+            }
+            message?.let { res ->
+                _uiState.update {
+                    it.copy(error = com.rjnr.pocketnode.ui.util.UiMessage.Resource(res))
                 }
             }
         }
