@@ -7,6 +7,7 @@ import androidx.test.core.app.ApplicationProvider
 import com.rjnr.pocketnode.core.log.NoopLogger
 import com.rjnr.pocketnode.core.prefs.SyncStrategy
 import com.rjnr.pocketnode.data.database.AppDatabase
+import com.rjnr.pocketnode.data.database.entity.PendingBroadcastEntity
 import com.rjnr.pocketnode.data.database.entity.WalletEntity
 import com.rjnr.pocketnode.data.gateway.GatewayRepository
 import com.rjnr.pocketnode.data.gateway.LedgerReader
@@ -202,6 +203,52 @@ class HomeViewModelWalletChangeTest {
     }
 
     private fun HomeViewModel.started() = settle { uiState.value.walletInfo != null && refreshes.get() > 0 }
+
+    private fun broadcast(hash: String, walletId: String) = runBlocking {
+        db.pendingBroadcastDao().insert(
+            PendingBroadcastEntity(
+                txHash = hash, walletId = walletId, network = NetworkType.TESTNET.name,
+                signedTxJson = "{}", reservedInputs = "[]", state = "BROADCAST",
+                submittedAtTipBlock = 1L, nullCount = 0, createdAt = 0L, lastCheckedAt = 0L,
+            )
+        )
+    }
+
+    private fun HomeViewModel.broadcastHashes() = uiState.value.broadcastStates.keys
+
+    /**
+     * Codex P2 on #565: the broadcast rows were keyed on the network only and
+     * read the active wallet id once, so after a wallet change Home kept the
+     * old wallet's in-flight sends and never showed the new wallet's.
+     */
+    @Test
+    fun `after Home's own switch the new wallet's broadcasts show and the old one's do not`() {
+        broadcast("0xa1", "A")
+        broadcast("0xb1", "B")
+        val vm = newViewModel()
+        vm.started()
+        settle { vm.broadcastHashes() == setOf("0xa1") }
+
+        vm.switchWallet("B")
+
+        settle { vm.broadcastHashes() == setOf("0xb1") }
+    }
+
+    @Test
+    fun `after a switch made elsewhere the new wallet's broadcasts show and the old one's do not`() {
+        broadcast("0xa1", "A")
+        broadcast("0xb1", "B")
+        val vm = newViewModel()
+        vm.started()
+        settle { vm.broadcastHashes() == setOf("0xa1") }
+
+        runBlocking {
+            walletRepository.switchActiveWallet("B")
+            gateway.onActiveWalletChanged(db.walletDao().getById("B")!!)
+        }
+
+        settle { vm.broadcastHashes() == setOf("0xb1") }
+    }
 
     @Test
     fun `switching wallets from Home refreshes once`() {

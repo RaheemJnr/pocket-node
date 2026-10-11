@@ -127,11 +127,19 @@ class HomeViewModel @Inject constructor(
     @OptIn(kotlinx.coroutines.ExperimentalCoroutinesApi::class)
     private fun observeBroadcastStates() {
         viewModelScope.launch {
-            _uiState.map { it.currentNetwork }
+            // Keyed on the network AND the active wallet (Codex P2 on #565):
+            // a wallet change (Home's switch, Wallet Manager, a delete or a
+            // cancelled add) re-subscribes to the new wallet's rows, and the
+            // previous wallet's are cleared at once rather than left showing
+            // until Room answers.
+            combine(
+                _uiState.map { it.currentNetwork }.distinctUntilChanged(),
+                walletRepository.getActiveWallet().map { it?.walletId ?: "" }.distinctUntilChanged(),
+            ) { network, walletId -> network to walletId }
                 .distinctUntilChanged()
-                .flatMapLatest { network ->
-                    val walletId = walletPreferences.getActiveWalletId() ?: ""
+                .flatMapLatest { (network, walletId) ->
                     pendingBroadcastDao.observeAll(walletId, network.name)
+                        .onStart { emit(emptyList()) }
                 }
                 .catch { e -> logger.w(TAG, "broadcast state stream failed: ${e.message}") }
                 .collect { rows ->
