@@ -217,7 +217,10 @@ class HomeViewModel @Inject constructor(
                 // When wallet changes externally (e.g. from WalletManager, or a
                 // delete in Wallet Settings, #563), drop the previous wallet's
                 // per-wallet UI state the way switchWallet does, then refresh.
-                if (walletChanged) {
+                // Home's own switch does that itself, so its change is skipped
+                // here whether it arrives during the switch or after it
+                // (#563 review F5: one refresh per switch).
+                if (walletChanged && !ownSwitchInFlight && info !== ownSwitchWalletInfo) {
                     onWalletChangedExternally()
                 }
             }
@@ -767,8 +770,15 @@ class HomeViewModel @Inject constructor(
         refresh()
     }
 
+    // #563 review F5: Home's own switch in flight, and the wallet info it
+    // produced, so the walletInfo collector does not handle it a second time.
+    // Main-thread only (viewModelScope).
+    private var ownSwitchInFlight = false
+    private var ownSwitchWalletInfo: WalletInfo? = null
+
     fun switchWallet(walletId: String) {
         viewModelScope.launch {
+            ownSwitchInFlight = true
             try {
                 syncStallDetector.reset()
                 stallBannerDismissed = false
@@ -776,6 +786,7 @@ class HomeViewModel @Inject constructor(
                 walletRepository.switchActiveWallet(walletId)
                 val wallet = walletRepository.getById(walletId) ?: return@launch
                 repository.onActiveWalletChanged(wallet)
+                ownSwitchWalletInfo = repository.walletInfo.value
                 // Refresh per-wallet sync preferences for UI
                 val newSyncMode = repository.getSavedSyncMode()
                 val newCustomHeight = repository.getSavedCustomBlockHeight()
@@ -793,6 +804,8 @@ class HomeViewModel @Inject constructor(
             } catch (e: Exception) {
                 logger.e(TAG, "Failed to switch wallet", e)
                 _uiState.update { it.copy(isSwitchingWallet = false, error = com.rjnr.pocketnode.ui.util.UiMessage.Resource(com.rjnr.pocketnode.R.string.vm_error_switch_wallet_failed, listOf(e.message ?: ""))) }
+            } finally {
+                ownSwitchInFlight = false
             }
         }
     }
