@@ -1,7 +1,5 @@
 package com.rjnr.pocketnode.ui.screens.auth
 
-import android.content.Context
-import android.content.Intent
 import com.rjnr.pocketnode.core.log.Logger
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
@@ -9,8 +7,8 @@ import com.rjnr.pocketnode.data.auth.PinManager
 import com.rjnr.pocketnode.data.gateway.CacheManager
 import com.rjnr.pocketnode.data.gateway.DaoSyncManager
 import com.rjnr.pocketnode.data.wallet.WalletRepository
+import com.rjnr.pocketnode.util.AppRestarter
 import dagger.hilt.android.lifecycle.HiltViewModel
-import dagger.hilt.android.qualifiers.ApplicationContext
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -33,7 +31,7 @@ private const val TAG = "ForgotPinViewModel"
  */
 @HiltViewModel
 class ForgotPinViewModel @Inject constructor(
-    @ApplicationContext private val context: Context,
+    private val appRestarter: AppRestarter,
     private val walletRepository: WalletRepository,
     private val pinManager: PinManager,
     private val cacheManager: CacheManager,
@@ -79,10 +77,7 @@ class ForgotPinViewModel @Inject constructor(
                 // sync polling loop has stale references to wallets that
                 // no longer exist — a process restart is the cleanest
                 // way to land the user on a deterministic blank state.
-                val intent = context.packageManager.getLaunchIntentForPackage(context.packageName)!!
-                intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TASK)
-                context.startActivity(intent)
-                android.os.Process.killProcess(android.os.Process.myPid())
+                appRestarter.restart()
             } catch (e: Throwable) {
                 logger.e(TAG, "factoryReset failed", e)
                 _uiState.update {

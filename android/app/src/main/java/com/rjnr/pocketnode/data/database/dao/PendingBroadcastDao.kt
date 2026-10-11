@@ -38,6 +38,10 @@ interface PendingBroadcastDao {
     @Query("DELETE FROM pending_broadcasts WHERE txHash = :hash")
     suspend fun delete(hash: String)
 
+    /** Every broadcast row of a wallet, on both networks (wallet removal). */
+    @Query("DELETE FROM pending_broadcasts WHERE walletId = :walletId")
+    suspend fun deleteForWallet(walletId: String)
+
     /** Snapshot — for cell-reservation reads inside a mutex-guarded section. */
     @Query(
         "SELECT * FROM pending_broadcasts " +

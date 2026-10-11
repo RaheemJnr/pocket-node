@@ -2,10 +2,14 @@ package com.rjnr.pocketnode.ui.screens.recovery
 
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
+import com.rjnr.pocketnode.data.auth.AuthManager
 import com.rjnr.pocketnode.data.auth.PinManager
 import com.rjnr.pocketnode.data.crypto.KeyBackupManager
 import com.rjnr.pocketnode.data.crypto.KeyMaterial
+import com.rjnr.pocketnode.data.gateway.LocalWalletReset
+import com.rjnr.pocketnode.util.AppRestarter
 import dagger.hilt.android.lifecycle.HiltViewModel
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -18,6 +22,8 @@ import javax.inject.Inject
 enum class RecoveryStage {
     PIN_ENTRY,
     MNEMONIC_ENTRY,
+    /** The app PIN, asked before the phrase restore opens. */
+    PHRASE_PIN_ENTRY,
     SUCCESS,
     ERROR
 }
@@ -27,7 +33,15 @@ data class RecoveryUiState(
     val failedAttempts: Int = 0,
     val recoveredWallets: List<RecoveredWallet> = emptyList(),
     val failedWalletIds: List<String> = emptyList(),
-    val error: String? = null
+    val error: String? = null,
+    /** Where Cancel on [RecoveryStage.PHRASE_PIN_ENTRY] goes back to. */
+    val stageBeforePhrasePin: RecoveryStage? = null,
+    /** The PIN cannot be verified: confirm removing the wallets first. */
+    val showStartFreshConfirm: Boolean = false,
+    val isStartingFresh: Boolean = false,
+    val startFreshFailed: Boolean = false,
+    /** One-shot: the phrase restore may open now (see [RecoveryViewModel.onPhraseRestoreOpened]). */
+    val phraseRestoreReady: Boolean = false,
 )
 
 data class RecoveredWallet(
@@ -39,6 +53,9 @@ data class RecoveredWallet(
 class RecoveryViewModel(
     private val backupManager: KeyBackupManager,
     private val pinManager: PinManager,
+    private val authManager: AuthManager,
+    private val localWalletReset: LocalWalletReset,
+    private val appRestarter: AppRestarter,
     private val ioDispatcher: CoroutineDispatcher
 ) : ViewModel() {
 
@@ -46,11 +63,38 @@ class RecoveryViewModel(
     @Inject
     constructor(
         backupManager: KeyBackupManager,
-        pinManager: PinManager
-    ) : this(backupManager, pinManager, Dispatchers.IO)
+        pinManager: PinManager,
+        authManager: AuthManager,
+        localWalletReset: LocalWalletReset,
+        appRestarter: AppRestarter,
+    ) : this(backupManager, pinManager, authManager, localWalletReset, appRestarter, Dispatchers.IO)
 
     private val _uiState = MutableStateFlow(RecoveryUiState())
     val uiState: StateFlow<RecoveryUiState> = _uiState
+
+    /** The stored app PIN was entered correctly on this screen. */
+    private var pinVerified = false
+
+    private enum class PinCheck { VERIFIED, NO_PIN, REFUSED }
+
+    /**
+     * What [checkPin] found, and on a refusal the UI change to show it. The
+     * caller applies [refusal] (or drops it when the request it belongs to
+     * was cancelled meanwhile).
+     */
+    private class PinResult(
+        val check: PinCheck,
+        val refusal: ((RecoveryUiState) -> RecoveryUiState)? = null,
+    )
+
+    /**
+     * Bumped by every phrase-PIN attempt and by [cancelPhrasePin]. A verify
+     * that finishes under an older value belongs to a cancelled or replaced
+     * request, and its result is dropped. Read and written on the main thread.
+     */
+    private var phrasePinRequest = 0
+
+    private enum class PhraseGate { OPEN, ASK_PIN, START_FRESH, READ_ERROR }
 
     init {
         if (!backupManager.hasAnyBackups()) {
@@ -59,50 +103,22 @@ class RecoveryViewModel(
     }
 
     /**
-     * Attempts to recover wallets from their PIN-encrypted backup blobs.
-     *
-     * PIN attempts are gated through [PinManager] (#319) so they share the
-     * same persistent, cross-session escalating lockout as the lock screen
-     * (30s ... permanent at 10 failures). Previously this path decrypted
-     * backups directly, throttled only by an in-memory counter that reset on
-     * every screen recreate — an on-device attacker could brute-force the
-     * 6-digit PIN indefinitely, bounded only by KDF cost.
+     * Attempts to recover wallets from their PIN-encrypted backup blobs,
+     * behind the shared [checkPin].
      */
     fun attemptPinRecovery(pin: CharArray) {
         viewModelScope.launch {
-            // Persistent lockout shared with the normal PIN gate.
-            if (pinManager.isLockedOut()) {
-                val secs = (pinManager.getLockoutRemainingMs() / 1000).coerceAtLeast(1)
-                _uiState.update {
-                    it.copy(error = "Too many attempts. Try again in ${secs}s.")
-                }
+            // Off the main thread: the PIN hash is Argon2id.
+            val result = withContext(ioDispatcher) { checkPin(pin, stayOn = RecoveryStage.PIN_ENTRY) }
+            result.refusal?.let { refusal ->
+                _uiState.update(refusal)
                 return@launch
             }
-
-            // Verify against the stored PIN hash so failures escalate the SAME
-            // lockout the lock screen uses. The degenerate "no PIN hash but
-            // backups exist" case can't be brute-forced here (nothing to verify
-            // against), so we fall through to a decrypt attempt in that case.
-            if (pinManager.hasPin() && !pinManager.verifyPinFromChars(pin)) {
-                // verifyPinFromChars already recorded the failed attempt and
-                // advanced the persistent lockout/escalation counters.
-                val newAttempts = _uiState.value.failedAttempts + 1
-                val permanent = pinManager.isPermanentlyLocked()
-                _uiState.update {
-                    it.copy(
-                        failedAttempts = newAttempts,
-                        stage = if (permanent) RecoveryStage.MNEMONIC_ENTRY else RecoveryStage.PIN_ENTRY,
-                        error = if (permanent) {
-                            "Too many failed attempts. Please enter your recovery phrase."
-                        } else if (pinManager.isLockedOut()) {
-                            val secs = (pinManager.getLockoutRemainingMs() / 1000).coerceAtLeast(1)
-                            "Incorrect PIN. Locked for ${secs}s."
-                        } else {
-                            "Incorrect PIN. ${pinManager.getRemainingAttempts()} attempts remaining."
-                        }
-                    )
-                }
-                return@launch
+            if (result.check == PinCheck.VERIFIED) {
+                pinVerified = true
+                // Same as a lock-screen unlock: the session PIN lets the
+                // restored wallets write their PIN-encrypted backups.
+                authManager.setSessionPin(pin)
             }
 
             // PIN verified (or no hash to verify against) — decrypt off the main
@@ -142,7 +158,204 @@ class RecoveryViewModel(
         }
     }
 
+    /**
+     * The one PIN check on this screen, shared by the backup restore and the
+     * phrase restore. Attempts are gated through [PinManager] (#319) so they
+     * share the same persistent, cross-session escalating lockout as the lock
+     * screen (30s ... permanent at 10 failures). Previously the backup path
+     * decrypted directly, throttled only by an in-memory counter that reset on
+     * every screen recreate.
+     *
+     * Touches no UI state itself: a refusal comes back as [PinResult.refusal].
+     * A wrong PIN stays on [stayOn] unless it was the one that made the
+     * lockout permanent. A PIN store that cannot be read refuses with a retry
+     * message. A wrong PIN is counted inside [PinManager.verifyPinFromChars]
+     * whatever the caller then does with the result.
+     */
+    private fun checkPin(pin: CharArray, stayOn: RecoveryStage): PinResult =
+        try {
+            verifyPinOrRefuse(pin, stayOn)
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            PinResult(PinCheck.REFUSED) { it.copy(stage = stayOn, error = PIN_READ_ERROR) }
+        }
+
+    private fun verifyPinOrRefuse(pin: CharArray, stayOn: RecoveryStage): PinResult {
+        // Persistent lockout shared with the normal PIN gate.
+        if (pinManager.isLockedOut()) {
+            val secs = (pinManager.getLockoutRemainingMs() / 1000).coerceAtLeast(1)
+            return PinResult(PinCheck.REFUSED) { it.copy(error = "Too many attempts. Try again in ${secs}s.") }
+        }
+
+        // Verify against the stored PIN hash so failures escalate the SAME
+        // lockout the lock screen uses. The degenerate "no PIN hash but
+        // backups exist" case can't be brute-forced here (nothing to verify
+        // against), so the backup path falls through to a decrypt attempt.
+        if (!pinManager.hasPin()) return PinResult(PinCheck.NO_PIN)
+        if (!pinManager.verifyPinFromChars(pin)) {
+            // verifyPinFromChars already recorded the failed attempt and
+            // advanced the persistent lockout/escalation counters.
+            val permanent = pinManager.isPermanentlyLocked()
+            val error = if (permanent) {
+                "Too many failed attempts. Please enter your recovery phrase."
+            } else if (pinManager.isLockedOut()) {
+                val secs = (pinManager.getLockoutRemainingMs() / 1000).coerceAtLeast(1)
+                "Incorrect PIN. Locked for ${secs}s."
+            } else {
+                "Incorrect PIN. ${pinManager.getRemainingAttempts()} attempts remaining."
+            }
+            return PinResult(PinCheck.REFUSED) {
+                it.copy(
+                    failedAttempts = it.failedAttempts + 1,
+                    stage = if (permanent) RecoveryStage.MNEMONIC_ENTRY else stayOn,
+                    stageBeforePhrasePin = if (permanent) null else it.stageBeforePhrasePin,
+                    error = error,
+                )
+            }
+        }
+        return PinResult(PinCheck.VERIFIED)
+    }
+
+    /**
+     * "Restore from phrase". The phrase restore keeps the wallets already in
+     * the app, so it opens only once the app PIN is verified here (or when no
+     * PIN is set). Only when the PIN is permanently locked does it offer to
+     * start fresh instead. A PIN store that cannot be read is a retry, never
+     * a reason to offer the wipe.
+     */
+    fun requestPhraseRestore() {
+        val state = _uiState.value
+        if (state.isStartingFresh || state.phraseRestoreReady) return
+        when (phraseGate()) {
+            PhraseGate.OPEN -> _uiState.update { it.copy(phraseRestoreReady = true) }
+            PhraseGate.ASK_PIN -> _uiState.update {
+                if (it.stage == RecoveryStage.PHRASE_PIN_ENTRY) it else it.copy(
+                    stage = RecoveryStage.PHRASE_PIN_ENTRY,
+                    stageBeforePhrasePin = it.stage,
+                    error = null,
+                )
+            }
+            PhraseGate.START_FRESH -> _uiState.update {
+                it.copy(showStartFreshConfirm = true, startFreshFailed = false)
+            }
+            PhraseGate.READ_ERROR -> _uiState.update {
+                it.copy(
+                    stage = RecoveryStage.PHRASE_PIN_ENTRY,
+                    stageBeforePhrasePin = if (it.stage == RecoveryStage.PHRASE_PIN_ENTRY) {
+                        it.stageBeforePhrasePin
+                    } else {
+                        it.stage
+                    },
+                    error = PIN_READ_ERROR,
+                )
+            }
+        }
+    }
+
+    private fun phraseGate(): PhraseGate {
+        if (pinVerified) return PhraseGate.OPEN
+        val hasPin = runCatching { pinManager.hasPin() }.getOrElse { return PhraseGate.READ_ERROR }
+        if (!hasPin) return PhraseGate.OPEN
+        val permanent = runCatching { pinManager.isPermanentlyLocked() }
+            .getOrElse { return PhraseGate.READ_ERROR }
+        return if (permanent) PhraseGate.START_FRESH else PhraseGate.ASK_PIN
+    }
+
+    /**
+     * The PIN entered on [RecoveryStage.PHRASE_PIN_ENTRY]. If Cancel (or a
+     * newer attempt) comes while the PIN is being checked, the result is
+     * dropped: nothing opens, no session PIN, no stage or error change.
+     */
+    fun attemptPhrasePin(pin: CharArray) {
+        if (_uiState.value.stage != RecoveryStage.PHRASE_PIN_ENTRY) return
+        val request = ++phrasePinRequest
+        viewModelScope.launch {
+            val result = withContext(ioDispatcher) {
+                checkPin(pin, stayOn = RecoveryStage.PHRASE_PIN_ENTRY)
+            }
+            if (request != phrasePinRequest || _uiState.value.stage != RecoveryStage.PHRASE_PIN_ENTRY) {
+                return@launch
+            }
+            result.refusal?.let { refusal ->
+                _uiState.update(refusal)
+                return@launch
+            }
+            if (result.check == PinCheck.VERIFIED) {
+                pinVerified = true
+                // Same as a lock-screen unlock: the session PIN lets the
+                // restored wallet write its PIN-encrypted backup.
+                authManager.setSessionPin(pin)
+            }
+            _uiState.update {
+                it.copy(
+                    stage = it.stageBeforePhrasePin ?: RecoveryStage.MNEMONIC_ENTRY,
+                    stageBeforePhrasePin = null,
+                    error = null,
+                    phraseRestoreReady = true,
+                )
+            }
+        }
+    }
+
+    fun cancelPhrasePin() {
+        // Drops the result of a PIN check still running for this step.
+        phrasePinRequest++
+        _uiState.update {
+            if (it.stage != RecoveryStage.PHRASE_PIN_ENTRY) it else it.copy(
+                stage = it.stageBeforePhrasePin ?: RecoveryStage.MNEMONIC_ENTRY,
+                stageBeforePhrasePin = null,
+                error = null,
+            )
+        }
+    }
+
+    /**
+     * "Remove and continue": remove every wallet, key and the PIN, then
+     * restart the app so it comes back up as a fresh install.
+     */
+    fun confirmStartFresh() {
+        val state = _uiState.value
+        if (!state.showStartFreshConfirm || state.isStartingFresh) return
+        _uiState.update { it.copy(isStartingFresh = true, startFreshFailed = false) }
+        viewModelScope.launch {
+            val ok = try {
+                withContext(ioDispatcher) { localWalletReset.removeAllWalletsAndPin() }
+                true
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                false
+            }
+            if (ok) {
+                pinVerified = false
+                authManager.clearSession()
+                // The light client, the sync loop and the start-up route all
+                // still describe the removed wallets: start a clean process.
+                // Stays in progress until the process goes away.
+                appRestarter.restart()
+                return@launch
+            }
+            _uiState.update { it.copy(isStartingFresh = false, startFreshFailed = true) }
+        }
+    }
+
+    fun dismissStartFresh() {
+        _uiState.update {
+            if (it.isStartingFresh) it else it.copy(showStartFreshConfirm = false, startFreshFailed = false)
+        }
+    }
+
+    /** The screen has opened the phrase restore. */
+    fun onPhraseRestoreOpened() {
+        _uiState.update { it.copy(phraseRestoreReady = false) }
+    }
+
     fun clearError() {
         _uiState.update { it.copy(error = null) }
+    }
+
+    private companion object {
+        const val PIN_READ_ERROR = "Could not check your PIN. Try again."
     }
 }
