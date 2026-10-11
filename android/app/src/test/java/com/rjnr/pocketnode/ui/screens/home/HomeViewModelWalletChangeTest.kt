@@ -9,6 +9,7 @@ import com.rjnr.pocketnode.core.prefs.SyncStrategy
 import com.rjnr.pocketnode.data.database.AppDatabase
 import com.rjnr.pocketnode.data.database.entity.WalletEntity
 import com.rjnr.pocketnode.data.gateway.GatewayRepository
+import com.rjnr.pocketnode.data.gateway.LedgerReader
 import com.rjnr.pocketnode.data.gateway.LightClientReadOnly
 import com.rjnr.pocketnode.data.gateway.NodeLifecycle
 import com.rjnr.pocketnode.data.gateway.SyncCoordinator
@@ -20,6 +21,7 @@ import com.rjnr.pocketnode.data.gateway.models.Script
 import com.rjnr.pocketnode.data.gateway.models.SyncMode
 import com.rjnr.pocketnode.data.gateway.testGatewayRepository
 import com.rjnr.pocketnode.data.price.PriceRepository
+import com.rjnr.pocketnode.data.update.UpdateRepository
 import com.rjnr.pocketnode.data.wallet.AddressUtils
 import com.rjnr.pocketnode.data.wallet.KeyManager
 import com.rjnr.pocketnode.data.wallet.MnemonicManager
@@ -98,6 +100,7 @@ class HomeViewModelWalletChangeTest {
         prefs = WalletPreferences(context, NoopLogger)
         prefs.setSyncStrategy(SyncStrategy.ALL_WALLETS)
         prefs.setPriceServiceEnabled(false)
+        prefs.setUpdateServiceEnabled(false)
         runBlocking {
             db.walletDao().insert(entity("A", "aa", true))
             db.walletDao().insert(entity("B", "bb", false))
@@ -114,6 +117,8 @@ class HomeViewModelWalletChangeTest {
         }
         val nodeLifecycle = mockk<NodeLifecycle>(relaxed = true)
         every { nodeLifecycle.currentNetwork } returns NetworkType.TESTNET
+        every { nodeLifecycle.network } returns MutableStateFlow(NetworkType.TESTNET)
+        every { nodeLifecycle.isSwitchingNetwork } returns MutableStateFlow(false)
         coEvery { nodeLifecycle.awaitNodeReady() } returns true
         val startupReachedNode = CompletableDeferred<Unit>()
         coEvery { nodeLifecycle.initializeNode(any(), any()) } answers { startupReachedNode.complete(Unit) }
@@ -124,6 +129,12 @@ class HomeViewModelWalletChangeTest {
         gateway = testGatewayRepository(
             db = db, walletPreferences = prefs, nodeLifecycle = nodeLifecycle, keyManager = keyManager,
             syncCoordinator = coordinator, syncEngine = syncEngine,
+            // A real reader over relaxed stores: its reads fail into a real
+            // Result.failure, which a MockK stub cannot return.
+            ledgerReader = LedgerReader(
+                mockk(relaxed = true), mockk(relaxed = true), mockk(relaxed = true), mockk(relaxed = true),
+                mockk(relaxed = true), mockk(relaxed = true), prefs, prefs, Json, NoopLogger,
+            ),
         )
         runBlocking { withTimeout(10_000) { startupReachedNode.await() } }
 
@@ -138,7 +149,12 @@ class HomeViewModelWalletChangeTest {
 
     @After
     fun tearDown() {
+        // Home's coroutines run outside runTest here; an exception they threw
+        // would otherwise surface in whichever runTest test runs next in this
+        // JVM. An empty runTest reports it against this test instead. Main is
+        // reset first: runTest would otherwise drive Home's endless timers.
         Dispatchers.resetMain()
+        kotlinx.coroutines.test.runTest { }
         db.close()
     }
 
@@ -153,7 +169,9 @@ class HomeViewModelWalletChangeTest {
             repository = gateway,
             priceRepository = PriceRepository(mockk(relaxed = true), Json, context, NoopLogger, prefs),
             walletRepository = walletRepository,
-            updateRepository = mockk(relaxed = true),
+            // Real repositories with their services off: they answer with a
+            // real Result.failure, which a MockK stub cannot return (#563).
+            updateRepository = UpdateRepository(mockk(relaxed = true), Json, NoopLogger, prefs),
             updateDownloader = mockk(relaxed = true),
             pinManager = mockk(relaxed = true),
             authManager = mockk(relaxed = true),
