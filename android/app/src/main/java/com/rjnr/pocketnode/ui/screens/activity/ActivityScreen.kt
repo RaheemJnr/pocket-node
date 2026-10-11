@@ -105,7 +105,6 @@ fun ActivityScreen(
     val clipboardManager = LocalClipboardManager.current
     val haptic = LocalHapticFeedback.current
     val context = LocalContext.current
-    var pendingCsvContent by remember { mutableStateOf<String?>(null) }
 
 
     // Retry-failed-tx confirmation. Copy mirrors HomeScreen exactly: FAILED is
@@ -127,20 +126,12 @@ fun ActivityScreen(
         )
     }
 
+    // #562: the CSV itself waits in the ViewModel, which also writes it, so
+    // the re-auth gate hiding this screen mid-picker (or a rotation) cannot
+    // leave an empty file.
     val exportLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.CreateDocument("text/csv")
-    ) { uri ->
-        val csv = pendingCsvContent
-        if (uri != null && csv != null) {
-            context.contentResolver.openOutputStream(uri)?.use { stream ->
-                // UTF-8 BOM so Excel on Windows renders non-ASCII wallet/memo data correctly.
-                stream.write("\uFEFF".toByteArray(Charsets.UTF_8))
-                stream.write(csv.toByteArray(Charsets.UTF_8))
-            }
-        }
-        // Always clear so a dismissed picker doesn't leave the previous CSV in memory.
-        pendingCsvContent = null
-    }
+    ) { uri -> viewModel.onExportDocumentChosen(uri, context.contentResolver) }
 
     val pagingItems = viewModel.transactionPagingFlow.collectAsLazyPagingItems()
     val selectedTransaction = selectedTxHash?.let { hash ->
@@ -164,10 +155,7 @@ fun ActivityScreen(
     val now by rememberTickingNow(enabled = hasInFlight)
 
     LaunchedEffect(Unit) {
-        viewModel.exportEvent.collect { csv ->
-            pendingCsvContent = csv
-            exportLauncher.launch("transactions.csv")
-        }
+        viewModel.exportEvent.collect { fileName -> exportLauncher.launch(fileName) }
     }
 
     Scaffold(
