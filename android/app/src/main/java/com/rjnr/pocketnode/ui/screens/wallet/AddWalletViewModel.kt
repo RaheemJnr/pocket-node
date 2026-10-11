@@ -25,6 +25,7 @@ import com.rjnr.pocketnode.data.restorehint.RestoreHintPlan
 import com.rjnr.pocketnode.data.restorehint.RestoreHintSecret
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -328,14 +329,27 @@ class AddWalletViewModel @Inject constructor(
             it.copy(isApplyingSyncChoice = true, syncChoiceError = null, restoreHintError = null)
         }
         viewModelScope.launch {
-            val rolledBack = try {
-                walletRepository.rollbackAddedWallet(wallet.walletId, previousId)
-                true
-            } catch (e: CancellationException) {
-                throw e
-            } catch (e: Exception) {
-                logger.e(TAG, "Rolling back the added wallet failed", e)
-                false
+            // #563 review F2: once the rollback commits, the gateway must
+            // switch back even if the user leaves the screen
+            // (viewModelScope cancelled), or it stays on the removed wallet.
+            val rolledBack = withContext(NonCancellable) {
+                val removed = try {
+                    walletRepository.rollbackAddedWallet(wallet.walletId, previousId)
+                    true
+                } catch (e: Exception) {
+                    logger.e(TAG, "Rolling back the added wallet failed", e)
+                    false
+                }
+                if (removed) {
+                    // The removed wallet is the loaded one: this switches the
+                    // gateway back to the previous wallet via onActiveWalletChanged.
+                    try {
+                        gatewayRepository.onWalletDeleted(wallet.walletId)
+                    } catch (e: Exception) {
+                        logger.w(TAG, "Re-registration after removing the added wallet failed", e)
+                    }
+                }
+                removed
             }
             if (!rolledBack) {
                 _uiState.update {
@@ -349,22 +363,20 @@ class AddWalletViewModel @Inject constructor(
             }
             pendingImportedWallet = null
             previousActiveWalletId = null
-            // The removed wallet is the loaded one: this switches the gateway
-            // back to the previous wallet via onActiveWalletChanged.
-            try {
-                gatewayRepository.onWalletDeleted(wallet.walletId)
-            } catch (e: CancellationException) {
-                throw e
-            } catch (e: Exception) {
-                logger.w(TAG, "Re-registration after removing the added wallet failed", e)
-            }
             clearRestoreHint()
+            // #563 review F6: the add was abandoned, so nothing the user
+            // entered for it stays on screen: name, phrase words, private key.
             _uiState.update {
                 it.copy(
                     isApplyingSyncChoice = false,
                     showSyncModeDialog = false,
                     syncChoiceError = null,
                     cancelRemovesWallet = false,
+                    name = "",
+                    importWords = List(12) { "" },
+                    importSuggestions = emptyMap(),
+                    importWordErrors = emptySet(),
+                    importPrivateKey = "",
                 )
             }
         }

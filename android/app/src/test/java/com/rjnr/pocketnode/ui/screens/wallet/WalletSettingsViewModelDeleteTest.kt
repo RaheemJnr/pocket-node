@@ -26,6 +26,9 @@ import io.mockk.coEvery
 import io.mockk.coVerify
 import io.mockk.every
 import io.mockk.mockk
+import io.mockk.spyk
+import androidx.lifecycle.viewModelScope
+import kotlinx.coroutines.cancel
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExperimentalCoroutinesApi
@@ -157,9 +160,9 @@ class WalletSettingsViewModelDeleteTest {
         clearMocks(syncCoordinator, answers = false)
     }
 
-    private fun newViewModel(walletId: String) = WalletSettingsViewModel(
+    private fun newViewModel(walletId: String, repo: WalletRepository = walletRepository) = WalletSettingsViewModel(
         savedStateHandle = SavedStateHandle(mapOf("walletId" to walletId)),
-        walletRepository = walletRepository,
+        walletRepository = repo,
         gatewayRepository = gateway,
         walletDao = db.walletDao(),
         keyManager = keyManager,
@@ -219,6 +222,37 @@ class WalletSettingsViewModelDeleteTest {
         // coordinator in RegistrationLockTest; this mock never reports a
         // landed set, so the #539 follow-up re-asks.)
         assertRegisteredOnlyAfterDelete()
+    }
+
+    /**
+     * #563 review F2: the screen closing (viewModelScope cancelled) after the
+     * delete committed must not leave the gateway on the deleted wallet.
+     */
+    @Test
+    fun `leaving the screen right after the delete commits still moves the gateway`() {
+        seed(
+            "C",
+            entity("A", "aa", false, lastActiveAt = 1L),
+            entity("C", "cc", true, lastActiveAt = 3L),
+        )
+        lateinit var vm: WalletSettingsViewModel
+        val repo = spyk(walletRepository)
+        coEvery { repo.deleteWallet(any()) } coAnswers {
+            callOriginal()
+            vm.viewModelScope.cancel()
+            // The rows are committed; cancellation lands at the delete's
+            // next suspension point (its VACUUM, on a real device).
+            kotlinx.coroutines.yield()
+        }
+        runTest(testDispatcher) {
+            vm = newViewModel("C", repo)
+            advanceUntilIdle()
+            vm.confirmDelete()
+            advanceUntilIdle()
+        }
+
+        assertNull(runBlocking { db.walletDao().getById("C") })
+        assertEquals(script("aa"), gateway.walletInfo.value?.script)
     }
 
     @Test

@@ -35,6 +35,8 @@ import io.mockk.coVerify
 import io.mockk.every
 import io.mockk.mockk
 import io.mockk.spyk
+import androidx.lifecycle.viewModelScope
+import kotlinx.coroutines.cancel
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -209,6 +211,60 @@ class AddWalletViewModelCancelAddTest {
         assertNull("stays on Add Wallet, no navigation", vm.uiState.value.createdWallet)
         assertNull(vm.uiState.value.syncChoiceError)
         assertFalse(vm.uiState.value.cancelRemovesWallet)
+        // F6: the abandoned add leaves nothing the user typed behind.
+        assertEquals(List(12) { "" }, vm.uiState.value.importWords)
+        assertTrue(vm.uiState.value.importSuggestions.isEmpty())
+        assertEquals("", vm.uiState.value.name)
+    }
+
+    /** #563 review F6: a cancelled private-key add clears the typed key and the picked hint file. */
+    @Test
+    fun `cancel after a private key import clears the typed key and the picked hint`() = runTest {
+        seedExisting()
+        val vm = newViewModel()
+        vm.onRestoreHintFilePicked("{}")
+        vm.updateName("Key")
+        vm.updateImportPrivateKey(ByteArray(32) { (it + 1).toByte() }.joinToString("") { "%02x".format(it) })
+        vm.importRawKey(activity, consented = true)
+        drainUntil { vm.uiState.value.showSyncModeDialog }
+        assertTrue(vm.uiState.value.cancelRemovesWallet)
+
+        vm.cancelAddedWallet()
+        drainUntil { !vm.uiState.value.showSyncModeDialog }
+
+        assertEquals("", vm.uiState.value.importPrivateKey)
+        assertEquals("", vm.uiState.value.name)
+        assertFalse(vm.uiState.value.hasRestoreHintFile)
+        assertNull(vm.uiState.value.restoreHintError)
+        assertEquals(2, db.walletDao().count())
+    }
+
+    /**
+     * #563 review F2: leaving the screen (viewModelScope cancelled) right
+     * after the rollback committed must still switch the gateway back.
+     */
+    @Test
+    fun `leaving the screen right after the rollback commits still switches the gateway back`() = runTest {
+        val (first, second) = seedExisting()
+        lateinit var vm: AddWalletViewModel
+        val spy = spyk(walletRepository)
+        coEvery { spy.rollbackAddedWallet(any(), any()) } coAnswers {
+            val result = callOriginal()
+            vm.viewModelScope.cancel()
+            // Committed; cancellation lands at the next suspension point.
+            kotlinx.coroutines.yield()
+            result
+        }
+        vm = newViewModel(spy)
+        vm.importPhrase()
+        drainUntil { vm.uiState.value.showSyncModeDialog }
+        val added = walletRepository.getActive()!!.walletId
+
+        vm.cancelAddedWallet()
+        advanceUntilIdle()
+
+        assertOnlyAddedWalletRemoved(first, second, added)
+        coVerify(exactly = 1) { gatewayRepository.onWalletDeleted(added) }
     }
 
     @Test
