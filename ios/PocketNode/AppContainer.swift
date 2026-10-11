@@ -64,6 +64,15 @@ final class AppContainer {
     /// Kept in sync with the system color scheme by `RootView`.
     var theme: Theme = .light
 
+    /// Carries a restore hint's outcome from the import screen to Home's
+    /// first sync choice (#559). Memory only; holds no secret.
+    let restoreHintHandoff = RestoreHintHandoff()
+
+    /// The restore hint export, built once and kept for the launch so a
+    /// sealed file waiting for the save sheet survives Settings being torn
+    /// down (see ``restoreHintExportViewModel()``).
+    @ObservationIgnored private var restoreHintExport: RestoreHintExportViewModel?
+
     /// Bumped whenever a decrypt in the wallet phase proves the keys unusable
     /// (today: the recovery phrase reveal and a send's key read). `RootView`
     /// reroutes on it, which lands on the restore for invalidated keys.
@@ -177,7 +186,42 @@ final class AppContainer {
 
     /// Backs the wallet shell's first screen.
     func makeHomeViewModel() -> HomeViewModel {
-        HomeViewModel(walletStore: walletStore, preferences: preferences, sync: sync)
+        HomeViewModel(
+            walletStore: walletStore,
+            preferences: preferences,
+            sync: sync,
+            restoreHint: restoreHintHandoff
+        )
+    }
+
+    /// The Settings "Export restore hint" model (#559). One per launch, held
+    /// here rather than by the screen: the save sheet can outlive the screen
+    /// (a lock replaces the wallet stack), and a file the screen held would
+    /// be lost with it. Same key-reading dependencies as the phrase reveal
+    /// (``makeBackupViewModel(isOnboarding:)``), and the same re-auth gate.
+    func restoreHintExportViewModel() -> RestoreHintExportViewModel {
+        if let restoreHintExport { return restoreHintExport }
+        let model = RestoreHintExportViewModel(
+            walletKeyStore: walletKeyStore,
+            walletStore: walletStore,
+            auth: auth,
+            preferences: preferences,
+            sources: sync,
+            onKeysUnusable: { [weak self] in self?.keysUnusableSignal += 1 }
+        )
+        restoreHintExport = model
+        return model
+    }
+
+    /// What a phrase or key import needs to use a restore hint file (#559):
+    /// the network the wallet will sync on, the lock generation that discards
+    /// a check a lock interrupted, and where the outcome goes.
+    func restoreHintSupport() -> OnboardingViewModel.RestoreHintSupport {
+        OnboardingViewModel.RestoreHintSupport(
+            network: { [preferences] in preferences.getSelectedNetwork() },
+            lockGeneration: { [auth] in auth.lockGeneration },
+            deliver: { [restoreHintHandoff] in restoreHintHandoff.deliver($0) }
+        )
     }
 
     /// Backs the Send screen.

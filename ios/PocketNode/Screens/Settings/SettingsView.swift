@@ -1,15 +1,22 @@
 import SwiftUI
 
-/// The settings list. One section for now, mirroring the security rows Android
-/// keeps in `ui/screens/settings/SecuritySettingsScreen.kt`: reach the backup
-/// flow from somewhere permanent, and turn biometric unlock on or off.
+/// The settings list. A Security section mirroring the rows Android keeps in
+/// `ui/screens/settings/SecuritySettingsScreen.kt` (reach the backup flow from
+/// somewhere permanent, and turn biometric unlock on or off), and a Wallet
+/// section with "Export restore hint" (#559).
 ///
 /// The backup row leads to the same `BackupView` as the Home banner, and that
 /// screen runs its own re-auth gate (`isOnboarding: false`), so nothing here
 /// has to guard it.
 struct SettingsView: View {
     let auth: AuthService
+    /// The restore hint export (#559). Owned by `AppContainer`, not by this
+    /// view, so a sealed file waiting for the save sheet survives the screen
+    /// being torn down and rebuilt (a lock replaces the wallet stack).
+    let restoreHint: RestoreHintExportViewModel
     let onBackUp: () -> Void
+
+    @Environment(\.scenePhase) private var scenePhase
 
     var body: some View {
         List {
@@ -42,6 +49,8 @@ struct SettingsView: View {
             } footer: {
                 Text("Your recovery phrase is shown only after you confirm it is you.")
             }
+
+            restoreHintSection
         }
         .navigationTitle("Settings")
         .navigationBarTitleDisplayMode(.inline)
@@ -49,6 +58,73 @@ struct SettingsView: View {
         // onto every row, replacing `settings.backup` / `settings.biometrics`.
         .accessibilityElement(children: .contain)
         .accessibilityIdentifier("settings.root")
+        // The iOS 17 overload with `onCancellation`: cancelling the document
+        // picker does not call `onCompletion` at all, it calls this, and
+        // without it the sealed file would stay pending for the launch.
+        .fileExporter(
+            isPresented: saverBinding,
+            document: restoreHint.pendingDocument,
+            contentTypes: [.json],
+            defaultFilename: restoreHint.pendingDocument?.fileName,
+            onCompletion: { result in
+                switch result {
+                case .success: restoreHint.saveSucceeded()
+                case .failure: restoreHint.saveDidNotComplete()
+                }
+            },
+            onCancellation: {
+                restoreHint.saveDidNotComplete()
+            }
+        )
+        // Drops a file sealed for a wallet that is no longer this device's,
+        // and a "saved" line left over from an earlier visit.
+        .onAppear { restoreHint.screenAppeared() }
+        .onChange(of: scenePhase) { _, phase in
+            if phase == .background { restoreHint.onBackgrounded() }
+        }
+    }
+
+    /// Android's Settings > Wallet "Export restore hint" row and its
+    /// explainer. The export asks for the same confirmation as the phrase
+    /// reveal; the view model runs it.
+    private var restoreHintSection: some View {
+        Section {
+            Button {
+                Task { await restoreHint.export() }
+            } label: {
+                HStack {
+                    Label(RestoreHintCopy.exportTitle, systemImage: "square.and.arrow.up")
+                    Spacer(minLength: 0)
+                    if restoreHint.isExporting {
+                        ProgressView()
+                    }
+                }
+            }
+            .disabled(restoreHint.isExporting)
+            .accessibilityIdentifier("settings.restoreHint")
+
+            if let message = restoreHint.message {
+                Text(message)
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
+                    .accessibilityIdentifier("settings.restoreHintMessage")
+            }
+        } header: {
+            Text("Wallet")
+        } footer: {
+            Text(RestoreHintCopy.exportExplainer)
+        }
+    }
+
+    /// Up while a sealed file is waiting. The setter does nothing on purpose:
+    /// the completion and cancellation callbacks above are what end a save,
+    /// and a sheet torn down with the screen (a lock) calls neither, which
+    /// must leave the file waiting so the sheet comes back with the screen.
+    private var saverBinding: Binding<Bool> {
+        Binding(
+            get: { restoreHint.isPresentingSaver },
+            set: { _ in }
+        )
     }
 
     /// Written through `AuthService` rather than straight to preferences, so

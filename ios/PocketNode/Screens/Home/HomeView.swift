@@ -18,6 +18,9 @@ struct HomeView: View {
     /// that has never synced and the "Change" link on one that has present it.
     @State private var isChoosingSyncMode = false
 
+    /// While "Start restore" is applying a restore hint's start.
+    @State private var isApplyingRestoreHint = false
+
     var body: some View {
         VStack(spacing: 16) {
             walletCard
@@ -157,19 +160,70 @@ struct HomeView: View {
         .accessibilityIdentifier("home.syncCard")
     }
 
+    @ViewBuilder
     private var chooseSyncPrompt: some View {
+        if let start = model.restoreHintStart {
+            restoreHintPrompt(start)
+        } else {
+            VStack(alignment: .leading, spacing: 10) {
+                if let rejection = model.restoreHintRejection {
+                    Text(rejection)
+                        .font(.footnote)
+                        .foregroundStyle(theme.error)
+                        .accessibilityIdentifier("home.restoreHintRejected")
+                }
+
+                Text("Your phone checks the blockchain itself. Tell it how far back to look and it will start.")
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
+
+                Button {
+                    isChoosingSyncMode = true
+                } label: {
+                    Text("Choose how far back to sync")
+                        .frame(maxWidth: .infinity)
+                }
+                .buttonStyle(.borderedProminent)
+                .accessibilityIdentifier("home.syncChooseButton")
+            }
+        }
+    }
+
+    /// A verified restore hint (#559): where the restore will start, with the
+    /// normal choices one tap away.
+    private func restoreHintPrompt(_ start: RestoreHintStart) -> some View {
         VStack(alignment: .leading, spacing: 10) {
-            Text("Your phone checks the blockchain itself. Tell it how far back to look and it will start.")
+            Text(RestoreHintCopy.readyTitle)
+                .font(.subheadline.weight(.semibold))
+            Text(start.message)
                 .font(.footnote)
                 .foregroundStyle(.secondary)
+                .accessibilityIdentifier("home.restoreHintReady")
 
+            Button {
+                isApplyingRestoreHint = true
+                Task {
+                    _ = await model.applyRestoreHint()
+                    isApplyingRestoreHint = false
+                }
+            } label: {
+                Text(isApplyingRestoreHint ? "Starting..." : RestoreHintCopy.startRestore)
+                    .frame(maxWidth: .infinity)
+            }
+            .buttonStyle(.borderedProminent)
+            .disabled(isApplyingRestoreHint)
+            .accessibilityIdentifier("home.restoreHintStart")
+
+            // The hint stays until a choice is applied, so cancelling the
+            // sheet brings it back.
             Button {
                 isChoosingSyncMode = true
             } label: {
                 Text("Choose how far back to sync")
                     .frame(maxWidth: .infinity)
             }
-            .buttonStyle(.borderedProminent)
+            .buttonStyle(.bordered)
+            .disabled(isApplyingRestoreHint)
             .accessibilityIdentifier("home.syncChooseButton")
         }
     }

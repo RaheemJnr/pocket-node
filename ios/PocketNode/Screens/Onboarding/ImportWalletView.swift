@@ -1,4 +1,5 @@
 import SwiftUI
+import UniformTypeIdentifiers
 
 /// Restoring a wallet from a recovery phrase or from a raw private key.
 ///
@@ -25,6 +26,7 @@ struct ImportWalletView: View {
     @State private var privateKey = ""
     @State private var name = "Imported Wallet"
     @State private var pasteFailed = false
+    @State private var isPickingRestoreHint = false
     @FocusState private var focusedWord: Int?
 
     init(model: OnboardingViewModel, initialMode: Mode? = nil) {
@@ -57,6 +59,12 @@ struct ImportWalletView: View {
                     }
                     .pickerStyle(.segmented)
                     .accessibilityIdentifier("import.mode")
+                }
+
+                // Before the phrase or key on purpose: opening the system
+                // picker can lock the session, and nothing secret exists yet.
+                if model.offersRestoreHint {
+                    restoreHintRow
                 }
 
                 switch mode {
@@ -121,6 +129,51 @@ struct ImportWalletView: View {
         .privacySensitive()
         .navigationTitle(model.isRestoring ? "Restore wallet" : "Import wallet")
         .navigationBarTitleDisplayMode(.inline)
+    }
+
+    // MARK: - Restore hint (#559)
+
+    /// "Use a restore hint file": optional, picked before the phrase or key.
+    /// Only the file's text is held; it is checked once the import has the
+    /// secret, and the outcome waits for the first sync choice on Home.
+    private var restoreHintRow: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            if model.restoreHintText != nil {
+                HStack {
+                    Label(RestoreHintCopy.fileAdded, systemImage: "doc.badge.clock")
+                        .font(.subheadline)
+                        .accessibilityIdentifier("import.restoreHintAdded")
+                    Spacer(minLength: 0)
+                    Button(RestoreHintCopy.remove) { model.removeRestoreHint() }
+                        .font(.subheadline)
+                        .disabled(model.isBusy)
+                        .accessibilityIdentifier("import.restoreHintRemove")
+                }
+            } else {
+                Button {
+                    isPickingRestoreHint = true
+                } label: {
+                    Label(RestoreHintCopy.useFile, systemImage: "doc.badge.clock")
+                }
+                .disabled(model.isBusy)
+                .accessibilityIdentifier("import.restoreHint")
+            }
+            Text(RestoreHintCopy.pickFirst)
+                .font(.caption)
+                .foregroundStyle(.secondary)
+            if let error = model.restoreHintPickError {
+                Text(error)
+                    .font(.caption)
+                    .foregroundStyle(Color.red)
+                    .accessibilityIdentifier("import.restoreHintError")
+            }
+        }
+        .fileImporter(
+            isPresented: $isPickingRestoreHint,
+            allowedContentTypes: [.json, .plainText]
+        ) { result in
+            model.pickRestoreHint(result)
+        }
     }
 
     // MARK: - Restore

@@ -27,14 +27,24 @@ final class HomeViewModel {
     /// view that reads one of the properties below is subscribed to it.
     private let sync: (any SyncStatusProviding)?
 
+    /// A restore hint's outcome waiting for this wallet's first sync choice
+    /// (#559), or nil where none can arrive.
+    private let restoreHint: RestoreHintHandoff?
+
+    /// The loaded wallet's id, so a hint verified for another wallet is never
+    /// applied here.
+    private var walletId: String?
+
     init(
         walletStore: WalletStore,
         preferences: any NetworkPreferences,
-        sync: (any SyncStatusProviding)? = nil
+        sync: (any SyncStatusProviding)? = nil,
+        restoreHint: RestoreHintHandoff? = nil
     ) {
         self.walletStore = walletStore
         self.preferences = preferences
         self.sync = sync
+        self.restoreHint = restoreHint
         refresh()
     }
 
@@ -44,11 +54,13 @@ final class HomeViewModel {
     func refresh() {
         refreshBalance()
         guard let record = walletStore.load() else {
+            walletId = nil
             walletName = ""
             address = ""
             needsBackup = false
             return
         }
+        walletId = record.id
         walletName = record.name
         address = preferences.getSelectedNetwork() == .mainnet
             ? record.mainnetAddress
@@ -120,10 +132,42 @@ final class HomeViewModel {
         sync?.retry()
     }
 
-    /// Apply a sync mode the user picked in the sheet.
+    /// Apply a sync mode the user picked in the sheet. A pending restore
+    /// hint is dropped once any choice is applied: the user chose instead.
     func chooseSyncMode(_ mode: SyncMode, customBlockHeight: Int64?) async -> Bool {
         guard let sync else { return false }
-        return await sync.choose(mode: mode, customBlockHeight: customBlockHeight)
+        let applied = await sync.choose(mode: mode, customBlockHeight: customBlockHeight)
+        if applied { restoreHint?.clear() }
+        return applied
+    }
+
+    // MARK: - Restore hint (#559)
+
+    /// The hint waiting for this wallet, only while it still has no sync
+    /// mode: once one is chosen the hint has nothing left to decide.
+    private var pendingRestoreHint: PendingRestoreHint? {
+        guard needsSyncMode else { return nil }
+        return restoreHint?.pending(for: walletId)
+    }
+
+    /// The start a verified hint offers.
+    var restoreHintStart: RestoreHintStart? {
+        guard case .ready(let start) = pendingRestoreHint?.verification else { return nil }
+        return start
+    }
+
+    /// Why the picked hint was not used. The normal choices stay available.
+    var restoreHintRejection: String? {
+        guard case .rejected(let reason) = pendingRestoreHint?.verification else { return nil }
+        return reason.message
+    }
+
+    /// "Start restore": applies the hint's start exactly as a manual pick
+    /// would, CUSTOM at the start height, or FULL_HISTORY when it is block 0.
+    /// Nothing else from the file is applied, and no safety flag is set.
+    func applyRestoreHint() async -> Bool {
+        guard let start = restoreHintStart else { return false }
+        return await chooseSyncMode(start.syncMode, customBlockHeight: start.customHeight)
     }
 
     // MARK: - Address

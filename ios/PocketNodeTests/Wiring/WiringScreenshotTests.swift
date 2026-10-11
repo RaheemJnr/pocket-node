@@ -104,7 +104,17 @@ final class WiringScreenshotTests: XCTestCase {
         )
 
         let view = NavigationStack {
-            SettingsView(auth: auth, onBackUp: {})
+            SettingsView(
+                auth: auth,
+                restoreHint: RestoreHintExportViewModel(
+                    walletKeyStore: StubWalletKeyReader(),
+                    walletStore: StubWalletRecordStore(),
+                    auth: StubAuthGate(),
+                    preferences: preferences,
+                    sources: StubRestoreHintSources()
+                ),
+                onBackUp: {}
+            )
         }
 
         save(render(view), named: "wiring-settings")
