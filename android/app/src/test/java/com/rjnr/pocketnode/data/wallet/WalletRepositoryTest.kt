@@ -669,4 +669,117 @@ class WalletRepositoryTest {
         val activeCount = allWallets.count { it.isActive }
         assertEquals(1, activeCount)
     }
+
+    private fun failedBroadcast(hash: String, walletId: String) =
+        com.rjnr.pocketnode.data.database.entity.PendingBroadcastEntity(
+            txHash = hash,
+            walletId = walletId,
+            network = "TESTNET",
+            signedTxJson = "{}",
+            reservedInputs = "[]",
+            state = "FAILED",
+            submittedAtTipBlock = 0L,
+            nullCount = 0,
+            createdAt = 0L,
+            lastCheckedAt = 0L,
+        )
+
+    @Test
+    fun `deleteWallet removes that wallet's pending broadcasts only`() = runTest {
+        val gone = repo.createWallet(
+            name = "Gone",
+            persistKeys = { walletId, bundle -> fakePersistV2(walletId, bundle) },
+        ).getOrThrow()
+        val keep = repo.createWallet(
+            name = "Keep",
+            persistKeys = { walletId, bundle -> fakePersistV2(walletId, bundle) },
+        ).getOrThrow()
+        val goneHash = "0x" + "aa".repeat(32)
+        val keepHash = "0x" + "bb".repeat(32)
+        db.pendingBroadcastDao().insert(failedBroadcast(goneHash, gone.walletId))
+        db.pendingBroadcastDao().insert(failedBroadcast(keepHash, keep.walletId))
+
+        repo.deleteWallet(gone.walletId)
+
+        assertNull(db.pendingBroadcastDao().getFailedRow(goneHash))
+        assertNotNull(db.pendingBroadcastDao().getFailedRow(keepHash))
+    }
+
+    private fun pinManagerWithPin(): com.rjnr.pocketnode.data.auth.PinManager {
+        val ctx = ApplicationProvider.getApplicationContext<Context>()
+        return com.rjnr.pocketnode.data.auth.PinManager(
+            ctx, com.rjnr.pocketnode.data.crypto.Blake2b(), NoopLogger,
+        ).apply {
+            testPrefs = ctx.getSharedPreferences("test_local_reset_pin", Context.MODE_PRIVATE)
+            testPrefs!!.edit().clear().commit()
+            argon2Iterations = 1
+            argon2MemoryKb = 8
+            argon2Parallelism = 1
+            setBackupChecker { true }
+            setPin("123456")
+        }
+    }
+
+    @Test
+    fun `LocalWalletReset removes every wallet's rows and keys, then the PIN`() = runTest {
+        val first = repo.importFromMnemonic(
+            words = mnemonicManager.generateMnemonic(MnemonicManager.WordCount.TWELVE),
+            name = "First",
+            persistKeys = { walletId, bundle -> fakePersistV2(walletId, bundle) },
+        ).getOrThrow()
+        val second = repo.createWallet(
+            name = "Second",
+            persistKeys = { walletId, bundle -> fakePersistV2(walletId, bundle) },
+        ).getOrThrow()
+        val ids = listOf(first.walletId, second.walletId)
+        ids.forEachIndexed { i, id ->
+            db.syncProgressDao().upsert(
+                com.rjnr.pocketnode.data.database.entity.SyncProgressEntity(id, "TESTNET", 1L, 1L, 0L)
+            )
+            db.pendingBroadcastDao().insert(failedBroadcast("0x" + "c$i".repeat(32), id))
+        }
+        assertTrue(db.subAccountCandidateDao().getForParent(first.walletId).isNotEmpty())
+        assertEquals(2, db.keyMaterialDao().count())
+        val pinManager = pinManagerWithPin()
+        val cacheManager = io.mockk.mockk<com.rjnr.pocketnode.data.gateway.CacheManager>(relaxed = true)
+        val daoSyncManager = io.mockk.mockk<com.rjnr.pocketnode.data.gateway.DaoSyncManager>(relaxed = true)
+
+        com.rjnr.pocketnode.data.gateway.LocalWalletReset(repo, cacheManager, daoSyncManager, pinManager).removeAllWalletsAndPin()
+
+        assertEquals(0, walletDao.count())
+        assertEquals(0, db.keyMaterialDao().count())
+        ids.forEachIndexed { i, id ->
+            assertNull(db.syncProgressDao().get(id, "TESTNET"))
+            assertTrue(db.subAccountCandidateDao().getForParent(id).isEmpty())
+            assertNull(db.pendingBroadcastDao().getFailedRow("0x" + "c$i".repeat(32)))
+        }
+        io.mockk.coVerify { cacheManager.clearAll() }
+        io.mockk.coVerify { daoSyncManager.clearAll() }
+        assertFalse(pinManager.hasPin())
+    }
+
+    @Test
+    fun `LocalWalletReset keeps the PIN when a wallet could not be removed`() = runTest {
+        repo.createWallet(
+            name = "Stuck",
+            persistKeys = { walletId, bundle -> fakePersistV2(walletId, bundle) },
+        ).getOrThrow()
+        val stuckDao = object : WalletDao by walletDao {
+            override suspend fun delete(walletId: String) = throw IllegalStateException("disk I/O error")
+        }
+        val pinManager = pinManagerWithPin()
+
+        val error = runCatching {
+            com.rjnr.pocketnode.data.gateway.LocalWalletReset(
+                newRepo(dao = stuckDao),
+                io.mockk.mockk(relaxed = true),
+                io.mockk.mockk(relaxed = true),
+                pinManager,
+            ).removeAllWalletsAndPin()
+        }.exceptionOrNull()
+
+        assertTrue(error is IllegalStateException)
+        assertEquals(1, walletDao.count())
+        assertTrue(pinManager.hasPin())
+    }
 }

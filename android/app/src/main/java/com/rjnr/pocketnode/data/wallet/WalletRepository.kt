@@ -509,6 +509,8 @@ class WalletRepository @Inject constructor(
             // leave them orphaned.
             appDatabase.syncProgressDao().deleteForWallet(walletId)
             subAccountCandidateDao.deleteForParent(walletId)
+            // Its send records (pending, broadcast and failed) go with it.
+            appDatabase.pendingBroadcastDao().deleteForWallet(walletId)
         }
         // The rows are gone, so the wallet is deleted whatever happens to its
         // keys. A transient failure (#563 review F4) is retried once; if it
