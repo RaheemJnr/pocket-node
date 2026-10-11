@@ -203,7 +203,10 @@ final class LightClientService {
     /// started and again once it is stopped — otherwise the 5s poll on Node
     /// Status would log a `NotInitialized` failure every tick after a stop.
     /// Individual failures while running are transient and leave the affected
-    /// field at its last value.
+    /// field at its last value. The tip height and hash update together or
+    /// not at all, since the restore-hint export reads them straight off this
+    /// service and a mismatched pair would export a height paired with an
+    /// older hash (#567).
     func refresh() async {
         apply(rawStatus: await runner.status())
         isInitialized = await runner.isInitialized()
@@ -212,11 +215,11 @@ final class LightClientService {
 
         do {
             let json = try await runner.tipHeader()
-            if let header = Self.decode(json) {
-                if let number = (header["number"] as? String).flatMap(Hex.parse) {
-                    tipNumber = number
-                }
-                tipHash = header["hash"] as? String ?? tipHash
+            if let tip = Self.parseTip(json) {
+                tipNumber = tip.number
+                tipHash = tip.hash
+            } else {
+                logger.debug("tip header parsed only partially; keeping the previous tip")
             }
         } catch {
             logger.debug("tip header unavailable: \(error.localizedDescription, privacy: .public)")
@@ -262,9 +265,27 @@ final class LightClientService {
         }
     }
 
-    private static func decode(_ json: String) -> [String: Any]? {
+    private nonisolated static func decode(_ json: String) -> [String: Any]? {
         guard let data = json.data(using: .utf8) else { return nil }
         return (try? JSONSerialization.jsonObject(with: data)) as? [String: Any]
+    }
+
+    /// A tip height paired with the hash of that same block. `refresh()` and
+    /// the restore-hint export both go through `parseTip` so the two fields
+    /// can never come from two different `getTipHeader` reads (#567).
+    struct TipReading: Equatable {
+        let number: Int
+        let hash: String
+    }
+
+    /// Parses `number` and `hash` out of one `getTipHeader` response. Returns
+    /// `nil` unless both parse, rather than handing back one freshly parsed
+    /// field next to whatever the caller already had for the other.
+    nonisolated static func parseTip(_ json: String) -> TipReading? {
+        guard let header = decode(json),
+              let number = (header["number"] as? String).flatMap(Hex.parse),
+              let hash = header["hash"] as? String else { return nil }
+        return TipReading(number: number, hash: hash)
     }
 
     /// `Application Support/PocketNode/<network>`, beside the wallet's
