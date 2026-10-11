@@ -1,5 +1,6 @@
 import Foundation
 import Observation
+import PocketNodeCore
 
 /// Drives the first-run flow: welcome, then create or import, then the backup
 /// step, then the PIN.
@@ -143,16 +144,20 @@ final class OnboardingViewModel {
     /// - Parameter step: where the flow starts. ``Step/welcome`` for a device
     ///   with no wallet; ``resumeStep(for:)`` for one whose onboarding was cut
     ///   short after the wallet was stored (see ``launchDestination(hasWallet:pinPresence:record:)``).
+    ///   - restoreHint: what the import needs to use a restore hint file
+    ///     (#559). Nil hides the "Use a restore hint file" row.
     init(
         creator: WalletCreator,
         resumingAt step: Step = .welcome,
-        prepareNewWallet: @escaping @MainActor () async -> Bool = { true }
+        prepareNewWallet: @escaping @MainActor () async -> Bool = { true },
+        restoreHint: RestoreHintSupport? = nil
     ) {
         self.creator = creator
         self.prepareNewWallet = prepareNewWallet
         self.keyRecovery = nil
         self.hasPin = { false }
         self.retryUnlockAction = nil
+        self.restoreHint = restoreHint
         self.step = step
     }
 
@@ -189,17 +194,28 @@ final class OnboardingViewModel {
     /// An import over key material this device can no longer decrypt, with
     /// no metadata left to say which wallet it was. Any phrase or key is
     /// accepted and replaces the unusable keys; a PIN that is there stays.
-    static func replacingUnusableKeys(creator: WalletCreator, hasPin: @escaping () -> Bool) -> OnboardingViewModel {
-        OnboardingViewModel(creator: creator, keyRecovery: .replaceUnusableKeys, hasPin: hasPin)
+    static func replacingUnusableKeys(
+        creator: WalletCreator,
+        hasPin: @escaping () -> Bool,
+        restoreHint: RestoreHintSupport? = nil
+    ) -> OnboardingViewModel {
+        OnboardingViewModel(
+            creator: creator,
+            keyRecovery: .replaceUnusableKeys,
+            hasPin: hasPin,
+            restoreHint: restoreHint
+        )
     }
 
     private init(
         creator: WalletCreator,
         keyRecovery: KeyRecovery,
         hasPin: @escaping () -> Bool,
-        retryUnlock: (@MainActor () async throws -> Void)? = nil
+        retryUnlock: (@MainActor () async throws -> Void)? = nil,
+        restoreHint: RestoreHintSupport? = nil
     ) {
         self.retryUnlockAction = retryUnlock
+        self.restoreHint = restoreHint
         self.creator = creator
         // A recovery puts keys back on a device that already has a wallet's
         // key material; it never starts a new one from nothing, so there is
@@ -365,16 +381,19 @@ final class OnboardingViewModel {
             }
             return
         }
+        let material = RestoreHintMaterial.mnemonic(WalletCreator.normalise(words))
         if replacesUnusableKeys {
             await run {
-                try await self.creator.replaceUnusableKeys(words: words, name: name)
+                let created = try await self.creator.replaceUnusableKeys(words: words, name: name)
+                await self.useRestoreHint(walletId: created.record.id, material: material)
                 self.step = self.hasPin() ? .done : .pinSetup
             }
             return
         }
         await run {
             try await self.requireCleanStart()
-            try await self.creator.importMnemonic(words: words, name: name)
+            let created = try await self.creator.importMnemonic(words: words, name: name)
+            await self.useRestoreHint(walletId: created.record.id, material: material)
             // Nothing to back up: the user supplied the phrase.
             self.step = .pinSetup
         }
@@ -390,14 +409,16 @@ final class OnboardingViewModel {
         }
         if replacesUnusableKeys {
             await run {
-                try await self.creator.replaceUnusableKeys(privateKeyHex: hex, name: name)
+                let created = try await self.creator.replaceUnusableKeys(privateKeyHex: hex, name: name)
+                await self.useRestoreHint(walletId: created.record.id, privateKeyHex: hex)
                 self.step = self.hasPin() ? .done : .pinSetup
             }
             return
         }
         await run {
             try await self.requireCleanStart()
-            try await self.creator.importPrivateKey(hex: hex, name: name)
+            let created = try await self.creator.importPrivateKey(hex: hex, name: name)
+            await self.useRestoreHint(walletId: created.record.id, privateKeyHex: hex)
             self.step = .pinSetup
         }
     }
@@ -439,6 +460,84 @@ final class OnboardingViewModel {
             errorMessage = Self.message(for: error)
         }
         isBusy = false
+    }
+
+    // MARK: - Restore hint (#559)
+
+    /// What the import needs to use a restore hint file.
+    struct RestoreHintSupport {
+        /// The network the restored wallet will sync on.
+        let network: @MainActor () -> NetworkType
+        /// `AuthGating.lockGeneration`: a lock while the hint is checked
+        /// discards the result.
+        let lockGeneration: @MainActor () -> Int
+        /// Hands the outcome to Home's sync choice (`RestoreHintHandoff`).
+        let deliver: @MainActor (PendingRestoreHint) -> Void
+        /// The check itself. The shared codec and planner in production.
+        var verify: @Sendable (String, RestoreHintMaterial, NetworkType) async -> RestoreHintVerification = {
+            await RestoreHintVerifier.verify(fileText: $0, material: $1, network: $2)
+        }
+    }
+
+    private let restoreHint: RestoreHintSupport?
+
+    /// The picked file's text, held until the import uses it. Only the text:
+    /// the file is picked before any phrase or key is entered, so no secret
+    /// exists while the system picker is open.
+    private(set) var restoreHintText: String?
+
+    /// Why the last pick could not be used, shown under the row.
+    private(set) var restoreHintPickError: String?
+
+    /// The row is offered on a first-run import and on the import over
+    /// unusable keys. A restore for a known wallet keeps that wallet's own
+    /// sync choice, so it has none.
+    var offersRestoreHint: Bool { restoreHint != nil && restoringRecord == nil }
+
+    /// The file picker's answer.
+    func pickRestoreHint(_ result: Result<URL, Error>) {
+        guard case .success(let url) = result else { return }
+        guard let text = RestoreHintFile.read(url: url) else {
+            restoreHintText = nil
+            restoreHintPickError = RestoreHintCopy.unreadable
+            return
+        }
+        setRestoreHint(text: text)
+    }
+
+    /// Holds `text` as the hint to use. Split out of ``pickRestoreHint(_:)``
+    /// so a test can hand over a file without a picker.
+    func setRestoreHint(text: String) {
+        restoreHintText = text
+        restoreHintPickError = nil
+    }
+
+    func removeRestoreHint() {
+        restoreHintText = nil
+        restoreHintPickError = nil
+    }
+
+    private func useRestoreHint(walletId: String, privateKeyHex hex: String) async {
+        guard restoreHintText != nil else { return }
+        guard let bytes = WalletCreator.decodePrivateKey(hex) else {
+            restoreHintText = nil
+            return
+        }
+        await useRestoreHint(walletId: walletId, material: .privateKey(bytes))
+    }
+
+    /// Checks the held file against the secret just entered, off the main
+    /// actor, and hands the outcome to Home. The secret is built and wiped
+    /// inside the check (`RestoreHintVerifier`); the file text is dropped
+    /// whatever happens. A lock while it runs discards the outcome: nothing
+    /// from it is applied and the user picks a sync mode as usual.
+    private func useRestoreHint(walletId: String, material: RestoreHintMaterial) async {
+        guard let restoreHint, let text = restoreHintText else { return }
+        restoreHintText = nil
+        let generation = restoreHint.lockGeneration()
+        let verification = await restoreHint.verify(text, material, restoreHint.network())
+        guard restoreHint.lockGeneration() == generation else { return }
+        restoreHint.deliver(PendingRestoreHint(walletId: walletId, verification: verification))
     }
 
     // MARK: - Error copy

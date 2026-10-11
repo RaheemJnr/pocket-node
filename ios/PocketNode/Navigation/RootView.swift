@@ -279,7 +279,13 @@ struct RootView: View {
                 )
             )
         case .replaceKeys:
-            startOnboarding(.replacingUnusableKeys(creator: container.walletCreator, hasPin: hasPin))
+            startOnboarding(
+                .replacingUnusableKeys(
+                    creator: container.walletCreator,
+                    hasPin: hasPin,
+                    restoreHint: container.restoreHintSupport()
+                )
+            )
         case .rebuildMetadata:
             // Behind the stand-in while it runs. A failure worth retrying
             // waits for the user's tap instead of the stand-in's timer.
@@ -390,7 +396,8 @@ struct RootView: View {
             onboarding = OnboardingViewModel(
                 creator: container.walletCreator,
                 resumingAt: step,
-                prepareNewWallet: { await gate.prepareNewWallet() }
+                prepareNewWallet: { await gate.prepareNewWallet() },
+                restoreHint: container.restoreHintSupport()
             )
             phase = .onboarding
         }
@@ -484,7 +491,11 @@ struct RootView: View {
         case .backup:
             BackupRoute()
         case .settings:
-            SettingsView(auth: auth, onBackUp: { path.append(Route.backup) })
+            SettingsView(
+                auth: auth,
+                restoreHint: container.restoreHintExportViewModel(),
+                onBackUp: { path.append(Route.backup) }
+            )
         }
     }
 }

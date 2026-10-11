@@ -134,6 +134,10 @@ final class SyncService: SyncStatusProviding {
     private let database: PocketNodeCoreDatabase
     private let service: SingleWalletSyncService
 
+    /// The `sync_progress` store the coordinator writes. Kept so the restore
+    /// hint export can read the wallet's light-client start (#559).
+    private let progressStore: RoomKmpSyncProgressStore
+
     /// The pieces of the shared stack the send path has to share rather than
     /// rebuild.
     ///
@@ -238,6 +242,7 @@ final class SyncService: SyncStatusProviding {
             queryContext: runtime.defaultContext
         )
         let progressStore = RoomKmpSyncProgressStore(dao: database.syncProgress())
+        self.progressStore = progressStore
         let registry = InMemoryWalletRegistry()
         // The three tables the activity read path added. `transactionStore` is what used to be
         // `EmptyTransactionStore`: the coordinator reads cached block numbers
@@ -708,5 +713,41 @@ final class SyncService: SyncStatusProviding {
             directory = AppDirectories.url().appendingPathComponent(name, isDirectory: true)
         }
         return directory.appendingPathComponent("pocket_node.db").path
+    }
+}
+
+// MARK: - Restore hint inputs (#559)
+
+extension SyncService: RestoreHintSources {
+    var restoreHintNetwork: NetworkType { network }
+
+    /// The node's tip after a fresh read, or nil while it has none.
+    func restoreHintTip() async -> RestoreHintTip? {
+        if lightClient.status == .running {
+            await lightClient.refresh()
+        }
+        let height = Int64(lightClient.tipNumber)
+        let hash = lightClient.tipHash
+        guard height > 0, !hash.isEmpty else { return nil }
+        return RestoreHintTip(height: height, hash: hash)
+    }
+
+    func restoreHintLightStart(walletId: String) async -> Int64? {
+        do {
+            let rows = try await progressStore.getAllForNetwork(network: network.name)
+            return rows.first { $0.walletId == walletId }?.lightStartBlockNumber
+        } catch {
+            logger.error("restore hint: sync progress unreadable: \(error.localizedDescription, privacy: .public)")
+            return nil
+        }
+    }
+
+    func restoreHintBlockNumbers(walletId: String) async -> [String] {
+        do {
+            return try await transactions.getBlockNumbers(walletId: walletId, network: network.name)
+        } catch {
+            logger.error("restore hint: block numbers unreadable: \(error.localizedDescription, privacy: .public)")
+            return []
+        }
     }
 }

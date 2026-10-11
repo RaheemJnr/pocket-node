@@ -104,3 +104,13 @@ extension LedgerReader: @retroactive @unchecked Sendable {}
 extension TransactionBuilder: @retroactive @unchecked Sendable {}
 extension PrivateKeySigner: @retroactive @unchecked Sendable {}
 extension KotlinByteArray: @retroactive @unchecked Sendable {}
+/// The restore hint export's reads (#559), on the same terms.
+///
+/// - `RoomKmpSyncProgressStore` and `RoomKmpTransactionStore` hold a Room DAO
+///   (whose queries run on Room's own query context and are safe to call from
+///   any thread), a logger and a clock, all `val`s set once in the
+///   initializer. They have no mutable state of their own.
+/// - `SyncProgressRecord` is a Kotlin `data class` with `val` properties only.
+extension RoomKmpSyncProgressStore: @retroactive @unchecked Sendable {}
+extension RoomKmpTransactionStore: @retroactive @unchecked Sendable {}
+extension SyncProgressRecord: @retroactive @unchecked Sendable {}
