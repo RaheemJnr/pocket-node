@@ -9,6 +9,7 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Warning
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
@@ -44,6 +45,24 @@ fun RecoveryScreen(
 ) {
     val uiState by viewModel.uiState.collectAsState()
     var pinInput by remember { mutableStateOf("") }
+
+    // The phrase restore opens only when the ViewModel allows it: after the
+    // app PIN is verified, or with no PIN set. Start fresh restarts the app.
+    LaunchedEffect(uiState.phraseRestoreReady) {
+        if (uiState.phraseRestoreReady) {
+            viewModel.onPhraseRestoreOpened()
+            onMnemonicRestore()
+        }
+    }
+
+    if (uiState.showStartFreshConfirm) {
+        StartFreshDialog(
+            inProgress = uiState.isStartingFresh,
+            failed = uiState.startFreshFailed,
+            onConfirm = viewModel::confirmStartFresh,
+            onDismiss = viewModel::dismissStartFresh,
+        )
+    }
 
     Scaffold(
         topBar = {
@@ -109,8 +128,54 @@ fun RecoveryScreen(
                         Text(stringResource(R.string.recovery_with_pin))
                     }
 
-                    TextButton(onClick = onMnemonicRestore) {
+                    TextButton(onClick = {
+                        pinInput = ""
+                        viewModel.requestPhraseRestore()
+                    }) {
                         Text(stringResource(R.string.recovery_use_phrase_instead))
+                    }
+                }
+
+                RecoveryStage.PHRASE_PIN_ENTRY -> {
+                    Text(
+                        text = stringResource(R.string.recovery_phrase_pin_message),
+                        style = MaterialTheme.typography.bodyLarge
+                    )
+
+                    OutlinedTextField(
+                        value = pinInput,
+                        onValueChange = { if (it.length <= 6 && it.all { c -> c.isDigit() }) pinInput = it },
+                        label = { Text(stringResource(R.string.recovery_pin_label)) },
+                        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.NumberPassword),
+                        visualTransformation = PasswordVisualTransformation(),
+                        singleLine = true,
+                        modifier = Modifier.fillMaxWidth()
+                    )
+
+                    uiState.error?.let { error ->
+                        Text(
+                            text = error,
+                            color = MaterialTheme.colorScheme.error,
+                            style = MaterialTheme.typography.bodySmall
+                        )
+                    }
+
+                    Button(
+                        onClick = {
+                            viewModel.attemptPhrasePin(pinInput.toCharArray())
+                            pinInput = ""
+                        },
+                        enabled = pinInput.length == 6,
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        Text(stringResource(R.string.recovery_phrase_pin_continue))
+                    }
+
+                    TextButton(onClick = {
+                        pinInput = ""
+                        viewModel.cancelPhrasePin()
+                    }) {
+                        Text(stringResource(R.string.recovery_phrase_pin_cancel))
                     }
                 }
 
@@ -120,8 +185,16 @@ fun RecoveryScreen(
                         style = MaterialTheme.typography.bodyLarge
                     )
 
+                    uiState.error?.let { error ->
+                        Text(
+                            text = error,
+                            color = MaterialTheme.colorScheme.error,
+                            style = MaterialTheme.typography.bodySmall
+                        )
+                    }
+
                     Button(
-                        onClick = onMnemonicRestore,
+                        onClick = viewModel::requestPhraseRestore,
                         modifier = Modifier.fillMaxWidth()
                     ) {
                         Text(stringResource(R.string.recovery_enter_phrase))
@@ -155,11 +228,53 @@ fun RecoveryScreen(
                         style = MaterialTheme.typography.bodyLarge
                     )
 
-                    Button(onClick = onMnemonicRestore, modifier = Modifier.fillMaxWidth()) {
+                    Button(onClick = viewModel::requestPhraseRestore, modifier = Modifier.fillMaxWidth()) {
                         Text(stringResource(R.string.recovery_restore_with_phrase))
                     }
                 }
             }
         }
     }
+}
+
+/**
+ * Shown when the app PIN is permanently locked: the app removes every wallet
+ * and key on this phone and restarts as a fresh install.
+ */
+@Composable
+private fun StartFreshDialog(
+    inProgress: Boolean,
+    failed: Boolean,
+    onConfirm: () -> Unit,
+    onDismiss: () -> Unit,
+) {
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text(stringResource(R.string.recovery_start_fresh_title)) },
+        text = {
+            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                Text(stringResource(R.string.recovery_start_fresh_body))
+                if (failed) {
+                    Text(
+                        text = stringResource(R.string.recovery_start_fresh_failed),
+                        color = MaterialTheme.colorScheme.error,
+                        style = MaterialTheme.typography.bodySmall
+                    )
+                }
+            }
+        },
+        confirmButton = {
+            TextButton(onClick = onConfirm, enabled = !inProgress) {
+                Text(
+                    text = stringResource(R.string.recovery_start_fresh_confirm),
+                    color = MaterialTheme.colorScheme.error
+                )
+            }
+        },
+        dismissButton = {
+            TextButton(onClick = onDismiss, enabled = !inProgress) {
+                Text(stringResource(R.string.recovery_start_fresh_cancel))
+            }
+        }
+    )
 }

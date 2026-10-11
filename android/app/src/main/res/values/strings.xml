@@ -201,6 +201,14 @@
     <string name="recovery_use_phrase_instead">Use recovery phrase instead</string>
     <string name="recovery_enter_phrase">Enter recovery phrase</string>
     <string name="recovery_restore_with_phrase">Restore with recovery phrase</string>
+    <string name="recovery_phrase_pin_message">Enter your app PIN to restore from a recovery phrase.</string>
+    <string name="recovery_phrase_pin_continue">Continue</string>
+    <string name="recovery_phrase_pin_cancel">Cancel</string>
+    <string name="recovery_start_fresh_title">Start fresh with a recovery phrase</string>
+    <string name="recovery_start_fresh_body">This will erase every wallet, key, and cache stored on this device. The only way to restore access afterwards is each wallet\'s 12-word recovery phrase. Without the phrase, those funds cannot be recovered.</string>
+    <string name="recovery_start_fresh_confirm">Remove and continue</string>
+    <string name="recovery_start_fresh_cancel">Cancel</string>
+    <string name="recovery_start_fresh_failed">The wallets could not be removed. Try again.</string>
     <!-- endregion -->
 
     <!-- region: MnemonicVerify -->

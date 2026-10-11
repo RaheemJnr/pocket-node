@@ -509,6 +509,8 @@ class WalletRepository @Inject constructor(
             // leave them orphaned.
             appDatabase.syncProgressDao().deleteForWallet(walletId)
             subAccountCandidateDao.deleteForParent(walletId)
+            // Its send records (pending, broadcast and failed) go with it.
+            appDatabase.pendingBroadcastDao().deleteForWallet(walletId)
         }
         // The rows are gone, so the wallet is deleted whatever happens to its
         // keys. A transient failure (#563 review F4) is retried once; if it
@@ -604,17 +606,21 @@ class WalletRepository @Inject constructor(
         appStatePreferences.clearActiveWalletId()
         walletDao.deactivateAll()
         // Snapshot the wallet list before mutation; iterating the live
-        // result would skip rows as deletions land.
-        val parents = walletDao.getAll().filter { it.parentWalletId == null }
-        for (parent in parents) {
-            val subs = walletDao.getSubAccountsList(parent.walletId)
-            for (sub in subs) {
-                runCatching { deleteWallet(sub.walletId) }
-                    .onFailure { logger.w(TAG, "factoryReset: sub ${sub.walletId} delete failed", it) }
-            }
-            runCatching { deleteWallet(parent.walletId) }
-                .onFailure { logger.w(TAG, "factoryReset: parent ${parent.walletId} delete failed", it) }
+        // result would skip rows as deletions land. Every row is deleted,
+        // sub-accounts first, including a sub-account whose parent row is
+        // already gone (it would never be reached through a parent).
+        val all = walletDao.getAll()
+        val ordered = all.filter { it.parentWalletId != null } + all.filter { it.parentWalletId == null }
+        for (wallet in ordered) {
+            runCatching { deleteWallet(wallet.walletId) }
+                .onFailure { logger.w(TAG, "factoryReset: ${wallet.walletId} delete failed", it) }
         }
-        logger.d(TAG, "factoryReset: ${parents.size} parent wallet(s) wiped")
+        // One more pass over whatever is still there (a row added meanwhile,
+        // or one whose delete failed transiently).
+        for (wallet in walletDao.getAll()) {
+            runCatching { deleteWallet(wallet.walletId) }
+                .onFailure { logger.w(TAG, "factoryReset: ${wallet.walletId} delete failed again", it) }
+        }
+        logger.d(TAG, "factoryReset: ${all.size} wallet(s) wiped")
     }
 }
