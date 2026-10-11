@@ -454,9 +454,14 @@ class WalletRepository @Inject constructor(
     suspend fun switchActiveWallet(walletId: String) {
         val wallet = walletDao.getById(walletId)
             ?: throw IllegalArgumentException("Wallet not found: $walletId")
-        walletDao.deactivateAll()
-        walletDao.activate(walletId)
-        walletDao.updateLastActiveAt(walletId, System.currentTimeMillis())
+        // One transaction (#563 review F3): a failure part-way must leave
+        // the previous wallet active, never no active wallet. The pref
+        // follows only once Room has committed.
+        appDatabase.withTransaction {
+            walletDao.deactivateAll()
+            walletDao.activate(walletId)
+            walletDao.updateLastActiveAt(walletId, System.currentTimeMillis())
+        }
         appStatePreferences.setActiveWalletId(walletId)
         logger.d(TAG, "Switched to wallet: $walletId")
     }
@@ -505,7 +510,24 @@ class WalletRepository @Inject constructor(
             appDatabase.syncProgressDao().deleteForWallet(walletId)
             subAccountCandidateDao.deleteForParent(walletId)
         }
-        keyManager.deleteWalletKeys(walletId)
+        // The rows are gone, so the wallet is deleted whatever happens to its
+        // keys. A transient failure (#563 review F4) is retried once; if it
+        // still fails the key_material row is left behind and logged.
+        for (attempt in 1..2) {
+            try {
+                keyManager.deleteWalletKeys(walletId)
+                break
+            } catch (e: kotlinx.coroutines.CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                // Type only: the message could carry key-store details.
+                if (attempt == 1) {
+                    logger.w(TAG, "Key deletion for $walletId failed (${e.javaClass.simpleName}); retrying once")
+                } else {
+                    logger.e(TAG, "Key deletion for $walletId failed again (${e.javaClass.simpleName}); key material left behind")
+                }
+            }
+        }
         // #538 review: a deleted wallet's gap-limit sweep markers must not
         // outlive it (they are keyed by walletId, but nothing else ever
         // reads or prunes them otherwise).

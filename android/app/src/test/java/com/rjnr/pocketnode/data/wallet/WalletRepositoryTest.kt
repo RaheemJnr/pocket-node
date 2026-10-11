@@ -86,6 +86,106 @@ class WalletRepositoryTest {
         db.close()
     }
 
+    private fun newRepo(dao: WalletDao = walletDao, km: KeyManager = keyManager) = WalletRepository(
+        dao, km, walletPreferences, walletPreferences, mnemonicManager, db,
+        db.transactionDao(), db.balanceCacheDao(), db.daoCellDao(),
+        db.pendingDaoWithdrawDao(), db.pendingDaoUnlockDao(), db.keyMaterialDao(),
+        db.subAccountCandidateDao(), SubAccountDiscovery(mnemonicManager, km), walletPreferences, NoopLogger
+    )
+
+    /** #563 review F3: a switch that fails part-way leaves the old wallet active, never none. */
+    @Test
+    fun `a switch that fails part-way leaves the previous wallet active`() = runTest {
+        val first = repo.createWallet(
+            name = "First",
+            persistKeys = { walletId, bundle -> fakePersistV2(walletId, bundle) },
+        ).getOrThrow()
+        val second = repo.createWallet(
+            name = "Second",
+            persistKeys = { walletId, bundle -> fakePersistV2(walletId, bundle) },
+        ).getOrThrow()
+        assertEquals(second.walletId, walletDao.getActive()?.walletId)
+        val failing = object : WalletDao by walletDao {
+            override suspend fun activate(walletId: String) = throw IllegalStateException("disk I/O error")
+        }
+
+        val error = runCatching { newRepo(dao = failing).switchActiveWallet(first.walletId) }.exceptionOrNull()
+
+        assertTrue(error is IllegalStateException)
+        assertEquals(second.walletId, walletDao.getActive()?.walletId)
+        assertEquals(second.walletId, walletPreferences.getActiveWalletId())
+    }
+
+    /** #563 review F3: the same holds for the switch inside a rollback. */
+    @Test
+    fun `a rollback whose switch fails part-way keeps the added wallet active`() = runTest {
+        val previous = repo.createWallet(
+            name = "Previous",
+            persistKeys = { walletId, bundle -> fakePersistV2(walletId, bundle) },
+        ).getOrThrow()
+        val added = repo.createWallet(
+            name = "Added",
+            persistKeys = { walletId, bundle -> fakePersistV2(walletId, bundle) },
+        ).getOrThrow()
+        val failing = object : WalletDao by walletDao {
+            override suspend fun activate(walletId: String) = throw IllegalStateException("disk I/O error")
+        }
+
+        val error = runCatching { newRepo(dao = failing).rollbackAddedWallet(added.walletId, previous.walletId) }
+            .exceptionOrNull()
+
+        assertTrue(error is IllegalStateException)
+        assertEquals(added.walletId, walletDao.getActive()?.walletId)
+        assertNotNull(walletDao.getById(added.walletId))
+        assertNotNull(walletDao.getById(previous.walletId))
+    }
+
+    /** #563 review F4: a transient key-deletion failure is retried once. */
+    @Test
+    fun `deleteWallet retries a failed key deletion once`() = runTest {
+        val gone = repo.createWallet(
+            name = "Gone",
+            persistKeys = { walletId, bundle -> fakePersistV2(walletId, bundle) },
+        ).getOrThrow()
+        repo.createWallet(
+            name = "Keep",
+            persistKeys = { walletId, bundle -> fakePersistV2(walletId, bundle) },
+        ).getOrThrow()
+        val km = io.mockk.spyk(keyManager)
+        var calls = 0
+        io.mockk.coEvery { km.deleteWalletKeys(any()) } coAnswers {
+            calls++
+            if (calls == 1) throw IllegalStateException("keystore busy")
+            keyManager.deleteWalletKeys(firstArg())
+        }
+
+        newRepo(km = km).deleteWallet(gone.walletId)
+
+        assertEquals(2, calls)
+        assertNull(walletDao.getById(gone.walletId))
+        assertNull(db.keyMaterialDao().getByWalletId(gone.walletId))
+    }
+
+    /** #563 review F4: the rows are gone, so a key deletion that keeps failing does not fail the delete. */
+    @Test
+    fun `deleteWallet whose key deletion keeps failing still completes`() = runTest {
+        val gone = repo.createWallet(
+            name = "Gone",
+            persistKeys = { walletId, bundle -> fakePersistV2(walletId, bundle) },
+        ).getOrThrow()
+        repo.createWallet(
+            name = "Keep",
+            persistKeys = { walletId, bundle -> fakePersistV2(walletId, bundle) },
+        ).getOrThrow()
+        val km = io.mockk.spyk(keyManager)
+        io.mockk.coEvery { km.deleteWalletKeys(any()) } throws IllegalStateException("keystore gone")
+
+        newRepo(km = km).deleteWallet(gone.walletId)
+
+        io.mockk.coVerify(exactly = 2) { km.deleteWalletKeys(gone.walletId) }
+        assertNull(walletDao.getById(gone.walletId))
+    }
+
     @Test
     fun `createWallet inserts entity and sets active`() = runTest {
         val wallet = repo.createWallet(
