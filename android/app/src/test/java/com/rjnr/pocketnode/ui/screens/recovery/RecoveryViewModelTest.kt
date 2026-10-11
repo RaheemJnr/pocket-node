@@ -15,6 +15,7 @@ import io.mockk.coVerify
 import io.mockk.every
 import io.mockk.mockk
 import io.mockk.verify
+import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.test.StandardTestDispatcher
@@ -35,6 +36,7 @@ import org.junit.rules.TemporaryFolder
 import org.junit.runner.RunWith
 import org.robolectric.RobolectricTestRunner
 import org.robolectric.annotation.Config
+import kotlin.coroutines.CoroutineContext
 
 @OptIn(ExperimentalCoroutinesApi::class)
 @RunWith(RobolectricTestRunner::class)
@@ -521,5 +523,83 @@ class RecoveryViewModelTest {
         assertTrue(vm.uiState.value.phraseRestoreReady)
         assertFalse(vm.uiState.value.showStartFreshConfirm)
         coVerify(exactly = 0) { localWalletReset.removeAllWalletsAndPin() }
+    }
+
+    // --- Cancel while the phrase PIN is being checked ---
+
+    /** Holds the PIN check until the test runs it, so Cancel can land first. */
+    private class HeldDispatcher : CoroutineDispatcher() {
+        private val queue = ArrayDeque<Runnable>()
+        val pending: Int get() = queue.size
+        override fun dispatch(context: CoroutineContext, block: Runnable) {
+            queue.addLast(block)
+        }
+        fun runAll() {
+            while (queue.isNotEmpty()) queue.removeFirst().run()
+        }
+    }
+
+    @Test
+    fun `Cancel during the PIN check drops a correct PIN`() = runTest {
+        val manager = createBackupManager()
+        manager.writeBackup("wallet1", testMaterial(), correctPin)
+        val held = HeldDispatcher()
+        val vm = RecoveryViewModel(manager, createPinManager(correctPin), authManager, localWalletReset, appRestarter, held)
+        vm.requestPhraseRestore()
+        vm.attemptPhrasePin(correctPin.copyOf())
+        advanceUntilIdle()
+        assertEquals(1, held.pending)
+
+        vm.cancelPhrasePin()
+        held.runAll()
+        advanceUntilIdle()
+
+        assertFalse(vm.uiState.value.phraseRestoreReady)
+        assertNull(authManager.getSessionPin())
+        assertEquals(RecoveryStage.PIN_ENTRY, vm.uiState.value.stage)
+        assertNull(vm.uiState.value.error)
+        // The dropped check did not count as verified: the next tap asks again.
+        vm.requestPhraseRestore()
+        assertEquals(RecoveryStage.PHRASE_PIN_ENTRY, vm.uiState.value.stage)
+        assertFalse(vm.uiState.value.phraseRestoreReady)
+    }
+
+    @Test
+    fun `a wrong PIN finishing after Cancel does not reopen the PIN step`() = runTest {
+        val pinManager = createPinManager(correctPin)
+        val held = HeldDispatcher()
+        val vm = RecoveryViewModel(createBackupManager(), pinManager, authManager, localWalletReset, appRestarter, held)
+        vm.requestPhraseRestore()
+        vm.attemptPhrasePin(wrongPin)
+        advanceUntilIdle()
+
+        vm.cancelPhrasePin()
+        held.runAll()
+        advanceUntilIdle()
+
+        assertEquals(RecoveryStage.MNEMONIC_ENTRY, vm.uiState.value.stage)
+        assertNull(vm.uiState.value.error)
+        assertFalse(vm.uiState.value.phraseRestoreReady)
+        // The wrong PIN still counts on the shared counter.
+        assertEquals(4, pinManager.getRemainingAttempts())
+    }
+
+    @Test
+    fun `only the latest phrase PIN attempt is applied`() = runTest {
+        val held = HeldDispatcher()
+        val vm = RecoveryViewModel(createBackupManager(), createPinManager(correctPin), authManager, localWalletReset, appRestarter, held)
+        vm.requestPhraseRestore()
+        vm.attemptPhrasePin(correctPin.copyOf())
+        vm.attemptPhrasePin(wrongPin)
+        advanceUntilIdle()
+        assertEquals(2, held.pending)
+
+        held.runAll()
+        advanceUntilIdle()
+
+        assertFalse(vm.uiState.value.phraseRestoreReady)
+        assertNull(authManager.getSessionPin())
+        assertEquals(RecoveryStage.PHRASE_PIN_ENTRY, vm.uiState.value.stage)
+        assertEquals("Incorrect PIN. 4 attempts remaining.", vm.uiState.value.error)
     }
 }
