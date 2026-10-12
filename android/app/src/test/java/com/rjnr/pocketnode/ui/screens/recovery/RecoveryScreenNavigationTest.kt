@@ -253,6 +253,12 @@ class RecoveryScreenNavigationTest {
         assertEquals(0, recoveries)
         compose.onNodeWithText("recovery_missing_wallets").assertExists()
         compose.onNodeWithText("recovery_restore_retry").assertDoesNotExist()
+        // The missing wallet can be re-keyed from its phrase on this screen.
+        compose.onNodeWithText("recovery_rekey_with_phrase").performClick()
+        compose.waitForIdle()
+        compose.onNodeWithText("recovery_rekey_phrase_title").assertExists()
+        compose.onNodeWithText("recovery_phrase_pin_cancel").performClick()
+        compose.waitForIdle()
         compose.onNodeWithText("recovery_restore_with_phrase").performClick()
         compose.waitForIdle()
         // The PIN was verified on this screen, so the phrase restore opens.

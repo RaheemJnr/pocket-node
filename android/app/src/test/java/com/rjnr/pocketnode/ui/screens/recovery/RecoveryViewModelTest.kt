@@ -801,4 +801,118 @@ class RecoveryViewModelTest {
         coVerify(exactly = 0) { keyRestorer.restore(any(), any(), any(), any()) }
         coVerify(exactly = 0) { keyRestorer.completeIfDone() }
     }
+
+    // --- Re-key a missing wallet from its phrase or private key ---
+
+    private val phraseWords = testMaterial().mnemonic!!.split(" ")
+
+    /** wallet1 has a row but its backup does not open: Recovery lists it as missing. */
+    private suspend fun kotlinx.coroutines.test.TestScope.recoveryWithMissingWallet1(): RecoveryViewModel {
+        val manager = createBackupManager()
+        manager.writeBackup("wallet1", testMaterial(), "222222".toCharArray())
+        val vm = newVm(manager, createPinManager(correctPin))
+        vm.attemptPinRecovery(correctPin.copyOf(), activity)
+        advanceUntilIdle()
+        assertEquals(RecoveryStage.RESTORE_FAILED, vm.uiState.value.stage)
+        return vm
+    }
+
+    @Test
+    fun `the re-key entry cannot open before the PIN is verified`() = runTest {
+        val manager = createBackupManager()
+        manager.writeBackup("wallet1", testMaterial(), correctPin)
+        val vm = newVm(manager, createPinManager(correctPin))
+
+        vm.openRekey("wallet1", withPrivateKey = false)
+        assertNull(vm.uiState.value.rekey)
+
+        vm.attemptPinRecovery(wrongPin, activity)
+        advanceUntilIdle()
+        vm.openRekey("wallet1", withPrivateKey = false)
+        assertNull(vm.uiState.value.rekey)
+        coVerify(exactly = 0) { keyRestorer.rekeyFromPhrase(any(), any(), any(), any()) }
+    }
+
+    @Test
+    fun `a re-key from the right phrase completes recovery`() = runTest {
+        coEvery { keyRestorer.rekeyFromPhrase(any(), "wallet1", any(), any()) } answers {
+            missing.remove("wallet1")
+            RecoveredKeyRestorer.RekeyResult.Done(mapOf("wallet1" to RecoveredKeyRestorer.Outcome.Restored))
+        }
+        val vm = recoveryWithMissingWallet1()
+
+        vm.openRekey("wallet1", withPrivateKey = false)
+        assertEquals("wallet1", vm.uiState.value.rekey!!.wallet.walletId)
+        vm.submitRekeyPhrase(activity, phraseWords)
+        advanceUntilIdle()
+
+        assertEquals(RecoveryStage.SUCCESS, vm.uiState.value.stage)
+        assertNull(vm.uiState.value.rekey)
+        coVerify(exactly = 1) { keyRestorer.rekeyFromPhrase(activity, "wallet1", phraseWords, false) }
+    }
+
+    @Test
+    fun `a phrase that belongs to another wallet says so and stays on the entry`() = runTest {
+        coEvery { keyRestorer.rekeyFromPhrase(any(), any(), any(), any()) } returns
+            RecoveredKeyRestorer.RekeyResult.NotThisWallet
+        val vm = recoveryWithMissingWallet1()
+
+        vm.openRekey("wallet1", withPrivateKey = false)
+        vm.submitRekeyPhrase(activity, phraseWords)
+        advanceUntilIdle()
+
+        assertEquals("This phrase does not belong to Name of wallet1.", vm.uiState.value.rekey!!.error)
+        assertEquals(RecoveryStage.RESTORE_FAILED, vm.uiState.value.stage)
+        assertFalse(vm.uiState.value.toString().contains("abandon"))
+    }
+
+    @Test
+    fun `the private-key entry opens only for raw-key wallets`() = runTest {
+        val vm = recoveryWithMissingWallet1()
+
+        vm.openRekey("wallet1", withPrivateKey = true)
+
+        assertNull(vm.uiState.value.rekey)
+    }
+
+    @Test
+    fun `a raw-key wallet is re-keyed from its private key and the key bytes are wiped`() = runTest {
+        walletRows["wallet1"] = walletRow("wallet1").copy(type = "raw_key")
+        var seen: ByteArray? = null
+        coEvery { keyRestorer.rekeyFromPrivateKey(any(), "wallet1", any(), any()) } answers {
+            seen = thirdArg()
+            missing.remove("wallet1")
+            RecoveredKeyRestorer.RekeyResult.Done(mapOf("wallet1" to RecoveredKeyRestorer.Outcome.Restored))
+        }
+        val vm = recoveryWithMissingWallet1()
+
+        vm.openRekey("wallet1", withPrivateKey = true)
+        vm.submitRekeyPrivateKey(activity, "11".repeat(32))
+        advanceUntilIdle()
+
+        assertEquals(RecoveryStage.SUCCESS, vm.uiState.value.stage)
+        assertTrue(seen!!.all { it == 0.toByte() })
+    }
+
+    @Test
+    fun `on a phone with no screen lock the re-key asks the consent first`() = runTest {
+        every { keyRestorer.needsNoLockConsent() } returns true
+        val vm = recoveryWithMissingWallet1()
+
+        vm.openRekey("wallet1", withPrivateKey = false)
+        assertTrue(vm.uiState.value.showNoLockConsent)
+        assertNull(vm.uiState.value.rekey)
+
+        vm.dismissNoLockConsent()
+        assertNull(vm.uiState.value.rekey)
+
+        vm.openRekey("wallet1", withPrivateKey = false)
+        vm.confirmNoLockConsent(activity)
+        assertEquals("wallet1", vm.uiState.value.rekey!!.wallet.walletId)
+        vm.submitRekeyPhrase(activity, phraseWords)
+        advanceUntilIdle()
+
+        coVerify(exactly = 1) { keyRestorer.rekeyFromPhrase(activity, "wallet1", any(), true) }
+        coVerify(exactly = 0) { keyRestorer.restore(any(), any(), any(), true) }
+    }
 }

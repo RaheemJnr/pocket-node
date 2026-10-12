@@ -8,6 +8,8 @@ import com.rjnr.pocketnode.data.auth.PinManager
 import com.rjnr.pocketnode.data.crypto.KeyBackupManager
 import com.rjnr.pocketnode.data.crypto.KeyMaterial
 import com.rjnr.pocketnode.data.gateway.LocalWalletReset
+import com.rjnr.pocketnode.core.crypto.hexToByteArray
+import com.rjnr.pocketnode.data.wallet.KeyManager
 import com.rjnr.pocketnode.data.wallet.RecoveredKeyRestorer
 import com.rjnr.pocketnode.util.AppRestarter
 import dagger.hilt.android.lifecycle.HiltViewModel
@@ -56,9 +58,30 @@ data class RecoveryUiState(
      */
     val showNoLockConsent: Boolean = false,
     /** On [RecoveryStage.RESTORE_FAILED]: wallets on this phone still without verified keys. */
-    val missingWalletNames: List<String> = emptyList(),
+    val missingWallets: List<MissingWallet> = emptyList(),
     /** On [RecoveryStage.SUCCESS]: wallets whose keys were written back and verified. */
     val restoredWalletCount: Int = 0,
+    /** The open phrase or private-key entry for one missing wallet, if any. */
+    val rekey: RekeyEntry? = null,
+    /** A re-key is being written and checked. */
+    val isRekeying: Boolean = false,
+) {
+    val missingWalletNames: List<String> get() = missingWallets.map { it.name }
+}
+
+/** A wallet row still without verified keys, as the Recovery screen lists it. */
+data class MissingWallet(
+    val walletId: String,
+    val name: String,
+    /** Restored from a private key rather than a phrase. */
+    val isRawKey: Boolean,
+)
+
+/** The phrase or private-key entry for [wallet]. [error] never holds the entered secret. */
+data class RekeyEntry(
+    val wallet: MissingWallet,
+    val withPrivateKey: Boolean,
+    val error: String? = null,
 )
 
 data class RecoveredWallet(
@@ -108,6 +131,12 @@ class RecoveryViewModel(
     private val decrypted = mutableMapOf<String, KeyMaterial>()
 
     private var restoreInProgress = false
+
+    /** The no-lock dialog was opened to start a re-key rather than the backup restore. */
+    private var consentForRekey: RekeyEntry? = null
+
+    /** The user accepted the no-lock dialog for the open re-key entry. */
+    private var rekeyV1Consented = false
 
     private enum class PinCheck { VERIFIED, NO_PIN, REFUSED }
 
@@ -191,14 +220,128 @@ class RecoveryViewModel(
     /** "Continue anyway" on the no-lock dialog: store the keys at V1. */
     fun confirmNoLockConsent(activity: FragmentActivity) {
         if (!_uiState.value.showNoLockConsent) return
+        val rekey = consentForRekey
+        consentForRekey = null
+        if (rekey != null) {
+            rekeyV1Consented = true
+            _uiState.update { it.copy(showNoLockConsent = false, rekey = rekey) }
+            return
+        }
         _uiState.update { it.copy(showNoLockConsent = false) }
         viewModelScope.launch { restoreRecoveredKeys(activity, noLockConsented = true) }
+    }
+
+    /**
+     * Opens the phrase (or, for a raw-key wallet, private-key) entry for a
+     * wallet still missing keys. Only after the app PIN was verified on this
+     * screen, or when no PIN is set. On a phone with no screen lock the
+     * no-lock dialog comes first.
+     */
+    fun openRekey(walletId: String, withPrivateKey: Boolean) {
+        val state = _uiState.value
+        if (state.stage != RecoveryStage.RESTORE_FAILED || state.isRekeying) return
+        if (!pinVerified && runCatching { pinManager.hasPin() }.getOrDefault(true)) return
+        val wallet = state.missingWallets.firstOrNull { it.walletId == walletId } ?: return
+        if (withPrivateKey && !wallet.isRawKey) return
+        val entry = RekeyEntry(wallet, withPrivateKey)
+        rekeyV1Consented = false
+        if (keyRestorer.needsNoLockConsent()) {
+            consentForRekey = entry
+            _uiState.update { it.copy(showNoLockConsent = true) }
+            return
+        }
+        _uiState.update { it.copy(rekey = entry) }
+    }
+
+    fun cancelRekey() {
+        if (_uiState.value.isRekeying) return
+        rekeyV1Consented = false
+        _uiState.update { it.copy(rekey = null) }
+    }
+
+    /** The phrase entered for the open re-key entry. */
+    fun submitRekeyPhrase(activity: FragmentActivity, words: List<String>) {
+        val entry = _uiState.value.rekey ?: return
+        if (entry.withPrivateKey || _uiState.value.isRekeying) return
+        val normalized = words.map { it.trim().lowercase() }
+        runRekey(entry, phraseMessages(entry)) {
+            keyRestorer.rekeyFromPhrase(activity, entry.wallet.walletId, normalized, allowV1 = rekeyV1Consented)
+        }
+    }
+
+    /** The private key entered for the open re-key entry. */
+    fun submitRekeyPrivateKey(activity: FragmentActivity, hex: String) {
+        val entry = _uiState.value.rekey ?: return
+        if (!entry.withPrivateKey || _uiState.value.isRekeying) return
+        val keyBytes = runCatching { hex.trim().hexToByteArray() }.getOrNull()
+        if (keyBytes == null) {
+            _uiState.update { it.copy(rekey = entry.copy(error = REKEY_INVALID_KEY)) }
+            return
+        }
+        runRekey(entry, keyMessages(entry), wipe = keyBytes) {
+            keyRestorer.rekeyFromPrivateKey(activity, entry.wallet.walletId, keyBytes, allowV1 = rekeyV1Consented)
+        }
+    }
+
+    private class RekeyMessages(val invalid: String, val notThisWallet: String)
+
+    private fun phraseMessages(entry: RekeyEntry) =
+        RekeyMessages(REKEY_INVALID_PHRASE, "This phrase does not belong to ${entry.wallet.name}.")
+
+    private fun keyMessages(entry: RekeyEntry) =
+        RekeyMessages(REKEY_INVALID_KEY, "This private key does not belong to ${entry.wallet.name}.")
+
+    private fun runRekey(
+        entry: RekeyEntry,
+        messages: RekeyMessages,
+        wipe: ByteArray? = null,
+        block: suspend () -> RecoveredKeyRestorer.RekeyResult,
+    ) {
+        _uiState.update { it.copy(isRekeying = true, rekey = entry.copy(error = null)) }
+        viewModelScope.launch {
+            val result = try {
+                block()
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                RecoveredKeyRestorer.RekeyResult.Done(
+                    mapOf(entry.wallet.walletId to RecoveredKeyRestorer.Outcome.Failed("unexpected error"))
+                )
+            } finally {
+                wipe?.fill(0)
+            }
+            when (result) {
+                RecoveredKeyRestorer.RekeyResult.InvalidInput -> _uiState.update {
+                    it.copy(isRekeying = false, rekey = entry.copy(error = messages.invalid))
+                }
+                RecoveredKeyRestorer.RekeyResult.NotThisWallet -> _uiState.update {
+                    it.copy(isRekeying = false, rekey = entry.copy(error = messages.notThisWallet))
+                }
+                RecoveredKeyRestorer.RekeyResult.NotMissing,
+                is RecoveredKeyRestorer.RekeyResult.Done -> {
+                    val outcomes = (result as? RecoveredKeyRestorer.RekeyResult.Done)?.outcomes.orEmpty()
+                    restoredWalletIds += outcomes.filterValues { it == RecoveredKeyRestorer.Outcome.Restored }.keys
+                    rekeyV1Consented = false
+                    _uiState.update { it.copy(isRekeying = false, rekey = null) }
+                    finishAttempt(
+                        mismatch = outcomes.values.any { it == RecoveredKeyRestorer.Outcome.AddressMismatch },
+                        retryable = outcomes.values.any {
+                            it == RecoveredKeyRestorer.Outcome.Cancelled ||
+                                it == RecoveredKeyRestorer.Outcome.NeedsNoLockConsent ||
+                                it is RecoveredKeyRestorer.Outcome.Failed
+                        },
+                        skipped = emptyList(),
+                    )
+                }
+            }
+        }
     }
 
     /** "Cancel" on the no-lock dialog: nothing is written, the backups stay. */
     fun dismissNoLockConsent() {
         if (!_uiState.value.showNoLockConsent) return
         decrypted.clear()
+        consentForRekey = null
         _uiState.update {
             it.copy(
                 showNoLockConsent = false,
@@ -272,40 +415,52 @@ class RecoveryViewModel(
                 _uiState.update { it.copy(showNoLockConsent = true) }
                 return
             }
-            val walletIds = keyRestorer.walletIds()
             // Decrypted backups with no wallet row on this phone; never written.
+            val walletIds = keyRestorer.walletIds()
             val skipped = decrypted.keys.filter { it !in walletIds }
-            if (keyRestorer.completeIfDone()) {
-                decrypted.clear()
-                _uiState.update {
-                    it.copy(
-                        stage = RecoveryStage.SUCCESS,
-                        restoredWalletCount = restoredWalletIds.size,
-                        missingWalletNames = emptyList(),
-                        failedWalletIds = (it.failedWalletIds + skipped).distinct(),
-                        error = null,
-                    )
-                }
-                return
-            }
             decrypted.clear()
-            val stillMissing = keyRestorer.missingWallets()
-            val error = when {
-                walletIds.isEmpty() -> RESTORE_NO_WALLET_ERROR
-                mismatch -> RESTORE_MISMATCH_ERROR
-                retryable || needsConsent -> RESTORE_RETRY_ERROR
-                else -> RESTORE_MISSING_ERROR
-            }
-            _uiState.update {
-                it.copy(
-                    stage = RecoveryStage.RESTORE_FAILED,
-                    error = error,
-                    canRetryRestore = retryable || needsConsent,
-                    missingWalletNames = stillMissing.map { w -> w.name },
-                )
-            }
+            finishAttempt(mismatch, retryable || needsConsent, skipped)
         } finally {
             restoreInProgress = false
+        }
+    }
+
+    /**
+     * Ends a backup restore or a re-key: SUCCESS only when
+     * [RecoveredKeyRestorer.completeIfDone] holds, otherwise
+     * [RecoveryStage.RESTORE_FAILED] listing the wallets still missing.
+     */
+    private suspend fun finishAttempt(mismatch: Boolean, retryable: Boolean, skipped: List<String>) {
+        if (keyRestorer.completeIfDone()) {
+            _uiState.update {
+                it.copy(
+                    stage = RecoveryStage.SUCCESS,
+                    restoredWalletCount = restoredWalletIds.size,
+                    missingWallets = emptyList(),
+                    failedWalletIds = (it.failedWalletIds + skipped).distinct(),
+                    error = null,
+                )
+            }
+            return
+        }
+        val walletIds = keyRestorer.walletIds()
+        val stillMissing = keyRestorer.missingWallets()
+        val error = when {
+            walletIds.isEmpty() -> RESTORE_NO_WALLET_ERROR
+            mismatch -> RESTORE_MISMATCH_ERROR
+            retryable -> RESTORE_RETRY_ERROR
+            else -> RESTORE_MISSING_ERROR
+        }
+        _uiState.update {
+            it.copy(
+                stage = RecoveryStage.RESTORE_FAILED,
+                error = error,
+                canRetryRestore = retryable,
+                missingWallets = stillMissing.map { w ->
+                    MissingWallet(w.walletId, w.name, isRawKey = w.type == KeyManager.WALLET_TYPE_RAW_KEY)
+                },
+                failedWalletIds = (it.failedWalletIds + skipped).distinct(),
+            )
         }
     }
 
@@ -525,6 +680,8 @@ class RecoveryViewModel(
         const val RESTORE_MISSING_ERROR =
             "Some wallets on this phone still have no keys and no backup that could be opened. " +
                 "Restore them with their recovery phrase."
+        const val REKEY_INVALID_PHRASE = "That is not a valid recovery phrase. Check the words and try again."
+        const val REKEY_INVALID_KEY = "That is not a valid private key. Enter the 64-character hex key."
         const val RESTORE_NO_WALLET_ERROR =
             "These backups do not belong to a wallet on this phone. Your backup files are kept. " +
                 "Restore with your recovery phrase."

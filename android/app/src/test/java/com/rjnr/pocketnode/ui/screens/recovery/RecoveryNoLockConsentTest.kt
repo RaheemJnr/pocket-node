@@ -314,4 +314,80 @@ class RecoveryNoLockConsentTest {
         // Write, cancelled read-back, then one read-back on the retry.
         assertEquals(3, prompts)
     }
+
+    // --- Re-key a missing wallet from its phrase, end to end ---
+
+    private val phraseWords =
+        "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about".split(" ")
+
+    /** A root wallet of the public abandon vector, with a row but no keys and no backup. */
+    private suspend fun addPhraseWalletWithoutBackup() {
+        val mm = MnemonicManager()
+        val key = mm.derivePrivateKey(mm.mnemonicToSeed(phraseWords))
+        val info = WalletDerivation.walletInfo(key)
+        db.walletDao().insert(
+            WalletEntity(
+                walletId = "root",
+                name = "Savings",
+                type = KeyManager.WALLET_TYPE_MNEMONIC,
+                derivationPath = "m/44'/309'/0'/0/0",
+                parentWalletId = null,
+                mainnetAddress = info.mainnetAddress,
+                testnetAddress = info.testnetAddress,
+            )
+        )
+    }
+
+    @Test
+    fun `a missing wallet with no backup is re-keyed from its phrase and recovery completes`() = runTest {
+        secureLock(true)
+        addWallet("w1", keyHex)
+        addPhraseWalletWithoutBackup()
+        val vm = newVm()
+        vm.attemptPinRecovery(pin.copyOf(), activity)
+        advanceUntilIdle()
+        assertEquals(RecoveryStage.RESTORE_FAILED, vm.uiState.value.stage)
+        assertEquals(listOf("Savings"), vm.uiState.value.missingWalletNames)
+
+        vm.openRekey("root", withPrivateKey = false)
+        vm.submitRekeyPhrase(activity, listOf("legal", "winner", "thank", "year", "wave", "sausage",
+            "worth", "useful", "legal", "winner", "thank", "yellow"))
+        advanceUntilIdle()
+        assertEquals("This phrase does not belong to Savings.", vm.uiState.value.rekey!!.error)
+        assertNull(db.keyMaterialDao().getByWalletId("root"))
+
+        vm.submitRekeyPhrase(activity, phraseWords)
+        advanceUntilIdle()
+
+        assertEquals(RecoveryStage.SUCCESS, vm.uiState.value.stage)
+        assertEquals(2, db.keyMaterialDao().getKdfVersion("root"))
+        assertFalse(state.isIncomplete())
+        @Suppress("DEPRECATION")
+        verify(exactly = 1) { keyManager.resetCorruptionFlag() }
+    }
+
+    @Test
+    fun `on a phone with no screen lock the phrase re-key stores V1 only after the consent`() = runTest {
+        secureLock(false)
+        addPhraseWalletWithoutBackup()
+        // A backup for another wallet id keeps the screen on the backup PIN.
+        backups.writeBackup(
+            "orphan",
+            KeyMaterial(privateKey = keyHex, walletType = KeyManager.WALLET_TYPE_RAW_KEY, mnemonicBackedUp = false),
+            pin.copyOf(),
+        )
+        val vm = newVm()
+        vm.attemptPinRecovery(pin.copyOf(), activity)
+        advanceUntilIdle()
+        assertEquals(RecoveryStage.RESTORE_FAILED, vm.uiState.value.stage)
+
+        vm.openRekey("root", withPrivateKey = false)
+        assertTrue(vm.uiState.value.showNoLockConsent)
+        vm.confirmNoLockConsent(activity)
+        vm.submitRekeyPhrase(activity, phraseWords)
+        advanceUntilIdle()
+
+        assertEquals(RecoveryStage.SUCCESS, vm.uiState.value.stage)
+        assertEquals(1, db.keyMaterialDao().getKdfVersion("root"))
+    }
 }

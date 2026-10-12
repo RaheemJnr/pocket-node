@@ -120,15 +120,17 @@ class RecoveredKeyRestorerTest {
         derivationPath: String? = "m/44'/309'/0'/0/0",
         accountIndex: Int = 0,
         blankTestnet: Boolean = false,
+        type: String = KeyManager.WALLET_TYPE_MNEMONIC,
+        parentWalletId: String? = null,
     ) {
         val info = WalletDerivation.walletInfo(keyHex.hexToByteArray())
         walletDao.insert(
             WalletEntity(
                 walletId = walletId,
                 name = walletId,
-                type = KeyManager.WALLET_TYPE_MNEMONIC,
+                type = type,
                 derivationPath = derivationPath,
-                parentWalletId = null,
+                parentWalletId = parentWalletId,
                 accountIndex = accountIndex,
                 mainnetAddress = info.mainnetAddress,
                 testnetAddress = if (blankTestnet) "" else info.testnetAddress,
@@ -417,5 +419,138 @@ class RecoveredKeyRestorerTest {
         assertEquals(RecoveredKeyRestorer.Outcome.Restored, outcome)
         assertFalse(restorer.needsNoLockConsent())
         assertEquals(2, keyMaterialDao.getKdfVersion("w1"))
+    }
+
+    // --- Re-key a missing wallet from its phrase or private key ---
+
+    private val words = phrase.split(" ")
+    private val otherPhrase =
+        "legal winner thank year wave sausage worth useful legal winner thank yellow".split(" ")
+
+    @Test
+    fun `a missing root wallet is re-keyed from its phrase, verified, and recovery completes`() = runTest {
+        secureLock(true)
+        insertWallet("root", phraseKeyHex)
+        restorer.markIncomplete()
+
+        val result = restorer.rekeyFromPhrase(activity, "root", words, allowV1 = false)
+
+        assertEquals(mapOf("root" to RecoveredKeyRestorer.Outcome.Restored), (result as RecoveredKeyRestorer.RekeyResult.Done).outcomes)
+        val read = reader.readKeyMaterial(activity, "root", "t", "s") as WalletKeyReader.MaterialResult.Success
+        assertArrayEquals(phraseKeyHex.hexToByteArray(), read.privateKey)
+        assertEquals(phrase, read.mnemonic)
+        assertTrue(restorer.completeIfDone())
+        assertFalse(state.isIncomplete())
+    }
+
+    @Test
+    fun `a phrase that does not belong to the wallet writes nothing`() = runTest {
+        secureLock(true)
+        insertWallet("root", phraseKeyHex)
+
+        val result = restorer.rekeyFromPhrase(activity, "root", otherPhrase, allowV1 = false)
+
+        assertEquals(RecoveredKeyRestorer.RekeyResult.NotThisWallet, result)
+        assertNull(keyMaterialDao.getByWalletId("root"))
+        coVerify(exactly = 0) { authManager.authenticateForCipher(any(), any(), any(), any()) }
+    }
+
+    @Test
+    fun `an invalid phrase writes nothing`() = runTest {
+        insertWallet("root", phraseKeyHex)
+
+        val result = restorer.rekeyFromPhrase(activity, "root", words.dropLast(1) + "zzzz", allowV1 = true)
+
+        assertEquals(RecoveredKeyRestorer.RekeyResult.InvalidInput, result)
+        assertNull(keyMaterialDao.getByWalletId("root"))
+    }
+
+    @Test
+    fun `a missing raw-key wallet is re-keyed from its private key`() = runTest {
+        secureLock(false)
+        insertWallet("raw", otherKeyHex, derivationPath = null, type = KeyManager.WALLET_TYPE_RAW_KEY)
+
+        val result = restorer.rekeyFromPrivateKey(activity, "raw", otherKeyHex.hexToByteArray(), allowV1 = true)
+
+        assertEquals(mapOf("raw" to RecoveredKeyRestorer.Outcome.Restored), (result as RecoveredKeyRestorer.RekeyResult.Done).outcomes)
+        val stored = v1Helper.readDecryptedKey("raw")!!
+        assertEquals(otherKeyHex, stored.privateKeyHex)
+        assertNull(stored.mnemonic)
+        assertEquals(KeyManager.WALLET_TYPE_RAW_KEY, stored.walletType)
+    }
+
+    @Test
+    fun `a private key that does not belong to the wallet writes nothing`() = runTest {
+        secureLock(false)
+        insertWallet("raw", otherKeyHex, derivationPath = null, type = KeyManager.WALLET_TYPE_RAW_KEY)
+
+        val result = restorer.rekeyFromPrivateKey(activity, "raw", phraseKeyHex.hexToByteArray(), allowV1 = true)
+
+        assertEquals(RecoveredKeyRestorer.RekeyResult.NotThisWallet, result)
+        assertNull(keyMaterialDao.getByWalletId("raw"))
+    }
+
+    @Test
+    fun `a missing sub-account is re-keyed from its parent's phrase and the parent is not touched`() = runTest {
+        secureLock(false)
+        insertWallet("root", phraseKeyHex)
+        v1Helper.migrateWallet("root", phraseKeyHex, phrase, KeyManager.WALLET_TYPE_MNEMONIC, true)
+        val rootRow = keyMaterialDao.getByWalletId("root")!!
+        insertWallet("sub", accountOneKeyHex, derivationPath = "m/44'/309'/1'/0/0", accountIndex = 1, parentWalletId = "root")
+
+        val result = restorer.rekeyFromPhrase(activity, "sub", words, allowV1 = true)
+
+        assertEquals(mapOf("sub" to RecoveredKeyRestorer.Outcome.Restored), (result as RecoveredKeyRestorer.RekeyResult.Done).outcomes)
+        val sub = v1Helper.readDecryptedKey("sub")!!
+        assertEquals(accountOneKeyHex, sub.privateKeyHex)
+        // Sub-accounts store no phrase.
+        assertNull(sub.mnemonic)
+        assertArrayEquals(rootRow.iv, keyMaterialDao.getByWalletId("root")!!.iv)
+        assertTrue(restorer.missingWallets().isEmpty())
+    }
+
+    @Test
+    fun `a parent's phrase re-keys the parent and its missing sub-account, each verified`() = runTest {
+        secureLock(true)
+        insertWallet("root", phraseKeyHex)
+        insertWallet("sub", accountOneKeyHex, derivationPath = "m/44'/309'/1'/0/0", accountIndex = 1, parentWalletId = "root")
+        insertWallet("raw", otherKeyHex, derivationPath = null, type = KeyManager.WALLET_TYPE_RAW_KEY)
+
+        val result = restorer.rekeyFromPhrase(activity, "root", words, allowV1 = false)
+
+        assertEquals(
+            mapOf("root" to RecoveredKeyRestorer.Outcome.Restored, "sub" to RecoveredKeyRestorer.Outcome.Restored),
+            (result as RecoveredKeyRestorer.RekeyResult.Done).outcomes,
+        )
+        // Two prompts each (write, read-back); the raw-key wallet is untouched.
+        coVerify(exactly = 4) { authManager.authenticateForCipher(any(), any(), any(), any()) }
+        assertNull(keyMaterialDao.getByWalletId("raw"))
+        assertEquals(listOf("raw"), restorer.missingWallets().map { it.walletId })
+    }
+
+    @Test
+    fun `a wallet that is not missing is never re-keyed`() = runTest {
+        secureLock(false)
+        insertWallet("root", phraseKeyHex)
+        v1Helper.migrateWallet("root", phraseKeyHex, phrase, KeyManager.WALLET_TYPE_MNEMONIC, true)
+
+        assertEquals(
+            RecoveredKeyRestorer.RekeyResult.NotMissing,
+            restorer.rekeyFromPhrase(activity, "root", words, allowV1 = true),
+        )
+    }
+
+    @Test
+    fun `without a screen lock a re-key needs the consent`() = runTest {
+        secureLock(false)
+        insertWallet("root", phraseKeyHex)
+
+        val result = restorer.rekeyFromPhrase(activity, "root", words, allowV1 = false)
+
+        assertEquals(
+            mapOf("root" to RecoveredKeyRestorer.Outcome.NeedsNoLockConsent),
+            (result as RecoveredKeyRestorer.RekeyResult.Done).outcomes,
+        )
+        assertNull(keyMaterialDao.getByWalletId("root"))
     }
 }

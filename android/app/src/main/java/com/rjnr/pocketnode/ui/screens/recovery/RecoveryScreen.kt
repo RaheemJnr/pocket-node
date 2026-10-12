@@ -1,6 +1,8 @@
 package com.rjnr.pocketnode.ui.screens.recovery
 
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
@@ -15,6 +17,7 @@ import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
@@ -87,6 +90,7 @@ fun RecoveryScreen(
             modifier = Modifier
                 .fillMaxSize()
                 .padding(padding)
+                .verticalScroll(rememberScrollState())
                 .padding(
                     horizontal = com.rjnr.pocketnode.ui.util.responsiveDp(16.dp, 24.dp, 32.dp),
                     vertical = 24.dp
@@ -232,7 +236,19 @@ fun RecoveryScreen(
                         )
                     }
 
-                    if (uiState.missingWalletNames.isNotEmpty()) {
+                    val rekey = uiState.rekey
+                    if (rekey != null) {
+                        RecoveryRekeyEntry(
+                            entry = rekey,
+                            busy = uiState.isRekeying,
+                            onSubmitPhrase = { viewModel.submitRekeyPhrase(activity, it) },
+                            onSubmitPrivateKey = { viewModel.submitRekeyPrivateKey(activity, it) },
+                            onCancel = viewModel::cancelRekey,
+                        )
+                        return@Column
+                    }
+
+                    if (uiState.missingWallets.isNotEmpty()) {
                         Text(
                             text = stringResource(
                                 R.string.recovery_missing_wallets,
@@ -240,6 +256,23 @@ fun RecoveryScreen(
                             ),
                             style = MaterialTheme.typography.bodyMedium
                         )
+                        for (wallet in uiState.missingWallets) {
+                            Text(text = wallet.name, style = MaterialTheme.typography.titleSmall)
+                            OutlinedButton(
+                                onClick = { viewModel.openRekey(wallet.walletId, withPrivateKey = false) },
+                                modifier = Modifier.fillMaxWidth()
+                            ) {
+                                Text(stringResource(R.string.recovery_rekey_with_phrase))
+                            }
+                            if (wallet.isRawKey) {
+                                OutlinedButton(
+                                    onClick = { viewModel.openRekey(wallet.walletId, withPrivateKey = true) },
+                                    modifier = Modifier.fillMaxWidth()
+                                ) {
+                                    Text(stringResource(R.string.recovery_rekey_with_private_key))
+                                }
+                            }
+                        }
                     }
 
                     if (uiState.canRetryRestore) {

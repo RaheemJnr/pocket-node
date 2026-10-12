@@ -2,6 +2,7 @@ package com.rjnr.pocketnode.data.wallet
 
 import androidx.fragment.app.FragmentActivity
 import com.rjnr.pocketnode.core.crypto.hexToByteArray
+import com.rjnr.pocketnode.core.crypto.toHexStringNoPrefix
 import com.rjnr.pocketnode.core.log.Logger
 import com.rjnr.pocketnode.data.auth.AuthManager
 import com.rjnr.pocketnode.data.crypto.KeyMaterial
@@ -41,6 +42,14 @@ import javax.inject.Singleton
  * 5. The wallet is recorded as unverified before the write, and only a
  *    successful read-back that gives the stored lock script clears it. A
  *    failed check deletes the row only if it is still the row written here.
+ *
+ * ## Re-key from a phrase or private key
+ * A missing wallet with no usable backup can be re-keyed from its phrase
+ * ([rekeyFromPhrase], derived at each row's own path, so a parent's phrase
+ * also re-keys its missing sub-accounts) or, for a raw-key wallet, its
+ * private key ([rekeyFromPrivateKey]). Both go through [restore] for the
+ * existing rows only: no wallet row is created and no row that is not
+ * missing is touched.
  *
  * Never logs key material: wallet ids and outcomes only.
  */
@@ -168,6 +177,106 @@ class RecoveredKeyRestorer @Inject constructor(
         } finally {
             keyBytes.fill(0)
         }
+    }
+
+    /** Result of re-keying a missing wallet from its phrase or private key. */
+    sealed class RekeyResult {
+        /** Not a valid phrase or a 32-byte key. Nothing written. */
+        object InvalidInput : RekeyResult()
+        /** The wallet is not missing keys (any more). Nothing written. */
+        object NotMissing : RekeyResult()
+        /** The phrase or key does not give this wallet's lock script. Nothing written. */
+        object NotThisWallet : RekeyResult()
+        /** Each wallet row the input matched, with its restore outcome. */
+        data class Done(val outcomes: Map<String, Outcome>) : RekeyResult()
+    }
+
+    /**
+     * Re-keys the missing wallet [targetId] from its recovery phrase. The
+     * phrase must give that wallet's lock script at its derivation path, or
+     * nothing is written. Every other missing wallet the phrase also matches
+     * at its own derivation path (a parent and its sub-accounts) is restored
+     * too, each through [restore] and verified on its own. Never creates a
+     * wallet row and never touches a row that is not missing.
+     */
+    suspend fun rekeyFromPhrase(
+        activity: FragmentActivity,
+        targetId: String,
+        words: List<String>,
+        allowV1: Boolean,
+    ): RekeyResult {
+        if (!mnemonicManager.validateMnemonic(words)) return RekeyResult.InvalidInput
+        val missing = missingWallets()
+        val target = missing.firstOrNull { it.walletId == targetId } ?: return RekeyResult.NotMissing
+        val seed = mnemonicManager.mnemonicToSeed(words)
+        try {
+            val targetKey = keyAtPath(seed, target)
+            val matches = try {
+                matchesWallet(targetKey, target)
+            } finally {
+                targetKey.fill(0)
+            }
+            if (!matches) {
+                logger.w(TAG, "Phrase does not match $targetId; nothing written")
+                return RekeyResult.NotThisWallet
+            }
+            val outcomes = linkedMapOf<String, Outcome>()
+            for (wallet in listOf(target) + missing.filter { it.walletId != targetId }) {
+                if (activity.isFinishing || activity.isDestroyed) {
+                    outcomes[wallet.walletId] = Outcome.Failed("screen closed")
+                    break
+                }
+                val key = keyAtPath(seed, wallet)
+                try {
+                    if (wallet !== target && !matchesWallet(key, wallet)) continue
+                    val material = KeyMaterial(
+                        privateKey = key.toHexStringNoPrefix(),
+                        // Sub-accounts store no phrase; only the parent does.
+                        mnemonic = if (wallet.parentWalletId == null) words.joinToString(" ") else null,
+                        walletType = KeyManager.WALLET_TYPE_MNEMONIC,
+                        // The user just entered the phrase.
+                        mnemonicBackedUp = true,
+                    )
+                    outcomes[wallet.walletId] = restore(activity, wallet.walletId, material, allowV1)
+                } finally {
+                    key.fill(0)
+                }
+            }
+            return RekeyResult.Done(outcomes)
+        } finally {
+            seed.fill(0)
+        }
+    }
+
+    /**
+     * Re-keys the missing raw-key wallet [targetId] from its private key,
+     * which must give that wallet's lock script, or nothing is written.
+     * The caller wipes [keyBytes].
+     */
+    suspend fun rekeyFromPrivateKey(
+        activity: FragmentActivity,
+        targetId: String,
+        keyBytes: ByteArray,
+        allowV1: Boolean,
+    ): RekeyResult {
+        if (keyBytes.size != PRIVATE_KEY_SIZE) return RekeyResult.InvalidInput
+        val target = missingWallets().firstOrNull { it.walletId == targetId } ?: return RekeyResult.NotMissing
+        if (!matchesWallet(keyBytes, target)) {
+            logger.w(TAG, "Private key does not match $targetId; nothing written")
+            return RekeyResult.NotThisWallet
+        }
+        val material = KeyMaterial(
+            privateKey = keyBytes.toHexStringNoPrefix(),
+            mnemonic = null,
+            walletType = KeyManager.WALLET_TYPE_RAW_KEY,
+            mnemonicBackedUp = false,
+        )
+        return RekeyResult.Done(mapOf(targetId to restore(activity, targetId, material, allowV1)))
+    }
+
+    private fun keyAtPath(seed: ByteArray, wallet: WalletEntity): ByteArray {
+        val (account, chain, index) = derivationIndices(wallet)
+        return mnemonicManager.derivePrivateKey(seed, account, chain, index)
     }
 
     private suspend fun write(

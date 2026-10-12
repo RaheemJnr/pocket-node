@@ -211,6 +211,11 @@
     <string name="recovery_restoring">Saving your restored wallet keys. Unlock with your screen lock when asked.</string>
     <string name="recovery_restore_retry">Try again</string>
     <string name="recovery_missing_wallets">Still to restore: %1$s</string>
+    <string name="recovery_rekey_with_phrase">Restore with recovery phrase</string>
+    <string name="recovery_rekey_with_private_key">Restore with private key</string>
+    <string name="recovery_rekey_phrase_title">Enter the recovery phrase of %1$s</string>
+    <string name="recovery_rekey_key_title">Enter the private key of %1$s</string>
+    <string name="recovery_rekey_submit">Restore this wallet</string>
     <string name="recovery_start_fresh_failed">The wallets could not be removed. Try again.</string>
     <!-- endregion -->
 
