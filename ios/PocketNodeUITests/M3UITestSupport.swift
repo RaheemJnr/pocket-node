@@ -83,4 +83,36 @@ enum M3UITest {
         guard element.waitForExistence(timeout: timeout) else { return "" }
         return element.label
     }
+
+    /// Waits until a static text's label equals `expected`, then asserts it.
+    ///
+    /// Validation of typed text runs after `typeText` returns, so a label read
+    /// straight after typing can still show the previous state (#571).
+    @MainActor
+    static func assertLabel(
+        _ identifier: String, equals expected: String, in app: XCUIApplication,
+        timeout: TimeInterval = 10, file: StaticString = #filePath, line: UInt = #line
+    ) {
+        let element = app.staticTexts[identifier].firstMatch
+        let predicate = NSPredicate(format: "label == %@", expected)
+        _ = XCTWaiter().wait(
+            for: [XCTNSPredicateExpectation(predicate: predicate, object: element)],
+            timeout: timeout
+        )
+        XCTAssertEqual(element.exists ? element.label : "", expected, file: file, line: line)
+    }
+
+    /// Waits until a text field's value equals `expected`, then asserts it.
+    @MainActor
+    static func assertValue(
+        of field: XCUIElement, equals expected: String, _ message: String = "",
+        timeout: TimeInterval = 10, file: StaticString = #filePath, line: UInt = #line
+    ) {
+        let predicate = NSPredicate(format: "value == %@", expected)
+        _ = XCTWaiter().wait(
+            for: [XCTNSPredicateExpectation(predicate: predicate, object: field)],
+            timeout: timeout
+        )
+        XCTAssertEqual(field.value as? String, expected, message, file: file, line: line)
+    }
 }
