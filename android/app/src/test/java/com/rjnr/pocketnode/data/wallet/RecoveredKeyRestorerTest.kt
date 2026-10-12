@@ -742,4 +742,23 @@ class RecoveredKeyRestorerTest {
         @Suppress("DEPRECATION")
         verify(exactly = 0) { keyManager.resetCorruptionFlag() }
     }
+
+    // --- Upgrade from before key_material: keys still in the legacy store ---
+
+    @Test
+    fun `a wallet whose keys are still in the legacy store is not missing`() = runTest {
+        insertWallet("legacy", phraseKeyHex)
+        every { keyManager.hasLegacyKeyFile("legacy") } returns true
+
+        assertTrue(restorer.missingWallets().isEmpty())
+        assertTrue(restorer.completeIfDone())
+    }
+
+    @Test
+    fun `a wallet with neither a key row nor a legacy key is missing`() = runTest {
+        insertWallet("lost", phraseKeyHex)
+        every { keyManager.hasLegacyKeyFile("lost") } returns false
+
+        assertEquals(listOf("lost"), restorer.missingWallets().map { it.walletId })
+    }
 }

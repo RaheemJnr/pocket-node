@@ -92,11 +92,17 @@ class RecoveredKeyRestorer @Inject constructor(
         data class Failed(val reason: String) : Outcome()
     }
 
-    /** Wallet rows without verified keys; see the completion invariant. */
+    /**
+     * Wallet rows without verified keys; see the completion invariant. A row
+     * with no `key_material` row whose keys are still in the legacy
+     * per-wallet store (an upgrade from before that table, migrated in the
+     * background) is not missing: its keys are there.
+     */
     suspend fun missingWallets(): List<WalletEntity> {
         val unverified = recoveryState.unverifiedWalletIds()
         return walletDao.getAll().filter {
-            it.walletId in unverified || keyMaterialDao.getKdfVersion(it.walletId) == null
+            it.walletId in unverified ||
+                (keyMaterialDao.getKdfVersion(it.walletId) == null && !keyManager.hasLegacyKeyFile(it.walletId))
         }
     }
 

@@ -118,4 +118,15 @@ class StartupRouterTest {
         assertFalse(d.recoveryPending)
         assertEquals(0, completeCalls)
     }
+
+    @Test
+    fun `legacy-only keys count as present, so an upgrading user routes normally`() = runTest {
+        // missingWallets() does not count a row whose keys are still in the
+        // legacy per-wallet store (RecoveredKeyRestorerTest covers that), so
+        // the router sees rows with nothing missing.
+        val d = route(rows = { 2 }, missing = { 0 })
+        assertEquals(Route.AUTH, d.route)
+        assertEquals(0, marked)
+        assertEquals(0, completeCalls)
+    }
 }

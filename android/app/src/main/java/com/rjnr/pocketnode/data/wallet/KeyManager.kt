@@ -525,6 +525,23 @@ class KeyManager @Inject constructor(
      * Verifies round-trip for each wallet. Only marks complete when ALL wallets succeed.
      * Safe to call multiple times — no-op if already complete.
      */
+    /**
+     * True when [walletId]'s keys still sit in its legacy per-wallet
+     * EncryptedSharedPreferences file, waiting for [migrateEspToRoomIfNeeded].
+     * That is the state of a wallet row created before the `key_material`
+     * table (DB v3/v4 installs) on the first launches after the upgrade: the
+     * migration runs in the background (GatewayRepository init) and may not
+     * have finished before the startup route is chosen.
+     *
+     * A file-presence check only, the same one the migration uses: it never
+     * opens the file, so no Keystore access, no prompt and no side effect on
+     * the corruption flag.
+     */
+    fun hasLegacyKeyFile(walletId: String): Boolean {
+        if (testWalletPrefs[walletId]?.contains(KEY_PRIVATE_KEY) == true) return true
+        return java.io.File(context.filesDir.parent, "shared_prefs/ckb_wallet_keys_$walletId.xml").exists()
+    }
+
     suspend fun migrateEspToRoomIfNeeded(walletDao: com.rjnr.pocketnode.data.database.dao.WalletDao) {
         val helper = keyStoreMigrationHelper ?: return
         if (helper.isMigrationComplete()) return

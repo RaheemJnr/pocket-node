@@ -156,4 +156,23 @@ class KeyManagerMultiWalletTest {
 
         assertNull(readV2Mnemonic("wallet-1"))
     }
+
+    @Test
+    fun `hasLegacyKeyFile sees a per-wallet legacy key file without opening it`() {
+        val context = ApplicationProvider.getApplicationContext<Context>()
+        val file = java.io.File(context.filesDir.parent, "shared_prefs/ckb_wallet_keys_legacy-1.xml")
+        file.delete()
+        assertFalse(keyManager.hasLegacyKeyFile("legacy-1"))
+
+        file.parentFile!!.mkdirs()
+        file.writeText("<map />")
+        try {
+            assertTrue(keyManager.hasLegacyKeyFile("legacy-1"))
+            assertFalse(keyManager.hasLegacyKeyFile("other"))
+            @Suppress("DEPRECATION")
+            assertFalse(keyManager.wasResetDueToCorruption())
+        } finally {
+            file.delete()
+        }
+    }
 }
