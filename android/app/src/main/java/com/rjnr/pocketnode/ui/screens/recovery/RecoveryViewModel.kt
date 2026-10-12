@@ -10,6 +10,7 @@ import com.rjnr.pocketnode.data.crypto.KeyMaterial
 import com.rjnr.pocketnode.data.gateway.LocalWalletReset
 import com.rjnr.pocketnode.core.crypto.hexToByteArray
 import com.rjnr.pocketnode.data.wallet.KeyManager
+import com.rjnr.pocketnode.data.gateway.MissingWalletRemover
 import com.rjnr.pocketnode.data.wallet.RecoveredKeyRestorer
 import com.rjnr.pocketnode.util.AppRestarter
 import dagger.hilt.android.lifecycle.HiltViewModel
@@ -72,6 +73,9 @@ data class RecoveryUiState(
      * the way to the per-wallet restore list from any stage.
      */
     val hasMissingWallets: Boolean = false,
+    /** Asking to confirm removing this missing wallet from the phone. */
+    val removeConfirm: MissingWallet? = null,
+    val isRemoving: Boolean = false,
 ) {
     val missingWalletNames: List<String> get() = missingWallets.map { it.name }
 }
@@ -107,6 +111,7 @@ class RecoveryViewModel(
     private val localWalletReset: LocalWalletReset,
     private val appRestarter: AppRestarter,
     private val keyRestorer: RecoveredKeyRestorer,
+    private val walletRemover: MissingWalletRemover,
     private val ioDispatcher: CoroutineDispatcher
 ) : ViewModel() {
 
@@ -119,7 +124,11 @@ class RecoveryViewModel(
         localWalletReset: LocalWalletReset,
         appRestarter: AppRestarter,
         keyRestorer: RecoveredKeyRestorer,
-    ) : this(backupManager, pinManager, authManager, localWalletReset, appRestarter, keyRestorer, Dispatchers.IO)
+        walletRemover: MissingWalletRemover,
+    ) : this(
+        backupManager, pinManager, authManager, localWalletReset, appRestarter, keyRestorer, walletRemover,
+        Dispatchers.IO,
+    )
 
     private val _uiState = MutableStateFlow(RecoveryUiState())
     val uiState: StateFlow<RecoveryUiState> = _uiState
@@ -287,6 +296,49 @@ class RecoveryViewModel(
             return
         }
         _uiState.update { it.copy(rekey = entry) }
+    }
+
+    /**
+     * "Remove <name> from this phone" for a wallet still missing keys, on the
+     * missing-wallets list (reached only after the PIN step). Asks to confirm.
+     */
+    fun requestRemove(walletId: String) {
+        val state = _uiState.value
+        if (state.stage != RecoveryStage.RESTORE_FAILED || state.isRekeying || state.isRemoving) return
+        if (!pinVerified && runCatching { pinManager.hasPin() }.getOrDefault(true)) return
+        val wallet = state.missingWallets.firstOrNull { it.walletId == walletId } ?: return
+        _uiState.update { it.copy(removeConfirm = wallet) }
+    }
+
+    fun cancelRemove() {
+        if (_uiState.value.isRemoving) return
+        _uiState.update { it.copy(removeConfirm = null) }
+    }
+
+    /** Removes the confirmed wallet through the normal delete path; its backup file stays. */
+    fun confirmRemove() {
+        val wallet = _uiState.value.removeConfirm ?: return
+        if (_uiState.value.isRemoving) return
+        _uiState.update { it.copy(isRemoving = true) }
+        viewModelScope.launch {
+            val result = try {
+                walletRemover.remove(wallet.walletId)
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                null
+            }
+            _uiState.update { it.copy(isRemoving = false, removeConfirm = null) }
+            finishAttempt(mismatch = false, retryable = false, skipped = emptyList())
+            val message = when (result) {
+                MissingWalletRemover.Result.ONLY_WALLET -> REMOVE_ONLY_WALLET
+                null -> REMOVE_FAILED
+                else -> null
+            }
+            if (message != null && _uiState.value.stage == RecoveryStage.RESTORE_FAILED) {
+                _uiState.update { it.copy(error = message) }
+            }
+        }
     }
 
     fun cancelRekey() {
@@ -732,6 +784,9 @@ class RecoveryViewModel(
         const val RESTORE_NO_LOCK_DECLINED =
             "Nothing was saved. Set a screen lock on this phone, then tap Try again. " +
                 "Your backup files are kept."
+        const val REMOVE_ONLY_WALLET =
+            "This is the only wallet on this phone. Restore it, or import another wallet first."
+        const val REMOVE_FAILED = "The wallet could not be removed. Try again."
         const val RESTORE_MISSING_ERROR = "Use the buttons below to restore each wallet."
         const val REKEY_INVALID_PHRASE = "That is not a valid recovery phrase. Check the words and try again."
         const val REKEY_INVALID_KEY = "That is not a valid private key. Enter the 64-character hex key."

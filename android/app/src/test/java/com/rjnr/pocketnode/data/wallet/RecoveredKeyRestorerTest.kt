@@ -93,10 +93,10 @@ class RecoveredKeyRestorerTest {
         } answers { AuthManager.CipherAuthResult.Success(args[1] as Cipher) }
         keyBackupManager = mockk(relaxed = true)
         writer = WalletKeyWriter(keyMaterialDao, v2Helper, v1Helper, encryption, authManager, keyBackupManager, NoopLogger)
-        reader = WalletKeyReader(keyMaterialDao, v1Helper, encryption, authManager, keyBackupManager, NoopLogger)
         keyManager = mockk(relaxed = true)
         state = RecoveryStateStore(ctx)
         state.clear()
+        reader = WalletKeyReader(keyMaterialDao, v1Helper, encryption, authManager, keyBackupManager, state, NoopLogger)
         restorer = newRestorer(reader)
     }
 
@@ -656,5 +656,90 @@ class RecoveredKeyRestorerTest {
         val stored = v1Helper.readDecryptedKey("raw")!!
         assertEquals(KeyManager.WALLET_TYPE_RAW_KEY, stored.walletType)
         assertNull(stored.mnemonic)
+    }
+
+    // --- Round 3 ---
+
+    private fun readerReturning(first: WalletKeyReader.Result): WalletKeyReader {
+        val r = mockk<WalletKeyReader>()
+        var calls = 0
+        coEvery { r.readPrivateKey(any(), any(), any(), any()) } coAnswers {
+            calls++
+            if (calls == 1) first else reader.readPrivateKey(arg(0), arg(1), arg(2), arg(3))
+        }
+        return r
+    }
+
+    @Test
+    fun `a transient lockout on read-back then a cancelled write keeps the unverified row`() = runTest {
+        secureLock(true)
+        insertWallet("w1", phraseKeyHex)
+        state.addUnverified("w1")
+        v1Helper.migrateWallet("w1", phraseKeyHex, phrase, KeyManager.WALLET_TYPE_MNEMONIC, true)
+        val before = keyMaterialDao.getByWalletId("w1")!!
+        coEvery {
+            authManager.authenticateForCipher(any(), any<Cipher>(), any(), any())
+        } returns AuthManager.CipherAuthResult.Cancelled
+
+        val outcome = newRestorer(readerReturning(WalletKeyReader.Result.AuthError(7, "lockout")))
+            .restore(activity, "w1", material(), allowV1 = true)
+
+        assertEquals(RecoveredKeyRestorer.Outcome.Failed("unlock error 7"), outcome)
+        assertArrayEquals(before.iv, keyMaterialDao.getByWalletId("w1")!!.iv)
+        assertTrue(state.unverifiedWalletIds().contains("w1"))
+    }
+
+    @Test
+    fun `the no-lock consent is asked before an unreadable unverified row is deleted`() = runTest {
+        secureLock(false)
+        insertWallet("w1", phraseKeyHex)
+        state.addUnverified("w1")
+        v1Helper.migrateWallet("w1", phraseKeyHex, phrase, KeyManager.WALLET_TYPE_MNEMONIC, true)
+        val before = keyMaterialDao.getByWalletId("w1")!!
+
+        val outcome = newRestorer(readerReturning(WalletKeyReader.Result.NotAvailable("decrypt failed")))
+            .restore(activity, "w1", material(), allowV1 = false)
+
+        assertEquals(RecoveredKeyRestorer.Outcome.NeedsNoLockConsent, outcome)
+        assertArrayEquals(before.iv, keyMaterialDao.getByWalletId("w1")!!.iv)
+    }
+
+    @Test
+    fun `an unverified row whose device key is invalidated is replaced`() = runTest {
+        secureLock(false)
+        insertWallet("w1", phraseKeyHex)
+        state.addUnverified("w1")
+        v1Helper.migrateWallet("w1", phraseKeyHex, phrase, KeyManager.WALLET_TYPE_MNEMONIC, true)
+        val before = keyMaterialDao.getByWalletId("w1")!!
+
+        val outcome = newRestorer(readerReturning(WalletKeyReader.Result.KeyInvalidated))
+            .restore(activity, "w1", material(), allowV1 = true)
+
+        assertEquals(RecoveredKeyRestorer.Outcome.Restored, outcome)
+        assertFalse(before.iv.contentEquals(keyMaterialDao.getByWalletId("w1")!!.iv))
+    }
+
+    @Test
+    fun `any good read of a wallet clears its unverified mark`() = runTest {
+        secureLock(false)
+        insertWallet("w1", phraseKeyHex)
+        state.addUnverified("w1")
+        v1Helper.migrateWallet("w1", phraseKeyHex, phrase, KeyManager.WALLET_TYPE_MNEMONIC, true)
+
+        val read = reader.readPrivateKey(activity, "w1", "t", "s")
+
+        assertTrue(read is WalletKeyReader.Result.Success)
+        assertFalse(state.unverifiedWalletIds().contains("w1"))
+        assertTrue(restorer.missingWallets().isEmpty())
+    }
+
+    @Test
+    fun `nothing to recover keeps the corruption flag for onboarding's notice`() = runTest {
+        every { keyBackupManager.hasAnyBackups() } returns false
+
+        assertTrue(restorer.completeIfDone())
+
+        @Suppress("DEPRECATION")
+        verify(exactly = 0) { keyManager.resetCorruptionFlag() }
     }
 }

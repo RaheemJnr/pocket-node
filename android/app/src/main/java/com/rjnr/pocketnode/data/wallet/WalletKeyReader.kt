@@ -44,8 +44,17 @@ class WalletKeyReader @Inject constructor(
     private val encryptionManager: KeystoreEncryptionManager,
     private val authManager: AuthManager,
     private val keyBackupManager: KeyBackupManager,
+    private val recoveryState: RecoveryStateStore,
     private val logger: Logger,
 ) {
+
+    /**
+     * A row that decrypts is a working row: it is never treated as
+     * unverified by the Recovery screen afterwards.
+     */
+    private fun markReadable(walletId: String) {
+        runCatching { recoveryState.removeUnverified(walletId) }
+    }
 
     sealed class Result {
         data class Success(val privateKey: ByteArray) : Result()
@@ -131,6 +140,7 @@ class WalletKeyReader @Inject constructor(
     private suspend fun readMaterialV1(walletId: String): MaterialResult {
         val data = keyStoreMigrationHelper.readDecryptedKey(walletId)
             ?: return MaterialResult.NotAvailable("V1 decrypt failed for $walletId")
+        markReadable(walletId)
         return MaterialResult.Success(
             privateKey = data.privateKeyHex.hexToByteArray(),
             mnemonic = data.mnemonic,
@@ -182,6 +192,7 @@ class WalletKeyReader @Inject constructor(
                     logger.e(TAG, "V2 material decrypt failed for $walletId", e)
                     null
                 } ?: return MaterialResult.NotAvailable("V2 decrypt failed for $walletId")
+                markReadable(walletId)
                 tryOpportunisticBackup(walletId, data)
                 MaterialResult.Success(
                     privateKey = data.privateKeyHex.hexToByteArray(),
@@ -196,6 +207,7 @@ class WalletKeyReader @Inject constructor(
     private suspend fun readV1(walletId: String): Result {
         val data = keyStoreMigrationHelper.readDecryptedKey(walletId)
             ?: return Result.NotAvailable("V1 decrypt failed for $walletId")
+        markReadable(walletId)
         return Result.Success(data.privateKeyHex.hexToByteArray())
     }
 
@@ -242,6 +254,7 @@ class WalletKeyReader @Inject constructor(
                     logger.e(TAG, "V2 decrypt failed for $walletId", e)
                     null
                 } ?: return Result.NotAvailable("V2 decrypt failed for $walletId")
+                markReadable(walletId)
                 tryOpportunisticBackup(walletId, data)
                 Result.Success(data.privateKeyHex.hexToByteArray())
             }

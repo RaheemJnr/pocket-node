@@ -144,27 +144,28 @@ class MainActivity : FragmentActivity() {
             cachedHasWallet = repository.hasWallet()
             @Suppress("DEPRECATION")
             val wasReset = keyManager.wasResetDueToCorruption()
-            // The in-memory flag above is only raised while Room holds no key
-            // rows, so a recovery that restored some wallets but not all is
-            // kept by a persistent marker until every wallet has verified keys.
-            // The marker is only set when a wallet row actually lacks keys (a
-            // read error counts as lacking), so a passing legacy-store hiccup
-            // is not persisted.
-            if (wasReset && runCatching { recoveredKeyRestorer.missingWallets().isNotEmpty() }.getOrDefault(true)) {
-                recoveredKeyRestorer.markIncomplete()
-            }
-            // Recovery is shown until it is complete; a phone with nothing to
-            // recover routes normally.
-            val recoveryPending = (wasReset || recoveredKeyRestorer.isMarkedIncomplete()) &&
-                !runCatching { recoveredKeyRestorer.completeIfDone() }.getOrDefault(false)
+            // Suppressed, not removed: the corruption flag guards the ESP
+            // legacy-key path, which un-migrated installs still read. The
+            // flag is in memory and only raised while Room holds no key rows,
+            // so StartupRouter also keeps Recovery through the persistent
+            // marker and whenever a wallet row lacks keys.
             val hasPin = pinManager.hasPin()
-            val route = when {
-                // Suppressed, not removed: the corruption flag guards the ESP
-                // legacy-key path, which un-migrated installs still read.
-                recoveryPending -> Screen.Recovery.route
-                !cachedHasWallet -> Screen.Onboarding.route
-                !hasPin -> Screen.InitialPinSetup.route
-                else -> Screen.Auth.route
+            val decision = StartupRouter.route(
+                corruptionFlag = wasReset,
+                markerSet = recoveredKeyRestorer.isMarkedIncomplete(),
+                hasWallet = cachedHasWallet,
+                hasPin = hasPin,
+                walletRowCount = { walletRepository.walletCount() },
+                missingWalletCount = { recoveredKeyRestorer.missingWallets().size },
+                markIncomplete = { recoveredKeyRestorer.markIncomplete() },
+                completeIfDone = { recoveredKeyRestorer.completeIfDone() },
+            )
+            val recoveryPending = decision.recoveryPending
+            val route = when (decision.route) {
+                StartupRouter.Route.RECOVERY -> Screen.Recovery.route
+                StartupRouter.Route.ONBOARDING -> Screen.Onboarding.route
+                StartupRouter.Route.PIN_SETUP -> Screen.InitialPinSetup.route
+                StartupRouter.Route.AUTH -> Screen.Auth.route
             }
             // #424 diagnostic: users report onboarding after an overwrite
             // install despite preserved data. Log the exact startup-gate inputs

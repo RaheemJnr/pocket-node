@@ -123,6 +123,7 @@ class RecoveryScreenNavigationTest {
             localWalletReset,
             appRestarter,
             keyRestorer,
+            mockk(relaxed = true),
             Dispatchers.Unconfined,
         )
         compose.setContent {

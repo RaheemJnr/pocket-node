@@ -480,8 +480,11 @@ class WalletRepository @Inject constructor(
     /**
      * Delete a wallet and its keys. Runs VACUUM afterward to reclaim freed pages.
      * Refuses to delete the active wallet, callers must switch first.
+     * [keepBackupFile]: leave the wallet's PIN-encrypted backup file on disk
+     * (the Recovery screen removes a wallet whose keys are lost but keeps
+     * its backup).
      */
-    suspend fun deleteWallet(walletId: String) {
+    suspend fun deleteWallet(walletId: String, keepBackupFile: Boolean = false) {
         val wallet = walletDao.getById(walletId)
             ?: throw IllegalArgumentException("Wallet not found: $walletId")
         if (wallet.isActive || appStatePreferences.getActiveWalletId() == walletId) {
@@ -517,7 +520,7 @@ class WalletRepository @Inject constructor(
         // still fails the key_material row is left behind and logged.
         for (attempt in 1..2) {
             try {
-                keyManager.deleteWalletKeys(walletId)
+                keyManager.deleteWalletKeys(walletId, keepBackup = keepBackupFile)
                 break
             } catch (e: kotlinx.coroutines.CancellationException) {
                 throw e

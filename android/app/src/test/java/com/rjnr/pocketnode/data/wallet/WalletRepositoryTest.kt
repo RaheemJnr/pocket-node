@@ -909,4 +909,23 @@ class WalletRepositoryTest {
         assertNull(walletDao.getById(parent.walletId))
         assertEquals(0, walletDao.count())
     }
+
+    @Test
+    fun `deleteWallet with keepBackupFile removes the wallet and its keys but keeps the backup`() = runTest {
+        val gone = repo.createWallet(
+            name = "Gone",
+            persistKeys = { walletId, bundle -> fakePersistV2(walletId, bundle) },
+        ).getOrThrow()
+        repo.createWallet(
+            name = "Stays",
+            persistKeys = { walletId, bundle -> fakePersistV2(walletId, bundle) },
+        ).getOrThrow()
+        backups.writeBackup(gone.walletId, backupMaterial(), "123456".toCharArray())
+
+        repo.deleteWallet(gone.walletId, keepBackupFile = true)
+
+        assertNull(walletDao.getById(gone.walletId))
+        assertNull(db.keyMaterialDao().getByWalletId(gone.walletId))
+        assertTrue(backups.hasBackup(gone.walletId))
+    }
 }

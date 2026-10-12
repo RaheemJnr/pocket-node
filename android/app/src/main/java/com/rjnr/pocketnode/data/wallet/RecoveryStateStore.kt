@@ -40,6 +40,7 @@ class RecoveryStateStore @Inject constructor(
     }
 
     fun removeUnverified(walletId: String) {
+        if (walletId !in unverifiedWalletIds()) return
         prefs.edit().putStringSet(KEY_UNVERIFIED, unverifiedWalletIds() - walletId).commit()
     }
 

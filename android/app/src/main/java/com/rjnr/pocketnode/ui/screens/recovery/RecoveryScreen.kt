@@ -72,6 +72,27 @@ fun RecoveryScreen(
         )
     }
 
+    uiState.removeConfirm?.let { wallet ->
+        AlertDialog(
+            onDismissRequest = viewModel::cancelRemove,
+            title = { Text(stringResource(R.string.recovery_remove_wallet, wallet.name)) },
+            text = { Text(stringResource(R.string.recovery_remove_body, wallet.name)) },
+            confirmButton = {
+                TextButton(onClick = viewModel::confirmRemove, enabled = !uiState.isRemoving) {
+                    Text(
+                        text = stringResource(R.string.recovery_remove_confirm),
+                        color = MaterialTheme.colorScheme.error
+                    )
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = viewModel::cancelRemove, enabled = !uiState.isRemoving) {
+                    Text(stringResource(R.string.recovery_remove_cancel))
+                }
+            }
+        )
+    }
+
     if (uiState.showStartFreshConfirm) {
         StartFreshDialog(
             inProgress = uiState.isStartingFresh,
@@ -285,6 +306,9 @@ fun RecoveryScreen(
                                 ) {
                                     Text(stringResource(R.string.recovery_rekey_with_private_key, wallet.name))
                                 }
+                            }
+                            TextButton(onClick = { viewModel.requestRemove(wallet.walletId) }) {
+                                Text(stringResource(R.string.recovery_remove_wallet, wallet.name))
                             }
                         }
                     }

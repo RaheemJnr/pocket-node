@@ -113,13 +113,20 @@ class RecoveredKeyRestorer @Inject constructor(
      *
      * A phone with nothing to recover (no wallet row, no key row and no
      * backup file) also counts as complete, so a stale marker never keeps a
-     * fresh install on the Recovery screen.
+     * fresh install on the Recovery screen. Then only the marker is cleared:
+     * the corruption flag stays up so onboarding can still say why the
+     * wallet is gone.
      */
     suspend fun completeIfDone(): Boolean {
         val wallets = walletDao.getAll()
-        val nothingToRecover = wallets.isEmpty() && keyMaterialDao.count() == 0 &&
-            !keyBackupManager.hasAnyBackups()
-        if (!nothingToRecover && (wallets.isEmpty() || missingWallets().isNotEmpty())) return false
+        if (wallets.isEmpty()) {
+            val nothingToRecover = keyMaterialDao.count() == 0 && !keyBackupManager.hasAnyBackups()
+            if (!nothingToRecover) return false
+            recoveryState.clear()
+            logger.i(TAG, "Nothing to recover: marker cleared")
+            return true
+        }
+        if (missingWallets().isNotEmpty()) return false
         recoveryState.clear()
         @Suppress("DEPRECATION")
         keyManager.resetCorruptionFlag()
@@ -148,20 +155,29 @@ class RecoveredKeyRestorer @Inject constructor(
         val existingIv = keyMaterialDao.getByWalletId(walletId)?.iv
         if (existingIv != null) {
             // Written by an earlier attempt, or never lost: verify it.
-            val outcome = verify(activity, walletId, wallet, writtenIv = null)
-            if (outcome == Outcome.Restored || outcome == Outcome.Cancelled) return outcome
-            // A row that was never verified and no longer reads back (for
-            // example after a screen lock change) would block every retry.
-            // It is dropped and written again, only when the new material
-            // matches this wallet. A verified row is never dropped.
-            if (walletId !in recoveryState.unverifiedWalletIds() || material == null ||
-                !materialMatches(material, wallet)
-            ) {
+            val checked = verifyChecked(activity, walletId, wallet, writtenIv = null)
+            val outcome = checked.outcome
+            // A row that was never verified and is proven unusable (it does
+            // not decrypt, its device key is gone, or it holds another key)
+            // would block every retry. It is dropped and written again, but
+            // only when the new material matches this wallet and could be
+            // written now (consent included). A transient unlock error
+            // (lockout, timeout, hardware busy) is a retry, never a reason to
+            // drop the row; a verified row is never dropped.
+            //
+            // Between the delete and the write the wallet has no key row.
+            // That gap is accepted: the material is in hand (a backup file
+            // that is kept, or a phrase or key the user just entered), and a
+            // failed write leaves the wallet missing, so the next attempt
+            // writes it again.
+            if (!checked.replaceable || walletId !in recoveryState.unverifiedWalletIds() || material == null) {
                 return outcome
             }
-            logger.w(TAG, "Unverified key row for $walletId does not read back; writing it again")
+            if (!materialMatches(material, wallet)) return outcome
+            if (needsNoLockConsent() && !allowV1) return Outcome.NeedsNoLockConsent
+            logger.w(TAG, "Unverified key row for $walletId is unusable; writing it again")
             runCatching { keyMaterialDao.deleteIfIv(walletId, existingIv) }
-                .onFailure { logger.e(TAG, "Removing the unreadable row failed for $walletId", it) }
+                .onFailure { logger.e(TAG, "Removing the unusable row failed for $walletId", it) }
             if (keyMaterialDao.getKdfVersion(walletId) != null) return outcome
         }
         if (material == null) return Outcome.NoBackup
@@ -345,34 +361,60 @@ class RecoveredKeyRestorer @Inject constructor(
         }
     }
 
+    /**
+     * A read-back result. [replaceable]: the row is proven unusable (does not
+     * decrypt, device key invalidated, or holds another key), as opposed to
+     * a cancel or a transient unlock error.
+     */
+    private class Checked(val outcome: Outcome, val replaceable: Boolean)
+
     private suspend fun verify(
         activity: FragmentActivity,
         walletId: String,
         wallet: WalletEntity,
         writtenIv: ByteArray?,
-    ): Outcome {
+    ): Outcome = verifyChecked(activity, walletId, wallet, writtenIv).outcome
+
+    private suspend fun verifyChecked(
+        activity: FragmentActivity,
+        walletId: String,
+        wallet: WalletEntity,
+        writtenIv: ByteArray?,
+    ): Checked {
+        // The reader clears the unverified mark on any good decrypt (F-B-4);
+        // remember it so a row holding another key keeps the mark.
+        val wasUnverified = walletId in recoveryState.unverifiedWalletIds()
         val read = keyReader.readPrivateKey(
             activity = activity,
             walletId = walletId,
             promptTitle = "Check restored keys",
             promptSubtitle = "Use your phone's screen lock to confirm this wallet's keys were saved.",
         )
-        val outcome = when (read) {
+        val checked = when (read) {
             is WalletKeyReader.Result.Success -> try {
-                if (matchesWallet(read.privateKey, wallet)) Outcome.Restored else Outcome.AddressMismatch
+                if (matchesWallet(read.privateKey, wallet)) {
+                    Checked(Outcome.Restored, replaceable = false)
+                } else {
+                    // A row holding another key is not verified.
+                    if (wasUnverified) recoveryState.addUnverified(walletId)
+                    Checked(Outcome.AddressMismatch, replaceable = true)
+                }
             } finally {
                 read.privateKey.fill(0)
             }
             // The row stays unverified; the next attempt reads it again.
-            WalletKeyReader.Result.Cancelled -> return Outcome.Cancelled
-            is WalletKeyReader.Result.AuthError -> Outcome.Failed("unlock error ${read.errorCode}")
-            is WalletKeyReader.Result.NotAvailable -> Outcome.Failed("stored keys not readable")
-            WalletKeyReader.Result.KeyInvalidated -> Outcome.Failed("device key invalidated")
+            WalletKeyReader.Result.Cancelled -> return Checked(Outcome.Cancelled, replaceable = false)
+            is WalletKeyReader.Result.AuthError ->
+                Checked(Outcome.Failed("unlock error ${read.errorCode}"), replaceable = false)
+            is WalletKeyReader.Result.NotAvailable ->
+                Checked(Outcome.Failed("stored keys not readable"), replaceable = true)
+            WalletKeyReader.Result.KeyInvalidated ->
+                Checked(Outcome.Failed("device key invalidated"), replaceable = true)
         }
-        if (outcome == Outcome.Restored) {
+        if (checked.outcome == Outcome.Restored) {
             recoveryState.removeUnverified(walletId)
             logger.i(TAG, "Verified restored keys for $walletId")
-            return outcome
+            return checked
         }
         logger.w(TAG, "Read-back check failed for $walletId")
         if (writtenIv != null) {
@@ -380,7 +422,7 @@ class RecoveredKeyRestorer @Inject constructor(
             runCatching { keyMaterialDao.deleteIfIv(walletId, writtenIv) }
                 .onFailure { logger.e(TAG, "Removing the unverified row failed for $walletId", it) }
         }
-        return outcome
+        return checked
     }
 
     /**

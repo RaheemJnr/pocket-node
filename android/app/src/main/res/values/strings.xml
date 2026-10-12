@@ -213,6 +213,10 @@
     <string name="recovery_rekey_with_phrase">Restore %1$s with its phrase</string>
     <string name="recovery_rekey_with_private_key">Restore %1$s with its private key</string>
     <string name="recovery_import_other_wallet">Import or create another wallet</string>
+    <string name="recovery_remove_wallet">Remove %1$s from this phone</string>
+    <string name="recovery_remove_body">This removes %1$s from this phone. Its funds stay on the blockchain and you can add it back later with its recovery phrase or private key.</string>
+    <string name="recovery_remove_confirm">Remove</string>
+    <string name="recovery_remove_cancel">Cancel</string>
     <string name="recovery_restore_missing">Restore the wallets on this phone</string>
     <string name="recovery_pin_for_missing">Enter your PIN to restore the wallets on this phone.</string>
     <string name="recovery_rekey_phrase_title">Enter the recovery phrase of %1$s</string>

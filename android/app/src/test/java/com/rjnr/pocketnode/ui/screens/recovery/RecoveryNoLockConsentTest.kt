@@ -105,9 +105,9 @@ class RecoveryNoLockConsentTest {
             argon2Parallelism = 1
         }
         val writer = WalletKeyWriter(db.keyMaterialDao(), v2Helper, v1Helper, encryption, authManager, backups, NoopLogger)
-        val reader = WalletKeyReader(db.keyMaterialDao(), v1Helper, encryption, authManager, backups, NoopLogger)
         state = RecoveryStateStore(ctx)
         state.clear()
+        val reader = WalletKeyReader(db.keyMaterialDao(), v1Helper, encryption, authManager, backups, state, NoopLogger)
         restorer = RecoveredKeyRestorer(
             db.walletDao(), db.keyMaterialDao(), writer, reader, authManager, keyManager,
             MnemonicManager(), state, backups, NoopLogger,
@@ -165,7 +165,7 @@ class RecoveryNoLockConsentTest {
         return RecoveryViewModel(
             backups, pinManager, authManager,
             mockk<LocalWalletReset>(relaxed = true), mockk<AppRestarter>(relaxed = true),
-            restorer, testDispatcher,
+            restorer, mockk(relaxed = true), testDispatcher,
         )
     }
 

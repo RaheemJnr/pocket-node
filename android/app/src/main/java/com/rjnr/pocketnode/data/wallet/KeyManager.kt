@@ -503,8 +503,9 @@ class KeyManager @Inject constructor(
         return getWalletPrefs(walletId).getBoolean(KEY_MNEMONIC_BACKED_UP, false)
     }
 
-    suspend fun deleteWalletKeys(walletId: String) {
-        keyBackupManager?.deleteBackup(walletId)
+    /** [keepBackup]: leave the PIN-encrypted backup file in place (Recovery's remove). */
+    suspend fun deleteWalletKeys(walletId: String, keepBackup: Boolean = false) {
+        if (!keepBackup) keyBackupManager?.deleteBackup(walletId)
         // Delete from Room
         val helper = keyStoreMigrationHelper
         if (helper != null) {
