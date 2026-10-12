@@ -52,7 +52,9 @@ class KeyStoreMigrationHelper(
         privateKeyHex: String,
         mnemonic: String?,
         walletType: String,
-        mnemonicBackedUp: Boolean
+        mnemonicBackedUp: Boolean,
+        // false: refuse to replace an existing row (insert-or-fail).
+        overwrite: Boolean = true,
     ) {
         val keyBytes = privateKeyHex.toByteArray(Charsets.UTF_8)
         val keyCipher = encryptionManager.newEncryptCipher()
@@ -75,7 +77,15 @@ class KeyStoreMigrationHelper(
             updatedAt = System.currentTimeMillis()
         )
 
-        keyMaterialDao.upsert(entity)
+        if (overwrite) {
+            keyMaterialDao.upsert(entity)
+        } else {
+            try {
+                keyMaterialDao.insertOrAbort(entity)
+            } catch (e: android.database.sqlite.SQLiteConstraintException) {
+                throw IllegalStateException("walletId=$walletId already exists in key_material; refuse to overwrite", e)
+            }
+        }
     }
 
     /**

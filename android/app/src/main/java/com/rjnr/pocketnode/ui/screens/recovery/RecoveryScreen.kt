@@ -1,6 +1,8 @@
 package com.rjnr.pocketnode.ui.screens.recovery
 
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
@@ -15,6 +17,7 @@ import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
@@ -29,22 +32,28 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.unit.dp
+import androidx.fragment.app.FragmentActivity
 import androidx.hilt.lifecycle.viewmodel.compose.hiltViewModel
 import com.rjnr.pocketnode.R
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun RecoveryScreen(
-    onRecoveryComplete: (List<RecoveredWallet>) -> Unit,
+    /** Every recovered wallet's keys are stored and verified. */
+    onRecoveryComplete: () -> Unit,
     onMnemonicRestore: () -> Unit,
     viewModel: RecoveryViewModel = hiltViewModel()
 ) {
     val uiState by viewModel.uiState.collectAsState()
     var pinInput by remember { mutableStateOf("") }
+    // MainActivity extends FragmentActivity: the restored keys are written
+    // through the key store's screen-lock prompt.
+    val activity = LocalContext.current as FragmentActivity
 
     // The phrase restore opens only when the ViewModel allows it: after the
     // app PIN is verified, or with no PIN set. Start fresh restarts the app.
@@ -53,6 +62,35 @@ fun RecoveryScreen(
             viewModel.onPhraseRestoreOpened()
             onMnemonicRestore()
         }
+    }
+
+    // No screen lock: same consent as wallet import before the software-only key.
+    if (uiState.showNoLockConsent) {
+        com.rjnr.pocketnode.ui.components.NoDeviceLockConsentDialog(
+            onConfirm = { viewModel.confirmNoLockConsent(activity) },
+            onDismiss = viewModel::dismissNoLockConsent,
+        )
+    }
+
+    uiState.removeConfirm?.let { wallet ->
+        AlertDialog(
+            onDismissRequest = viewModel::cancelRemove,
+            title = { Text(stringResource(R.string.recovery_remove_wallet, wallet.name)) },
+            text = { Text(stringResource(R.string.recovery_remove_body, wallet.name)) },
+            confirmButton = {
+                TextButton(onClick = viewModel::confirmRemove, enabled = !uiState.isRemoving) {
+                    Text(
+                        text = stringResource(R.string.recovery_remove_confirm),
+                        color = MaterialTheme.colorScheme.error
+                    )
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = viewModel::cancelRemove, enabled = !uiState.isRemoving) {
+                    Text(stringResource(R.string.recovery_remove_cancel))
+                }
+            }
+        )
     }
 
     if (uiState.showStartFreshConfirm) {
@@ -73,6 +111,7 @@ fun RecoveryScreen(
             modifier = Modifier
                 .fillMaxSize()
                 .padding(padding)
+                .verticalScroll(rememberScrollState())
                 .padding(
                     horizontal = com.rjnr.pocketnode.ui.util.responsiveDp(16.dp, 24.dp, 32.dp),
                     vertical = 24.dp
@@ -95,7 +134,11 @@ fun RecoveryScreen(
             when (uiState.stage) {
                 RecoveryStage.PIN_ENTRY -> {
                     Text(
-                        text = "Enter your PIN to restore your wallets from backup.",
+                        text = if (uiState.hasBackups) {
+                            "Enter your PIN to restore your wallets from backup."
+                        } else {
+                            stringResource(R.string.recovery_pin_for_missing)
+                        },
                         style = MaterialTheme.typography.bodyLarge
                     )
 
@@ -119,7 +162,7 @@ fun RecoveryScreen(
 
                     Button(
                         onClick = {
-                            viewModel.attemptPinRecovery(pinInput.toCharArray())
+                            viewModel.attemptPinRecovery(pinInput.toCharArray(), activity)
                             pinInput = ""
                         },
                         enabled = pinInput.length == 6,
@@ -193,6 +236,17 @@ fun RecoveryScreen(
                         )
                     }
 
+                    if (uiState.hasMissingWallets) {
+                        // Wallets on this phone still lack keys: restore them
+                        // in place (the import path refuses their addresses).
+                        Button(
+                            onClick = viewModel::requestMissingRestore,
+                            modifier = Modifier.fillMaxWidth()
+                        ) {
+                            Text(stringResource(R.string.recovery_restore_missing))
+                        }
+                    }
+
                     Button(
                         onClick = viewModel::requestPhraseRestore,
                         modifier = Modifier.fillMaxWidth()
@@ -201,9 +255,81 @@ fun RecoveryScreen(
                     }
                 }
 
+                RecoveryStage.RESTORING -> {
+                    Text(
+                        text = stringResource(R.string.recovery_restoring),
+                        style = MaterialTheme.typography.bodyLarge
+                    )
+                    CircularProgressIndicator()
+                }
+
+                RecoveryStage.RESTORE_FAILED -> {
+                    uiState.error?.let { error ->
+                        Text(
+                            text = error,
+                            color = MaterialTheme.colorScheme.error,
+                            style = MaterialTheme.typography.bodyLarge
+                        )
+                    }
+
+                    val rekey = uiState.rekey
+                    if (rekey != null) {
+                        RecoveryRekeyEntry(
+                            entry = rekey,
+                            busy = uiState.isRekeying,
+                            onSubmitPhrase = { viewModel.submitRekeyPhrase(activity, it) },
+                            onSubmitPrivateKey = { viewModel.submitRekeyPrivateKey(activity, it) },
+                            onCancel = viewModel::cancelRekey,
+                        )
+                        return@Column
+                    }
+
+                    if (uiState.missingWallets.isNotEmpty()) {
+                        Text(
+                            text = stringResource(
+                                R.string.recovery_missing_wallets,
+                                uiState.missingWalletNames.joinToString(", ")
+                            ),
+                            style = MaterialTheme.typography.bodyMedium
+                        )
+                        for (wallet in uiState.missingWallets) {
+                            OutlinedButton(
+                                onClick = { viewModel.openRekey(wallet.walletId, withPrivateKey = false) },
+                                modifier = Modifier.fillMaxWidth()
+                            ) {
+                                Text(stringResource(R.string.recovery_rekey_with_phrase, wallet.name))
+                            }
+                            if (wallet.isRawKey) {
+                                OutlinedButton(
+                                    onClick = { viewModel.openRekey(wallet.walletId, withPrivateKey = true) },
+                                    modifier = Modifier.fillMaxWidth()
+                                ) {
+                                    Text(stringResource(R.string.recovery_rekey_with_private_key, wallet.name))
+                                }
+                            }
+                            TextButton(onClick = { viewModel.requestRemove(wallet.walletId) }) {
+                                Text(stringResource(R.string.recovery_remove_wallet, wallet.name))
+                            }
+                        }
+                    }
+
+                    if (uiState.canRetryRestore) {
+                        Button(
+                            onClick = viewModel::retryRestore,
+                            modifier = Modifier.fillMaxWidth()
+                        ) {
+                            Text(stringResource(R.string.recovery_restore_retry))
+                        }
+                    }
+
+                    TextButton(onClick = viewModel::requestPhraseRestore) {
+                        Text(stringResource(R.string.recovery_import_other_wallet))
+                    }
+                }
+
                 RecoveryStage.SUCCESS -> {
-                    LaunchedEffect(uiState.recoveredWallets) {
-                        onRecoveryComplete(uiState.recoveredWallets)
+                    LaunchedEffect(Unit) {
+                        onRecoveryComplete()
                     }
 
                     Text(
@@ -229,7 +355,7 @@ fun RecoveryScreen(
                     )
 
                     Button(onClick = viewModel::requestPhraseRestore, modifier = Modifier.fillMaxWidth()) {
-                        Text(stringResource(R.string.recovery_restore_with_phrase))
+                        Text(stringResource(R.string.recovery_import_other_wallet))
                     }
                 }
             }

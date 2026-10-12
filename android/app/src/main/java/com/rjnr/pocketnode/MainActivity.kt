@@ -26,6 +26,7 @@ import com.rjnr.pocketnode.data.gateway.GatewayRepository
 import com.rjnr.pocketnode.data.sync.SyncWorkScheduler
 import com.rjnr.pocketnode.data.crypto.KeyBackupManager
 import com.rjnr.pocketnode.data.wallet.KeyManager
+import com.rjnr.pocketnode.data.wallet.RecoveredKeyRestorer
 import com.rjnr.pocketnode.ui.navigation.CkbNavGraph
 import com.rjnr.pocketnode.ui.navigation.Screen
 import com.rjnr.pocketnode.data.wallet.WalletPreferences
@@ -73,6 +74,9 @@ class MainActivity : FragmentActivity() {
 
     @Inject
     lateinit var logger: Logger
+
+    @Inject
+    lateinit var recoveredKeyRestorer: RecoveredKeyRestorer
 
     // #524: the re-auth lock replaces the nav graph on screen instead of
     // navigating to Screen.Auth, so the back stack and screen state survive.
@@ -140,14 +144,28 @@ class MainActivity : FragmentActivity() {
             cachedHasWallet = repository.hasWallet()
             @Suppress("DEPRECATION")
             val wasReset = keyManager.wasResetDueToCorruption()
+            // Suppressed, not removed: the corruption flag guards the ESP
+            // legacy-key path, which un-migrated installs still read. The
+            // flag is in memory and only raised while Room holds no key rows,
+            // so StartupRouter also keeps Recovery through the persistent
+            // marker and whenever a wallet row lacks keys.
             val hasPin = pinManager.hasPin()
-            val route = when {
-                // Suppressed, not removed: the corruption flag guards the ESP
-                // legacy-key path, which un-migrated installs still read.
-                wasReset -> Screen.Recovery.route
-                !cachedHasWallet -> Screen.Onboarding.route
-                !hasPin -> Screen.InitialPinSetup.route
-                else -> Screen.Auth.route
+            val decision = StartupRouter.route(
+                corruptionFlag = wasReset,
+                markerSet = recoveredKeyRestorer.isMarkedIncomplete(),
+                hasWallet = cachedHasWallet,
+                hasPin = hasPin,
+                walletRowCount = { walletRepository.walletCount() },
+                missingWalletCount = { recoveredKeyRestorer.missingWallets().size },
+                markIncomplete = { recoveredKeyRestorer.markIncomplete() },
+                completeIfDone = { recoveredKeyRestorer.completeIfDone() },
+            )
+            val recoveryPending = decision.recoveryPending
+            val route = when (decision.route) {
+                StartupRouter.Route.RECOVERY -> Screen.Recovery.route
+                StartupRouter.Route.ONBOARDING -> Screen.Onboarding.route
+                StartupRouter.Route.PIN_SETUP -> Screen.InitialPinSetup.route
+                StartupRouter.Route.AUTH -> Screen.Auth.route
             }
             // #424 diagnostic: users report onboarding after an overwrite
             // install despite preserved data. Log the exact startup-gate inputs
@@ -166,6 +184,7 @@ class MainActivity : FragmentActivity() {
                     Log.INFO,
                     "StartupGate",
                     "#424 route=$route hasWallet=$cachedHasWallet wasReset=$wasReset " +
+                        "recoveryPending=$recoveryPending " +
                         "hasPin=$hasPin ${keyManager.diagnosticKeyState()} " +
                         "wallets=${walletRepository.walletCount()} " +
                         "activeWalletId=${walletRepository.activeWalletIdSnapshot()} " +

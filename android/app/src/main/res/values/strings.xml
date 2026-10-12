@@ -200,7 +200,6 @@
     <string name="recovery_with_pin">Recover with PIN</string>
     <string name="recovery_use_phrase_instead">Use recovery phrase instead</string>
     <string name="recovery_enter_phrase">Enter recovery phrase</string>
-    <string name="recovery_restore_with_phrase">Restore with recovery phrase</string>
     <string name="recovery_phrase_pin_message">Enter your app PIN to restore from a recovery phrase.</string>
     <string name="recovery_phrase_pin_continue">Continue</string>
     <string name="recovery_phrase_pin_cancel">Cancel</string>
@@ -208,6 +207,21 @@
     <string name="recovery_start_fresh_body">This will erase every wallet, key, and cache stored on this device. The only way to restore access afterwards is each wallet\'s 12-word recovery phrase. Without the phrase, those funds cannot be recovered.</string>
     <string name="recovery_start_fresh_confirm">Remove and continue</string>
     <string name="recovery_start_fresh_cancel">Cancel</string>
+    <string name="recovery_restoring">Saving your restored wallet keys. Unlock with your screen lock when asked.</string>
+    <string name="recovery_restore_retry">Try again</string>
+    <string name="recovery_missing_wallets">Still to restore: %1$s</string>
+    <string name="recovery_rekey_with_phrase">Restore %1$s with its phrase</string>
+    <string name="recovery_rekey_with_private_key">Restore %1$s with its private key</string>
+    <string name="recovery_import_other_wallet">Import or create another wallet</string>
+    <string name="recovery_remove_wallet">Remove %1$s from this phone</string>
+    <string name="recovery_remove_body">This removes %1$s from this phone. Its funds stay on the blockchain and you can add it back later with its recovery phrase or private key.</string>
+    <string name="recovery_remove_confirm">Remove</string>
+    <string name="recovery_remove_cancel">Cancel</string>
+    <string name="recovery_restore_missing">Restore the wallets on this phone</string>
+    <string name="recovery_pin_for_missing">Enter your PIN to restore the wallets on this phone.</string>
+    <string name="recovery_rekey_phrase_title">Enter the recovery phrase of %1$s</string>
+    <string name="recovery_rekey_key_title">Enter the private key of %1$s</string>
+    <string name="recovery_rekey_submit">Restore this wallet</string>
     <string name="recovery_start_fresh_failed">The wallets could not be removed. Try again.</string>
     <!-- endregion -->
 

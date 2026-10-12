@@ -3,6 +3,8 @@ package com.rjnr.pocketnode.ui.screens.recovery
 import android.app.Application
 import android.content.ComponentName
 import android.content.Context
+import androidx.compose.ui.test.assertIsEnabled
+import androidx.compose.ui.test.assertIsNotEnabled
 import androidx.compose.ui.test.hasSetTextAction
 import androidx.compose.ui.test.junit4.createAndroidComposeRule
 import androidx.compose.ui.test.onNodeWithText
@@ -16,10 +18,13 @@ import com.rjnr.pocketnode.data.crypto.Blake2b
 import com.rjnr.pocketnode.data.crypto.KeyBackupManager
 import com.rjnr.pocketnode.data.crypto.KeyMaterial
 import com.rjnr.pocketnode.data.gateway.LocalWalletReset
+import com.rjnr.pocketnode.data.database.entity.WalletEntity
+import com.rjnr.pocketnode.data.wallet.RecoveredKeyRestorer
 import com.rjnr.pocketnode.ui.screens.auth.NamedStringsActivity
 import com.rjnr.pocketnode.util.AppRestarter
 import io.mockk.coEvery
 import io.mockk.coVerify
+import io.mockk.every
 import io.mockk.mockk
 import io.mockk.verify
 import kotlinx.coroutines.Dispatchers
@@ -66,6 +71,20 @@ class RecoveryScreenNavigationTest {
 
     private val localWalletReset = mockk<LocalWalletReset>(relaxed = true)
     private val appRestarter = mockk<AppRestarter>(relaxed = true)
+    // wallet1 is the one wallet row; it stays missing until restored.
+    private val missing = mutableSetOf("wallet1")
+    private val walletRow = WalletEntity(
+        walletId = "wallet1", name = "Main", type = "mnemonic", derivationPath = null, parentWalletId = null,
+    )
+    private val keyRestorer = mockk<RecoveredKeyRestorer>(relaxed = true).also {
+        coEvery { it.missingWallets() } answers { if ("wallet1" in missing) listOf(walletRow) else emptyList() }
+        coEvery { it.walletIds() } returns setOf("wallet1")
+        coEvery { it.completeIfDone() } answers { missing.isEmpty() }
+        coEvery { it.restore(any(), any(), any(), any()) } answers {
+            missing.remove(secondArg<String>())
+            RecoveredKeyRestorer.Outcome.Restored
+        }
+    }
     private var phraseRestores = 0
     private var recoveries = 0
     private var fakeTimeMs = 1_000_000L
@@ -103,6 +122,8 @@ class RecoveryScreenNavigationTest {
             AuthManager(ApplicationProvider.getApplicationContext()),
             localWalletReset,
             appRestarter,
+            keyRestorer,
+            mockk(relaxed = true),
             Dispatchers.Unconfined,
         )
         compose.setContent {
@@ -202,5 +223,91 @@ class RecoveryScreenNavigationTest {
 
         assertEquals(1, phraseRestores)
         coVerify(exactly = 0) { localWalletReset.removeAllWalletsAndPin() }
+    }
+
+    private fun enterBackupPin(pin: String) {
+        compose.onNode(hasSetTextAction()).performTextInput(pin)
+        compose.onNodeWithText("recovery_with_pin").performClick()
+        compose.waitForIdle()
+    }
+
+    @Test
+    fun `the backup restore leaves Recovery only after the right PIN and the keys are written back`() {
+        show(pinManager("123456"), withBackup = true)
+
+        enterBackupPin("999999")
+        assertEquals(0, recoveries)
+        coVerify(exactly = 0) { keyRestorer.restore(any(), any(), any(), any()) }
+
+        enterBackupPin("123456")
+        assertEquals(1, recoveries)
+        coVerify(exactly = 1) { keyRestorer.restore(any(), "wallet1", any(), any()) }
+        coVerify(exactly = 1) { keyRestorer.completeIfDone() }
+    }
+
+    @Test
+    fun `a backup that does not match its wallet stays on Recovery with the phrase restore offered`() {
+        coEvery { keyRestorer.restore(any(), any(), any(), any()) } returns
+            RecoveredKeyRestorer.Outcome.AddressMismatch
+        show(pinManager("123456"), withBackup = true)
+
+        enterBackupPin("123456")
+
+        assertEquals(0, recoveries)
+        compose.onNodeWithText("recovery_missing_wallets").assertExists()
+        compose.onNodeWithText("recovery_restore_retry").assertDoesNotExist()
+        // The missing wallet can be re-keyed from its phrase on this screen.
+        compose.onNodeWithText("recovery_rekey_with_phrase").performClick()
+        compose.waitForIdle()
+        compose.onNodeWithText("recovery_rekey_phrase_title").assertExists()
+        compose.onNodeWithText("recovery_phrase_pin_cancel").performClick()
+        compose.waitForIdle()
+        compose.onNodeWithText("recovery_import_other_wallet").performClick()
+        compose.waitForIdle()
+        // The PIN was verified on this screen, so the phrase restore opens.
+        assertEquals(1, phraseRestores)
+    }
+
+    @Test
+    fun `with no screen lock the import consent dialog shows before anything is stored`() {
+        every { keyRestorer.needsNoLockConsent() } returns true
+        show(pinManager("123456"), withBackup = true)
+
+        enterBackupPin("123456")
+        compose.onNodeWithText("Continue without a device lock?").assertExists()
+        coVerify(exactly = 0) { keyRestorer.restore(any(), any(), any(), any()) }
+
+        compose.onNodeWithText("Cancel").performClick()
+        compose.waitForIdle()
+        assertEquals(0, recoveries)
+        coVerify(exactly = 0) { keyRestorer.restore(any(), any(), any(), any()) }
+        // Try again goes back to the PIN: the decrypted backups were dropped.
+        compose.onNodeWithText("recovery_restore_retry").performClick()
+        compose.waitForIdle()
+        enterBackupPin("123456")
+
+        compose.onNodeWithText("Continue anyway").performClick()
+        compose.waitForIdle()
+        coVerify(exactly = 1) { keyRestorer.restore(any(), "wallet1", any(), true) }
+        assertEquals(1, recoveries)
+    }
+
+    @Test
+    fun `a whole phrase pasted into the first word fills every field of the re-key entry`() {
+        coEvery { keyRestorer.restore(any(), any(), any(), any()) } returns
+            RecoveredKeyRestorer.Outcome.AddressMismatch
+        show(pinManager("123456"), withBackup = true)
+        enterBackupPin("123456")
+
+        compose.onNodeWithText("recovery_rekey_with_phrase").performClick()
+        compose.waitForIdle()
+        compose.onNodeWithText("recovery_rekey_submit").assertIsNotEnabled()
+
+        compose.onAllNodes(hasSetTextAction())[0].performTextInput(
+            "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about"
+        )
+        compose.waitForIdle()
+
+        compose.onNodeWithText("recovery_rekey_submit").assertIsEnabled()
     }
 }

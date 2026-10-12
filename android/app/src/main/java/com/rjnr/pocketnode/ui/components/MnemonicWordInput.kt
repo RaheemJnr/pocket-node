@@ -1,6 +1,7 @@
 package com.rjnr.pocketnode.ui.components
 
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.ExposedDropdownMenuBox
@@ -16,6 +17,8 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.res.stringResource
+import androidx.compose.ui.text.input.KeyboardCapitalization
+import androidx.compose.ui.text.input.KeyboardType
 import com.rjnr.pocketnode.R
 import com.rjnr.pocketnode.ui.util.Bip39WordList
 
@@ -28,7 +31,8 @@ fun MnemonicWordInput(
     isError: Boolean,
     onValueChange: (String) -> Unit,
     onSuggestionSelected: (String) -> Unit,
-    modifier: Modifier = Modifier
+    modifier: Modifier = Modifier,
+    keyboardOptions: KeyboardOptions = SecretWordKeyboardOptions,
 ) {
     var expanded by remember { mutableStateOf(false) }
 
@@ -50,7 +54,8 @@ fun MnemonicWordInput(
                 .menuAnchor(ExposedDropdownMenuAnchorType.PrimaryEditable),
             singleLine = true,
             isError = isError,
-            textStyle = MaterialTheme.typography.bodyMedium
+            textStyle = MaterialTheme.typography.bodyMedium,
+            keyboardOptions = keyboardOptions,
         )
 
         ExposedDropdownMenu(
@@ -69,3 +74,14 @@ fun MnemonicWordInput(
         }
     }
 }
+
+/**
+ * Keyboard for a recovery phrase word or a private key: a password-type
+ * field with no autocorrect and no capitals, so the keyboard does not learn
+ * or suggest the secret.
+ */
+val SecretWordKeyboardOptions = KeyboardOptions(
+    capitalization = KeyboardCapitalization.None,
+    autoCorrectEnabled = false,
+    keyboardType = KeyboardType.Password,
+)

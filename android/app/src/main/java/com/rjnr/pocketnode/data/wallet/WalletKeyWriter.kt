@@ -251,6 +251,8 @@ class WalletKeyWriter @Inject constructor(
                     mnemonic = bundle.mnemonic,
                     walletType = walletType,
                     mnemonicBackedUp = mnemonicBackedUp,
+                    // A new wallet never replaces an existing row.
+                    overwrite = false,
                 )
                 logger.i(TAG, "Wrote new V1 wallet row for $walletId (no device credential)")
                 Result.Success

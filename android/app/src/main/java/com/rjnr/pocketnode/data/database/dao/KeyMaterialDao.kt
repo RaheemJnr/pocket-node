@@ -28,6 +28,14 @@ interface KeyMaterialDao {
     @Query("DELETE FROM key_material WHERE walletId = :walletId")
     suspend fun delete(walletId: String)
 
+    /**
+     * Delete [walletId]'s row only while it is still the one encrypted with
+     * [iv] (every write draws a fresh IV), so a row written by anyone else
+     * is never removed. Returns the number of rows deleted.
+     */
+    @Query("DELETE FROM key_material WHERE walletId = :walletId AND iv = :iv")
+    suspend fun deleteIfIv(walletId: String, iv: ByteArray): Int
+
     @Query("SELECT COUNT(*) FROM key_material")
     suspend fun count(): Int
 
