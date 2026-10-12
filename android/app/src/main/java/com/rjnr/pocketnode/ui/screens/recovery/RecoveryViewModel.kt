@@ -65,6 +65,13 @@ data class RecoveryUiState(
     val rekey: RekeyEntry? = null,
     /** A re-key is being written and checked. */
     val isRekeying: Boolean = false,
+    /** PIN-encrypted backup files exist (the PIN step restores from them). */
+    val hasBackups: Boolean = true,
+    /**
+     * Wallet rows on this phone still lack verified keys: the screen offers
+     * the way to the per-wallet restore list from any stage.
+     */
+    val hasMissingWallets: Boolean = false,
 ) {
     val missingWalletNames: List<String> get() = missingWallets.map { it.name }
 }
@@ -160,11 +167,40 @@ class RecoveryViewModel(
     private enum class PhraseGate { OPEN, ASK_PIN, START_FRESH, READ_ERROR }
 
     init {
-        // This screen means the key store needs recovery: keep offering it at
-        // every launch until every wallet has verified keys.
-        keyRestorer.markIncomplete()
         if (!backupManager.hasAnyBackups()) {
-            _uiState.update { it.copy(stage = RecoveryStage.MNEMONIC_ENTRY) }
+            _uiState.update { it.copy(stage = RecoveryStage.MNEMONIC_ENTRY, hasBackups = false) }
+        }
+        viewModelScope.launch {
+            val missing = runCatching { keyRestorer.missingWallets() }.getOrDefault(emptyList())
+            if (missing.isNotEmpty()) {
+                // Keep offering this screen at every launch until every
+                // wallet has verified keys.
+                keyRestorer.markIncomplete()
+                _uiState.update { it.copy(hasMissingWallets = true) }
+            }
+        }
+    }
+
+    /**
+     * "Restore the wallets on this phone": the way to the per-wallet restore
+     * list from any stage. Asks the app PIN first unless it was verified on
+     * this screen or none is set; with no PIN the list shows directly.
+     */
+    fun requestMissingRestore() {
+        val state = _uiState.value
+        if (!state.hasMissingWallets || restoreInProgress || state.isRekeying) return
+        when (phraseGate()) {
+            PhraseGate.OPEN -> viewModelScope.launch {
+                finishAttempt(mismatch = false, retryable = false, skipped = emptyList())
+            }
+            PhraseGate.ASK_PIN -> _uiState.update {
+                it.copy(stage = RecoveryStage.PIN_ENTRY, error = null, canRetryRestore = false)
+            }
+            // A PIN locked for good can only start fresh.
+            PhraseGate.START_FRESH -> _uiState.update {
+                it.copy(showStartFreshConfirm = true, startFreshFailed = false)
+            }
+            PhraseGate.READ_ERROR -> _uiState.update { it.copy(error = PIN_READ_ERROR) }
         }
     }
 
@@ -264,8 +300,10 @@ class RecoveryViewModel(
         val entry = _uiState.value.rekey ?: return
         if (entry.withPrivateKey || _uiState.value.isRekeying) return
         val normalized = words.map { it.trim().lowercase() }
+        val activityRef = WeakReference(activity)
         runRekey(entry, phraseMessages(entry)) {
-            keyRestorer.rekeyFromPhrase(activity, entry.wallet.walletId, normalized, allowV1 = rekeyV1Consented)
+            val current = liveActivity(activityRef) ?: return@runRekey screenClosed(entry)
+            keyRestorer.rekeyFromPhrase(current, entry.wallet.walletId, normalized, allowV1 = rekeyV1Consented)
         }
     }
 
@@ -278,10 +316,19 @@ class RecoveryViewModel(
             _uiState.update { it.copy(rekey = entry.copy(error = REKEY_INVALID_KEY)) }
             return
         }
+        val activityRef = WeakReference(activity)
         runRekey(entry, keyMessages(entry), wipe = keyBytes) {
-            keyRestorer.rekeyFromPrivateKey(activity, entry.wallet.walletId, keyBytes, allowV1 = rekeyV1Consented)
+            val current = liveActivity(activityRef) ?: return@runRekey screenClosed(entry)
+            keyRestorer.rekeyFromPrivateKey(current, entry.wallet.walletId, keyBytes, allowV1 = rekeyV1Consented)
         }
     }
+
+    private fun liveActivity(ref: WeakReference<FragmentActivity>): FragmentActivity? =
+        ref.get()?.takeUnless { it.isFinishing || it.isDestroyed }
+
+    private fun screenClosed(entry: RekeyEntry) = RecoveredKeyRestorer.RekeyResult.Done(
+        mapOf(entry.wallet.walletId to RecoveredKeyRestorer.Outcome.Failed("screen closed"))
+    )
 
     private class RekeyMessages(val invalid: String, val notThisWallet: String)
 
@@ -340,8 +387,13 @@ class RecoveryViewModel(
     /** "Cancel" on the no-lock dialog: nothing is written, the backups stay. */
     fun dismissNoLockConsent() {
         if (!_uiState.value.showNoLockConsent) return
+        if (consentForRekey != null) {
+            // Declining before a re-key only closes the dialog.
+            consentForRekey = null
+            _uiState.update { it.copy(showNoLockConsent = false) }
+            return
+        }
         decrypted.clear()
-        consentForRekey = null
         _uiState.update {
             it.copy(
                 showNoLockConsent = false,
@@ -431,7 +483,10 @@ class RecoveryViewModel(
      * [RecoveryStage.RESTORE_FAILED] listing the wallets still missing.
      */
     private suspend fun finishAttempt(mismatch: Boolean, retryable: Boolean, skipped: List<String>) {
-        if (keyRestorer.completeIfDone()) {
+        val walletIds = keyRestorer.walletIds()
+        // With no wallet row there is nothing to open: the screen stays and
+        // offers the import (completeIfDone still clears a stale marker).
+        if (keyRestorer.completeIfDone() && walletIds.isNotEmpty()) {
             _uiState.update {
                 it.copy(
                     stage = RecoveryStage.SUCCESS,
@@ -443,7 +498,6 @@ class RecoveryViewModel(
             }
             return
         }
-        val walletIds = keyRestorer.walletIds()
         val stillMissing = keyRestorer.missingWallets()
         val error = when {
             walletIds.isEmpty() -> RESTORE_NO_WALLET_ERROR
@@ -456,6 +510,7 @@ class RecoveryViewModel(
                 stage = RecoveryStage.RESTORE_FAILED,
                 error = error,
                 canRetryRestore = retryable,
+                hasMissingWallets = stillMissing.isNotEmpty(),
                 missingWallets = stillMissing.map { w ->
                     MissingWallet(w.walletId, w.name, isRawKey = w.type == KeyManager.WALLET_TYPE_RAW_KEY)
                 },
@@ -677,9 +732,7 @@ class RecoveryViewModel(
         const val RESTORE_NO_LOCK_DECLINED =
             "Nothing was saved. Set a screen lock on this phone, then tap Try again. " +
                 "Your backup files are kept."
-        const val RESTORE_MISSING_ERROR =
-            "Some wallets on this phone still have no keys and no backup that could be opened. " +
-                "Restore them with their recovery phrase."
+        const val RESTORE_MISSING_ERROR = "Use the buttons below to restore each wallet."
         const val REKEY_INVALID_PHRASE = "That is not a valid recovery phrase. Check the words and try again."
         const val REKEY_INVALID_KEY = "That is not a valid private key. Enter the 64-character hex key."
         const val RESTORE_NO_WALLET_ERROR =

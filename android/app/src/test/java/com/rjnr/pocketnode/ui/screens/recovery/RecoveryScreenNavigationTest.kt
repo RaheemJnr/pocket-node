@@ -3,6 +3,8 @@ package com.rjnr.pocketnode.ui.screens.recovery
 import android.app.Application
 import android.content.ComponentName
 import android.content.Context
+import androidx.compose.ui.test.assertIsEnabled
+import androidx.compose.ui.test.assertIsNotEnabled
 import androidx.compose.ui.test.hasSetTextAction
 import androidx.compose.ui.test.junit4.createAndroidComposeRule
 import androidx.compose.ui.test.onNodeWithText
@@ -259,7 +261,7 @@ class RecoveryScreenNavigationTest {
         compose.onNodeWithText("recovery_rekey_phrase_title").assertExists()
         compose.onNodeWithText("recovery_phrase_pin_cancel").performClick()
         compose.waitForIdle()
-        compose.onNodeWithText("recovery_restore_with_phrase").performClick()
+        compose.onNodeWithText("recovery_import_other_wallet").performClick()
         compose.waitForIdle()
         // The PIN was verified on this screen, so the phrase restore opens.
         assertEquals(1, phraseRestores)
@@ -287,5 +289,24 @@ class RecoveryScreenNavigationTest {
         compose.waitForIdle()
         coVerify(exactly = 1) { keyRestorer.restore(any(), "wallet1", any(), true) }
         assertEquals(1, recoveries)
+    }
+
+    @Test
+    fun `a whole phrase pasted into the first word fills every field of the re-key entry`() {
+        coEvery { keyRestorer.restore(any(), any(), any(), any()) } returns
+            RecoveredKeyRestorer.Outcome.AddressMismatch
+        show(pinManager("123456"), withBackup = true)
+        enterBackupPin("123456")
+
+        compose.onNodeWithText("recovery_rekey_with_phrase").performClick()
+        compose.waitForIdle()
+        compose.onNodeWithText("recovery_rekey_submit").assertIsNotEnabled()
+
+        compose.onAllNodes(hasSetTextAction())[0].performTextInput(
+            "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about"
+        )
+        compose.waitForIdle()
+
+        compose.onNodeWithText("recovery_rekey_submit").assertIsEnabled()
     }
 }

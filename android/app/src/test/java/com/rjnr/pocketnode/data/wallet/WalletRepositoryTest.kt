@@ -748,7 +748,12 @@ class WalletRepositoryTest {
         legacyPrefs
         return com.rjnr.pocketnode.data.gateway.LocalWalletReset(
             repository, keyManager, db.keyMaterialDao(), backups, cacheManager, daoSyncManager, pinManager,
+            recoveryState,
         )
+    }
+
+    private val recoveryState by lazy {
+        RecoveryStateStore(androidx.test.core.app.ApplicationProvider.getApplicationContext())
     }
 
     private fun backupMaterial() = com.rjnr.pocketnode.data.crypto.KeyMaterial(
@@ -806,9 +811,12 @@ class WalletRepositoryTest {
         backups.writeBackup("orphan-backup", backupMaterial(), "123456".toCharArray())
         legacyPrefs.edit().putString("private_key", "a".repeat(64)).commit()
         val pinManager = pinManagerWithPin()
+        recoveryState.markIncomplete()
 
         localReset(pinManager = pinManager).removeAllWalletsAndPin()
 
+        // Start fresh: the restarted app must not reopen on Recovery.
+        assertFalse(recoveryState.isIncomplete())
         assertTrue(backups.listBackupWalletIds().isEmpty())
         assertFalse(legacyPrefs.contains("private_key"))
         assertFalse(keyManager.hasWallet())
@@ -863,16 +871,19 @@ class WalletRepositoryTest {
         io.mockk.every { stuckBackups.deleteBackup(any()) } returns Unit
         backups.writeBackup("default", backupMaterial(), "123456".toCharArray())
         val pinManager = pinManagerWithPin()
+        recoveryState.markIncomplete()
 
         val error = runCatching {
             com.rjnr.pocketnode.data.gateway.LocalWalletReset(
                 repo, keyManager, db.keyMaterialDao(), stuckBackups,
-                io.mockk.mockk(relaxed = true), io.mockk.mockk(relaxed = true), pinManager,
+                io.mockk.mockk(relaxed = true), io.mockk.mockk(relaxed = true), pinManager, recoveryState,
             ).removeAllWalletsAndPin()
         }.exceptionOrNull()
 
         assertTrue(error is IllegalStateException)
         assertTrue(pinManager.hasPin())
+        // Something is left: recovery is not over.
+        assertTrue(recoveryState.isIncomplete())
     }
 
     @Test

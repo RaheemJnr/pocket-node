@@ -680,7 +680,7 @@ class RecoveryViewModelTest {
 
         assertEquals(RecoveryStage.RESTORE_FAILED, vm.uiState.value.stage)
         assertEquals(listOf("Name of wallet2"), vm.uiState.value.missingWalletNames)
-        assertTrue(vm.uiState.value.error!!.contains("recovery phrase"))
+        assertEquals("Use the buttons below to restore each wallet.", vm.uiState.value.error)
     }
 
     @Test
@@ -914,5 +914,96 @@ class RecoveryViewModelTest {
 
         coVerify(exactly = 1) { keyRestorer.rekeyFromPhrase(activity, "wallet1", any(), true) }
         coVerify(exactly = 0) { keyRestorer.restore(any(), any(), any(), true) }
+    }
+
+    // --- Round 2 ---
+
+    @Test
+    fun `with no backup files and no PIN the missing wallets list opens directly`() = runTest {
+        val vm = newVm(createBackupManager(), createPinManager(null))
+        advanceUntilIdle()
+        assertEquals(RecoveryStage.MNEMONIC_ENTRY, vm.uiState.value.stage)
+        assertTrue(vm.uiState.value.hasMissingWallets)
+
+        vm.requestMissingRestore()
+        advanceUntilIdle()
+
+        assertEquals(RecoveryStage.RESTORE_FAILED, vm.uiState.value.stage)
+        assertEquals(listOf("Name of wallet1"), vm.uiState.value.missingWalletNames)
+        assertEquals("Use the buttons below to restore each wallet.", vm.uiState.value.error)
+        vm.openRekey("wallet1", withPrivateKey = false)
+        assertEquals("wallet1", vm.uiState.value.rekey!!.wallet.walletId)
+    }
+
+    @Test
+    fun `with no backup files and a PIN the missing wallets need the PIN first`() = runTest {
+        val vm = newVm(createBackupManager(), createPinManager(correctPin))
+        advanceUntilIdle()
+
+        vm.requestMissingRestore()
+        assertEquals(RecoveryStage.PIN_ENTRY, vm.uiState.value.stage)
+        assertFalse(vm.uiState.value.hasBackups)
+        vm.openRekey("wallet1", withPrivateKey = false)
+        assertNull(vm.uiState.value.rekey)
+
+        vm.attemptPinRecovery(correctPin.copyOf(), activity)
+        advanceUntilIdle()
+        assertEquals(RecoveryStage.RESTORE_FAILED, vm.uiState.value.stage)
+        vm.openRekey("wallet1", withPrivateKey = false)
+        assertEquals("wallet1", vm.uiState.value.rekey!!.wallet.walletId)
+    }
+
+    @Test
+    fun `the marker is set only when a wallet lacks keys`() = runTest {
+        missing.clear()
+        val vm = newVm(createBackupManager(), createPinManager(correctPin))
+        advanceUntilIdle()
+
+        assertFalse(vm.uiState.value.hasMissingWallets)
+        verify(exactly = 0) { keyRestorer.markIncomplete() }
+    }
+
+    @Test
+    fun `declining the no-lock dialog before a re-key only closes the dialog`() = runTest {
+        every { keyRestorer.needsNoLockConsent() } returns true
+        val vm = recoveryWithMissingWallet1()
+        val before = vm.uiState.value
+
+        vm.openRekey("wallet1", withPrivateKey = false)
+        vm.dismissNoLockConsent()
+
+        assertFalse(vm.uiState.value.showNoLockConsent)
+        assertEquals(before.stage, vm.uiState.value.stage)
+        assertEquals(before.error, vm.uiState.value.error)
+        assertEquals(before.canRetryRestore, vm.uiState.value.canRetryRestore)
+    }
+
+    @Test
+    fun `a re-key whose screen has gone writes nothing`() = runTest {
+        val vm = recoveryWithMissingWallet1()
+        val dying = mockk<FragmentActivity>(relaxed = true)
+        every { dying.isDestroyed } returns true
+
+        vm.openRekey("wallet1", withPrivateKey = false)
+        vm.submitRekeyPhrase(dying, phraseWords)
+        advanceUntilIdle()
+
+        coVerify(exactly = 0) { keyRestorer.rekeyFromPhrase(any(), any(), any(), any()) }
+        assertEquals(RecoveryStage.RESTORE_FAILED, vm.uiState.value.stage)
+    }
+
+    @Test
+    fun `nothing to recover never reports success into an app with no wallet`() = runTest {
+        walletRows.clear()
+        missing.clear()
+        // No wallet, key or backup left: the restorer calls it complete.
+        coEvery { keyRestorer.completeIfDone() } returns true
+        val vm = newVm(backupsFor("orphan"), createPinManager(correctPin))
+
+        vm.attemptPinRecovery(correctPin.copyOf(), activity)
+        advanceUntilIdle()
+
+        assertEquals(RecoveryStage.RESTORE_FAILED, vm.uiState.value.stage)
+        assertTrue(vm.uiState.value.error!!.contains("do not belong"))
     }
 }

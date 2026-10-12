@@ -4,6 +4,7 @@ import com.rjnr.pocketnode.data.auth.PinManager
 import com.rjnr.pocketnode.data.crypto.KeyBackupManager
 import com.rjnr.pocketnode.data.database.dao.KeyMaterialDao
 import com.rjnr.pocketnode.data.wallet.KeyManager
+import com.rjnr.pocketnode.data.wallet.RecoveryStateStore
 import com.rjnr.pocketnode.data.wallet.WalletRepository
 import javax.inject.Inject
 import javax.inject.Singleton
@@ -21,9 +22,10 @@ import javax.inject.Singleton
  *  - the legacy single-wallet key store ([KeyManager.deleteWallet]),
  *  - the remaining Room caches.
  *
- * The PIN goes last, and only once nothing above is left: no wallet row, no
+ * The PIN goes next to last, and only once nothing above is left: no wallet row, no
  * key_material row, no backup file and no legacy key. Otherwise this throws
- * and the PIN stays, so keys are never left behind without it.
+ * and the PIN stays, so keys are never left behind without it. Last, the
+ * Recovery screen's "recovery incomplete" marker is cleared.
  */
 @Singleton
 class LocalWalletReset @Inject constructor(
@@ -34,6 +36,7 @@ class LocalWalletReset @Inject constructor(
     private val cacheManager: CacheManager,
     private val daoSyncManager: DaoSyncManager,
     private val pinManager: PinManager,
+    private val recoveryState: RecoveryStateStore,
 ) {
     suspend fun removeAllWalletsAndPin() {
         walletRepository.factoryReset()
@@ -52,5 +55,7 @@ class LocalWalletReset @Inject constructor(
 
         // force: the PIN-encrypted backups were removed above.
         pinManager.removePin(force = true)
+        // Nothing is left to recover: the restarted app is a fresh install.
+        recoveryState.clear()
     }
 }

@@ -106,7 +106,8 @@ class RecoveredKeyRestorerTest {
     }
 
     private fun newRestorer(keyReader: WalletKeyReader) = RecoveredKeyRestorer(
-        walletDao, keyMaterialDao, writer, keyReader, authManager, keyManager, mnemonicManager, state, NoopLogger,
+        walletDao, keyMaterialDao, writer, keyReader, authManager, keyManager, mnemonicManager, state,
+        keyBackupManager, NoopLogger,
     )
 
     private fun secureLock(present: Boolean) {
@@ -405,7 +406,28 @@ class RecoveredKeyRestorerTest {
     }
 
     @Test
-    fun `no wallet rows at all is never complete`() = runTest {
+    fun `nothing to recover at all counts as complete and clears a stale marker`() = runTest {
+        restorer.markIncomplete()
+        every { keyBackupManager.hasAnyBackups() } returns false
+
+        assertTrue(restorer.completeIfDone())
+        assertFalse(state.isIncomplete())
+    }
+
+    @Test
+    fun `no wallet rows but backup files left is not complete`() = runTest {
+        restorer.markIncomplete()
+        every { keyBackupManager.hasAnyBackups() } returns true
+
+        assertFalse(restorer.completeIfDone())
+        assertTrue(state.isIncomplete())
+    }
+
+    @Test
+    fun `no wallet rows but a key row left is not complete`() = runTest {
+        v1Helper.migrateWallet("stray", otherKeyHex, null, KeyManager.WALLET_TYPE_RAW_KEY, false)
+        every { keyBackupManager.hasAnyBackups() } returns false
+
         assertFalse(restorer.completeIfDone())
     }
 
@@ -552,5 +574,87 @@ class RecoveredKeyRestorerTest {
             (result as RecoveredKeyRestorer.RekeyResult.Done).outcomes,
         )
         assertNull(keyMaterialDao.getByWalletId("root"))
+    }
+
+    // --- An unverified row that no longer reads back is written again ---
+
+    private fun readerFailingFirst(times: Int): WalletKeyReader {
+        val failing = mockk<WalletKeyReader>()
+        var calls = 0
+        coEvery { failing.readPrivateKey(any(), any(), any(), any()) } coAnswers {
+            calls++
+            if (calls <= times) WalletKeyReader.Result.NotAvailable("decrypt failed")
+            else reader.readPrivateKey(arg(0), arg(1), arg(2), arg(3))
+        }
+        return failing
+    }
+
+    @Test
+    fun `an unverified row that no longer reads back is replaced when the material matches`() = runTest {
+        secureLock(true)
+        insertWallet("w1", phraseKeyHex)
+        var prompts = 0
+        coEvery {
+            authManager.authenticateForCipher(any(), any<Cipher>(), any(), any())
+        } answers {
+            prompts++
+            if (prompts == 2) AuthManager.CipherAuthResult.Cancelled
+            else AuthManager.CipherAuthResult.Success(args[1] as Cipher)
+        }
+        // Written, then the read-back was cancelled: the row stays unverified.
+        assertEquals(RecoveredKeyRestorer.Outcome.Cancelled, restorer.restore(activity, "w1", material(), true))
+        val stale = keyMaterialDao.getByWalletId("w1")!!
+
+        // Now the row no longer reads back (say, the screen lock changed).
+        val outcome = newRestorer(readerFailingFirst(1)).restore(activity, "w1", material(), true)
+
+        assertEquals(RecoveredKeyRestorer.Outcome.Restored, outcome)
+        val fresh = keyMaterialDao.getByWalletId("w1")!!
+        assertFalse(stale.iv.contentEquals(fresh.iv))
+        assertTrue(restorer.missingWallets().isEmpty())
+    }
+
+    @Test
+    fun `an unverified row that no longer reads back is kept when there is no material`() = runTest {
+        secureLock(false)
+        insertWallet("w1", phraseKeyHex)
+        state.addUnverified("w1")
+        v1Helper.migrateWallet("w1", phraseKeyHex, phrase, KeyManager.WALLET_TYPE_MNEMONIC, true)
+        val before = keyMaterialDao.getByWalletId("w1")!!
+
+        val outcome = newRestorer(readerFailingFirst(1)).restore(activity, "w1", null, true)
+
+        assertTrue(outcome is RecoveredKeyRestorer.Outcome.Failed)
+        assertArrayEquals(before.iv, keyMaterialDao.getByWalletId("w1")!!.iv)
+    }
+
+    @Test
+    fun `a verified row that does not read back is never deleted`() = runTest {
+        secureLock(false)
+        insertWallet("w1", phraseKeyHex)
+        // Not in the unverified set: a row from before, or one already verified.
+        v1Helper.migrateWallet("w1", phraseKeyHex, phrase, KeyManager.WALLET_TYPE_MNEMONIC, true)
+        val before = keyMaterialDao.getByWalletId("w1")!!
+
+        val outcome = newRestorer(readerFailingFirst(1)).restore(activity, "w1", material(), true)
+
+        assertTrue(outcome is RecoveredKeyRestorer.Outcome.Failed)
+        assertArrayEquals(before.iv, keyMaterialDao.getByWalletId("w1")!!.iv)
+    }
+
+    // --- Re-keyed rows keep their own type ---
+
+    @Test
+    fun `a raw-key wallet re-keyed from a phrase stays a raw key with no phrase`() = runTest {
+        secureLock(false)
+        // A raw key that is account 0 of the phrase.
+        insertWallet("raw", phraseKeyHex, derivationPath = null, type = KeyManager.WALLET_TYPE_RAW_KEY)
+
+        val result = restorer.rekeyFromPhrase(activity, "raw", words, allowV1 = true)
+
+        assertEquals(mapOf("raw" to RecoveredKeyRestorer.Outcome.Restored), (result as RecoveredKeyRestorer.RekeyResult.Done).outcomes)
+        val stored = v1Helper.readDecryptedKey("raw")!!
+        assertEquals(KeyManager.WALLET_TYPE_RAW_KEY, stored.walletType)
+        assertNull(stored.mnemonic)
     }
 }

@@ -113,7 +113,11 @@ fun RecoveryScreen(
             when (uiState.stage) {
                 RecoveryStage.PIN_ENTRY -> {
                     Text(
-                        text = "Enter your PIN to restore your wallets from backup.",
+                        text = if (uiState.hasBackups) {
+                            "Enter your PIN to restore your wallets from backup."
+                        } else {
+                            stringResource(R.string.recovery_pin_for_missing)
+                        },
                         style = MaterialTheme.typography.bodyLarge
                     )
 
@@ -211,6 +215,17 @@ fun RecoveryScreen(
                         )
                     }
 
+                    if (uiState.hasMissingWallets) {
+                        // Wallets on this phone still lack keys: restore them
+                        // in place (the import path refuses their addresses).
+                        Button(
+                            onClick = viewModel::requestMissingRestore,
+                            modifier = Modifier.fillMaxWidth()
+                        ) {
+                            Text(stringResource(R.string.recovery_restore_missing))
+                        }
+                    }
+
                     Button(
                         onClick = viewModel::requestPhraseRestore,
                         modifier = Modifier.fillMaxWidth()
@@ -257,19 +272,18 @@ fun RecoveryScreen(
                             style = MaterialTheme.typography.bodyMedium
                         )
                         for (wallet in uiState.missingWallets) {
-                            Text(text = wallet.name, style = MaterialTheme.typography.titleSmall)
                             OutlinedButton(
                                 onClick = { viewModel.openRekey(wallet.walletId, withPrivateKey = false) },
                                 modifier = Modifier.fillMaxWidth()
                             ) {
-                                Text(stringResource(R.string.recovery_rekey_with_phrase))
+                                Text(stringResource(R.string.recovery_rekey_with_phrase, wallet.name))
                             }
                             if (wallet.isRawKey) {
                                 OutlinedButton(
                                     onClick = { viewModel.openRekey(wallet.walletId, withPrivateKey = true) },
                                     modifier = Modifier.fillMaxWidth()
                                 ) {
-                                    Text(stringResource(R.string.recovery_rekey_with_private_key))
+                                    Text(stringResource(R.string.recovery_rekey_with_private_key, wallet.name))
                                 }
                             }
                         }
@@ -285,7 +299,7 @@ fun RecoveryScreen(
                     }
 
                     TextButton(onClick = viewModel::requestPhraseRestore) {
-                        Text(stringResource(R.string.recovery_restore_with_phrase))
+                        Text(stringResource(R.string.recovery_import_other_wallet))
                     }
                 }
 
@@ -317,7 +331,7 @@ fun RecoveryScreen(
                     )
 
                     Button(onClick = viewModel::requestPhraseRestore, modifier = Modifier.fillMaxWidth()) {
-                        Text(stringResource(R.string.recovery_restore_with_phrase))
+                        Text(stringResource(R.string.recovery_import_other_wallet))
                     }
                 }
             }

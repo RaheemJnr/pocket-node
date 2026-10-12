@@ -5,6 +5,7 @@ import com.rjnr.pocketnode.core.crypto.hexToByteArray
 import com.rjnr.pocketnode.core.crypto.toHexStringNoPrefix
 import com.rjnr.pocketnode.core.log.Logger
 import com.rjnr.pocketnode.data.auth.AuthManager
+import com.rjnr.pocketnode.data.crypto.KeyBackupManager
 import com.rjnr.pocketnode.data.crypto.KeyMaterial
 import com.rjnr.pocketnode.data.database.dao.KeyMaterialDao
 import com.rjnr.pocketnode.data.database.dao.WalletDao
@@ -21,7 +22,8 @@ import javax.inject.Singleton
  *
  * Recovery is complete only when the phone has at least one wallet row and
  * every wallet row (sub-accounts included) has a `key_material` row that is
- * not waiting for verification. Wallets that fail this are [missingWallets].
+ * not waiting for verification, or when there is nothing to recover at all
+ * (no wallet row, no key row, no backup file). Wallets that fail this are [missingWallets].
  * Until then the "recovery incomplete" marker in [RecoveryStateStore] stays
  * set, and the app opens on the Recovery screen at every cold start.
  *
@@ -63,6 +65,7 @@ class RecoveredKeyRestorer @Inject constructor(
     private val keyManager: KeyManager,
     private val mnemonicManager: MnemonicManager,
     private val recoveryState: RecoveryStateStore,
+    private val keyBackupManager: KeyBackupManager,
     private val logger: Logger,
 ) {
 
@@ -107,9 +110,16 @@ class RecoveredKeyRestorer @Inject constructor(
     /**
      * When the completion invariant holds, clears the marker and the startup
      * corruption flag and returns true. Otherwise changes nothing.
+     *
+     * A phone with nothing to recover (no wallet row, no key row and no
+     * backup file) also counts as complete, so a stale marker never keeps a
+     * fresh install on the Recovery screen.
      */
     suspend fun completeIfDone(): Boolean {
-        if (walletDao.getAll().isEmpty() || missingWallets().isNotEmpty()) return false
+        val wallets = walletDao.getAll()
+        val nothingToRecover = wallets.isEmpty() && keyMaterialDao.count() == 0 &&
+            !keyBackupManager.hasAnyBackups()
+        if (!nothingToRecover && (wallets.isEmpty() || missingWallets().isNotEmpty())) return false
         recoveryState.clear()
         @Suppress("DEPRECATION")
         keyManager.resetCorruptionFlag()
@@ -135,9 +145,24 @@ class RecoveredKeyRestorer @Inject constructor(
             logger.w(TAG, "No wallet row for backup $walletId; skipped, backup kept")
             return Outcome.NoWalletRow
         }
-        if (keyMaterialDao.getKdfVersion(walletId) != null) {
-            // Written by an earlier attempt, or never lost: verify only.
-            return verify(activity, walletId, wallet, writtenIv = null)
+        val existingIv = keyMaterialDao.getByWalletId(walletId)?.iv
+        if (existingIv != null) {
+            // Written by an earlier attempt, or never lost: verify it.
+            val outcome = verify(activity, walletId, wallet, writtenIv = null)
+            if (outcome == Outcome.Restored || outcome == Outcome.Cancelled) return outcome
+            // A row that was never verified and no longer reads back (for
+            // example after a screen lock change) would block every retry.
+            // It is dropped and written again, only when the new material
+            // matches this wallet. A verified row is never dropped.
+            if (walletId !in recoveryState.unverifiedWalletIds() || material == null ||
+                !materialMatches(material, wallet)
+            ) {
+                return outcome
+            }
+            logger.w(TAG, "Unverified key row for $walletId does not read back; writing it again")
+            runCatching { keyMaterialDao.deleteIfIv(walletId, existingIv) }
+                .onFailure { logger.e(TAG, "Removing the unreadable row failed for $walletId", it) }
+            if (keyMaterialDao.getKdfVersion(walletId) != null) return outcome
         }
         if (material == null) return Outcome.NoBackup
 
@@ -229,13 +254,16 @@ class RecoveredKeyRestorer @Inject constructor(
                 val key = keyAtPath(seed, wallet)
                 try {
                     if (wallet !== target && !matchesWallet(key, wallet)) continue
+                    // The row keeps its own type. Only a root phrase wallet stores
+                    // the phrase: sub-accounts store none, and a raw-key wallet
+                    // (which may be account 0 of a phrase) stays a raw key.
+                    val storesPhrase = wallet.type == KeyManager.WALLET_TYPE_MNEMONIC && wallet.parentWalletId == null
                     val material = KeyMaterial(
                         privateKey = key.toHexStringNoPrefix(),
-                        // Sub-accounts store no phrase; only the parent does.
-                        mnemonic = if (wallet.parentWalletId == null) words.joinToString(" ") else null,
-                        walletType = KeyManager.WALLET_TYPE_MNEMONIC,
+                        mnemonic = if (storesPhrase) words.joinToString(" ") else null,
+                        walletType = wallet.type,
                         // The user just entered the phrase.
-                        mnemonicBackedUp = true,
+                        mnemonicBackedUp = storesPhrase,
                     )
                     outcomes[wallet.walletId] = restore(activity, wallet.walletId, material, allowV1)
                 } finally {
@@ -277,6 +305,16 @@ class RecoveredKeyRestorer @Inject constructor(
     private fun keyAtPath(seed: ByteArray, wallet: WalletEntity): ByteArray {
         val (account, chain, index) = derivationIndices(wallet)
         return mnemonicManager.derivePrivateKey(seed, account, chain, index)
+    }
+
+    private fun materialMatches(material: KeyMaterial, wallet: WalletEntity): Boolean {
+        val keyBytes = runCatching { material.privateKey.hexToByteArray() }.getOrNull()
+            ?.takeIf { it.size == PRIVATE_KEY_SIZE } ?: return false
+        return try {
+            matchesWallet(keyBytes, wallet) && phraseMatchesKey(material.mnemonic, keyBytes, wallet)
+        } finally {
+            keyBytes.fill(0)
+        }
     }
 
     private suspend fun write(

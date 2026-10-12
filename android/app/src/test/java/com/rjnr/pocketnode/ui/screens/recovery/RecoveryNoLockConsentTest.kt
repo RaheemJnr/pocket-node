@@ -110,7 +110,7 @@ class RecoveryNoLockConsentTest {
         state.clear()
         restorer = RecoveredKeyRestorer(
             db.walletDao(), db.keyMaterialDao(), writer, reader, authManager, keyManager,
-            MnemonicManager(), state, NoopLogger,
+            MnemonicManager(), state, backups, NoopLogger,
         )
     }
 
@@ -389,5 +389,31 @@ class RecoveryNoLockConsentTest {
 
         assertEquals(RecoveryStage.SUCCESS, vm.uiState.value.stage)
         assertEquals(1, db.keyMaterialDao().getKdfVersion("root"))
+    }
+
+    // --- No backup files at all: the missing wallets are still reachable ---
+
+    @Test
+    fun `with no backup files a missing wallet is reached through the PIN and re-keyed`() = runTest {
+        secureLock(true)
+        addPhraseWalletWithoutBackup()
+        val vm = newVm()
+        advanceUntilIdle()
+        assertEquals(RecoveryStage.MNEMONIC_ENTRY, vm.uiState.value.stage)
+        assertTrue(vm.uiState.value.hasMissingWallets)
+        assertTrue(state.isIncomplete())
+
+        vm.requestMissingRestore()
+        assertEquals(RecoveryStage.PIN_ENTRY, vm.uiState.value.stage)
+        vm.attemptPinRecovery(pin.copyOf(), activity)
+        advanceUntilIdle()
+        assertEquals(listOf("Savings"), vm.uiState.value.missingWalletNames)
+
+        vm.openRekey("root", withPrivateKey = false)
+        vm.submitRekeyPhrase(activity, phraseWords)
+        advanceUntilIdle()
+
+        assertEquals(RecoveryStage.SUCCESS, vm.uiState.value.stage)
+        assertFalse(state.isIncomplete())
     }
 }

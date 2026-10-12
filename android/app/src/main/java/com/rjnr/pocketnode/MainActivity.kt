@@ -147,14 +147,21 @@ class MainActivity : FragmentActivity() {
             // The in-memory flag above is only raised while Room holds no key
             // rows, so a recovery that restored some wallets but not all is
             // kept by a persistent marker until every wallet has verified keys.
-            if (wasReset) recoveredKeyRestorer.markIncomplete()
-            val recoveryPending = !wasReset && recoveredKeyRestorer.isMarkedIncomplete() &&
+            // The marker is only set when a wallet row actually lacks keys (a
+            // read error counts as lacking), so a passing legacy-store hiccup
+            // is not persisted.
+            if (wasReset && runCatching { recoveredKeyRestorer.missingWallets().isNotEmpty() }.getOrDefault(true)) {
+                recoveredKeyRestorer.markIncomplete()
+            }
+            // Recovery is shown until it is complete; a phone with nothing to
+            // recover routes normally.
+            val recoveryPending = (wasReset || recoveredKeyRestorer.isMarkedIncomplete()) &&
                 !runCatching { recoveredKeyRestorer.completeIfDone() }.getOrDefault(false)
             val hasPin = pinManager.hasPin()
             val route = when {
                 // Suppressed, not removed: the corruption flag guards the ESP
                 // legacy-key path, which un-migrated installs still read.
-                wasReset || recoveryPending -> Screen.Recovery.route
+                recoveryPending -> Screen.Recovery.route
                 !cachedHasWallet -> Screen.Onboarding.route
                 !hasPin -> Screen.InitialPinSetup.route
                 else -> Screen.Auth.route

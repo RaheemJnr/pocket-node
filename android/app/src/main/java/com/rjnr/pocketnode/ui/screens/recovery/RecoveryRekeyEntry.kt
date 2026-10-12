@@ -24,6 +24,7 @@ import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.unit.dp
 import com.rjnr.pocketnode.R
 import com.rjnr.pocketnode.ui.components.MnemonicWordInput
+import com.rjnr.pocketnode.ui.components.SecretWordKeyboardOptions
 import com.rjnr.pocketnode.ui.util.Bip39WordList
 
 /**
@@ -74,6 +75,7 @@ internal fun RecoveryRekeyEntry(
                 onValueChange = { privateKey = it.trim() },
                 label = { Text(stringResource(R.string.mnemonic_import_private_key_label)) },
                 visualTransformation = PasswordVisualTransformation(),
+                keyboardOptions = SecretWordKeyboardOptions,
                 singleLine = true,
                 modifier = Modifier.fillMaxWidth()
             )
@@ -88,7 +90,15 @@ internal fun RecoveryRekeyEntry(
                             value = value,
                             suggestions = if (value.length >= 2) Bip39WordList.getSuggestions(value) else emptyList(),
                             isError = value.isNotEmpty() && !Bip39WordList.isValidWord(value),
-                            onValueChange = { words[index] = it.trim().lowercase() },
+                            onValueChange = { text ->
+                                // A whole pasted phrase fills every field, as on the import screen.
+                                val parts = text.trim().lowercase().split(WHITESPACE).filter { it.isNotEmpty() }
+                                if (parts.size > 1) {
+                                    for (i in 0 until WORD_COUNT) words[i] = parts.getOrElse(i) { "" }
+                                } else {
+                                    words[index] = text.trim().lowercase()
+                                }
+                            },
                             onSuggestionSelected = { words[index] = it },
                             modifier = Modifier.weight(1f)
                         )
@@ -126,3 +136,4 @@ internal fun RecoveryRekeyEntry(
 }
 
 private const val WORD_COUNT = 12
+private val WHITESPACE = Regex("\\s+")
