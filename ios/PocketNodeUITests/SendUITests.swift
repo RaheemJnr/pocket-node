@@ -19,18 +19,15 @@ final class SendUITests: XCTestCase {
 
         let recipient = app.textFields["send.recipient"]
         M3UITest.type("not-an-address", into: recipient)
-        XCTAssertEqual(M3UITest.label("send.addressState", in: app), "Invalid address format")
+        M3UITest.assertLabel("send.addressState", equals: "Invalid address format", in: app)
 
         Self.clear(recipient, in: app)
         recipient.typeText(M3UITest.mainnetAddress)
-        XCTAssertEqual(
-            M3UITest.label("send.addressState", in: app),
-            "This is a mainnet address on testnet"
-        )
+        M3UITest.assertLabel("send.addressState", equals: "This is a mainnet address on testnet", in: app)
 
         Self.clear(recipient, in: app)
         recipient.typeText(M3UITest.testnetAddress)
-        XCTAssertEqual(M3UITest.label("send.addressState", in: app), "Valid CKB testnet address")
+        M3UITest.assertLabel("send.addressState", equals: "Valid CKB testnet address", in: app)
     }
 
     /// The shared sanitiser drops a ninth decimal as it is typed, and the field
@@ -45,13 +42,13 @@ final class SendUITests: XCTestCase {
 
         let amount = app.textFields["send.amount"]
         M3UITest.type("12.3456789", into: amount)
-        XCTAssertEqual(amount.value as? String, "12.3456789", "seven decimals are kept as typed")
+        M3UITest.assertValue(of: amount, equals: "12.3456789", "seven decimals are kept as typed")
 
         amount.typeText("0")
-        XCTAssertEqual(amount.value as? String, "12.34567890", "the eighth decimal still lands")
+        M3UITest.assertValue(of: amount, equals: "12.34567890", "the eighth decimal still lands")
 
         amount.typeText("1")
-        XCTAssertEqual(amount.value as? String, "12.34567890", "the ninth is dropped from the field too")
+        M3UITest.assertValue(of: amount, equals: "12.34567890", "the ninth is dropped from the field too")
     }
 
     /// A character that is not part of a number never lingers on screen.
@@ -65,13 +62,13 @@ final class SendUITests: XCTestCase {
 
         let amount = app.textFields["send.amount"]
         M3UITest.type("61", into: amount)
-        XCTAssertEqual(amount.value as? String, "61")
+        M3UITest.assertValue(of: amount, equals: "61")
 
         amount.typeText("x")
-        XCTAssertEqual(amount.value as? String, "61", "a rejected character should not linger")
+        M3UITest.assertValue(of: amount, equals: "61", "a rejected character should not linger")
 
         amount.typeText(".5")
-        XCTAssertEqual(amount.value as? String, "61.5", "and typing carries on from the kept value")
+        M3UITest.assertValue(of: amount, equals: "61.5", "and typing carries on from the kept value")
     }
 
     /// Below one minimal cell the form refuses before anything is built.
@@ -88,10 +85,7 @@ final class SendUITests: XCTestCase {
             app.staticTexts["sendFailure.message"].firstMatch.waitForExistence(timeout: 15),
             "no failure dialog for an amount under the minimum"
         )
-        XCTAssertEqual(
-            M3UITest.label("sendFailure.message", in: app),
-            "Minimum transfer is 61 CKB"
-        )
+        M3UITest.assertLabel("sendFailure.message", equals: "Minimum transfer is 61 CKB", in: app)
     }
 
     /// What a well-formed send does on a wallet with nothing in it.
@@ -115,7 +109,7 @@ final class SendUITests: XCTestCase {
             app.staticTexts["sendFailure.message"].firstMatch.waitForExistence(timeout: 20),
             "no outcome at all from a send on an empty wallet"
         )
-        XCTAssertEqual(M3UITest.label("sendFailure.message", in: app), "Insufficient balance")
+        M3UITest.assertLabel("sendFailure.message", equals: "Insufficient balance", in: app)
         XCTAssertFalse(
             app.staticTexts["review.total"].firstMatch.exists,
             "the review sheet should never open without cells to fund it"
@@ -139,7 +133,7 @@ final class SendUITests: XCTestCase {
             app.textFields["send.recipient"].waitForExistence(timeout: 15),
             "the scanner did not dismiss"
         )
-        XCTAssertEqual(M3UITest.label("send.addressState", in: app), "Valid CKB testnet address")
+        M3UITest.assertLabel("send.addressState", equals: "Valid CKB testnet address", in: app)
     }
 
     // MARK: - Helpers
