@@ -24,10 +24,11 @@ import javax.inject.Singleton
  *    nothing is written ([Outcome.AddressMismatch]).
  * 3. The bundle is persisted through [WalletKeyWriter], the same writer a
  *    fresh import uses: auth-bound V2 when the device has a biometric or a
- *    screen lock, otherwise the V1 software key. The material it replaces
- *    lived in EncryptedSharedPreferences, which is not auth-bound either, so
- *    neither choice stores the keys more weakly than before. An existing
- *    `key_material` row is never overwritten; it is only verified.
+ *    screen lock, otherwise the V1 software key. Like every other wallet
+ *    write, V1 needs the user's consent first (the "Continue without a
+ *    device lock?" dialog): without `allowV1` nothing is written and the
+ *    result is [Outcome.NeedsNoLockConsent]. An existing `key_material` row
+ *    is never overwritten; it is only verified.
  * 4. The stored key is read back through [WalletKeyReader] and must derive
  *    the stored addresses again. A row written here that fails this check is
  *    removed, so a later attempt starts clean.
@@ -55,6 +56,11 @@ class RecoveredKeyRestorer @Inject constructor(
          * derive the wallet's addresses. Nothing was overwritten.
          */
         object AddressMismatch : Outcome()
+        /**
+         * The phone has no screen lock and the user has not agreed to the
+         * software-only key yet; nothing was written.
+         */
+        object NeedsNoLockConsent : Outcome()
         /** The user dismissed the unlock prompt; a retry can finish it. */
         object Cancelled : Outcome()
         /** Write or read-back failed; [reason] never holds key material. */
@@ -65,6 +71,7 @@ class RecoveredKeyRestorer @Inject constructor(
         activity: FragmentActivity,
         walletId: String,
         material: KeyMaterial,
+        allowV1: Boolean,
     ): Outcome {
         val wallet = walletDao.getById(walletId)
         if (wallet == null) {
@@ -86,6 +93,10 @@ class RecoveredKeyRestorer @Inject constructor(
                 // Written by an earlier attempt, or never lost: verify only.
                 false
             } else {
+                if (needsNoLockConsent() && !allowV1) {
+                    logger.i(TAG, "No screen lock and no consent yet for $walletId; not written")
+                    return Outcome.NeedsNoLockConsent
+                }
                 when (val written = write(activity, walletId, keyBytes, material)) {
                     WalletKeyWriter.Result.Success -> true
                     WalletKeyWriter.Result.Cancelled -> return Outcome.Cancelled
@@ -106,6 +117,13 @@ class RecoveredKeyRestorer @Inject constructor(
         }
     }
 
+    /**
+     * True when a restore would store keys at V1 (no biometric, no screen
+     * lock), which needs the no-lock consent first.
+     */
+    fun needsNoLockConsent(): Boolean =
+        !authManager.isBiometricEnrolled() && !authManager.hasDeviceCredential()
+
     /** Clears the startup corruption flag; call only once every wallet is [Outcome.Restored]. */
     @Suppress("DEPRECATION")
     fun clearCorruptionFlag() {
@@ -120,7 +138,7 @@ class RecoveredKeyRestorer @Inject constructor(
     ): WalletKeyWriter.Result {
         // Same bundle format a fresh import produces.
         val bundle = WalletDerivation.encodePlaintextBundle(keyBytes, material.mnemonic?.split(" "))
-        return if (authManager.isBiometricEnrolled() || authManager.hasDeviceCredential()) {
+        return if (!needsNoLockConsent()) {
             keyWriter.persistNewWallet(
                 activity = activity,
                 walletId = walletId,

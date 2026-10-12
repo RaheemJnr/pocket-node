@@ -50,6 +50,11 @@ data class RecoveryUiState(
     val phraseRestoreReady: Boolean = false,
     /** On [RecoveryStage.RESTORE_FAILED]: Try again can still finish the restore. */
     val canRetryRestore: Boolean = false,
+    /**
+     * The phone has no screen lock: ask before storing the restored keys
+     * with the software-only key (same dialog as wallet import).
+     */
+    val showNoLockConsent: Boolean = false,
     /** On [RecoveryStage.SUCCESS]: wallets whose keys were written back and verified. */
     val restoredWalletCount: Int = 0,
 )
@@ -163,7 +168,7 @@ class RecoveryViewModel(
                 _uiState.update {
                     it.copy(recoveredWallets = recovered, failedWalletIds = failed, error = null)
                 }
-                restoreRecoveredKeys(activity)
+                restoreRecoveredKeys(activity, noLockConsented = false)
             } else {
                 // Verified PIN but nothing decrypted (corrupt blobs, or the
                 // degenerate no-hash case with a wrong PIN). Fall back to the
@@ -182,7 +187,27 @@ class RecoveryViewModel(
     fun retryRestore(activity: FragmentActivity) {
         val state = _uiState.value
         if (state.stage != RecoveryStage.RESTORE_FAILED || !state.canRetryRestore) return
-        viewModelScope.launch { restoreRecoveredKeys(activity) }
+        viewModelScope.launch { restoreRecoveredKeys(activity, noLockConsented = false) }
+    }
+
+    /** "Continue anyway" on the no-lock dialog: store the keys at V1. */
+    fun confirmNoLockConsent(activity: FragmentActivity) {
+        if (!_uiState.value.showNoLockConsent) return
+        _uiState.update { it.copy(showNoLockConsent = false) }
+        viewModelScope.launch { restoreRecoveredKeys(activity, noLockConsented = true) }
+    }
+
+    /** "Cancel" on the no-lock dialog: nothing is written, the backups stay. */
+    fun dismissNoLockConsent() {
+        if (!_uiState.value.showNoLockConsent) return
+        _uiState.update {
+            it.copy(
+                showNoLockConsent = false,
+                stage = RecoveryStage.RESTORE_FAILED,
+                error = RESTORE_NO_LOCK_DECLINED,
+                canRetryRestore = true,
+            )
+        }
     }
 
     /**
@@ -191,18 +216,27 @@ class RecoveryViewModel(
      * flag cleared and the screen left ([RecoveryStage.SUCCESS]). Otherwise
      * it stays on [RecoveryStage.RESTORE_FAILED]; backup files are never
      * removed here.
+     *
+     * On a phone with no screen lock the keys would be stored with the
+     * software-only key, so the no-lock dialog is asked first, once per
+     * attempt; until it is accepted nothing is written.
      */
-    private suspend fun restoreRecoveredKeys(activity: FragmentActivity) {
+    private suspend fun restoreRecoveredKeys(activity: FragmentActivity, noLockConsented: Boolean) {
         if (restoreInProgress) return
         restoreInProgress = true
         try {
             _uiState.update { it.copy(stage = RecoveryStage.RESTORING, error = null, canRetryRestore = false) }
+            if (!noLockConsented && keyRestorer.needsNoLockConsent()) {
+                _uiState.update { it.copy(showNoLockConsent = true) }
+                return
+            }
             var mismatch = false
             var retryable = false
+            var needsConsent = false
             for (wallet in _uiState.value.recoveredWallets) {
                 if (wallet.walletId in restoredWalletIds || wallet.walletId in skippedWalletIds) continue
                 val outcome = try {
-                    keyRestorer.restore(activity, wallet.walletId, wallet.material)
+                    keyRestorer.restore(activity, wallet.walletId, wallet.material, allowV1 = noLockConsented)
                 } catch (e: CancellationException) {
                     throw e
                 } catch (e: Exception) {
@@ -212,20 +246,31 @@ class RecoveryViewModel(
                     RecoveredKeyRestorer.Outcome.Restored -> restoredWalletIds.add(wallet.walletId)
                     RecoveredKeyRestorer.Outcome.NoWalletRow -> skippedWalletIds.add(wallet.walletId)
                     RecoveredKeyRestorer.Outcome.AddressMismatch -> mismatch = true
+                    // The screen lock went away mid-restore: ask, then retry.
+                    RecoveredKeyRestorer.Outcome.NeedsNoLockConsent -> needsConsent = true
                     RecoveredKeyRestorer.Outcome.Cancelled,
                     is RecoveredKeyRestorer.Outcome.Failed -> retryable = true
                 }
             }
 
+            if (needsConsent && !mismatch && !retryable) {
+                _uiState.update { it.copy(showNoLockConsent = true) }
+                return
+            }
             val error = when {
                 mismatch -> RESTORE_MISMATCH_ERROR
+                needsConsent -> RESTORE_RETRY_ERROR
                 retryable -> RESTORE_RETRY_ERROR
                 restoredWalletIds.isEmpty() -> RESTORE_NO_WALLET_ERROR
                 else -> null
             }
             if (error != null) {
                 _uiState.update {
-                    it.copy(stage = RecoveryStage.RESTORE_FAILED, error = error, canRetryRestore = retryable)
+                    it.copy(
+                        stage = RecoveryStage.RESTORE_FAILED,
+                        error = error,
+                        canRetryRestore = retryable || needsConsent,
+                    )
                 }
                 return
             }
@@ -449,6 +494,9 @@ class RecoveryViewModel(
                 "Restore that wallet with its recovery phrase."
         const val RESTORE_RETRY_ERROR =
             "Some wallet keys could not be saved yet. Your backup files are kept. Try again."
+        const val RESTORE_NO_LOCK_DECLINED =
+            "Nothing was saved. Set a screen lock on this phone, then tap Try again. " +
+                "Your backup files are kept."
         const val RESTORE_NO_WALLET_ERROR =
             "These backups do not belong to a wallet on this phone. Your backup files are kept. " +
                 "Restore with your recovery phrase."

@@ -127,7 +127,7 @@ class RecoveredKeyRestorerTest {
         secureLock(true)
         insertWallet("w1", keyHex)
 
-        val outcome = restorer.restore(activity, "w1", material())
+        val outcome = restorer.restore(activity, "w1", material(), allowV1 = true)
 
         assertEquals(RecoveredKeyRestorer.Outcome.Restored, outcome)
         assertEquals(2, keyMaterialDao.getKdfVersion("w1"))
@@ -145,7 +145,7 @@ class RecoveredKeyRestorerTest {
         secureLock(false)
         insertWallet("w1", keyHex)
 
-        val outcome = restorer.restore(activity, "w1", material())
+        val outcome = restorer.restore(activity, "w1", material(), allowV1 = true)
 
         assertEquals(RecoveredKeyRestorer.Outcome.Restored, outcome)
         assertEquals(1, keyMaterialDao.getKdfVersion("w1"))
@@ -159,8 +159,8 @@ class RecoveredKeyRestorerTest {
         insertWallet("w1", keyHex)
         insertWallet("w2", otherKeyHex)
 
-        assertEquals(RecoveredKeyRestorer.Outcome.Restored, restorer.restore(activity, "w1", material(keyHex)))
-        assertEquals(RecoveredKeyRestorer.Outcome.Restored, restorer.restore(activity, "w2", material(otherKeyHex)))
+        assertEquals(RecoveredKeyRestorer.Outcome.Restored, restorer.restore(activity, "w1", material(keyHex), allowV1 = true))
+        assertEquals(RecoveredKeyRestorer.Outcome.Restored, restorer.restore(activity, "w2", material(otherKeyHex), allowV1 = true))
 
         assertEquals(keyHex, v1Helper.readDecryptedKey("w1")!!.privateKeyHex)
         assertEquals(otherKeyHex, v1Helper.readDecryptedKey("w2")!!.privateKeyHex)
@@ -171,7 +171,7 @@ class RecoveredKeyRestorerTest {
         secureLock(true)
         insertWallet("w1", keyHex)
 
-        val outcome = restorer.restore(activity, "w1", material(otherKeyHex))
+        val outcome = restorer.restore(activity, "w1", material(otherKeyHex), allowV1 = true)
 
         assertEquals(RecoveredKeyRestorer.Outcome.AddressMismatch, outcome)
         assertNull(keyMaterialDao.getByWalletId("w1"))
@@ -186,7 +186,7 @@ class RecoveredKeyRestorerTest {
         // A different key is already stored under w1.
         v1Helper.migrateWallet("w1", otherKeyHex, null, KeyManager.WALLET_TYPE_RAW_KEY, false)
 
-        val outcome = restorer.restore(activity, "w1", material())
+        val outcome = restorer.restore(activity, "w1", material(), allowV1 = true)
 
         assertEquals(RecoveredKeyRestorer.Outcome.AddressMismatch, outcome)
         assertEquals(otherKeyHex, v1Helper.readDecryptedKey("w1")!!.privateKeyHex)
@@ -196,7 +196,7 @@ class RecoveredKeyRestorerTest {
     fun `a backup with no wallet row is skipped and its file kept`() = runTest {
         secureLock(true)
 
-        val outcome = restorer.restore(activity, "orphan", material())
+        val outcome = restorer.restore(activity, "orphan", material(), allowV1 = true)
 
         assertEquals(RecoveredKeyRestorer.Outcome.NoWalletRow, outcome)
         assertNull(keyMaterialDao.getByWalletId("orphan"))
@@ -212,7 +212,7 @@ class RecoveredKeyRestorerTest {
             authManager.authenticateForCipher(any(), any<Cipher>(), any(), any())
         } returns AuthManager.CipherAuthResult.Cancelled
 
-        val outcome = restorer.restore(activity, "w1", material())
+        val outcome = restorer.restore(activity, "w1", material(), allowV1 = true)
 
         assertEquals(RecoveredKeyRestorer.Outcome.Cancelled, outcome)
         assertNull(keyMaterialDao.getByWalletId("w1"))
@@ -231,11 +231,11 @@ class RecoveredKeyRestorerTest {
             else AuthManager.CipherAuthResult.Success(args[1] as Cipher)
         }
 
-        assertEquals(RecoveredKeyRestorer.Outcome.Cancelled, restorer.restore(activity, "w1", material()))
+        assertEquals(RecoveredKeyRestorer.Outcome.Cancelled, restorer.restore(activity, "w1", material(), allowV1 = true))
         val written = keyMaterialDao.getByWalletId("w1")
         assertNotNull(written)
 
-        assertEquals(RecoveredKeyRestorer.Outcome.Restored, restorer.restore(activity, "w1", material()))
+        assertEquals(RecoveredKeyRestorer.Outcome.Restored, restorer.restore(activity, "w1", material(), allowV1 = true))
         // The retry read the existing row (prompt 3) and wrote nothing new.
         assertEquals(3, prompts)
         assertArrayEquals(written!!.encryptedPrivateKey, keyMaterialDao.getByWalletId("w1")!!.encryptedPrivateKey)
@@ -249,7 +249,7 @@ class RecoveredKeyRestorerTest {
         coEvery { lyingReader.readPrivateKey(any(), any(), any(), any()) } returns
             WalletKeyReader.Result.Success(otherKeyHex.hexToByteArray())
 
-        val outcome = newRestorer(lyingReader).restore(activity, "w1", material())
+        val outcome = newRestorer(lyingReader).restore(activity, "w1", material(), allowV1 = true)
 
         assertEquals(RecoveredKeyRestorer.Outcome.AddressMismatch, outcome)
         assertNull(keyMaterialDao.getByWalletId("w1"))
@@ -264,7 +264,7 @@ class RecoveredKeyRestorerTest {
         coEvery { failingReader.readPrivateKey(any(), any(), any(), any()) } returns
             WalletKeyReader.Result.NotAvailable("decrypt failed")
 
-        val outcome = newRestorer(failingReader).restore(activity, "w1", material())
+        val outcome = newRestorer(failingReader).restore(activity, "w1", material(), allowV1 = true)
 
         assertTrue(outcome is RecoveredKeyRestorer.Outcome.Failed)
         assertNull(keyMaterialDao.getByWalletId("w1"))
@@ -275,5 +275,30 @@ class RecoveredKeyRestorerTest {
         restorer.clearCorruptionFlag()
         @Suppress("DEPRECATION")
         verify(exactly = 1) { keyManager.resetCorruptionFlag() }
+    }
+
+    @Test
+    fun `without a screen lock and without consent nothing is written`() = runTest {
+        secureLock(false)
+        insertWallet("w1", keyHex)
+
+        val outcome = restorer.restore(activity, "w1", material(), allowV1 = false)
+
+        assertEquals(RecoveredKeyRestorer.Outcome.NeedsNoLockConsent, outcome)
+        assertTrue(restorer.needsNoLockConsent())
+        assertNull(keyMaterialDao.getByWalletId("w1"))
+        verify(exactly = 0) { keyBackupManager.deleteBackup(any()) }
+    }
+
+    @Test
+    fun `with a screen lock no consent is needed and the keys go to V2`() = runTest {
+        secureLock(true)
+        insertWallet("w1", keyHex)
+
+        val outcome = restorer.restore(activity, "w1", material(), allowV1 = false)
+
+        assertEquals(RecoveredKeyRestorer.Outcome.Restored, outcome)
+        assertEquals(false, restorer.needsNoLockConsent())
+        assertEquals(2, keyMaterialDao.getKdfVersion("w1"))
     }
 }

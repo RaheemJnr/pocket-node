@@ -61,6 +61,14 @@ fun RecoveryScreen(
         }
     }
 
+    // No screen lock: same consent as wallet import before the software-only key.
+    if (uiState.showNoLockConsent) {
+        com.rjnr.pocketnode.ui.components.NoDeviceLockConsentDialog(
+            onConfirm = { viewModel.confirmNoLockConsent(activity) },
+            onDismiss = viewModel::dismissNoLockConsent,
+        )
+    }
+
     if (uiState.showStartFreshConfirm) {
         StartFreshDialog(
             inProgress = uiState.isStartingFresh,

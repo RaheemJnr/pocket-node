@@ -21,6 +21,7 @@ import com.rjnr.pocketnode.ui.screens.auth.NamedStringsActivity
 import com.rjnr.pocketnode.util.AppRestarter
 import io.mockk.coEvery
 import io.mockk.coVerify
+import io.mockk.every
 import io.mockk.mockk
 import io.mockk.verify
 import kotlinx.coroutines.Dispatchers
@@ -68,7 +69,7 @@ class RecoveryScreenNavigationTest {
     private val localWalletReset = mockk<LocalWalletReset>(relaxed = true)
     private val appRestarter = mockk<AppRestarter>(relaxed = true)
     private val keyRestorer = mockk<RecoveredKeyRestorer>(relaxed = true).also {
-        coEvery { it.restore(any(), any(), any()) } returns RecoveredKeyRestorer.Outcome.Restored
+        coEvery { it.restore(any(), any(), any(), any()) } returns RecoveredKeyRestorer.Outcome.Restored
     }
     private var phraseRestores = 0
     private var recoveries = 0
@@ -221,17 +222,17 @@ class RecoveryScreenNavigationTest {
 
         enterBackupPin("999999")
         assertEquals(0, recoveries)
-        coVerify(exactly = 0) { keyRestorer.restore(any(), any(), any()) }
+        coVerify(exactly = 0) { keyRestorer.restore(any(), any(), any(), any()) }
 
         enterBackupPin("123456")
         assertEquals(1, recoveries)
-        coVerify(exactly = 1) { keyRestorer.restore(any(), "wallet1", any()) }
+        coVerify(exactly = 1) { keyRestorer.restore(any(), "wallet1", any(), any()) }
         verify(exactly = 1) { keyRestorer.clearCorruptionFlag() }
     }
 
     @Test
     fun `a backup that does not match its wallet stays on Recovery with the phrase restore offered`() {
-        coEvery { keyRestorer.restore(any(), any(), any()) } returns
+        coEvery { keyRestorer.restore(any(), any(), any(), any()) } returns
             RecoveredKeyRestorer.Outcome.AddressMismatch
         show(pinManager("123456"), withBackup = true)
 
@@ -244,5 +245,27 @@ class RecoveryScreenNavigationTest {
         compose.waitForIdle()
         // The PIN was verified on this screen, so the phrase restore opens.
         assertEquals(1, phraseRestores)
+    }
+
+    @Test
+    fun `with no screen lock the import consent dialog shows before anything is stored`() {
+        every { keyRestorer.needsNoLockConsent() } returns true
+        show(pinManager("123456"), withBackup = true)
+
+        enterBackupPin("123456")
+        compose.onNodeWithText("Continue without a device lock?").assertExists()
+        coVerify(exactly = 0) { keyRestorer.restore(any(), any(), any(), any()) }
+
+        compose.onNodeWithText("Cancel").performClick()
+        compose.waitForIdle()
+        assertEquals(0, recoveries)
+        coVerify(exactly = 0) { keyRestorer.restore(any(), any(), any(), any()) }
+        compose.onNodeWithText("recovery_restore_retry").performClick()
+        compose.waitForIdle()
+
+        compose.onNodeWithText("Continue anyway").performClick()
+        compose.waitForIdle()
+        coVerify(exactly = 1) { keyRestorer.restore(any(), "wallet1", any(), true) }
+        assertEquals(1, recoveries)
     }
 }

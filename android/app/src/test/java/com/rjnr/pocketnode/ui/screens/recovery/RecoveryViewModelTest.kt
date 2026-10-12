@@ -66,7 +66,7 @@ class RecoveryViewModelTest {
     private val appRestarter = mockk<AppRestarter>(relaxed = true)
     private val activity = mockk<FragmentActivity>(relaxed = true)
     private val keyRestorer = mockk<RecoveredKeyRestorer>(relaxed = true).also {
-        coEvery { it.restore(any(), any(), any()) } returns RecoveredKeyRestorer.Outcome.Restored
+        coEvery { it.restore(any(), any(), any(), any()) } returns RecoveredKeyRestorer.Outcome.Restored
     }
 
     @Before
@@ -135,7 +135,7 @@ class RecoveryViewModelTest {
         assertEquals(RecoveryStage.SUCCESS, vm.uiState.value.stage)
         assertEquals(1, vm.uiState.value.restoredWalletCount)
         coVerify(exactly = 1) {
-            keyRestorer.restore(activity, "wallet1", match { it.privateKey == "a".repeat(64) })
+            keyRestorer.restore(activity, "wallet1", match { it.privateKey == "a".repeat(64) }, false)
         }
         // The decrypted copies leave the UI state once they are stored.
         assertTrue(vm.uiState.value.recoveredWallets.isEmpty())
@@ -240,8 +240,8 @@ class RecoveryViewModelTest {
 
         assertEquals(RecoveryStage.SUCCESS, vm.uiState.value.stage)
         assertEquals(1, vm.uiState.value.restoredWalletCount)
-        coVerify(exactly = 1) { keyRestorer.restore(activity, "wallet1", any()) }
-        coVerify(exactly = 0) { keyRestorer.restore(any(), "wallet2", any()) }
+        coVerify(exactly = 1) { keyRestorer.restore(activity, "wallet1", any(), any()) }
+        coVerify(exactly = 0) { keyRestorer.restore(any(), "wallet2", any(), any()) }
         assertEquals(1, vm.uiState.value.failedWalletIds.size)
         assertEquals("wallet2", vm.uiState.value.failedWalletIds[0])
     }
@@ -627,14 +627,14 @@ class RecoveryViewModelTest {
 
         assertEquals(RecoveryStage.SUCCESS, vm.uiState.value.stage)
         assertEquals(2, vm.uiState.value.restoredWalletCount)
-        coVerify(exactly = 1) { keyRestorer.restore(activity, "wallet1", any()) }
-        coVerify(exactly = 1) { keyRestorer.restore(activity, "wallet2", any()) }
+        coVerify(exactly = 1) { keyRestorer.restore(activity, "wallet1", any(), any()) }
+        coVerify(exactly = 1) { keyRestorer.restore(activity, "wallet2", any(), any()) }
         verify(exactly = 1) { keyRestorer.clearCorruptionFlag() }
     }
 
     @Test
     fun `a mismatched backup stops on an error, keeps the flag and offers no retry`() = runTest {
-        coEvery { keyRestorer.restore(any(), "wallet2", any()) } returns
+        coEvery { keyRestorer.restore(any(), "wallet2", any(), any()) } returns
             RecoveredKeyRestorer.Outcome.AddressMismatch
         val manager = backupsFor("wallet1", "wallet2")
         val vm = newVm(manager, createPinManager(correctPin))
@@ -654,7 +654,7 @@ class RecoveryViewModelTest {
     @Test
     fun `a cancelled prompt can be retried and the retry skips wallets already restored`() = runTest {
         var wallet2Calls = 0
-        coEvery { keyRestorer.restore(any(), "wallet2", any()) } answers {
+        coEvery { keyRestorer.restore(any(), "wallet2", any(), any()) } answers {
             wallet2Calls++
             if (wallet2Calls == 1) RecoveredKeyRestorer.Outcome.Cancelled
             else RecoveredKeyRestorer.Outcome.Restored
@@ -671,14 +671,14 @@ class RecoveryViewModelTest {
         advanceUntilIdle()
 
         assertEquals(RecoveryStage.SUCCESS, vm.uiState.value.stage)
-        coVerify(exactly = 1) { keyRestorer.restore(any(), "wallet1", any()) }
+        coVerify(exactly = 1) { keyRestorer.restore(any(), "wallet1", any(), any()) }
         assertEquals(2, wallet2Calls)
         verify(exactly = 1) { keyRestorer.clearCorruptionFlag() }
     }
 
     @Test
     fun `a backup without a wallet row is skipped and reported, the rest restore`() = runTest {
-        coEvery { keyRestorer.restore(any(), "orphan", any()) } returns
+        coEvery { keyRestorer.restore(any(), "orphan", any(), any()) } returns
             RecoveredKeyRestorer.Outcome.NoWalletRow
         val vm = newVm(backupsFor("wallet1", "orphan"), createPinManager(correctPin))
 
@@ -693,7 +693,7 @@ class RecoveryViewModelTest {
 
     @Test
     fun `when no backup has a wallet row nothing is left and the flag stays`() = runTest {
-        coEvery { keyRestorer.restore(any(), any(), any()) } returns
+        coEvery { keyRestorer.restore(any(), any(), any(), any()) } returns
             RecoveredKeyRestorer.Outcome.NoWalletRow
         val vm = newVm(backupsFor("orphan"), createPinManager(correctPin))
 
@@ -713,7 +713,7 @@ class RecoveryViewModelTest {
         advanceUntilIdle()
 
         assertEquals(RecoveryStage.PIN_ENTRY, vm.uiState.value.stage)
-        coVerify(exactly = 0) { keyRestorer.restore(any(), any(), any()) }
+        coVerify(exactly = 0) { keyRestorer.restore(any(), any(), any(), any()) }
         verify(exactly = 0) { keyRestorer.clearCorruptionFlag() }
     }
 }
