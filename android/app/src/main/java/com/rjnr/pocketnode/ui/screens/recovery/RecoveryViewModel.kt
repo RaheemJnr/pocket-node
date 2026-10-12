@@ -19,6 +19,7 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import java.lang.ref.WeakReference
 import javax.inject.Inject
 
 enum class RecoveryStage {
@@ -37,7 +38,6 @@ enum class RecoveryStage {
 data class RecoveryUiState(
     val stage: RecoveryStage = RecoveryStage.PIN_ENTRY,
     val failedAttempts: Int = 0,
-    val recoveredWallets: List<RecoveredWallet> = emptyList(),
     val failedWalletIds: List<String> = emptyList(),
     val error: String? = null,
     /** Where Cancel on [RecoveryStage.PHRASE_PIN_ENTRY] goes back to. */
@@ -55,6 +55,8 @@ data class RecoveryUiState(
      * with the software-only key (same dialog as wallet import).
      */
     val showNoLockConsent: Boolean = false,
+    /** On [RecoveryStage.RESTORE_FAILED]: wallets on this phone still without verified keys. */
+    val missingWalletNames: List<String> = emptyList(),
     /** On [RecoveryStage.SUCCESS]: wallets whose keys were written back and verified. */
     val restoredWalletCount: Int = 0,
 )
@@ -62,7 +64,10 @@ data class RecoveryUiState(
 data class RecoveredWallet(
     val walletId: String,
     val material: KeyMaterial
-)
+) {
+    /** Never prints the key material. */
+    override fun toString(): String = "RecoveredWallet(walletId=$walletId)"
+}
 
 @HiltViewModel
 class RecoveryViewModel(
@@ -92,11 +97,15 @@ class RecoveryViewModel(
     /** The stored app PIN was entered correctly on this screen. */
     private var pinVerified = false
 
-    /** Wallets whose recovered keys are stored and verified; a retry skips them. */
+    /** Wallets whose recovered keys were stored and verified on this screen. */
     private val restoredWalletIds = mutableSetOf<String>()
 
-    /** Decrypted backups with no wallet row on this phone; never written. */
-    private val skippedWalletIds = mutableSetOf<String>()
+    /**
+     * Decrypted backups, by wallet id. Kept only while an attempt runs (and
+     * while its no-lock dialog is open), never in UI state; each entry is
+     * dropped once its wallet is restored or its backup does not match.
+     */
+    private val decrypted = mutableMapOf<String, KeyMaterial>()
 
     private var restoreInProgress = false
 
@@ -122,6 +131,9 @@ class RecoveryViewModel(
     private enum class PhraseGate { OPEN, ASK_PIN, START_FRESH, READ_ERROR }
 
     init {
+        // This screen means the key store needs recovery: keep offering it at
+        // every launch until every wallet has verified keys.
+        keyRestorer.markIncomplete()
         if (!backupManager.hasAnyBackups()) {
             _uiState.update { it.copy(stage = RecoveryStage.MNEMONIC_ENTRY) }
         }
@@ -131,7 +143,7 @@ class RecoveryViewModel(
      * Attempts to recover wallets from their PIN-encrypted backup blobs,
      * behind the shared [checkPin], then writes the recovered keys back
      * through [RecoveredKeyRestorer]. [activity] drives the screen-lock
-     * prompts of the normal key store.
+     * prompts of the normal key store; only a weak reference is kept.
      */
     fun attemptPinRecovery(pin: CharArray, activity: FragmentActivity) {
         if (restoreInProgress) return
@@ -149,45 +161,31 @@ class RecoveryViewModel(
                 authManager.setSessionPin(pin)
             }
 
-            // PIN verified (or no hash to verify against) — decrypt off the main
-            // thread (PBKDF2/Argon2 is CPU/memory-heavy).
-            val recovered = mutableListOf<RecoveredWallet>()
+            // PIN verified (or no hash to verify against): decrypt off the
+            // main thread (PBKDF2/Argon2 is CPU/memory-heavy).
+            val recovered = mutableMapOf<String, KeyMaterial>()
             val failed = mutableListOf<String>()
             withContext(ioDispatcher) {
                 for (id in backupManager.listBackupWalletIds()) {
                     val material = backupManager.readBackup(id, pin)
-                    if (material != null) {
-                        recovered.add(RecoveredWallet(id, material))
-                    } else {
-                        failed.add(id)
-                    }
+                    if (material != null) recovered[id] = material else failed.add(id)
                 }
             }
-
-            if (recovered.isNotEmpty()) {
-                _uiState.update {
-                    it.copy(recoveredWallets = recovered, failedWalletIds = failed, error = null)
-                }
-                restoreRecoveredKeys(activity, noLockConsented = false)
-            } else {
-                // Verified PIN but nothing decrypted (corrupt blobs, or the
-                // degenerate no-hash case with a wrong PIN). Fall back to the
-                // mnemonic so the user isn't stuck.
-                _uiState.update {
-                    it.copy(
-                        stage = RecoveryStage.MNEMONIC_ENTRY,
-                        error = "Could not recover from PIN. Please enter your recovery phrase."
-                    )
-                }
-            }
+            decrypted.clear()
+            decrypted.putAll(recovered)
+            _uiState.update { it.copy(failedWalletIds = failed, error = null) }
+            restoreRecoveredKeys(activity, noLockConsented = false)
         }
     }
 
-    /** Try again on [RecoveryStage.RESTORE_FAILED]. */
-    fun retryRestore(activity: FragmentActivity) {
+    /**
+     * Try again on [RecoveryStage.RESTORE_FAILED]. The decrypted backups were
+     * dropped when the attempt ended, so this goes back to the PIN.
+     */
+    fun retryRestore() {
         val state = _uiState.value
         if (state.stage != RecoveryStage.RESTORE_FAILED || !state.canRetryRestore) return
-        viewModelScope.launch { restoreRecoveredKeys(activity, noLockConsented = false) }
+        _uiState.update { it.copy(stage = RecoveryStage.PIN_ENTRY, error = null, canRetryRestore = false) }
     }
 
     /** "Continue anyway" on the no-lock dialog: store the keys at V1. */
@@ -200,6 +198,7 @@ class RecoveryViewModel(
     /** "Cancel" on the no-lock dialog: nothing is written, the backups stay. */
     fun dismissNoLockConsent() {
         if (!_uiState.value.showNoLockConsent) return
+        decrypted.clear()
         _uiState.update {
             it.copy(
                 showNoLockConsent = false,
@@ -211,11 +210,13 @@ class RecoveryViewModel(
     }
 
     /**
-     * Writes each recovered wallet's keys back and reads them back. Only when
-     * every wallet with a row on this phone is restored is the corruption
-     * flag cleared and the screen left ([RecoveryStage.SUCCESS]). Otherwise
-     * it stays on [RecoveryStage.RESTORE_FAILED]; backup files are never
-     * removed here.
+     * Brings every wallet row to verified keys: writes the decrypted backups
+     * of wallets without keys, and reads back rows written earlier but not
+     * verified. Only when [RecoveredKeyRestorer.completeIfDone] holds (every
+     * wallet row has verified keys) is the corruption state cleared and the
+     * screen left ([RecoveryStage.SUCCESS]). Otherwise it stays on
+     * [RecoveryStage.RESTORE_FAILED] naming the wallets still missing, and
+     * the decrypted backups are dropped. Backup files are never removed here.
      *
      * On a phone with no screen lock the keys would be stored with the
      * software-only key, so the no-lock dialog is asked first, once per
@@ -224,32 +225,46 @@ class RecoveryViewModel(
     private suspend fun restoreRecoveredKeys(activity: FragmentActivity, noLockConsented: Boolean) {
         if (restoreInProgress) return
         restoreInProgress = true
+        val activityRef = WeakReference(activity)
         try {
             _uiState.update { it.copy(stage = RecoveryStage.RESTORING, error = null, canRetryRestore = false) }
-            if (!noLockConsented && keyRestorer.needsNoLockConsent()) {
+            val missing = keyRestorer.missingWallets()
+            if (!noLockConsented && missing.any { it.walletId in decrypted } && keyRestorer.needsNoLockConsent()) {
                 _uiState.update { it.copy(showNoLockConsent = true) }
                 return
             }
             var mismatch = false
             var retryable = false
             var needsConsent = false
-            for (wallet in _uiState.value.recoveredWallets) {
-                if (wallet.walletId in restoredWalletIds || wallet.walletId in skippedWalletIds) continue
+            for (wallet in missing) {
+                val current = activityRef.get()
+                if (current == null || current.isFinishing || current.isDestroyed) {
+                    // The screen went away: stop before the next prompt.
+                    retryable = true
+                    break
+                }
                 val outcome = try {
-                    keyRestorer.restore(activity, wallet.walletId, wallet.material, allowV1 = noLockConsented)
+                    keyRestorer.restore(current, wallet.walletId, decrypted[wallet.walletId], allowV1 = noLockConsented)
                 } catch (e: CancellationException) {
                     throw e
                 } catch (e: Exception) {
                     RecoveredKeyRestorer.Outcome.Failed("unexpected error")
                 }
                 when (outcome) {
-                    RecoveredKeyRestorer.Outcome.Restored -> restoredWalletIds.add(wallet.walletId)
-                    RecoveredKeyRestorer.Outcome.NoWalletRow -> skippedWalletIds.add(wallet.walletId)
-                    RecoveredKeyRestorer.Outcome.AddressMismatch -> mismatch = true
+                    RecoveredKeyRestorer.Outcome.Restored -> {
+                        decrypted.remove(wallet.walletId)
+                        restoredWalletIds.add(wallet.walletId)
+                    }
+                    RecoveredKeyRestorer.Outcome.AddressMismatch -> {
+                        decrypted.remove(wallet.walletId)
+                        mismatch = true
+                    }
                     // The screen lock went away mid-restore: ask, then retry.
                     RecoveredKeyRestorer.Outcome.NeedsNoLockConsent -> needsConsent = true
                     RecoveredKeyRestorer.Outcome.Cancelled,
                     is RecoveredKeyRestorer.Outcome.Failed -> retryable = true
+                    RecoveredKeyRestorer.Outcome.NoBackup,
+                    RecoveredKeyRestorer.Outcome.NoWalletRow -> Unit
                 }
             }
 
@@ -257,37 +272,46 @@ class RecoveryViewModel(
                 _uiState.update { it.copy(showNoLockConsent = true) }
                 return
             }
-            val error = when {
-                mismatch -> RESTORE_MISMATCH_ERROR
-                needsConsent -> RESTORE_RETRY_ERROR
-                retryable -> RESTORE_RETRY_ERROR
-                restoredWalletIds.isEmpty() -> RESTORE_NO_WALLET_ERROR
-                else -> null
-            }
-            if (error != null) {
+            val walletIds = keyRestorer.walletIds()
+            // Decrypted backups with no wallet row on this phone; never written.
+            val skipped = decrypted.keys.filter { it !in walletIds }
+            if (keyRestorer.completeIfDone()) {
+                decrypted.clear()
                 _uiState.update {
                     it.copy(
-                        stage = RecoveryStage.RESTORE_FAILED,
-                        error = error,
-                        canRetryRestore = retryable || needsConsent,
+                        stage = RecoveryStage.SUCCESS,
+                        restoredWalletCount = restoredWalletIds.size,
+                        missingWalletNames = emptyList(),
+                        failedWalletIds = (it.failedWalletIds + skipped).distinct(),
+                        error = null,
                     )
                 }
                 return
             }
-            keyRestorer.clearCorruptionFlag()
+            decrypted.clear()
+            val stillMissing = keyRestorer.missingWallets()
+            val error = when {
+                walletIds.isEmpty() -> RESTORE_NO_WALLET_ERROR
+                mismatch -> RESTORE_MISMATCH_ERROR
+                retryable || needsConsent -> RESTORE_RETRY_ERROR
+                else -> RESTORE_MISSING_ERROR
+            }
             _uiState.update {
                 it.copy(
-                    stage = RecoveryStage.SUCCESS,
-                    // The keys are in the key store now; drop the decrypted copies.
-                    recoveredWallets = emptyList(),
-                    restoredWalletCount = restoredWalletIds.size,
-                    failedWalletIds = (it.failedWalletIds + skippedWalletIds).distinct(),
-                    error = null,
+                    stage = RecoveryStage.RESTORE_FAILED,
+                    error = error,
+                    canRetryRestore = retryable || needsConsent,
+                    missingWalletNames = stillMissing.map { w -> w.name },
                 )
             }
         } finally {
             restoreInProgress = false
         }
+    }
+
+    override fun onCleared() {
+        decrypted.clear()
+        super.onCleared()
     }
 
     /**
@@ -357,6 +381,7 @@ class RecoveryViewModel(
      * a reason to offer the wipe.
      */
     fun requestPhraseRestore() {
+        decrypted.clear()
         val state = _uiState.value
         if (state.isStartingFresh || state.phraseRestoreReady) return
         when (phraseGate()) {
@@ -497,6 +522,9 @@ class RecoveryViewModel(
         const val RESTORE_NO_LOCK_DECLINED =
             "Nothing was saved. Set a screen lock on this phone, then tap Try again. " +
                 "Your backup files are kept."
+        const val RESTORE_MISSING_ERROR =
+            "Some wallets on this phone still have no keys and no backup that could be opened. " +
+                "Restore them with their recovery phrase."
         const val RESTORE_NO_WALLET_ERROR =
             "These backups do not belong to a wallet on this phone. Your backup files are kept. " +
                 "Restore with your recovery phrase."

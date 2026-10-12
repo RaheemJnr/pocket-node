@@ -232,9 +232,19 @@ fun RecoveryScreen(
                         )
                     }
 
+                    if (uiState.missingWalletNames.isNotEmpty()) {
+                        Text(
+                            text = stringResource(
+                                R.string.recovery_missing_wallets,
+                                uiState.missingWalletNames.joinToString(", ")
+                            ),
+                            style = MaterialTheme.typography.bodyMedium
+                        )
+                    }
+
                     if (uiState.canRetryRestore) {
                         Button(
-                            onClick = { viewModel.retryRestore(activity) },
+                            onClick = viewModel::retryRestore,
                             modifier = Modifier.fillMaxWidth()
                         ) {
                             Text(stringResource(R.string.recovery_restore_retry))

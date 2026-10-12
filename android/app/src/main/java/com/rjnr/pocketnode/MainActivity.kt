@@ -26,6 +26,7 @@ import com.rjnr.pocketnode.data.gateway.GatewayRepository
 import com.rjnr.pocketnode.data.sync.SyncWorkScheduler
 import com.rjnr.pocketnode.data.crypto.KeyBackupManager
 import com.rjnr.pocketnode.data.wallet.KeyManager
+import com.rjnr.pocketnode.data.wallet.RecoveredKeyRestorer
 import com.rjnr.pocketnode.ui.navigation.CkbNavGraph
 import com.rjnr.pocketnode.ui.navigation.Screen
 import com.rjnr.pocketnode.data.wallet.WalletPreferences
@@ -73,6 +74,9 @@ class MainActivity : FragmentActivity() {
 
     @Inject
     lateinit var logger: Logger
+
+    @Inject
+    lateinit var recoveredKeyRestorer: RecoveredKeyRestorer
 
     // #524: the re-auth lock replaces the nav graph on screen instead of
     // navigating to Screen.Auth, so the back stack and screen state survive.
@@ -140,11 +144,17 @@ class MainActivity : FragmentActivity() {
             cachedHasWallet = repository.hasWallet()
             @Suppress("DEPRECATION")
             val wasReset = keyManager.wasResetDueToCorruption()
+            // The in-memory flag above is only raised while Room holds no key
+            // rows, so a recovery that restored some wallets but not all is
+            // kept by a persistent marker until every wallet has verified keys.
+            if (wasReset) recoveredKeyRestorer.markIncomplete()
+            val recoveryPending = !wasReset && recoveredKeyRestorer.isMarkedIncomplete() &&
+                !runCatching { recoveredKeyRestorer.completeIfDone() }.getOrDefault(false)
             val hasPin = pinManager.hasPin()
             val route = when {
                 // Suppressed, not removed: the corruption flag guards the ESP
                 // legacy-key path, which un-migrated installs still read.
-                wasReset -> Screen.Recovery.route
+                wasReset || recoveryPending -> Screen.Recovery.route
                 !cachedHasWallet -> Screen.Onboarding.route
                 !hasPin -> Screen.InitialPinSetup.route
                 else -> Screen.Auth.route
@@ -166,6 +176,7 @@ class MainActivity : FragmentActivity() {
                     Log.INFO,
                     "StartupGate",
                     "#424 route=$route hasWallet=$cachedHasWallet wasReset=$wasReset " +
+                        "recoveryPending=$recoveryPending " +
                         "hasPin=$hasPin ${keyManager.diagnosticKeyState()} " +
                         "wallets=${walletRepository.walletCount()} " +
                         "activeWalletId=${walletRepository.activeWalletIdSnapshot()} " +

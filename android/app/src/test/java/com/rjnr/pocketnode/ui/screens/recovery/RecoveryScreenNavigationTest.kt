@@ -16,6 +16,7 @@ import com.rjnr.pocketnode.data.crypto.Blake2b
 import com.rjnr.pocketnode.data.crypto.KeyBackupManager
 import com.rjnr.pocketnode.data.crypto.KeyMaterial
 import com.rjnr.pocketnode.data.gateway.LocalWalletReset
+import com.rjnr.pocketnode.data.database.entity.WalletEntity
 import com.rjnr.pocketnode.data.wallet.RecoveredKeyRestorer
 import com.rjnr.pocketnode.ui.screens.auth.NamedStringsActivity
 import com.rjnr.pocketnode.util.AppRestarter
@@ -68,8 +69,19 @@ class RecoveryScreenNavigationTest {
 
     private val localWalletReset = mockk<LocalWalletReset>(relaxed = true)
     private val appRestarter = mockk<AppRestarter>(relaxed = true)
+    // wallet1 is the one wallet row; it stays missing until restored.
+    private val missing = mutableSetOf("wallet1")
+    private val walletRow = WalletEntity(
+        walletId = "wallet1", name = "Main", type = "mnemonic", derivationPath = null, parentWalletId = null,
+    )
     private val keyRestorer = mockk<RecoveredKeyRestorer>(relaxed = true).also {
-        coEvery { it.restore(any(), any(), any(), any()) } returns RecoveredKeyRestorer.Outcome.Restored
+        coEvery { it.missingWallets() } answers { if ("wallet1" in missing) listOf(walletRow) else emptyList() }
+        coEvery { it.walletIds() } returns setOf("wallet1")
+        coEvery { it.completeIfDone() } answers { missing.isEmpty() }
+        coEvery { it.restore(any(), any(), any(), any()) } answers {
+            missing.remove(secondArg<String>())
+            RecoveredKeyRestorer.Outcome.Restored
+        }
     }
     private var phraseRestores = 0
     private var recoveries = 0
@@ -227,7 +239,7 @@ class RecoveryScreenNavigationTest {
         enterBackupPin("123456")
         assertEquals(1, recoveries)
         coVerify(exactly = 1) { keyRestorer.restore(any(), "wallet1", any(), any()) }
-        verify(exactly = 1) { keyRestorer.clearCorruptionFlag() }
+        coVerify(exactly = 1) { keyRestorer.completeIfDone() }
     }
 
     @Test
@@ -239,7 +251,7 @@ class RecoveryScreenNavigationTest {
         enterBackupPin("123456")
 
         assertEquals(0, recoveries)
-        verify(exactly = 0) { keyRestorer.clearCorruptionFlag() }
+        compose.onNodeWithText("recovery_missing_wallets").assertExists()
         compose.onNodeWithText("recovery_restore_retry").assertDoesNotExist()
         compose.onNodeWithText("recovery_restore_with_phrase").performClick()
         compose.waitForIdle()
@@ -260,8 +272,10 @@ class RecoveryScreenNavigationTest {
         compose.waitForIdle()
         assertEquals(0, recoveries)
         coVerify(exactly = 0) { keyRestorer.restore(any(), any(), any(), any()) }
+        // Try again goes back to the PIN: the decrypted backups were dropped.
         compose.onNodeWithText("recovery_restore_retry").performClick()
         compose.waitForIdle()
+        enterBackupPin("123456")
 
         compose.onNodeWithText("Continue anyway").performClick()
         compose.waitForIdle()

@@ -210,6 +210,7 @@
     <string name="recovery_start_fresh_cancel">Cancel</string>
     <string name="recovery_restoring">Saving your restored wallet keys. Unlock with your screen lock when asked.</string>
     <string name="recovery_restore_retry">Try again</string>
+    <string name="recovery_missing_wallets">Still to restore: %1$s</string>
     <string name="recovery_start_fresh_failed">The wallets could not be removed. Try again.</string>
     <!-- endregion -->
 

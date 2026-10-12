@@ -28,7 +28,11 @@ data class KeyMaterial(
     val mnemonicBackedUp: Boolean,
     val createdAt: String = java.time.Instant.now().toString(),
     val version: Int = 1
-)
+) {
+    /** Never prints the key or the phrase (logs, crash reports, debuggers). */
+    override fun toString(): String =
+        "KeyMaterial(walletType=$walletType, hasMnemonic=${mnemonic != null}, version=$version)"
+}
 
 @Singleton
 class KeyBackupManager @Inject constructor(

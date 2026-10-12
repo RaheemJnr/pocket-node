@@ -18,6 +18,8 @@ import com.rjnr.pocketnode.data.database.AppDatabase
 import com.rjnr.pocketnode.data.database.entity.WalletEntity
 import com.rjnr.pocketnode.data.gateway.LocalWalletReset
 import com.rjnr.pocketnode.data.wallet.KeyManager
+import com.rjnr.pocketnode.data.wallet.MnemonicManager
+import com.rjnr.pocketnode.data.wallet.RecoveryStateStore
 import com.rjnr.pocketnode.data.wallet.RecoveredKeyRestorer
 import com.rjnr.pocketnode.data.wallet.WalletDerivation
 import com.rjnr.pocketnode.data.wallet.WalletKeyReader
@@ -72,6 +74,7 @@ class RecoveryNoLockConsentTest {
     private lateinit var authManager: AuthManager
     private lateinit var backups: KeyBackupManager
     private lateinit var restorer: RecoveredKeyRestorer
+    private lateinit var state: RecoveryStateStore
     private val keyManager = mockk<KeyManager>(relaxed = true)
     private val activity = mockk<FragmentActivity>(relaxed = true)
 
@@ -103,7 +106,12 @@ class RecoveryNoLockConsentTest {
         }
         val writer = WalletKeyWriter(db.keyMaterialDao(), v2Helper, v1Helper, encryption, authManager, backups, NoopLogger)
         val reader = WalletKeyReader(db.keyMaterialDao(), v1Helper, encryption, authManager, backups, NoopLogger)
-        restorer = RecoveredKeyRestorer(db.walletDao(), db.keyMaterialDao(), writer, reader, authManager, keyManager, NoopLogger)
+        state = RecoveryStateStore(ctx)
+        state.clear()
+        restorer = RecoveredKeyRestorer(
+            db.walletDao(), db.keyMaterialDao(), writer, reader, authManager, keyManager,
+            MnemonicManager(), state, NoopLogger,
+        )
     }
 
     @After
@@ -117,12 +125,12 @@ class RecoveryNoLockConsentTest {
         every { authManager.hasDeviceCredential() } returns present
     }
 
-    private suspend fun recoveryWithOneWallet(): RecoveryViewModel {
+    private suspend fun addWallet(walletId: String, keyHex: String, backupPin: CharArray? = pin) {
         val info = WalletDerivation.walletInfo(keyHex.hexToByteArray())
         db.walletDao().insert(
             WalletEntity(
-                walletId = "w1",
-                name = "w1",
+                walletId = walletId,
+                name = "Name of $walletId",
                 type = KeyManager.WALLET_TYPE_RAW_KEY,
                 derivationPath = null,
                 parentWalletId = null,
@@ -130,11 +138,21 @@ class RecoveryNoLockConsentTest {
                 testnetAddress = info.testnetAddress,
             )
         )
-        backups.writeBackup(
-            "w1",
-            KeyMaterial(privateKey = keyHex, walletType = KeyManager.WALLET_TYPE_RAW_KEY, mnemonicBackedUp = false),
-            pin.copyOf(),
-        )
+        if (backupPin != null) {
+            backups.writeBackup(
+                walletId,
+                KeyMaterial(privateKey = keyHex, walletType = KeyManager.WALLET_TYPE_RAW_KEY, mnemonicBackedUp = false),
+                backupPin.copyOf(),
+            )
+        }
+    }
+
+    private suspend fun recoveryWithOneWallet(): RecoveryViewModel {
+        addWallet("w1", keyHex)
+        return newVm()
+    }
+
+    private fun newVm(): RecoveryViewModel {
         val ctx = ApplicationProvider.getApplicationContext<Context>()
         val pinManager = PinManager(ctx, Blake2b(), NoopLogger).apply {
             testPrefs = ctx.getSharedPreferences("test_recovery_no_lock_pin", Context.MODE_PRIVATE)
@@ -203,7 +221,9 @@ class RecoveryNoLockConsentTest {
         advanceUntilIdle()
 
         secureLock(true)
-        vm.retryRestore(activity)
+        vm.retryRestore()
+        assertEquals(RecoveryStage.PIN_ENTRY, vm.uiState.value.stage)
+        vm.attemptPinRecovery(pin.copyOf(), activity)
         advanceUntilIdle()
 
         assertFalse(vm.uiState.value.showNoLockConsent)
@@ -223,5 +243,75 @@ class RecoveryNoLockConsentTest {
         assertEquals(RecoveryStage.SUCCESS, vm.uiState.value.stage)
         assertEquals(2, db.keyMaterialDao().getKdfVersion("w1"))
         coVerify(exactly = 2) { authManager.authenticateForCipher(activity, any(), any(), any()) }
+    }
+
+    // --- Recovery is complete only when every wallet row has verified keys ---
+
+    @Test
+    fun `a wallet whose backup cannot be opened keeps Recovery, the marker and the flag`() = runTest {
+        secureLock(true)
+        addWallet("w1", keyHex)
+        addWallet("w2", "22".repeat(32), backupPin = "999999".toCharArray())
+        val vm = newVm()
+
+        vm.attemptPinRecovery(pin.copyOf(), activity)
+        advanceUntilIdle()
+
+        assertEquals(RecoveryStage.RESTORE_FAILED, vm.uiState.value.stage)
+        assertEquals(listOf("Name of w2"), vm.uiState.value.missingWalletNames)
+        assertEquals(2, db.keyMaterialDao().getKdfVersion("w1"))
+        assertNull(db.keyMaterialDao().getByWalletId("w2"))
+        assertTrue(state.isIncomplete())
+        assertTrue(backups.hasBackup("w2"))
+        @Suppress("DEPRECATION")
+        verify(exactly = 0) { keyManager.resetCorruptionFlag() }
+    }
+
+    @Test
+    fun `a wallet row with no backup file keeps Recovery and the marker`() = runTest {
+        secureLock(true)
+        addWallet("w1", keyHex)
+        addWallet("w2", "22".repeat(32), backupPin = null)
+        val vm = newVm()
+
+        vm.attemptPinRecovery(pin.copyOf(), activity)
+        advanceUntilIdle()
+
+        assertEquals(RecoveryStage.RESTORE_FAILED, vm.uiState.value.stage)
+        assertEquals(listOf("Name of w2"), vm.uiState.value.missingWalletNames)
+        assertTrue(state.isIncomplete())
+        // The marker survives a new launch: a new screen still sees w2 missing.
+        assertEquals(listOf("w2"), restorer.missingWallets().map { it.walletId })
+        assertTrue(restorer.isMarkedIncomplete())
+    }
+
+    @Test
+    fun `a read-back cancelled once is verified on the next attempt and only then completes`() = runTest {
+        secureLock(true)
+        addWallet("w1", keyHex)
+        var prompts = 0
+        coEvery {
+            authManager.authenticateForCipher(any(), any<Cipher>(), any(), any())
+        } answers {
+            prompts++
+            if (prompts == 2) AuthManager.CipherAuthResult.Cancelled
+            else AuthManager.CipherAuthResult.Success(args[1] as Cipher)
+        }
+        val vm = newVm()
+
+        vm.attemptPinRecovery(pin.copyOf(), activity)
+        advanceUntilIdle()
+        assertEquals(RecoveryStage.RESTORE_FAILED, vm.uiState.value.stage)
+        assertTrue(vm.uiState.value.canRetryRestore)
+        assertTrue(state.isIncomplete())
+
+        vm.retryRestore()
+        vm.attemptPinRecovery(pin.copyOf(), activity)
+        advanceUntilIdle()
+
+        assertEquals(RecoveryStage.SUCCESS, vm.uiState.value.stage)
+        assertFalse(state.isIncomplete())
+        // Write, cancelled read-back, then one read-back on the retry.
+        assertEquals(3, prompts)
     }
 }
