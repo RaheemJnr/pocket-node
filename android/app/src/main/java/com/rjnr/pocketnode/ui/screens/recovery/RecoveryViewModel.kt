@@ -1,5 +1,6 @@
 package com.rjnr.pocketnode.ui.screens.recovery
 
+import androidx.fragment.app.FragmentActivity
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.rjnr.pocketnode.data.auth.AuthManager
@@ -7,6 +8,7 @@ import com.rjnr.pocketnode.data.auth.PinManager
 import com.rjnr.pocketnode.data.crypto.KeyBackupManager
 import com.rjnr.pocketnode.data.crypto.KeyMaterial
 import com.rjnr.pocketnode.data.gateway.LocalWalletReset
+import com.rjnr.pocketnode.data.wallet.RecoveredKeyRestorer
 import com.rjnr.pocketnode.util.AppRestarter
 import dagger.hilt.android.lifecycle.HiltViewModel
 import kotlinx.coroutines.CancellationException
@@ -24,6 +26,10 @@ enum class RecoveryStage {
     MNEMONIC_ENTRY,
     /** The app PIN, asked before the phrase restore opens. */
     PHRASE_PIN_ENTRY,
+    /** Backups decrypted; their keys are being written back and checked. */
+    RESTORING,
+    /** Some decrypted keys could not be written back; see [RecoveryUiState.error]. */
+    RESTORE_FAILED,
     SUCCESS,
     ERROR
 }
@@ -42,6 +48,10 @@ data class RecoveryUiState(
     val startFreshFailed: Boolean = false,
     /** One-shot: the phrase restore may open now (see [RecoveryViewModel.onPhraseRestoreOpened]). */
     val phraseRestoreReady: Boolean = false,
+    /** On [RecoveryStage.RESTORE_FAILED]: Try again can still finish the restore. */
+    val canRetryRestore: Boolean = false,
+    /** On [RecoveryStage.SUCCESS]: wallets whose keys were written back and verified. */
+    val restoredWalletCount: Int = 0,
 )
 
 data class RecoveredWallet(
@@ -56,6 +66,7 @@ class RecoveryViewModel(
     private val authManager: AuthManager,
     private val localWalletReset: LocalWalletReset,
     private val appRestarter: AppRestarter,
+    private val keyRestorer: RecoveredKeyRestorer,
     private val ioDispatcher: CoroutineDispatcher
 ) : ViewModel() {
 
@@ -67,13 +78,22 @@ class RecoveryViewModel(
         authManager: AuthManager,
         localWalletReset: LocalWalletReset,
         appRestarter: AppRestarter,
-    ) : this(backupManager, pinManager, authManager, localWalletReset, appRestarter, Dispatchers.IO)
+        keyRestorer: RecoveredKeyRestorer,
+    ) : this(backupManager, pinManager, authManager, localWalletReset, appRestarter, keyRestorer, Dispatchers.IO)
 
     private val _uiState = MutableStateFlow(RecoveryUiState())
     val uiState: StateFlow<RecoveryUiState> = _uiState
 
     /** The stored app PIN was entered correctly on this screen. */
     private var pinVerified = false
+
+    /** Wallets whose recovered keys are stored and verified; a retry skips them. */
+    private val restoredWalletIds = mutableSetOf<String>()
+
+    /** Decrypted backups with no wallet row on this phone; never written. */
+    private val skippedWalletIds = mutableSetOf<String>()
+
+    private var restoreInProgress = false
 
     private enum class PinCheck { VERIFIED, NO_PIN, REFUSED }
 
@@ -104,9 +124,12 @@ class RecoveryViewModel(
 
     /**
      * Attempts to recover wallets from their PIN-encrypted backup blobs,
-     * behind the shared [checkPin].
+     * behind the shared [checkPin], then writes the recovered keys back
+     * through [RecoveredKeyRestorer]. [activity] drives the screen-lock
+     * prompts of the normal key store.
      */
-    fun attemptPinRecovery(pin: CharArray) {
+    fun attemptPinRecovery(pin: CharArray, activity: FragmentActivity) {
+        if (restoreInProgress) return
         viewModelScope.launch {
             // Off the main thread: the PIN hash is Argon2id.
             val result = withContext(ioDispatcher) { checkPin(pin, stayOn = RecoveryStage.PIN_ENTRY) }
@@ -138,12 +161,9 @@ class RecoveryViewModel(
 
             if (recovered.isNotEmpty()) {
                 _uiState.update {
-                    it.copy(
-                        stage = RecoveryStage.SUCCESS,
-                        recoveredWallets = recovered,
-                        failedWalletIds = failed
-                    )
+                    it.copy(recoveredWallets = recovered, failedWalletIds = failed, error = null)
                 }
+                restoreRecoveredKeys(activity)
             } else {
                 // Verified PIN but nothing decrypted (corrupt blobs, or the
                 // degenerate no-hash case with a wrong PIN). Fall back to the
@@ -155,6 +175,73 @@ class RecoveryViewModel(
                     )
                 }
             }
+        }
+    }
+
+    /** Try again on [RecoveryStage.RESTORE_FAILED]. */
+    fun retryRestore(activity: FragmentActivity) {
+        val state = _uiState.value
+        if (state.stage != RecoveryStage.RESTORE_FAILED || !state.canRetryRestore) return
+        viewModelScope.launch { restoreRecoveredKeys(activity) }
+    }
+
+    /**
+     * Writes each recovered wallet's keys back and reads them back. Only when
+     * every wallet with a row on this phone is restored is the corruption
+     * flag cleared and the screen left ([RecoveryStage.SUCCESS]). Otherwise
+     * it stays on [RecoveryStage.RESTORE_FAILED]; backup files are never
+     * removed here.
+     */
+    private suspend fun restoreRecoveredKeys(activity: FragmentActivity) {
+        if (restoreInProgress) return
+        restoreInProgress = true
+        try {
+            _uiState.update { it.copy(stage = RecoveryStage.RESTORING, error = null, canRetryRestore = false) }
+            var mismatch = false
+            var retryable = false
+            for (wallet in _uiState.value.recoveredWallets) {
+                if (wallet.walletId in restoredWalletIds || wallet.walletId in skippedWalletIds) continue
+                val outcome = try {
+                    keyRestorer.restore(activity, wallet.walletId, wallet.material)
+                } catch (e: CancellationException) {
+                    throw e
+                } catch (e: Exception) {
+                    RecoveredKeyRestorer.Outcome.Failed("unexpected error")
+                }
+                when (outcome) {
+                    RecoveredKeyRestorer.Outcome.Restored -> restoredWalletIds.add(wallet.walletId)
+                    RecoveredKeyRestorer.Outcome.NoWalletRow -> skippedWalletIds.add(wallet.walletId)
+                    RecoveredKeyRestorer.Outcome.AddressMismatch -> mismatch = true
+                    RecoveredKeyRestorer.Outcome.Cancelled,
+                    is RecoveredKeyRestorer.Outcome.Failed -> retryable = true
+                }
+            }
+
+            val error = when {
+                mismatch -> RESTORE_MISMATCH_ERROR
+                retryable -> RESTORE_RETRY_ERROR
+                restoredWalletIds.isEmpty() -> RESTORE_NO_WALLET_ERROR
+                else -> null
+            }
+            if (error != null) {
+                _uiState.update {
+                    it.copy(stage = RecoveryStage.RESTORE_FAILED, error = error, canRetryRestore = retryable)
+                }
+                return
+            }
+            keyRestorer.clearCorruptionFlag()
+            _uiState.update {
+                it.copy(
+                    stage = RecoveryStage.SUCCESS,
+                    // The keys are in the key store now; drop the decrypted copies.
+                    recoveredWallets = emptyList(),
+                    restoredWalletCount = restoredWalletIds.size,
+                    failedWalletIds = (it.failedWalletIds + skippedWalletIds).distinct(),
+                    error = null,
+                )
+            }
+        } finally {
+            restoreInProgress = false
         }
     }
 
@@ -357,5 +444,13 @@ class RecoveryViewModel(
 
     private companion object {
         const val PIN_READ_ERROR = "Could not check your PIN. Try again."
+        const val RESTORE_MISMATCH_ERROR =
+            "A backup does not match its wallet, so it was not used. Your backup files are kept. " +
+                "Restore that wallet with its recovery phrase."
+        const val RESTORE_RETRY_ERROR =
+            "Some wallet keys could not be saved yet. Your backup files are kept. Try again."
+        const val RESTORE_NO_WALLET_ERROR =
+            "These backups do not belong to a wallet on this phone. Your backup files are kept. " +
+                "Restore with your recovery phrase."
     }
 }

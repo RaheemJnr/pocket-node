@@ -16,6 +16,7 @@ import com.rjnr.pocketnode.data.crypto.Blake2b
 import com.rjnr.pocketnode.data.crypto.KeyBackupManager
 import com.rjnr.pocketnode.data.crypto.KeyMaterial
 import com.rjnr.pocketnode.data.gateway.LocalWalletReset
+import com.rjnr.pocketnode.data.wallet.RecoveredKeyRestorer
 import com.rjnr.pocketnode.ui.screens.auth.NamedStringsActivity
 import com.rjnr.pocketnode.util.AppRestarter
 import io.mockk.coEvery
@@ -66,6 +67,9 @@ class RecoveryScreenNavigationTest {
 
     private val localWalletReset = mockk<LocalWalletReset>(relaxed = true)
     private val appRestarter = mockk<AppRestarter>(relaxed = true)
+    private val keyRestorer = mockk<RecoveredKeyRestorer>(relaxed = true).also {
+        coEvery { it.restore(any(), any(), any()) } returns RecoveredKeyRestorer.Outcome.Restored
+    }
     private var phraseRestores = 0
     private var recoveries = 0
     private var fakeTimeMs = 1_000_000L
@@ -103,6 +107,7 @@ class RecoveryScreenNavigationTest {
             AuthManager(ApplicationProvider.getApplicationContext()),
             localWalletReset,
             appRestarter,
+            keyRestorer,
             Dispatchers.Unconfined,
         )
         compose.setContent {
@@ -202,5 +207,42 @@ class RecoveryScreenNavigationTest {
 
         assertEquals(1, phraseRestores)
         coVerify(exactly = 0) { localWalletReset.removeAllWalletsAndPin() }
+    }
+
+    private fun enterBackupPin(pin: String) {
+        compose.onNode(hasSetTextAction()).performTextInput(pin)
+        compose.onNodeWithText("recovery_with_pin").performClick()
+        compose.waitForIdle()
+    }
+
+    @Test
+    fun `the backup restore leaves Recovery only after the right PIN and the keys are written back`() {
+        show(pinManager("123456"), withBackup = true)
+
+        enterBackupPin("999999")
+        assertEquals(0, recoveries)
+        coVerify(exactly = 0) { keyRestorer.restore(any(), any(), any()) }
+
+        enterBackupPin("123456")
+        assertEquals(1, recoveries)
+        coVerify(exactly = 1) { keyRestorer.restore(any(), "wallet1", any()) }
+        verify(exactly = 1) { keyRestorer.clearCorruptionFlag() }
+    }
+
+    @Test
+    fun `a backup that does not match its wallet stays on Recovery with the phrase restore offered`() {
+        coEvery { keyRestorer.restore(any(), any(), any()) } returns
+            RecoveredKeyRestorer.Outcome.AddressMismatch
+        show(pinManager("123456"), withBackup = true)
+
+        enterBackupPin("123456")
+
+        assertEquals(0, recoveries)
+        verify(exactly = 0) { keyRestorer.clearCorruptionFlag() }
+        compose.onNodeWithText("recovery_restore_retry").assertDoesNotExist()
+        compose.onNodeWithText("recovery_restore_with_phrase").performClick()
+        compose.waitForIdle()
+        // The PIN was verified on this screen, so the phrase restore opens.
+        assertEquals(1, phraseRestores)
     }
 }

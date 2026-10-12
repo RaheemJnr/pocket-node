@@ -29,22 +29,28 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.unit.dp
+import androidx.fragment.app.FragmentActivity
 import androidx.hilt.lifecycle.viewmodel.compose.hiltViewModel
 import com.rjnr.pocketnode.R
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun RecoveryScreen(
-    onRecoveryComplete: (List<RecoveredWallet>) -> Unit,
+    /** Every recovered wallet's keys are stored and verified. */
+    onRecoveryComplete: () -> Unit,
     onMnemonicRestore: () -> Unit,
     viewModel: RecoveryViewModel = hiltViewModel()
 ) {
     val uiState by viewModel.uiState.collectAsState()
     var pinInput by remember { mutableStateOf("") }
+    // MainActivity extends FragmentActivity: the restored keys are written
+    // through the key store's screen-lock prompt.
+    val activity = LocalContext.current as FragmentActivity
 
     // The phrase restore opens only when the ViewModel allows it: after the
     // app PIN is verified, or with no PIN set. Start fresh restarts the app.
@@ -119,7 +125,7 @@ fun RecoveryScreen(
 
                     Button(
                         onClick = {
-                            viewModel.attemptPinRecovery(pinInput.toCharArray())
+                            viewModel.attemptPinRecovery(pinInput.toCharArray(), activity)
                             pinInput = ""
                         },
                         enabled = pinInput.length == 6,
@@ -201,9 +207,40 @@ fun RecoveryScreen(
                     }
                 }
 
+                RecoveryStage.RESTORING -> {
+                    Text(
+                        text = stringResource(R.string.recovery_restoring),
+                        style = MaterialTheme.typography.bodyLarge
+                    )
+                    CircularProgressIndicator()
+                }
+
+                RecoveryStage.RESTORE_FAILED -> {
+                    uiState.error?.let { error ->
+                        Text(
+                            text = error,
+                            color = MaterialTheme.colorScheme.error,
+                            style = MaterialTheme.typography.bodyLarge
+                        )
+                    }
+
+                    if (uiState.canRetryRestore) {
+                        Button(
+                            onClick = { viewModel.retryRestore(activity) },
+                            modifier = Modifier.fillMaxWidth()
+                        ) {
+                            Text(stringResource(R.string.recovery_restore_retry))
+                        }
+                    }
+
+                    TextButton(onClick = viewModel::requestPhraseRestore) {
+                        Text(stringResource(R.string.recovery_restore_with_phrase))
+                    }
+                }
+
                 RecoveryStage.SUCCESS -> {
-                    LaunchedEffect(uiState.recoveredWallets) {
-                        onRecoveryComplete(uiState.recoveredWallets)
+                    LaunchedEffect(Unit) {
+                        onRecoveryComplete()
                     }
 
                     Text(

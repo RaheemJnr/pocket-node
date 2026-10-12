@@ -208,6 +208,8 @@
     <string name="recovery_start_fresh_body">This will erase every wallet, key, and cache stored on this device. The only way to restore access afterwards is each wallet\'s 12-word recovery phrase. Without the phrase, those funds cannot be recovered.</string>
     <string name="recovery_start_fresh_confirm">Remove and continue</string>
     <string name="recovery_start_fresh_cancel">Cancel</string>
+    <string name="recovery_restoring">Saving your restored wallet keys. Unlock with your screen lock when asked.</string>
+    <string name="recovery_restore_retry">Try again</string>
     <string name="recovery_start_fresh_failed">The wallets could not be removed. Try again.</string>
     <!-- endregion -->
 

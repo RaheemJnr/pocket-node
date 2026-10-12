@@ -535,7 +535,8 @@ fun CkbNavGraph(
 
         composable(Screen.Recovery.route) {
             RecoveryScreen(
-                onRecoveryComplete = { recoveredWallets ->
+                // The keys are already written back and verified by the screen.
+                onRecoveryComplete = {
                     navController.navigate(destinationAfterWalletReady()) {
                         popUpTo(Screen.Recovery.route) { inclusive = true }
                     }
