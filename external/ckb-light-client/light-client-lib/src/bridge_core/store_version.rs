@@ -12,10 +12,12 @@
 //! | On disk                         | Action                                     |
 //! |---------------------------------|--------------------------------------------|
 //! | no file                         | create an empty store stamped 1            |
-//! | user_version 0 (pre-versioning) | stamp 1, no data change                    |
+//! | user_version 0 (pre-versioning) | stamp 1, then upgrade as a version-1 store |
 //! | user_version 1                  | nothing                                    |
 //! | 0 < v < 1 + registered steps    | run each step in order, stamping after it  |
-//! | step missing or failing         | set aside, fresh store stamped 1           |
+//! | step missing, or step error     | set aside, fresh store stamped 1           |
+//! | transient step error, or any    | error; store left in place, rolled back,   |
+//! |   begin / stamp / commit error  |   retried on the next start                |
 //! | v > 1 (store from a newer build)| set aside, fresh store stamped 1           |
 //! | not a SQLite file / corrupt     | set aside, fresh store stamped 1           |
 //! | a directory (old RocksDB store) | set aside, fresh store stamped 1           |
@@ -38,6 +40,10 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 /// Layout version of the store this build reads and writes.
 pub const STORE_FORMAT_VERSION: u32 = 1;
+
+/// Stores written before versioning existed carry `user_version` 0 and have
+/// this layout.
+const PRE_VERSIONING_LAYOUT: u32 = 1;
 
 /// One upgrade step: migrates a store at version `from` to `from + 1`.
 ///
@@ -96,17 +102,22 @@ pub(crate) fn ensure_store_version_with(
         return Ok(StoreVersionAction::Created);
     }
 
-    let found = match read_version(path)? {
+    let mut found = match read_version(path)? {
         Some(v) => v,
         None => return set_aside(path, None, target),
     };
 
+    if found == 0 {
+        // Version 0 is the version-1 layout. Record that, then carry on like
+        // any version-1 store so later upgrade steps still run.
+        stamp(path, PRE_VERSIONING_LAYOUT)?;
+        if target == PRE_VERSIONING_LAYOUT {
+            return Ok(StoreVersionAction::Stamped);
+        }
+        found = PRE_VERSIONING_LAYOUT;
+    }
     if found == target {
         return Ok(StoreVersionAction::Current);
-    }
-    if found == 0 {
-        stamp(path, target)?;
-        return Ok(StoreVersionAction::Stamped);
     }
     if found > target {
         return set_aside(path, Some(found), target);
@@ -164,6 +175,27 @@ fn is_unreadable(e: &rusqlite::Error) -> bool {
     )
 }
 
+/// Errors that say nothing about the store's layout: a later start can
+/// succeed, so a step that fails with one of these must not set the store
+/// aside.
+fn is_transient(e: &rusqlite::Error) -> bool {
+    matches!(
+        e.sqlite_error_code(),
+        Some(
+            ErrorCode::DatabaseBusy
+                | ErrorCode::DatabaseLocked
+                | ErrorCode::DiskFull
+                | ErrorCode::SystemIoFailure
+                | ErrorCode::CannotOpen
+                | ErrorCode::PermissionDenied
+                | ErrorCode::ReadOnly
+                | ErrorCode::OutOfMemory
+                | ErrorCode::OperationInterrupted
+                | ErrorCode::FileLockingProtocolFailed
+        )
+    )
+}
+
 fn create_stamped(path: &Path, version: u32) -> Result<(), BridgeError> {
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent).map_err(storage_err)?;
@@ -181,9 +213,14 @@ fn stamp(path: &Path, version: u32) -> Result<(), BridgeError> {
     conn.close().map_err(|(_, e)| sqlite_err(e))
 }
 
-/// Runs the steps from `from` up to `target`. The outer `Result` is an I/O
-/// level failure to open the store; the inner `Err` carries the version the
-/// store reached when a step was missing or failed.
+/// Runs the steps from `from` up to `target`.
+///
+/// The outer `Err` leaves the store in place (rolled back to the last
+/// completed step) so the next start retries: opening the store, beginning,
+/// stamping or committing a step's transaction failed, or a step failed with
+/// a transient error. The inner `Err` carries the version the store reached
+/// when a step was missing or a step itself failed for another reason, which
+/// means this build cannot bring the store forward and it is set aside.
 fn upgrade(
     path: &Path,
     from: u32,
@@ -196,12 +233,19 @@ fn upgrade(
             warn!("No upgrade step for light client store version {}", v);
             return Ok(Err(v));
         };
-        let result = conn.transaction().and_then(|tx| {
-            (step.run)(&tx)?;
-            tx.pragma_update(None, "user_version", v + 1)?;
-            tx.commit()
-        });
-        if let Err(e) = result {
+        let tx = fault(Phase::Begin)
+            .and_then(|_| conn.transaction())
+            .map_err(sqlite_err)?;
+        if let Err(e) = (step.run)(&tx) {
+            if is_transient(&e) {
+                warn!(
+                    "Light client store upgrade {} -> {} hit a transient error, will retry: {}",
+                    v,
+                    v + 1,
+                    e
+                );
+                return Err(sqlite_err(e));
+            }
             warn!(
                 "Light client store upgrade {} -> {} failed: {}",
                 v,
@@ -210,10 +254,44 @@ fn upgrade(
             );
             return Ok(Err(v));
         }
+        fault(Phase::Stamp)
+            .and_then(|_| tx.pragma_update(None, "user_version", v + 1))
+            .map_err(sqlite_err)?;
+        fault(Phase::Commit)
+            .and_then(|_| tx.commit())
+            .map_err(sqlite_err)?;
         info!("Light client store upgraded {} -> {}", v, v + 1);
     }
     conn.close().map_err(|(_, e)| sqlite_err(e))?;
     Ok(Ok(()))
+}
+
+/// Points in an upgrade transaction where tests can inject a failure.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Phase {
+    Begin,
+    Stamp,
+    Commit,
+}
+
+#[cfg(test)]
+thread_local! {
+    static FAIL_AT: std::cell::Cell<Option<Phase>> = const { std::cell::Cell::new(None) };
+}
+
+/// Always `Ok` in production. Under test, fails with a non-transient
+/// `SQLITE_ERROR` at the phase set in `FAIL_AT`, so the tests can show that
+/// such a failure is never classified like a step error.
+fn fault(phase: Phase) -> rusqlite::Result<()> {
+    #[cfg(test)]
+    if FAIL_AT.with(|f| f.get()) == Some(phase) {
+        return Err(rusqlite::Error::SqliteFailure(
+            rusqlite::ffi::Error::new(rusqlite::ffi::SQLITE_ERROR),
+            Some(format!("injected {:?} failure", phase)),
+        ));
+    }
+    let _ = phase;
+    Ok(())
 }
 
 /// Renames the store and its -wal / -shm siblings out of the way, then creates
@@ -654,6 +732,203 @@ mod tests {
         assert_eq!(user_version(&aside), 1);
         assert!(!has_table(&aside, "half_done"));
         assert_eq!(row_count(&aside), 2);
+    }
+
+    fn busy_step(_conn: &Connection) -> rusqlite::Result<()> {
+        Err(rusqlite::Error::SqliteFailure(
+            rusqlite::ffi::Error::new(rusqlite::ffi::SQLITE_BUSY),
+            None,
+        ))
+    }
+
+    fn constraint_step(conn: &Connection) -> rusqlite::Result<()> {
+        // Duplicate primary key: a real, non-transient step failure.
+        conn.execute(
+            "INSERT INTO kv (key, value) VALUES (?1, ?2)",
+            rusqlite::params![b"GENESIS_BLOCK".as_slice(), b"dup".as_slice()],
+        )
+        .map(|_| ())
+    }
+
+    /// A v1 store holding `ROWS`.
+    fn v1_store(dir: &TempDir) -> PathBuf {
+        let path = dir.path().join("store.db");
+        write_store(&path, ROWS);
+        set_version(&path, 1);
+        path
+    }
+
+    fn assert_left_in_place_at_v1(dir: &TempDir, path: &Path, before: &[(Vec<u8>, Vec<u8>)]) {
+        assert_eq!(user_version(path), 1);
+        assert_eq!(rows(path), before);
+        assert!(!has_table(path, "upgraded_marker"));
+        assert_eq!(entries(dir.path()), vec!["store.db"]);
+    }
+
+    #[test]
+    fn pre_versioning_store_runs_upgrade_steps_from_version_one() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("store.db");
+        write_store(&path, ROWS);
+        assert_eq!(user_version(&path), 0);
+        let before = rows(&path);
+        let steps = [UpgradeStep {
+            from: 1,
+            run: add_marker_table,
+        }];
+
+        assert_eq!(
+            ensure_store_version_with(&path, 2, &steps).unwrap(),
+            StoreVersionAction::Upgraded { from: 1, to: 2 }
+        );
+        assert_eq!(user_version(&path), 2);
+        assert!(has_table(&path, "upgraded_marker"));
+        assert_eq!(rows(&path), before);
+        assert_eq!(entries(dir.path()), vec!["store.db"]);
+    }
+
+    #[test]
+    fn pre_versioning_store_with_target_one_is_stamped() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("store.db");
+        write_store(&path, ROWS);
+        assert_eq!(
+            ensure_store_version_with(&path, 1, &[]).unwrap(),
+            StoreVersionAction::Stamped
+        );
+        assert_eq!(user_version(&path), 1);
+    }
+
+    #[test]
+    fn pre_versioning_store_without_steps_is_set_aside() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("store.db");
+        write_store(&path, ROWS);
+
+        let action = ensure_store_version_with(&path, 2, &[]).unwrap();
+        let StoreVersionAction::SetAside { found, renamed_to } = action else {
+            panic!("expected SetAside, got {:?}", action);
+        };
+        assert_eq!(found, Some(1));
+        let aside = dir.path().join(renamed_to);
+        assert_eq!(row_count(&aside), 2);
+        assert_eq!(user_version(&aside), 1);
+        assert_eq!(user_version(&path), 2);
+    }
+
+    #[test]
+    fn transient_step_error_is_an_error_and_keeps_the_store() {
+        let dir = TempDir::new().unwrap();
+        let path = v1_store(&dir);
+        let before = rows(&path);
+        let steps = [UpgradeStep {
+            from: 1,
+            run: busy_step,
+        }];
+
+        let result = ensure_store_version_with(&path, 2, &steps);
+        assert!(
+            matches!(result, Err(BridgeError::Storage(_))),
+            "expected Storage error, got {:?}",
+            result
+        );
+        assert_left_in_place_at_v1(&dir, &path, &before);
+    }
+
+    #[test]
+    fn non_transient_step_error_sets_store_aside() {
+        let dir = TempDir::new().unwrap();
+        let path = v1_store(&dir);
+        let before = rows(&path);
+        let steps = [UpgradeStep {
+            from: 1,
+            run: constraint_step,
+        }];
+
+        let action = ensure_store_version_with(&path, 2, &steps).unwrap();
+        let StoreVersionAction::SetAside { found, renamed_to } = action else {
+            panic!("expected SetAside, got {:?}", action);
+        };
+        assert_eq!(found, Some(1));
+        let aside = dir.path().join(renamed_to);
+        assert_eq!(user_version(&aside), 1);
+        assert_eq!(rows(&aside), before);
+        assert_eq!(user_version(&path), 2);
+    }
+
+    fn assert_injected_failure_keeps_store(phase: Phase) {
+        let dir = TempDir::new().unwrap();
+        let path = v1_store(&dir);
+        let before = rows(&path);
+        let steps = [UpgradeStep {
+            from: 1,
+            run: add_marker_table,
+        }];
+
+        FAIL_AT.with(|f| f.set(Some(phase)));
+        let result = ensure_store_version_with(&path, 2, &steps);
+        FAIL_AT.with(|f| f.set(None));
+
+        assert!(
+            matches!(result, Err(BridgeError::Storage(_))),
+            "{:?}: expected Storage error, got {:?}",
+            phase,
+            result
+        );
+        assert_left_in_place_at_v1(&dir, &path, &before);
+    }
+
+    #[test]
+    fn begin_failure_is_an_error_and_keeps_the_store() {
+        assert_injected_failure_keeps_store(Phase::Begin);
+    }
+
+    #[test]
+    fn stamp_failure_is_an_error_and_keeps_the_store() {
+        assert_injected_failure_keeps_store(Phase::Stamp);
+    }
+
+    #[test]
+    fn commit_failure_is_an_error_and_keeps_the_store() {
+        assert_injected_failure_keeps_store(Phase::Commit);
+    }
+
+    #[test]
+    fn transient_classification() {
+        use rusqlite::ffi;
+        let err = |code| rusqlite::Error::SqliteFailure(ffi::Error::new(code), None);
+        for code in [
+            ffi::SQLITE_BUSY,
+            ffi::SQLITE_LOCKED,
+            ffi::SQLITE_FULL,
+            ffi::SQLITE_IOERR,
+            ffi::SQLITE_CANTOPEN,
+            ffi::SQLITE_PERM,
+            ffi::SQLITE_READONLY,
+            ffi::SQLITE_NOMEM,
+            ffi::SQLITE_INTERRUPT,
+            ffi::SQLITE_PROTOCOL,
+        ] {
+            assert!(
+                is_transient(&err(code)),
+                "code {} should be transient",
+                code
+            );
+        }
+        for code in [
+            ffi::SQLITE_ERROR,
+            ffi::SQLITE_CONSTRAINT,
+            ffi::SQLITE_CORRUPT,
+            ffi::SQLITE_NOTADB,
+            ffi::SQLITE_MISMATCH,
+        ] {
+            assert!(
+                !is_transient(&err(code)),
+                "code {} should not be transient",
+                code
+            );
+        }
+        assert!(!is_transient(&rusqlite::Error::InvalidQuery));
     }
 
     #[test]
