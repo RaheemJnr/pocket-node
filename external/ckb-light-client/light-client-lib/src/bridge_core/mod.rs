@@ -12,6 +12,7 @@
 //! - `query`: query APIs returning the same JSON strings the JNI bridge returns
 //! - `dao`: Nervos DAO arithmetic helpers (no node state involved)
 //! - `rpc`: JSON-RPC 2.0 passthrough for a few read-only node methods
+//! - `store_version`: format version of the on-device store, checked by `init`
 //!
 //! ## State machine
 //!
@@ -24,6 +25,7 @@ pub mod error;
 pub mod lifecycle;
 pub mod query;
 pub mod rpc;
+pub mod store_version;
 pub mod types;
 
 pub use error::BridgeError;
