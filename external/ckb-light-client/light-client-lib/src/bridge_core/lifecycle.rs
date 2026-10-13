@@ -29,6 +29,7 @@
 //! switch, and [`stop`] for why it no longer waits on `ckb-stop-handler` (#487).
 
 use super::error::BridgeError;
+use super::store_version::ensure_store_version;
 use super::types::*;
 use crate::protocols::{
     FilterProtocol, LightClientProtocol, Peers, PendingTxs, RelayProtocol, SyncProtocol,
@@ -142,6 +143,15 @@ pub fn init(
         error!("Failed to create network directory: {}", e);
         BridgeError::Storage(e.to_string())
     })?;
+
+    // Check the store's format version before the storage layer opens it. A
+    // store this build cannot read is set aside (renamed, never deleted) and a
+    // fresh one is created, so init carries on either way.
+    let store_action = ensure_store_version(&run_env.store.path).map_err(|e| {
+        error!("Failed to check store format version: {}", e);
+        e
+    })?;
+    info!("Store format version check: {:?}", store_action);
 
     // Initialize storage
     info!("Initializing storage...");
