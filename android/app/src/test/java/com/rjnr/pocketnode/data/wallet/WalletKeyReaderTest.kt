@@ -55,7 +55,7 @@ class WalletKeyReaderTest {
             val encryption = mockk<KeystoreEncryptionManager>()
             every { encryption.newDecryptCipherV2(any()) } throws failure
             val auth = mockk<AuthManager>()
-            val reader = WalletKeyReader(dao, mockk(), encryption, auth, mockk(), mockk(), NoopLogger)
+            val reader = WalletKeyReader(dao, mockk(), encryption, auth, mockk(), NoopLogger)
             val activity = mockk<FragmentActivity>()
             val key = reader.readPrivateKey(activity, "wallet", "Send", "Authenticate")
             val material = reader.readKeyMaterial(activity, "wallet", "Reveal", "Authenticate")
