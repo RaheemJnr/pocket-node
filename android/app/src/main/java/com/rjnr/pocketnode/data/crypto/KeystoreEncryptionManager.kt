@@ -2,6 +2,7 @@ package com.rjnr.pocketnode.data.crypto
 
 import android.os.Build
 import android.security.keystore.KeyGenParameterSpec
+import android.security.keystore.KeyPermanentlyInvalidatedException
 import android.security.keystore.KeyProperties
 import androidx.annotation.VisibleForTesting
 import java.security.KeyStore
@@ -97,7 +98,14 @@ class KeystoreEncryptionManager @Inject constructor() {
      */
     fun newDecryptCipherV2(iv: ByteArray): Cipher {
         val cipher = Cipher.getInstance(CIPHER_TRANSFORM)
-        cipher.init(Cipher.DECRYPT_MODE, secretKeyV2, GCMParameterSpec(GCM_TAG_BITS, iv))
+        // A replacement key cannot decrypt existing ciphertext. In particular,
+        // removing the device lock may delete the auth-bound key (#576).
+        val key = testKeyV2 ?: KeyStore.getInstance(KEYSTORE_PROVIDER).run {
+            load(null)
+            (getEntry(KEY_ALIAS_V2, null) as? KeyStore.SecretKeyEntry)?.secretKey
+                ?: throw KeyPermanentlyInvalidatedException("Wallet encryption key is missing")
+        }
+        cipher.init(Cipher.DECRYPT_MODE, key, GCMParameterSpec(GCM_TAG_BITS, iv))
         return cipher
     }
 
