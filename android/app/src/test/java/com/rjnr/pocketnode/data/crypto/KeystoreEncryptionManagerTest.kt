@@ -79,6 +79,28 @@ class KeystoreEncryptionManagerTest {
         assertArrayEquals(plaintext, decrypted)
     }
 
+    @Test
+    fun `missing V2 decryption key reports invalidation without generating a replacement`() {
+        val store = io.mockk.mockk<java.security.KeyStore>(relaxed = true)
+        io.mockk.mockkStatic(java.security.KeyStore::class)
+        io.mockk.mockkStatic(javax.crypto.KeyGenerator::class)
+        try {
+            io.mockk.every { java.security.KeyStore.getInstance("AndroidKeyStore") } returns store
+            io.mockk.every { store.getEntry("pocket_node_key_material_v2", null) } returns null
+            io.mockk.every { javax.crypto.KeyGenerator.getInstance("AES", "AndroidKeyStore") } throws
+                AssertionError("Decryption must never request a replacement key")
+            assertThrows(android.security.keystore.KeyPermanentlyInvalidatedException::class.java) {
+                KeystoreEncryptionManager().newDecryptCipherV2(ByteArray(12))
+            }
+            io.mockk.verify(exactly = 0) {
+                javax.crypto.KeyGenerator.getInstance("AES", "AndroidKeyStore")
+            }
+        } finally {
+            io.mockk.unmockkStatic(javax.crypto.KeyGenerator::class)
+            io.mockk.unmockkStatic(java.security.KeyStore::class)
+        }
+    }
+
     // -- V2 (auth-bound) API --
     //
     // In Robolectric the V2 key is a raw AES key (no real Keystore), so the
