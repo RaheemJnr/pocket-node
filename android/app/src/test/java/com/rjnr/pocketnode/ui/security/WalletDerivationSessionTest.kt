@@ -35,13 +35,19 @@ class WalletDerivationSessionTest {
             }
         } finally { Dispatchers.resetMain() }
     }
-    @Test fun `nested writer owns credential handoff but reauth still cancels`() = runTest {
+    @Test @Config(sdk = [30]) fun `only actual nested credential handoff delegates writer authority and reauth still cancels`() = runTest {
         Dispatchers.setMain(UnconfinedTestDispatcher(testScheduler))
         try {
             val host = Robolectric.buildActivity(FragmentActivity::class.java).setup()
             var returned = false
             WalletDerivationSession.run(host.get(), ReauthLockEvents.locks.value) { session ->
-                session.persist { host.pause().stop(); yield(); host.start().resume(); returned = true }
+                session.persist {
+                    com.rjnr.pocketnode.data.vault.VaultOperationSession.run(host.get()) { credential ->
+                        credential.systemAuthentication(com.rjnr.pocketnode.data.vault.VaultDevicePromptMode.CREDENTIAL_ONLY) {
+                            host.pause().stop(); yield(); host.start().resume(); returned = true
+                        }
+                    }
+                }
             }
             assertTrue(returned)
             val job = async {
@@ -61,5 +67,22 @@ class WalletDerivationSessionTest {
             val job = async { WalletDerivationSession.run(host.get(), old) { entered = true } }
             job.join(); assertTrue(job.isCancelled); assertFalse(entered)
         } finally { Dispatchers.resetMain() }
+    }    @Test fun `ordinary persist stop has no writer wide exemption`() = runTest {
+        Dispatchers.setMain(UnconfinedTestDispatcher(testScheduler))
+        try {
+            val host = Robolectric.buildActivity(FragmentActivity::class.java).setup()
+            val key = ByteArray(32) { 7 }; var returned = false
+            val job = async {
+                WalletDerivationSession.run(host.get(), ReauthLockEvents.locks.value) { session ->
+                    try {
+                        session.persist { host.pause().stop(); yield(); returned = true }
+                    } finally { key.fill(0) }
+                }
+            }
+            job.join(); host.start().resume()
+            assertTrue(job.isCancelled); assertFalse(returned); assertArrayEquals(ByteArray(32), key)
+        } finally { Dispatchers.resetMain() }
     }
+
+
 }
