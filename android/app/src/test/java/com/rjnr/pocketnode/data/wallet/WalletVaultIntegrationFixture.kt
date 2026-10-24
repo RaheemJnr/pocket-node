@@ -36,11 +36,13 @@ class WalletVaultIntegrationFixture(existingDatabase: AppDatabase? = null) : Aut
     val preference = WalletUnlockPreference(context)
     val pass = "public disposable wallet passphrase"
     val credentials = ArrayDeque<CharArray?>()
+    val choices = ArrayDeque<Boolean?>()
     var cleanupOk = true
+    var onCredential: (suspend () -> Unit)? = null
     val prompt = object : VaultPrompt {
-        override suspend fun request(activity: FragmentActivity, title: String, message: String, confirm: Boolean) = credentials.removeFirstOrNull()
-        override suspend fun requestLegacyPin(activity: FragmentActivity, title: String, message: String) = credentials.removeFirstOrNull()
-        override suspend fun choose(activity: FragmentActivity, title: String, message: String, positiveLabel: String, negativeLabel: String): Boolean? = false
+        override suspend fun request(activity: FragmentActivity, title: String, message: String, confirm: Boolean) = run { onCredential?.invoke(); credentials.removeFirstOrNull() }
+        override suspend fun requestLegacyPin(activity: FragmentActivity, title: String, message: String) = run { onCredential?.invoke(); credentials.removeFirstOrNull() }
+        override suspend fun choose(activity: FragmentActivity, title: String, message: String, positiveLabel: String, negativeLabel: String): Boolean? = if (choices.isEmpty()) false else choices.removeFirst()
         override suspend fun notify(activity: FragmentActivity, title: String, message: String) {}
     }
     val device = object : VaultDeviceAuthentication {
@@ -52,7 +54,12 @@ class WalletVaultIntegrationFixture(existingDatabase: AppDatabase? = null) : Aut
         it.keyStoreMigrationHelper = legacy
         it.testPrefs = context.getSharedPreferences("ckb_wallet_keys", 0)
     }
-    val coordinator = WalletVaultCoordinator(db, store, crypto, WalletSecretValidator(MnemonicManager()), prompt, device, VaultLegacyCleanup { id, generation, material -> cleanupOk && WalletLegacyCleanup(context, backup, db, keyManager, legacy).clean(id, generation, material) })
+    val coordinator = WalletVaultCoordinator(db, store, crypto, WalletSecretValidator(MnemonicManager()), prompt, device, object : VaultLegacyCleanup {
+        override suspend fun clean(walletId: String, expectedGeneration: Long, verifiedMaterial: KeyMaterial) =
+            cleanupOk && WalletLegacyCleanup(context, backup, db, keyManager, legacy).clean(walletId, expectedGeneration, verifiedMaterial)
+        override suspend fun cleanWithProof(walletId: String, expectedGeneration: Long, verifiedMaterial: KeyMaterial, proof: BoundLegacyBackupProof) =
+            cleanupOk && WalletLegacyCleanup(context, backup, db, keyManager, legacy).cleanWithProof(walletId, expectedGeneration, verifiedMaterial, proof)
+    })
     val reader = WalletKeyReader(db.keyMaterialDao(), legacy, encryption, auth, recovery, coordinator, pin, prompt, preference)
     val writer = WalletKeyWriter(coordinator)
     val material = KeyMaterial("00".repeat(31) + "02", walletType = "raw_key", mnemonicBackedUp = false)

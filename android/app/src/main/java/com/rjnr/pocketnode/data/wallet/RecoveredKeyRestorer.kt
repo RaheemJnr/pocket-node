@@ -1,72 +1,34 @@
 package com.rjnr.pocketnode.data.wallet
 
 import androidx.fragment.app.FragmentActivity
-import com.rjnr.pocketnode.core.crypto.hexToByteArray
 import com.rjnr.pocketnode.core.crypto.toHexStringNoPrefix
 import com.rjnr.pocketnode.core.log.Logger
-import com.rjnr.pocketnode.data.auth.AuthManager
 import com.rjnr.pocketnode.data.crypto.KeyBackupManager
 import com.rjnr.pocketnode.data.crypto.KeyMaterial
 import com.rjnr.pocketnode.data.database.dao.KeyMaterialDao
 import com.rjnr.pocketnode.data.database.dao.WalletDao
 import com.rjnr.pocketnode.data.database.entity.WalletEntity
-import com.rjnr.pocketnode.data.gateway.models.Script
+import com.rjnr.pocketnode.data.vault.*
 import javax.inject.Inject
 import javax.inject.Singleton
 
-/**
- * Writes key material decrypted from PIN backups (Recovery screen, "Recover
- * with PIN") into the normal key store, and decides when recovery is done.
- *
- * ## Completion invariant
- *
- * Recovery is complete only when the phone has at least one wallet row and
- * every wallet row (sub-accounts included) has a `key_material` row that is
- * not waiting for verification, or when there is nothing to recover at all
- * (no wallet row, no key row, no backup file). Wallets that fail this are [missingWallets].
- * Until then the "recovery incomplete" marker in [RecoveryStateStore] stays
- * set, and the app opens on the Recovery screen at every cold start.
- *
- * ## Per wallet ([restore])
- * 1. The wallet must have a Room wallet row; a backup without one is
- *    skipped ([Outcome.NoWalletRow]) and its file kept.
- * 2. A wallet that already has a key row is never written: the row is only
- *    read back and checked.
- * 3. Otherwise the backup key must give the wallet's stored lock script,
- *    and a backup phrase must derive that same key at the wallet's
- *    derivation path, or nothing is written ([Outcome.AddressMismatch]).
- * 4. The bundle is written through [WalletKeyWriter] (the import writer,
- *    insert-or-fail): auth-bound V2 behind the screen lock when the phone
- *    has one, otherwise the V1 software key, and V1 only with the user's
- *    consent (`allowV1`, else [Outcome.NeedsNoLockConsent]). The V2 write
- *    also rewrites the wallet's PIN backup file under the session PIN, as
- *    import does.
- * 5. The wallet is recorded as unverified before the write, and only a
- *    successful read-back that gives the stored lock script clears it. A
- *    failed check deletes the row only if it is still the row written here.
- *
- * ## Re-key from a phrase or private key
- * A missing wallet with no usable backup can be re-keyed from its phrase
- * ([rekeyFromPhrase], derived at each row's own path, so a parent's phrase
- * also re-keys its missing sub-accounts) or, for a raw-key wallet, its
- * private key ([rekeyFromPrivateKey]). Both go through [restore] for the
- * existing rows only: no wallet row is created and no row that is not
- * missing is touched.
- *
- * Never logs key material: wallet ids and outcomes only.
+/** Validates external recovery against existing metadata, then commits verified V3 protection.
+ * Missing and unusable rows remain intact until coordinator generation/source-CAS activation.
+ * No app-PIN backup, unauthenticated fallback or IV-based recovery deletion is performed.
  */
 @Singleton
 class RecoveredKeyRestorer @Inject constructor(
     private val walletDao: WalletDao,
     private val keyMaterialDao: KeyMaterialDao,
-    private val keyWriter: WalletKeyWriter,
     private val keyReader: WalletKeyReader,
-    private val authManager: AuthManager,
     private val keyManager: KeyManager,
     private val mnemonicManager: MnemonicManager,
     private val recoveryState: RecoveryStateStore,
     private val keyBackupManager: KeyBackupManager,
     private val logger: Logger,
+    private val coordinator: WalletVaultCoordinator,
+    private val prompt: VaultPrompt,
+    private val legacyRecovery: LegacyBackupRecovery,
 ) {
 
     sealed class Outcome {
@@ -81,10 +43,7 @@ class RecoveredKeyRestorer @Inject constructor(
          * the wallet. Nothing was overwritten.
          */
         object AddressMismatch : Outcome()
-        /**
-         * The phone has no screen lock and the user has not agreed to the
-         * software-only key yet; nothing was written.
-         */
+        /** Compatibility only for task6 UI migration; V3 recovery never returns this outcome. */
         object NeedsNoLockConsent : Outcome()
         /** The user dismissed an unlock prompt; a retry can finish it. */
         object Cancelled : Outcome()
@@ -140,89 +99,101 @@ class RecoveredKeyRestorer @Inject constructor(
         return true
     }
 
-    /**
-     * True when a restore would store keys at V1 (no biometric, no screen
-     * lock), which needs the no-lock consent first.
-     */
-    fun needsNoLockConsent(): Boolean =
-        !authManager.isBiometricEnrolled() && !authManager.hasDeviceCredential()
+    /** Compatibility for the old UI; recovery always requires a verified wallet passphrase. */
+    fun needsNoLockConsent(): Boolean = false
 
+    @Suppress("UNUSED_PARAMETER")
     suspend fun restore(
         activity: FragmentActivity,
         walletId: String,
         material: KeyMaterial?,
         allowV1: Boolean,
     ): Outcome {
-        val wallet = walletDao.getById(walletId)
-        if (wallet == null) {
-            logger.w(TAG, "No wallet row for backup $walletId; skipped, backup kept")
-            return Outcome.NoWalletRow
-        }
-        val existingIv = keyMaterialDao.getByWalletId(walletId)?.iv
-        if (existingIv != null) {
-            // Written by an earlier attempt, or never lost: verify it.
-            val checked = verifyChecked(activity, walletId, wallet, writtenIv = null)
-            val outcome = checked.outcome
-            // A row that was never verified and is proven unusable (it does
-            // not decrypt, its device key is gone, or it holds another key)
-            // would block every retry. It is dropped and written again, but
-            // only when the new material matches this wallet and could be
-            // written now (consent included). A transient unlock error
-            // (lockout, timeout, hardware busy) is a retry, never a reason to
-            // drop the row; a verified row is never dropped.
-            //
-            // Between the delete and the write the wallet has no key row.
-            // That gap is accepted: the material is in hand (a backup file
-            // that is kept, or a phrase or key the user just entered), and a
-            // failed write leaves the wallet missing, so the next attempt
-            // writes it again.
-            if (!checked.replaceable || walletId !in recoveryState.unverifiedWalletIds() || material == null) {
-                return outcome
-            }
-            if (!materialMatches(material, wallet)) return outcome
-            if (needsNoLockConsent() && !allowV1) return Outcome.NeedsNoLockConsent
-            logger.w(TAG, "Unverified key row for $walletId is unusable; writing it again")
-            runCatching { keyMaterialDao.deleteIfIv(walletId, existingIv) }
-                .onFailure { logger.e(TAG, "Removing the unusable row failed for $walletId", it) }
-            if (keyMaterialDao.getKdfVersion(walletId) != null) return outcome
-        }
+        val wallet = walletDao.getById(walletId) ?: return Outcome.NoWalletRow
+        // A row's mere presence is never evidence of successful authentication.
         if (material == null) return Outcome.NoBackup
-
-        val keyBytes = runCatching { material.privateKey.hexToByteArray() }.getOrNull()
-            ?.takeIf { it.size == PRIVATE_KEY_SIZE }
-            ?: return Outcome.Failed("backup key is not a 32-byte key").also {
-                logger.w(TAG, "Backup for $walletId does not hold a 32-byte key")
-            }
-        try {
-            if (!matchesWallet(keyBytes, wallet) || !phraseMatchesKey(material.mnemonic, keyBytes, wallet)) {
-                logger.w(TAG, "Backup for $walletId does not match the wallet; not written")
-                return Outcome.AddressMismatch
-            }
-            if (needsNoLockConsent() && !allowV1) {
-                logger.i(TAG, "No screen lock and no consent yet for $walletId; not written")
-                return Outcome.NeedsNoLockConsent
-            }
-
-            // Recorded before the write: a row whose read-back never
-            // completes stays missing across launches.
-            recoveryState.addUnverified(walletId)
-            when (val written = write(activity, walletId, keyBytes, material)) {
-                WalletKeyWriter.Result.Success -> Unit
-                WalletKeyWriter.Result.Cancelled -> return Outcome.Cancelled
-                is WalletKeyWriter.Result.AuthError ->
-                    return Outcome.Failed("unlock error ${written.errorCode}")
-                WalletKeyWriter.Result.KeyInvalidated -> return Outcome.Failed("device key invalidated")
-                WalletKeyWriter.Result.NoSecureLock -> return Outcome.NeedsNoLockConsent
-                is WalletKeyWriter.Result.WriteFailed -> {
-                    logger.e(TAG, "Writing restored keys failed for $walletId", written.cause)
-                    return Outcome.Failed("write failed")
+        val normalized = if (material.mnemonic == null) material.copy(walletType = "raw_key") else material
+        if (!WalletSecretValidator(mnemonicManager).validate(normalized, wallet))
+            return Outcome.AddressMismatch
+        recoveryState.addUnverified(walletId)
+        recoveryState.markIncomplete()
+        if (normalized.mnemonic == null && wallet.type == KeyManager.WALLET_TYPE_MNEMONIC &&
+            keyMaterialDao.getKdfVersion(walletId) != null) {
+            if (keyMaterialDao.getKdfVersion(walletId) == 3) {
+                when (val existing = coordinator.readForRecovery(activity, walletId)) {
+                    is VaultAccessResult.Success -> {
+                        recoveryState.removeUnverified(walletId)
+                        return Outcome.Restored
+                    }
+                    VaultAccessResult.Cancelled -> return Outcome.Cancelled
+                    is VaultAccessResult.Unavailable -> {
+                        if (existing.kind !in setOf(
+                            VaultFailureKind.MISSING_DEVICE_KEY,
+                            VaultFailureKind.INVALIDATED_DEVICE_KEY,
+                            VaultFailureKind.NO_DEVICE_WRAP,
+                            VaultFailureKind.NO_DEVICE_LOCK,
+                        )) return Outcome.Failed("Existing wallet authentication needs a retry; nothing was replaced.")
+                        when (prompt.choose(activity, "Preserve existing recovery phrase",
+                            "The device route is unavailable. Your independent wallet passphrase may still recover the seed. External-key-only recovery cannot restore an inaccessible seed or other accounts.",
+                            "Use wallet passphrase", "Recover spending only")) {
+                            true -> return when (coordinator.read(activity, walletId, "Recover existing seed", "Enter its wallet passphrase",
+                                VaultReadPreference.PASSPHRASE)) {
+                                is VaultAccessResult.Success -> { recoveryState.removeUnverified(walletId); Outcome.Restored }
+                                VaultAccessResult.Cancelled -> Outcome.Cancelled
+                                else -> Outcome.Failed("Passphrase authentication or cleanup did not complete. Nothing was replaced.")
+                            }
+                            false -> if (!confirmSpendingOnly(activity)) return Outcome.Cancelled
+                            null -> return Outcome.Cancelled
+                        }
+                    }
+                    else -> return Outcome.Failed("Existing seed cleanup must finish before external-key replacement.")
                 }
+            } else when (val existing = keyReader.readKeyMaterial(activity, walletId, "Preserve recovery phrase",
+                "Authenticate existing wallet keys before private-key-only recovery.")) {
+                is WalletKeyReader.MaterialResult.Success -> {
+                    try {
+                        // The reader validates both addresses and completes verified protection/cleanup.
+                        recoveryState.removeUnverified(walletId)
+                        return Outcome.Restored
+                    } finally { existing.privateKey.fill(0) }
+                }
+                WalletKeyReader.MaterialResult.Cancelled -> return Outcome.Cancelled
+                WalletKeyReader.MaterialResult.KeyInvalidated -> {
+                    if (!confirmSpendingOnly(activity)) return Outcome.Cancelled
+                }
+                else -> return Outcome.Failed("Existing seed authentication did not complete. Retry or resolve legacy backup cleanup; nothing was replaced.")
             }
-            // Every write draws a fresh IV: it identifies the row written here.
-            val writtenIv = keyMaterialDao.getByWalletId(walletId)?.iv
-            return verify(activity, walletId, wallet, writtenIv)
-        } finally {
-            keyBytes.fill(0)
+        }
+        return when (coordinator.recoverExisting(activity, walletId, normalized)) {
+            is VaultAccessResult.Success -> {
+                recoveryState.removeUnverified(walletId)
+                Outcome.Restored
+            }
+            VaultAccessResult.Cancelled -> Outcome.Cancelled
+            VaultAccessResult.CleanupRequired ->
+                Outcome.Failed("Verified protection is saved; legacy backup ownership or seed preservation still needs recovery.")
+            else -> Outcome.Failed("Wallet authentication or verification failed")
+        }
+    }
+
+    private suspend fun confirmSpendingOnly(activity: FragmentActivity): Boolean = prompt.choose(activity,
+        "Recover spending only?",
+        "This private key restores spending for this wallet only. It does not restore an inaccessible recovery phrase or other accounts. Any readable seed is retained; surviving backups still require verified cleanup.",
+        "Recover spending only", "Cancel") == true
+
+    /** Native old-PIN prompt and all decrypted backup material stay inside the foreground operation. */
+    suspend fun restoreLegacyBackup(activity: FragmentActivity, walletId: String): Outcome {
+        if (walletDao.getById(walletId) == null) return Outcome.NoWalletRow
+        recoveryState.addUnverified(walletId)
+        recoveryState.markIncomplete()
+        return when (legacyRecovery.recover(activity, walletId)) {
+            is VaultAccessResult.Success -> {
+                recoveryState.removeUnverified(walletId)
+                Outcome.Restored
+            }
+            VaultAccessResult.Cancelled -> Outcome.Cancelled
+            VaultAccessResult.CleanupRequired -> Outcome.Failed("Verified vault saved; unresolved legacy sources remain preserved.")
+            else -> Outcome.Failed("No matching backup authenticated. Keep this wallet read-only and retry the old app PIN or external recovery secret.")
         }
     }
 
@@ -283,11 +254,13 @@ class RecoveredKeyRestorer @Inject constructor(
                     val material = KeyMaterial(
                         privateKey = key.toHexStringNoPrefix(),
                         mnemonic = if (storesPhrase) words.joinToString(" ") else null,
-                        walletType = wallet.type,
+                        walletType = if (storesPhrase) KeyManager.WALLET_TYPE_MNEMONIC else KeyManager.WALLET_TYPE_RAW_KEY,
                         // The user just entered the phrase.
                         mnemonicBackedUp = storesPhrase,
                     )
-                    outcomes[wallet.walletId] = restore(activity, wallet.walletId, material, allowV1)
+                    val outcome = restore(activity, wallet.walletId, material, allowV1)
+                    outcomes[wallet.walletId] = outcome
+                    if (outcome == Outcome.Cancelled) break
                 } finally {
                     key.fill(0)
                 }
@@ -329,145 +302,9 @@ class RecoveredKeyRestorer @Inject constructor(
         return mnemonicManager.derivePrivateKey(seed, account, chain, index)
     }
 
-    private fun materialMatches(material: KeyMaterial, wallet: WalletEntity): Boolean {
-        val keyBytes = runCatching { material.privateKey.hexToByteArray() }.getOrNull()
-            ?.takeIf { it.size == PRIVATE_KEY_SIZE } ?: return false
-        return try {
-            matchesWallet(keyBytes, wallet) && phraseMatchesKey(material.mnemonic, keyBytes, wallet)
-        } finally {
-            keyBytes.fill(0)
-        }
-    }
-
-    private suspend fun write(
-        activity: FragmentActivity,
-        walletId: String,
-        keyBytes: ByteArray,
-        material: KeyMaterial,
-    ): WalletKeyWriter.Result {
-        // Same bundle format a fresh import produces.
-        val bundle = WalletDerivation.encodePlaintextBundle(keyBytes, material.mnemonic?.let(::words))
-        return if (!needsNoLockConsent()) {
-            keyWriter.persistNewWallet(
-                activity = activity,
-                walletId = walletId,
-                bundle = bundle,
-                walletType = material.walletType,
-                mnemonicBackedUp = material.mnemonicBackedUp,
-                promptTitle = "Restore wallet keys",
-                promptSubtitle = "Use your phone's screen lock to save this wallet's restored keys.",
-            )
-        } else {
-            keyWriter.persistNewWalletV1Fallback(
-                walletId = walletId,
-                bundle = bundle,
-                walletType = material.walletType,
-                mnemonicBackedUp = material.mnemonicBackedUp,
-            )
-        }
-    }
-
-    /**
-     * A read-back result. [replaceable]: the row is proven unusable (does not
-     * decrypt, device key invalidated, or holds another key), as opposed to
-     * a cancel or a transient unlock error.
-     */
-    private class Checked(val outcome: Outcome, val replaceable: Boolean)
-
-    private suspend fun verify(
-        activity: FragmentActivity,
-        walletId: String,
-        wallet: WalletEntity,
-        writtenIv: ByteArray?,
-    ): Outcome = verifyChecked(activity, walletId, wallet, writtenIv).outcome
-
-    private suspend fun verifyChecked(
-        activity: FragmentActivity,
-        walletId: String,
-        wallet: WalletEntity,
-        writtenIv: ByteArray?,
-    ): Checked {
-        // The reader clears the unverified mark on any good decrypt (F-B-4);
-        // remember it so a row holding another key keeps the mark.
-        val wasUnverified = walletId in recoveryState.unverifiedWalletIds()
-        val read = keyReader.readPrivateKey(
-            activity = activity,
-            walletId = walletId,
-            promptTitle = "Check restored keys",
-            promptSubtitle = "Use your phone's screen lock to confirm this wallet's keys were saved.",
-        )
-        val checked = when (read) {
-            is WalletKeyReader.Result.Success -> try {
-                if (matchesWallet(read.privateKey, wallet)) {
-                    Checked(Outcome.Restored, replaceable = false)
-                } else {
-                    // A row holding another key is not verified.
-                    if (wasUnverified) recoveryState.addUnverified(walletId)
-                    Checked(Outcome.AddressMismatch, replaceable = true)
-                }
-            } finally {
-                read.privateKey.fill(0)
-            }
-            // The row stays unverified; the next attempt reads it again.
-            WalletKeyReader.Result.Cancelled -> return Checked(Outcome.Cancelled, replaceable = false)
-            is WalletKeyReader.Result.AuthError ->
-                Checked(Outcome.Failed("unlock error ${read.errorCode}"), replaceable = false)
-            is WalletKeyReader.Result.NotAvailable ->
-                Checked(Outcome.Failed("stored keys not readable"), replaceable = true)
-            WalletKeyReader.Result.KeyInvalidated ->
-                Checked(Outcome.Failed("device key invalidated"), replaceable = true)
-        }
-        if (checked.outcome == Outcome.Restored) {
-            recoveryState.removeUnverified(walletId)
-            logger.i(TAG, "Verified restored keys for $walletId")
-            return checked
-        }
-        logger.w(TAG, "Read-back check failed for $walletId")
-        if (writtenIv != null) {
-            // Only the row written in this call, and only while it is still that row.
-            runCatching { keyMaterialDao.deleteIfIv(walletId, writtenIv) }
-                .onFailure { logger.e(TAG, "Removing the unverified row failed for $walletId", it) }
-        }
-        return checked
-    }
-
-    /**
-     * The key gives the lock script stored for the wallet: both addresses
-     * when both are stored, the one that is when the other is blank.
-     */
     private fun matchesWallet(privateKey: ByteArray, wallet: WalletEntity): Boolean {
-        val script = runCatching { WalletDerivation.lockScript(WalletDerivation.publicKey(privateKey)) }
-            .getOrNull() ?: return false
-        val stored = listOf(wallet.mainnetAddress, wallet.testnetAddress).filter { it.isNotBlank() }
-        if (stored.isEmpty()) return false
-        return stored.all { address ->
-            runCatching { sameScript(WalletDerivation.lockScriptFromAddress(address), script) }.getOrDefault(false)
-        }
-    }
-
-    private fun sameScript(a: Script, b: Script): Boolean =
-        a.codeHash.equals(b.codeHash, ignoreCase = true) &&
-            a.hashType == b.hashType &&
-            a.args.equals(b.args, ignoreCase = true)
-
-    /**
-     * A backup that carries a phrase must derive its own private key at the
-     * wallet's derivation path; a backup without one has nothing to check.
-     */
-    private fun phraseMatchesKey(mnemonic: String?, keyBytes: ByteArray, wallet: WalletEntity): Boolean {
-        if (mnemonic == null) return true
-        val (account, chain, index) = derivationIndices(wallet)
-        val seed = runCatching { mnemonicManager.mnemonicToSeed(words(mnemonic)) }.getOrNull() ?: return false
-        val derived = try {
-            runCatching { mnemonicManager.derivePrivateKey(seed, account, chain, index) }.getOrNull()
-        } finally {
-            seed.fill(0)
-        }
-        return try {
-            derived != null && derived.contentEquals(keyBytes)
-        } finally {
-            derived?.fill(0)
-        }
+        val info = runCatching { WalletDerivation.walletInfo(privateKey) }.getOrNull() ?: return false
+        return wallet.mainnetAddress == info.mainnetAddress && wallet.testnetAddress == info.testnetAddress
     }
 
     private fun derivationIndices(wallet: WalletEntity): Triple<Int, Int, Int> {
@@ -476,12 +313,9 @@ class RecoveredKeyRestorer @Inject constructor(
         return Triple(match.groupValues[1].toInt(), match.groupValues[2].toInt(), match.groupValues[3].toInt())
     }
 
-    private fun words(mnemonic: String): List<String> = mnemonic.trim().split(WHITESPACE)
-
     private companion object {
         const val TAG = "RecoveredKeyRestorer"
         const val PRIVATE_KEY_SIZE = 32
         val PATH = Regex("""m/44'/309'/(\d+)'/(\d+)/(\d+)""")
-        val WHITESPACE = Regex("""\s+""")
     }
 }

@@ -182,6 +182,10 @@ class KeyStoreMigrationHelper(
     internal fun defaultSourceForVaultCleanup(source: KeyMaterialEntity): DecryptedKeyData? =
         if (source.walletId == "default" && source.kdfVersion == 1) decryptV1Row(source) else null
 
+    /** Cleanup-only identity witness; never a UI secret-access route. */
+    internal fun legacySourceForVaultCleanup(source: KeyMaterialEntity): DecryptedKeyData? =
+        if (source.kdfVersion == 1) decryptV1Row(source) else null
+
     private fun decryptV1Row(entity: KeyMaterialEntity): DecryptedKeyData? {
         return try {
             val keyCipher = encryptionManager.newDecryptCipher(entity.iv)

@@ -109,8 +109,9 @@ class RecoveryNoLockConsentTest {
         state.clear()
         val reader = WalletKeyReader(db.keyMaterialDao(), v1Helper, encryption, authManager, state, mockk(), mockk(), mockk(), com.rjnr.pocketnode.data.wallet.WalletUnlockPreference(ApplicationProvider.getApplicationContext()))
         restorer = RecoveredKeyRestorer(
-            db.walletDao(), db.keyMaterialDao(), writer, reader, authManager, keyManager,
-            MnemonicManager(), state, backups, NoopLogger,
+            db.walletDao(), db.keyMaterialDao(), reader, keyManager,
+            MnemonicManager(), state, backups, NoopLogger, com.rjnr.pocketnode.data.wallet.WalletVaultIntegrationFixture(db).coordinator,
+            mockk(), mockk(),
         )
     }
 

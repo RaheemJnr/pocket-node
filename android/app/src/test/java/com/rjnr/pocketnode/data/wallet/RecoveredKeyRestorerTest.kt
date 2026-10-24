@@ -60,7 +60,8 @@ class RecoveredKeyRestorerTest {
     private lateinit var state: RecoveryStateStore
     private lateinit var restorer: RecoveredKeyRestorer
     private val mnemonicManager = MnemonicManager()
-    private val activity = mockk<FragmentActivity>(relaxed = true)
+    private lateinit var activity: FragmentActivity
+    private lateinit var fixture: WalletVaultIntegrationFixture
 
     private val phrase =
         "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about"
@@ -81,22 +82,17 @@ class RecoveredKeyRestorerTest {
             .build()
         walletDao = db.walletDao()
         keyMaterialDao = db.keyMaterialDao()
-        val encryption = KeystoreEncryptionManager.createForTest()
-        val prefs = ctx.getSharedPreferences("test_recovered_key_restorer", Context.MODE_PRIVATE)
-        prefs.edit().clear().commit()
-        v1Helper = KeyStoreMigrationHelper(keyMaterialDao, encryption, prefs, NoopLogger)
-        val v2Helper = KeystoreV2MigrationHelper(keyMaterialDao, encryption, prefs, logger = NoopLogger)
-        authManager = mockk(relaxed = true)
-        every { authManager.getSessionPin() } returns null
-        coEvery {
-            authManager.authenticateForCipher(any(), any<Cipher>(), any(), any())
-        } answers { AuthManager.CipherAuthResult.Success(args[1] as Cipher) }
+        fixture = WalletVaultIntegrationFixture(db)
+        activity = fixture.activity
+        repeat(12) { fixture.phrase() }
+        v1Helper = fixture.legacy
+        authManager = fixture.auth
         keyBackupManager = mockk(relaxed = true)
-        writer = WalletKeyWriter(WalletVaultIntegrationFixture(db).coordinator)
+        writer = fixture.writer
         keyManager = mockk(relaxed = true)
-        state = RecoveryStateStore(ctx)
+        state = fixture.recovery
         state.clear()
-        reader = WalletKeyReader(keyMaterialDao, v1Helper, encryption, authManager, state, mockk(), mockk(), mockk(), WalletUnlockPreference(ApplicationProvider.getApplicationContext()))
+        reader = fixture.reader
         restorer = newRestorer(reader)
     }
 
@@ -106,8 +102,9 @@ class RecoveredKeyRestorerTest {
     }
 
     private fun newRestorer(keyReader: WalletKeyReader) = RecoveredKeyRestorer(
-        walletDao, keyMaterialDao, writer, keyReader, authManager, keyManager, mnemonicManager, state,
-        keyBackupManager, NoopLogger,
+        walletDao, keyMaterialDao, keyReader, keyManager, mnemonicManager, state,
+        keyBackupManager, NoopLogger, fixture.coordinator, fixture.prompt,
+        com.rjnr.pocketnode.data.vault.LegacyBackupRecovery(db, fixture.backup, fixture.coordinator, fixture.prompt, com.rjnr.pocketnode.data.vault.WalletSecretValidator(mnemonicManager), fixture.keyManager, fixture.legacy),
     )
 
     private fun secureLock(present: Boolean) {
@@ -147,51 +144,38 @@ class RecoveredKeyRestorerTest {
     )
 
     @Test
-    fun `with a screen lock the keys are written at V2 and read back to the wallet`() = runTest {
+    fun `recovery writes V3 and authenticated readback matches wallet and seed`() = walletOperationTest {
         secureLock(true)
         insertWallet("w1", phraseKeyHex)
-
-        val outcome = restorer.restore(activity, "w1", material(), allowV1 = false)
-
-        assertEquals(RecoveredKeyRestorer.Outcome.Restored, outcome)
-        assertEquals(2, keyMaterialDao.getKdfVersion("w1"))
-        // One prompt to write, one to read back.
-        coVerify(exactly = 2) { authManager.authenticateForCipher(activity, any(), any(), any()) }
+        assertEquals(RecoveredKeyRestorer.Outcome.Restored, restorer.restore(activity, "w1", material(), false))
+        assertEquals(3, keyMaterialDao.getKdfVersion("w1"))
         val read = reader.readKeyMaterial(activity, "w1", "t", "s") as WalletKeyReader.MaterialResult.Success
-        assertArrayEquals(phraseKeyHex.hexToByteArray(), read.privateKey)
-        assertEquals(phrase, read.mnemonic)
-        assertTrue(read.mnemonicBackedUp)
+        try { assertArrayEquals(phraseKeyHex.hexToByteArray(), read.privateKey); assertEquals(phrase, read.mnemonic) }
+        finally { read.privateKey.fill(0) }
         assertTrue(restorer.missingWallets().isEmpty())
     }
 
     @Test
-    fun `without a screen lock and with consent the keys are written at V1`() = runTest {
+    fun `without Android lock recovered keys still require V3 passphrase protection`() = walletOperationTest {
         secureLock(false)
         insertWallet("w1", phraseKeyHex)
-
-        val outcome = restorer.restore(activity, "w1", material(), allowV1 = true)
-
-        assertEquals(RecoveredKeyRestorer.Outcome.Restored, outcome)
-        assertEquals(1, keyMaterialDao.getKdfVersion("w1"))
-        assertEquals(phraseKeyHex, v1Helper.readDecryptedKey("w1")!!.privateKeyHex)
-        assertEquals(phrase, v1Helper.readDecryptedKey("w1")!!.mnemonic)
+        assertEquals(RecoveredKeyRestorer.Outcome.Restored, restorer.restore(activity, "w1", material(), true))
+        assertEquals(3, keyMaterialDao.getKdfVersion("w1"))
+        val read = fixture.coordinator.read(activity, "w1", "Read", "Read") as com.rjnr.pocketnode.data.vault.VaultAccessResult.Success
+        assertEquals(phraseKeyHex, read.material.privateKey); assertEquals(phrase, read.material.mnemonic)
     }
 
     @Test
-    fun `without a screen lock and without consent nothing is written`() = runTest {
+    fun `without Android lock weak fallback consent is unnecessary and never writes V1`() = walletOperationTest {
         secureLock(false)
         insertWallet("w1", phraseKeyHex)
-
-        val outcome = restorer.restore(activity, "w1", material(), allowV1 = false)
-
-        assertEquals(RecoveredKeyRestorer.Outcome.NeedsNoLockConsent, outcome)
-        assertTrue(restorer.needsNoLockConsent())
-        assertNull(keyMaterialDao.getByWalletId("w1"))
-        verify(exactly = 0) { keyBackupManager.deleteBackup(any()) }
+        assertEquals(RecoveredKeyRestorer.Outcome.Restored, restorer.restore(activity, "w1", material(), false))
+        assertFalse(restorer.needsNoLockConsent()); assertEquals(3, keyMaterialDao.getKdfVersion("w1"))
+        assertFalse(fixture.backup.hasAnyBackups())
     }
 
     @Test
-    fun `each wallet gets its own keys`() = runTest {
+    fun `each wallet gets its own keys`() = walletOperationTest {
         secureLock(false)
         insertWallet("w1", phraseKeyHex)
         insertWallet("w2", otherKeyHex, derivationPath = null)
@@ -202,12 +186,12 @@ class RecoveredKeyRestorerTest {
             restorer.restore(activity, "w2", material(otherKeyHex, mnemonic = null), true),
         )
 
-        assertEquals(phraseKeyHex, v1Helper.readDecryptedKey("w1")!!.privateKeyHex)
-        assertEquals(otherKeyHex, v1Helper.readDecryptedKey("w2")!!.privateKeyHex)
+        assertEquals(phraseKeyHex, (fixture.coordinator.read(activity, "w1", "Read", "Read") as com.rjnr.pocketnode.data.vault.VaultAccessResult.Success).material.privateKey)
+        assertEquals(otherKeyHex, (fixture.coordinator.read(activity, "w2", "Read", "Read") as com.rjnr.pocketnode.data.vault.VaultAccessResult.Success).material.privateKey)
     }
 
     @Test
-    fun `a phrase is checked at the wallet's own derivation path`() = runTest {
+    fun `a phrase is checked at the wallet's own derivation path`() = walletOperationTest {
         secureLock(false)
         insertWallet("acct1", accountOneKeyHex, derivationPath = "m/44'/309'/1'/0/0", accountIndex = 1)
 
@@ -217,7 +201,7 @@ class RecoveredKeyRestorerTest {
     }
 
     @Test
-    fun `a backup whose key does not give the wallet's lock script writes nothing`() = runTest {
+    fun `a backup whose key does not give the wallet's lock script writes nothing`() = walletOperationTest {
         secureLock(true)
         insertWallet("w1", phraseKeyHex)
 
@@ -230,7 +214,7 @@ class RecoveredKeyRestorerTest {
     }
 
     @Test
-    fun `a backup whose phrase does not derive its key writes nothing`() = runTest {
+    fun `a backup whose phrase does not derive its key writes nothing`() = walletOperationTest {
         secureLock(true)
         // The row and the key agree; the phrase in the backup does not.
         insertWallet("w1", otherKeyHex)
@@ -243,28 +227,23 @@ class RecoveredKeyRestorerTest {
     }
 
     @Test
-    fun `a blank stored testnet address is tolerated, the mainnet one is checked`() = runTest {
-        secureLock(false)
+    fun `both stored addresses are required before recovery mutation`() = walletOperationTest {
         insertWallet("w1", phraseKeyHex, blankTestnet = true)
-
-        assertEquals(RecoveredKeyRestorer.Outcome.Restored, restorer.restore(activity, "w1", material(), true))
+        assertEquals(RecoveredKeyRestorer.Outcome.AddressMismatch, restorer.restore(activity, "w1", material(), true))
+        assertNull(keyMaterialDao.getByWalletId("w1"))
     }
 
     @Test
-    fun `a key already stored for the wallet is never overwritten`() = runTest {
-        secureLock(false)
+    fun `present unusable mismatched key can be repaired by matching external seed`() = walletOperationTest {
         insertWallet("w1", phraseKeyHex)
-        // A different key is already stored under w1.
         v1Helper.migrateWallet("w1", otherKeyHex, null, KeyManager.WALLET_TYPE_RAW_KEY, false)
-
-        val outcome = restorer.restore(activity, "w1", material(), allowV1 = true)
-
-        assertEquals(RecoveredKeyRestorer.Outcome.AddressMismatch, outcome)
-        assertEquals(otherKeyHex, v1Helper.readDecryptedKey("w1")!!.privateKeyHex)
+        assertEquals(RecoveredKeyRestorer.Outcome.Restored, restorer.restore(activity, "w1", material(), true))
+        val read = fixture.coordinator.read(activity, "w1", "Read", "Read") as com.rjnr.pocketnode.data.vault.VaultAccessResult.Success
+        assertEquals(phrase, read.material.mnemonic)
     }
 
     @Test
-    fun `the V1 write refuses to replace an existing row`() = runTest {
+    fun `the V1 write refuses to replace an existing row`() = walletOperationTest {
         v1Helper.migrateWallet("w1", otherKeyHex, null, KeyManager.WALLET_TYPE_RAW_KEY, false)
         try {
             v1Helper.migrateWallet("w1", phraseKeyHex, phrase, KeyManager.WALLET_TYPE_MNEMONIC, true, overwrite = false)
@@ -276,7 +255,7 @@ class RecoveredKeyRestorerTest {
     }
 
     @Test
-    fun `a backup with no wallet row is skipped and its file kept`() = runTest {
+    fun `a backup with no wallet row is skipped and its file kept`() = walletOperationTest {
         secureLock(true)
 
         val outcome = restorer.restore(activity, "orphan", material(), allowV1 = true)
@@ -288,7 +267,7 @@ class RecoveredKeyRestorerTest {
     }
 
     @Test
-    fun `a wallet with no key row and no backup is NoBackup and stays missing`() = runTest {
+    fun `a wallet with no key row and no backup is NoBackup and stays missing`() = walletOperationTest {
         secureLock(true)
         insertWallet("w1", phraseKeyHex)
 
@@ -298,95 +277,55 @@ class RecoveredKeyRestorerTest {
     }
 
     @Test
-    fun `a cancelled write prompt stores nothing`() = runTest {
-        secureLock(true)
+    fun `a cancelled passphrase prompt stores nothing`() = walletOperationTest {
         insertWallet("w1", phraseKeyHex)
-        coEvery {
-            authManager.authenticateForCipher(any(), any<Cipher>(), any(), any())
-        } returns AuthManager.CipherAuthResult.Cancelled
-
-        val outcome = restorer.restore(activity, "w1", material(), allowV1 = true)
-
-        assertEquals(RecoveredKeyRestorer.Outcome.Cancelled, outcome)
+        fixture.credentials.clear(); fixture.phrase(null)
+        assertEquals(RecoveredKeyRestorer.Outcome.Cancelled, restorer.restore(activity, "w1", material(), true))
         assertNull(keyMaterialDao.getByWalletId("w1"))
     }
 
     @Test
-    fun `a row cancelled at read-back stays missing until a later attempt verifies it`() = runTest {
-        secureLock(true)
-        insertWallet("w1", phraseKeyHex)
-        var prompts = 0
-        coEvery {
-            authManager.authenticateForCipher(any(), any<Cipher>(), any(), any())
-        } answers {
-            prompts++
-            if (prompts == 2) AuthManager.CipherAuthResult.Cancelled
-            else AuthManager.CipherAuthResult.Success(args[1] as Cipher)
-        }
-
-        assertEquals(RecoveredKeyRestorer.Outcome.Cancelled, restorer.restore(activity, "w1", material(), true))
-        val written = keyMaterialDao.getByWalletId("w1")
-        assertNotNull(written)
-        // The row exists but is not verified: recovery is not complete.
-        assertEquals(listOf("w1"), restorer.missingWallets().map { it.walletId })
-        assertFalse(restorer.completeIfDone())
-        assertTrue(state.unverifiedWalletIds().contains("w1"))
-
-        // A later attempt, even without the backup, verifies the stored row.
-        assertEquals(RecoveredKeyRestorer.Outcome.Restored, restorer.restore(activity, "w1", null, true))
-        assertEquals(3, prompts)
-        assertArrayEquals(written!!.encryptedPrivateKey, keyMaterialDao.getByWalletId("w1")!!.encryptedPrivateKey)
+    fun `pending cleanup keeps verified row unhealthy until authenticated retry completes`() = walletOperationTest {
+        insertWallet("w1", phraseKeyHex); fixture.cleanupOk = false
+        assertTrue(restorer.restore(activity, "w1", material(), true) is RecoveredKeyRestorer.Outcome.Failed)
+        assertEquals(3, keyMaterialDao.getKdfVersion("w1")); assertFalse(restorer.completeIfDone())
+        assertTrue("w1" in state.unverifiedWalletIds())
+        fixture.cleanupOk = true
+        assertEquals(RecoveredKeyRestorer.Outcome.Restored, restorer.restore(activity, "w1", material(), true))
         assertTrue(restorer.missingWallets().isEmpty())
     }
 
     @Test
-    fun `a read-back that does not give the lock script removes the row it wrote`() = runTest {
-        secureLock(false)
+    fun `failed durable envelope readback rolls activation back and preserves original source`() = walletOperationTest {
         insertWallet("w1", phraseKeyHex)
-        val lyingReader = mockk<WalletKeyReader>()
-        coEvery { lyingReader.readPrivateKey(any(), any(), any(), any()) } returns
-            WalletKeyReader.Result.Success(otherKeyHex.hexToByteArray())
-
-        val outcome = newRestorer(lyingReader).restore(activity, "w1", material(), allowV1 = true)
-
-        assertEquals(RecoveredKeyRestorer.Outcome.AddressMismatch, outcome)
-        assertNull(keyMaterialDao.getByWalletId("w1"))
-        verify(exactly = 0) { keyBackupManager.deleteBackup(any()) }
+        v1Helper.migrateWallet("w1", phraseKeyHex, phrase, "mnemonic", true)
+        val before = keyMaterialDao.getByWalletId("w1")
+        db.openHelper.writableDatabase.execSQL("CREATE TRIGGER corrupt_readback AFTER INSERT ON wallet_vault BEGIN UPDATE wallet_vault SET envelope=X'00' WHERE walletId=NEW.walletId; END")
+        assertTrue(restorer.restore(activity, "w1", material(), true) is RecoveredKeyRestorer.Outcome.Failed)
+        assertEquals(before, keyMaterialDao.getByWalletId("w1")); assertNull(fixture.store.get("w1"))
     }
 
     @Test
-    fun `a row replaced by someone else after the write is never removed`() = runTest {
-        secureLock(false)
+    fun `a concurrent source replacement during passphrase prompt survives source CAS rejection`() = walletOperationTest {
         insertWallet("w1", phraseKeyHex)
-        val racingReader = mockk<WalletKeyReader>()
-        coEvery { racingReader.readPrivateKey(any(), any(), any(), any()) } coAnswers {
-            // Another writer replaces the row between the write and the check.
-            v1Helper.migrateWallet("w1", otherKeyHex, null, KeyManager.WALLET_TYPE_RAW_KEY, false)
-            WalletKeyReader.Result.NotAvailable("decrypt failed")
-        }
-
-        val outcome = newRestorer(racingReader).restore(activity, "w1", material(), allowV1 = true)
-
-        assertTrue(outcome is RecoveredKeyRestorer.Outcome.Failed)
+        v1Helper.migrateWallet("w1", phraseKeyHex, phrase, "mnemonic", true)
+        fixture.onCredential = { v1Helper.migrateWallet("w1", otherKeyHex, null, "raw_key", false) }
+        assertTrue(restorer.restore(activity, "w1", material(), true) is RecoveredKeyRestorer.Outcome.Failed)
         assertEquals(otherKeyHex, v1Helper.readDecryptedKey("w1")!!.privateKeyHex)
     }
 
     @Test
-    fun `an unreadable stored row is a failure and the row it wrote is removed`() = runTest {
-        secureLock(false)
+    fun `storage failure preserves original encrypted source and recovery marker`() = walletOperationTest {
         insertWallet("w1", phraseKeyHex)
-        val failingReader = mockk<WalletKeyReader>()
-        coEvery { failingReader.readPrivateKey(any(), any(), any(), any()) } returns
-            WalletKeyReader.Result.NotAvailable("decrypt failed")
-
-        val outcome = newRestorer(failingReader).restore(activity, "w1", material(), allowV1 = true)
-
-        assertTrue(outcome is RecoveredKeyRestorer.Outcome.Failed)
-        assertNull(keyMaterialDao.getByWalletId("w1"))
+        v1Helper.migrateWallet("w1", phraseKeyHex, phrase, "mnemonic", true)
+        val before = keyMaterialDao.getByWalletId("w1")
+        db.openHelper.writableDatabase.execSQL("CREATE TRIGGER reject_vault BEFORE INSERT ON wallet_vault BEGIN SELECT RAISE(ABORT, 'disk full'); END")
+        assertTrue(restorer.restore(activity, "w1", material(), true) is RecoveredKeyRestorer.Outcome.Failed)
+        assertEquals(before, keyMaterialDao.getByWalletId("w1")); assertTrue("w1" in state.unverifiedWalletIds())
     }
 
     @Test
-    fun `completion needs every wallet row, sub-accounts included, to have verified keys`() = runTest {
+    fun `completion needs every wallet row, sub-accounts included, to have verified keys`() = walletOperationTest {
         secureLock(false)
         insertWallet("root", phraseKeyHex)
         insertWallet("sub", accountOneKeyHex, derivationPath = "m/44'/309'/1'/0/0", accountIndex = 1)
@@ -406,7 +345,7 @@ class RecoveredKeyRestorerTest {
     }
 
     @Test
-    fun `nothing to recover at all counts as complete and clears a stale marker`() = runTest {
+    fun `nothing to recover at all counts as complete and clears a stale marker`() = walletOperationTest {
         restorer.markIncomplete()
         every { keyBackupManager.hasAnyBackups() } returns false
 
@@ -415,7 +354,7 @@ class RecoveredKeyRestorerTest {
     }
 
     @Test
-    fun `no wallet rows but backup files left is not complete`() = runTest {
+    fun `no wallet rows but backup files left is not complete`() = walletOperationTest {
         restorer.markIncomplete()
         every { keyBackupManager.hasAnyBackups() } returns true
 
@@ -424,7 +363,7 @@ class RecoveredKeyRestorerTest {
     }
 
     @Test
-    fun `no wallet rows but a key row left is not complete`() = runTest {
+    fun `no wallet rows but a key row left is not complete`() = walletOperationTest {
         v1Helper.migrateWallet("stray", otherKeyHex, null, KeyManager.WALLET_TYPE_RAW_KEY, false)
         every { keyBackupManager.hasAnyBackups() } returns false
 
@@ -432,7 +371,7 @@ class RecoveredKeyRestorerTest {
     }
 
     @Test
-    fun `with a screen lock no consent is needed and the keys go to V2`() = runTest {
+    fun `with a screen lock no weak fallback consent is needed and keys go to V3`() = walletOperationTest {
         secureLock(true)
         insertWallet("w1", phraseKeyHex)
 
@@ -440,7 +379,7 @@ class RecoveredKeyRestorerTest {
 
         assertEquals(RecoveredKeyRestorer.Outcome.Restored, outcome)
         assertFalse(restorer.needsNoLockConsent())
-        assertEquals(2, keyMaterialDao.getKdfVersion("w1"))
+        assertEquals(3, keyMaterialDao.getKdfVersion("w1"))
     }
 
     // --- Re-key a missing wallet from its phrase or private key ---
@@ -450,7 +389,7 @@ class RecoveredKeyRestorerTest {
         "legal winner thank year wave sausage worth useful legal winner thank yellow".split(" ")
 
     @Test
-    fun `a missing root wallet is re-keyed from its phrase, verified, and recovery completes`() = runTest {
+    fun `a missing root wallet is re-keyed from its phrase, verified, and recovery completes`() = walletOperationTest {
         secureLock(true)
         insertWallet("root", phraseKeyHex)
         restorer.markIncomplete()
@@ -466,7 +405,7 @@ class RecoveredKeyRestorerTest {
     }
 
     @Test
-    fun `a phrase that does not belong to the wallet writes nothing`() = runTest {
+    fun `a phrase that does not belong to the wallet writes nothing`() = walletOperationTest {
         secureLock(true)
         insertWallet("root", phraseKeyHex)
 
@@ -478,7 +417,7 @@ class RecoveredKeyRestorerTest {
     }
 
     @Test
-    fun `an invalid phrase writes nothing`() = runTest {
+    fun `an invalid phrase writes nothing`() = walletOperationTest {
         insertWallet("root", phraseKeyHex)
 
         val result = restorer.rekeyFromPhrase(activity, "root", words.dropLast(1) + "zzzz", allowV1 = true)
@@ -488,21 +427,21 @@ class RecoveredKeyRestorerTest {
     }
 
     @Test
-    fun `a missing raw-key wallet is re-keyed from its private key`() = runTest {
+    fun `a missing raw-key wallet is re-keyed from its private key`() = walletOperationTest {
         secureLock(false)
         insertWallet("raw", otherKeyHex, derivationPath = null, type = KeyManager.WALLET_TYPE_RAW_KEY)
 
         val result = restorer.rekeyFromPrivateKey(activity, "raw", otherKeyHex.hexToByteArray(), allowV1 = true)
 
         assertEquals(mapOf("raw" to RecoveredKeyRestorer.Outcome.Restored), (result as RecoveredKeyRestorer.RekeyResult.Done).outcomes)
-        val stored = v1Helper.readDecryptedKey("raw")!!
-        assertEquals(otherKeyHex, stored.privateKeyHex)
+        val stored = (fixture.coordinator.read(activity, "raw", "Read", "Read") as com.rjnr.pocketnode.data.vault.VaultAccessResult.Success).material
+        assertEquals(otherKeyHex, stored.privateKey)
         assertNull(stored.mnemonic)
         assertEquals(KeyManager.WALLET_TYPE_RAW_KEY, stored.walletType)
     }
 
     @Test
-    fun `a private key that does not belong to the wallet writes nothing`() = runTest {
+    fun `a private key that does not belong to the wallet writes nothing`() = walletOperationTest {
         secureLock(false)
         insertWallet("raw", otherKeyHex, derivationPath = null, type = KeyManager.WALLET_TYPE_RAW_KEY)
 
@@ -513,7 +452,7 @@ class RecoveredKeyRestorerTest {
     }
 
     @Test
-    fun `a missing sub-account is re-keyed from its parent's phrase and the parent is not touched`() = runTest {
+    fun `a missing sub-account is re-keyed from its parent's phrase and the parent is not touched`() = walletOperationTest {
         secureLock(false)
         insertWallet("root", phraseKeyHex)
         v1Helper.migrateWallet("root", phraseKeyHex, phrase, KeyManager.WALLET_TYPE_MNEMONIC, true)
@@ -523,8 +462,8 @@ class RecoveredKeyRestorerTest {
         val result = restorer.rekeyFromPhrase(activity, "sub", words, allowV1 = true)
 
         assertEquals(mapOf("sub" to RecoveredKeyRestorer.Outcome.Restored), (result as RecoveredKeyRestorer.RekeyResult.Done).outcomes)
-        val sub = v1Helper.readDecryptedKey("sub")!!
-        assertEquals(accountOneKeyHex, sub.privateKeyHex)
+        val sub = (fixture.coordinator.read(activity, "sub", "Read", "Read") as com.rjnr.pocketnode.data.vault.VaultAccessResult.Success).material
+        assertEquals(accountOneKeyHex, sub.privateKey)
         // Sub-accounts store no phrase.
         assertNull(sub.mnemonic)
         assertArrayEquals(rootRow.iv, keyMaterialDao.getByWalletId("root")!!.iv)
@@ -532,7 +471,7 @@ class RecoveredKeyRestorerTest {
     }
 
     @Test
-    fun `a parent's phrase re-keys the parent and its missing sub-account, each verified`() = runTest {
+    fun `a parent's phrase re-keys the parent and its missing sub-account, each verified`() = walletOperationTest {
         secureLock(true)
         insertWallet("root", phraseKeyHex)
         insertWallet("sub", accountOneKeyHex, derivationPath = "m/44'/309'/1'/0/0", accountIndex = 1, parentWalletId = "root")
@@ -544,14 +483,14 @@ class RecoveredKeyRestorerTest {
             mapOf("root" to RecoveredKeyRestorer.Outcome.Restored, "sub" to RecoveredKeyRestorer.Outcome.Restored),
             (result as RecoveredKeyRestorer.RekeyResult.Done).outcomes,
         )
-        // Two prompts each (write, read-back); the raw-key wallet is untouched.
-        coVerify(exactly = 4) { authManager.authenticateForCipher(any(), any(), any(), any()) }
+        assertEquals(3, keyMaterialDao.getKdfVersion("root"))
+        assertEquals(3, keyMaterialDao.getKdfVersion("sub"))
         assertNull(keyMaterialDao.getByWalletId("raw"))
         assertEquals(listOf("raw"), restorer.missingWallets().map { it.walletId })
     }
 
     @Test
-    fun `a wallet that is not missing is never re-keyed`() = runTest {
+    fun `a wallet that is not missing is never re-keyed`() = walletOperationTest {
         secureLock(false)
         insertWallet("root", phraseKeyHex)
         v1Helper.migrateWallet("root", phraseKeyHex, phrase, KeyManager.WALLET_TYPE_MNEMONIC, true)
@@ -563,89 +502,53 @@ class RecoveredKeyRestorerTest {
     }
 
     @Test
-    fun `without a screen lock a re-key needs the consent`() = runTest {
-        secureLock(false)
+    fun `without Android lock rekey requires wallet passphrase instead of weak fallback consent`() = walletOperationTest {
         insertWallet("root", phraseKeyHex)
-
-        val result = restorer.rekeyFromPhrase(activity, "root", words, allowV1 = false)
-
-        assertEquals(
-            mapOf("root" to RecoveredKeyRestorer.Outcome.NeedsNoLockConsent),
-            (result as RecoveredKeyRestorer.RekeyResult.Done).outcomes,
-        )
-        assertNull(keyMaterialDao.getByWalletId("root"))
+        val result = restorer.rekeyFromPhrase(activity, "root", words, false) as RecoveredKeyRestorer.RekeyResult.Done
+        assertEquals(mapOf("root" to RecoveredKeyRestorer.Outcome.Restored), result.outcomes)
+        assertEquals(3, keyMaterialDao.getKdfVersion("root"))
     }
 
     // --- An unverified row that no longer reads back is written again ---
 
-    private fun readerFailingFirst(times: Int): WalletKeyReader {
-        val failing = mockk<WalletKeyReader>()
-        var calls = 0
-        coEvery { failing.readPrivateKey(any(), any(), any(), any()) } coAnswers {
-            calls++
-            if (calls <= times) WalletKeyReader.Result.NotAvailable("decrypt failed")
-            else reader.readPrivateKey(arg(0), arg(1), arg(2), arg(3))
-        }
-        return failing
-    }
+
 
     @Test
-    fun `an unverified row that no longer reads back is replaced when the material matches`() = runTest {
-        secureLock(true)
+    fun `unverified present ciphertext is replaced after matching external seed and current passphrase`() = walletOperationTest {
         insertWallet("w1", phraseKeyHex)
-        var prompts = 0
-        coEvery {
-            authManager.authenticateForCipher(any(), any<Cipher>(), any(), any())
-        } answers {
-            prompts++
-            if (prompts == 2) AuthManager.CipherAuthResult.Cancelled
-            else AuthManager.CipherAuthResult.Success(args[1] as Cipher)
-        }
-        // Written, then the read-back was cancelled: the row stays unverified.
-        assertEquals(RecoveredKeyRestorer.Outcome.Cancelled, restorer.restore(activity, "w1", material(), true))
-        val stale = keyMaterialDao.getByWalletId("w1")!!
-
-        // Now the row no longer reads back (say, the screen lock changed).
-        val outcome = newRestorer(readerFailingFirst(1)).restore(activity, "w1", material(), true)
-
-        assertEquals(RecoveredKeyRestorer.Outcome.Restored, outcome)
-        val fresh = keyMaterialDao.getByWalletId("w1")!!
-        assertFalse(stale.iv.contentEquals(fresh.iv))
-        assertTrue(restorer.missingWallets().isEmpty())
+        v1Helper.migrateWallet("w1", phraseKeyHex, phrase, "mnemonic", true); state.addUnverified("w1")
+        assertEquals(RecoveredKeyRestorer.Outcome.Restored, restorer.restore(activity, "w1", material(), true))
+        assertEquals(3, keyMaterialDao.getKdfVersion("w1")); assertTrue(restorer.missingWallets().isEmpty())
     }
 
     @Test
-    fun `an unverified row that no longer reads back is kept when there is no material`() = runTest {
+    fun `an unverified row that no longer reads back is kept when there is no material`() = walletOperationTest {
         secureLock(false)
         insertWallet("w1", phraseKeyHex)
         state.addUnverified("w1")
         v1Helper.migrateWallet("w1", phraseKeyHex, phrase, KeyManager.WALLET_TYPE_MNEMONIC, true)
         val before = keyMaterialDao.getByWalletId("w1")!!
 
-        val outcome = newRestorer(readerFailingFirst(1)).restore(activity, "w1", null, true)
+        val outcome = restorer.restore(activity, "w1", null, true)
 
-        assertTrue(outcome is RecoveredKeyRestorer.Outcome.Failed)
+        assertEquals(RecoveredKeyRestorer.Outcome.NoBackup, outcome)
         assertArrayEquals(before.iv, keyMaterialDao.getByWalletId("w1")!!.iv)
     }
 
     @Test
-    fun `a verified row that does not read back is never deleted`() = runTest {
-        secureLock(false)
+    fun `wrong current passphrase never replaces existing verified vault`() = walletOperationTest {
         insertWallet("w1", phraseKeyHex)
-        // Not in the unverified set: a row from before, or one already verified.
-        v1Helper.migrateWallet("w1", phraseKeyHex, phrase, KeyManager.WALLET_TYPE_MNEMONIC, true)
-        val before = keyMaterialDao.getByWalletId("w1")!!
-
-        val outcome = newRestorer(readerFailingFirst(1)).restore(activity, "w1", material(), true)
-
-        assertTrue(outcome is RecoveredKeyRestorer.Outcome.Failed)
-        assertArrayEquals(before.iv, keyMaterialDao.getByWalletId("w1")!!.iv)
+        assertEquals(RecoveredKeyRestorer.Outcome.Restored, restorer.restore(activity, "w1", material(), true))
+        val before = fixture.db.walletVaultDao().get("w1")!!
+        fixture.credentials.clear(); fixture.phrase("wrong public disposable passphrase")
+        assertTrue(restorer.restore(activity, "w1", material(), true) is RecoveredKeyRestorer.Outcome.Failed)
+        assertArrayEquals(before.envelope, fixture.db.walletVaultDao().get("w1")!!.envelope)
     }
 
     // --- Re-keyed rows keep their own type ---
 
     @Test
-    fun `a raw-key wallet re-keyed from a phrase stays a raw key with no phrase`() = runTest {
+    fun `a raw-key wallet re-keyed from a phrase stays a raw key with no phrase`() = walletOperationTest {
         secureLock(false)
         // A raw key that is account 0 of the phrase.
         insertWallet("raw", phraseKeyHex, derivationPath = null, type = KeyManager.WALLET_TYPE_RAW_KEY)
@@ -653,74 +556,51 @@ class RecoveredKeyRestorerTest {
         val result = restorer.rekeyFromPhrase(activity, "raw", words, allowV1 = true)
 
         assertEquals(mapOf("raw" to RecoveredKeyRestorer.Outcome.Restored), (result as RecoveredKeyRestorer.RekeyResult.Done).outcomes)
-        val stored = v1Helper.readDecryptedKey("raw")!!
+        val stored = (fixture.coordinator.read(activity, "raw", "Read", "Read") as com.rjnr.pocketnode.data.vault.VaultAccessResult.Success).material
         assertEquals(KeyManager.WALLET_TYPE_RAW_KEY, stored.walletType)
         assertNull(stored.mnemonic)
     }
 
     // --- Round 3 ---
 
-    private fun readerReturning(first: WalletKeyReader.Result): WalletKeyReader {
-        val r = mockk<WalletKeyReader>()
-        var calls = 0
-        coEvery { r.readPrivateKey(any(), any(), any(), any()) } coAnswers {
-            calls++
-            if (calls == 1) first else reader.readPrivateKey(arg(0), arg(1), arg(2), arg(3))
-        }
-        return r
+
+
+    @Test
+    fun `cancelled current passphrase keeps unverified source without deletion`() = walletOperationTest {
+        insertWallet("w1", phraseKeyHex); state.addUnverified("w1")
+        v1Helper.migrateWallet("w1", phraseKeyHex, phrase, "mnemonic", true)
+        val before = keyMaterialDao.getByWalletId("w1")
+        fixture.credentials.clear(); fixture.phrase(null)
+        assertEquals(RecoveredKeyRestorer.Outcome.Cancelled, restorer.restore(activity, "w1", material(), true))
+        assertEquals(before, keyMaterialDao.getByWalletId("w1")); assertTrue("w1" in state.unverifiedWalletIds())
     }
 
     @Test
-    fun `a transient lockout on read-back then a cancelled write keeps the unverified row`() = runTest {
-        secureLock(true)
-        insertWallet("w1", phraseKeyHex)
-        state.addUnverified("w1")
-        v1Helper.migrateWallet("w1", phraseKeyHex, phrase, KeyManager.WALLET_TYPE_MNEMONIC, true)
-        val before = keyMaterialDao.getByWalletId("w1")!!
-        coEvery {
-            authManager.authenticateForCipher(any(), any<Cipher>(), any(), any())
-        } returns AuthManager.CipherAuthResult.Cancelled
-
-        val outcome = newRestorer(readerReturning(WalletKeyReader.Result.AuthError(7, "lockout")))
-            .restore(activity, "w1", material(), allowV1 = true)
-
-        assertEquals(RecoveredKeyRestorer.Outcome.Failed("unlock error 7"), outcome)
-        assertArrayEquals(before.iv, keyMaterialDao.getByWalletId("w1")!!.iv)
-        assertTrue(state.unverifiedWalletIds().contains("w1"))
+    fun `external recovery cancellation without Android lock preserves old ciphertext`() = walletOperationTest {
+        insertWallet("w1", phraseKeyHex); state.addUnverified("w1")
+        v1Helper.migrateWallet("w1", phraseKeyHex, phrase, "mnemonic", true)
+        val before = keyMaterialDao.getByWalletId("w1")
+        fixture.credentials.clear(); fixture.phrase(null)
+        assertEquals(RecoveredKeyRestorer.Outcome.Cancelled, restorer.restore(activity, "w1", material(), false))
+        assertEquals(before, keyMaterialDao.getByWalletId("w1"))
     }
 
     @Test
-    fun `the no-lock consent is asked before an unreadable unverified row is deleted`() = runTest {
+    fun `unverified legacy ciphertext is replaced after external seed verification`() = walletOperationTest {
         secureLock(false)
         insertWallet("w1", phraseKeyHex)
         state.addUnverified("w1")
         v1Helper.migrateWallet("w1", phraseKeyHex, phrase, KeyManager.WALLET_TYPE_MNEMONIC, true)
         val before = keyMaterialDao.getByWalletId("w1")!!
 
-        val outcome = newRestorer(readerReturning(WalletKeyReader.Result.NotAvailable("decrypt failed")))
-            .restore(activity, "w1", material(), allowV1 = false)
-
-        assertEquals(RecoveredKeyRestorer.Outcome.NeedsNoLockConsent, outcome)
-        assertArrayEquals(before.iv, keyMaterialDao.getByWalletId("w1")!!.iv)
-    }
-
-    @Test
-    fun `an unverified row whose device key is invalidated is replaced`() = runTest {
-        secureLock(false)
-        insertWallet("w1", phraseKeyHex)
-        state.addUnverified("w1")
-        v1Helper.migrateWallet("w1", phraseKeyHex, phrase, KeyManager.WALLET_TYPE_MNEMONIC, true)
-        val before = keyMaterialDao.getByWalletId("w1")!!
-
-        val outcome = newRestorer(readerReturning(WalletKeyReader.Result.KeyInvalidated))
-            .restore(activity, "w1", material(), allowV1 = true)
+        val outcome = restorer.restore(activity, "w1", material(), allowV1 = true)
 
         assertEquals(RecoveredKeyRestorer.Outcome.Restored, outcome)
         assertFalse(before.iv.contentEquals(keyMaterialDao.getByWalletId("w1")!!.iv))
     }
 
     @Test
-    fun `any good read of a wallet clears its unverified mark`() = runTest {
+    fun `any good read of a wallet clears its unverified mark`() = walletOperationTest {
         secureLock(false)
         insertWallet("w1", phraseKeyHex)
         state.addUnverified("w1")
@@ -734,7 +614,7 @@ class RecoveredKeyRestorerTest {
     }
 
     @Test
-    fun `nothing to recover keeps the corruption flag for onboarding's notice`() = runTest {
+    fun `nothing to recover keeps the corruption flag for onboarding's notice`() = walletOperationTest {
         every { keyBackupManager.hasAnyBackups() } returns false
 
         assertTrue(restorer.completeIfDone())
@@ -746,7 +626,7 @@ class RecoveredKeyRestorerTest {
     // --- Upgrade from before key_material: keys still in the legacy store ---
 
     @Test
-    fun `a wallet whose keys are still in the legacy store is not missing`() = runTest {
+    fun `a wallet whose keys are still in the legacy store is not missing`() = walletOperationTest {
         insertWallet("legacy", phraseKeyHex)
         every { keyManager.hasLegacyKeyFile("legacy") } returns true
 
@@ -755,10 +635,80 @@ class RecoveredKeyRestorerTest {
     }
 
     @Test
-    fun `a wallet with neither a key row nor a legacy key is missing`() = runTest {
+    fun `a wallet with neither a key row nor a legacy key is missing`() = walletOperationTest {
         insertWallet("lost", phraseKeyHex)
         every { keyManager.hasLegacyKeyFile("lost") } returns false
 
         assertEquals(listOf("lost"), restorer.missingWallets().map { it.walletId })
+    }
+
+    @Test fun `private key recovery preserves a readable legacy seed instead of downgrading`() = walletOperationTest {
+        insertWallet("w1", phraseKeyHex)
+        v1Helper.migrateWallet("w1", phraseKeyHex, phrase, "mnemonic", true)
+        state.addUnverified("w1")
+        assertEquals(RecoveredKeyRestorer.Outcome.Restored, restorer.restore(activity, "w1", material(mnemonic = null), false))
+        val read = fixture.coordinator.read(activity, "w1", "Read", "Read") as com.rjnr.pocketnode.data.vault.VaultAccessResult.Success
+        assertEquals(phrase, read.material.mnemonic)
+    }
+    @Test fun `temporary existing seed authentication failure cannot authorize raw replacement`() = walletOperationTest {
+        insertWallet("w1", phraseKeyHex)
+        v1Helper.migrateWallet("w1", phraseKeyHex, phrase, "mnemonic", true)
+        val before = keyMaterialDao.getByWalletId("w1")
+        val failing = mockk<WalletKeyReader>()
+        coEvery { failing.readKeyMaterial(any(), any(), any(), any()) } returns WalletKeyReader.MaterialResult.AuthError(7, "lockout")
+        assertTrue(newRestorer(failing).restore(activity, "w1", material(mnemonic = null), false) is RecoveredKeyRestorer.Outcome.Failed)
+        assertEquals(before, keyMaterialDao.getByWalletId("w1"))
+        assertTrue("w1" in state.unverifiedWalletIds()); assertTrue(state.isIncomplete())
+    }
+    @Test fun `pending seed upgrade cleanup never becomes permission for raw downgrade`() = walletOperationTest {
+        insertWallet("w1", phraseKeyHex)
+        v1Helper.migrateWallet("w1", phraseKeyHex, phrase, "mnemonic", true)
+        fixture.cleanupOk = false
+        assertTrue(restorer.restore(activity, "w1", material(mnemonic = null), false) is RecoveredKeyRestorer.Outcome.Failed)
+        fixture.cleanupOk = true
+        val read = fixture.coordinator.read(activity, "w1", "Read", "Read") as com.rjnr.pocketnode.data.vault.VaultAccessResult.Success
+        assertEquals(phrase, read.material.mnemonic)
+    }
+
+    @Test fun `generic cancellation stops phrase recovery before other matching wallets`() = walletOperationTest {
+        insertWallet("root", phraseKeyHex)
+        insertWallet("sub", accountOneKeyHex, "m/44'/309'/1'/0/0", 1, parentWalletId = "root")
+        fixture.credentials.clear(); fixture.phrase(null); fixture.phrase()
+        val result = restorer.rekeyFromPhrase(activity, "root", words, false) as RecoveredKeyRestorer.RekeyResult.Done
+        assertEquals(mapOf("root" to RecoveredKeyRestorer.Outcome.Cancelled), result.outcomes)
+        assertNull(keyMaterialDao.getByWalletId("root")); assertNull(keyMaterialDao.getByWalletId("sub"))
+    }
+
+    @Test fun `independent phrase choice preserves V3 seed during private key recovery`() = walletOperationTest {
+        insertWallet("w1", phraseKeyHex)
+        assertEquals(RecoveredKeyRestorer.Outcome.Restored, restorer.restore(activity, "w1", material(), false))
+        val before = fixture.db.walletVaultDao().get("w1")!!
+        fixture.choices += true
+        assertEquals(RecoveredKeyRestorer.Outcome.Restored, restorer.restore(activity, "w1", material(mnemonic = null), false))
+        assertArrayEquals(before.envelope, fixture.db.walletVaultDao().get("w1")!!.envelope)
+    }
+    @Test fun `wrong independent phrase never becomes consent for spending only recovery`() = walletOperationTest {
+        insertWallet("w1", phraseKeyHex)
+        assertEquals(RecoveredKeyRestorer.Outcome.Restored, restorer.restore(activity, "w1", material(), false))
+        val before = fixture.db.walletVaultDao().get("w1")!!
+        fixture.choices += true; fixture.credentials.clear(); fixture.phrase("wrong public wallet passphrase")
+        assertTrue(restorer.restore(activity, "w1", material(mnemonic = null), false) is RecoveredKeyRestorer.Outcome.Failed)
+        assertArrayEquals(before.envelope, fixture.db.walletVaultDao().get("w1")!!.envelope)
+    }
+    @Test fun `deliberate spending only choice still retains current phrase readable seed`() = walletOperationTest {
+        insertWallet("w1", phraseKeyHex)
+        assertEquals(RecoveredKeyRestorer.Outcome.Restored, restorer.restore(activity, "w1", material(), false))
+        fixture.choices += false; fixture.choices += true
+        assertEquals(RecoveredKeyRestorer.Outcome.Restored, restorer.restore(activity, "w1", material(mnemonic = null), false))
+        val read = fixture.coordinator.read(activity, "w1", "Read", "Read") as com.rjnr.pocketnode.data.vault.VaultAccessResult.Success
+        assertEquals(phrase, read.material.mnemonic)
+    }
+    @Test fun `cancel recovery route choice preserves current V3 envelope`() = walletOperationTest {
+        insertWallet("w1", phraseKeyHex)
+        assertEquals(RecoveredKeyRestorer.Outcome.Restored, restorer.restore(activity, "w1", material(), false))
+        val before = fixture.db.walletVaultDao().get("w1")!!
+        fixture.choices += null
+        assertEquals(RecoveredKeyRestorer.Outcome.Cancelled, restorer.restore(activity, "w1", material(mnemonic = null), false))
+        assertArrayEquals(before.envelope, fixture.db.walletVaultDao().get("w1")!!.envelope)
     }
 }

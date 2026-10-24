@@ -22,9 +22,13 @@ class WalletVaultCoordinator(
 ) {
     private val json = Json { encodeDefaults = true }
 
-    suspend fun read(activity: FragmentActivity, walletId: String, title: String, subtitle: String, preference: VaultReadPreference = VaultReadPreference.DEFAULT): VaultAccessResult = access(activity) { session ->
+    suspend fun read(activity: FragmentActivity, walletId: String, title: String, subtitle: String, preference: VaultReadPreference = VaultReadPreference.DEFAULT): VaultAccessResult =
+        readAuthenticated(activity, walletId, title, subtitle, preference, true)
+
+    private suspend fun readAuthenticated(activity: FragmentActivity, walletId: String, title: String, subtitle: String,
+        preference: VaultReadPreference, allowPhraseFallback: Boolean): VaultAccessResult = access(activity) { session ->
         var envelope = store.get(walletId) ?: return@access VaultAccessResult.NoVault
-        val material = unlock(activity, session, envelope, title, subtitle, preference) ?: return@access VaultAccessResult.Cancelled
+        val material = unlock(activity, session, envelope, title, subtitle, preference, allowPhraseFallback) ?: return@access VaultAccessResult.Cancelled
         validateExisting(walletId, material)
         if (walletId in store.snapshot().unrecoveredWalletIds) {
             val current = credential(activity, false) ?: return@access VaultAccessResult.Cancelled
@@ -39,6 +43,10 @@ class WalletVaultCoordinator(
         else VaultAccessResult.Success(material)
     }
 
+    /** Recovery-only first attempt: classification must not silently imply consent to another route. */
+    suspend fun readForRecovery(activity: FragmentActivity, walletId: String): VaultAccessResult =
+        readAuthenticated(activity, walletId, "Preserve recovery phrase", "Authenticate the existing wallet before external recovery", VaultReadPreference.DEFAULT, false)
+
     suspend fun persistNew(activity: FragmentActivity, walletId: String, material: KeyMaterial): VaultAccessResult =
         enroll(activity, walletId, material, Enrollment.NEW)
 
@@ -50,8 +58,22 @@ class WalletVaultCoordinator(
     suspend fun recoverExisting(activity: FragmentActivity, walletId: String, material: KeyMaterial): VaultAccessResult =
         enroll(activity, walletId, material, Enrollment.RECOVERY)
 
+    internal suspend fun recoverWithLegacyProof(activity: FragmentActivity, walletId: String, material: KeyMaterial, proof: LegacyBackupProof): VaultAccessResult =
+        enroll(activity, walletId, material, Enrollment.RECOVERY, proof = proof)
+
+    private suspend fun checkProofSource(id: String, proof: LegacyBackupProof) {
+        if (!proof.active || proof.wallet.walletId != id || db.walletDao().getById(id) != proof.wallet ||
+            db.keyMaterialDao().getByWalletId(id) != proof.source ||
+            !LegacyBackupProof.sameEnvelope(db.walletVaultDao().get(id), proof.original)) throw VaultFailure()
+        for ((sourceId, captured) in proof.legacySources) {
+            if (db.keyMaterialDao().getByWalletId(sourceId) != captured.first ||
+                db.walletVaultDao().legacy(sourceId)?.source() != captured.second) throw VaultFailure()
+        }
+    }
+
     private enum class Enrollment { NEW, LEGACY, RECOVERY }
-    private suspend fun enroll(activity: FragmentActivity, id: String, material: KeyMaterial, mode: Enrollment, expectedLegacyIv: ByteArray? = null): VaultAccessResult = access(activity) { session ->
+    private suspend fun enroll(activity: FragmentActivity, id: String, material: KeyMaterial, mode: Enrollment, expectedLegacyIv: ByteArray? = null, proof: LegacyBackupProof? = null): VaultAccessResult = access(activity) { session ->
+        proof?.let { checkProofSource(id, it) }
         val wallet = db.walletDao().getById(id)
         if (mode != Enrollment.NEW && wallet == null) throw VaultFailure()
         if (!validate(material, wallet)) throw VaultFailure()
@@ -65,6 +87,7 @@ class WalletVaultCoordinator(
             checkPhrase(phrase)
             val protectedMaterial = preserveAccessibleMnemonic(old, material, wallet, phrase)
             val candidate = create(id, old?.let(::nextGeneration) ?: 0, protectedMaterial, phrase)
+            proof?.let { checkProofSource(id, it) }
             if (old == null) {
                 val metadata = source ?: KeyMaterialEntity(id, byteArrayOf(), null, byteArrayOf(), material.walletType,
                     material.mnemonicBackedUp, System.currentTimeMillis())
@@ -76,7 +99,7 @@ class WalletVaultCoordinator(
             // Verify persisted material rather than the candidate held in memory.
             val verified = decrypt(committed, phrase)
             if (!validate(verified, wallet) || verified.privateKey != protectedMaterial.privateKey || verified.mnemonic != protectedMaterial.mnemonic) throw VaultFailure()
-            if (!finishCleanup(id, committed.generation, verified)) return@access VaultAccessResult.CleanupRequired
+            if (!finishCleanup(id, committed.generation, verified, proof?.let { BoundLegacyBackupProof(it, db.walletVaultDao().get(id) ?: throw VaultFailure()) })) return@access VaultAccessResult.CleanupRequired
             if (device.unavailableReason() == null && prompt.choose(activity, "Use device authentication?",
                     "Your wallet passphrase remains required for recovery. Device authentication is optional.", "Enable", "Passphrase only") == true) {
                 var ownedKey: ByteArray? = null
@@ -169,7 +192,7 @@ class WalletVaultCoordinator(
         } finally { next.fill('\u0000') }
     }
 
-    private suspend fun unlock(activity: FragmentActivity, session: VaultOperationSession, envelope: WalletEnvelope, title: String, subtitle: String, preference: VaultReadPreference): KeyMaterial? {
+    private suspend fun unlock(activity: FragmentActivity, session: VaultOperationSession, envelope: WalletEnvelope, title: String, subtitle: String, preference: VaultReadPreference, allowPhraseFallback: Boolean): KeyMaterial? {
         if (envelope.deviceWrap != null && preference != VaultReadPreference.PASSPHRASE) {
             val promptMode = when (preference) {
                 VaultReadPreference.BIOMETRIC_ONLY -> VaultDevicePromptMode.BIOMETRIC_ONLY
@@ -183,9 +206,10 @@ class WalletVaultCoordinator(
                     return decryptDevice(envelope, result.value)
                 }
                 DeviceVaultResult.Cancelled -> return null
-                is DeviceVaultResult.Unavailable -> Unit
+                is DeviceVaultResult.Unavailable -> if (!allowPhraseFallback) throw VaultAccessFailure(deviceFailureKind(result.reason))
             }
         }
+        if (!allowPhraseFallback) throw VaultAccessFailure(VaultFailureKind.NO_DEVICE_WRAP)
         val phrase = credential(activity, false) ?: return null
         try { return decrypt(envelope, phrase) } finally { phrase.fill('\u0000') }
     }
@@ -233,10 +257,17 @@ class WalletVaultCoordinator(
         try { crypto.create(id, generation, bytes, phrase) } finally { bytes.fill(0) }
     }
     private suspend fun decrypt(envelope: WalletEnvelope, phrase: CharArray): KeyMaterial = withContext(Dispatchers.IO) {
-        decode(crypto.decrypt(envelope, envelope.walletId, phrase))
+        val key = crypto.unwrapDataKey(envelope, envelope.walletId, phrase)
+        try {
+            try { decode(crypto.decryptWithDataKey(envelope, envelope.walletId, key)) }
+            catch (_: WalletEnvelopeAuthenticationException) { throw VaultAccessFailure(VaultFailureKind.PAYLOAD_INTEGRITY) }
+        } finally { key.fill(0) }
     }
     private suspend fun decryptDevice(envelope: WalletEnvelope, ownedKey: ByteArray): KeyMaterial = try {
-        withContext(Dispatchers.IO) { decode(crypto.decryptWithDataKey(envelope, envelope.walletId, ownedKey)) }
+        withContext(Dispatchers.IO) {
+            try { decode(crypto.decryptWithDataKey(envelope, envelope.walletId, ownedKey)) }
+            catch (_: WalletEnvelopeAuthenticationException) { throw VaultAccessFailure(VaultFailureKind.PAYLOAD_INTEGRITY) }
+        }
     } finally { ownedKey.fill(0) }
     private fun decode(bytes: ByteArray): KeyMaterial = try { json.decodeFromString<KeyMaterial>(bytes.toString(Charsets.UTF_8)) }
         catch (_: Exception) { throw VaultFailure() } finally { bytes.fill(0) }
@@ -244,9 +275,9 @@ class WalletVaultCoordinator(
         if (envelope.generation == Long.MAX_VALUE) throw VaultFailure()
         return envelope.generation + 1
     }
-    private suspend fun finishCleanup(id: String, generation: Long, material: KeyMaterial): Boolean = try {
+    private suspend fun finishCleanup(id: String, generation: Long, material: KeyMaterial, proof: BoundLegacyBackupProof? = null): Boolean = try {
         if (id !in store.pendingLegacyCleanup()) true
-        else if (!cleanup.clean(id, generation, material)) false
+        else if (!(if (proof == null) cleanup.clean(id, generation, material) else cleanup.cleanWithProof(id, generation, material, proof))) false
         else {
             store.markLegacyCleanupComplete(id, generation)
             true
@@ -257,10 +288,15 @@ class WalletVaultCoordinator(
     private suspend fun access(activity: FragmentActivity, block: suspend (VaultOperationSession) -> VaultAccessResult): VaultAccessResult = try {
         VaultOperationSession.run(activity, block)
     } catch (e: CancellationException) { throw e }
+      catch (error: VaultAccessFailure) { VaultAccessResult.Unavailable("Wallet access requires another deliberate recovery route", error.kind) }
+      catch (_: WalletEnvelopeFormatException) { VaultAccessResult.Unavailable("Wallet envelope is malformed or unsupported", VaultFailureKind.MALFORMED_OR_UNSUPPORTED) }
+      catch (_: WalletEnvelopeAuthenticationException) { VaultAccessResult.Unavailable("Passphrase or encrypted wrap authentication failed", VaultFailureKind.CREDENTIAL_OR_WRAP_INTEGRITY) }
+      catch (_: VaultFailure) { VaultAccessResult.Unavailable("Wallet identity verification failed", VaultFailureKind.VERIFICATION_FAILED) }
       catch (_: Exception) { VaultAccessResult.Unavailable("Wallet authentication or verification failed") }
     private suspend fun maintenance(activity: FragmentActivity, block: suspend (VaultOperationSession) -> VaultMaintenanceResult): VaultMaintenanceResult = try {
         VaultOperationSession.run(activity, block)
     } catch (e: CancellationException) { throw e }
       catch (_: Exception) { VaultMaintenanceResult.Unavailable("Wallet passphrase operation could not be completed") }
+    private class VaultAccessFailure(val kind: VaultFailureKind) : Exception("Wallet access unavailable")
     private class VaultFailure : Exception("Wallet verification failed")
 }

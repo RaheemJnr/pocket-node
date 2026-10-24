@@ -111,6 +111,8 @@ class DeviceVaultKeyStore internal constructor(
             }
         } catch (error: CancellationException) { throw error }
           catch (_: KeyPermanentlyInvalidatedException) { return DeviceVaultResult.Unavailable("invalidated-device-key") }
+          catch (_: javax.crypto.AEADBadTagException) { return DeviceVaultResult.Unavailable("device-wrap-integrity") }
+          catch (_: WalletEnvelopeFormatException) { return DeviceVaultResult.Unavailable("malformed-device-envelope") }
           catch (_: Exception) { return DeviceVaultResult.Unavailable("device-unwrapping-unavailable") }
     }
 }
@@ -162,4 +164,16 @@ private class AndroidVaultDeviceCipherStore(private val auth: AuthManager) : Vau
             init(Cipher.DECRYPT_MODE, key, GCMParameterSpec(128, nonce))
         }
     }
+}
+
+/** Stable device adapter result codes, never exception text or UI strings, classify recovery choices. */
+internal fun deviceFailureKind(reason: String): VaultFailureKind = when (reason) {
+    "missing-device-key" -> VaultFailureKind.MISSING_DEVICE_KEY
+    "invalidated-device-key" -> VaultFailureKind.INVALIDATED_DEVICE_KEY
+    "missing-device-wrap" -> VaultFailureKind.NO_DEVICE_WRAP
+    "no-device-lock" -> VaultFailureKind.NO_DEVICE_LOCK
+    "unsupported-device-authentication" -> VaultFailureKind.UNSUPPORTED_DEVICE_AUTH
+    "device-wrap-integrity", "invalid-device-wrap", "crypto-authentication-failed" -> VaultFailureKind.PAYLOAD_INTEGRITY
+    "malformed-device-envelope" -> VaultFailureKind.MALFORMED_OR_UNSUPPORTED
+    else -> VaultFailureKind.TEMPORARY_DEVICE_FAILURE
 }

@@ -226,6 +226,25 @@ class KeyManager @Inject constructor(
         return DecryptedKeyData(hex, mnemonic, type, prefs.getBoolean(KEY_MNEMONIC_BACKED_UP, false))
     }
 
+    /** Exact legacy ESP file witness; paired before/after its cleanup-only material read. */
+    internal fun defaultPreferenceCleanupSnapshot(): List<String?> {
+        val file = java.io.File(context.filesDir.parentFile, "shared_prefs/ckb_wallet_keys.xml")
+        return listOf(file, java.io.File(file.path + ".bak")).map { source ->
+            if (!source.exists()) null else source.inputStream().use { input ->
+                val digest = java.security.MessageDigest.getInstance("SHA-256")
+                val buffer = ByteArray(8192)
+                try {
+                    while (true) {
+                        val count = input.read(buffer)
+                        if (count < 0) break
+                        digest.update(buffer, 0, count)
+                    }
+                    digest.digest().joinToString("") { "%02x".format(it) }
+                } finally { buffer.fill(0) }
+            }
+        }
+    }
+
     /** Cleanup-only source read. Caller must prove identity against a freshly verified vault bundle. */
     internal fun defaultPreferencesForVaultCleanup(): DecryptedKeyData? {
         val file = java.io.File(context.filesDir.parentFile, "shared_prefs/ckb_wallet_keys.xml")

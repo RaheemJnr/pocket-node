@@ -36,7 +36,7 @@ class WalletKeyReader @Inject constructor(
         /** Auth framework reported an error (not user-cancel). */
         data class AuthError(val errorCode: Int, val message: CharSequence) : Result()
         /** Wallet row missing, decrypt failed, or unknown kdfVersion. */
-        data class NotAvailable(val reason: String) : Result()
+        data class NotAvailable(val reason: String, val kind: com.rjnr.pocketnode.data.vault.VaultFailureKind = com.rjnr.pocketnode.data.vault.VaultFailureKind.UNKNOWN) : Result()
         /**
          * The V2 Keystore key is missing or invalidated, for example after
          * removing the device screen lock or changing biometric enrollment.
@@ -57,7 +57,7 @@ class WalletKeyReader @Inject constructor(
         }
         object Cancelled : MaterialResult()
         data class AuthError(val errorCode: Int, val message: CharSequence) : MaterialResult()
-        data class NotAvailable(val reason: String) : MaterialResult()
+        data class NotAvailable(val reason: String, val kind: com.rjnr.pocketnode.data.vault.VaultFailureKind = com.rjnr.pocketnode.data.vault.VaultFailureKind.UNKNOWN) : MaterialResult()
         object KeyInvalidated : MaterialResult()
     }
 
@@ -66,7 +66,7 @@ class WalletKeyReader @Inject constructor(
             is MaterialResult.Success -> Result.Success(result.privateKey)
             MaterialResult.Cancelled -> Result.Cancelled
             is MaterialResult.AuthError -> Result.AuthError(result.errorCode, result.message)
-            is MaterialResult.NotAvailable -> Result.NotAvailable(result.reason)
+            is MaterialResult.NotAvailable -> Result.NotAvailable(result.reason, result.kind)
             MaterialResult.KeyInvalidated -> Result.KeyInvalidated
         }
 
@@ -97,7 +97,7 @@ class WalletKeyReader @Inject constructor(
             VaultAccessResult.Cancelled -> MaterialResult.Cancelled
             VaultAccessResult.CleanupRequired -> MaterialResult.NotAvailable("Wallet protection is saved, but legacy backup cleanup needs a retry. Unlock again to finish.")
             VaultAccessResult.NoVault -> unavailable(walletId, "Wallet vault is missing. Recover with an independent backup.")
-            is VaultAccessResult.Unavailable -> MaterialResult.NotAvailable(access.reason)
+            is VaultAccessResult.Unavailable -> MaterialResult.NotAvailable(access.reason, access.kind)
         }
     }
 

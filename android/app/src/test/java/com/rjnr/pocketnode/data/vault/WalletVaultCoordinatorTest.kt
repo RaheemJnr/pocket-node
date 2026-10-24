@@ -385,4 +385,33 @@ class WalletVaultCoordinatorTest {
         assertFalse(validator.validate(material, row.copy(derivationPath = "garbage")))
         assertFalse(validator.validate(material.copy(walletType = "mnemonic", mnemonic = "abandon ".repeat(11) + "about"), null))
     }
+
+    @Test fun `recovery reports missing device key without consuming independent passphrase`() = operationTest {
+        active(deviceWrap = true); deviceKeys.clear(); unwrapResult = DeviceVaultResult.Unavailable("missing-device-key"); phrase()
+        val result = coordinator.readForRecovery(activity, "a") as VaultAccessResult.Unavailable
+        assertEquals(VaultFailureKind.MISSING_DEVICE_KEY, result.kind)
+        assertEquals(1, credentials.size)
+    }
+    @Test fun `recovery distinguishes invalidated key and temporary device failure`() = operationTest {
+        active(deviceWrap = true)
+        for ((reason, kind) in listOf("invalidated-device-key" to VaultFailureKind.INVALIDATED_DEVICE_KEY,
+            "device-authentication-failed" to VaultFailureKind.TEMPORARY_DEVICE_FAILURE)) {
+            unwrapResult = DeviceVaultResult.Unavailable(reason)
+            assertEquals(kind, (coordinator.readForRecovery(activity, "a") as VaultAccessResult.Unavailable).kind)
+        }
+    }
+    @Test fun `absent device wrap explicitly offers independent credentials without claiming erased seed`() = operationTest {
+        active(); phrase()
+        assertEquals(VaultFailureKind.NO_DEVICE_WRAP, (coordinator.readForRecovery(activity, "a") as VaultAccessResult.Unavailable).kind)
+        assertEquals(1, credentials.size)
+    }
+    @Test fun `wrong phrase is distinguishable from malformed envelope and never authorizes recovery`() = operationTest {
+        active(); phrase("wrong public wallet passphrase")
+        assertEquals(VaultFailureKind.CREDENTIAL_OR_WRAP_INTEGRITY,
+            (coordinator.read(activity, "a", "Read", "Read", VaultReadPreference.PASSPHRASE) as VaultAccessResult.Unavailable).kind)
+        db.openHelper.writableDatabase.execSQL("UPDATE wallet_vault SET envelope=X'00' WHERE walletId='a'")
+        assertEquals(VaultFailureKind.MALFORMED_OR_UNSUPPORTED,
+            (coordinator.readForRecovery(activity, "a") as VaultAccessResult.Unavailable).kind)
+        assertArrayEquals(byteArrayOf(0), db.walletVaultDao().get("a")!!.envelope)
+    }
 }

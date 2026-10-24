@@ -22,10 +22,12 @@ import org.robolectric.annotation.Config
 class WalletLegacyCleanupTest {
     private suspend fun activate(f: WalletVaultIntegrationFixture) {
         f.wallet()
+        f.legacy.migrateWallet("a", f.material.privateKey, null, "raw_key", false)
+        val source = f.db.keyMaterialDao().getByWalletId("a")!!
         val bytes = Json.encodeToString(f.material).toByteArray()
         try {
             val envelope = f.crypto.create("a", 0, bytes, f.pass.toCharArray())
-            f.store.activate(KeyMaterialEntity("a", byteArrayOf(), null, byteArrayOf(), "raw_key", false, 1), null, envelope, f.pass.toCharArray())
+            f.store.activate(source, source.iv, envelope, f.pass.toCharArray())
         } finally { bytes.fill(0) }
     }
     @get:Rule val folder = TemporaryFolder()
