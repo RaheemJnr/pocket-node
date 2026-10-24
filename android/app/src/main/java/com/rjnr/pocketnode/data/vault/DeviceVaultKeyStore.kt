@@ -76,10 +76,11 @@ class DeviceVaultKeyStore internal constructor(
                 .take(12).joinToString("") { "%02x".format(it) }
             val alias = "pocket_node_vault_${id}_${envelope.generation}_${UUID.randomUUID()}"
             val cipher = keys.encryptionCipher(alias)
-            cipher.updateAAD(WalletEnvelopeMetadata.device(envelope, alias))
             return when (val result = authentication.authenticate(activity, cipher, "Enable device authentication", "Your wallet passphrase remains the recovery fallback", mode)) {
                 is AuthManager.CipherAuthResult.Success -> {
                     if (result.cipher !== cipher) return DeviceVaultResult.Unavailable("crypto-authentication-failed")
+                    // AndroidKeyStore may cache an auth error if AAD is sent before the per-use prompt.
+                    cipher.updateAAD(WalletEnvelopeMetadata.device(envelope, alias))
                     DeviceVaultResult.Success(DeviceKeyWrap(alias, cipher.doFinal(owned), cipher.iv))
                 }
                 AuthManager.CipherAuthResult.Cancelled -> DeviceVaultResult.Cancelled
@@ -98,10 +99,10 @@ class DeviceVaultKeyStore internal constructor(
             if (!supports(mode)) return DeviceVaultResult.Unavailable("unsupported-device-authentication")
             // Read-only lookup. Never create a key in the decryption path.
             val cipher = keys.decryptionCipher(wrap.alias, wrap.nonce) ?: return DeviceVaultResult.Unavailable("missing-device-key")
-            cipher.updateAAD(WalletEnvelopeMetadata.device(envelope, wrap.alias))
             return when (val result = authentication.authenticate(activity, cipher, title, subtitle, mode)) {
                 is AuthManager.CipherAuthResult.Success -> {
                     if (result.cipher !== cipher) return DeviceVaultResult.Unavailable("crypto-authentication-failed")
+                    cipher.updateAAD(WalletEnvelopeMetadata.device(envelope, wrap.alias))
                     val key = cipher.doFinal(wrap.wrappedKey)
                     if (key.size != 32) { key.fill(0); return DeviceVaultResult.Unavailable("invalid-device-wrap") }
                     DeviceVaultResult.Success(key)

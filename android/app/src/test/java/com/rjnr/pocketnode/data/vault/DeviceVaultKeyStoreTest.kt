@@ -3,6 +3,7 @@ package com.rjnr.pocketnode.data.vault
 import androidx.fragment.app.FragmentActivity
 import com.rjnr.pocketnode.data.auth.AuthManager
 import kotlinx.coroutines.runBlocking
+import io.mockk.*
 import org.junit.Assert.*
 import org.junit.Test
 import org.junit.runner.RunWith
@@ -44,6 +45,59 @@ class DeviceVaultKeyStoreTest {
         observedMode = mode
         if (authSuccess) AuthManager.CipherAuthResult.Success(if (wrongCipher) Cipher.getInstance("AES/GCM/NoPadding") else cipher) else AuthManager.CipherAuthResult.Cancelled
     })
+    @Test fun `AAD and finalization wait for the exact authenticated cipher in both directions`() = runBlocking {
+        for (mode in listOf(VaultDevicePromptMode.BIOMETRIC_ONLY, VaultDevicePromptMode.CREDENTIAL_ONLY)) {
+            // API26 intentionally rejects credential-only; the API30 override below covers it.
+            if (mode == VaultDevicePromptMode.CREDENTIAL_ONLY && android.os.Build.VERSION.SDK_INT < 30) continue
+            for (decrypt in listOf(false, true)) {
+                for (outcome in listOf("success", "cancel", "different")) {
+                    var authorized = false
+                    var aadCalls = 0
+                    var finalCalls = 0
+                    val cipher = mockk<Cipher>()
+                    every { cipher.iv } returns ByteArray(12)
+                    every { cipher.updateAAD(any<ByteArray>()) } answers {
+                        aadCalls++
+                        check(authorized) { "AAD submitted before per-use authentication" }
+                    }
+                    every { cipher.doFinal(any<ByteArray>()) } answers {
+                        check(authorized && aadCalls == 1)
+                        finalCalls++
+                        ByteArray(if (decrypt) 32 else 48)
+                    }
+                    val gatedBackend = object : VaultDeviceCipherStore {
+                        override fun unavailableReason(): String? = null
+                        override fun availablePromptModes() = setOf(mode)
+                        override fun encryptionCipher(alias: String) = cipher
+                        override fun decryptionCipher(alias: String, nonce: ByteArray) = cipher
+                    }
+                    val gated = DeviceVaultKeyStore(gatedBackend, VaultCipherAuthenticator { _, actual, _, _, _ ->
+                        assertSame(cipher, actual)
+                        when (outcome) {
+                            "cancel" -> AuthManager.CipherAuthResult.Cancelled
+                            "different" -> AuthManager.CipherAuthResult.Success(mockk<Cipher>())
+                            else -> { authorized = true; AuthManager.CipherAuthResult.Success(cipher) }
+                        }
+                    })
+                    val result = if (decrypt) gated.unwrap(activity,
+                        envelope.copy(deviceWrap = DeviceKeyWrap("public-fixture", ByteArray(48), ByteArray(12))), "Read", "Auth", mode)
+                    else gated.wrap(activity, envelope, dataKey, mode)
+                    if (outcome == "success") {
+                        assertTrue("Authenticated $mode decrypt=$decrypt must succeed", result is DeviceVaultResult.Success)
+                        assertEquals(1, aadCalls); assertEquals(1, finalCalls)
+                    } else {
+                        assertFalse(result is DeviceVaultResult.Success)
+                        assertEquals(0, aadCalls); assertEquals(0, finalCalls)
+                    }
+                }
+            }
+        }
+    }
+
+    @Test @Config(sdk = [30]) fun `credential ciphers enforce authenticated AAD ordering`() {
+        `AAD and finalization wait for the exact authenticated cipher in both directions`()
+    }
+
     @Test fun `device wrap binds payload metadata and new aliases preserve older wrap`() = runBlocking {
         val wrap = (device.wrap(activity, envelope, dataKey) as DeviceVaultResult.Success).value
         val second = (device.wrap(activity, envelope, dataKey) as DeviceVaultResult.Success).value
