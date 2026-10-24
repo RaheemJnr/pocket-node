@@ -104,7 +104,7 @@ class RecoveredKeyRestorerTest {
     private fun newRestorer(keyReader: WalletKeyReader) = RecoveredKeyRestorer(
         walletDao, keyMaterialDao, keyReader, keyManager, mnemonicManager, state,
         keyBackupManager, NoopLogger, fixture.coordinator, fixture.prompt,
-        com.rjnr.pocketnode.data.vault.LegacyBackupRecovery(db, fixture.backup, fixture.coordinator, fixture.prompt, com.rjnr.pocketnode.data.vault.WalletSecretValidator(mnemonicManager), fixture.keyManager, fixture.reader, fixture.legacy),
+        com.rjnr.pocketnode.data.vault.LegacyBackupRecovery(db, fixture.backup, fixture.coordinator, fixture.prompt, com.rjnr.pocketnode.data.vault.WalletSecretValidator(mnemonicManager), fixture.keyManager, fixture.reader, fixture.legacy), db.walletVaultDao(),
     )
 
     private fun secureLock(present: Boolean) {
@@ -804,6 +804,86 @@ class RecoveredKeyRestorerTest {
         assertTrue(newRestorer(boundary).restore(activity, "w1", material(), false) is RecoveredKeyRestorer.Outcome.Failed)
         assertTrue(owned.all { it == 0.toByte() })
         assertNull(fixture.store.get("w1")); assertNull(db.walletVaultDao().profile())
+    }
+
+    @Test fun `pending archived V2 full phrase recovers after restart`() = archivedExternalV2(full = true, restart = true)
+    @Test fun `pending archived V2 raw key preserves accessible current seed`() = archivedExternalV2(full = false)
+    @Test fun `pending archived V2 authenticated source preserves seed for raw input`() = archivedExternalV2(full = false, authenticated = true)
+    @Test fun `pending archived V2 authenticated source accepts matching full phrase`() = archivedExternalV2(full = true, authenticated = true)
+    @Test fun `pending archived V2 full phrase decline preserves envelope`() = archivedExternalV2(full = true, consent = false)
+    @Test fun `pending archived V2 raw key decline preserves envelope`() = archivedExternalV2(full = false, consent = false)
+    @Test fun `pending archived V2 full phrase cancelled auth preserves envelope`() = archivedExternalV2(full = true, failure = WalletKeyReader.MaterialResult.Cancelled)
+    @Test fun `pending archived V2 raw key transient auth preserves envelope`() = archivedExternalV2(full = false, failure = WalletKeyReader.MaterialResult.NotAvailable("retry"))
+    @Test fun `pending archived V2 full phrase transient auth preserves envelope`() = archivedExternalV2(full = true, failure = WalletKeyReader.MaterialResult.NotAvailable("retry"))
+    @Test fun `pending archived V2 raw key cancelled auth preserves envelope`() = archivedExternalV2(full = false, failure = WalletKeyReader.MaterialResult.Cancelled)
+    @Test fun `pending archived V2 replacement during consent rejects proof`() = archivedExternalV2(full = true, change = "archive")
+    @Test fun `pending V3 envelope replacement during consent rejects proof`() = archivedExternalV2(full = true, change = "envelope")
+    @Test fun `pending V3 marker replacement during consent rejects proof`() = archivedExternalV2(full = true, change = "marker")
+    @Test fun `pending archived V2 full phrase preserves opaque backup`() = archivedExternalV2(full = true, backup = true)
+    @Test fun `pending archived V2 raw key preserves opaque backup`() = archivedExternalV2(full = false, backup = true)
+
+    @Test fun `pending raw V3 payload gains full seed from validated external phrase`() = archivedExternalV2(full = true, oldSeed = false)
+    @Test fun `pending raw V3 payload and raw external key remain spending only`() = archivedExternalV2(full = false, oldSeed = false)
+    @Test fun `authenticated archived raw key cannot silently discard current V3 seed`() = archivedExternalV2(full = false, authenticated = true, authenticatedSeed = false, consent = false)
+    @Test fun `authenticated archived raw key retains current phrase readable V3 seed after consent`() = archivedExternalV2(full = false, authenticated = true, authenticatedSeed = false)
+    @Test fun `pending archived recovery permits presentation only metadata change`() = archivedExternalV2(full = true, change = "presentation")
+    private fun archivedExternalV2(full: Boolean, restart: Boolean = false, authenticated: Boolean = false,
+        consent: Boolean? = true, failure: WalletKeyReader.MaterialResult? = null, change: String? = null, backup: Boolean = false, oldSeed: Boolean = true, authenticatedSeed: Boolean = true) = walletOperationTest {
+        insertWallet("w1", phraseKeyHex)
+        fixture.v2.writeNewV2Row("w1", com.rjnr.pocketnode.data.crypto.WalletKeyBundle(phraseKeyHex, if (authenticatedSeed) phrase else null),
+            fixture.encryption.newEncryptCipherV2(), "mnemonic", true).getOrThrow()
+        val source = keyMaterialDao.getByWalletId("w1")!!
+        // Activation commits, then cleanup cannot complete; a restart loses the ephemeral proof.
+        fixture.cleanupOk = false
+        assertEquals(com.rjnr.pocketnode.data.vault.VaultAccessResult.CleanupRequired,
+            fixture.coordinator.protectLegacy(activity, "w1", material(mnemonic = if (oldSeed) phrase else null), source.iv))
+        fixture.cleanupOk = true
+        val original = db.walletVaultDao().get("w1")!!
+        val marker = keyMaterialDao.getByWalletId("w1")!!
+        assertEquals(source, db.walletVaultDao().legacy("w1")!!.source())
+        state.clear() // Simulate restart with no operation-local health or source proof.
+        if (backup) fixture.backup.writeBackup("w1", material(), "111111".toCharArray())
+        val copies = fixture.backup.captureCopies("w1")
+        val boundary = mockk<WalletKeyReader>()
+        val owned = phraseKeyHex.hexToByteArray()
+        coEvery { boundary.authenticateCapturedV2Source(any(), source) } returns (failure ?:
+            if (authenticated) WalletKeyReader.MaterialResult.Success(owned, if (authenticatedSeed) phrase else null, if (authenticatedSeed) "mnemonic" else "raw_key", authenticatedSeed)
+            else WalletKeyReader.MaterialResult.KeyInvalidated)
+        if ((!authenticated || !full && !authenticatedSeed) && failure == null) fixture.choices += consent
+        fixture.onChoice = {
+            when (change) {
+                "archive" -> db.openHelper.writableDatabase.execSQL("UPDATE wallet_vault_legacy SET updatedAt = updatedAt + 1 WHERE walletId = 'w1'")
+                "envelope" -> db.walletVaultDao().update(original.copy(generation = original.generation + 1))
+                "marker" -> keyMaterialDao.upsert(marker.copy(updatedAt = marker.updatedAt + 1))
+                "presentation" -> db.openHelper.writableDatabase.execSQL("UPDATE wallets SET name = 'Renamed' WHERE walletId = 'w1'")
+            }
+            fixture.onChoice = null
+        }
+        val fresh = newRestorer(boundary)
+        val result = if (restart) (fresh.rekeyFromPhrase(activity, "w1", phrase.split(" "), false) as RecoveredKeyRestorer.RekeyResult.Done).outcomes.getValue("w1")
+            else fresh.restore(activity, "w1", material(mnemonic = if (full) phrase else null), false)
+        val success = failure == null && (change == null || change == "presentation") && (authenticated && (full || authenticatedSeed) || consent == true)
+        if (success) {
+            assertEquals(if (backup) RecoveredKeyRestorer.Outcome.CleanupRequired else RecoveredKeyRestorer.Outcome.Restored, result)
+            if (backup) {
+                assertEquals(source, db.walletVaultDao().legacy("w1")!!.source())
+                val after = fixture.backup.captureCopies("w1")
+                copies.zip(after).forEach { (a, b) -> assertArrayEquals(a, b) }
+                assertTrue("w1" in db.walletVaultDao().pendingCleanup()); assertFalse(fresh.completeIfDone())
+            } else {
+                assertNull(db.walletVaultDao().legacy("w1")); assertTrue(db.walletVaultDao().pendingCleanup().isEmpty())
+                val read = fixture.coordinator.read(activity, "w1", "Read", "Read") as com.rjnr.pocketnode.data.vault.VaultAccessResult.Success
+                assertEquals(if (full || authenticated || oldSeed) phrase else null, read.material.mnemonic)
+                assertEquals(if (full || authenticated || oldSeed) "mnemonic" else "raw_key", read.material.walletType)
+            }
+        } else {
+            if (change != null || failure != null && failure != WalletKeyReader.MaterialResult.Cancelled) assertTrue(result is RecoveredKeyRestorer.Outcome.Failed)
+            else assertEquals(RecoveredKeyRestorer.Outcome.Cancelled, result)
+            assertArrayEquals(original.envelope, db.walletVaultDao().get("w1")!!.envelope)
+            assertEquals(if (change == "envelope") original.generation + 1 else original.generation, db.walletVaultDao().get("w1")!!.generation)
+            assertTrue("w1" in db.walletVaultDao().pendingCleanup())
+        }
+        if (authenticated) assertTrue(owned.all { it == 0.toByte() })
     }
 
 }

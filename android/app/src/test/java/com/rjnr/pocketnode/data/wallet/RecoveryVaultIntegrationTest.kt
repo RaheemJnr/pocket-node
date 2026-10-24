@@ -15,7 +15,7 @@ class RecoveryVaultIntegrationTest {
     private fun restorer(f: WalletVaultIntegrationFixture) = RecoveredKeyRestorer(
         f.db.walletDao(), f.db.keyMaterialDao(), f.reader, f.keyManager,
         MnemonicManager(), f.recovery, f.backup, NoopLogger, f.coordinator, f.prompt,
-        com.rjnr.pocketnode.data.vault.LegacyBackupRecovery(f.db, f.backup, f.coordinator, f.prompt, com.rjnr.pocketnode.data.vault.WalletSecretValidator(MnemonicManager()), f.keyManager, f.reader, f.legacy),
+        com.rjnr.pocketnode.data.vault.LegacyBackupRecovery(f.db, f.backup, f.coordinator, f.prompt, com.rjnr.pocketnode.data.vault.WalletSecretValidator(MnemonicManager()), f.keyManager, f.reader, f.legacy), f.db.walletVaultDao(),
     )
     @Test fun `missing wallet becomes verified V3 without Android lock or weak fallback consent`() = walletOperationTest {
         WalletVaultIntegrationFixture().use { f ->

@@ -317,4 +317,42 @@ class WalletVaultStoreTest {
         assertTrue(store.snapshot().unrecoveredWalletIds.isEmpty())
     }
 
+    @Test fun `archived recovery ordinary replacement checks exact source after dispatch`() = archivedReplacementCas(false)
+    @Test fun `archived recovery profile reset checks exact source after dispatch`() = archivedReplacementCas(true)
+    private fun archivedReplacementCas(reset: Boolean) = runTest {
+        add("b")
+        for (changed in listOf("archive", "marker", "envelope")) {
+            val source = metadata("a")
+            db.keyMaterialDao().upsert(source)
+            store.activate(source, source.iv, envelope("a"), pass)
+            val original = db.walletVaultDao().get("a")!!
+            val marker = db.keyMaterialDao().getByWalletId("a")!!
+            val witness = WalletVaultSourceSnapshot(source, original, marker)
+            val before = store.snapshot()
+            val sibling = db.walletVaultDao().get("b")!!
+            val profile = db.walletVaultDao().profile()!!
+            val replacement = crypto.create("a", original.generation + 1, material, if (reset) nextPass else pass)
+            val queued = WalletVaultStore(db, crypto, StandardTestDispatcher(testScheduler))
+            val attempt = async(start = CoroutineStart.UNDISPATCHED) { runCatching {
+                if (reset) queued.replaceAfterAuthenticatedReset(before, listOf(replacement), nextPass, expectedSource = witness)
+                else queued.replaceAuthenticatedWallet("a", original.generation, replacement, pass, expectedSource = witness)
+            } }
+            // The store call captured its arguments, but its Room transaction has not started.
+            when (changed) {
+                "archive" -> db.openHelper.writableDatabase.execSQL("UPDATE wallet_vault_legacy SET updatedAt = updatedAt + 1 WHERE walletId = 'a'")
+                "marker" -> db.keyMaterialDao().upsert(marker.copy(updatedAt = marker.updatedAt + 1))
+                "envelope" -> db.walletVaultDao().update(original.copy(envelope = WalletEnvelopeCodec.encode(
+                    crypto.create("a", original.generation, material, pass))))
+            }
+            val captured = db.walletVaultDao().get("a")!!
+            assertTrue(attempt.await().exceptionOrNull() is WalletVaultConflictException)
+            assertArrayEquals(captured.envelope, db.walletVaultDao().get("a")!!.envelope)
+            assertEquals(captured.generation, db.walletVaultDao().get("a")!!.generation)
+            assertArrayEquals(profile.envelope, db.walletVaultDao().profile()!!.envelope)
+            assertArrayEquals(sibling.envelope, db.walletVaultDao().get("b")!!.envelope)
+            assertTrue("a" in db.walletVaultDao().pendingCleanup())
+            store.removeWallet("a")
+        }
+    }
+
 }

@@ -38,13 +38,15 @@ class RecoveryScreenNavigationTest {
         coVerify(exactly = 0) { operations.complete() }
         compose.onAllNodes(hasSetTextAction()).assertCountEquals(0)
     }
-    @Test fun `pending cleanup offers archive retry and hides external replacement`() {
+    @Test fun `pending cleanup offers explicit external recovery as well as archive retry`() {
         val operations = mockk<RecoveryOperations>(relaxed = true)
         coEvery { operations.wallets() } returns listOf(MissingWallet("a", "Savings", false, cleanupPending = true, hasLegacyArchive = true))
         val vm = RecoveryViewModel(operations)
         compose.setContent { RecoveryScreen({}, {}, vm) }
         compose.onNodeWithText("Resume legacy cleanup").performScrollTo().assertExists()
-        compose.onNodeWithText("Use private key (spending only)").assertDoesNotExist()
+        compose.onNodeWithText("Use recovery phrase").performScrollTo().performClick()
+        coVerify(exactly = 1) { operations.external(any(), "a", false) }
+        compose.onNodeWithText("Use private key (spending only)").assertExists()
         compose.onNodeWithText("Authenticate old backup PIN").assertDoesNotExist()
     }
 }

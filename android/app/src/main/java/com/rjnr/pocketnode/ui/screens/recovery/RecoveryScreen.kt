@@ -40,10 +40,8 @@ fun RecoveryScreen(onRecoveryComplete: () -> Unit, onContinueReadOnly: () -> Uni
                 }
                 OutlinedButton(onClick = { viewModel.unlock(activity, wallet.walletId, VaultReadPreference.PASSPHRASE) }) { Text("Use wallet passphrase") }
                 OutlinedButton(onClick = { viewModel.unlock(activity, wallet.walletId, VaultReadPreference.DEFAULT) }) { Text("Use device authentication") }
-                if (!wallet.cleanupPending) {
-                    OutlinedButton(onClick = { viewModel.recoverExternal(activity, wallet.walletId, false) }) { Text("Use recovery phrase") }
-                    OutlinedButton(onClick = { viewModel.recoverExternal(activity, wallet.walletId, true) }) { Text("Use private key (spending only)") }
-                }
+                OutlinedButton(onClick = { viewModel.recoverExternal(activity, wallet.walletId, false) }) { Text("Use recovery phrase") }
+                OutlinedButton(onClick = { viewModel.recoverExternal(activity, wallet.walletId, true) }) { Text("Use private key (spending only)") }
             }
             TextButton(onClick = onContinueReadOnly, enabled = state.stage != RecoveryStage.RESTORING) { Text("Keep wallets read-only and continue") }
         }

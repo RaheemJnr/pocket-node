@@ -199,6 +199,9 @@ object AppModule {
     fun provideKeyMaterialDao(db: AppDatabase): KeyMaterialDao = db.keyMaterialDao()
 
     @Provides
+    fun provideWalletVaultDao(db: AppDatabase): com.rjnr.pocketnode.data.database.dao.WalletVaultDao = db.walletVaultDao()
+
+    @Provides
     fun provideContactDao(db: AppDatabase): ContactDao = db.contactDao()
 
     @Provides

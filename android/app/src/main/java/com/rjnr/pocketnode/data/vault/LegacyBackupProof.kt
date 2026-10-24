@@ -55,6 +55,7 @@ internal class LegacySourceAcknowledgment(
     val wallet: WalletEntity,
     val source: KeyMaterialEntity,
     val original: WalletVaultEntity?,
+    val replacementSource: WalletVaultSourceSnapshot? = null,
 ) {
     override fun toString() = "LegacySourceAcknowledgment([redacted])"
 }
@@ -64,6 +65,7 @@ internal class LegacySourceAuthentication(
     val wallet: WalletEntity,
     val source: KeyMaterialEntity,
     val original: WalletVaultEntity?,
+    val replacementSource: WalletVaultSourceSnapshot? = null,
 ) {
     override fun toString() = "LegacySourceAuthentication([redacted])"
 }

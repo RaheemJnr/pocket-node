@@ -74,8 +74,8 @@ class RecoveryOperations @Inject constructor(
         }
     }
     suspend fun external(activity: FragmentActivity, id: String, privateKey: Boolean): RecoveredKeyRestorer.RekeyResult = com.rjnr.pocketnode.data.vault.VaultOperationSession.run(activity) owned@ {
-        // Check persisted cleanup state again; stale UI never authorizes replacement.
-        if (id in db.walletVaultDao().pendingCleanup()) return@owned RecoveredKeyRestorer.RekeyResult.Done(mapOf(id to RecoveredKeyRestorer.Outcome.CleanupRequired))
+        // A pending archive can be classified using a newly supplied, validated external secret.
+        // The restorer binds its proof to the captured source and persisted V3 state.
         val secret = input.request(activity, privateKey)
             ?: return@owned RecoveredKeyRestorer.RekeyResult.Done(mapOf(id to RecoveredKeyRestorer.Outcome.Cancelled))
         try {

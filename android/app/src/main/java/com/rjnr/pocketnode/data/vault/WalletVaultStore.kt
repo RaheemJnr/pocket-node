@@ -201,18 +201,20 @@ class WalletVaultStore(
      * old material and validate address/derivation. Current profile authentication is required too.
      * Preserves the marker flags and cleanup state; no other wallet or profile is changed.
      */
-    suspend fun replaceAuthenticatedWallet(
+    internal suspend fun replaceAuthenticatedWallet(
         walletId: String,
         expectedGeneration: Long,
         replacement: WalletEnvelope,
         currentPassphrase: CharArray,
         expectedWallet: WalletEntity? = null,
+        expectedSource: WalletVaultSourceSnapshot? = null,
     ) {
         val candidate = WalletEnvelopeCodec.encode(replacement)
         val owned = currentPassphrase.copyOf()
         try {
             boundary {
                 walletIdentity(walletId)
+                expectedSource?.let { checkRecoverySource(it, walletId) }
                 conflictUnless(db.walletDao().getById(walletId)?.let(::stableWalletIdentity) == expectedWallet?.let(::stableWalletIdentity))
                 val currentProfile = profile() ?: throw WalletEnvelopeFormatException()
                 verifyProfile(currentProfile, owned)
@@ -260,17 +262,19 @@ class WalletVaultStore(
      * Unrecovered envelopes and their profileGeneration remain unchanged and are reported by the
      * next snapshot. Rotation fails closed while any wallet belongs to an older profile.
      */
-    suspend fun replaceAfterAuthenticatedReset(
+    internal suspend fun replaceAfterAuthenticatedReset(
         expected: WalletVaultSnapshot,
         replacements: List<WalletEnvelope>,
         newPassphrase: CharArray,
         expectedWallets: Map<String, WalletEntity> = emptyMap(),
+        expectedSource: WalletVaultSourceSnapshot? = null,
     ) {
         val staged = replacements.map(WalletEnvelopeCodec::encode)
         val next = newPassphrase.copyOf()
         try {
             boundary {
                 requireEnvelope(staged.isNotEmpty())
+                expectedSource?.let { checkRecoverySource(it, replacements.singleOrNull()?.walletId ?: throw WalletVaultConflictException()) }
                 val rows = dao.all()
                 val currentProfile = profile() ?: throw WalletEnvelopeFormatException()
                 conflictUnless(same(expected.profile, currentProfile))
@@ -294,6 +298,13 @@ class WalletVaultStore(
                 verifyProfile(profile() ?: throw WalletEnvelopeFormatException(), next)
             }
         } finally { next.fill('\u0000') }
+    }
+
+    private suspend fun checkRecoverySource(expected: WalletVaultSourceSnapshot, id: String) {
+        conflictUnless(expected.source.walletId == id && expected.source.kdfVersion == 2 && expected.original.walletId == id && expected.marker.walletId == id &&
+            expected.marker.kdfVersion == 3 && expected.original.cleanupPending &&
+            dao.legacy(id)?.source() == expected.source && db.keyMaterialDao().getByWalletId(id) == expected.marker &&
+            LegacyBackupProof.sameEnvelope(dao.get(id), expected.original))
     }
 
     private suspend fun checkSnapshot(expected: WalletVaultSnapshot) {
@@ -369,4 +380,12 @@ class WalletVaultStore(
             catch (_: Exception) { throw WalletVaultStorageException() }
         }
     }
+}
+
+/** Ciphertext-only identity captured before external authentication; checked inside replacement transactions. */
+internal class WalletVaultSourceSnapshot(source: KeyMaterialEntity, original: WalletVaultEntity, marker: KeyMaterialEntity) {
+    val source = source.copy(encryptedPrivateKey = source.encryptedPrivateKey.copyOf(), encryptedMnemonic = source.encryptedMnemonic?.copyOf(), iv = source.iv.copyOf())
+    val original = original.copy(envelope = original.envelope.copyOf())
+    val marker = marker.copy(encryptedPrivateKey = marker.encryptedPrivateKey.copyOf(), encryptedMnemonic = marker.encryptedMnemonic?.copyOf(), iv = marker.iv.copyOf())
+    override fun toString() = "WalletVaultSourceSnapshot([redacted])"
 }

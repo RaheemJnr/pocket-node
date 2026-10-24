@@ -16,10 +16,10 @@ import org.robolectric.annotation.Config
 @RunWith(RobolectricTestRunner::class)
 @Config(sdk = [28], manifest = Config.NONE)
 class RecoveryNoLockConsentTest {
-    private fun operations(f: WalletVaultIntegrationFixture, input: RecoverySecretDialog = mockk()): RecoveryOperations {
-        val restorer = RecoveredKeyRestorer(f.db.walletDao(), f.db.keyMaterialDao(), f.reader, f.keyManager,
+    private fun operations(f: WalletVaultIntegrationFixture, input: RecoverySecretDialog = mockk(), reader: WalletKeyReader = f.reader): RecoveryOperations {
+        val restorer = RecoveredKeyRestorer(f.db.walletDao(), f.db.keyMaterialDao(), reader, f.keyManager,
             MnemonicManager(), f.recovery, f.backup, NoopLogger, f.coordinator, f.prompt,
-            LegacyBackupRecovery(f.db, f.backup, f.coordinator, f.prompt, WalletSecretValidator(MnemonicManager()), f.keyManager, f.reader, f.legacy))
+            LegacyBackupRecovery(f.db, f.backup, f.coordinator, f.prompt, WalletSecretValidator(MnemonicManager()), f.keyManager, f.reader, f.legacy), f.db.walletVaultDao())
         return RecoveryOperations(restorer, f.db, f.backup, input, f.coordinator, f.recovery, f.store)
     }
     private fun backup(f: WalletVaultIntegrationFixture, id: String = "a", suffix: String = ".enc") {
@@ -116,10 +116,14 @@ class RecoveryNoLockConsentTest {
     }
     @Test fun `interrupted backup presence offers old PIN and cleanup never raw replacement`() = walletOperationTest {
         WalletVaultIntegrationFixture().use { f ->
-            f.wallet(); backup(f, suffix = ".enc.tmp"); val ops = operations(f)
+            f.wallet(); backup(f, suffix = ".enc.tmp")
+            val input = mockk<RecoverySecretDialog>()
+            coEvery { input.request(f.activity, true) } returns f.material.privateKey.toCharArray()
+            val ops = operations(f, input)
             assertTrue(ops.wallets().single().hasBackup)
             f.phrase(); assertEquals(VaultAccessResult.CleanupRequired, f.coordinator.recoverExisting(f.activity, "a", f.material))
             assertTrue(ops.wallets().single().cleanupPending)
+            f.phrase()
             val result = ops.external(f.activity, "a", true) as RecoveredKeyRestorer.RekeyResult.Done
             assertEquals(RecoveredKeyRestorer.Outcome.CleanupRequired, result.outcomes["a"])
             f.phrase("111111"); f.phrase()
@@ -216,6 +220,50 @@ class RecoveryNoLockConsentTest {
             val result = operations(f, input).external(f.activity, "a", true) as RecoveredKeyRestorer.RekeyResult.Done
             assertEquals(RecoveredKeyRestorer.Outcome.Restored, result.outcomes["a"])
             assertNotNull(f.store.get("a")); assertNull(f.db.walletVaultDao().legacy("a"))
+        }
+    }
+
+    @Test fun `pending archived V2 phrase flows through recreated ViewModel and native external operation`() = pendingExternalEntry(false, false)
+    @Test fun `pending archived V2 raw input flows through recreated ViewModel and preserves full seed`() = pendingExternalEntry(true, false)
+    @Test fun `pending archived V2 phrase entry cannot retire opaque PIN backup`() = pendingExternalEntry(false, true)
+    @Test fun `pending archived V2 raw entry cannot retire opaque PIN backup`() = pendingExternalEntry(true, true)
+    private fun pendingExternalEntry(raw: Boolean, opaque: Boolean) = walletOperationTest {
+        WalletVaultIntegrationFixture().use { f ->
+            phraseWallet(f)
+            val mm = MnemonicManager(); val seed = mm.mnemonicToSeed(words.split(" ")); val key = mm.derivePrivateKey(seed)
+            val keyHex = key.joinToString("") { "%02x".format(it) }; seed.fill(0); key.fill(0)
+            val material = com.rjnr.pocketnode.data.crypto.KeyMaterial(keyHex, words, "mnemonic", true)
+            f.v2.writeNewV2Row("a", com.rjnr.pocketnode.data.crypto.WalletKeyBundle(keyHex, words), f.encryption.newEncryptCipherV2(), "mnemonic", true).getOrThrow()
+            f.phrase()
+            assertEquals(VaultAccessResult.CleanupRequired, f.coordinator.recoverExisting(f.activity, "a", material))
+            val archive = f.db.walletVaultDao().legacy("a")!!
+            f.recovery.clear()
+            if (opaque) f.backup.writeBackup("a", material, "111111".toCharArray())
+            val input = mockk<RecoverySecretDialog>(); val owned = (if (raw) keyHex else words).toCharArray()
+            coEvery { input.request(f.activity, raw) } returns owned
+            val invalidated = mockk<WalletKeyReader>()
+            coEvery { invalidated.authenticateCapturedV2Source(any(), archive.source()) } returns WalletKeyReader.MaterialResult.KeyInvalidated
+            val ops = operations(f, input, invalidated)
+            val vm = vm(f, ops)
+            assertTrue(vm.uiState.value.missingWallets.single().cleanupPending)
+            f.choices += true; f.phrase()
+            vm.recoverExternal(f.activity, "a", raw); settled(vm)
+            coVerify(exactly = 1) { input.request(f.activity, raw) }
+            coVerify(exactly = 1) { invalidated.authenticateCapturedV2Source(any(), archive.source()) }
+            assertTrue(owned.all { it == '\u0000' })
+            if (opaque) {
+                assertEquals(RecoveryStage.RESTORE_FAILED, vm.uiState.value.stage)
+                assertEquals(0, vm.uiState.value.restoredWalletCount)
+                assertTrue(vm.uiState.value.missingWallets.single().cleanupPending)
+                assertEquals(archive.source(), f.db.walletVaultDao().legacy("a")?.source()); assertTrue(f.backup.hasBackup("a"))
+                assertFalse(ops.complete())
+            } else {
+                assertEquals(RecoveryStage.SUCCESS, vm.uiState.value.stage)
+                assertNull(f.db.walletVaultDao().legacy("a"))
+                f.phrase()
+                val read = f.coordinator.read(f.activity, "a", "Read", "Read") as VaultAccessResult.Success
+                assertEquals(words, read.material.mnemonic)
+            }
         }
     }
 

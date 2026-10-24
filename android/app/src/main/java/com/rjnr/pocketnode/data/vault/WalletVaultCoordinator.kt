@@ -1,6 +1,7 @@
 package com.rjnr.pocketnode.data.vault
 
 import androidx.fragment.app.FragmentActivity
+import com.rjnr.pocketnode.data.wallet.stableWalletIdentity
 import com.rjnr.pocketnode.data.crypto.KeyMaterial
 import com.rjnr.pocketnode.data.database.AppDatabase
 import com.rjnr.pocketnode.data.database.entity.KeyMaterialEntity
@@ -93,7 +94,7 @@ class WalletVaultCoordinator(
     private suspend fun checkSourceWitness(id: String, wallet: com.rjnr.pocketnode.data.database.entity.WalletEntity,
         source: KeyMaterialEntity, original: com.rjnr.pocketnode.data.database.entity.WalletVaultEntity?) {
         if (source.kdfVersion != 2 || source.walletId != id || wallet.walletId != id ||
-            db.walletDao().getById(id) != wallet ||
+            db.walletDao().getById(id)?.let(::stableWalletIdentity) != stableWalletIdentity(wallet) ||
             !LegacyBackupProof.sameEnvelope(db.walletVaultDao().get(id), original) ||
             (db.keyMaterialDao().getByWalletId(id) != source && db.walletVaultDao().legacy(id)?.source() != source)) throw VaultFailure()
     }
@@ -122,6 +123,7 @@ class WalletVaultCoordinator(
         val wallet = creation?.wallet ?: existingWallet
         if (mode != Enrollment.NEW && wallet == null) throw VaultFailure()
         if (!validate(material, wallet)) throw VaultFailure()
+        val replacementSource = acknowledgment?.replacementSource ?: authentication?.replacementSource
         val old = store.get(id)
         if (old != null && mode != Enrollment.RECOVERY && mode != Enrollment.INTERNAL_CLEANUP) throw VaultFailure()
         val source = db.keyMaterialDao().getByWalletId(id)
@@ -157,9 +159,9 @@ class WalletVaultCoordinator(
                     material.mnemonicBackedUp, System.currentTimeMillis())
                 store.activate(metadata, if (mode == Enrollment.LEGACY) expectedLegacyIv else source?.iv, candidate, phrase, creation, wallet, reset)
             } else if (reset != null) {
-                store.replaceAfterAuthenticatedReset(reset, listOf(candidate), phrase, mapOf(id to (wallet ?: throw VaultFailure())))
+                store.replaceAfterAuthenticatedReset(reset, listOf(candidate), phrase, mapOf(id to (wallet ?: throw VaultFailure())), replacementSource)
             } else {
-                store.replaceAuthenticatedWallet(id, old.generation, candidate, phrase, wallet)
+                store.replaceAuthenticatedWallet(id, old.generation, candidate, phrase, wallet, replacementSource)
             }
             val committed = store.get(id) ?: throw VaultFailure()
             // Verify persisted material rather than the candidate held in memory.

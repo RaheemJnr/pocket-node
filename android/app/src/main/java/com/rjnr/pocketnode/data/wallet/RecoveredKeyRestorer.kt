@@ -29,6 +29,7 @@ class RecoveredKeyRestorer @Inject constructor(
     private val coordinator: WalletVaultCoordinator,
     private val prompt: VaultPrompt,
     private val legacyRecovery: LegacyBackupRecovery,
+    private val vaultDao: com.rjnr.pocketnode.data.database.dao.WalletVaultDao,
 ) {
 
     sealed class Outcome {
@@ -60,7 +61,7 @@ class RecoveredKeyRestorer @Inject constructor(
      * background) is not missing: its keys are there.
      */
     suspend fun missingWallets(): List<WalletEntity> {
-        val unverified = recoveryState.unverifiedWalletIds()
+        val unverified = recoveryState.unverifiedWalletIds() + vaultDao.pendingCleanup()
         return walletDao.getAll().filter {
             it.walletId in unverified ||
                 (keyMaterialDao.getKdfVersion(it.walletId) == null && !keyManager.hasLegacyKeyFile(it.walletId))
@@ -114,38 +115,48 @@ class RecoveredKeyRestorer @Inject constructor(
         val wallet = walletDao.getById(walletId) ?: return Outcome.NoWalletRow
         // A row's mere presence is never evidence of successful authentication.
         if (material == null) return Outcome.NoBackup
-        val normalized = if (material.mnemonic == null) material.copy(walletType = "raw_key") else material
+        var normalized = if (material.mnemonic == null) material.copy(walletType = "raw_key") else material
         if (!WalletSecretValidator(mnemonicManager).validate(normalized, wallet))
             return Outcome.AddressMismatch
         recoveryState.addUnverified(walletId)
         recoveryState.markIncomplete()
         val capturedSource = keyMaterialDao.getByWalletId(walletId)
+        val capturedVault = vaultDao.get(walletId)
+        val archivedV2 = if (capturedSource?.kdfVersion == 3 && capturedVault?.cleanupPending == true)
+            vaultDao.legacy(walletId)?.source()?.takeIf { it.kdfVersion == 2 } else null
+        val classifiedV2 = archivedV2 ?: capturedSource?.takeIf { it.kdfVersion == 2 && normalized.mnemonic != null }
+        val replacementSource = archivedV2?.let { WalletVaultSourceSnapshot(it, capturedVault!!, capturedSource!!) }
         var acknowledgment: LegacySourceAcknowledgment? = null
         var authentication: LegacySourceAuthentication? = null
-        if (normalized.mnemonic != null && capturedSource?.kdfVersion == 2) {
+        if (classifiedV2 != null) {
             // Classify the exact old source before activation. A supplied seed does not prove
             // the contents or lost capabilities of an unreadable legacy source.
-            when (val existing = keyReader.authenticateCapturedV2Source(activity, capturedSource)) {
+            when (val existing = keyReader.authenticateCapturedV2Source(activity, classifiedV2)) {
                 is WalletKeyReader.MaterialResult.Success -> try {
                     val previous = KeyMaterial(existing.privateKey.toHexStringNoPrefix(), existing.mnemonic,
                         existing.walletType, existing.mnemonicBackedUp)
                     if (!WalletSecretValidator(mnemonicManager).validate(previous, wallet) ||
                         previous.privateKey != normalized.privateKey ||
-                        previous.mnemonic != null && previous.mnemonic != normalized.mnemonic)
+                        previous.mnemonic != null && normalized.mnemonic != null && previous.mnemonic != normalized.mnemonic)
                         return Outcome.Failed("The existing recovery capabilities do not match. Nothing was replaced.")
-                    authentication = LegacySourceAuthentication(wallet, capturedSource, null)
+                    if (normalized.mnemonic == null && previous.mnemonic != null) normalized = previous
+                    // The newer V3 vault can contain a richer seed than its archived raw source.
+                    if (archivedV2 != null && normalized.mnemonic == null && !confirmSpendingOnly(activity)) return Outcome.Cancelled
+                    authentication = LegacySourceAuthentication(wallet, classifiedV2, capturedVault, replacementSource)
                 } finally { existing.privateKey.fill(0) }
                 WalletKeyReader.MaterialResult.KeyInvalidated -> {
-                    if (prompt.choose(activity, "Replace inaccessible legacy protection?",
+                    if (normalized.mnemonic == null) {
+                        if (!confirmSpendingOnly(activity)) return Outcome.Cancelled
+                    } else if (prompt.choose(activity, "Replace inaccessible legacy protection?",
                         "The old device key is permanently unavailable. This verified recovery phrase restores its matching wallet and derived accounts, but cannot prove that the inaccessible old source had no different recovery phrase or accounts. Continue only if you accept losing those inaccessible capabilities. Surviving old-PIN backups still require authentication and remain preserved.",
                         "Use verified recovery phrase", "Cancel") != true) return Outcome.Cancelled
-                    acknowledgment = LegacySourceAcknowledgment(wallet, capturedSource, null)
+                    acknowledgment = LegacySourceAcknowledgment(wallet, classifiedV2, capturedVault, replacementSource)
                 }
                 WalletKeyReader.MaterialResult.Cancelled -> return Outcome.Cancelled
                 else -> return Outcome.Failed("Existing source authentication needs a retry. Nothing was replaced.")
             }
         }
-        if (normalized.mnemonic == null && capturedSource != null &&
+        if (classifiedV2 == null && normalized.mnemonic == null && capturedSource != null &&
             (wallet.type == KeyManager.WALLET_TYPE_MNEMONIC || capturedSource.kdfVersion == 2)) {
             if (keyMaterialDao.getKdfVersion(walletId) == 3) {
                 when (val existing = coordinator.readForRecovery(activity, walletId)) {
@@ -184,7 +195,6 @@ class RecoveredKeyRestorer @Inject constructor(
                         if (!confirmSpendingOnly(activity)) return Outcome.Cancelled
                     }
                     VaultAccessResult.CleanupRequired -> return Outcome.CleanupRequired
-                    else -> return Outcome.Failed("Existing seed authentication did not complete.")
                 }
             } else when (val existing = keyReader.readKeyMaterial(activity, walletId, "Preserve recovery phrase",
                 "Authenticate existing wallet keys before private-key-only recovery.")) {

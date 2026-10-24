@@ -48,7 +48,6 @@ class RecoveryViewModel @Inject constructor(private val operations: RecoveryOper
     fun resumeCleanup(activity: FragmentActivity, id: String) = run(id) { operations.cleanup(activity, id) }
     fun unlock(activity: FragmentActivity, id: String, preference: VaultReadPreference) = run(id) { operations.unlock(activity, id, preference) }
     fun recoverExternal(activity: FragmentActivity, id: String, privateKey: Boolean) {
-        if (_uiState.value.missingWallets.firstOrNull { it.walletId == id }?.cleanupPending != false) return
         run(id) {
             when (val result = operations.external(activity, id, privateKey)) {
                 RecoveredKeyRestorer.RekeyResult.InvalidInput -> RecoveredKeyRestorer.Outcome.Failed("Invalid recovery secret. Check the words or 64-character private key.")

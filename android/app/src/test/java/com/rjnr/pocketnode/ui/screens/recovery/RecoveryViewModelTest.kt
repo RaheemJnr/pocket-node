@@ -58,11 +58,13 @@ class RecoveryViewModelTest {
         assertEquals(2, vm.uiState.value.missingWallets.size)
         assertTrue(vm.uiState.value.outcomes.getValue("a").contains("Cancelled"))
     }
-    @Test fun `pending cleanup cannot become raw replacement and retry remains deliberate`() = runTest {
+    @Test fun `pending cleanup external input remains explicit and incomplete outcome stays pending`() = runTest {
         wallets[0] = wallets[0].copy(cleanupPending = true, hasLegacyArchive = true)
         val vm = RecoveryViewModel(operations); advanceUntilIdle()
+        coEvery { operations.external(activity, "a", true) } returns RecoveredKeyRestorer.RekeyResult.Done(mapOf("a" to RecoveredKeyRestorer.Outcome.CleanupRequired))
         vm.recoverExternal(activity, "a", true); advanceUntilIdle()
-        coVerify(exactly = 0) { operations.external(any(), any(), any()) }
+        coVerify(exactly = 1) { operations.external(activity, "a", true) }
+        assertEquals(0, vm.uiState.value.restoredWalletCount)
         coEvery { operations.cleanup(activity, "a") } returns RecoveredKeyRestorer.Outcome.Cancelled
         vm.resumeCleanup(activity, "a"); advanceUntilIdle()
         assertTrue(vm.uiState.value.missingWallets.first().cleanupPending)
