@@ -87,6 +87,10 @@ android {
 
     testOptions {
         unitTests.all { test ->
+            // Recycle Robolectric workers before accumulated sandbox state exhausts the
+            // default heap during real-cost Argon2 tests. Keep one bounded worker at a time.
+            test.forkEvery = 25L
+            test.maxParallelForks = 1
             // MockK uses ByteBuddy. On JDK 21+ self-attach is restricted (JEP 451)
             // and once one MockK test runs in a fork the second one fails with
             // "Could not initialize class io.mockk.impl.JvmMockKGateway".
