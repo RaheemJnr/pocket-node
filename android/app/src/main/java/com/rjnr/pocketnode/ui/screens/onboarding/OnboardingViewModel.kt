@@ -24,15 +24,6 @@ data class OnboardingUiState(
     val error: com.rjnr.pocketnode.ui.util.UiMessage? = null,
     val isWalletCreated: Boolean = false,
     val wasCorrupted: Boolean = false,
-    /**
-     * True when the device has neither enrolled biometrics nor a device
-     * lock (PIN/pattern/password). The V2 Keystore key cannot be created
-     * on such devices because `setUserAuthenticationRequired(true)`
-     * requires *some* credential to authenticate against. Banking-app
-     * pattern: refuse setup and tell the user to enable a lock in Android
-     * Settings before proceeding (#213 sub-PR 6).
-     */
-    val noDeviceCredential: Boolean = false,
 )
 
 @HiltViewModel
@@ -51,64 +42,20 @@ class OnboardingViewModel @Inject constructor(
         _uiState.update {
             it.copy(
                 wasCorrupted = repository.wasResetDueToCorruption(),
-                noDeviceCredential = !canCreateV2BoundKey(),
             )
         }
     }
 
-    /**
-     * True if Keystore can mint a V2 (auth-bound) key on this device.
-     * Either an enrolled biometric or a device credential (PIN/pattern/
-     * password) is required — the V2 spec uses
-     * `AUTH_BIOMETRIC_STRONG or AUTH_DEVICE_CREDENTIAL`.
-     */
-    private fun canCreateV2BoundKey(): Boolean =
-        authManager.isBiometricEnrolled() || authManager.hasDeviceCredential()
-
-    /**
-     * Create the first wallet at kdfVersion=2.
-     *
-     * [name] is captured from the onboarding "Name your wallet" step
-     * (Telegram bug 3); falls back to "My Wallet" if the user submitted
-     * empty so the call never produces a blank-named wallet row.
-     *
-     * [activity] is required so [WalletKeyWriter] can drive the
-     * BiometricPrompt CryptoObject flow. Cancellation by the user is
-     * surfaced as a silent return (no error toast) so the user can
-     * retry by tapping again.
-     */
+    /** Creates the first wallet with independent passphrase protection before reporting success. */
     fun createNewWallet(activity: FragmentActivity, name: String = "My Wallet") {
-        // Post-#289 there is no V1 write path: WalletRepository.createWallet
-        // funnels through WalletKeyWriter → KeystoreV2MigrationHelper.writeNewV2Row
-        // which mints a fresh V2 Keystore key with setUserAuthenticationRequired(true).
-        // Without an enrolled biometric or device credential, the keystore
-        // refuses the key creation with IllegalStateException("Secure lock
-        // screen must be enabled to create keys requiring user authentication").
-        //
-        // The Screen surfaces a dialog before this fn is reached
-        // (showNoDeviceLockWarning when uiState.noDeviceCredential is true)
-        // directing the user to Android Settings → Security to enable a
-        // device lock. Defense-in-depth: the writer also catches the
-        // IllegalStateException and surfaces a friendly error here in case
-        // the device-credential state changes between the gate check and
-        // the actual key creation (#289 no-secure-lock follow-up).
+        if (_uiState.value.isLoading) return
         val trimmed = name.trim().ifBlank { "My Wallet" }
-        // Re-check at call time, not just at VM init — the user may have
-        // come back from Android Settings after enabling a device lock and
-        // we want to prefer V2 if they did.
-        val useV1Fallback = !canCreateV2BoundKey()
         viewModelScope.launch {
             _uiState.update { it.copy(isLoading = true, error = null) }
             val result = walletRepository.createWallet(
                 name = trimmed,
                 persistKeys = { walletId, bundle ->
-                    if (useV1Fallback) {
-                        // Software-only V1 path. The Onboarding screen
-                        // already showed an informed-consent dialog
-                        // ("Continue without a device lock?") before we
-                        // reach this point. AuthScreen's migration loop
-                        // will upgrade the row to V2 the moment the user
-                        // enables a device lock and cold-starts the app.
+
                         walletKeyWriter.persistCreatedWallet(
                             activity = activity,
                             walletId = walletId,
@@ -116,15 +63,7 @@ class OnboardingViewModel @Inject constructor(
                             walletType = KeyManager.WALLET_TYPE_MNEMONIC,
                             mnemonicBackedUp = false,
                         )
-                    } else {
-                        walletKeyWriter.persistCreatedWallet(
-                            activity = activity,
-                            walletId = walletId,
-                            bundle = bundle,
-                            walletType = KeyManager.WALLET_TYPE_MNEMONIC,
-                            mnemonicBackedUp = false,
-                        )
-                    }
+
                 },
             )
             result.onSuccess { entity ->
@@ -148,10 +87,10 @@ class OnboardingViewModel @Inject constructor(
         /**
          * Map a wallet-create failure to a user-facing message.
          *
-         *   - Cancelled: silent (null) — user dismissed the BiometricPrompt
+         *   - Cancelled: silent (null), user dismissed the wallet prompt
          *     intentionally; no error toast, they can retry by tapping again.
          *   - AuthError: surface the prompt's error message.
-         *   - WriteFailed: generic "save failed" — the cause is logged but
+         *   - WriteFailed: generic "save failed", the cause is logged but
          *     not shown verbatim (likely Room/disk error, not user-actionable).
          *   - KeyInvalidated: tells the user to re-import; the V2 keystore
          *     key has been wiped by biometric enrollment change.

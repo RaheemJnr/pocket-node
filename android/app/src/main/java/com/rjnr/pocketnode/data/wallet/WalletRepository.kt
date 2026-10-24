@@ -45,9 +45,13 @@ class WalletRepository @Inject constructor(
     private val logger: Logger,
 ) {
     /** Operation-owned proposed metadata; only new UUID creation paths issue this context. */
-    class Creation internal constructor(internal val wallet: WalletEntity) {
+    class Creation internal constructor(internal val wallet: WalletEntity, internal val expectedParent: WalletEntity? = null) {
         val walletId: String get() = wallet.walletId
+        internal fun parentMatches(current: WalletEntity?): Boolean = expectedParent?.let {
+            current != null && parentIdentity(it) == parentIdentity(current)
+        } ?: (wallet.parentWalletId == null)
     }
+
 
     suspend fun markVerifiedMnemonicBackup(witness: WalletBackupWitness): Boolean = appDatabase.withTransaction {
         val id = witness.wallet.walletId
@@ -333,10 +337,12 @@ class WalletRepository @Inject constructor(
         name: String,
         parentMnemonic: List<String>,
         explicitIndex: Int? = null,
+        expectedParent: WalletEntity? = null,
         persistKeys: suspend (walletId: Creation, bundle: WalletKeyBundle) -> WalletKeyWriter.Result,
     ): Result<WalletEntity> = runCatching {
         val parent = walletDao.getById(parentWalletId)
             ?: throw IllegalArgumentException("Parent wallet not found")
+        require(expectedParent == null || parentIdentity(expectedParent) == parentIdentity(parent)) { "Parent wallet changed. Authenticate again." }
         require(parent.type == KeyManager.WALLET_TYPE_MNEMONIC) {
             "Sub-accounts require a mnemonic wallet"
         }
@@ -384,7 +390,7 @@ class WalletRepository @Inject constructor(
                 colorIndex = colorIndex
             )
 
-            val persistResult = persistKeys(Creation(entity.copy(isActive = false)), bundle)
+            val persistResult = persistKeys(Creation(entity.copy(isActive = false), expectedParent ?: parent), bundle)
             if (persistResult !is WalletKeyWriter.Result.Success) {
                 throw WalletKeyWriter.PersistException(persistResult)
             }
@@ -640,3 +646,6 @@ class WalletRepository @Inject constructor(
         logger.d(TAG, "factoryReset: ${all.size} wallet(s) wiped")
     }
 }
+
+/** Stable identity excludes presentation and activity changes caused by restoring sibling accounts. */
+private fun parentIdentity(wallet: WalletEntity) = wallet.copy(name = "", isActive = false, lastActiveAt = 0, colorIndex = 0)

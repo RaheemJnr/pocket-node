@@ -40,6 +40,43 @@ class RecoverySecretDialogTest {
             }
         } finally { Dispatchers.resetMain() }
     }
+    @Test fun `native import accepts owned phrase and key input without retaining text`() = runTest {
+        Dispatchers.setMain(UnconfinedTestDispatcher(testScheduler))
+        try {
+            val activity = Robolectric.buildActivity(FragmentActivity::class.java).setup().get()
+            for (privateKey in listOf(false, true)) {
+                val result = async { RecoverySecretDialog().requestImport(activity, privateKey) }; runCurrent()
+                assertFalse("Import must wait for native user input", result.isCompleted)
+                val dialog = ShadowAlertDialog.getLatestAlertDialog()
+                val field = inputs(dialog.window!!.decorView).single()
+                assertFalse(field.isSaveEnabled)
+                field.setText(if (privateKey) "00".repeat(31) + "02" else "abandon ".repeat(11) + "about")
+                dialog.getButton(AlertDialog.BUTTON_POSITIVE).performClick(); runCurrent()
+                val owned = result.await()!!
+                assertTrue(owned.isNotEmpty()); owned.fill('\u0000')
+                assertEquals(0, field.text.length)
+            }
+        } finally { Dispatchers.resetMain() }
+    }
+
+    @Test fun `reauthentication clears native typed import and cancels delivery`() = runTest {
+        Dispatchers.setMain(UnconfinedTestDispatcher(testScheduler))
+        try {
+            val activity = Robolectric.buildActivity(FragmentActivity::class.java).setup().get()
+            val result = async { RecoverySecretDialog().requestImport(activity, false) }; runCurrent()
+            assertFalse("Import must wait for native user input", result.isCompleted)
+            val dialog = ShadowAlertDialog.getLatestAlertDialog()
+            val field = inputs(dialog.window!!.decorView).single()
+            field.setText("abandon ability")
+            com.rjnr.pocketnode.ui.screens.auth.ReauthLockEvents.onLocked(); runCurrent()
+            val cancelled = result.isCompleted
+            if (!cancelled) dialog.getButton(AlertDialog.BUTTON_NEGATIVE).performClick()
+            runCurrent(); assertNull(result.await())
+            assertTrue("Lock must cancel native input", cancelled)
+            assertEquals(0, field.text.length); assertFalse(dialog.isShowing)
+        } finally { Dispatchers.resetMain() }
+    }
+
     @Test fun `cancel background and coroutine cancellation clear entered external secret`() = runTest {
         Dispatchers.setMain(UnconfinedTestDispatcher(testScheduler))
         try {

@@ -27,30 +27,6 @@ class WalletManagerViewModel @Inject constructor(
     private val logger: Logger,
 ) : ViewModel() {
 
-    private fun canCreateV2BoundKey(): Boolean =
-        authManager.isBiometricEnrolled() || authManager.hasDeviceCredential()
-
-    // F1/F3: no device lock -> restored sub-accounts persist at the V1 software
-    // fallback. Warn once before the batch, matching onboarding.
-    private var pendingNoLockAction: (() -> Unit)? = null
-
-    private fun requestNoLockConsent(action: () -> Unit) {
-        pendingNoLockAction = action
-        _uiState.update { it.copy(showNoLockConsent = true) }
-    }
-
-    fun confirmNoLockConsent() {
-        val action = pendingNoLockAction
-        pendingNoLockAction = null
-        _uiState.update { it.copy(showNoLockConsent = false) }
-        action?.invoke()
-    }
-
-    fun dismissNoLockConsent() {
-        pendingNoLockAction = null
-        _uiState.update { it.copy(showNoLockConsent = false) }
-    }
-
     private val _uiState = MutableStateFlow(WalletManagerUiState())
     val uiState: StateFlow<WalletManagerUiState> = _uiState.asStateFlow()
 
@@ -91,19 +67,16 @@ class WalletManagerViewModel @Inject constructor(
      */
     fun restoreFoundSubAccounts(
         activity: androidx.fragment.app.FragmentActivity,
-        consented: Boolean = false,
     ) {
         val found = _uiState.value.foundCandidates
         if (found.isEmpty() || _uiState.value.isRestoring) return
-        if (!consented && !canCreateV2BoundKey()) {
-            requestNoLockConsent { restoreFoundSubAccounts(activity, consented = true) }
-            return
-        }
         _uiState.update { it.copy(isRestoring = true) }
         viewModelScope.launch {
             try {
                 var restored = 0
                 found.groupBy { it.parentWalletId }.forEach { (parentId, candidates) ->
+                    val expectedParent = walletRepository.getById(parentId) ?: return@forEach
+                    val lock = com.rjnr.pocketnode.ui.screens.auth.ReauthLockEvents.locks.value
                     val readResult = walletKeyReader.readKeyMaterial(
                         activity = activity,
                         walletId = parentId,
@@ -117,14 +90,18 @@ class WalletManagerViewModel @Inject constructor(
                     val words = readResult.mnemonic?.split(" ")
                     if (words.isNullOrEmpty()) return@forEach
 
+                    if (walletRepository.getById(parentId) != expectedParent) return@forEach
+                    com.rjnr.pocketnode.ui.security.WalletDerivationSession.run(activity, lock) { session ->
                     candidates.sortedBy { it.accountIndex }.forEach { candidate ->
                         walletRepository.createSubAccount(
                             parentWalletId = parentId,
                             name = "Sub-account ${candidate.accountIndex}",
                             parentMnemonic = words,
                             explicitIndex = candidate.accountIndex,
+                            expectedParent = expectedParent,
                             persistKeys = { newWalletId, bundle ->
-                                if (canCreateV2BoundKey()) {
+                                session.persist {
+
                                     walletKeyWriter.persistCreatedWallet(
                                         activity = activity,
                                         walletId = newWalletId,
@@ -134,15 +111,6 @@ class WalletManagerViewModel @Inject constructor(
                                         promptTitle = "Secure restored sub-account",
                                         promptSubtitle = "Encrypt sub-account ${candidate.accountIndex}'s keys.",
                                     )
-                                } else {
-                                    // No secure lock; user consented to V1 above.
-                                    walletKeyWriter.persistCreatedWallet(
-                                        activity = activity,
-                                        walletId = newWalletId,
-                                        bundle = bundle,
-                                        walletType = com.rjnr.pocketnode.data.wallet.KeyManager.WALLET_TYPE_MNEMONIC,
-                                        mnemonicBackedUp = false,
-                                    )
                                 }
                             },
                         ).onSuccess { wallet ->
@@ -151,6 +119,7 @@ class WalletManagerViewModel @Inject constructor(
                         }.onFailure { e ->
                             logger.e(TAG, "Restore failed for $parentId index ${candidate.accountIndex}", e)
                         }
+                    }
                     }
                 }
                 if (restored == 0) {
@@ -198,7 +167,5 @@ data class WalletManagerUiState(
     /** Discovered-but-unrestored sub-account slots with on-chain history (#82). */
     val foundCandidates: List<com.rjnr.pocketnode.data.database.entity.SubAccountCandidateEntity> = emptyList(),
     val isRestoring: Boolean = false,
-    /** F1/F3: show the no-device-lock consent dialog before V1 restore writes. */
-    val showNoLockConsent: Boolean = false,
     val error: com.rjnr.pocketnode.ui.util.UiMessage? = null,
 )

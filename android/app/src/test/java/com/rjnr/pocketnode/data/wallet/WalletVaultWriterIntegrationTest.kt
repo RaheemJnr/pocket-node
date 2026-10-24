@@ -19,15 +19,35 @@ class WalletVaultWriterIntegrationTest {
             val proposed = com.rjnr.pocketnode.data.database.entity.WalletEntity("child", "Child", "mnemonic",
                 "m/44'/309'/1'/0/0", "parent", accountIndex = 1,
                 mainnetAddress = info.mainnetAddress, testnetAddress = info.testnetAddress)
+            val parent = f.creation("parent").wallet.copy(type = "mnemonic", derivationPath = "m/44'/309'/0'/0/0")
+            f.db.walletDao().insert(parent)
             f.phrase()
             assertEquals(WalletKeyWriter.Result.Success, f.writer.persistCreatedWallet(f.activity,
-                WalletRepository.Creation(proposed), com.rjnr.pocketnode.data.crypto.WalletKeyBundle(hex, null), "mnemonic", false))
+                WalletRepository.Creation(proposed, parent), com.rjnr.pocketnode.data.crypto.WalletKeyBundle(hex, null), "mnemonic", false))
             assertEquals(proposed, f.db.walletDao().getById("child"))
             assertEquals("mnemonic", f.db.keyMaterialDao().getByWalletId("child")!!.walletType)
             f.phrase()
             val read = f.reader.readKeyMaterial(f.activity, "child", "Read", "Authenticate") as WalletKeyReader.MaterialResult.Success
             try { assertNull(read.mnemonic); assertEquals("raw_key", read.walletType); assertFalse(read.mnemonicBackedUp) }
             finally { read.privateKey.fill(0) }
+        }
+    }
+
+    @Test fun `parent deletion or replacement during writer credential prompt leaves no child`() = walletOperationTest {
+        for (replace in listOf(false, true)) WalletVaultIntegrationFixture().use { f ->
+            val parent = f.creation("parent").wallet.copy(type = "mnemonic", derivationPath = "m/44'/309'/0'/0/0")
+            f.db.walletDao().insert(parent)
+            val child = f.creation("child").wallet.copy(type = "mnemonic", parentWalletId = "parent", accountIndex = 1, derivationPath = "m/44'/309'/1'/0/0")
+            f.onCredential = {
+                f.db.walletDao().delete("parent")
+                if (replace) f.db.walletDao().insert(parent.copy(mainnetAddress = "replaced"))
+            }
+            f.phrase()
+            assertTrue(f.writer.persistCreatedWallet(f.activity, WalletRepository.Creation(child, parent), f.bundle, "mnemonic", false) is WalletKeyWriter.Result.WriteFailed)
+            assertNull(f.db.walletDao().getById("child")); assertNull(f.db.keyMaterialDao().getByWalletId("child"))
+            assertNull(f.store.get("child")); assertFalse(f.store.hasProfile())
+            if (replace) assertEquals("replaced", f.db.walletDao().getById("parent")!!.mainnetAddress)
+            else assertNull(f.db.walletDao().getById("parent"))
         }
     }
 

@@ -112,6 +112,7 @@ class WalletVaultStore(
                 if (creation != null) {
                     conflictUnless(creation.walletId == meta.walletId && expectedIv == null && source == null &&
                         db.walletDao().getById(meta.walletId) == null && dao.legacy(meta.walletId) == null)
+                    conflictUnless(creation.parentMatches(creation.wallet.parentWalletId?.let { db.walletDao().getById(it) }))
                     // This context names a newly generated namespace, never a historical recovery target.
                     db.walletDao().insert(creation.wallet)
                 }

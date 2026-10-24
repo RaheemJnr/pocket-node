@@ -30,7 +30,6 @@ import com.rjnr.pocketnode.ui.screens.recovery.RecoveryScreen
 import androidx.compose.runtime.collectAsState
 import com.rjnr.pocketnode.ui.screens.security.SecurityChecklistScreen
 import com.rjnr.pocketnode.ui.screens.security.SecurityChecklistViewModel
-import com.rjnr.pocketnode.ui.screens.security.MnemonicVerifyScreen
 import com.rjnr.pocketnode.ui.screens.wallet.AddWalletScreen
 import com.rjnr.pocketnode.ui.screens.wallet.WalletManagerScreen
 import com.rjnr.pocketnode.ui.screens.wallet.WalletSettingsScreen
@@ -580,12 +579,9 @@ fun CkbNavGraph(
         }
 
         composable(Screen.MnemonicVerify.route) {
-            MnemonicVerifyScreen(
-                mnemonicWords = emptyList(), // TODO: wire from KeyManager via ViewModel
-                onVerified = {
-                    navController.popBackStack()
-                },
-                onBack = { navController.popBackStack() }
+            MnemonicBackupScreen(
+                onNavigateToHome = { navController.popBackStack() },
+                onNavigateBack = { navController.popBackStack() },
             )
         }
 

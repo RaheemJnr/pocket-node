@@ -48,6 +48,23 @@ class WalletVaultStoreTest {
         .allowMainThreadQueries().build()
     @After fun teardown() { db.close(); ApplicationProvider.getApplicationContext<Context>().deleteDatabase("vault-store.db"); pass.fill('\u0000'); nextPass.fill('\u0000') }
 
+    @Test fun `new child activation rejects deleted or replaced authenticated parent atomically`() = runBlocking {
+        val parent = com.rjnr.pocketnode.data.database.entity.WalletEntity("parent", "Parent", "mnemonic", "m/44'/309'/0'/0/0", null, mainnetAddress = "original")
+        for (replaced in listOf(false, true)) {
+            db.walletDao().insert(parent)
+            val child = parent.copy(walletId = "child", parentWalletId = "parent", accountIndex = 1)
+            val creation = com.rjnr.pocketnode.data.wallet.WalletRepository.Creation(child, parent)
+            val candidate = envelope("child")
+            // Simulates a change while the independent passphrase prompt is open.
+            db.walletDao().delete("parent")
+            if (replaced) db.walletDao().insert(parent.copy(mainnetAddress = "replacement"))
+            rejects { store.activate(metadata("child"), null, candidate, pass, creation) }
+            assertNull(db.walletDao().getById("child")); assertNull(store.get("child"))
+            assertNull(db.keyMaterialDao().getByWalletId("child")); assertFalse(store.hasProfile())
+            db.walletDao().delete("parent")
+        }
+    }
+
     @Test fun `activation archives exact source and persists verified marker and pending cleanup`() = runBlocking {
         val legacy = metadata("a")
         db.keyMaterialDao().upsert(legacy)

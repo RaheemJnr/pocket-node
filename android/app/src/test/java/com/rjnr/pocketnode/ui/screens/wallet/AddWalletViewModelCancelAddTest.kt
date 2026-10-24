@@ -68,6 +68,7 @@ import org.robolectric.RobolectricTestRunner
 @OptIn(ExperimentalCoroutinesApi::class)
 @RunWith(RobolectricTestRunner::class)
 class AddWalletViewModelCancelAddTest {
+    private val nativeInput = com.rjnr.pocketnode.ui.security.NativeImportFixture()
 
     private val testDispatcher = StandardTestDispatcher()
     private val phrase = List(11) { "abandon" } + "about"
@@ -80,7 +81,7 @@ class AddWalletViewModelCancelAddTest {
     private lateinit var encryptionManager: KeystoreEncryptionManager
     private val gatewayRepository = mockk<GatewayRepository>(relaxed = true)
     private val walletKeyWriter = mockk<WalletKeyWriter>()
-    private val activity = mockk<FragmentActivity>(relaxed = true)
+    private val activity = org.robolectric.Robolectric.buildActivity(FragmentActivity::class.java).setup().get()
 
     private suspend fun persist(walletId: WalletRepository.Creation, bundle: WalletKeyBundle, type: String): WalletKeyWriter.Result =
         com.rjnr.pocketnode.data.wallet.persistVerifiedFixture(db, walletId, bundle)
@@ -138,6 +139,7 @@ class AddWalletViewModelCancelAddTest {
         authManager = mockk(relaxed = true),
         logger = NoopLogger,
         restoreHintImporter = importer,
+        importOperations = nativeInput.operations(walletRepository, walletKeyWriter, MnemonicManager(), importer),
     )
 
     /** Two existing wallets with keys and a sync_progress row each; [first] stays active. */
@@ -167,8 +169,8 @@ class AddWalletViewModelCancelAddTest {
 
     private fun AddWalletViewModel.importPhrase() {
         updateName("Restored")
-        phrase.forEachIndexed { i, w -> updateImportWord(i, w) }
-        importMnemonic(activity, consented = true)
+        phrase.forEachIndexed { i, w -> nativeInput.word(i, w) }
+        importMnemonic(activity)
     }
 
     private suspend fun assertOnlyAddedWalletRemoved(first: String, second: String, added: String) {
@@ -209,8 +211,7 @@ class AddWalletViewModelCancelAddTest {
         assertNull(vm.uiState.value.syncChoiceError)
         assertFalse(vm.uiState.value.cancelRemovesWallet)
         // F6: the abandoned add leaves nothing the user typed behind.
-        assertEquals(List(12) { "" }, vm.uiState.value.importWords)
-        assertTrue(vm.uiState.value.importSuggestions.isEmpty())
+        assertTrue(nativeInput.issued.all { chars -> chars.all { it == '\u0000' } })
         assertEquals("", vm.uiState.value.name)
     }
 
@@ -221,15 +222,15 @@ class AddWalletViewModelCancelAddTest {
         val vm = newViewModel()
         vm.onRestoreHintFilePicked("{}")
         vm.updateName("Key")
-        vm.updateImportPrivateKey(ByteArray(32) { (it + 1).toByte() }.joinToString("") { "%02x".format(it) })
-        vm.importRawKey(activity, consented = true)
+        nativeInput.key(ByteArray(32) { (it + 1).toByte() }.joinToString("") { "%02x".format(it) })
+        vm.importRawKey(activity)
         drainUntil { vm.uiState.value.showSyncModeDialog }
         assertTrue(vm.uiState.value.cancelRemovesWallet)
 
         vm.cancelAddedWallet()
         drainUntil { !vm.uiState.value.showSyncModeDialog }
 
-        assertEquals("", vm.uiState.value.importPrivateKey)
+        assertTrue(nativeInput.issued.all { chars -> chars.all { it == '\u0000' } })
         assertEquals("", vm.uiState.value.name)
         assertFalse(vm.uiState.value.hasRestoreHintFile)
         assertNull(vm.uiState.value.restoreHintError)

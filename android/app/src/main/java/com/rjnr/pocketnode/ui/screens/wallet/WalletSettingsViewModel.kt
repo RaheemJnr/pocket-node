@@ -285,47 +285,11 @@ class WalletSettingsViewModel @Inject constructor(
 
     // -- Sub-accounts --
 
-    /**
-     * V2-aware sub-account creation. Two BiometricPrompts:
-     *
-     *   1. Read parent's mnemonic via [WalletKeyReader] (one prompt).
-     *   2. Persist new sub-account at V2 via [WalletKeyWriter.persistCreatedWallet]
-     *      inside the [WalletRepository.createSubAccount] callback (second
-     *      prompt).
-     *
-     * Replaces the old V1-fallback path which crashed on V2 parents.
-     */
-    private fun canCreateV2BoundKey(): Boolean =
-        authManager.isBiometricEnrolled() || authManager.hasDeviceCredential()
-
-    // F1/F3: on a no-lock device the new sub-account persists at the V1
-    // software fallback. Warn first (shared consent dialog), matching
-    // onboarding, instead of silently downgrading.
-    private var pendingNoLockAction: (() -> Unit)? = null
-
-    private fun requestNoLockConsent(action: () -> Unit) {
-        pendingNoLockAction = action
-        _uiState.update { it.copy(showNoLockConsent = true) }
-    }
-
-    fun confirmNoLockConsent() {
-        val action = pendingNoLockAction
-        pendingNoLockAction = null
-        _uiState.update { it.copy(showNoLockConsent = false) }
-        action?.invoke()
-    }
-
-    fun dismissNoLockConsent() {
-        pendingNoLockAction = null
-        _uiState.update { it.copy(showNoLockConsent = false) }
-    }
-
-    fun addSubAccount(activity: FragmentActivity, name: String, consented: Boolean = false) {
-        if (!consented && !canCreateV2BoundKey()) {
-            requestNoLockConsent { addSubAccount(activity, name, consented = true) }
-            return
-        }
+    /** Uses only the authenticated parent seed and atomically binds the new child to that parent. */
+    fun addSubAccount(activity: FragmentActivity, name: String) {
         viewModelScope.launch {
+            val expectedParent = walletRepository.getById(walletId) ?: return@launch
+            val lock = ReauthLockEvents.locks.value
             when (val readResult = walletKeyReader.readKeyMaterial(
                 activity = activity,
                 walletId = walletId,
@@ -348,11 +312,14 @@ class WalletSettingsViewModel @Inject constructor(
                         _uiState.update { it.copy(error = com.rjnr.pocketnode.ui.util.UiMessage.Resource(com.rjnr.pocketnode.R.string.vm_error_parent_no_mnemonic)) }
                         return@launch
                     }
+                    if (walletRepository.getById(walletId) != expectedParent) return@launch
+                    com.rjnr.pocketnode.ui.security.WalletDerivationSession.run(activity, lock) { session ->
                     // Distinct prompt copy for prompt #2 (sub-account encrypt)
                     // so the user knows this is securing the NEW sub-account,
                     // not re-confirming the parent unlock from prompt #1.
-                    val result = walletRepository.createSubAccount(walletId, name, parentMnemonic = words) { newWalletId, bundle ->
-                        if (canCreateV2BoundKey()) {
+                    val result = walletRepository.createSubAccount(walletId, name, parentMnemonic = words, expectedParent = expectedParent) { newWalletId, bundle ->
+                        session.persist {
+
                             walletKeyWriter.persistCreatedWallet(
                                 activity = activity,
                                 walletId = newWalletId,
@@ -361,15 +328,6 @@ class WalletSettingsViewModel @Inject constructor(
                                 mnemonicBackedUp = false,
                                 promptTitle = "Secure new sub-account",
                                 promptSubtitle = "Encrypt the new account's keys.",
-                            )
-                        } else {
-                            // No secure lock; the user consented to V1 above.
-                            walletKeyWriter.persistCreatedWallet(
-                                activity = activity,
-                                walletId = newWalletId,
-                                bundle = bundle,
-                                walletType = KeyManager.WALLET_TYPE_MNEMONIC,
-                                mnemonicBackedUp = false,
                             )
                         }
                     }
@@ -387,6 +345,7 @@ class WalletSettingsViewModel @Inject constructor(
                             }
                         }
                     }
+                    }
                 }
             }
         }
@@ -403,8 +362,6 @@ data class WalletSettingsUiState(
     val subAccounts: List<WalletEntity> = emptyList(),
     /** Active network — sub-account rows encode their address with its hrp (#489). */
     val network: NetworkType = NetworkType.MAINNET,
-    /** F1/F3: show the no-device-lock consent dialog before a V1 sub-account write. */
-    val showNoLockConsent: Boolean = false,
     val isEditing: Boolean = false,
     val editName: String = "",
     val isBackedUp: Boolean = false,

@@ -58,6 +58,7 @@ import org.robolectric.RobolectricTestRunner
 @OptIn(ExperimentalCoroutinesApi::class)
 @RunWith(RobolectricTestRunner::class)
 class MnemonicImportViewModelRestoreHintTest {
+    private val nativeInput = com.rjnr.pocketnode.ui.security.NativeImportFixture()
 
     private val testDispatcher = StandardTestDispatcher()
     private val words = List(11) { "abandon" } + "about"
@@ -68,7 +69,7 @@ class MnemonicImportViewModelRestoreHintTest {
     private val repository = mockk<GatewayRepository>(relaxed = true)
     private val walletKeyWriter = mockk<WalletKeyWriter>()
     private val authManager = mockk<AuthManager>(relaxed = true)
-    private val activity = mockk<FragmentActivity>(relaxed = true)
+    private val activity = org.robolectric.Robolectric.buildActivity(FragmentActivity::class.java).setup().get()
 
     @Before
     fun setUp() {
@@ -121,6 +122,7 @@ class MnemonicImportViewModelRestoreHintTest {
         authManager = authManager,
         logger = NoopLogger,
         restoreHintImporter = importer,
+        importOperations = nativeInput.operations(walletRepository, walletKeyWriter, MnemonicManager(), importer),
     )
 
     private fun hintFile(phrase: List<String> = words, network: NetworkType = NetworkType.TESTNET) =
@@ -154,7 +156,7 @@ class MnemonicImportViewModelRestoreHintTest {
         // starts a re-auth lock. The picked file must survive it.
         if (lockWhilePicking) ReauthLockEvents.onLocked()
         advanceUntilIdle()
-        vm.pasteMnemonic(words.joinToString(" "))
+        nativeInput.phrase(words.joinToString(" "))
         vm.importMnemonic(activity)
         drainUntil { vm.uiState.value.restoreHintPlan != null || vm.uiState.value.restoreHintError != null }
         assertTrue(vm.uiState.value.showSyncModeDialog)
@@ -196,14 +198,14 @@ class MnemonicImportViewModelRestoreHintTest {
     fun `a re-auth lock while the secret is being derived discards it and the result`() = runTest {
         val vm = newViewModel()
         var derived: RestoreHintSecret? = null
-        vm.deriveMnemonicHintSecret = { words ->
+        nativeInput.deriveMnemonicHintSecret = { words ->
             RestoreHintSecret.fromMnemonic(words).also {
                 derived = it
                 ReauthLockEvents.onLocked()
             }
         }
         vm.onRestoreHintFilePicked(hintFile())
-        vm.pasteMnemonic(words.joinToString(" "))
+        nativeInput.phrase(words.joinToString(" "))
         vm.importMnemonic(activity)
         drainUntil { derived != null && vm.uiState.value.showSyncModeDialog }
         advanceUntilIdle()

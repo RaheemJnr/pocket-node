@@ -145,21 +145,18 @@ class SettingsViewModelNetworkServicesTest {
     }
 
     @Test
-    fun `gap scan rejects missing seed for every storage version`() = runTest(testDispatcher) {
+    fun `gap scan requires actual centrally authenticated seed`() = runTest(testDispatcher) {
         val authorizer = mockk<SeedPhraseAuthorizer>()
         val keys = mockk<KeyMaterialDao>()
         every { walletRepository.activeWalletIdSnapshot() } returns "wallet"
         coEvery { authorizer.authorize(any(), "wallet", any(), any()) } returns
-            SeedPhraseAuthorizer.SeedResult.Failed("Recovery phrase unavailable for this wallet")
-        for (version in listOf(1, 2, 3)) {
-            coEvery { keys.getKdfVersion("wallet") } returns version
-            val vm = SettingsViewModel(repository, walletPrefs, mockk(relaxed = true), walletRepository,
-                noUpdateAvailableRepository(), authorizer, keys, mockk(relaxed = true))
-            runCurrent()
-            vm.runGapLimitScan(mockk())
-            runCurrent()
-            assertTrue("version $version must require actual authenticated seed", vm.uiState.value.error.toString().contains("Recovery phrase unavailable"))
-        }
+        SeedPhraseAuthorizer.SeedResult.Failed("Recovery phrase unavailable for this wallet")
+        val vm = SettingsViewModel(repository, walletPrefs, mockk(relaxed = true), walletRepository,
+            noUpdateAvailableRepository(), authorizer, keys, mockk(relaxed = true))
+        runCurrent()
+        vm.runGapLimitScan(mockk())
+        runCurrent()
+        assertTrue( vm.uiState.value.error.toString().contains("Recovery phrase unavailable"))
     }
 
     @Test

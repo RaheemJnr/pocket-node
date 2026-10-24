@@ -38,13 +38,7 @@ private const val TAG = "AddWalletVM"
 
 data class AddWalletUiState(
     val isLoading: Boolean = false,
-    /** F1/F3: show the no-device-lock informed-consent dialog before a V1 fallback write. */
-    val showNoLockConsent: Boolean = false,
     val name: String = "",
-    val importWords: List<String> = List(12) { "" },
-    val importSuggestions: Map<Int, List<String>> = emptyMap(),
-    val importWordErrors: Set<Int> = emptySet(),
-    val importPrivateKey: String = "",
     val createdWallet: WalletEntity? = null,
     val isNewlyGenerated: Boolean = false,
     val error: UiMessage? = null,
@@ -87,48 +81,10 @@ class AddWalletViewModel @Inject constructor(
     private val authManager: com.rjnr.pocketnode.data.auth.AuthManager,
     private val logger: Logger,
     private val restoreHintImporter: RestoreHintImporter,
+    private val importOperations: com.rjnr.pocketnode.ui.security.WalletImportOperations,
 ) : ViewModel() {
 
-    /**
-     * #354: a V2 auth-bound Keystore key needs an enrolled biometric or a
-     * device credential. Without one, key creation throws
-     * IllegalStateException("Secure lock screen must be enabled..."). The
-     * main-wallet flow already falls back to a software-only V1 key in that
-     * case; the add-wallet / sub-account flows did not, so they crashed.
-     * Mirror the same gate here.
-     */
-    private fun canCreateV2BoundKey(): Boolean =
-        authManager.isBiometricEnrolled() || authManager.hasDeviceCredential()
-
-    // F1/F3: on a no-lock device, persisting drops to the V1 software fallback.
-    // Onboarding warns before this; the Add Wallet flows must too. Each action
-    // takes a `consented` flag: the first call, if no secure lock, stashes a
-    // re-invocation and shows the shared consent dialog instead of silently
-    // downgrading. Confirm re-runs the action with consented=true.
-    private var pendingNoLockAction: (() -> Unit)? = null
-
-    private fun requestNoLockConsent(action: () -> Unit) {
-        pendingNoLockAction = action
-        _uiState.update { it.copy(showNoLockConsent = true) }
-    }
-
-    fun confirmNoLockConsent() {
-        val action = pendingNoLockAction
-        pendingNoLockAction = null
-        _uiState.update { it.copy(showNoLockConsent = false) }
-        action?.invoke()
-    }
-
-    fun dismissNoLockConsent() {
-        pendingNoLockAction = null
-        _uiState.update { it.copy(showNoLockConsent = false, isLoading = false) }
-    }
-
-    /**
-     * Persist a new wallet's keys, choosing the V1 software-only fallback when
-     * the device has no secure lock (#354). AuthScreen's migration loop
-     * upgrades the row to V2 once the user enables a device lock.
-     */
+    /** Every fresh namespace requires verified independent passphrase protection. */
     private suspend fun persistWalletKeys(
         activity: FragmentActivity,
         walletId: WalletRepository.Creation,
@@ -136,27 +92,10 @@ class AddWalletViewModel @Inject constructor(
         walletType: String,
         mnemonicBackedUp: Boolean,
         promptTitle: String = "Secure wallet",
-        promptSubtitle: String = "Use your phone's screen lock to encrypt the new wallet's keys.",
-    ): WalletKeyWriter.Result =
-        if (!canCreateV2BoundKey()) {
-            walletKeyWriter.persistCreatedWallet(
-                activity = activity,
-                walletId = walletId,
-                bundle = bundle,
-                walletType = walletType,
-                mnemonicBackedUp = mnemonicBackedUp,
-            )
-        } else {
-            walletKeyWriter.persistCreatedWallet(
-                activity = activity,
-                walletId = walletId,
-                bundle = bundle,
-                walletType = walletType,
-                mnemonicBackedUp = mnemonicBackedUp,
-                promptTitle = promptTitle,
-                promptSubtitle = promptSubtitle,
-            )
-        }
+        promptSubtitle: String = "Protect this wallet with your independent wallet passphrase.",
+    ): WalletKeyWriter.Result = walletKeyWriter.persistCreatedWallet(
+        activity, walletId, bundle, walletType, mnemonicBackedUp, promptTitle, promptSubtitle,
+    )
 
     /**
      * Optional parent-wallet hint forwarded from the WalletManager
@@ -191,23 +130,7 @@ class AddWalletViewModel @Inject constructor(
     /** #559: the verified hint awaiting confirmation; public data only. */
     private var pendingRestoreHint: RestoreHintImporter.Verification.Ready? = null
 
-    /** Seed derivation for hint verification, off the main thread; a test seam. */
-    internal var deriveMnemonicHintSecret: suspend (List<String>) -> RestoreHintSecret = { words ->
-        withContext(Dispatchers.Default) { RestoreHintSecret.fromMnemonic(words) }
-    }
-
     init {
-        // #524: a typed recovery phrase or private key never survives a lock.
-        viewModelScope.onEachReauthLock {
-            _uiState.update {
-                it.copy(
-                    importWords = List(12) { "" },
-                    importSuggestions = emptyMap(),
-                    importWordErrors = emptySet(),
-                    importPrivateKey = "",
-                )
-            }
-        }
         viewModelScope.launch {
             val mnemonicRoots = walletRepository.getAll()
                 .filter { it.type == "mnemonic" && it.parentWalletId == null }
@@ -374,10 +297,6 @@ class AddWalletViewModel @Inject constructor(
                     syncChoiceError = null,
                     cancelRemovesWallet = false,
                     name = "",
-                    importWords = List(12) { "" },
-                    importSuggestions = emptyMap(),
-                    importWordErrors = emptySet(),
-                    importPrivateKey = "",
                 )
             }
         }
@@ -409,34 +328,16 @@ class AddWalletViewModel @Inject constructor(
      * wipes the secret before returning. A re-auth lock while the secret
      * existed discards the result: the lock is meant to end its life.
      */
-    private suspend fun verifyRestoreHint(makeSecret: suspend () -> RestoreHintSecret) {
-        val text = restoreHintFileText ?: return
-        val locksAtStart = ReauthLockEvents.locks.value
-        val secret = try {
-            makeSecret()
-        } catch (e: CancellationException) {
-            throw e
-        } catch (e: Exception) {
-            logger.w(TAG, "Restore hint secret unavailable", e)
-            return
-        }
-        val verification = try {
-            if (ReauthLockEvents.locks.value != locksAtStart) return
-            restoreHintImporter.verify(text, secret, gatewayRepository.currentNetwork)
-        } finally {
-            secret.wipe()
-        }
+    private fun acceptRestoreHint(verification: RestoreHintImporter.Verification?) {
         val state = _uiState.value
-        if (ReauthLockEvents.locks.value != locksAtStart || !state.showSyncModeDialog || state.isApplyingSyncChoice) {
-            return
-        }
+        if (!state.showSyncModeDialog || state.isApplyingSyncChoice) return
         when (verification) {
             is RestoreHintImporter.Verification.Ready -> {
                 pendingRestoreHint = verification
                 _uiState.update { it.copy(restoreHintPlan = verification.plan, restoreHintError = null) }
             }
-            is RestoreHintImporter.Verification.Rejected ->
-                _uiState.update { it.copy(restoreHintPlan = null, restoreHintError = verification.reason) }
+            is RestoreHintImporter.Verification.Rejected -> _uiState.update { it.copy(restoreHintPlan = null, restoreHintError = verification.reason) }
+            null -> Unit
         }
     }
 
@@ -460,17 +361,8 @@ class AddWalletViewModel @Inject constructor(
         _uiState.update { it.copy(selectedParentId = walletId) }
     }
 
-    /**
-     * V2-aware sub-account creation. Two BiometricPrompt prompts fire,
-     * back-to-back:
-     *
-     *   1. Read parent's mnemonic via [WalletKeyReader.readKeyMaterial]
-     *      (bonus bug fix, the previous flow routed through V1 storage
-     *      and crashed on V2 parents).
-     *   2. Encrypt + persist the new sub-account's key material via
-     *      [WalletKeyWriter.persistCreatedWallet] (inside [persistKeys]).
-     */
-    fun createSubAccount(activity: FragmentActivity, consented: Boolean = false) {
+    /** Authenticates the parent seed, then independently protects the derived child. */
+    fun createSubAccount(activity: FragmentActivity) {
         if (_uiState.value.isLoading) return // prevent double-tap
         val name = _uiState.value.name.trim()
         val parentId = _uiState.value.selectedParentId
@@ -483,82 +375,87 @@ class AddWalletViewModel @Inject constructor(
             _uiState.update { it.copy(error = UiMessage.Resource(R.string.vm_error_select_parent_wallet)) }
             return
         }
-        if (!consented && !canCreateV2BoundKey()) {
-            requestNoLockConsent { createSubAccount(activity, consented = true) }
-            return
-        }
 
         viewModelScope.launch {
             _uiState.update { it.copy(isLoading = true, error = null) }
+            try {
+                val expectedParent = walletRepository.getById(parentId) ?: return@launch
+                val lock = ReauthLockEvents.locks.value
 
-            // Prompt #1: read parent's mnemonic.
-            val readResult = walletKeyReader.readKeyMaterial(
-                activity = activity,
-                walletId = parentId,
-                promptTitle = "Unlock parent wallet",
-                promptSubtitle = "Authentication required to derive a sub-account.",
-            )
-            val parentMnemonic = when (readResult) {
-                is WalletKeyReader.MaterialResult.Success -> {
-                    readResult.privateKey.fill(0)
-                    val words = readResult.mnemonic?.split(" ")
-                    if (words.isNullOrEmpty()) {
+                // Prompt #1: read parent's mnemonic.
+                val readResult = walletKeyReader.readKeyMaterial(
+                    activity = activity,
+                    walletId = parentId,
+                    promptTitle = "Unlock parent wallet",
+                    promptSubtitle = "Authentication required to derive a sub-account.",
+                )
+                val parentMnemonic = when (readResult) {
+                    is WalletKeyReader.MaterialResult.Success -> {
+                        readResult.privateKey.fill(0)
+                        val words = readResult.mnemonic?.split(" ")
+                        if (words.isNullOrEmpty()) {
+                            _uiState.update {
+                                it.copy(isLoading = false, error = UiMessage.Resource(R.string.vm_error_parent_no_mnemonic))
+                            }
+                            return@launch
+                        }
+                        words
+                    }
+                    is WalletKeyReader.MaterialResult.Cancelled -> {
+                        // Silent: user dismissed prompt intentionally.
+                        _uiState.update { it.copy(isLoading = false) }
+                        return@launch
+                    }
+                    is WalletKeyReader.MaterialResult.AuthError -> {
                         _uiState.update {
-                            it.copy(isLoading = false, error = UiMessage.Resource(R.string.vm_error_parent_no_mnemonic))
+                            it.copy(isLoading = false, error = UiMessage.Raw("Auth error: ${readResult.message}"))
                         }
                         return@launch
                     }
-                    words
-                }
-                is WalletKeyReader.MaterialResult.Cancelled -> {
-                    // Silent: user dismissed prompt intentionally.
-                    _uiState.update { it.copy(isLoading = false) }
-                    return@launch
-                }
-                is WalletKeyReader.MaterialResult.AuthError -> {
-                    _uiState.update {
-                        it.copy(isLoading = false, error = UiMessage.Raw("Auth error: ${readResult.message}"))
+                    is WalletKeyReader.MaterialResult.KeyInvalidated -> {
+                        _uiState.update {
+                            it.copy(isLoading = false, error = UiMessage.Resource(R.string.vm_error_biometric_changed_parent))
+                        }
+                        return@launch
                     }
-                    return@launch
-                }
-                is WalletKeyReader.MaterialResult.KeyInvalidated -> {
-                    _uiState.update {
-                        it.copy(isLoading = false, error = UiMessage.Resource(R.string.vm_error_biometric_changed_parent))
+                    is WalletKeyReader.MaterialResult.NotAvailable -> {
+                        _uiState.update {
+                            it.copy(
+                                isLoading = false,
+                                error = UiMessage.Resource(R.string.vm_error_cannot_read_parent, listOf(readResult.reason)),
+                            )
+                        }
+                        return@launch
                     }
-                    return@launch
                 }
-                is WalletKeyReader.MaterialResult.NotAvailable -> {
-                    _uiState.update {
-                        it.copy(
-                            isLoading = false,
-                            error = UiMessage.Resource(R.string.vm_error_cannot_read_parent, listOf(readResult.reason)),
-                        )
-                    }
-                    return@launch
-                }
-            }
 
-            // Prompt #2: persist sub-account at V2 (inside the closure).
-            // Distinct title/subtitle from prompt #1 so the user understands
-            // they're securing the NEW sub-account, not re-confirming the parent.
-            val result = walletRepository.createSubAccount(parentId, name, parentMnemonic) { walletId, bundle ->
-                persistWalletKeys(
-                    activity = activity,
-                    walletId = walletId,
-                    bundle = bundle,
-                    walletType = KeyManager.WALLET_TYPE_MNEMONIC,
-                    mnemonicBackedUp = false,
-                    promptTitle = "Secure new sub-account",
-                    promptSubtitle = "Use your phone's screen lock to encrypt the new account's keys.",
-                )
-            }
-            result.onSuccess { wallet ->
-                gatewayRepository.onActiveWalletChanged(wallet)
-                _uiState.update { it.copy(isLoading = false, createdWallet = wallet) }
-            }.onFailure { error ->
-                logger.e(TAG, "Sub-account creation failed", error)
-                _uiState.update { it.copy(isLoading = false, error = persistErrorMessage(error)) }
-            }
+                if (_uiState.value.selectedParentId != parentId || walletRepository.getById(parentId) != expectedParent) return@launch
+                com.rjnr.pocketnode.ui.security.WalletDerivationSession.run(activity, lock) { session ->
+                // Persist only against the parent authenticated above.
+                // Distinct title/subtitle from prompt #1 so the user understands
+                // they're securing the NEW sub-account, not re-confirming the parent.
+                val result = walletRepository.createSubAccount(parentId, name, parentMnemonic, expectedParent = expectedParent) { walletId, bundle ->
+                    session.persist {
+                    persistWalletKeys(
+                        activity = activity,
+                        walletId = walletId,
+                        bundle = bundle,
+                        walletType = KeyManager.WALLET_TYPE_MNEMONIC,
+                        mnemonicBackedUp = false,
+                        promptTitle = "Secure new sub-account",
+                        promptSubtitle = "Protect the new account with your independent wallet passphrase.",
+                    )
+                    }
+                }
+                result.onSuccess { wallet ->
+                    gatewayRepository.onActiveWalletChanged(wallet)
+                    _uiState.update { it.copy(isLoading = false, createdWallet = wallet) }
+                }.onFailure { error ->
+                    logger.e(TAG, "Sub-account creation failed", error)
+                    _uiState.update { it.copy(isLoading = false, error = persistErrorMessage(error)) }
+                }
+                }
+            } finally { _uiState.update { it.copy(isLoading = false) } }
         }
     }
 
@@ -566,74 +463,11 @@ class AddWalletViewModel @Inject constructor(
         _uiState.update { it.copy(name = name) }
     }
 
-    fun updateImportWord(index: Int, text: String) {
-        val trimmed = text.trim().lowercase()
-        val newWords = _uiState.value.importWords.toMutableList().apply { set(index, trimmed) }
-        val newSuggestions = _uiState.value.importSuggestions.toMutableMap()
-        val newErrors = _uiState.value.importWordErrors.toMutableSet()
-
-        if (trimmed.length >= 2) {
-            newSuggestions[index] = Bip39WordList.getSuggestions(trimmed)
-        } else {
-            newSuggestions.remove(index)
-        }
-
-        if (trimmed.isNotEmpty() && !Bip39WordList.isValidWord(trimmed)) {
-            newErrors.add(index)
-        } else {
-            newErrors.remove(index)
-        }
-
-        _uiState.update {
-            it.copy(
-                importWords = newWords,
-                importSuggestions = newSuggestions,
-                importWordErrors = newErrors
-            )
-        }
-    }
-
-    fun selectImportSuggestion(index: Int, word: String) {
-        val newWords = _uiState.value.importWords.toMutableList().apply { set(index, word) }
-        val newSuggestions = _uiState.value.importSuggestions.toMutableMap().apply { remove(index) }
-        val newErrors = _uiState.value.importWordErrors.toMutableSet().apply { remove(index) }
-        _uiState.update {
-            it.copy(
-                importWords = newWords,
-                importSuggestions = newSuggestions,
-                importWordErrors = newErrors
-            )
-        }
-    }
-
-    fun pasteImportMnemonic(text: String) {
-        val parts = text.trim().lowercase().split("\\s+".toRegex()).take(12)
-        val newWords = List(12) { i -> parts.getOrElse(i) { "" } }
-        val newErrors = newWords.mapIndexedNotNull { i, w ->
-            if (w.isNotEmpty() && !Bip39WordList.isValidWord(w)) i else null
-        }.toSet()
-        _uiState.update {
-            it.copy(
-                importWords = newWords,
-                importSuggestions = emptyMap(),
-                importWordErrors = newErrors
-            )
-        }
-    }
-
-    fun updateImportPrivateKey(key: String) {
-        _uiState.update { it.copy(importPrivateKey = key) }
-    }
-
-    fun createNewWallet(activity: FragmentActivity, consented: Boolean = false) {
+    fun createNewWallet(activity: FragmentActivity) {
         if (_uiState.value.isLoading) return // prevent double-tap
         val name = _uiState.value.name.trim()
         if (name.isBlank()) {
             _uiState.update { it.copy(error = UiMessage.Resource(R.string.vm_error_enter_wallet_name)) }
-            return
-        }
-        if (!consented && !canCreateV2BoundKey()) {
-            requestNoLockConsent { createNewWallet(activity, consented = true) }
             return
         }
 
@@ -668,124 +502,30 @@ class AddWalletViewModel @Inject constructor(
         }
     }
 
-    fun importMnemonic(activity: FragmentActivity, consented: Boolean = false) {
-        if (_uiState.value.isLoading) return // prevent double-tap
-        val name = _uiState.value.name.trim()
-        val words = _uiState.value.importWords.map { it.trim().lowercase() }
+    fun importMnemonic(activity: FragmentActivity) = importWallet(activity, false)
+    fun importRawKey(activity: FragmentActivity) = importWallet(activity, true)
 
+    private fun importWallet(activity: FragmentActivity, privateKey: Boolean) {
+        if (_uiState.value.isLoading) return
+        val name = _uiState.value.name.trim()
         if (name.isBlank()) {
             _uiState.update { it.copy(error = UiMessage.Resource(R.string.vm_error_enter_wallet_name)) }
             return
         }
-        if (words.any { it.isEmpty() }) {
-            _uiState.update { it.copy(error = UiMessage.Resource(R.string.vm_error_fill_all_words)) }
-            return
-        }
-        if (words.any { !Bip39WordList.isValidWord(it) }) {
-            _uiState.update { it.copy(error = UiMessage.Resource(R.string.vm_error_words_not_bip39)) }
-            return
-        }
-        if (!mnemonicManager.validateMnemonic(words)) {
-            _uiState.update { it.copy(error = UiMessage.Resource(R.string.vm_error_invalid_mnemonic)) }
-            return
-        }
-        if (!consented && !canCreateV2BoundKey()) {
-            requestNoLockConsent { importMnemonic(activity, consented = true) }
-            return
-        }
-
         viewModelScope.launch {
             _uiState.update { it.copy(isLoading = true, error = null) }
-            val previousActive = walletRepository.getActive()?.walletId
-            val result = walletRepository.importFromMnemonic(
-                words = words,
-                name = name,
-                persistKeys = { walletId, bundle ->
-                    persistWalletKeys(
-                        activity = activity,
-                        walletId = walletId,
-                        bundle = bundle,
-                        walletType = KeyManager.WALLET_TYPE_MNEMONIC,
-                        mnemonicBackedUp = true,
-                    )
-                },
-            )
-            result.onSuccess { wallet ->
-                gatewayRepository.onActiveWalletChanged(wallet)
-                // #431: hold navigation until the sync-mode sheet resolves.
-                pendingImportedWallet = wallet
-                previousActiveWalletId = previousActive?.takeIf { it != wallet.walletId }
-                _uiState.update {
-                    it.copy(
-                        isLoading = false,
-                        showSyncModeDialog = true,
-                        cancelRemovesWallet = previousActiveWalletId != null,
-                    )
+            try {
+                when (val result = importOperations.import(activity, privateKey, name, restoreHintFileText, gatewayRepository.currentNetwork) { wallet, previous ->
+                    gatewayRepository.onActiveWalletChanged(wallet)
+                    pendingImportedWallet = wallet
+                    previousActiveWalletId = previous?.takeIf { it != wallet.walletId }
+                    _uiState.update { it.copy(isLoading = false, showSyncModeDialog = true, cancelRemovesWallet = previousActiveWalletId != null) }
+                }) {
+                    is com.rjnr.pocketnode.ui.security.WalletImportOperations.Outcome.Completed -> acceptRestoreHint(result.hint)
+                    is com.rjnr.pocketnode.ui.security.WalletImportOperations.Outcome.Failed -> _uiState.update { it.copy(error = UiMessage.Raw(result.message)) }
+                    com.rjnr.pocketnode.ui.security.WalletImportOperations.Outcome.Cancelled -> Unit
                 }
-                verifyRestoreHint {
-                    deriveMnemonicHintSecret(words)
-                }
-            }.onFailure { error ->
-                logger.e(TAG, "Mnemonic import failed", error)
-                _uiState.update { it.copy(isLoading = false, error = persistErrorMessage(error)) }
-            }
-        }
-    }
-
-    fun importRawKey(activity: FragmentActivity, consented: Boolean = false) {
-        if (_uiState.value.isLoading) return // prevent double-tap
-        val name = _uiState.value.name.trim()
-        val key = _uiState.value.importPrivateKey.trim()
-
-        if (name.isBlank()) {
-            _uiState.update { it.copy(error = UiMessage.Resource(R.string.vm_error_enter_wallet_name)) }
-            return
-        }
-        if (key.removePrefix("0x").length != 64) {
-            _uiState.update { it.copy(error = UiMessage.Resource(R.string.vm_error_invalid_private_key)) }
-            return
-        }
-        if (!consented && !canCreateV2BoundKey()) {
-            requestNoLockConsent { importRawKey(activity, consented = true) }
-            return
-        }
-
-        viewModelScope.launch {
-            _uiState.update { it.copy(isLoading = true, error = null) }
-            val previousActive = walletRepository.getActive()?.walletId
-            val result = walletRepository.importRawKey(key, name) { walletId, bundle ->
-                persistWalletKeys(
-                    activity = activity,
-                    walletId = walletId,
-                    bundle = bundle,
-                    walletType = KeyManager.WALLET_TYPE_RAW_KEY,
-                    mnemonicBackedUp = false,
-                )
-            }
-            result.onSuccess { wallet ->
-                gatewayRepository.onActiveWalletChanged(wallet)
-                // #431: hold navigation until the sync-mode sheet resolves.
-                pendingImportedWallet = wallet
-                previousActiveWalletId = previousActive?.takeIf { it != wallet.walletId }
-                _uiState.update {
-                    it.copy(
-                        isLoading = false,
-                        showSyncModeDialog = true,
-                        cancelRemovesWallet = previousActiveWalletId != null,
-                    )
-                }
-                verifyRestoreHint {
-                    val keyBytes = key.hexToByteArray()
-                    try {
-                        RestoreHintSecret.fromPrivateKey(keyBytes)
-                    } finally {
-                        keyBytes.fill(0)
-                    }
-                }
-            }.onFailure { error ->
-                logger.e(TAG, "Raw key import failed", error)
-                _uiState.update { it.copy(isLoading = false, error = persistErrorMessage(error)) }
-            }
+            } finally { _uiState.update { it.copy(isLoading = false) } }
         }
     }
 

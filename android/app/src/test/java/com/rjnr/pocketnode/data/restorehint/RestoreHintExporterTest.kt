@@ -258,29 +258,23 @@ class RestoreHintExporterTest {
     }
 
     @Test
-    fun `every version exports through central passphrase capable reader without device lock`() = runTest {
+    fun `export uses central passphrase capable reader without device lock`() = runTest {
         db.walletDao().insert(wallet("root", active = true))
         every { authManager.isBiometricEnrolled() } returns false
         every { authManager.hasDeviceCredential() } returns false
-        for (version in listOf(1, 2, 3)) {
-            coEvery { keyMaterialDao.getKdfVersion("root") } returns version
-            val key = ByteArray(32) { 5 }
-            coEvery { walletKeyReader.readKeyMaterial(activity, "root", any(), any()) } returns
-                WalletKeyReader.MaterialResult.Success(key, words.joinToString(" "), "mnemonic", true)
-            val result = exporter().export(activity, network)
-            assertTrue("version $version", result is RestoreHintExporter.ExportResult.Ready)
-            assertTrue(key.all { it == 0.toByte() })
-        }
+        val key = ByteArray(32) { 5 }
+        coEvery { walletKeyReader.readKeyMaterial(activity, "root", any(), any()) } returns
+            WalletKeyReader.MaterialResult.Success(key, words.joinToString(" "), "mnemonic", true)
+        val result = exporter().export(activity, network)
+        assertTrue(result is RestoreHintExporter.ExportResult.Ready)
+        assertTrue(key.all { it == 0.toByte() })
     }
 
     @Test
-    fun `cancelled central authentication aborts export for every version`() = runTest {
+    fun `cancelled central authentication aborts export`() = runTest {
         db.walletDao().insert(wallet("root", active = true))
-        for (version in listOf(1, 2, 3)) {
-            coEvery { keyMaterialDao.getKdfVersion("root") } returns version
-            coEvery { walletKeyReader.readKeyMaterial(activity, "root", any(), any()) } returns WalletKeyReader.MaterialResult.Cancelled
-            assertEquals(RestoreHintExporter.ExportResult.Cancelled, exporter().export(activity, network))
-        }
+        coEvery { walletKeyReader.readKeyMaterial(activity, "root", any(), any()) } returns WalletKeyReader.MaterialResult.Cancelled
+        assertEquals(RestoreHintExporter.ExportResult.Cancelled, exporter().export(activity, network))
     }
 
     @Test
