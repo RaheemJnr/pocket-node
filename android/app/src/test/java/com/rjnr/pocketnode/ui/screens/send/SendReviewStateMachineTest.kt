@@ -48,6 +48,8 @@ import org.junit.Test
  * returns to the form with the inputs intact, and nothing broadcasts without
  * a confirmed review.
  */
+@org.junit.runner.RunWith(org.robolectric.RobolectricTestRunner::class)
+@org.robolectric.annotation.Config(sdk = [28])
 @OptIn(ExperimentalCoroutinesApi::class)
 class SendReviewStateMachineTest {
 
@@ -154,7 +156,7 @@ class SendReviewStateMachineTest {
         Dispatchers.resetMain()
     }
 
-    private fun newViewModel(): SendViewModel = SendViewModel(
+    private fun newViewModel(quarantineStore: com.rjnr.pocketnode.data.transaction.BulkSendQuarantineStore = com.rjnr.pocketnode.data.transaction.BulkSendQuarantineStore(androidx.test.core.app.ApplicationProvider.getApplicationContext<android.content.Context>())): SendViewModel = SendViewModel(
         repository = repository,
         keyManager = keyManager,
         transactionBuilder = transactionBuilder,
@@ -167,6 +169,7 @@ class SendReviewStateMachineTest {
         errorJournal = errorJournal,
         uiPreferences = uiPreferences,
         logger = NoopLogger,
+        bulkQuarantineStore = quarantineStore,
     )
 
     private suspend fun SendViewModel.fillForm(amount: String = "100") {
@@ -477,7 +480,7 @@ class SendReviewStateMachineTest {
         // Cell-count preview is a separate job; MockK cannot unbox its suspend Result.
         coEvery { repository.getCells() } throws kotlinx.coroutines.CancellationException("public fixture skips cell-count preview")
         var batches = 0
-        coEvery { repository.prepareAndSendBulkOrThrow(any(), any(), any()) } coAnswers {
+        coEvery { repository.prepareAndSendBulkOrThrow(any(), any(), any(), any(), any()) } coAnswers {
             assertTrue(key.all { it == 7.toByte() }); batches++
             // A public signed batch is now pending; cancellation cannot authorize another signature.
             host.stopResume()
@@ -500,6 +503,7 @@ class SendReviewStateMachineTest {
 
     @Test fun `cancelled bulk retains only never entered recipients and quarantines submitted or uncertain batches`() = runTest(testDispatcher) {
         for (lock in listOf(false, true)) for (betweenBatches in listOf(false, true)) {
+            androidx.test.core.app.ApplicationProvider.getApplicationContext<android.content.Context>().getSharedPreferences("bulk_send_quarantine", 0).edit().clear().commit()
             every { repository.balance } returns MutableStateFlow(BalanceResponse(senderAddress,
                 "0x${100_000_00000000L.toString(16)}", "100000", "0x1"))
             coEvery { repository.getCells() } throws kotlinx.coroutines.CancellationException("public fixture skips cell-count preview")
@@ -507,7 +511,7 @@ class SendReviewStateMachineTest {
             val host = com.rjnr.pocketnode.data.wallet.ForegroundTestHost()
             fun cancelHost() { if (lock) com.rjnr.pocketnode.ui.screens.auth.ReauthLockEvents.onLocked() else host.stopResume() }
             coEvery { walletKeyReader.readPrivateKey(any(), any(), any(), any()) } returns WalletKeyReader.Result.Success(key)
-            coEvery { repository.prepareAndSendBulkOrThrow(any(), any(), any()) } coAnswers {
+            coEvery { repository.prepareAndSendBulkOrThrow(any(), any(), any(), any(), any()) } coAnswers {
                 assertTrue(key.all { it == 7.toByte() }); calls++
                 if (calls == 1) {
                     if (betweenBatches) cancelHost()
@@ -537,9 +541,125 @@ class SendReviewStateMachineTest {
                 vm.sendTransaction(); advanceUntilIdle()
                 assertEquals(remaining.size, vm.uiState.value.reviewRequest!!.recipientCount)
                 assertEquals(interrupted, vm.uiState.value.interruptedBulkSends.single())
+                val recreated = newViewModel(); advanceUntilIdle()
+                try {
+                    recreated.updateSendMode(SendMode.BULK)
+                    recreated.updateBulkRecipients(addresses.joinToString("\n")); recreated.updateAmount("100")
+                    assertEquals("Navigation and recreation must retain quarantine", remaining, recreated.uiState.value.bulkValidRecipients)
+                    every { walletRepository.activeWalletIdSnapshot() } returns "other-wallet"
+                    recreated.updateAmount("100")
+                    assertEquals(addresses, recreated.uiState.value.bulkValidRecipients)
+                    every { walletRepository.activeWalletIdSnapshot() } returns "w1"
+                    recreated.updateAmount("100")
+                    assertEquals(remaining, recreated.uiState.value.bulkValidRecipients)
+                    recreated.acknowledgeBulkReconciliation(interrupted.id)
+                    assertEquals(addresses, recreated.uiState.value.bulkValidRecipients)
+                } finally { androidx.lifecycle.ViewModelStore().apply { put("recreated", recreated); clear() } }
             } finally { androidx.lifecycle.ViewModelStore().apply { put("test", vm); clear() }; runCurrent() }
         }
     }
 
+
+    @Test fun `network switch cancels authentication and prevents another bulk signature`() = runTest(testDispatcher) {
+        for (phase in listOf("auth", "between", "broadcast")) {
+            val duringAuth = phase == "auth"
+            androidx.test.core.app.ApplicationProvider.getApplicationContext<android.content.Context>().getSharedPreferences("bulk_send_quarantine", 0).edit().clear().commit()
+            val network = MutableStateFlow(NetworkType.TESTNET)
+            every { repository.network } returns network
+            every { repository.currentNetwork } answers { network.value }
+            every { repository.balance } returns MutableStateFlow(BalanceResponse(senderAddress,
+                "0x${100_000_00000000L.toString(16)}", "100000", "0x1"))
+            coEvery { repository.getCells() } throws kotlinx.coroutines.CancellationException("skip public preview")
+            val key = ByteArray(32) { 7 }; var authCancelled = false; var calls = 0
+            coEvery { walletKeyReader.readPrivateKey(any(), any(), any(), any()) } coAnswers {
+                if (duringAuth) {
+                    try { kotlinx.coroutines.awaitCancellation() } finally { authCancelled = true }
+                } else WalletKeyReader.Result.Success(key)
+            }
+            coEvery { repository.prepareAndSendBulkOrThrow(any(), any(), any(), any(), any()) } coAnswers {
+                assertEquals("w1", arg<String>(3)); assertEquals(NetworkType.TESTNET, arg<NetworkType>(4))
+                calls++
+                network.value = NetworkType.MAINNET
+                if (phase == "broadcast") kotlinx.coroutines.awaitCancellation() else "submitted-before-switch"
+            }
+            val addresses = (1..26).map { index -> com.rjnr.pocketnode.data.wallet.AddressUtils.encode(
+                Script(Script.SECP256K1_CODE_HASH, "type", "0x" + "%040x".format(index)), NetworkType.TESTNET) }
+            val vm = newViewModel(); advanceUntilIdle()
+            vm.updateSendMode(SendMode.BULK); vm.updateBulkRecipients(addresses.joinToString("\n")); vm.updateAmount("100")
+            vm.sendTransaction(); advanceUntilIdle(); vm.confirmSend(foregroundActivity); runCurrent()
+            if (duringAuth) { network.value = NetworkType.MAINNET; runCurrent() }
+            try {
+                if (duringAuth) { assertTrue("Network change must cancel authentication", authCancelled); assertEquals(0, calls) }
+                else {
+                    assertEquals("No next batch on another network", 1, calls); assertTrue(key.all { it == 0.toByte() })
+                    val record = vm.uiState.value.interruptedBulkSends.single()
+                    assertEquals(NetworkType.TESTNET, record.network)
+                    assertEquals("w1", record.walletId)
+                    assertEquals(if (phase == "broadcast") 25 else 0, record.uncertainRecipients.size)
+                }
+            } finally { androidx.lifecycle.ViewModelStore().apply { put("network", vm); clear() }; runCurrent() }
+        }
+    }
+
+    @Test fun `failed quarantine persistence prevents first or subsequent signing`() = runTest(testDispatcher) {
+        for (failWrite in listOf(1, 2, 0)) {
+            val context = androidx.test.core.app.ApplicationProvider.getApplicationContext<android.content.Context>()
+            context.getSharedPreferences("bulk_send_quarantine", 0).edit().clear().commit()
+            val store = io.mockk.spyk(com.rjnr.pocketnode.data.transaction.BulkSendQuarantineStore(context))
+            var writes = 0; var calls = 0
+            every { store.put(any()) } answers { writes++; if (writes == failWrite) error("public injected write failure") else callOriginal() }
+            every { repository.balance } returns MutableStateFlow(BalanceResponse(senderAddress,
+                "0x${100_000_00000000L.toString(16)}", "100000", "0x1"))
+            coEvery { repository.getCells() } throws kotlinx.coroutines.CancellationException("skip public preview")
+            val key = ByteArray(32) { 7 }
+            coEvery { walletKeyReader.readPrivateKey(any(), any(), any(), any()) } returns WalletKeyReader.Result.Success(key)
+            coEvery { repository.prepareAndSendBulkOrThrow(any(), any(), any(), any(), any()) } coAnswers { assertTrue(key.all { it == 7.toByte() }); calls++; "public-hash-$calls" }
+            val addresses = (1..26).map { index -> com.rjnr.pocketnode.data.wallet.AddressUtils.encode(
+                Script(Script.SECP256K1_CODE_HASH, "type", "0x" + "%040x".format(index)), NetworkType.TESTNET) }
+            val vm = newViewModel(store); advanceUntilIdle()
+            vm.updateSendMode(SendMode.BULK); vm.updateBulkRecipients(addresses.joinToString("\n")); vm.updateAmount("100")
+            vm.sendTransaction(); advanceUntilIdle(); vm.confirmSend(foregroundActivity); runCurrent()
+            try {
+                assertEquals(if (failWrite == 0) 2 else if (failWrite == 1) 0 else 1, calls)
+                assertTrue(key.all { it == 0.toByte() })
+                if (failWrite == 0) {
+                    assertTrue(com.rjnr.pocketnode.data.transaction.BulkSendQuarantineStore(context).load().isEmpty())
+                    vm.updateBulkRecipients(addresses.joinToString("\n")); vm.updateAmount("100")
+                    vm.sendTransaction(); advanceUntilIdle(); assertNotNull(vm.uiState.value.reviewRequest)
+                } else { vm.sendTransaction(); advanceUntilIdle(); assertNull(vm.uiState.value.reviewRequest) }
+                if (failWrite == 2) assertEquals(addresses.take(25), com.rjnr.pocketnode.data.transaction.BulkSendQuarantineStore(context).load().single().uncertainRecipients)
+            } finally { androidx.lifecycle.ViewModelStore().apply { put("writes", vm); clear() }; runCurrent() }
+        }
+    }
+
+    @Test fun `corrupt history blocks bulk review and stop before first batch leaves no uncertain send`() = runTest(testDispatcher) {
+        val context = androidx.test.core.app.ApplicationProvider.getApplicationContext<android.content.Context>()
+        val prefs = context.getSharedPreferences("bulk_send_quarantine", 0)
+        val addresses = (1..26).map { index -> com.rjnr.pocketnode.data.wallet.AddressUtils.encode(
+            Script(Script.SECP256K1_CODE_HASH, "type", "0x" + "%040x".format(index)), NetworkType.TESTNET) }
+        every { repository.balance } returns MutableStateFlow(BalanceResponse(senderAddress,
+            "0x${100_000_00000000L.toString(16)}", "100000", "0x1"))
+        coEvery { repository.getCells() } throws kotlinx.coroutines.CancellationException("skip public preview")
+        for (corrupt in listOf(true, false)) {
+            prefs.edit().clear().commit()
+            if (corrupt) prefs.edit().putString("records", "unreadable-public-history").commit()
+            val key = ByteArray(32) { 7 }
+            coEvery { walletKeyReader.readPrivateKey(any(), any(), any(), any()) } answers {
+                host.stopResume(); WalletKeyReader.Result.Success(key)
+            }
+            val vm = newViewModel(); advanceUntilIdle()
+            vm.updateSendMode(SendMode.BULK); vm.updateBulkRecipients(addresses.joinToString("\n")); vm.updateAmount("100")
+            vm.sendTransaction(); advanceUntilIdle()
+            try {
+                if (corrupt) { assertNull(vm.uiState.value.reviewRequest); assertEquals("unreadable-public-history", prefs.getString("records", null)) }
+                else {
+                    assertNotNull(vm.uiState.value.reviewRequest); vm.confirmSend(foregroundActivity); runCurrent()
+                    assertTrue(key.all { it == 0.toByte() })
+                    assertTrue(com.rjnr.pocketnode.data.transaction.BulkSendQuarantineStore(context).load().isEmpty())
+                }
+                coVerify(exactly = 0) { repository.prepareAndSendBulkOrThrow(any(), any(), any(), any(), any()) }
+            } finally { androidx.lifecycle.ViewModelStore().apply { put("before-first", vm); clear() }; runCurrent() }
+        }
+    }
 
 }

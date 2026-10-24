@@ -48,6 +48,8 @@ import org.junit.Test
  * Threshold: the send must leave at least one minimal cell (61 CKB) or 1% of
  * the balance, whichever is larger.
  */
+@org.junit.runner.RunWith(org.robolectric.RobolectricTestRunner::class)
+@org.robolectric.annotation.Config(sdk = [28])
 @OptIn(ExperimentalCoroutinesApi::class)
 class SendSweepWarningTest {
 
@@ -141,6 +143,7 @@ class SendSweepWarningTest {
         errorJournal = errorJournal,
         uiPreferences = uiPreferences,
         logger = NoopLogger,
+        bulkQuarantineStore = com.rjnr.pocketnode.data.transaction.BulkSendQuarantineStore(androidx.test.core.app.ApplicationProvider.getApplicationContext<android.content.Context>()),
     )
 
     /**

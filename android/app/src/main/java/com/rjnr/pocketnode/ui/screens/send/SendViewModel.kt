@@ -13,6 +13,8 @@ import com.rjnr.pocketnode.data.database.entity.WalletEntity
 import com.rjnr.pocketnode.data.gateway.GatewayRepository
 import com.rjnr.pocketnode.data.gateway.models.NetworkType
 import com.rjnr.pocketnode.data.gateway.models.TransactionStatusResponse
+import com.rjnr.pocketnode.data.transaction.BulkSendQuarantineStore
+import com.rjnr.pocketnode.data.transaction.InterruptedBulkSend
 import com.rjnr.pocketnode.data.transaction.RecipientOutput
 import com.rjnr.pocketnode.data.transaction.TransactionBuilder
 import com.rjnr.pocketnode.data.wallet.AddressUtils
@@ -117,15 +119,6 @@ data class SendReview(
     }
 }
 
-/** Public reconciliation evidence retained across edits and subsequent batches in this screen. */
-data class InterruptedBulkSend(
-    val fromAddress: String,
-    val network: NetworkType,
-    val submittedRecipients: List<String>,
-    val submittedTxHashes: List<String>,
-    val uncertainRecipients: List<String>,
-)
-
 data class SendUiState(
     /** Founder-only easter egg: the Single/Bulk toggle is hidden until unlocked. */
     val bulkUnlocked: Boolean = false,
@@ -211,6 +204,7 @@ class SendViewModel @Inject constructor(
     private val errorJournal: com.rjnr.pocketnode.data.diagnostics.ErrorJournal,
     private val uiPreferences: com.rjnr.pocketnode.core.prefs.UiPreferences,
     private val logger: Logger,
+    private val bulkQuarantineStore: BulkSendQuarantineStore,
 ) : ViewModel() {
 
     private val _uiState = MutableStateFlow(SendUiState())
@@ -218,6 +212,7 @@ class SendViewModel @Inject constructor(
 
     private var pollingJob: Job? = null
     private var sendJob: Job? = null
+    private var bulkHistoryUnavailable = false
 
     /**
      * Fee shown on the review sheet the user just confirmed, for a single
@@ -283,6 +278,11 @@ class SendViewModel @Inject constructor(
     }
 
     init {
+        try { _uiState.update { it.copy(interruptedBulkSends = bulkQuarantineStore.load()) } }
+        catch (_: Exception) {
+            bulkHistoryUnavailable = true
+            _uiState.update { it.copy(bulkFailureMessage = "Bulk send history is unreadable. Bulk sending is blocked until the history can be recovered and reconciled.") }
+        }
         // Bulk-airdrop easter egg is unlocked from Settings > Version (7 taps);
         // the Send screen just reads the persisted flag to show/hide the toggle.
         _uiState.update { it.copy(bulkUnlocked = uiPreferences.isBulkSendUnlocked()) }
@@ -298,31 +298,21 @@ class SendViewModel @Inject constructor(
             walletRepository.walletsFlow.collect { wallets ->
                 val active = wallets.find { it.isActive }
                 val others = wallets.filter { it.walletId != active?.walletId }
-                _uiState.update { it.copy(otherWallets = others) }
+                _uiState.update { it.copy(otherWallets = others).refreshBulkPreview() }
             }
         }
 
         // Track network type and cancel in-flight transaction if network changes mid-send
         viewModelScope.launch {
             repository.network.collect { network ->
-                val state = _uiState.value.transactionState
-                if (state != TransactionState.IDLE && state != TransactionState.CONFIRMED && state != TransactionState.FAILED) {
-                    sendJob?.cancel()
+                if (network != _uiState.value.networkType) {
+                    sendJob?.cancel(kotlinx.coroutines.CancellationException("Network changed"))
                     pollingJob?.cancel()
-                    _uiState.update {
-                        it.copy(
-                            networkType = network,
-                            isLoading = false,
-                            error = com.rjnr.pocketnode.ui.util.UiMessage.Resource(com.rjnr.pocketnode.R.string.vm_error_network_changed_tx_cancelled),
-                            transactionState = TransactionState.FAILED,
-                            statusMessage = "Transaction cancelled due to network switch"
-                        )
-                    }
-                } else {
-                    _uiState.update { current ->
-                        current.copy(networkType = network).refreshBulkPreview()
-                    }
+                    _uiState.update { it.copy(networkType = network, reviewRequest = null,
+                        isLoading = false, transactionState = TransactionState.IDLE,
+                        statusMessage = "Network changed. Check the original network for pending transactions before retrying.").refreshBulkPreview() }
                 }
+
             }
         }
     }
@@ -670,7 +660,8 @@ class SendViewModel @Inject constructor(
         confirmedFeeShannons = review.feeShannons.takeIf { !review.isBulk }
         _uiState.update { it.copy(reviewRequest = null, sweepWarningAcknowledged = false) }
 
-        viewModelScope.launch {
+        if (sendJob?.isActive == true) return
+        sendJob = viewModelScope.launch(start = kotlinx.coroutines.CoroutineStart.LAZY) {
             if (activity == null) {
                 _uiState.update { it.copy(error = com.rjnr.pocketnode.ui.util.UiMessage.Resource(com.rjnr.pocketnode.R.string.vm_error_send_v2_reopen)) }
                 return@launch
@@ -683,6 +674,7 @@ class SendViewModel @Inject constructor(
                 throw cancelled
             }
         }
+        sendJob?.start()
     }
 
     private suspend fun peekActiveKdfVersion(): Int? {
@@ -732,6 +724,10 @@ class SendViewModel @Inject constructor(
     }
 
     private fun validateBulkInputs(): Boolean {
+        if (bulkHistoryUnavailable) {
+            _uiState.update { it.copy(error = com.rjnr.pocketnode.ui.util.UiMessage.Raw("Bulk send history must be recovered before sending.")) }
+            return false
+        }
         val state = _uiState.value.refreshBulkPreview()
         if (state.bulkRecipientsText.isBlank()) {
             _uiState.update { it.copy(error = com.rjnr.pocketnode.ui.util.UiMessage.Raw("Paste at least one recipient address.")) }
@@ -810,8 +806,12 @@ class SendViewModel @Inject constructor(
                 return@owned
             }
             is WalletKeyReader.Result.Success -> try {
+                kotlinx.coroutines.currentCoroutineContext().ensureActive()
+                if (repository.currentNetwork != state.networkType || walletPreferencesActiveId() != walletId) {
+                    throw kotlinx.coroutines.CancellationException("Send source changed")
+                }
                 if (state.sendMode == SendMode.BULK) {
-                    proceedWithBulkSend(amountShannons, capturedAddress, readResult.privateKey)
+                    proceedWithBulkSend(amountShannons, capturedAddress, readResult.privateKey, walletId, state.networkType)
                 } else {
                     proceedWithSend(amountShannons, capturedAddress, readResult.privateKey)
                 }
@@ -885,6 +885,8 @@ class SendViewModel @Inject constructor(
         amountShannons: Long,
         capturedAddress: String,
         privateKey: ByteArray,
+        capturedWalletId: String,
+        capturedNetwork: NetworkType,
     ) {
         val initialState = _uiState.value.refreshBulkPreview(amountShannonsOverride = amountShannons)
         val recipients = initialState.bulkValidRecipients.map { RecipientOutput(it, amountShannons) }
@@ -905,12 +907,22 @@ class SendViewModel @Inject constructor(
 
         val submitted = mutableListOf<String>()
         var entered = emptyList<String>()
+        val recordId = java.util.UUID.randomUUID().toString()
+        var durableRecord: InterruptedBulkSend? = null
         try {
             batches.forEachIndexed { index, batch ->
                 // Cancellation between successful batches must prevent another signing call.
                 kotlinx.coroutines.yield()
                 kotlinx.coroutines.currentCoroutineContext().ensureActive()
-                entered = batch.map { it.address }
+                if (repository.currentNetwork != capturedNetwork || walletPreferencesActiveId() != capturedWalletId) {
+                    throw kotlinx.coroutines.CancellationException("Send source changed")
+                }
+                val next = batch.map { it.address }
+                val before = InterruptedBulkSend(recordId, capturedWalletId, capturedAddress, capturedNetwork,
+                    submitted.toList(), _uiState.value.bulkSubmittedTxHashes.toList(), next)
+                bulkQuarantineStore.put(before)
+                durableRecord = before
+                entered = next
                 _uiState.update {
                     it.copy(
                         statusMessage = "Broadcasting batch ${index + 1} of ${batches.size}...",
@@ -921,8 +933,14 @@ class SendViewModel @Inject constructor(
                     fromAddress = capturedAddress,
                     recipients = batch,
                     privateKey = privateKey,
+                    expectedWalletId = capturedWalletId,
+                    expectedNetwork = capturedNetwork,
                 )
                 submitted += entered
+                val after = before.copy(submittedRecipients = submitted.toList(),
+                    submittedTxHashes = before.submittedTxHashes + txHash, uncertainRecipients = emptyList())
+                bulkQuarantineStore.put(after)
+                durableRecord = after
                 entered = emptyList()
                 _uiState.update {
                     it.copy(
@@ -934,6 +952,8 @@ class SendViewModel @Inject constructor(
                 }
             }
 
+            // All batches have returned public hashes. Retire this provisional record only now.
+            bulkQuarantineStore.remove(recordId)
             _uiState.update {
                 it.copy(
                     isLoading = false,
@@ -954,43 +974,26 @@ class SendViewModel @Inject constructor(
             // back into retry text without reconciliation, even if cancellation preceded signing.
             val remaining = recipients.drop(submitted.size + entered.size).map { it.address }
             _uiState.update { state ->
-                val record = InterruptedBulkSend(capturedAddress, initialState.networkType,
-                    submitted.toList(), state.bulkSubmittedTxHashes.toList(), entered.toList())
+                val record = durableRecord
                 state.copy(
                     isLoading = false,
                     bulkRecipientsText = remaining.joinToString("\n"),
-                    interruptedBulkSends = state.interruptedBulkSends + record,
+                    interruptedBulkSends = state.interruptedBulkSends + listOfNotNull(record),
                     bulkFailureMessage = "Bulk send interrupted. Only ${remaining.size} recipients from batches that never started remain. Check interrupted batch details before sending any excluded recipient again.",
                 ).refreshBulkPreview()
             }
             throw cancelled
         }
-        catch (e: Exception) {
-            logger.e(TAG, "Bulk send failed", e)
-            errorJournal.record("bulk-send", e.message ?: e.javaClass.simpleName)
-            _uiState.update { state ->
-                // Item 4: a batch failed mid-airdrop. The batches before it are
-                // already on-chain and cannot be undone. Repopulate the paste
-                // field with ONLY the unsent recipients so the user can press
-                // Send to retry the remainder — re-sending the whole list would
-                // double-pay everyone already funded. `bulkCompletedRecipients`
-                // is the count that actually broadcast; the failed batch did not.
-                val sent = state.bulkCompletedRecipients
-                val remaining = recipients.drop(sent).map { it.address }
-                state.copy(
-                    isLoading = false,
-                    error = com.rjnr.pocketnode.ui.util.UiMessage.Raw(parseErrorMessage(e)),
-                    errorDetail = e.message,
-                    transactionState = TransactionState.FAILED,
-                    statusMessage = if (remaining.isEmpty()) {
-                        "Bulk send stopped on batch ${state.bulkCurrentBatch}."
-                    } else {
-                        "Sent to $sent of ${recipients.size}. ${remaining.size} remaining — press Send to retry the rest."
-                    },
-                    bulkFailureMessage = parseErrorMessage(e),
-                    bulkRecipientsText = if (remaining.isEmpty()) state.bulkRecipientsText else remaining.joinToString("\n"),
-                ).refreshBulkPreview()
-            }
+        catch (_: Exception) {
+            // A failed checked write or broadcast cannot make the entered batch safe to retry.
+            // The last durable record was committed before signing; never overwrite its uncertainty.
+            bulkHistoryUnavailable = true
+            _uiState.update { state -> state.copy(isLoading = false,
+                interruptedBulkSends = state.interruptedBulkSends + listOfNotNull(durableRecord),
+                bulkRecipientsText = recipients.drop(durableRecord?.let { it.submittedRecipients.size + it.uncertainRecipients.size } ?: 0).joinToString("\n") { it.address },
+                transactionState = TransactionState.IDLE,
+                bulkFailureMessage = "Bulk send stopped. Reconcile recorded batches; bulk sending is blocked until history is reloaded.",
+                statusMessage = "Check transaction status before retrying.").refreshBulkPreview() }
         }
     }
 
@@ -1194,6 +1197,18 @@ class SendViewModel @Inject constructor(
         }
     }
 
+    /** Explicit acknowledgement in the reconciliation dialog; navigation never clears evidence. */
+    fun acknowledgeBulkReconciliation(id: String) {
+        if (sendJob?.isActive == true) return
+        try {
+            bulkQuarantineStore.remove(id)
+            _uiState.update { it.copy(interruptedBulkSends = bulkQuarantineStore.load()).refreshBulkPreview() }
+        } catch (_: Exception) {
+            bulkHistoryUnavailable = true
+            _uiState.update { it.copy(bulkFailureMessage = "Reconciliation could not be saved. Recipients remain blocked.") }
+        }
+    }
+
     override fun onCleared() {
         super.onCleared()
         sendJob?.cancel()
@@ -1204,9 +1219,9 @@ class SendViewModel @Inject constructor(
         if (sendMode != SendMode.BULK) return this
         val amountShannons = amountShannonsOverride ?: parseAmountShannons(amountCkb) ?: 0L
         val raw = parseBulkRecipients(bulkRecipientsText, networkType)
-        // Keep reconciliation evidence across form/wallet/network changes in this screen. An
+        // Durable reconciliation evidence is scoped to the stable sender wallet and network. An
         // edited or re-pasted list cannot silently turn submitted/uncertain recipients into retries.
-        val excluded = interruptedBulkSends.flatMap { it.submittedRecipients + it.uncertainRecipients }.toSet()
+        val excluded = interruptedBulkSends.filter { it.walletId == walletPreferencesActiveId() && it.network == networkType }.flatMap { it.submittedRecipients + it.uncertainRecipients }.toSet()
         val blocked = raw.validAddresses.count { it in excluded }
         val parsed = raw.copy(validAddresses = raw.validAddresses.filterNot { it in excluded },
             invalidEntries = raw.invalidEntries + if (blocked == 0) emptyList() else

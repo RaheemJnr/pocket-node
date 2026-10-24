@@ -407,6 +407,18 @@ class GatewayRepositorySelfTransferWiringTest {
         assertEquals("self", record!!.direction)
         assertEquals(sweepFee, record.balanceChange.removePrefix("0x").toLong(16))
     }
+    @Test fun `bulk adapter rejects changed reviewed wallet or network before touching borrowed key`() = runTest {
+        val key = ByteArray(32) { 7 }
+        for ((expectedWallet, expectedNetwork) in listOf(walletId to NetworkType.MAINNET, "other-wallet" to network)) {
+            val failure = runCatching {
+                repository.prepareAndSendBulkOrThrow(activeTestnetAddress, emptyList(), key, expectedWallet, expectedNetwork)
+            }.exceptionOrNull()
+            assertTrue(failure is kotlinx.coroutines.CancellationException)
+            assertTrue(key.all { it == 7.toByte() })
+            assertTrue(db.pendingBroadcastDao().getActive(walletId, network.name).isEmpty())
+        }
+    }
+
 }
 
 private val otherWalletArgs = "0x" + "44".repeat(20)

@@ -1084,10 +1084,17 @@ class GatewayRepository @Inject constructor(
         signer = PrivateKeySigner(privateKey),
     )
 
-    /** Plain-result UI seam, matching shared OrThrow adapters; preserves cancellation and borrowed key ownership. */
+    /** Binds this batch to the reviewed source; preserves shared cancellation and borrowed key ownership. */
     internal suspend fun prepareAndSendBulkOrThrow(
         fromAddress: String, recipients: List<RecipientOutput>, privateKey: ByteArray,
-    ): String = prepareAndSendBulk(fromAddress, recipients, privateKey).getOrThrow()
+        expectedWalletId: String, expectedNetwork: NetworkType,
+    ): String {
+        val context = sendContext()
+        if (context.walletId != expectedWalletId || context.network != expectedNetwork) {
+            throw kotlinx.coroutines.CancellationException("Send source changed")
+        }
+        return sendPipeline.prepareAndSendBulk(context, fromAddress, recipients, PrivateKeySigner(privateKey)).getOrThrow()
+    }
 
     /** @see SendPipeline.retryBroadcast */
     suspend fun retryBroadcast(txHash: String): Result<String> =
