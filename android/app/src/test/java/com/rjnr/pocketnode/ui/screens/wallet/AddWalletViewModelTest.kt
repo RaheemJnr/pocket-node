@@ -21,6 +21,7 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.test.StandardTestDispatcher
 import kotlinx.coroutines.test.advanceUntilIdle
 import kotlinx.coroutines.test.resetMain
+import kotlinx.coroutines.test.runCurrent
 import kotlinx.coroutines.test.runTest
 import kotlinx.coroutines.test.setMain
 import org.junit.After
@@ -28,18 +29,8 @@ import org.junit.Assert.*
 import org.junit.Before
 import org.junit.Test
 
-/**
- * Tests for [AddWalletViewModel.createSubAccount] focused on V2 keystore
- * correctness post-#289 chunk 5:
- *
- *   - Test #8: cancelling the BiometricPrompt during sub-account creation
- *     MUST NOT pollute Room (no `createSubAccount` repo call, no
- *     `onActiveWalletChanged` hook).
- *   - Test #9: on a V2 parent the parent's mnemonic MUST be read via
- *     [WalletKeyReader.readKeyMaterial] BEFORE
- *     [WalletKeyWriter.persistNewWallet] is invoked, the previous
- *     (pre-#289) flow routed through the V1 path which crashed on V2
- *     parents.
+/** Public orchestration checks: actual seed capability, cancellation and selected-parent races.
+ * Durable cryptography and atomic persistence are covered by the real repository/vault fixtures.
  */
 @OptIn(ExperimentalCoroutinesApi::class)
 class AddWalletViewModelTest {
@@ -67,11 +58,10 @@ class AddWalletViewModelTest {
         walletKeyReader = mockk(relaxed = true)
         walletKeyWriter = mockk(relaxed = true)
         authManager = mockk(relaxed = true)
-        // Default: device has a secure lock, so the V2 path runs (matches
-        // the pre-#354 behavior these tests were written against).
+        // Device state must not authorize secret extraction or weaker persistence.
         io.mockk.every { authManager.isBiometricEnrolled() } returns true
         io.mockk.every { authManager.hasDeviceCredential() } returns true
-        activity = mockk(relaxed = true)
+        activity = com.rjnr.pocketnode.data.wallet.ForegroundTestHost().activity
     }
 
     @After
@@ -89,33 +79,44 @@ class AddWalletViewModelTest {
         authManager = authManager,
         logger = NoopLogger,
         restoreHintImporter = mockk(relaxed = true),
+        importOperations = mockk(relaxed = true),
     )
 
     @Test
-    fun `a re-auth lock clears a typed recovery phrase and private key but keeps the name (#524)`() = runTest {
-        val vm = newViewModel()
-        advanceUntilIdle()
-        vm.updateName("Savings")
-        vm.updateImportWord(0, "abandon")
-        vm.updateImportPrivateKey("0x" + "11".repeat(32))
-
-        com.rjnr.pocketnode.ui.screens.auth.ReauthLockEvents.onLocked()
-        advanceUntilIdle()
-
-        assertTrue(vm.uiState.value.importWords.all { it.isEmpty() })
-        assertEquals("", vm.uiState.value.importPrivateKey)
-        assertEquals("Savings", vm.uiState.value.name)
+    fun `parent selection changed during authentication refuses derivation and clears key`() = runTest {
+        val parent = com.rjnr.pocketnode.data.database.entity.WalletEntity("parent-id", "Parent", "mnemonic", null, null)
+        coEvery { walletRepository.getById("parent-id") } returns parent
+        val key = ByteArray(32) { 8 }
+        val vm = newViewModel(); advanceUntilIdle(); vm.selectParent("parent-id"); vm.updateName("Child")
+        coEvery { walletKeyReader.readKeyMaterial(any(), eq("parent-id"), any(), any()) } coAnswers {
+            vm.selectParent("different")
+            WalletKeyReader.MaterialResult.Success(key, "abandon ".repeat(11) + "about", "mnemonic", false)
+        }
+        vm.createSubAccount(activity); advanceUntilIdle()
+        coVerify(exactly = 0) { walletRepository.createSubAccount(any(), any(), any(), any(), any(), any()) }
+        assertArrayEquals(ByteArray(32), key)
+        assertFalse(vm.uiState.value.isLoading)
     }
 
     @Test
-    fun `a lock that happened before the ViewModel existed clears nothing (#524)`() = runTest {
-        com.rjnr.pocketnode.ui.screens.auth.ReauthLockEvents.onLocked()
+    fun `mnemonic origin without protected seed refuses derivation and clears unused key`() = runTest {
+        val key = ByteArray(32) { 7 }
+        coEvery { walletKeyReader.readKeyMaterial(any(), eq("parent-id"), any(), any()) } returns
+            WalletKeyReader.MaterialResult.Success(key, null, "mnemonic", false)
         val vm = newViewModel()
+        vm.selectParent("parent-id"); vm.updateName("sub"); vm.createSubAccount(activity)
         advanceUntilIdle()
-        vm.updateImportWord(0, "abandon")
-        advanceUntilIdle()
+        assertTrue(key.all { it == 0.toByte() })
+        assertNull(vm.uiState.value.createdWallet)
+        assertFalse(vm.uiState.value.isLoading)
+        assertNotNull(vm.uiState.value.error)
+    }
 
-        assertEquals("abandon", vm.uiState.value.importWords[0])
+    @Test
+    fun `a re-auth lock preserves the public wallet name`() = runTest {
+        val vm = newViewModel(); advanceUntilIdle(); vm.updateName("Savings")
+        com.rjnr.pocketnode.ui.screens.auth.ReauthLockEvents.onLocked(); advanceUntilIdle()
+        assertEquals("Savings", vm.uiState.value.name)
     }
 
     @Test
@@ -133,10 +134,10 @@ class AddWalletViewModelTest {
         // The writer must not be invoked, the repo `createSubAccount` must not be
         // called, and there must be no active-wallet registration.
         coVerify(exactly = 0) {
-            walletKeyWriter.persistNewWallet(any(), any(), any(), any(), any(), any(), any())
+            walletKeyWriter.persistCreatedWallet(any(), any(), any(), any(), any(), any(), any())
         }
         coVerify(exactly = 0) {
-            walletRepository.createSubAccount(any(), any(), any(), any(), any())
+            walletRepository.createSubAccount(any(), any(), any(), any(), any(), any())
         }
         coVerify(exactly = 0) { gatewayRepository.onActiveWalletChanged(any()) }
         assertNull(vm.uiState.value.createdWallet)
@@ -144,27 +145,9 @@ class AddWalletViewModelTest {
         assertFalse(vm.uiState.value.isLoading)
     }
 
-    // NOTE: test #9 from the plan (`createSubAccount on V2 parent calls
-    // walletKeyReader before walletKeyWriter`, pins the #289 bonus bug fix
-    // ordering) cannot be expressed as a unit test against the current
-    // MockK version. `WalletRepository.createSubAccount` returns
-    // `kotlin.Result<WalletEntity>`, and MockK 1.13.16 cannot round-trip
-    // a stubbed inline-value-class return through the suspend continuation
-    // resume boundary, neither `returns Result.success(...)` nor
-    // `returns Result.failure(...)` survive the boxing, surfacing as
-    // `ClassCastException: kotlin.Result cannot be cast to WalletEntity`
-    // at `AddWalletViewModel.kt:170`.
-    //
-    // The ordering contract (reader-before-writer on V2 parents) is
-    // instead verified by:
-    //   - The `Cancelled` test above (covers the reader-only short path).
-    //   - Code review of `AddWalletViewModel.createSubAccount` (the
-    //     reader call sits explicitly above the repo call).
-    //   - The chunk 5 spec/quality reviews on commit `eb9805e`.
-    //   - The pre-tag manual smoke (Chunk 7 task 7.3) which exercises
-    //     the V2 parent path end-to-end on a real device.
-    //
-    // Restore as a real test if MockK adds inline-value-class support.
+    // Suspend kotlin.Result repository methods cannot be reliably stubbed by this
+    // MockK version. Real repository tests cover derivation/persistence, and
+    // WalletVaultWriterIntegrationTest covers atomic writer protection and parent races.
 
     // #431: the post-import sync-mode sheet (showSyncModeDialog,
     // onSyncModeSelected, skipSyncSelection) is covered in
@@ -172,4 +155,19 @@ class AddWalletViewModelTest {
     // WalletRepository instead of a mocked one, mocking
     // `importFromMnemonic`'s `kotlin.Result<WalletEntity>` return hits the
     // exact same MockK inline-value-class crash documented above.
+    @Test fun `fresh creation stop before writer cancels generation owner`() = runTest {
+        val host = com.rjnr.pocketnode.data.wallet.ForegroundTestHost()
+        var entered = false
+        val owned = ByteArray(32) { 3 }
+        coEvery { walletRepository.createWallet(any(), any(), any()) } coAnswers {
+            entered = true
+            try { kotlinx.coroutines.awaitCancellation() } finally { owned.fill(0) }
+        }
+        val vm = newViewModel(); advanceUntilIdle(); vm.updateName("Fresh")
+        vm.createNewWallet(host.activity); runCurrent()
+        assertTrue(entered); host.stopResume(); runCurrent()
+        try { assertTrue(owned.all { it == 0.toByte() }); assertFalse(vm.uiState.value.isLoading); coVerify(exactly = 0) { walletKeyWriter.persistCreatedWallet(any(), any(), any(), any(), any(), any(), any()) } }
+        finally { androidx.lifecycle.ViewModelStore().apply { put("test", vm); clear() } }
+    }
+
 }

@@ -3,9 +3,6 @@ package com.rjnr.pocketnode.data.restorehint
 import androidx.fragment.app.FragmentActivity
 import com.rjnr.pocketnode.core.log.Logger
 import com.rjnr.pocketnode.core.prefs.SyncPreferences
-import com.rjnr.pocketnode.data.auth.AuthManager
-import com.rjnr.pocketnode.data.crypto.KeystoreEncryptionManager
-import com.rjnr.pocketnode.data.database.dao.KeyMaterialDao
 import com.rjnr.pocketnode.data.database.dao.SubAccountCandidateDao
 import com.rjnr.pocketnode.data.database.dao.SyncProgressDao
 import com.rjnr.pocketnode.data.database.dao.TransactionDao
@@ -30,13 +27,8 @@ import javax.inject.Singleton
  * when a sub-account is active) and the root's sub-accounts, on the current
  * network. It holds block heights and indices only; see [RestoreHintPayload].
  *
- * Exporting asks for the same authentication as revealing the recovery
- * phrase: the hint is MAC'd with a key derived from the seed (or the private
- * key of a raw-key wallet), so the secret has to be read, and a V2 wallet can
- * only be read through its BiometricPrompt. A V1 wallet decrypts without one,
- * so it gets the same device-credential prompt the phrase reveal shows; with
- * no screen lock at all the export is refused rather than run ungated. Nothing
- * here writes key material.
+ * Exporting always authenticates through the central wallet reader. The hint MAC uses
+ * the actual protected seed (or raw key); device authentication is optional.
  */
 @Singleton
 class RestoreHintExporter @Inject constructor(
@@ -47,9 +39,6 @@ class RestoreHintExporter @Inject constructor(
     private val syncPreferences: SyncPreferences,
     private val lightClient: LightClientReadOnly,
     private val walletKeyReader: WalletKeyReader,
-    private val keyMaterialDao: KeyMaterialDao,
-    private val authManager: AuthManager,
-    private val encryptionManager: KeystoreEncryptionManager,
     private val json: Json,
     private val logger: Logger,
 ) {
@@ -74,24 +63,10 @@ class RestoreHintExporter @Inject constructor(
         activity: FragmentActivity,
         network: NetworkType,
         nowMs: Long = System.currentTimeMillis(),
-    ): ExportResult {
-        val active = walletDao.getActive() ?: return ExportResult.Failed("No active wallet")
+    ): ExportResult = com.rjnr.pocketnode.data.vault.VaultOperationSession.run(activity) owned@ {
+        val active = walletDao.getActive() ?: return@owned ExportResult.Failed("No active wallet")
         val root = active.parentWalletId?.let { walletDao.getById(it) } ?: active
-        val tip = readTip() ?: return ExportResult.NoTip
-
-        val kdf = runCatching { keyMaterialDao.getKdfVersion(root.walletId) }.getOrNull()
-        // V2: the BiometricPrompt inside readKeyMaterial is the gate.
-        if (kdf != 2) {
-            val gate = try {
-                deviceAuthGate(activity)
-            } catch (e: CancellationException) {
-                throw e
-            } catch (e: Exception) {
-                logger.e(TAG, "Restore hint auth prompt failed", e)
-                ExportResult.Failed("auth prompt threw ${e::class.simpleName}")
-            }
-            gate?.let { return it }
-        }
+        val tip = readTip() ?: return@owned ExportResult.NoTip
 
         val material = try {
             walletKeyReader.readKeyMaterial(
@@ -104,21 +79,24 @@ class RestoreHintExporter @Inject constructor(
             throw e
         } catch (e: Exception) {
             logger.e(TAG, "Restore hint key read failed", e)
-            return ExportResult.Failed("key read threw ${e::class.simpleName}")
+            return@owned ExportResult.Failed("key read threw ${e::class.simpleName}")
         }
         val secret = when (material) {
             is WalletKeyReader.MaterialResult.Success -> try {
-                secretFor(root, material) ?: return ExportResult.Failed("recovery phrase unavailable")
+                if (walletDao.getActive() != active || walletDao.getById(root.walletId) != root) {
+                    return@owned ExportResult.Failed("Active wallet changed. Try again.")
+                }
+                secretFor(root, material) ?: return@owned ExportResult.Failed("recovery phrase unavailable")
             } finally {
                 material.privateKey.fill(0)
             }
-            is WalletKeyReader.MaterialResult.Cancelled -> return ExportResult.Cancelled
-            is WalletKeyReader.MaterialResult.KeyInvalidated -> return ExportResult.KeyInvalidated
-            is WalletKeyReader.MaterialResult.AuthError -> return ExportResult.Failed("auth error ${material.errorCode}")
-            is WalletKeyReader.MaterialResult.NotAvailable -> return ExportResult.Failed(material.reason)
+            is WalletKeyReader.MaterialResult.Cancelled -> return@owned ExportResult.Cancelled
+            is WalletKeyReader.MaterialResult.KeyInvalidated -> return@owned ExportResult.KeyInvalidated
+            is WalletKeyReader.MaterialResult.AuthError -> return@owned ExportResult.Failed("auth error ${material.errorCode}")
+            is WalletKeyReader.MaterialResult.NotAvailable -> return@owned ExportResult.Failed(material.reason)
         }
 
-        return try {
+        return@owned try {
             val payload = buildPayload(root, network, tip.first, tip.second, nowMs)
             ExportResult.Ready(RestoreHintFormat.fileName(network.name), RestoreHintCodec.seal(payload, secret))
         } catch (e: CancellationException) {
@@ -235,24 +213,6 @@ class RestoreHintExporter @Inject constructor(
         } else {
             RestoreHintSecret.fromPrivateKey(material.privateKey)
         }
-
-    /** Null when the prompt passed; otherwise the result to return. */
-    private suspend fun deviceAuthGate(activity: FragmentActivity): ExportResult? {
-        if (!authManager.isBiometricEnrolled() && !authManager.hasDeviceCredential()) {
-            return ExportResult.NeedsScreenLock
-        }
-        val cipher = try {
-            encryptionManager.newEncryptCipherV2()
-        } catch (e: Throwable) {
-            logger.e(TAG, "Auth cipher creation failed", e)
-            return ExportResult.Failed(e.message ?: "cipher")
-        }
-        return when (val auth = authManager.authenticateForCipher(activity, cipher, PROMPT_TITLE, PROMPT_SUBTITLE)) {
-            is AuthManager.CipherAuthResult.Success -> null
-            is AuthManager.CipherAuthResult.Cancelled -> ExportResult.Cancelled
-            is AuthManager.CipherAuthResult.Error -> ExportResult.Failed(auth.errString.toString())
-        }
-    }
 
     private suspend fun readTip(): Pair<Long, String>? = try {
         lightClient.getTipHeader()?.let { raw ->

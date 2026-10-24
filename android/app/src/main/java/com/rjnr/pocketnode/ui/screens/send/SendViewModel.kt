@@ -25,6 +25,7 @@ import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.*
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.ensureActive
 import java.math.BigDecimal
 import java.math.RoundingMode
 import com.rjnr.pocketnode.data.auth.AuthMethod
@@ -116,6 +117,15 @@ data class SendReview(
     }
 }
 
+/** Public reconciliation evidence retained across edits and subsequent batches in this screen. */
+data class InterruptedBulkSend(
+    val fromAddress: String,
+    val network: NetworkType,
+    val submittedRecipients: List<String>,
+    val submittedTxHashes: List<String>,
+    val uncertainRecipients: List<String>,
+)
+
 data class SendUiState(
     /** Founder-only easter egg: the Single/Bulk toggle is hidden until unlocked. */
     val bulkUnlocked: Boolean = false,
@@ -131,6 +141,7 @@ data class SendUiState(
     val bulkCompletedRecipients: Int = 0,
     val bulkSubmittedTxHashes: List<String> = emptyList(),
     val bulkFailureMessage: String? = null,
+    val interruptedBulkSends: List<InterruptedBulkSend> = emptyList(),
     val amountCkb: String = "",
     val isLoading: Boolean = false,
     val error: com.rjnr.pocketnode.ui.util.UiMessage? = null,
@@ -660,17 +671,16 @@ class SendViewModel @Inject constructor(
         _uiState.update { it.copy(reviewRequest = null, sweepWarningAcknowledged = false) }
 
         viewModelScope.launch {
-            val kdfVersion = peekActiveKdfVersion()
-            if (kdfVersion == 2) {
-                if (activity == null) {
-                    _uiState.update {
-                        it.copy(error = com.rjnr.pocketnode.ui.util.UiMessage.Resource(com.rjnr.pocketnode.R.string.vm_error_send_v2_reopen))
-                    }
-                    return@launch
-                }
-                executeSendV2(activity)
-            } else {
-                sendTransactionV1OrFallback()
+            if (activity == null) {
+                _uiState.update { it.copy(error = com.rjnr.pocketnode.ui.util.UiMessage.Resource(com.rjnr.pocketnode.R.string.vm_error_send_v2_reopen)) }
+                return@launch
+            }
+            try { executeSendV2(activity) }
+            catch (cancelled: kotlinx.coroutines.CancellationException) {
+                _uiState.update { it.copy(isLoading = false, error = null, errorDetail = null,
+                    transactionState = TransactionState.IDLE,
+                    statusMessage = it.bulkFailureMessage ?: "Operation stopped. Check wallet activity for pending transactions before retrying.") }
+                throw cancelled
             }
         }
     }
@@ -752,24 +762,7 @@ class SendViewModel @Inject constructor(
         return true
     }
 
-    private fun sendTransactionV1OrFallback() {
-        if (!validateInputs()) return
-
-        // Check if authentication is required before sending (V1 path).
-        if (authManager.isAuthBeforeSendEnabled() && pinManager.hasPin()) {
-            val method = if (authManager.isBiometricEnabled() && authManager.isBiometricEnrolled()) {
-                AuthMethod.BIOMETRIC
-            } else {
-                AuthMethod.PIN
-            }
-            _uiState.update { it.copy(requiresAuth = true, authMethod = method) }
-            return
-        }
-
-        executeSend()
-    }
-
-    private suspend fun executeSendV2(activity: FragmentActivity) {
+    private suspend fun executeSendV2(activity: FragmentActivity) = com.rjnr.pocketnode.data.vault.VaultOperationSession.run(activity) owned@ {
         val state = _uiState.value
         val amountShannons = parseAmountShannons(state.amountCkb)
             ?: error("Invalid amount state before authenticated send")
@@ -777,12 +770,12 @@ class SendViewModel @Inject constructor(
         val capturedAddress = repository.getCurrentAddress()
         if (capturedAddress == null) {
             _uiState.update { it.copy(error = com.rjnr.pocketnode.ui.util.UiMessage.Resource(com.rjnr.pocketnode.R.string.vm_error_wallet_not_initialized)) }
-            return
+            return@owned
         }
 
         val walletId = walletPreferencesActiveId() ?: run {
             _uiState.update { it.copy(error = com.rjnr.pocketnode.ui.util.UiMessage.Resource(com.rjnr.pocketnode.R.string.vm_error_no_active_wallet)) }
-            return
+            return@owned
         }
 
         when (val readResult = walletKeyReader.readPrivateKey(
@@ -793,19 +786,19 @@ class SendViewModel @Inject constructor(
         )) {
             is WalletKeyReader.Result.Cancelled -> {
                 _uiState.update { it.copy(error = null, isLoading = false) }
-                return
+                return@owned
             }
             is WalletKeyReader.Result.AuthError -> {
                 _uiState.update {
                     it.copy(error = com.rjnr.pocketnode.ui.util.UiMessage.Resource(com.rjnr.pocketnode.R.string.vm_error_auth_failed_with_reason, listOf(readResult.message.toString())), isLoading = false)
                 }
-                return
+                return@owned
             }
             is WalletKeyReader.Result.NotAvailable -> {
                 _uiState.update {
                     it.copy(error = com.rjnr.pocketnode.ui.util.UiMessage.Resource(com.rjnr.pocketnode.R.string.vm_error_cannot_read_wallet_key, listOf(readResult.reason)), isLoading = false)
                 }
-                return
+                return@owned
             }
             is WalletKeyReader.Result.KeyInvalidated -> {
                 _uiState.update {
@@ -814,15 +807,15 @@ class SendViewModel @Inject constructor(
                         isLoading = false,
                     )
                 }
-                return
+                return@owned
             }
-            is WalletKeyReader.Result.Success -> {
+            is WalletKeyReader.Result.Success -> try {
                 if (state.sendMode == SendMode.BULK) {
                     proceedWithBulkSend(amountShannons, capturedAddress, readResult.privateKey)
                 } else {
                     proceedWithSend(amountShannons, capturedAddress, readResult.privateKey)
                 }
-            }
+            } finally { readResult.privateKey.fill(0) }
         }
     }
 
@@ -849,6 +842,7 @@ class SendViewModel @Inject constructor(
                 amountShannons = amountShannons,
                 privateKey = privateKey,
                 expectedFeeShannons = confirmedFeeShannons,
+                onSigned = { privateKey.fill(0) },
             ).getOrThrow()
             _uiState.update {
                 it.copy(
@@ -863,7 +857,8 @@ class SendViewModel @Inject constructor(
             // #197: bump useCount for saved contacts, queue save-prompt for new addresses.
             afterSendBookkeeping(recipient)
             startPollingTransactionStatus(txHash, capturedAddress)
-        } catch (e: Exception) {
+        } catch (cancelled: kotlinx.coroutines.CancellationException) { throw cancelled }
+        catch (e: Exception) {
             logger.e(TAG, "V2 send failed", e)
             errorJournal.record("send", e.message ?: e.javaClass.simpleName)
             _uiState.update {
@@ -880,101 +875,10 @@ class SendViewModel @Inject constructor(
         }
     }
 
+    /** Legacy PIN/dashboard callbacks do not authorize vault access. Reopen the foreground review. */
     fun executeSend() {
-        val state = _uiState.value
-        _uiState.update { it.copy(requiresAuth = false, authMethod = null) }
-
-        val amountShannons = parseAmountShannons(state.amountCkb)
-        if (amountShannons == null) {
-            _uiState.update { it.copy(error = com.rjnr.pocketnode.ui.util.UiMessage.Resource(com.rjnr.pocketnode.R.string.vm_error_invalid_amount)) }
-            return
-        }
-
-        // Capture wallet identity upfront to prevent wallet-switch race conditions
-        val capturedAddress = repository.getCurrentAddress()
-
-        if (capturedAddress == null) {
-            _uiState.update { it.copy(error = com.rjnr.pocketnode.ui.util.UiMessage.Resource(com.rjnr.pocketnode.R.string.vm_error_wallet_not_initialized)) }
-            return
-        }
-
-        sendJob = viewModelScope.launch {
-            val capturedKey = try { repository.getPrivateKey() } catch (e: Exception) {
-                _uiState.update { it.copy(error = com.rjnr.pocketnode.ui.util.UiMessage.Resource(com.rjnr.pocketnode.R.string.vm_error_access_keys_failed, listOf(e.message ?: ""))) }
-                return@launch
-            }
-            _uiState.update {
-                it.copy(
-                    isLoading = true,
-                    error = null,
-                    transactionState = TransactionState.SENDING,
-                    statusMessage = "Building transaction..."
-                )
-            }
-
-            try {
-                logger.d(TAG, "Starting send transaction flow")
-                // Recipient + amount + sender together are a full payment
-                // record; logcat is adb/bugreport-readable on debug builds.
-                // Redact the addresses, drop the amount (#321).
-                logger.d(TAG, "  Recipient: ${state.recipientAddress.redactAddress()}")
-                logger.d(TAG, "  From address: ${capturedAddress.redactAddress()}")
-
-                _uiState.update { it.copy(statusMessage = "Broadcasting transaction...") }
-                logger.d(TAG, "📡 prepareAndSend: fetching cells, filtering reserved, building, broadcasting...")
-
-                if (state.sendMode == SendMode.BULK) {
-                    proceedWithBulkSend(amountShannons, capturedAddress, capturedKey)
-                } else {
-                    val recipient = state.recipientAddress
-                    val txHash = repository.prepareAndSend(
-                        fromAddress = capturedAddress,
-                        toAddress = recipient,
-                        amountShannons = amountShannons,
-                        privateKey = capturedKey,
-                        expectedFeeShannons = confirmedFeeShannons,
-                    ).getOrThrow()
-                    logger.d(TAG, "✅ Transaction sent! Hash: $txHash")
-
-                    _uiState.update {
-                        it.copy(
-                            isLoading = false,
-                            txHash = txHash,
-                            recipientAddress = "",
-                            amountCkb = "",
-                            transactionState = TransactionState.PENDING,
-                            statusMessage = "Transaction submitted. Waiting for confirmation..."
-                        )
-                    }
-
-                    // #197: usage bump for saved contacts, save-prompt for new ones.
-                    afterSendBookkeeping(recipient)
-
-                    // Start polling for transaction status using the captured address
-                    startPollingTransactionStatus(txHash, capturedAddress)
-                }
-
-            } catch (e: Exception) {
-                logger.e(TAG, "❌ Transaction failed", e)
-                logger.e(TAG, "  Error type: ${e.javaClass.simpleName}")
-                logger.e(TAG, "  Error message: ${e.message}")
-                e.printStackTrace()
-
-                val userFriendlyError = parseErrorMessage(e)
-                errorJournal.record("send", e.message ?: e.javaClass.simpleName)
-                _uiState.update {
-                    it.copy(
-                        isLoading = false,
-                        error = com.rjnr.pocketnode.ui.util.UiMessage.Raw(userFriendlyError),
-                        errorDetail = e.message,
-                        transactionState = TransactionState.FAILED,
-                        statusMessage = "Transaction failed"
-                    )
-                }
-            } finally {
-                capturedKey.fill(0) // transient signing key — zero after use (#321)
-            }
-        }
+        _uiState.update { it.copy(requiresAuth = false, authMethod = null,
+            error = com.rjnr.pocketnode.ui.util.UiMessage.Resource(com.rjnr.pocketnode.R.string.vm_error_send_v2_reopen)) }
     }
 
     private suspend fun proceedWithBulkSend(
@@ -999,19 +903,27 @@ class SendViewModel @Inject constructor(
             )
         }
 
+        val submitted = mutableListOf<String>()
+        var entered = emptyList<String>()
         try {
             batches.forEachIndexed { index, batch ->
+                // Cancellation between successful batches must prevent another signing call.
+                kotlinx.coroutines.yield()
+                kotlinx.coroutines.currentCoroutineContext().ensureActive()
+                entered = batch.map { it.address }
                 _uiState.update {
                     it.copy(
                         statusMessage = "Broadcasting batch ${index + 1} of ${batches.size}...",
                         bulkCurrentBatch = index + 1,
                     )
                 }
-                val txHash = repository.prepareAndSendBulk(
+                val txHash = repository.prepareAndSendBulkOrThrow(
                     fromAddress = capturedAddress,
                     recipients = batch,
                     privateKey = privateKey,
-                ).getOrThrow()
+                )
+                submitted += entered
+                entered = emptyList()
                 _uiState.update {
                     it.copy(
                         bulkCurrentBatch = index + 1,
@@ -1037,7 +949,23 @@ class SendViewModel @Inject constructor(
                     statusMessage = "Bulk send submitted for ${recipients.size} recipients across ${batches.size} transactions.",
                 )
             }
-        } catch (e: Exception) {
+        } catch (cancelled: kotlinx.coroutines.CancellationException) {
+            // The entered batch may already be persisted or accepted by the node. Never put it
+            // back into retry text without reconciliation, even if cancellation preceded signing.
+            val remaining = recipients.drop(submitted.size + entered.size).map { it.address }
+            _uiState.update { state ->
+                val record = InterruptedBulkSend(capturedAddress, initialState.networkType,
+                    submitted.toList(), state.bulkSubmittedTxHashes.toList(), entered.toList())
+                state.copy(
+                    isLoading = false,
+                    bulkRecipientsText = remaining.joinToString("\n"),
+                    interruptedBulkSends = state.interruptedBulkSends + record,
+                    bulkFailureMessage = "Bulk send interrupted. Only ${remaining.size} recipients from batches that never started remain. Check interrupted batch details before sending any excluded recipient again.",
+                ).refreshBulkPreview()
+            }
+            throw cancelled
+        }
+        catch (e: Exception) {
             logger.e(TAG, "Bulk send failed", e)
             errorJournal.record("bulk-send", e.message ?: e.javaClass.simpleName)
             _uiState.update { state ->
@@ -1275,7 +1203,14 @@ class SendViewModel @Inject constructor(
     private fun SendUiState.refreshBulkPreview(amountShannonsOverride: Long? = null): SendUiState {
         if (sendMode != SendMode.BULK) return this
         val amountShannons = amountShannonsOverride ?: parseAmountShannons(amountCkb) ?: 0L
-        val parsed = parseBulkRecipients(bulkRecipientsText, networkType)
+        val raw = parseBulkRecipients(bulkRecipientsText, networkType)
+        // Keep reconciliation evidence across form/wallet/network changes in this screen. An
+        // edited or re-pasted list cannot silently turn submitted/uncertain recipients into retries.
+        val excluded = interruptedBulkSends.flatMap { it.submittedRecipients + it.uncertainRecipients }.toSet()
+        val blocked = raw.validAddresses.count { it in excluded }
+        val parsed = raw.copy(validAddresses = raw.validAddresses.filterNot { it in excluded },
+            invalidEntries = raw.invalidEntries + if (blocked == 0) emptyList() else
+                listOf("$blocked recipients excluded from an interrupted send. Review its submitted and uncertain batches first."))
         val batchCount = if (parsed.validAddresses.isEmpty()) 0 else (parsed.validAddresses.size + BULK_BATCH_SIZE - 1) / BULK_BATCH_SIZE
         // Item 3: estimate each batch's input count from the wallet's average
         // cell size (balance / cell count) instead of assuming 1. A fragmented

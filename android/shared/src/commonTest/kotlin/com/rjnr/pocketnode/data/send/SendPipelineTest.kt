@@ -139,6 +139,21 @@ class SendPipelineTest {
 
     private fun signer() = PrivateKeySigner(TEST_KEY.copyOf())
 
+
+    @Test fun cancellationAtBroadcastPreservesExactPendingSignedTransaction() = runTest {
+        val bridge = object : FakeLightClientApi() {
+            override fun sendTransaction(txJson: String): String? {
+                throw kotlinx.coroutines.CancellationException("public test cancellation")
+            }
+        }
+        val signed = json.decodeFromString<Transaction>(pendingChangeTx())
+        val result = runCatching { pipelineOver(bridge).sendTransaction(ctx(this), signed).getOrThrow() }
+        assertTrue(result.exceptionOrNull() is kotlinx.coroutines.CancellationException)
+        val row = broadcasts.byHash.values.single()
+        assertEquals("BROADCASTING", row.state)
+        assertEquals(json.encodeToString(signed), row.signedTxJson)
+    }
+
     // ---- preview: the cell set a send is allowed to select from ----
 
     @Test
@@ -342,6 +357,42 @@ class SendPipelineTest {
             result.exceptionOrNull()?.message,
         )
         assertTrue(broadcasts.byHash.isEmpty(), "nothing may be reserved when the fee moved")
+    }
+
+    @Test fun singleSendInvokesLastUseCallbackBeforeBroadcast() = runTest {
+        val key = TEST_KEY.copyOf(); var callbacks = 0
+        val builder = TransactionBuilder(NetworkValidator())
+        val signed = builder.buildTransfer(FROM_ADDRESS, TO_ADDRESS, 100_00000000L,
+            LIVE_CELLS, PrivateKeySigner(key), NetworkType.TESTNET)
+        val expected = builder.computeTxHash(signed)
+        val api = object : FakeLightClientApi() {
+            override fun sendTransaction(txJson: String): String? {
+                assertTrue(key.all { it == 0.toByte() })
+                assertEquals(1, callbacks)
+                return "\"$expected\""
+            }
+        }.enqueue("getTipHeader", LightClientFixtures.TIP_HEADER)
+            .enqueue("getTransactions", LightClientFixtures.GET_TRANSACTIONS_PAGE)
+            .enqueue("getCells", cellsPage(LIVE_CELLS))
+        val hash = pipelineOver(api).prepareAndSend(ctx(this), FROM_ADDRESS, TO_ADDRESS,
+            100_00000000L, PrivateKeySigner(key), onSigned = { callbacks++; key.fill(0) }).getOrThrow()
+        assertEquals(expected, hash); assertEquals(1, callbacks)
+    }
+
+    @Test fun successiveBulkBatchesKeepBorrowedSigningBufferIntact() = runTest {
+        val borrowed = TEST_KEY.copyOf()
+        repeat(2) { batch ->
+            val api = api()
+            val recipients = listOf(RecipientOutput(TO_ADDRESS, (100 + batch) * 100_000000L))
+            val signed = TransactionBuilder(NetworkValidator()).buildMultiTransfer(
+                FROM_ADDRESS, recipients, LIVE_CELLS, PrivateKeySigner(borrowed), NetworkType.TESTNET)
+            val hash = TransactionBuilder(NetworkValidator()).computeTxHash(signed)
+            api.enqueue("sendTransaction", "\"$hash\"")
+            pipelineOver(api).prepareAndSendBulk(ctx(this), FROM_ADDRESS, recipients, PrivateKeySigner(borrowed)).getOrThrow()
+            assertTrue(borrowed.contentEquals(TEST_KEY))
+            // A later batch sees a fresh cell snapshot; the borrowed signer remains reusable.
+            broadcasts.byHash.clear()
+        }
     }
 
     // ---- bulk ----

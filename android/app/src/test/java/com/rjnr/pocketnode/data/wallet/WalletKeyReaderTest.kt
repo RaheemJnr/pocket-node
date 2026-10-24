@@ -24,6 +24,35 @@ import org.robolectric.annotation.Config
 @Config(sdk = [28], manifest = Config.NONE)
 class WalletKeyReaderTest {
     @Test
+    fun `reader success diagnostics redact mnemonic and signing key`() {
+        val phrase = "public disposable phrase never print"
+        val key = ByteArray(32) { 42 }
+        val signing = WalletKeyReader.Result.Success(key).toString()
+        val material = WalletKeyReader.MaterialResult.Success(key, phrase, "mnemonic", true).toString()
+        assertFalse(material.contains(phrase))
+        assertFalse(material.contains("42"))
+        assertFalse(signing.contains("42"))
+    }
+
+    @Test
+    fun `legacy software key cannot be released before verified passphrase protection`() = runTest {
+        val dao = mockk<com.rjnr.pocketnode.data.database.dao.KeyMaterialDao>()
+        val row = KeyMaterialEntity("wallet", byteArrayOf(1), null, ByteArray(12), "raw_key", false, 0, 1)
+        coEvery { dao.getByWalletId("wallet") } returns row
+        val helper = mockk<com.rjnr.pocketnode.data.crypto.KeyStoreMigrationHelper>()
+        coEvery { helper.readDecryptedKey("wallet") } returns com.rjnr.pocketnode.data.crypto.DecryptedKeyData(
+            "00".repeat(31) + "01", null, "raw_key", false)
+        val pin = mockk<com.rjnr.pocketnode.data.auth.PinManager>()
+        every { pin.hasPin() } returns true
+        val prompt = mockk<com.rjnr.pocketnode.data.vault.VaultPrompt>()
+        coEvery { prompt.requestLegacyPin(any(), any(), any()) } returns null
+        val reader = WalletKeyReader(dao, helper, mockk(), mockk(), mockk(relaxed = true), mockk(), pin, prompt,
+            WalletUnlockPreference(ApplicationProvider.getApplicationContext()))
+        val result = reader.readPrivateKey(org.robolectric.Robolectric.buildActivity(FragmentActivity::class.java).setup().get(), "wallet", "Send", "Authenticate")
+        assertFalse("Legacy software key escaped before wallet passphrase setup", result is WalletKeyReader.Result.Success)
+    }
+
+    @Test
     fun `missing or invalidated key returns recovery result for signing and material without changing wallet`() = runTest {
         val failures = listOf(
             KeyPermanentlyInvalidatedException(),
@@ -55,8 +84,8 @@ class WalletKeyReaderTest {
             val encryption = mockk<KeystoreEncryptionManager>()
             every { encryption.newDecryptCipherV2(any()) } throws failure
             val auth = mockk<AuthManager>()
-            val reader = WalletKeyReader(dao, mockk(), encryption, auth, mockk(), mockk(), NoopLogger)
-            val activity = mockk<FragmentActivity>()
+            val reader = WalletKeyReader(dao, mockk(), encryption, auth, mockk(relaxed = true), mockk(), mockk(), mockk(), WalletUnlockPreference(ApplicationProvider.getApplicationContext()))
+            val activity = org.robolectric.Robolectric.buildActivity(FragmentActivity::class.java).setup().get()
             val key = reader.readPrivateKey(activity, "wallet", "Send", "Authenticate")
             val material = reader.readKeyMaterial(activity, "wallet", "Reveal", "Authenticate")
             if (invalidated) {

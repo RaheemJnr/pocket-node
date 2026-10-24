@@ -25,6 +25,21 @@ interface KeyMaterialDao {
     @Insert(onConflict = OnConflictStrategy.ABORT)
     suspend fun insertOrAbort(entity: KeyMaterialEntity)
 
+    /** An old migration must never replace a concurrently activated V2/V3/unknown row. */
+    @Transaction
+    suspend fun replaceLegacyV1(entity: KeyMaterialEntity, expectedIv: ByteArray?) {
+        val current = getByWalletId(entity.walletId)
+        if (expectedIv == null) {
+            check(current == null) { "Legacy wallet changed during migration." }
+            insertOrAbort(entity)
+        } else {
+            check(current != null && current.kdfVersion == 1 && current.iv.contentEquals(expectedIv)) {
+                "Legacy wallet changed during migration."
+            }
+            upsert(entity.copy(walletType = current.walletType, mnemonicBackedUp = current.mnemonicBackedUp))
+        }
+    }
+
     @Query("DELETE FROM key_material WHERE walletId = :walletId")
     suspend fun delete(walletId: String)
 

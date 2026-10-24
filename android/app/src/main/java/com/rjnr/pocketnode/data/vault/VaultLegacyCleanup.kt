@@ -1,0 +1,10 @@
+package com.rjnr.pocketnode.data.vault
+
+import com.rjnr.pocketnode.data.crypto.KeyMaterial
+
+/** Witness is freshly verified for this generation and operation-scoped; implementations must never retain it. */
+fun interface VaultLegacyCleanup {
+    suspend fun clean(walletId: String, expectedGeneration: Long, verifiedMaterial: KeyMaterial): Boolean
+    suspend fun cleanWithProof(walletId: String, expectedGeneration: Long, verifiedMaterial: KeyMaterial, proof: BoundLegacyBackupProof): Boolean = false
+    suspend fun cleanWithSource(walletId: String, expectedGeneration: Long, verifiedMaterial: KeyMaterial, proof: BoundLegacySourceProof): Boolean = false
+}

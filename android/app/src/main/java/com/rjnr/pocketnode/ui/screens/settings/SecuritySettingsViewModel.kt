@@ -1,6 +1,11 @@
 package com.rjnr.pocketnode.ui.screens.settings
 
-import com.rjnr.pocketnode.core.log.Logger
+import androidx.fragment.app.FragmentActivity
+import com.rjnr.pocketnode.data.wallet.WalletUnlockPreference
+import com.rjnr.pocketnode.data.vault.VaultReadPreference
+import com.rjnr.pocketnode.data.vault.VaultDevicePromptMode
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.CancellationException
 import androidx.lifecycle.SavedStateHandle
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
@@ -9,8 +14,6 @@ import com.rjnr.pocketnode.data.auth.AuthManager
 import com.rjnr.pocketnode.data.auth.PinManager
 import com.rjnr.pocketnode.data.database.dao.WalletDao
 import com.rjnr.pocketnode.data.crypto.KeyBackupManager
-import com.rjnr.pocketnode.data.wallet.KeyManager
-import com.rjnr.pocketnode.data.crypto.KeyMaterial
 import com.rjnr.pocketnode.ui.util.UiMessage
 import dagger.hilt.android.lifecycle.HiltViewModel
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -40,23 +43,15 @@ data class SecuritySettingsUiState(
     val biometricStatusText: String = "",
     val isAuthBeforeSendEnabled: Boolean = false,
     val error: UiMessage? = null,
-    /**
-     * Non-null when the user is being asked to confirm that adding or
-     * removing a biometric enrollment will invalidate their V2 wallet
-     * keys. The dialog explains the consequence and offers a
-     * cancel/proceed choice (#213 sub-PR 6). When the user proceeds, the
-     * wallet remains usable only via recovery-phrase re-import.
-     */
+    val unlockPreference: VaultReadPreference = VaultReadPreference.DEFAULT,
+    val vaultBusy: Boolean = false,
+    val vaultMessage: String? = null,
+    val vaultWallets: List<WalletSecurityStatus> = emptyList(),
+    /** Dashboard biometric preference confirmation; independent vault fallback is explained. */
     val biometricEnrollmentWarning: BiometricEnrollmentWarning? = null,
 )
 
-/**
- * State for the biometric-enrollment warning modal shown when the user
- * is about to enable biometric on a device that already has wallets.
- * The V2 Keystore key uses `setInvalidatedByBiometricEnrollment(true)`,
- * so any future change to enrolled biometrics wipes the key and the
- * wallet can only be recovered from its mnemonic.
- */
+/** Confirmation for changing dashboard biometric convenience. */
 data class BiometricEnrollmentWarning(
     val enabling: Boolean,
 )
@@ -67,9 +62,9 @@ class SecuritySettingsViewModel @Inject constructor(
     private val authManager: AuthManager,
     private val pinManager: PinManager,
     private val keyBackupManager: KeyBackupManager,
-    private val keyManager: KeyManager,
     private val walletDao: WalletDao,
-    private val logger: Logger,
+    private val unlockPreference: WalletUnlockPreference,
+    private val vaultOperations: SecurityVaultOperations,
 ) : ViewModel() {
 
     private val _uiState = MutableStateFlow(SecuritySettingsUiState())
@@ -102,16 +97,44 @@ class SecuritySettingsViewModel @Inject constructor(
         refreshState()
     }
 
+    private var vaultJob: Job? = null
+
+    fun selectUnlockPreference(value: VaultReadPreference) {
+        unlockPreference.set(value)
+        _uiState.update { it.copy(unlockPreference = value) }
+    }
+    fun changePassphrase(activity: FragmentActivity) = maintain { vaultOperations.change(activity) }
+    fun resetPassphrase(activity: FragmentActivity, mode: VaultDevicePromptMode? = null) = maintain { vaultOperations.reset(activity, mode) }
+    fun enrollDevice(activity: FragmentActivity, id: String, mode: VaultDevicePromptMode? = null) = maintain { vaultOperations.enroll(activity, id, mode) }
+    fun cancelVaultOperation() { vaultJob?.cancel() }
+    private fun maintain(action: suspend () -> VaultSettingsResult) {
+        if (vaultJob?.isActive == true) return
+        _uiState.update { it.copy(vaultBusy = true, vaultMessage = null) }
+        vaultJob = viewModelScope.launch {
+            try {
+                val result = action()
+                _uiState.update { it.copy(vaultMessage = result.message, vaultWallets = result.wallets.ifEmpty { it.vaultWallets }) }
+            } catch (e: CancellationException) {
+                _uiState.update { it.copy(vaultMessage = "Cancelled. Saved protection is preserved.") }
+                throw e
+            } catch (_: Exception) {
+                _uiState.update { it.copy(vaultMessage = "Operation did not complete. Saved protection is preserved.") }
+            } finally { _uiState.update { it.copy(vaultBusy = false) } }
+        }
+    }
+
     fun refreshState() {
         val biometricStatus = authManager.isBiometricAvailable()
         viewModelScope.launch {
-            val walletCount = walletDao.count()
+            val statuses = vaultOperations.walletNames()
             _uiState.update {
                 it.copy(
                     isBiometricAvailable = biometricStatus == AuthManager.BiometricStatus.AVAILABLE,
                     isBiometricEnabled = authManager.isBiometricEnabled(),
                     hasPin = pinManager.hasPin(),
-                    canRemovePin = walletCount == 0 && !keyBackupManager.hasAnyBackups(),
+                    canRemovePin = !keyBackupManager.hasAnyBackups(),
+                    unlockPreference = unlockPreference.get(),
+                    vaultWallets = statuses,
                     biometricStatusText = when (biometricStatus) {
                         AuthManager.BiometricStatus.AVAILABLE -> "Fingerprint hardware available"
                         AuthManager.BiometricStatus.NO_HARDWARE -> "No biometric hardware detected"
@@ -150,12 +173,7 @@ class SecuritySettingsViewModel @Inject constructor(
             _uiState.update { it.copy(error = UiMessage.Resource(R.string.vm_error_set_pin_first_biometric)) }
             return
         }
-        // The V2 Keystore key is configured with
-        // setInvalidatedByBiometricEnrollment(true), so any later change
-        // to enrolled biometrics will wipe the key. Warn the user once
-        // here so they understand they MUST keep their recovery phrase
-        // backed up; if they later add or remove a fingerprint, the
-        // wallet becomes unreadable except via re-import (#213 sub-PR 6).
+        // Explain the distinction between optional device access and independent vault protection.
         viewModelScope.launch {
             if (walletDao.count() > 0) {
                 _uiState.update {
@@ -184,15 +202,8 @@ class SecuritySettingsViewModel @Inject constructor(
     }
 
     private fun removePin() {
-        // Mandatory PIN: refuse removal as long as any wallet exists so every wallet
-        // always has a PIN-encrypted backup available for recovery.
+        // Preserve access to old backup credentials until authenticated cleanup finishes.
         viewModelScope.launch {
-            if (walletDao.count() > 0) {
-                _uiState.update {
-                    it.copy(error = UiMessage.Resource(R.string.vm_error_pin_required_remove_wallets))
-                }
-                return@launch
-            }
             if (keyBackupManager.hasAnyBackups()) {
                 _uiState.update {
                     it.copy(error = UiMessage.Resource(R.string.vm_error_pin_required_backups))
@@ -208,55 +219,8 @@ class SecuritySettingsViewModel @Inject constructor(
         }
     }
 
-    fun onPinCreated(pin: String) {
-        authManager.setSessionPin(pin.toCharArray())
-        viewModelScope.launch {
-            try {
-                val wallets = walletDao.getAll()
-                for (wallet in wallets) {
-                    // V2 wallets require a BiometricPrompt per read. Skip
-                    // them silently here — the user will populate the
-                    // backup when they next reveal their recovery phrase
-                    // (which already prompts for biometric). Without this
-                    // skip, the loop would crash on the first V2 wallet
-                    // with V2KeyMaterialRequiresAuthException (#213 sub-PR 5).
-                    val privateKey = try {
-                        keyManager.getPrivateKeyForWallet(wallet.walletId) ?: continue
-                    } catch (e: com.rjnr.pocketnode.data.crypto.V2KeyMaterialRequiresAuthException) {
-                        logger.i(
-                            "SecuritySettingsVM",
-                            "Skipping V2-protected wallet ${wallet.walletId} during PIN backup",
-                        )
-                        continue
-                    } catch (e: Exception) {
-                        // Not a V2 wallet waiting for a prompt — the row is
-                        // genuinely unreadable (#496). Same skip, honest label:
-                        // calling it V2-protected hid a broken wallet.
-                        logger.e(
-                            "SecuritySettingsVM",
-                            "Skipping wallet ${wallet.walletId} during PIN backup: key material unreadable",
-                            e,
-                        )
-                        continue
-                    }
-                    val mnemonic = try {
-                        keyManager.getMnemonicForWallet(wallet.walletId)
-                    } catch (e: Exception) {
-                        null
-                    }
-                    val material = KeyMaterial(
-                        privateKey = privateKey.joinToString("") { "%02x".format(it) },
-                        mnemonic = mnemonic?.joinToString(" "),
-                        walletType = if (mnemonic != null) KeyManager.WALLET_TYPE_MNEMONIC else KeyManager.WALLET_TYPE_RAW_KEY,
-                        mnemonicBackedUp = keyManager.hasMnemonicBackupForWallet(wallet.walletId)
-                    )
-                    keyBackupManager.writeBackup(wallet.walletId, material, pin.toCharArray())
-                }
-            } catch (e: Exception) {
-                logger.w("SecuritySettingsVM", "Failed to write backups on PIN creation", e)
-            }
-        }
-    }
+    /** Dashboard PIN setup does not create a weaker copy of any wallet secret. */
+    fun onPinCreated() { refreshState() }
 
     fun clearError() {
         _uiState.update { it.copy(error = null) }

@@ -75,7 +75,7 @@ class MnemonicManager @Inject constructor() {
         passphrase: String = ""
     ): ByteArray {
         val seed = mnemonicToSeed(words, passphrase)
-        return derivePrivateKey(seed)
+        return try { derivePrivateKey(seed) } finally { seed.fill(0) }
     }
 
     /**

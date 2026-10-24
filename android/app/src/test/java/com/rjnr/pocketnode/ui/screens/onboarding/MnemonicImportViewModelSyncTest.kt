@@ -71,6 +71,7 @@ class MnemonicImportViewModelSyncTest {
         authManager = mockk(relaxed = true),
         logger = NoopLogger,
         restoreHintImporter = mockk(relaxed = true),
+        importOperations = mockk(relaxed = true),
     )
 
     @Test

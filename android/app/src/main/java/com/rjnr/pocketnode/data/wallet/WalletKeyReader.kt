@@ -3,68 +3,40 @@ package com.rjnr.pocketnode.data.wallet
 import android.security.keystore.KeyPermanentlyInvalidatedException
 import androidx.fragment.app.FragmentActivity
 import com.rjnr.pocketnode.core.crypto.hexToByteArray
-import com.rjnr.pocketnode.core.log.Logger
 import com.rjnr.pocketnode.data.auth.AuthManager
-import com.rjnr.pocketnode.data.crypto.KeyBackupManager
+import com.rjnr.pocketnode.data.auth.PinManager
 import com.rjnr.pocketnode.data.crypto.KeyMaterial
+import com.rjnr.pocketnode.data.crypto.KeyStoreMigrationHelper
 import com.rjnr.pocketnode.data.crypto.KeystoreEncryptionManager
 import com.rjnr.pocketnode.data.database.dao.KeyMaterialDao
-import com.rjnr.pocketnode.data.crypto.DecryptedKeyData
-import com.rjnr.pocketnode.data.crypto.KeyStoreMigrationHelper
+import com.rjnr.pocketnode.data.vault.*
+import kotlinx.coroutines.CancellationException
 import javax.inject.Inject
 import javax.inject.Singleton
-import kotlinx.coroutines.CancellationException
-import kotlinx.coroutines.launch
 
-/**
- * Activity-aware bridge between a ViewModel and the (V1 or V2)
- * key-material store. Lets call sites read a wallet's private key without
- * caring whether the row is on the legacy unrestricted Keystore key (V1)
- * or the auth-bound key (V2); the BiometricPrompt CryptoObject dance is
- * encapsulated here.
- *
- * ## Why a separate class
- *
- * `KeyManager` is `@Singleton` and never sees an `Activity`. Threading
- * `FragmentActivity` through every call site for V2-only code paths was
- * a bigger refactor than the audit fix warranted. This reader is the one
- * boundary between the data layer and the UI layer that needs activity
- * scope. It's intentionally small.
- *
- * ## Status
- *
- * Sub-PR 4 of #213 wires this into [SendViewModel][com.rjnr.pocketnode.ui.screens.send.SendViewModel]
- * as the first user. Sub-PR 5 will migrate mnemonic backup, sub-account
- * derivation, DAO ops, and the security settings export flow to this
- * same reader.
- */
+/** The only public secret read boundary. Legacy material is released only after verified migration. */
 @Singleton
 class WalletKeyReader @Inject constructor(
     private val keyMaterialDao: KeyMaterialDao,
-    private val keyStoreMigrationHelper: KeyStoreMigrationHelper,
-    private val encryptionManager: KeystoreEncryptionManager,
-    private val authManager: AuthManager,
-    private val keyBackupManager: KeyBackupManager,
-    private val recoveryState: RecoveryStateStore,
-    private val logger: Logger,
+    private val legacy: KeyStoreMigrationHelper,
+    private val encryption: KeystoreEncryptionManager,
+    private val auth: AuthManager,
+    private val recovery: RecoveryStateStore,
+    private val coordinator: WalletVaultCoordinator,
+    private val pin: PinManager,
+    private val prompt: VaultPrompt,
+    private val unlockPreference: WalletUnlockPreference,
 ) {
-
-    /**
-     * A row that decrypts is a working row: it is never treated as
-     * unverified by the Recovery screen afterwards.
-     */
-    private fun markReadable(walletId: String) {
-        runCatching { recoveryState.removeUnverified(walletId) }
-    }
-
     sealed class Result {
-        data class Success(val privateKey: ByteArray) : Result()
+        data class Success(val privateKey: ByteArray) : Result() {
+            override fun toString() = "WalletKeyReader.Success([redacted])"
+        }
         /** User cancelled the biometric prompt; no key returned. */
         object Cancelled : Result()
         /** Auth framework reported an error (not user-cancel). */
         data class AuthError(val errorCode: Int, val message: CharSequence) : Result()
         /** Wallet row missing, decrypt failed, or unknown kdfVersion. */
-        data class NotAvailable(val reason: String) : Result()
+        data class NotAvailable(val reason: String, val kind: com.rjnr.pocketnode.data.vault.VaultFailureKind = com.rjnr.pocketnode.data.vault.VaultFailureKind.UNKNOWN) : Result()
         /**
          * The V2 Keystore key is missing or invalidated, for example after
          * removing the device screen lock or changing biometric enrollment.
@@ -80,242 +52,122 @@ class WalletKeyReader @Inject constructor(
             val mnemonic: String?,
             val walletType: String,
             val mnemonicBackedUp: Boolean,
-        ) : MaterialResult()
+            val backupWitness: WalletBackupWitness? = null,
+        ) : MaterialResult() {
+            override fun toString() = "WalletKeyReader.MaterialSuccess([redacted])"
+        }
         object Cancelled : MaterialResult()
         data class AuthError(val errorCode: Int, val message: CharSequence) : MaterialResult()
-        data class NotAvailable(val reason: String) : MaterialResult()
+        data class NotAvailable(val reason: String, val kind: com.rjnr.pocketnode.data.vault.VaultFailureKind = com.rjnr.pocketnode.data.vault.VaultFailureKind.UNKNOWN) : MaterialResult()
         object KeyInvalidated : MaterialResult()
     }
 
-    /**
-     * Read the private key for [walletId]. Picks the V1 or V2 code path
-     * based on the row's `kdfVersion`. V2 prompts the user via
-     * `BiometricPrompt`; V1 returns silently.
-     *
-     * The Cipher returned by Keystore is single-shot: this method consumes
-     * it immediately in `decryptWithCipher` and discards it. Callers must
-     * not retain the returned key any longer than needed for the operation
-     * at hand (sign, derive sub-account, display mnemonic).
-     */
-    suspend fun readPrivateKey(
-        activity: FragmentActivity,
-        walletId: String,
-        promptTitle: String,
-        promptSubtitle: String,
-    ): Result {
-        val kdfVersion = keyMaterialDao.getKdfVersion(walletId)
-            ?: return Result.NotAvailable("no key_material row for $walletId")
-
-        return when (kdfVersion) {
-            1 -> readV1(walletId)
-            2 -> readV2(activity, walletId, promptTitle, promptSubtitle)
-            else -> Result.NotAvailable("unknown kdfVersion=$kdfVersion")
+    suspend fun readPrivateKey(activity: FragmentActivity, walletId: String, promptTitle: String, promptSubtitle: String): Result =
+        when (val result = readKeyMaterial(activity, walletId, promptTitle, promptSubtitle)) {
+            is MaterialResult.Success -> Result.Success(result.privateKey)
+            MaterialResult.Cancelled -> Result.Cancelled
+            is MaterialResult.AuthError -> Result.AuthError(result.errorCode, result.message)
+            is MaterialResult.NotAvailable -> Result.NotAvailable(result.reason, result.kind)
+            MaterialResult.KeyInvalidated -> Result.KeyInvalidated
         }
-    }
 
-    /**
-     * Like [readPrivateKey] but returns the full key material bundle —
-     * private key, mnemonic, walletType, mnemonicBackedUp — in a single
-     * V2 cipher operation. Used by call sites that need both pieces (e.g.
-     * the seed-phrase reveal screen, or sub-account derivation that needs
-     * the parent's mnemonic).
-     *
-     * V2 cost: exactly one BiometricPrompt regardless of how much of the
-     * bundle the caller uses. V1 cost: silent, same as [readPrivateKey].
-     */
-    suspend fun readKeyMaterial(
-        activity: FragmentActivity,
-        walletId: String,
-        promptTitle: String,
-        promptSubtitle: String,
-    ): MaterialResult {
-        val kdfVersion = keyMaterialDao.getKdfVersion(walletId)
-            ?: return MaterialResult.NotAvailable("no key_material row for $walletId")
-        return when (kdfVersion) {
-            1 -> readMaterialV1(walletId)
-            2 -> readMaterialV2(activity, walletId, promptTitle, promptSubtitle)
-            else -> MaterialResult.NotAvailable("unknown kdfVersion=$kdfVersion")
-        }
-    }
-
-    private suspend fun readMaterialV1(walletId: String): MaterialResult {
-        val data = keyStoreMigrationHelper.readDecryptedKey(walletId)
-            ?: return MaterialResult.NotAvailable("V1 decrypt failed for $walletId")
-        markReadable(walletId)
-        return MaterialResult.Success(
-            privateKey = data.privateKeyHex.hexToByteArray(),
-            mnemonic = data.mnemonic,
-            walletType = data.walletType,
-            mnemonicBackedUp = data.mnemonicBackedUp,
-        )
-    }
-
-    private suspend fun readMaterialV2(
-        activity: FragmentActivity,
-        walletId: String,
-        promptTitle: String,
-        promptSubtitle: String,
-    ): MaterialResult {
-        val entity = keyMaterialDao.getByWalletId(walletId)
-            ?: return MaterialResult.NotAvailable("no key_material row for $walletId")
-        val cipher = try {
-            encryptionManager.newDecryptCipherV2(entity.iv)
-        } catch (e: CancellationException) {
-            throw e
-        } catch (e: Exception) {
-            if (isInvalidatedKey(e)) {
-                logger.w(TAG, "V2 wallet key missing or invalidated for $walletId")
-                return MaterialResult.KeyInvalidated
+    suspend fun readKeyMaterial(activity: FragmentActivity, walletId: String, promptTitle: String, promptSubtitle: String): MaterialResult {
+        val source = keyMaterialDao.getByWalletId(walletId)
+            ?: return unavailable(walletId, "Wallet keys are missing. Recover with an independent backup.")
+        val access = when (source.kdfVersion) {
+            3 -> coordinator.read(activity, walletId, promptTitle, promptSubtitle, unlockPreference.get())
+            1, 2 -> {
+                val extracted = extractLegacy(activity, walletId, source, promptTitle, promptSubtitle)
+                if (extracted !is MaterialResult.Success) return extracted
+                try {
+                    if (keyMaterialDao.getByWalletId(walletId) != source) return MaterialResult.NotAvailable("Wallet changed. Try again.")
+                    val hex = extracted.privateKey.joinToString("") { "%02x".format(it) }
+                    coordinator.protectLegacy(activity, walletId, KeyMaterial(hex, extracted.mnemonic,
+                        if (extracted.mnemonic == null) "raw_key" else extracted.walletType, source.mnemonicBackedUp), source.iv)
+                } finally { extracted.privateKey.fill(0) }
             }
-            logger.w(TAG, "Unable to open V2 wallet key for $walletId", e)
-            return MaterialResult.NotAvailable("Unable to access the device wallet key. Please try again.")
+            else -> return MaterialResult.NotAvailable("Unsupported wallet key version.")
         }
-        val authResult = authManager.authenticateForCipher(
-            activity = activity,
-            cipher = cipher,
-            title = promptTitle,
-            subtitle = promptSubtitle,
-        )
-        return when (authResult) {
-            is AuthManager.CipherAuthResult.Cancelled -> MaterialResult.Cancelled
-            is AuthManager.CipherAuthResult.Error ->
-                MaterialResult.AuthError(authResult.errorCode, authResult.errString)
-            is AuthManager.CipherAuthResult.Success -> {
-                val data = try {
-                    keyStoreMigrationHelper.readDecryptedKey(walletId, authResult.cipher)
-                } catch (e: Exception) {
-                    logger.e(TAG, "V2 material decrypt failed for $walletId", e)
-                    null
-                } ?: return MaterialResult.NotAvailable("V2 decrypt failed for $walletId")
-                markReadable(walletId)
-                tryOpportunisticBackup(walletId, data)
-                MaterialResult.Success(
-                    privateKey = data.privateKeyHex.hexToByteArray(),
-                    mnemonic = data.mnemonic,
-                    walletType = data.walletType,
-                    mnemonicBackedUp = data.mnemonicBackedUp,
-                )
+        return when (access) {
+            is VaultAccessResult.Success -> {
+                recovery.removeUnverified(walletId)
+                val material = access.material
+                val backedUp = keyMaterialDao.getMnemonicBackedUp(walletId) ?: material.mnemonicBackedUp
+                MaterialResult.Success(material.privateKey.hexToByteArray(), material.mnemonic, material.walletType,
+                    backedUp, access.backupWitness)
             }
+            VaultAccessResult.Cancelled -> MaterialResult.Cancelled
+            VaultAccessResult.CleanupRequired -> MaterialResult.NotAvailable("Wallet protection is saved, but legacy backup cleanup needs a retry. Unlock again to finish.")
+            VaultAccessResult.NoVault -> unavailable(walletId, "Wallet vault is missing. Recover with an independent backup.")
+            is VaultAccessResult.Unavailable -> MaterialResult.NotAvailable(access.reason, access.kind)
         }
     }
 
-    private suspend fun readV1(walletId: String): Result {
-        val data = keyStoreMigrationHelper.readDecryptedKey(walletId)
-            ?: return Result.NotAvailable("V1 decrypt failed for $walletId")
-        markReadable(walletId)
-        return Result.Success(data.privateKeyHex.hexToByteArray())
+    /** Recovery-only extraction of an exact current/archive V2 source; no migration or UI-free access. */
+    internal suspend fun authenticateCapturedV2Source(activity: FragmentActivity,
+        source: com.rjnr.pocketnode.data.database.entity.KeyMaterialEntity): MaterialResult {
+        require(source.kdfVersion == 2)
+        return extractLegacy(activity, source.walletId, source, "Preserve existing recovery phrase",
+            "Authenticate the existing wallet source before recovering its old backup.")
     }
 
-    private suspend fun readV2(
-        activity: FragmentActivity,
-        walletId: String,
-        promptTitle: String,
-        promptSubtitle: String,
-    ): Result {
-        val entity = keyMaterialDao.getByWalletId(walletId)
-            ?: return Result.NotAvailable("no key_material row for $walletId")
-        val cipher = try {
-            encryptionManager.newDecryptCipherV2(entity.iv)
-        } catch (e: CancellationException) {
-            throw e
-        } catch (e: Exception) {
-            if (isInvalidatedKey(e)) {
-                logger.w(TAG, "V2 wallet key missing or invalidated for $walletId")
-                return Result.KeyInvalidated
+    private suspend fun extractLegacy(activity: FragmentActivity, walletId: String,
+        source: com.rjnr.pocketnode.data.database.entity.KeyMaterialEntity, promptTitle: String, promptSubtitle: String): MaterialResult {
+        var ownedKey: ByteArray? = null
+        try {
+            val result = VaultOperationSession.run(activity) { session ->
+                val data = if (source.kdfVersion == 1) {
+                    if (pin.hasPin()) {
+                        val entered = prompt.requestLegacyPin(activity, "Authorize legacy wallet upgrade",
+                            "Enter your existing app PIN to authorize upgrading this legacy wallet. A separate strong wallet passphrase is required next.")
+                            ?: return@run MaterialResult.Cancelled
+                        try {
+                            if (!pin.verifyPinFromChars(entered)) return@run MaterialResult.NotAvailable("App PIN was not accepted. Try again later.")
+                        } finally { entered.fill('\u0000') }
+                    }
+                    legacy.readDecryptedKey(walletId)
+                } else {
+                    val cipher = try { encryption.newDecryptCipherV2(source.iv) }
+                    catch (e: CancellationException) { throw e }
+                    catch (e: Exception) {
+                        val invalidated = generateSequence<Throwable>(e) { it.cause }.take(16).any {
+                            it is KeyPermanentlyInvalidatedException || it is IllegalStateException && it.message?.contains("Secure lock screen", true) == true
+                        }
+                        if (invalidated) { recovery.addUnverified(walletId); recovery.markIncomplete(); return@run MaterialResult.KeyInvalidated }
+                        return@run MaterialResult.NotAvailable("Device authentication is temporarily unavailable. Try again.")
+                    }
+                    val mode = when (unlockPreference.get()) {
+                        VaultReadPreference.PASSPHRASE -> return@run MaterialResult.NotAvailable("This legacy wallet needs its existing Android authentication or an independent recovery backup before passphrase protection can be set up.")
+                        VaultReadPreference.CREDENTIAL_ONLY -> VaultDevicePromptMode.CREDENTIAL_ONLY
+                        VaultReadPreference.BIOMETRIC_ONLY -> VaultDevicePromptMode.BIOMETRIC_ONLY
+                        VaultReadPreference.DEFAULT -> if (auth.isBiometricEnrolled()) VaultDevicePromptMode.BIOMETRIC_ONLY
+                            else if (android.os.Build.VERSION.SDK_INT >= 30 && auth.hasDeviceCredential()) VaultDevicePromptMode.CREDENTIAL_ONLY
+                            else VaultDevicePromptMode.BIOMETRIC_ONLY
+                    }
+                    val authMode = if (mode == VaultDevicePromptMode.CREDENTIAL_ONLY) AuthManager.CipherPromptMode.CREDENTIAL_ONLY else AuthManager.CipherPromptMode.BIOMETRIC_ONLY
+                    val authenticated = session.systemAuthentication(mode) {
+                        auth.authenticateForCipher(activity, cipher, promptTitle, promptSubtitle, promptMode = authMode)
+                    }
+                    when (authenticated) {
+                        AuthManager.CipherAuthResult.Cancelled -> return@run MaterialResult.Cancelled
+                        is AuthManager.CipherAuthResult.Error -> return@run MaterialResult.AuthError(authenticated.errorCode, authenticated.errString)
+                        is AuthManager.CipherAuthResult.Success -> {
+                            if (authenticated.cipher !== cipher) return@run MaterialResult.NotAvailable("Authentication did not authorize this wallet.")
+                            legacy.readCapturedV2Source(source, authenticated.cipher)
+                        }
+                    }
+                } ?: return@run unavailable(walletId, "Legacy keys are unreadable. Recover with an independent backup.")
+                val key = data.privateKeyHex.hexToByteArray().also { ownedKey = it }
+                MaterialResult.Success(key, data.mnemonic, data.walletType, source.mnemonicBackedUp)
             }
-            logger.w(TAG, "Unable to open V2 wallet key for $walletId", e)
-            return Result.NotAvailable("Unable to access the device wallet key. Please try again.")
-        }
-        val authResult = authManager.authenticateForCipher(
-            activity = activity,
-            cipher = cipher,
-            title = promptTitle,
-            subtitle = promptSubtitle,
-        )
-        return when (authResult) {
-            is AuthManager.CipherAuthResult.Cancelled -> Result.Cancelled
-            is AuthManager.CipherAuthResult.Error ->
-                Result.AuthError(authResult.errorCode, authResult.errString)
-            is AuthManager.CipherAuthResult.Success -> {
-                val data = try {
-                    keyStoreMigrationHelper.readDecryptedKey(walletId, authResult.cipher)
-                } catch (e: Exception) {
-                    logger.e(TAG, "V2 decrypt failed for $walletId", e)
-                    null
-                } ?: return Result.NotAvailable("V2 decrypt failed for $walletId")
-                markReadable(walletId)
-                tryOpportunisticBackup(walletId, data)
-                Result.Success(data.privateKeyHex.hexToByteArray())
-            }
-        }
+            ownedKey = null
+            return result
+        } finally { ownedKey?.fill(0) }
     }
 
-    /** Android providers may wrap keystore failures (including on Samsung, #576). */
-    private fun isInvalidatedKey(error: Exception): Boolean =
-        generateSequence<Throwable>(error) { it.cause }.take(16).any {
-            it is KeyPermanentlyInvalidatedException ||
-                (it is IllegalStateException &&
-                    it.message?.contains("Secure lock screen", ignoreCase = true) == true)
-        }
-
-    /**
-     * Lazy PIN-encrypted backup population for V2 wallets (#295).
-     *
-     * `SecuritySettingsViewModel.onPinCreated` silently skips V2 wallets in
-     * its post-PIN-setup population loop because writing a backup requires
-     * a biometric-authed read. As a result, V2 wallets created on v1.7.x
-     * have no PIN-recoverable backup blob until the user explicitly reveals
-     * their seed phrase. This means a user who creates a wallet, sets a
-     * PIN, and never reveals the seed has nothing to fall back on for PIN
-     * recovery.
-     *
-     * Fix: any time a V2 read completes successfully, we already hold
-     * the full plaintext material under a biometric prompt the user just
-     * authed — write the backup blob opportunistically if it does not
-     * already exist. Requires a cached session PIN ([AuthManager.getSessionPin]);
-     * skipped silently if the user is biometric-only this session. Failures
-     * are logged and swallowed — backup population is defense-in-depth, not
-     * blocking the caller.
-     */
-    private fun tryOpportunisticBackup(
-        walletId: String,
-        data: DecryptedKeyData,
-    ) {
-        if (keyBackupManager.hasBackup(walletId)) return
-        val sessionPin = authManager.getSessionPin() ?: return
-        // Fire-and-forget on an IO scope: callers invoke the read paths from
-        // viewModelScope on Main, and KeyBackupManager.writeBackup runs a
-        // 600k-iteration PBKDF2 plus a file write -- synchronous execution
-        // would freeze the UI right after the biometric prompt on the user's
-        // first send/reveal (Codex review on #311).
-        backupScope.launch {
-            try {
-                val material = KeyMaterial(
-                    privateKey = data.privateKeyHex,
-                    mnemonic = data.mnemonic,
-                    walletType = data.walletType,
-                    mnemonicBackedUp = data.mnemonicBackedUp,
-                )
-                keyBackupManager.writeBackup(walletId, material, sessionPin)
-                logger.i(TAG, "Opportunistic backup populated for $walletId after V2 read")
-            } catch (e: Throwable) {
-                logger.w(TAG, "Opportunistic backup write failed for $walletId", e)
-            } finally {
-                java.util.Arrays.fill(sessionPin, '\u0000')
-            }
-        }
-    }
-
-    /**
-     * Process-lifetime scope for opportunistic backup writes. SupervisorJob
-     * so one failed write can't cancel later ones; Dispatchers.IO for the
-     * PBKDF2 + disk work.
-     */
-    private val backupScope = kotlinx.coroutines.CoroutineScope(
-        kotlinx.coroutines.SupervisorJob() + kotlinx.coroutines.Dispatchers.IO
-    )
-
-    companion object {
-        private const val TAG = "WalletKeyReader"
+    private fun unavailable(walletId: String, reason: String): MaterialResult {
+        recovery.addUnverified(walletId)
+        recovery.markIncomplete()
+        return MaterialResult.NotAvailable(reason)
     }
 }

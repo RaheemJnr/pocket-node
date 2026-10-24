@@ -592,6 +592,27 @@ private fun SendScreenUI(
                         color = MaterialTheme.colorScheme.onSurfaceVariant
                     )
                 }
+                uiState.interruptedBulkSends.forEachIndexed { index, interrupted ->
+                    var expanded by remember(index) { mutableStateOf(false) }
+                    Spacer(modifier = Modifier.height(12.dp))
+                    Card(modifier = Modifier.fillMaxWidth(), shape = RoundedCornerShape(8.dp)) {
+                        Column(modifier = Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                            Text("Interrupted send: ${interrupted.submittedRecipients.size} submitted, ${interrupted.uncertainRecipients.size} uncertain",
+                                style = MaterialTheme.typography.bodyMedium, fontWeight = FontWeight.Medium)
+                            Text("These recipients are excluded from retries. Check Activity and transaction status before sending to them again.",
+                                style = MaterialTheme.typography.bodySmall)
+                            TextButton(onClick = { expanded = !expanded }) { Text(if (expanded) "Hide batch details" else "Review batch details") }
+                            if (expanded) androidx.compose.foundation.text.selection.SelectionContainer {
+                                Text(buildString {
+                                    append("Network: ${interrupted.network.name}\nFrom: ${interrupted.fromAddress}\n")
+                                    append("Submitted transaction hashes:\n${interrupted.submittedTxHashes.joinToString("\n")}\n")
+                                    append("Submitted recipients:\n${interrupted.submittedRecipients.joinToString("\n")}\n")
+                                    append("Uncertain recipients (do not retry yet):\n${interrupted.uncertainRecipients.joinToString("\n")}")
+                                }, style = MaterialTheme.typography.bodySmall)
+                            }
+                        }
+                    }
+                }
                 if (uiState.bulkSubmittedTxHashes.isNotEmpty() || uiState.bulkFailureMessage != null || uiState.isLoading) {
                     Spacer(modifier = Modifier.height(12.dp))
                     Card(

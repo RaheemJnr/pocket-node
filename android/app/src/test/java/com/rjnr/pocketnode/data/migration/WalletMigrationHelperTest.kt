@@ -94,6 +94,55 @@ class WalletMigrationHelperTest {
     }
 
     @Test
+    fun `startup reconciles committed creation before preferences were selected`() = runTest {
+        val key = "00".repeat(31) + "01"
+        val info = com.rjnr.pocketnode.data.wallet.WalletDerivation.walletInfo(ByteArray(32).also { it[31] = 1 })
+        val proposed = WalletEntity("created", "Created", "raw_key", null, null,
+            mainnetAddress = info.mainnetAddress, testnetAddress = info.testnetAddress)
+        com.rjnr.pocketnode.data.wallet.persistVerifiedFixture(db,
+            com.rjnr.pocketnode.data.wallet.WalletRepository.Creation(proposed),
+            com.rjnr.pocketnode.data.crypto.WalletKeyBundle(key, null))
+        walletPreferences.setActiveWalletId("missing")
+        helper.migrateIfNeeded()
+        assertEquals("created", walletDao.getActive()?.walletId)
+        assertEquals("created", walletPreferences.getActiveWalletId())
+        assertNotNull(db.walletVaultDao().get("created"))
+    }
+
+    @Test
+    fun `bootstrap metadata failure rolls back key creation and retries from preserved ESP`() = runTest {
+        val context = ApplicationProvider.getApplicationContext<Context>()
+        val source = context.getSharedPreferences("ckb_wallet_keys", Context.MODE_PRIVATE)
+        source.edit().clear().putString("private_key", "aa".repeat(32))
+            .putString("wallet_type", "raw_key").putBoolean("mnemonic_backed_up", true).commit()
+        keyManager.testPrefs = source
+        db.openHelper.writableDatabase.execSQL("CREATE TRIGGER reject_bootstrap BEFORE INSERT ON wallets BEGIN SELECT RAISE(ABORT, 'metadata failure'); END")
+        helper.migrateIfNeeded()
+        assertEquals(0, walletDao.count()); assertEquals(0, db.keyMaterialDao().count())
+        assertTrue(source.contains("private_key"))
+        db.openHelper.writableDatabase.execSQL("DROP TRIGGER reject_bootstrap")
+        helper.migrateIfNeeded()
+        assertEquals(1, walletDao.count()); assertEquals(1, db.keyMaterialDao().count())
+        assertEquals("default", walletDao.getActive()!!.walletId)
+        assertTrue(db.keyMaterialDao().getByWalletId("default")!!.mnemonicBackedUp)
+    }
+
+    @Test
+    fun `bootstrap retains default source identity and exact ciphertext through metadata failure and retry`() = runTest {
+        seedLegacyDefaultWallet("aa".repeat(32), null, "raw_key")
+        val original = db.keyMaterialDao().getByWalletId("default")!!
+        db.openHelper.writableDatabase.execSQL("CREATE TRIGGER reject_bootstrap BEFORE INSERT ON wallets BEGIN SELECT RAISE(ABORT, 'metadata failure'); END")
+        helper.migrateIfNeeded()
+        assertEquals(0, walletDao.count()); assertEquals(1, db.keyMaterialDao().count())
+        assertEquals(original, db.keyMaterialDao().getByWalletId("default"))
+        db.openHelper.writableDatabase.execSQL("DROP TRIGGER reject_bootstrap")
+        helper.migrateIfNeeded()
+        assertEquals("default", walletDao.getActive()!!.walletId)
+        assertEquals(1, db.keyMaterialDao().count())
+        assertEquals(original, db.keyMaterialDao().getByWalletId("default"))
+    }
+
+    @Test
     fun `no-op when no legacy wallet exists`() = runTest {
         // No wallet in KeyManager
         helper.migrateIfNeeded()
@@ -108,7 +157,7 @@ class WalletMigrationHelperTest {
             mnemonic = null,
             walletType = KeyManager.WALLET_TYPE_RAW_KEY,
         )
-        val legacyInfo = keyManager.getWalletInfo()
+        val legacyInfo = keyManager.deriveWalletInfo(ByteArray(32) { 0xaa.toByte() })
 
         helper.migrateIfNeeded()
 
@@ -127,7 +176,7 @@ class WalletMigrationHelperTest {
         assertEquals(legacyInfo.testnetAddress, wallet.testnetAddress)
 
         // Keys should be copied to wallet-scoped storage
-        val scopedKey = keyManager.getPrivateKeyForWallet(activeWalletId)
+        val scopedKey = keyStoreMigrationHelper.readDecryptedKey(activeWalletId)?.privateKeyHex
         assertNotNull(scopedKey)
     }
 
@@ -166,7 +215,7 @@ class WalletMigrationHelperTest {
         assertEquals("m/44'/309'/0'/0/0", wallet.derivationPath)
 
         // Mnemonic should be copied
-        val migratedMnemonic = keyManager.getMnemonicForWallet(activeWalletId)
+        val migratedMnemonic = keyStoreMigrationHelper.readDecryptedKey(activeWalletId)?.mnemonic?.split(" ")
         assertNotNull(migratedMnemonic)
         assertTrue(migratedMnemonic!!.size >= 12)
     }

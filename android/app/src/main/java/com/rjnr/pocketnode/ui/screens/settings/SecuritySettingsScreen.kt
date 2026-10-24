@@ -28,6 +28,7 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
 import androidx.compose.material3.TopAppBarDefaults
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
@@ -83,10 +84,7 @@ fun SecuritySettingsScreen(
             title = { Text(if (warning.enabling) "Enable biometric unlock?" else "Disable biometric unlock?") },
             text = {
                 Text(
-                    "Pocket Node binds your wallet keys to your current biometrics. " +
-                    "If you later add or remove a fingerprint or face, the keys on this device are wiped " +
-                    "and the wallet can only be recovered from its recovery phrase.\n\n" +
-                    "Make sure your recovery phrase is written down somewhere safe before you continue."
+                    "Device authentication is optional convenience. If Android removes its key, verified vault wallets can still use their independent wallet passphrase. Legacy wallets may require their old backup PIN or external recovery secret. Keep an external backup for device loss or uninstall."
                 )
             },
             confirmButton = {
@@ -109,8 +107,7 @@ fun SecuritySettingsScreen(
                 title = { Text(stringResource(R.string.security_settings_pin_required_title)) },
                 text = {
                     Text(
-                        "This is intentional, not an error. Your PIN encrypts the recovery backup that can restore a wallet, so a PIN stays required as long as any wallet exists.\n\n" +
-                        "To remove the PIN, first write down your recovery phrase, then delete every wallet in Wallet Manager. The option becomes available once no wallets remain."
+                        "Old PIN-encrypted backups remain on this device. Finish verified wallet protection and authenticated legacy cleanup before removing this dashboard PIN. New vault protection uses an independent strong wallet passphrase."
                     )
                 },
                 confirmButton = {
@@ -166,6 +163,32 @@ fun SecuritySettingsScreen(
                 .padding(horizontal = com.rjnr.pocketnode.ui.util.screenHorizontalPadding(), vertical = 16.dp)
                 .verticalScroll(rememberScrollState())
         ) {
+            val activity = context as androidx.fragment.app.FragmentActivity
+            DisposableEffect(viewModel) { onDispose { viewModel.cancelVaultOperation() } }
+            Text("Wallet authentication", style = MaterialTheme.typography.titleLarge)
+            Text("Biometrics are optional convenience. Choose a wallet passphrase or Android credential before unlocking any secret. Cancel always aborts.")
+            for ((preference, label) in listOf(
+                com.rjnr.pocketnode.data.vault.VaultReadPreference.DEFAULT to "Biometrics when available (default)",
+                com.rjnr.pocketnode.data.vault.VaultReadPreference.PASSPHRASE to "Wallet passphrase",
+                com.rjnr.pocketnode.data.vault.VaultReadPreference.CREDENTIAL_ONLY to "Android screen lock",
+            )) {
+                OutlinedButton(onClick = { viewModel.selectUnlockPreference(preference) }, enabled = !uiState.vaultBusy) {
+                    Text(if (uiState.unlockPreference == preference) "Selected: $label" else label)
+                }
+            }
+            Text("Your app PIN only opens the dashboard. The wallet passphrase protects this installation; it does not replace an external recovery phrase/private-key backup for uninstall, data clearing or device loss.")
+            Button(onClick = { viewModel.changePassphrase(activity) }, enabled = !uiState.vaultBusy) { Text("Change known wallet passphrase") }
+            OutlinedButton(onClick = { viewModel.resetPassphrase(activity) }, enabled = !uiState.vaultBusy) { Text("Reset forgotten passphrase with device authentication") }
+            OutlinedButton(onClick = { viewModel.resetPassphrase(activity, com.rjnr.pocketnode.data.vault.VaultDevicePromptMode.CREDENTIAL_ONLY) }, enabled = !uiState.vaultBusy) { Text("Reset using Android screen lock") }
+            Text("Reset authenticates every accessible wallet. Other wallets retain their previous protection and must be recovered before a later known-passphrase change.")
+            uiState.vaultMessage?.let { Text(it) }
+            uiState.vaultWallets.forEach { wallet ->
+                Text("${wallet.name}: ${wallet.message}")
+                OutlinedButton(onClick = { viewModel.enrollDevice(activity, wallet.walletId) }, enabled = !uiState.vaultBusy) { Text("Re-enroll device for ${wallet.name}") }
+                OutlinedButton(onClick = { viewModel.enrollDevice(activity, wallet.walletId, com.rjnr.pocketnode.data.vault.VaultDevicePromptMode.CREDENTIAL_ONLY) }, enabled = !uiState.vaultBusy) { Text("Enroll Android screen lock for ${wallet.name}") }
+            }
+            if (uiState.vaultBusy) TextButton(onClick = viewModel::cancelVaultOperation) { Text("Cancel") }
+            Spacer(Modifier.height(16.dp))
             // PIN Section
             Card(
                 modifier = Modifier.fillMaxWidth(),
@@ -175,7 +198,7 @@ fun SecuritySettingsScreen(
             ) {
                 Column(modifier = Modifier.padding(16.dp)) {
                     Text(
-                        text = "PIN Lock",
+                        text = "Dashboard PIN lock",
                         style = MaterialTheme.typography.titleMedium
                     )
 
@@ -294,7 +317,7 @@ fun SecuritySettingsScreen(
                             )
                             Spacer(modifier = Modifier.height(4.dp))
                             Text(
-                                text = "Require biometrics or PIN before sending CKB",
+                                text = "Additional dashboard authentication. Vault signing always requires wallet authentication.",
                                 style = MaterialTheme.typography.bodySmall,
                                 color = MaterialTheme.colorScheme.onSurfaceVariant
                             )

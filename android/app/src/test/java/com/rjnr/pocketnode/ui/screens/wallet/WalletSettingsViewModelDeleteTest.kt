@@ -166,18 +166,15 @@ class WalletSettingsViewModelDeleteTest {
         gatewayRepository = gateway,
         walletDao = db.walletDao(),
         keyManager = keyManager,
-        pinManager = mockk(relaxed = true),
         daoCellDao = db.daoCellDao(),
         transactionDao = db.transactionDao(),
         appStatePreferences = walletPreferences,
         networkPreferences = walletPreferences,
         walletKeyReader = mockk(relaxed = true),
         walletKeyWriter = mockk(relaxed = true),
-        keyMaterialDao = db.keyMaterialDao(),
-        migrationHelper = mockk(relaxed = true),
-        encryptionManager = mockk(relaxed = true),
         authManager = mockk(relaxed = true),
         logger = NoopLogger,
+        backupOperations = mockk(relaxed = true),
     )
 
     private fun deleteViaSettings(walletId: String) = runTest(testDispatcher) {

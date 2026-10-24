@@ -132,6 +132,14 @@ class AuthManager @Inject constructor(
         data class Error(val errorCode: Int, val errString: CharSequence) : CipherAuthResult()
     }
 
+    enum class CipherPromptMode { DEFAULT, BIOMETRIC_ONLY, CREDENTIAL_ONLY }
+
+    internal fun allowedCipherAuthenticators(mode: CipherPromptMode): Int? = when (mode) {
+        CipherPromptMode.DEFAULT -> getAllowedAuthenticators()
+        CipherPromptMode.BIOMETRIC_ONLY -> Authenticators.BIOMETRIC_STRONG
+        CipherPromptMode.CREDENTIAL_ONLY -> if (Build.VERSION.SDK_INT >= 30) Authenticators.DEVICE_CREDENTIAL else null
+    }
+
     /**
      * Prompt the user via BiometricPrompt and return the same [cipher] back
      * once Keystore has authorized it. Used by the V2 (auth-bound) wallet
@@ -140,9 +148,10 @@ class AuthManager @Inject constructor(
      * `newDecryptCipherV2`, runs it through this helper, and only then
      * passes it to `encryptWithCipher` / `decryptWithCipher`.
      *
-     * The prompt always uses [getAllowedAuthenticators] so users without
-     * biometrics can fall back to the device PIN/pattern set in Android
-     * Settings. The negative-button text is only shown for biometric-only
+     * By default the prompt uses [getAllowedAuthenticators]. Vault callers select
+     * an explicit biometric-only or API30+ credential-only mode so lifecycle
+     * handoff policy matches the actual system prompt. Other callers retain the
+     * existing combined/default policy. Negative-button text is only shown for biometric-only
      * prompts; [Authenticators.DEVICE_CREDENTIAL] disallows it.
      *
      * Suspending: the coroutine is resumed when the framework callback
@@ -153,8 +162,14 @@ class AuthManager @Inject constructor(
         cipher: Cipher,
         title: String,
         subtitle: String,
-        negativeButtonText: String = "Cancel"
+        negativeButtonText: String = "Cancel",
+        promptMode: CipherPromptMode = CipherPromptMode.DEFAULT,
     ): CipherAuthResult = suspendCancellableCoroutine { cont ->
+        val allowed = allowedCipherAuthenticators(promptMode)
+        if (allowed == null) {
+            cont.resume(CipherAuthResult.Error(BiometricPrompt.ERROR_VENDOR, "Unsupported cryptographic authenticator"))
+            return@suspendCancellableCoroutine
+        }
         val executor = ContextCompat.getMainExecutor(activity)
         val prompt = BiometricPrompt(
             activity,
@@ -191,7 +206,6 @@ class AuthManager @Inject constructor(
             }
         )
 
-        val allowed = getAllowedAuthenticators()
         val builder = BiometricPrompt.PromptInfo.Builder()
             .setTitle(title)
             .setSubtitle(subtitle)

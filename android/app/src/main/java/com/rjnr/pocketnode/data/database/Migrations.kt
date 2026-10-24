@@ -595,3 +595,39 @@ val MIGRATION_16_17 = object : Migration(16, 17) {
         )
     }
 }
+
+/** Additive only: legacy ciphertext and wallet metadata remain untouched until verified activation. */
+val MIGRATION_17_18 = object : Migration(17, 18) {
+    override fun migrate(db: SupportSQLiteDatabase) {
+        db.execSQL("""
+            CREATE TABLE IF NOT EXISTS `wallet_vault` (
+                `walletId` TEXT NOT NULL,
+                `generation` INTEGER NOT NULL,
+                `profileGeneration` INTEGER NOT NULL,
+                `envelope` BLOB NOT NULL,
+                `cleanupPending` INTEGER NOT NULL,
+                PRIMARY KEY(`walletId`)
+            )
+        """.trimIndent())
+        db.execSQL("""
+            CREATE TABLE IF NOT EXISTS `wallet_passphrase_profile` (
+                `id` INTEGER NOT NULL,
+                `envelope` BLOB NOT NULL,
+                PRIMARY KEY(`id`)
+            )
+        """.trimIndent())
+        db.execSQL("""
+            CREATE TABLE IF NOT EXISTS `wallet_vault_legacy` (
+                `walletId` TEXT NOT NULL,
+                `encryptedPrivateKey` BLOB NOT NULL,
+                `encryptedMnemonic` BLOB,
+                `iv` BLOB NOT NULL,
+                `walletType` TEXT NOT NULL,
+                `mnemonicBackedUp` INTEGER NOT NULL,
+                `updatedAt` INTEGER NOT NULL,
+                `kdfVersion` INTEGER NOT NULL,
+                PRIMARY KEY(`walletId`)
+            )
+        """.trimIndent())
+    }
+}
