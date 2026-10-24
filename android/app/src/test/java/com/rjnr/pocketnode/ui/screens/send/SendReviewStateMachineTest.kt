@@ -662,4 +662,38 @@ class SendReviewStateMachineTest {
         }
     }
 
+    @Test fun `reconciliation reopens bulk only after checked removal and reload both succeed`() = runTest(testDispatcher) {
+        val context = androidx.test.core.app.ApplicationProvider.getApplicationContext<android.content.Context>()
+        val store = io.mockk.spyk(com.rjnr.pocketnode.data.transaction.BulkSendQuarantineStore(context))
+        every { repository.balance } returns MutableStateFlow(BalanceResponse(senderAddress,
+            "0x${100_000_00000000L.toString(16)}", "100000", "0x1"))
+        coEvery { repository.getCells() } throws kotlinx.coroutines.CancellationException("skip public preview")
+        coEvery { repository.prepareAndSendBulkOrThrow(any(), any(), any(), any(), any()) } throws IllegalStateException("public broadcast failure")
+        val addresses = (1..26).map { index -> com.rjnr.pocketnode.data.wallet.AddressUtils.encode(
+            Script(Script.SECP256K1_CODE_HASH, "type", "0x" + "%040x".format(index)), NetworkType.TESTNET) }
+        val vm = newViewModel(store); advanceUntilIdle()
+        vm.updateSendMode(SendMode.BULK); vm.updateBulkRecipients(addresses.joinToString("\n")); vm.updateAmount("100")
+        vm.sendTransaction(); advanceUntilIdle(); vm.confirmSend(foregroundActivity); runCurrent()
+        try {
+            val record = vm.uiState.value.interruptedBulkSends.single()
+            vm.sendTransaction(); advanceUntilIdle(); assertNull(vm.uiState.value.reviewRequest)
+            every { store.remove(any()) } throws IllegalStateException("public remove failure")
+            vm.acknowledgeBulkReconciliation(record.id)
+            vm.sendTransaction(); advanceUntilIdle(); assertNull(vm.uiState.value.reviewRequest)
+            assertEquals(listOf(record), vm.uiState.value.interruptedBulkSends)
+            every { store.remove(any()) } answers { callOriginal() }
+            var loads = 0
+            every { store.load() } answers { loads++; if (loads == 2) error("public reload failure") else callOriginal() }
+            vm.acknowledgeBulkReconciliation(record.id)
+            vm.sendTransaction(); advanceUntilIdle(); assertNull(vm.uiState.value.reviewRequest)
+            assertEquals(listOf(record), vm.uiState.value.interruptedBulkSends)
+            every { store.load() } answers { callOriginal() }
+            vm.acknowledgeBulkReconciliation(record.id)
+            vm.updateBulkRecipients(addresses.joinToString("\n")); vm.updateAmount("100")
+            vm.sendTransaction(); advanceUntilIdle()
+            assertNotNull("Successful explicit reconciliation must allow reviewed repayment", vm.uiState.value.reviewRequest)
+            assertTrue(vm.uiState.value.interruptedBulkSends.isEmpty())
+        } finally { androidx.lifecycle.ViewModelStore().apply { put("reconcile", vm); clear() }; runCurrent() }
+    }
+
 }

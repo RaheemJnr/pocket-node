@@ -1202,7 +1202,10 @@ class SendViewModel @Inject constructor(
         if (sendJob?.isActive == true) return
         try {
             bulkQuarantineStore.remove(id)
-            _uiState.update { it.copy(interruptedBulkSends = bulkQuarantineStore.load()).refreshBulkPreview() }
+            val remaining = bulkQuarantineStore.load()
+            bulkHistoryUnavailable = false
+            _uiState.update { it.copy(interruptedBulkSends = remaining, bulkFailureMessage = null,
+                error = null).refreshBulkPreview() }
         } catch (_: Exception) {
             bulkHistoryUnavailable = true
             _uiState.update { it.copy(bulkFailureMessage = "Reconciliation could not be saved. Recipients remain blocked.") }

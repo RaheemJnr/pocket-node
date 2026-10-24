@@ -41,8 +41,9 @@ class CapturedLegacyPreferencesTest {
             val recovered = keyManager.readCapturedPreference(name, raw, masterAlias = alias)
             assertEquals("11".repeat(32), recovered?.privateKeyHex)
             assertEquals("public disposable fixture words", recovered?.mnemonic)
-            // The captured filename is authenticated, even though no backing file is opened.
-            assertTrue(runCatching { keyManager.readCapturedPreference(name + "_wrong", raw, masterAlias = alias) }.isFailure)
+            // ESP encrypts the lookup key with filename AAD. A different filename can yield a
+            // missing lookup (null), not necessarily a decryption exception; neither proves ownership.
+            assertNull(runCatching { keyManager.readCapturedPreference(name + "_wrong", raw, masterAlias = alias) }.getOrNull())
             assertTrue(runCatching { keyManager.readCapturedPreference(name, raw, masterAlias = missingAlias) }.isFailure)
             assertTrue(runCatching { keyManager.readCapturedPreference(name,
                 raw - "__androidx_security_crypto_encrypted_prefs_key_keyset__", masterAlias = alias) }.isFailure)
