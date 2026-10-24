@@ -17,6 +17,7 @@ import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.test.StandardTestDispatcher
 import kotlinx.coroutines.test.advanceUntilIdle
 import kotlinx.coroutines.test.resetMain
+import kotlinx.coroutines.test.runCurrent
 import kotlinx.coroutines.test.runTest
 import kotlinx.coroutines.test.setMain
 import org.junit.After
@@ -72,14 +73,14 @@ class SecuritySettingsViewModelTest {
     @After
     fun tearDown() { Dispatchers.resetMain() }
 
-    private fun newViewModel() = SecuritySettingsViewModel(
+    private fun newViewModel(vault: SecurityVaultOperations = mockk(relaxed = true)) = SecuritySettingsViewModel(
         savedStateHandle = savedStateHandle,
         authManager = authManager,
         pinManager = pinManager,
         keyBackupManager = keyBackupManager,
-        keyManager = keyManager,
         walletDao = walletDao,
-        logger = NoopLogger,
+        unlockPreference = mockk(relaxed = true),
+        vaultOperations = vault,
     )
 
     @Test
@@ -153,4 +154,30 @@ class SecuritySettingsViewModelTest {
         assertEquals(false, vm.uiState.value.isAuthBeforeSendEnabled)
         assertNotNull(vm.uiState.value.error)
     }
+    @Test
+    fun `partial reset exposes per wallet outcomes and never reports inaccessible wallet updated`() = runTest {
+        val operations = mockk<SecurityVaultOperations>(relaxed = true)
+        coEvery { operations.reset(any(), any()) } returns VaultSettingsResult("Partial reset", listOf(
+            WalletSecurityStatus("a", "Savings", "Passphrase updated"),
+            WalletSecurityStatus("b", "Other", "Not reset — previous protection preserved; recovery required")))
+        val vm = newViewModel(operations); advanceUntilIdle()
+        vm.resetPassphrase(mockk()); advanceUntilIdle()
+        assertEquals(false, vm.uiState.value.vaultBusy)
+        assertEquals("Partial reset", vm.uiState.value.vaultMessage)
+        assertEquals("b", vm.uiState.value.vaultWallets.single { it.message.startsWith("Not reset") }.walletId)
+    }
+    @Test
+    fun `cancelling pending reset returns settings to idle without another authentication route`() = runTest {
+        val operations = mockk<SecurityVaultOperations>(relaxed = true)
+        coEvery { operations.reset(any(), any()) } coAnswers { kotlinx.coroutines.awaitCancellation() }
+        val vm = newViewModel(operations); advanceUntilIdle()
+        vm.resetPassphrase(mockk()); runCurrent()
+        assertEquals(true, vm.uiState.value.vaultBusy)
+        vm.cancelVaultOperation(); advanceUntilIdle()
+        assertEquals(false, vm.uiState.value.vaultBusy)
+        org.junit.Assert.assertTrue(vm.uiState.value.vaultMessage!!.contains("Cancelled"))
+        coVerify(exactly = 0) { operations.change(any()) }
+        coVerify(exactly = 0) { operations.enroll(any(), any(), any()) }
+    }
+
 }

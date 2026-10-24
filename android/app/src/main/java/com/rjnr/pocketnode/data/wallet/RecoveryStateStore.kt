@@ -9,11 +9,9 @@ import javax.inject.Singleton
 /**
  * Persistent state of a Recovery screen restore that has not finished.
  *
- * KeyManager's corruption flag lives in memory and is only raised while
- * Room holds no key rows at all, so once one wallet's keys are restored a
- * cold start no longer sees it. This store keeps the "recovery incomplete"
- * marker across launches until every wallet row has verified keys, plus the
- * wallets whose key rows were written but not yet read back.
+ * Wallet ids remain unverified after missing keys, failed authentication or pending
+ * legacy cleanup. Only an authenticated recovery success removes an id; merely
+ * entering the dashboard in read-only mode does not clear this state.
  *
  * Plain (not encrypted) app prefs: it holds only wallet ids and a flag.
  */

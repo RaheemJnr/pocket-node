@@ -45,6 +45,8 @@ class RecoveredKeyRestorer @Inject constructor(
         object AddressMismatch : Outcome()
         /** Compatibility only for task6 UI migration; V3 recovery never returns this outcome. */
         object NeedsNoLockConsent : Outcome()
+        /** Verified protection exists, but retained sources still need authenticated cleanup. */
+        object CleanupRequired : Outcome()
         /** The user dismissed an unlock prompt; a retry can finish it. */
         object Cancelled : Outcome()
         /** Write or read-back failed; [reason] never holds key material. */
@@ -142,13 +144,15 @@ class RecoveredKeyRestorer @Inject constructor(
                                 VaultReadPreference.PASSPHRASE)) {
                                 is VaultAccessResult.Success -> { recoveryState.removeUnverified(walletId); Outcome.Restored }
                                 VaultAccessResult.Cancelled -> Outcome.Cancelled
+                                VaultAccessResult.CleanupRequired -> Outcome.CleanupRequired
                                 else -> Outcome.Failed("Passphrase authentication or cleanup did not complete. Nothing was replaced.")
                             }
                             false -> if (!confirmSpendingOnly(activity)) return Outcome.Cancelled
                             null -> return Outcome.Cancelled
                         }
                     }
-                    else -> return Outcome.Failed("Existing seed cleanup must finish before external-key replacement.")
+                    VaultAccessResult.CleanupRequired -> return Outcome.CleanupRequired
+                    else -> return Outcome.Failed("Existing seed authentication did not complete.")
                 }
             } else when (val existing = keyReader.readKeyMaterial(activity, walletId, "Preserve recovery phrase",
                 "Authenticate existing wallet keys before private-key-only recovery.")) {
@@ -176,7 +180,7 @@ class RecoveredKeyRestorer @Inject constructor(
             }
             VaultAccessResult.Cancelled -> Outcome.Cancelled
             VaultAccessResult.CleanupRequired ->
-                Outcome.Failed("Verified protection is saved; legacy backup ownership or seed preservation still needs recovery.")
+                Outcome.CleanupRequired
             else -> Outcome.Failed("Wallet authentication or verification failed")
         }
     }
@@ -202,7 +206,7 @@ class RecoveredKeyRestorer @Inject constructor(
                 Outcome.Restored
             }
             VaultAccessResult.Cancelled -> Outcome.Cancelled
-            VaultAccessResult.CleanupRequired -> Outcome.Failed("Verified vault saved; unresolved legacy sources remain preserved.")
+            VaultAccessResult.CleanupRequired -> Outcome.CleanupRequired
             else -> Outcome.Failed(if (resume) "Legacy source authentication or cleanup did not complete. Sources remain preserved; retry authentication." else "No matching backup authenticated. Keep this wallet read-only and retry the old app PIN or external recovery secret.")
         }
     }

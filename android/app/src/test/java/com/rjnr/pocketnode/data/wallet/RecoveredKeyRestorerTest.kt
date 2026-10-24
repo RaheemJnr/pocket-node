@@ -287,7 +287,7 @@ class RecoveredKeyRestorerTest {
     @Test
     fun `pending cleanup keeps verified row unhealthy until authenticated retry completes`() = walletOperationTest {
         insertWallet("w1", phraseKeyHex); fixture.cleanupOk = false
-        assertTrue(restorer.restore(activity, "w1", material(), true) is RecoveredKeyRestorer.Outcome.Failed)
+        assertEquals(RecoveredKeyRestorer.Outcome.CleanupRequired, restorer.restore(activity, "w1", material(), true))
         assertEquals(3, keyMaterialDao.getKdfVersion("w1")); assertFalse(restorer.completeIfDone())
         assertTrue("w1" in state.unverifiedWalletIds())
         fixture.cleanupOk = true
@@ -741,7 +741,7 @@ class RecoveredKeyRestorerTest {
             assertEquals(RecoveredKeyRestorer.Outcome.Restored, result)
             assertNull(db.walletVaultDao().legacy("w1"))
         } else if (backup) {
-            assertTrue(result is RecoveredKeyRestorer.Outcome.Failed)
+            assertEquals(RecoveredKeyRestorer.Outcome.CleanupRequired, result)
             assertEquals(source, db.walletVaultDao().legacy("w1")?.source())
             assertTrue(fixture.backup.hasBackup("w1"))
         } else {

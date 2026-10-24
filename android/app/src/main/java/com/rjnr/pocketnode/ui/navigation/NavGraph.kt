@@ -541,8 +541,8 @@ fun CkbNavGraph(
                         popUpTo(Screen.Recovery.route) { inclusive = true }
                     }
                 },
-                onMnemonicRestore = {
-                    navController.navigate(Screen.Onboarding.route) {
+                onContinueReadOnly = {
+                    navController.navigate(Screen.Main.route) {
                         popUpTo(Screen.Recovery.route) { inclusive = true }
                     }
                 }

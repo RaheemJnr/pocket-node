@@ -86,16 +86,25 @@ class WalletKeyWriterTest {
     }
 
     @Test
-    fun `persistNewWallet retires weak PIN backup only after verified protection`() = walletOperationTest {
-
-        val oldBackup = java.io.File(vaultFixture.context.cacheDir, "integration-backups/w-2.enc")
-        oldBackup.parentFile!!.mkdirs(); oldBackup.writeText("public disposable weak backup")
-        vaultFixture.phrase()
-        val result = writer.persistNewWallet(activity, "w-2", bundle, "mnemonic", true)
-
-        assertEquals(WalletKeyWriter.Result.Success, result)
+    fun `persistNewWallet preserves weak backup until explicit authenticated cleanup`() = walletOperationTest {
+        val f = vaultFixture
+        f.wallet("w-2")
+        val oldBackup = java.io.File(f.context.cacheDir, "integration-backups/w-2.enc")
+        oldBackup.parentFile!!.mkdirs()
+        val original = WalletKeyWriterTest::class.java.getResourceAsStream("/legacy-scalar2-pin111111.enc")!!.use { it.readBytes() }
+        oldBackup.writeBytes(original)
+        f.phrase()
+        val result = writer.persistNewWallet(activity, "w-2", f.bundle, "raw_key", false)
+        assertTrue(result is WalletKeyWriter.Result.WriteFailed)
         assertEquals(3, keyMaterialDao.getByWalletId("w-2")!!.kdfVersion)
+        org.junit.Assert.assertArrayEquals(original, oldBackup.readBytes())
+        assertTrue("w-2" in f.store.pendingLegacyCleanup())
+        val recovery = com.rjnr.pocketnode.data.vault.LegacyBackupRecovery(f.db, f.backup, f.coordinator, f.prompt,
+            com.rjnr.pocketnode.data.vault.WalletSecretValidator(MnemonicManager()), f.keyManager, f.reader, f.legacy)
+        f.phrase("111111"); f.phrase()
+        assertTrue(recovery.recover(activity, "w-2") is com.rjnr.pocketnode.data.vault.VaultAccessResult.Success)
         org.junit.Assert.assertFalse(oldBackup.exists())
+        assertTrue(f.store.pendingLegacyCleanup().isEmpty())
     }
 
     @Test
