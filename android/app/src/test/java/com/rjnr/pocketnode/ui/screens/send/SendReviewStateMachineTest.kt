@@ -477,7 +477,7 @@ class SendReviewStateMachineTest {
         // Cell-count preview is a separate job; MockK cannot unbox its suspend Result.
         coEvery { repository.getCells() } throws kotlinx.coroutines.CancellationException("public fixture skips cell-count preview")
         var batches = 0
-        coEvery { repository.prepareAndSendBulk(any(), any(), any()) } coAnswers {
+        coEvery { repository.prepareAndSendBulkOrThrow(any(), any(), any()) } coAnswers {
             assertTrue(key.all { it == 7.toByte() }); batches++
             // A public signed batch is now pending; cancellation cannot authorize another signature.
             host.stopResume()
@@ -496,6 +496,49 @@ class SendReviewStateMachineTest {
             assertFalse(vm.uiState.value.isLoading)
             assertFalse(vm.uiState.value.transactionState == TransactionState.FAILED)
         } finally { androidx.lifecycle.ViewModelStore().apply { put("test", vm); clear() } }
+    }
+
+    @Test fun `cancelled bulk retains only never entered recipients and quarantines submitted or uncertain batches`() = runTest(testDispatcher) {
+        for (lock in listOf(false, true)) for (betweenBatches in listOf(false, true)) {
+            every { repository.balance } returns MutableStateFlow(BalanceResponse(senderAddress,
+                "0x${100_000_00000000L.toString(16)}", "100000", "0x1"))
+            coEvery { repository.getCells() } throws kotlinx.coroutines.CancellationException("public fixture skips cell-count preview")
+            val key = ByteArray(32) { 7 }; var calls = 0
+            val host = com.rjnr.pocketnode.data.wallet.ForegroundTestHost()
+            fun cancelHost() { if (lock) com.rjnr.pocketnode.ui.screens.auth.ReauthLockEvents.onLocked() else host.stopResume() }
+            coEvery { walletKeyReader.readPrivateKey(any(), any(), any(), any()) } returns WalletKeyReader.Result.Success(key)
+            coEvery { repository.prepareAndSendBulkOrThrow(any(), any(), any()) } coAnswers {
+                assertTrue(key.all { it == 7.toByte() }); calls++
+                if (calls == 1) {
+                    if (betweenBatches) cancelHost()
+                    "public-submitted-batch-hash"
+                } else kotlinx.coroutines.awaitCancellation()
+            }
+            val addresses = (1..51).map { index -> com.rjnr.pocketnode.data.wallet.AddressUtils.encode(
+                Script(Script.SECP256K1_CODE_HASH, "type", "0x" + "%040x".format(index)), NetworkType.TESTNET) }
+            val vm = newViewModel(); advanceUntilIdle()
+            vm.updateSendMode(SendMode.BULK); vm.updateBulkRecipients(addresses.joinToString("\n")); vm.updateAmount("100")
+            vm.sendTransaction(); advanceUntilIdle(); vm.confirmSend(host.activity); runCurrent()
+            val expectedCalls = if (betweenBatches) 1 else 2
+            val remaining = addresses.drop(if (betweenBatches) 25 else 50)
+            assertEquals(expectedCalls, calls); assertEquals(25, vm.uiState.value.bulkCompletedRecipients)
+            if (!betweenBatches) cancelHost()
+            runCurrent()
+            try {
+                assertEquals(remaining, vm.uiState.value.bulkValidRecipients)
+                val interrupted = vm.uiState.value.interruptedBulkSends.single()
+                assertEquals(addresses.take(25), interrupted.submittedRecipients)
+                assertEquals(if (betweenBatches) emptyList<String>() else addresses.subList(25, 50), interrupted.uncertainRecipients)
+                assertEquals(listOf("public-submitted-batch-hash"), interrupted.submittedTxHashes)
+                assertTrue(key.all { it == 0.toByte() }); assertEquals(expectedCalls, calls)
+                vm.updateBulkRecipients(addresses.joinToString("\n"))
+                assertEquals(remaining, vm.uiState.value.bulkValidRecipients)
+                assertTrue(vm.uiState.value.bulkInvalidEntries.isNotEmpty())
+                vm.sendTransaction(); advanceUntilIdle()
+                assertEquals(remaining.size, vm.uiState.value.reviewRequest!!.recipientCount)
+                assertEquals(interrupted, vm.uiState.value.interruptedBulkSends.single())
+            } finally { androidx.lifecycle.ViewModelStore().apply { put("test", vm); clear() }; runCurrent() }
+        }
     }
 
 

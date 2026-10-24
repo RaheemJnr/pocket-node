@@ -227,7 +227,9 @@ class HomeViewModelWalletChangeTest {
         coEvery { seedAuthorizer.authorize(any(), "A", any(), any()) } returns
             com.rjnr.pocketnode.data.wallet.SeedPhraseAuthorizer.SeedResult.Failed("Protected seed required")
         val vm = newViewModel()
-        scheduler.runCurrent()
+        // Initial Room wallet emissions can enqueue refresh(), which clears an old error.
+        // Wait for startup before asserting the result of this explicit user operation.
+        vm.started()
         vm.runGapLimitScan(com.rjnr.pocketnode.data.wallet.ForegroundTestHost().activity)
         scheduler.runCurrent()
         assertTrue(vm.uiState.value.error.toString().contains("Protected seed required"))
@@ -243,7 +245,7 @@ class HomeViewModelWalletChangeTest {
             prefs.setActiveWalletId("B")
             com.rjnr.pocketnode.data.wallet.SeedPhraseAuthorizer.SeedResult.Words(listOf("abandon"))
         }
-        val vm = newViewModel(); scheduler.runCurrent()
+        val vm = newViewModel(); vm.started()
         vm.runGapLimitScan(com.rjnr.pocketnode.data.wallet.ForegroundTestHost().activity); scheduler.runCurrent()
         assertTrue(vm.uiState.value.error.toString().contains("wallet changed", ignoreCase = true))
     }

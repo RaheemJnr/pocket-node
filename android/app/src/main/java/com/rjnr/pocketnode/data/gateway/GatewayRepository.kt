@@ -1084,6 +1084,11 @@ class GatewayRepository @Inject constructor(
         signer = PrivateKeySigner(privateKey),
     )
 
+    /** Plain-result UI seam, matching shared OrThrow adapters; preserves cancellation and borrowed key ownership. */
+    internal suspend fun prepareAndSendBulkOrThrow(
+        fromAddress: String, recipients: List<RecipientOutput>, privateKey: ByteArray,
+    ): String = prepareAndSendBulk(fromAddress, recipients, privateKey).getOrThrow()
+
     /** @see SendPipeline.retryBroadcast */
     suspend fun retryBroadcast(txHash: String): Result<String> =
         sendPipeline.retryBroadcast(sendContext(), txHash)
