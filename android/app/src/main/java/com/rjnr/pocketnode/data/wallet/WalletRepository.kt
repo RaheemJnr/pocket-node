@@ -49,6 +49,15 @@ class WalletRepository @Inject constructor(
         val walletId: String get() = wallet.walletId
     }
 
+    suspend fun markVerifiedMnemonicBackup(witness: WalletBackupWitness): Boolean = appDatabase.withTransaction {
+        val id = witness.wallet.walletId
+        val vaults = appDatabase.walletVaultDao()
+        if (!witness.matches(walletDao.getById(id), keyMaterialDao.getByWalletId(id), vaults.get(id), vaults.profile()))
+            return@withTransaction false
+        keyMaterialDao.updateMnemonicBackedUp(id, true, System.currentTimeMillis())
+        true
+    }
+
     val walletsFlow: Flow<List<WalletEntity>> = walletDao.getAllFlow()
 
     /**

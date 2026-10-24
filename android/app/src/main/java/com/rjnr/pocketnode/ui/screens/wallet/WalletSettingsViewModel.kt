@@ -41,18 +41,15 @@ class WalletSettingsViewModel @Inject constructor(
     private val gatewayRepository: GatewayRepository,
     private val walletDao: WalletDao,
     private val keyManager: KeyManager,
-    private val pinManager: PinManager,
     private val daoCellDao: DaoCellDao,
     private val transactionDao: TransactionDao,
     private val appStatePreferences: AppStatePreferences,
     private val networkPreferences: NetworkPreferences,
     private val walletKeyReader: WalletKeyReader,
     private val walletKeyWriter: WalletKeyWriter,
-    private val keyMaterialDao: KeyMaterialDao,
-    private val migrationHelper: com.rjnr.pocketnode.data.crypto.KeystoreV2MigrationHelper,
-    private val encryptionManager: com.rjnr.pocketnode.data.crypto.KeystoreEncryptionManager,
     private val authManager: com.rjnr.pocketnode.data.auth.AuthManager,
     private val logger: Logger,
+    private val backupOperations: com.rjnr.pocketnode.ui.security.WalletBackupOperations,
 ) : ViewModel() {
 
     private val walletId: String = savedStateHandle["walletId"] ?: ""
@@ -262,242 +259,26 @@ class WalletSettingsViewModel @Inject constructor(
 
     // -- Wallet type helpers --
 
-    fun hasMnemonic(): Boolean {
-        val wallet = _uiState.value.wallet ?: return false
-        return wallet.type == KeyManager.WALLET_TYPE_MNEMONIC && wallet.parentWalletId == null
+    fun hasMnemonic(): Boolean = _uiState.value.hasMnemonic == true && _uiState.value.wallet?.parentWalletId == null
+    fun isRawKey(): Boolean = _uiState.value.hasMnemonic == false
+    fun isSubAccount(): Boolean = _uiState.value.wallet?.parentWalletId != null
+
+    private var revealOperation: kotlinx.coroutines.Job? = null
+    fun lockSeedPhrase() { revealOperation?.cancel() }
+
+    /** Compatibility callbacks fail closed: an app PIN and an Activity-free call never read material. */
+    fun onPinVerified() = Unit
+    fun loadSensitiveData() {
+        _uiState.update { it.copy(error = com.rjnr.pocketnode.ui.util.UiMessage.Raw("Authenticate in the foreground to view recovery material.")) }
     }
 
-    fun isRawKey(): Boolean {
-        val wallet = _uiState.value.wallet ?: return false
-        return wallet.type == KeyManager.WALLET_TYPE_RAW_KEY
-    }
-
-    fun isSubAccount(): Boolean {
-        val wallet = _uiState.value.wallet ?: return false
-        return wallet.parentWalletId != null
-    }
-
-    fun getPrivateKeyHex(): String? = _uiState.value.privateKeyHex
-
-    fun requiresPinForSeedPhrase(): Boolean = pinManager.hasPin()
-
-    fun onPinVerified() {
-        _uiState.update { it.copy(seedPhraseUnlocked = true, pinVerifyRequested = false) }
-        loadSensitiveData()
-    }
-
-    /** Screen consumed the [WalletSettingsUiState.pinVerifyRequested] navigation signal (F2). */
-    fun onPinVerifyRequestHandled() {
-        _uiState.update { it.copy(pinVerifyRequested = false) }
-    }
-
-    fun lockSeedPhrase() {
-        _uiState.update { it.withSecretsLocked() }
-    }
-
-    /**
-     * #524: commit a reveal only if no re-auth lock started since
-     * [lockAtStart] (read before prompting or reading). A reveal that
-     * finishes after a lock (e.g. a device-credential screen on API 28-29
-     * stops the activity mid-prompt) is dropped: the secret must not come
-     * back behind the lock screen.
-     */
-    private fun commitReveal(lockAtStart: Int, update: (WalletSettingsUiState) -> WalletSettingsUiState): Boolean {
-        if (ReauthLockEvents.locks.value != lockAtStart) {
-            logger.i(TAG, "Dropping a reveal that finished after a re-auth lock")
-            return false
-        }
-        _uiState.update(update)
-        return true
-    }
-
-    fun getMnemonic(): List<String>? = _uiState.value.mnemonicWords
-
-    /**
-     * Load private key and mnemonic from Room into UiState (V1 path).
-     * Called when seed phrase is unlocked (PIN verified or no PIN required).
-     * For V2 wallets the activity-aware overload [loadSensitiveData(activity)]
-     * must be used — otherwise the V2 read throws and the seed phrase view
-     * shows blank fields (#213 sub-PR 5).
-     */
-    fun loadSensitiveData() = loadSensitiveDataV1(ReauthLockEvents.locks.value)
-
-    private fun loadSensitiveDataV1(lockAtStart: Int) {
-        viewModelScope.launch {
-            if (keyMaterialDao.getKdfVersion(walletId) == 2) {
-                _uiState.update {
-                    it.copy(error = com.rjnr.pocketnode.ui.util.UiMessage.Resource(com.rjnr.pocketnode.R.string.vm_error_reopen_for_biometric))
-                }
-                return@launch
-            }
-            try {
-                val keyHex = keyManager.getPrivateKeyForWallet(walletId)?.let { bytes ->
-                    try {
-                        bytes.joinToString("") { "%02x".format(it) }
-                    } finally {
-                        bytes.fill(0)
-                    }
-                }
-                val words = try {
-                    keyManager.getMnemonicForWallet(walletId)
-                } catch (e: Exception) {
-                    logger.e(TAG, "Failed to get mnemonic", e)
-                    null
-                }
-                commitReveal(lockAtStart) { it.copy(privateKeyHex = keyHex, mnemonicWords = words) }
-            } catch (e: Exception) {
-                // Since #496 an unreadable key_material row throws instead of
-                // quietly handing back the legacy copy. Blank fields told the
-                // user nothing; name the failure and the way out.
-                logger.e(TAG, "Failed to load sensitive data", e)
-                _uiState.update {
-                    it.copy(
-                        error = com.rjnr.pocketnode.ui.util.UiMessage.Resource(
-                            com.rjnr.pocketnode.R.string.vm_error_key_material_unreadable
-                        )
-                    )
-                }
-            }
-        }
-    }
-
-    /**
-     * V2-aware variant of [loadSensitiveData]. For V2 wallets, drives a
-     * BiometricPrompt CryptoObject via [WalletKeyReader] to decrypt the
-     * bundled key+mnemonic. For V1 wallets, falls back to the silent
-     * path so existing PIN-only flows keep working. The mnemonic is
-     * pulled from the same V2 bundle, so V2 reads cost exactly one prompt.
-     */
     fun loadSensitiveData(activity: FragmentActivity) {
-        val lockAtStart = ReauthLockEvents.locks.value
-        viewModelScope.launch {
-            val kdf = keyMaterialDao.getKdfVersion(walletId)
-            // Lazy V1 → V2 migration on first sensitive-data reveal.
-            // Previously the V1 branch fell through to the silent PIN-
-            // only load, which a Telegram user reported as "mnemonic
-            // readily available" (bug 1). The wallet stays on V1 until
-            // the user re-launches the app and triggers AuthScreen's
-            // migration runner, which is a long window where the
-            // mnemonic is one PIN entry from disclosure.
-            //
-            // The flow now: one BiometricPrompt unlocks a V2 encrypt
-            // cipher; we use it to migrate the row to V2 AND extract
-            // the plaintext bundle in the same cipher operation. After
-            // this method returns once, the wallet is on V2 and all
-            // future reveals follow the standard V2 read path with its
-            // own BiometricPrompt.
-            if (kdf == 1) {
-                // No secure lock -> the V2 key cannot be minted, so the lazy
-                // V1->V2 upgrade below would throw ("Secure lock screen must
-                // be enabled", wrapped in InvalidAlgorithmParameterException —
-                // seed reveal errored on every no-lock device, device-test
-                // 2026-07). Fall through to the silent V1 read, the strongest
-                // path available without a lock; AuthScreen's migration
-                // upgrades the row once the user enables one.
-                if (!authManager.isBiometricEnrolled() && !authManager.hasDeviceCredential()) {
-                    // F2: no device lock, so no BiometricPrompt/CryptoObject gate
-                    // is available. The app PIN is then the only per-operation
-                    // gate for revealing the seed / private key. Require it
-                    // (route to PinEntry) instead of silently unlocking — a
-                    // momentarily-unlocked session must not reveal secrets
-                    // without the PIN. If there is no PIN either, there is
-                    // nothing to gate with, so proceed.
-                    if (noLockRevealNeedsPin(pinManager.hasPin(), _uiState.value.seedPhraseUnlocked)) {
-                        logger.i(TAG, "No secure lock — gating V1 reveal behind app PIN for $walletId")
-                        _uiState.update { it.copy(pinVerifyRequested = true) }
-                        return@launch
-                    }
-                    logger.i(TAG, "No secure lock, no PIN — V1 reveal for $walletId")
-                    loadSensitiveDataV1(lockAtStart)
-                    // The screen gate is `seedPhraseUnlocked || !requiresPin`;
-                    // flip so the loaded words show.
-                    commitReveal(lockAtStart) { it.copy(seedPhraseUnlocked = true) }
-                    return@launch
-                }
-                val cipher = try {
-                    encryptionManager.newEncryptCipherV2()
-                } catch (e: Throwable) {
-                    logger.e(TAG, "V2 cipher creation failed", e)
-                    _uiState.update { it.copy(error = com.rjnr.pocketnode.ui.util.UiMessage.Resource(com.rjnr.pocketnode.R.string.vm_error_cannot_read_wallet_key, listOf(e.message ?: "cipher"))) }
-                    return@launch
-                }
-                val auth = authManager.authenticateForCipher(
-                    activity = activity,
-                    cipher = cipher,
-                    title = "View recovery phrase",
-                    subtitle = "Verify your identity to display this wallet's secrets",
-                )
-                when (auth) {
-                    is com.rjnr.pocketnode.data.auth.AuthManager.CipherAuthResult.Cancelled -> {
-                        _uiState.update { it.copy(error = com.rjnr.pocketnode.ui.util.UiMessage.Resource(com.rjnr.pocketnode.R.string.vm_error_auth_cancelled)) }
-                        return@launch
-                    }
-                    is com.rjnr.pocketnode.data.auth.AuthManager.CipherAuthResult.Error -> {
-                        _uiState.update { it.copy(error = com.rjnr.pocketnode.ui.util.UiMessage.Resource(com.rjnr.pocketnode.R.string.vm_error_cannot_read_wallet_key, listOf("auth ${auth.errorCode}"))) }
-                        return@launch
-                    }
-                    is com.rjnr.pocketnode.data.auth.AuthManager.CipherAuthResult.Success -> {
-                        val bundle = migrationHelper.migrateWalletAndExtract(walletId, auth.cipher)
-                            .getOrElse { e ->
-                                logger.e(TAG, "V1 → V2 migrate-and-extract failed for $walletId", e)
-                                _uiState.update {
-                                    it.copy(error = com.rjnr.pocketnode.ui.util.UiMessage.Resource(com.rjnr.pocketnode.R.string.vm_error_cannot_read_wallet_key, listOf(e.message ?: "migrate")))
-                                }
-                                return@launch
-                            }
-                        val words = bundle.mnemonic?.split(" ")
-                        commitReveal(lockAtStart) {
-                            it.copy(
-                                privateKeyHex = bundle.privateKeyHex,
-                                mnemonicWords = words,
-                                seedPhraseUnlocked = true,
-                            )
-                        }
-                        return@launch
-                    }
-                }
-            }
-            if (kdf != 2) {
-                loadSensitiveDataV1(lockAtStart)
-                return@launch
-            }
-            // V2 path: single BiometricPrompt CryptoObject unlocks the
-            // bundle that contains both the private key and the mnemonic.
-            // No second prompt needed for the mnemonic display.
-            when (val result = walletKeyReader.readKeyMaterial(
-                activity = activity,
-                walletId = walletId,
-                promptTitle = "View recovery phrase",
-                promptSubtitle = "Verify your identity to display this wallet's secrets",
-            )) {
-                is WalletKeyReader.MaterialResult.Cancelled,
-                is WalletKeyReader.MaterialResult.AuthError -> {
-                    _uiState.update { it.copy(error = com.rjnr.pocketnode.ui.util.UiMessage.Resource(com.rjnr.pocketnode.R.string.vm_error_auth_cancelled)) }
-                }
-                is WalletKeyReader.MaterialResult.NotAvailable -> {
-                    _uiState.update { it.copy(error = com.rjnr.pocketnode.ui.util.UiMessage.Resource(com.rjnr.pocketnode.R.string.vm_error_cannot_read_wallet_key, listOf(result.reason))) }
-                }
-                is WalletKeyReader.MaterialResult.KeyInvalidated -> {
-                    _uiState.update {
-                        it.copy(error = com.rjnr.pocketnode.ui.util.UiMessage.Resource(com.rjnr.pocketnode.R.string.vm_error_biometric_changed_self))
-                    }
-                }
-                is WalletKeyReader.MaterialResult.Success -> {
-                    val keyHex = try {
-                        result.privateKey.joinToString("") { "%02x".format(it) }
-                    } finally {
-                        result.privateKey.fill(0)
-                    }
-                    val words = result.mnemonic?.split(" ")
-                    // seedPhraseUnlocked must flip here so the screen
-                    // gate (`showSeedPhrase && (seedPhraseUnlocked || !requiresPinForSeedPhrase())`)
-                    // shows the mnemonic. Previously this flag was set
-                    // only via onPinVerified, so V2 reveals worked by
-                    // accident only when no PIN was set.
-                    commitReveal(lockAtStart) {
-                        it.copy(privateKeyHex = keyHex, mnemonicWords = words, seedPhraseUnlocked = true)
-                    }
-                }
+        if (revealOperation?.isActive == true) return
+        revealOperation = viewModelScope.launch {
+            when (val result = backupOperations.show(activity, walletId, verify = false)) {
+                is com.rjnr.pocketnode.ui.security.WalletBackupOperations.Outcome.Shown -> _uiState.update { it.copy(hasMnemonic = result.hasMnemonic) }
+                is com.rjnr.pocketnode.ui.security.WalletBackupOperations.Outcome.Failed -> _uiState.update { it.copy(error = com.rjnr.pocketnode.ui.util.UiMessage.Raw(result.message)) }
+                com.rjnr.pocketnode.ui.security.WalletBackupOperations.Outcome.Cancelled -> Unit
             }
         }
     }
@@ -615,22 +396,7 @@ class WalletSettingsViewModel @Inject constructor(
         _uiState.update { it.copy(error = null) }
     }
 
-    companion object {
-        /**
-         * F2: on a no-lock device (no biometric, no device credential) the app
-         * PIN is the only per-operation gate for revealing secrets. A reveal
-         * needs the PIN when one is set and the seed is not already unlocked in
-         * this session. With no PIN there is nothing to gate with, so reveal
-         * proceeds.
-         */
-        fun noLockRevealNeedsPin(hasPin: Boolean, alreadyUnlocked: Boolean): Boolean =
-            hasPin && !alreadyUnlocked
-    }
 }
-
-/** The state with every revealed secret dropped and the reveal gate re-armed (#524). */
-internal fun WalletSettingsUiState.withSecretsLocked(): WalletSettingsUiState =
-    copy(seedPhraseUnlocked = false, privateKeyHex = null, mnemonicWords = null)
 
 data class WalletSettingsUiState(
     val wallet: WalletEntity? = null,
@@ -648,13 +414,5 @@ data class WalletSettingsUiState(
     val pendingTxCount: Int = 0,
     val deleted: Boolean = false,
     val error: com.rjnr.pocketnode.ui.util.UiMessage? = null,
-    val seedPhraseUnlocked: Boolean = false,
-    val privateKeyHex: String? = null,
-    val mnemonicWords: List<String>? = null,
-    /**
-     * F2: a no-lock V1 reveal needs the app PIN. The screen observes this,
-     * navigates to PinEntry("verify"), and clears it; on success the returning
-     * flow calls [WalletSettingsViewModel.onPinVerified].
-     */
-    val pinVerifyRequested: Boolean = false,
+    val hasMnemonic: Boolean? = null,
 )

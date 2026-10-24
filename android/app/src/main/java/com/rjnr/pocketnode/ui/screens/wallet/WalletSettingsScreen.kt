@@ -72,51 +72,18 @@ fun WalletSettingsScreen(
 ) {
     val uiState by viewModel.uiState.collectAsState()
     val snackbarHostState = remember { SnackbarHostState() }
-    val clipboardManager = androidx.compose.ui.platform.LocalClipboardManager.current
     val context = androidx.compose.ui.platform.LocalContext.current
-    val scope = androidx.compose.runtime.rememberCoroutineScope()
-    var showSeedPhrase by rememberSaveable { mutableStateOf(false) }
     // #524: the add-account dialog and its typed name survive the re-auth
     // lock and rotation.
     var showAddAccountDialog by rememberSaveable { mutableStateOf(false) }
 
-    // FLAG_SECURE: this screen can render the full mnemonic and raw private
-    // key after biometric unlock — block screenshots, screen recording, and
-    // the recents thumbnail, matching MnemonicBackupScreen (#317).
-    val view = androidx.compose.ui.platform.LocalView.current
-    androidx.compose.runtime.DisposableEffect(Unit) {
-        val window = (view.context as? android.app.Activity)?.window
-        window?.setFlags(
-            android.view.WindowManager.LayoutParams.FLAG_SECURE,
-            android.view.WindowManager.LayoutParams.FLAG_SECURE
-        )
-        onDispose {
-            window?.clearFlags(android.view.WindowManager.LayoutParams.FLAG_SECURE)
-        }
-    }
-
-    // V2-aware: route the "view recovery phrase" / "view private key"
-    // taps through the activity-bound entry point so a CryptoObject
-    // BiometricPrompt fires for V2 wallets (#213 sub-PR 5). V1 wallets
-    // fall through to the silent loadSensitiveData() inside the VM.
     fun unlockSensitive() {
-        val activity = context as? androidx.fragment.app.FragmentActivity
-        if (activity != null) viewModel.loadSensitiveData(activity)
-        else viewModel.loadSensitiveData()
+        (context as? androidx.fragment.app.FragmentActivity)?.let(viewModel::loadSensitiveData)
     }
+    androidx.compose.runtime.DisposableEffect(viewModel) { onDispose { viewModel.lockSeedPhrase() } }
 
     LaunchedEffect(uiState.deleted) {
         if (uiState.deleted) onNavigateBack()
-    }
-
-    // F2: a no-lock V1 reveal asked for the app PIN. Route to PinEntry("verify");
-    // on success the returning flow calls viewModel.onPinVerified() (NavGraph),
-    // which loads the secret and unlocks the reveal.
-    LaunchedEffect(uiState.pinVerifyRequested) {
-        if (uiState.pinVerifyRequested) {
-            viewModel.onPinVerifyRequestHandled()
-            onNavigateToPinVerify()
-        }
     }
 
     LaunchedEffect(uiState.error) {
@@ -322,209 +289,12 @@ fun WalletSettingsScreen(
 
             HorizontalDivider(modifier = Modifier.padding(horizontal = 16.dp))
 
-            // -- Backup & key section --
-            if (viewModel.hasMnemonic()) {
-                // Mnemonic wallet: show backup status + seed phrase
-                Column(modifier = Modifier.padding(horizontal = 16.dp)) {
-                    Spacer(Modifier.height(8.dp))
-
-                    // Opens the guided 3-step backup for THIS wallet (display →
-                    // verify → confirm), which is what flips the status below
-                    // from Pending to Completed. Distinct from "View seed
-                    // phrase", which only reveals the words read-only and
-                    // never records a backup. The row used to be inert while
-                    // Settings carried a whole-app "Backup Wallet" entry; that
-                    // entry is gone, so this is now the way in. The words stay
-                    // behind the PIN / biometric gate on the destination
-                    // screen (#488).
-                    SettingsActionRow(
-                        label = "Backup wallet",
-                        value = if (uiState.isBackedUp) "Completed" else "Pending",
-                        valueColor = if (uiState.isBackedUp)
-                            MaterialTheme.colorScheme.primary
-                        else
-                            MaterialTheme.colorScheme.error,
-                        onClick = onNavigateToBackup
-                    )
-
-                    // View seed phrase (requires PIN verification if PIN is set)
-                    if (showSeedPhrase && (uiState.seedPhraseUnlocked || !viewModel.requiresPinForSeedPhrase())) {
-                        val words = viewModel.getMnemonic()
-                        if (words != null) {
-                            Card(
-                                modifier = Modifier
-                                    .fillMaxWidth()
-                                    .padding(vertical = 8.dp),
-                                colors = CardDefaults.cardColors(
-                                    containerColor = MaterialTheme.colorScheme.errorContainer
-                                )
-                            ) {
-                                Column(modifier = Modifier.padding(16.dp)) {
-                                    Text(
-                                        text = "Seed Phrase",
-                                        style = MaterialTheme.typography.titleSmall,
-                                        color = MaterialTheme.colorScheme.onErrorContainer
-                                    )
-                                    Spacer(Modifier.height(8.dp))
-                                    Text(
-                                        text = words.joinToString(" "),
-                                        style = MaterialTheme.typography.bodyMedium,
-                                        fontFamily = FontFamily.Monospace,
-                                        color = MaterialTheme.colorScheme.onErrorContainer
-                                    )
-                                    Spacer(Modifier.height(8.dp))
-                                    OutlinedButton(onClick = {
-                                        showSeedPhrase = false
-                                        viewModel.lockSeedPhrase()
-                                    }) {
-                                        Text(stringResource(R.string.wallet_settings_hide))
-                                    }
-                                }
-                            }
-                        }
-                    } else {
-                        SettingsActionRow(
-                            label = "View seed phrase",
-                            onClick = {
-                                // Always biometric (or device credential
-                                // fallback via V2 BiometricPrompt). The
-                                // older PIN-verify branch was the path
-                                // Radoslav flagged on Telegram (bug 1):
-                                // entering a PIN was enough to reveal
-                                // the mnemonic, with no biometric step.
-                                // unlockSensitive() routes V2 wallets
-                                // through `readKeyMaterial` and V1
-                                // wallets through `migrateWalletAndExtract`
-                                // so both end with biometric gating.
-                                showSeedPhrase = true
-                                unlockSensitive()
-                            }
-                        )
-                    }
-                }
-
-                HorizontalDivider(modifier = Modifier.padding(horizontal = 16.dp))
-            } else if (viewModel.isRawKey()) {
-                // Raw key wallet: explain no mnemonic, offer private key copy
-                Column(modifier = Modifier.padding(horizontal = 16.dp)) {
-                    Spacer(Modifier.height(8.dp))
-
-                    Card(
-                        modifier = Modifier.fillMaxWidth(),
-                        colors = CardDefaults.cardColors(
-                            containerColor = MaterialTheme.colorScheme.surfaceVariant
-                        )
-                    ) {
-                        Column(modifier = Modifier.padding(16.dp)) {
-                            Text(
-                                text = "No seed phrase available",
-                                style = MaterialTheme.typography.titleSmall
-                            )
-                            Spacer(Modifier.height(4.dp))
-                            Text(
-                                text = "This wallet was imported using a private key, so there is no seed phrase. You can copy your private key instead to back up this wallet.",
-                                style = MaterialTheme.typography.bodySmall,
-                                color = MaterialTheme.colorScheme.onSurfaceVariant
-                            )
-                        }
-                    }
-
-                    Spacer(Modifier.height(8.dp))
-
-                    var showPrivateKey by rememberSaveable { mutableStateOf(false) }
-
-                    if (showPrivateKey && (uiState.seedPhraseUnlocked || !viewModel.requiresPinForSeedPhrase())) {
-                        val keyHex = viewModel.getPrivateKeyHex()
-                        if (keyHex != null) {
-                            Card(
-                                modifier = Modifier
-                                    .fillMaxWidth()
-                                    .padding(vertical = 8.dp),
-                                colors = CardDefaults.cardColors(
-                                    containerColor = MaterialTheme.colorScheme.errorContainer
-                                )
-                            ) {
-                                Column(modifier = Modifier.padding(16.dp)) {
-                                    Text(
-                                        text = "Private Key",
-                                        style = MaterialTheme.typography.titleSmall,
-                                        color = MaterialTheme.colorScheme.onErrorContainer
-                                    )
-                                    Spacer(Modifier.height(8.dp))
-                                    val masked = keyHex.take(8) + "••••••••••••••••" + keyHex.takeLast(8)
-                                    Text(
-                                        text = masked,
-                                        style = MaterialTheme.typography.bodySmall,
-                                        fontFamily = FontFamily.Monospace,
-                                        color = MaterialTheme.colorScheme.onErrorContainer
-                                    )
-                                    Spacer(Modifier.height(8.dp))
-                                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                                        OutlinedButton(onClick = {
-                                            // Timed clear on a process-lifetime scope so it
-                                            // survives navigating away from this screen
-                                            // (#290/#317 + Codex review on #322).
-                                            SensitiveClipboard.copyWithTimeout(context, keyHex)
-                                            scope.launch {
-                                                snackbarHostState.showSnackbar("Private key copied. Clipboard will clear in 60s.")
-                                            }
-                                        }) {
-                                            Text(stringResource(R.string.wallet_settings_copy))
-                                        }
-                                        OutlinedButton(onClick = {
-                                            showPrivateKey = false
-                                            viewModel.lockSeedPhrase()
-                                        }) {
-                                            Text(stringResource(R.string.wallet_settings_hide))
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                    } else {
-                        SettingsActionRow(
-                            label = "View private key",
-                            onClick = {
-                                // Mirror the seed-phrase reveal: biometric
-                                // only, no PIN-only fast-path.
-                                showPrivateKey = true
-                                unlockSensitive()
-                            }
-                        )
-                    }
-                }
-
-                HorizontalDivider(modifier = Modifier.padding(horizontal = 16.dp))
-            } else if (viewModel.isSubAccount()) {
-                // Sub-account: explain dependency on parent
-                Column(modifier = Modifier.padding(horizontal = 16.dp)) {
-                    Spacer(Modifier.height(8.dp))
-
-                    Card(
-                        modifier = Modifier.fillMaxWidth(),
-                        colors = CardDefaults.cardColors(
-                            containerColor = MaterialTheme.colorScheme.surfaceVariant
-                        )
-                    ) {
-                        Column(modifier = Modifier.padding(16.dp)) {
-                            Text(
-                                text = "No seed phrase for sub-accounts",
-                                style = MaterialTheme.typography.titleSmall
-                            )
-                            Spacer(Modifier.height(4.dp))
-                            Text(
-                                text = "This account is derived from its parent wallet's seed phrase. To back up this account, back up the parent wallet instead. The parent's seed phrase can recover all its sub-accounts.",
-                                style = MaterialTheme.typography.bodySmall,
-                                color = MaterialTheme.colorScheme.onSurfaceVariant
-                            )
-                        }
-                    }
-
-                    Spacer(Modifier.height(8.dp))
-                }
-
-                HorizontalDivider(modifier = Modifier.padding(horizontal = 16.dp))
+            Column(modifier = Modifier.padding(horizontal = 16.dp)) {
+                SettingsActionRow(label = "Backup wallet", value = if (uiState.isBackedUp) "Completed" else "Pending", onClick = onNavigateToBackup)
+                SettingsActionRow(label = "View recovery material", onClick = { unlockSensitive() })
+                if (uiState.hasMnemonic == false) Text("This protected wallet has a private key but no recovery phrase. It cannot derive new accounts.")
             }
+            HorizontalDivider(modifier = Modifier.padding(horizontal = 16.dp))
 
             // -- Accounts section (mnemonic wallets only, not sub-accounts themselves) --
             if (viewModel.hasMnemonic()) {

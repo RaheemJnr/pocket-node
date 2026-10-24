@@ -3,7 +3,7 @@ package com.rjnr.pocketnode.data.vault
 import com.rjnr.pocketnode.data.crypto.KeyMaterial
 
 sealed interface VaultAccessResult {
-    class Success(val material: KeyMaterial) : VaultAccessResult {
+    class Success(val material: KeyMaterial, val backupWitness: com.rjnr.pocketnode.data.wallet.WalletBackupWitness? = null) : VaultAccessResult {
         override fun toString() = "VaultAccessResult.Success([redacted])"
     }
     data object Cancelled : VaultAccessResult

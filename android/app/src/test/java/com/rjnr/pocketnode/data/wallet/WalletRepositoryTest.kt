@@ -81,6 +81,47 @@ class WalletRepositoryTest {
         db.subAccountCandidateDao(), SubAccountDiscovery(mnemonics, km), walletPreferences, NoopLogger
     )
 
+    @Test
+    fun `verified backup witness marks exact protected record without legacy backup fallback`() = runTest {
+        val created = repo.createWallet("Backup", { id, bundle -> fakePersistV2(id, bundle) }).getOrThrow().let { walletDao.getById(it.walletId)!! }
+        val marker = db.keyMaterialDao().getByWalletId(created.walletId)!!
+        val vault = db.walletVaultDao().get(created.walletId)!!
+        val profile = db.walletVaultDao().profile()!!
+        val witness = WalletBackupWitness(created, marker, vault, profile)
+        val noLegacy = io.mockk.spyk(keyManager)
+        io.mockk.coEvery { noLegacy.setMnemonicBackedUpForWallet(any(), any()) } throws AssertionError("Legacy backup writer must never run")
+        assertTrue(newRepo(km = noLegacy).markVerifiedMnemonicBackup(witness))
+        assertTrue(db.keyMaterialDao().getMnemonicBackedUp(created.walletId)!!)
+        assertArrayEquals(vault.envelope, db.walletVaultDao().get(created.walletId)!!.envelope)
+    }
+
+    @Test
+    fun `verified backup witness refuses changed identity marker generation envelope profile and pending cleanup`() = runTest {
+        val created = repo.createWallet("Backup", { id, bundle -> fakePersistV2(id, bundle) }).getOrThrow().let { walletDao.getById(it.walletId)!! }
+        val marker = db.keyMaterialDao().getByWalletId(created.walletId)!!
+        val vault = db.walletVaultDao().get(created.walletId)!!
+        val profile = db.walletVaultDao().profile()!!
+        val witness = WalletBackupWitness(created, marker, vault, profile)
+        val changes: List<suspend () -> Unit> = listOf(
+            { walletDao.update(created.copy(name = "Replacement")) },
+            { db.keyMaterialDao().delete(created.walletId) },
+            { db.keyMaterialDao().upsert(marker.copy(kdfVersion = 1)) },
+            { db.keyMaterialDao().upsert(marker.copy(updatedAt = marker.updatedAt + 1)) },
+            { db.walletVaultDao().update(vault.copy(generation = vault.generation + 1)) },
+            { db.walletVaultDao().update(vault.copy(envelope = vault.envelope.copyOf().also { it[0] = (it[0].toInt() xor 1).toByte() })) },
+            { db.walletVaultDao().update(vault.copy(profileGeneration = vault.profileGeneration + 1)) },
+            { db.walletVaultDao().update(vault.copy(cleanupPending = true)) },
+            { db.walletVaultDao().updateProfile(profile.copy(envelope = profile.envelope.copyOf().also { it[0] = (it[0].toInt() xor 1).toByte() })) },
+        )
+        for (change in changes) {
+            change()
+            assertFalse(repo.markVerifiedMnemonicBackup(witness))
+            assertFalse(db.keyMaterialDao().getMnemonicBackedUp(created.walletId) ?: false)
+            walletDao.update(created); db.keyMaterialDao().upsert(marker)
+            db.walletVaultDao().update(vault); db.walletVaultDao().updateProfile(profile)
+        }
+    }
+
     /** #563 review F3: a switch that fails part-way leaves the old wallet active, never none. */
     @Test
     fun `cancelled creation clears derived seed and key after consumer returns`() = runTest {

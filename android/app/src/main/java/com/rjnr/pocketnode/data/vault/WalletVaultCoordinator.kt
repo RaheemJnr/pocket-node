@@ -27,6 +27,10 @@ class WalletVaultCoordinator(
 
     private suspend fun readAuthenticated(activity: FragmentActivity, walletId: String, title: String, subtitle: String,
         preference: VaultReadPreference, allowPhraseFallback: Boolean): VaultAccessResult = access(activity) { session ->
+        val backupWallet = db.walletDao().getById(walletId)
+        val backupMarker = db.keyMaterialDao().getByWalletId(walletId)
+        val backupRow = db.walletVaultDao().get(walletId)
+        val backupProfile = db.walletVaultDao().profile()
         var envelope = store.get(walletId) ?: return@access VaultAccessResult.NoVault
         val material = unlock(activity, session, envelope, title, subtitle, preference, allowPhraseFallback) ?: return@access VaultAccessResult.Cancelled
         validateExisting(walletId, material)
@@ -40,7 +44,22 @@ class WalletVaultCoordinator(
             } finally { current.fill('\u0000') }
         }
         if (!finishCleanup(walletId, envelope.generation, material)) VaultAccessResult.CleanupRequired
-        else VaultAccessResult.Success(material)
+        else VaultAccessResult.Success(material, backupWitness(backupWallet, backupMarker, backupRow, backupProfile, envelope, material))
+    }
+
+    private fun backupWitness(
+        wallet: com.rjnr.pocketnode.data.database.entity.WalletEntity?,
+        marker: KeyMaterialEntity?,
+        row: com.rjnr.pocketnode.data.database.entity.WalletVaultEntity?,
+        profile: com.rjnr.pocketnode.data.database.entity.WalletPassphraseProfileEntity?,
+        authenticated: WalletEnvelope,
+        material: KeyMaterial,
+    ): com.rjnr.pocketnode.data.wallet.WalletBackupWitness? {
+        if (material.mnemonic.isNullOrBlank() || wallet == null || marker == null || row == null || profile == null ||
+            marker.kdfVersion != 3 || wallet.walletId != authenticated.walletId || marker.walletId != wallet.walletId ||
+            row.walletId != wallet.walletId || row.generation != authenticated.generation ||
+            !row.envelope.contentEquals(WalletEnvelopeCodec.encode(authenticated))) return null
+        return com.rjnr.pocketnode.data.wallet.WalletBackupWitness(wallet, marker, row, profile)
     }
 
     /** Recovery-only first attempt: classification must not silently imply consent to another route. */
@@ -118,6 +137,8 @@ class WalletVaultCoordinator(
             val verified = decrypt(committed, phrase)
             if (!validate(verified, wallet) || verified.privateKey != protectedMaterial.privateKey || verified.mnemonic != protectedMaterial.mnemonic) throw VaultFailure()
             val committedRow = db.walletVaultDao().get(id) ?: throw VaultFailure()
+            val backupMarker = db.keyMaterialDao().getByWalletId(id)
+            val backupProfile = db.walletVaultDao().profile()
             if (creation == null && !finishCleanup(id, committed.generation, verified, proof?.let { BoundLegacyBackupProof(it, committedRow) },
                     when {
                         mode == Enrollment.LEGACY -> source?.let { BoundLegacySourceProof(it, committedRow, LegacySourceAuthority.AUTHENTICATED) }
@@ -137,7 +158,7 @@ class WalletVaultCoordinator(
                     }
                 } finally { ownedKey?.fill(0) }
             }
-            VaultAccessResult.Success(verified)
+            VaultAccessResult.Success(verified, backupWitness(wallet, backupMarker, committedRow, backupProfile, committed, verified))
         } finally { phrase.fill('\u0000') }
     }
 

@@ -52,6 +52,7 @@ class WalletKeyReader @Inject constructor(
             val mnemonic: String?,
             val walletType: String,
             val mnemonicBackedUp: Boolean,
+            val backupWitness: WalletBackupWitness? = null,
         ) : MaterialResult() {
             override fun toString() = "WalletKeyReader.MaterialSuccess([redacted])"
         }
@@ -92,7 +93,7 @@ class WalletKeyReader @Inject constructor(
                 recovery.removeUnverified(walletId)
                 val material = access.material
                 MaterialResult.Success(material.privateKey.hexToByteArray(), material.mnemonic, material.walletType,
-                    keyMaterialDao.getMnemonicBackedUp(walletId) ?: material.mnemonicBackedUp)
+                    keyMaterialDao.getMnemonicBackedUp(walletId) ?: material.mnemonicBackedUp, access.backupWitness)
             }
             VaultAccessResult.Cancelled -> MaterialResult.Cancelled
             VaultAccessResult.CleanupRequired -> MaterialResult.NotAvailable("Wallet protection is saved, but legacy backup cleanup needs a retry. Unlock again to finish.")
