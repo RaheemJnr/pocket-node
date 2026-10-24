@@ -16,9 +16,11 @@ class LegacyBackupProof internal constructor(
     internal var copies: Map<String, List<Copy?>>,
 ) : AutoCloseable {
     internal class Copy(val fingerprint: String, val material: KeyMaterial)
+    internal var authenticatedSources: Map<KeyMaterialEntity, KeyMaterial> = emptyMap()
+    internal var acknowledgedInaccessibleSources: Set<LegacySourceAcknowledgment> = emptySet()
     internal var active = true
         private set
-    override fun close() { active = false; copies = emptyMap() }
+    override fun close() { active = false; copies = emptyMap(); authenticatedSources = emptyMap(); acknowledgedInaccessibleSources = emptySet() }
     override fun toString() = "LegacyBackupProof([redacted])"
     internal companion object {
         fun fingerprint(bytes: ByteArray): String = MessageDigest.getInstance("SHA-256").digest(bytes).joinToString("") { "%02x".format(it) }
@@ -36,3 +38,22 @@ class BoundLegacyBackupProof internal constructor(
 ) {
     override fun toString() = "BoundLegacyBackupProof([redacted])"
 }
+
+/** Fresh source authorization, explicitly authenticated or acknowledged inaccessible, bound to activation. */
+class BoundLegacySourceProof internal constructor(
+    internal val source: KeyMaterialEntity,
+    internal val committed: WalletVaultEntity,
+    internal val authority: LegacySourceAuthority,
+) {
+    override fun toString() = "BoundLegacySourceProof([redacted])"
+}
+
+/** Issued only by a foreground route after classified permanent key loss and explicit native consent. */
+internal class LegacySourceAcknowledgment(
+    val wallet: WalletEntity,
+    val source: KeyMaterialEntity,
+    val original: WalletVaultEntity?,
+) {
+    override fun toString() = "LegacySourceAcknowledgment([redacted])"
+}
+internal enum class LegacySourceAuthority { AUTHENTICATED, ACKNOWLEDGED_INACCESSIBLE }

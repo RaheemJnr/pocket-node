@@ -101,6 +101,14 @@ class WalletKeyReader @Inject constructor(
         }
     }
 
+    /** Recovery-only extraction of an exact current/archive V2 source; no migration or UI-free access. */
+    internal suspend fun authenticateCapturedV2Source(activity: FragmentActivity,
+        source: com.rjnr.pocketnode.data.database.entity.KeyMaterialEntity): MaterialResult {
+        require(source.kdfVersion == 2)
+        return extractLegacy(activity, source.walletId, source, "Preserve existing recovery phrase",
+            "Authenticate the existing wallet source before recovering its old backup.")
+    }
+
     private suspend fun extractLegacy(activity: FragmentActivity, walletId: String,
         source: com.rjnr.pocketnode.data.database.entity.KeyMaterialEntity, promptTitle: String, promptSubtitle: String): MaterialResult {
         var ownedKey: ByteArray? = null
@@ -143,7 +151,7 @@ class WalletKeyReader @Inject constructor(
                         is AuthManager.CipherAuthResult.Error -> return@run MaterialResult.AuthError(authenticated.errorCode, authenticated.errString)
                         is AuthManager.CipherAuthResult.Success -> {
                             if (authenticated.cipher !== cipher) return@run MaterialResult.NotAvailable("Authentication did not authorize this wallet.")
-                            legacy.readDecryptedKey(walletId, authenticated.cipher)
+                            legacy.readCapturedV2Source(source, authenticated.cipher)
                         }
                     }
                 } ?: return@run unavailable(walletId, "Legacy keys are unreadable. Recover with an independent backup.")

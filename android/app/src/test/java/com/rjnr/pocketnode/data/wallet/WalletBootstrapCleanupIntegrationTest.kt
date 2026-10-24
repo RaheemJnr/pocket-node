@@ -26,12 +26,16 @@ class WalletBootstrapCleanupIntegrationTest {
             val preferences = WalletPreferences(f.context, NoopLogger)
             WalletMigrationHelper(f.db.walletDao(), manager, preferences, f.db, f.db.syncProgressDao(), f.legacy, NoopLogger).migrateIfNeeded()
             val id = f.db.walletDao().getActive()!!.walletId
-            val weak = File(f.context.cacheDir, "integration-backups/default.enc").apply { parentFile!!.mkdirs(); writeText("public disposable old backup") }
+            f.backup.writeBackup("default", f.material, "111111".toCharArray())
+            val weak = File(f.context.cacheDir, "integration-backups/default.enc")
             val unrelated = File(weak.parentFile, "other.enc").apply { writeText("unrelated") }
             assertTrue(weak.exists())
             f.phrase()
-            val result = f.reader.readPrivateKey(f.activity, id, "Sign", "Authenticate") as WalletKeyReader.Result.Success
-            result.privateKey.fill(0)
+            assertTrue(f.reader.readPrivateKey(f.activity, id, "Sign", "Authenticate") is WalletKeyReader.Result.NotAvailable)
+            assertTrue(weak.exists())
+            f.phrase("111111"); f.phrase()
+            assertTrue(LegacyBackupRecovery(f.db, f.backup, f.coordinator, f.prompt,
+                WalletSecretValidator(MnemonicManager()), f.keyManager, f.reader, f.legacy).recover(f.activity, id) is VaultAccessResult.Success)
             assertEquals("default", id)
             assertFalse(weak.exists())
             assertFalse(File(f.context.filesDir.parentFile, "shared_prefs/ckb_wallet_keys.xml").exists())
@@ -46,10 +50,14 @@ class WalletBootstrapCleanupIntegrationTest {
             f.wallet("historical")
             f.legacy.migrateWallet("default", f.material.privateKey, null, "raw_key", false)
             f.legacy.migrateWallet("historical", f.material.privateKey, null, "raw_key", false)
-            val weak = File(f.context.cacheDir, "integration-backups/default.enc").apply { parentFile!!.mkdirs(); writeText("public disposable backup") }
+            f.backup.writeBackup("default", f.material, "111111".toCharArray())
+            val weak = File(f.context.cacheDir, "integration-backups/default.enc")
             f.phrase()
-            val result = f.reader.readPrivateKey(f.activity, "historical", "Sign", "Authenticate") as WalletKeyReader.Result.Success
-            result.privateKey.fill(0)
+            assertTrue(f.reader.readPrivateKey(f.activity, "historical", "Sign", "Authenticate") is WalletKeyReader.Result.NotAvailable)
+            assertTrue(weak.exists())
+            f.phrase("111111"); f.phrase()
+            assertTrue(LegacyBackupRecovery(f.db, f.backup, f.coordinator, f.prompt,
+                WalletSecretValidator(MnemonicManager()), f.keyManager, f.reader, f.legacy).recover(f.activity, "historical") is VaultAccessResult.Success)
             assertNull(f.db.keyMaterialDao().getByWalletId("default"))
             assertFalse(weak.exists())
             assertFalse(File(f.context.filesDir.parentFile, "shared_prefs/ckb_wallet_keys.xml").exists())

@@ -117,8 +117,10 @@ class RecoveredKeyRestorer @Inject constructor(
             return Outcome.AddressMismatch
         recoveryState.addUnverified(walletId)
         recoveryState.markIncomplete()
-        if (normalized.mnemonic == null && wallet.type == KeyManager.WALLET_TYPE_MNEMONIC &&
-            keyMaterialDao.getKdfVersion(walletId) != null) {
+        val capturedSource = keyMaterialDao.getByWalletId(walletId)
+        var acknowledgment: LegacySourceAcknowledgment? = null
+        if (normalized.mnemonic == null && capturedSource != null &&
+            (wallet.type == KeyManager.WALLET_TYPE_MNEMONIC || capturedSource.kdfVersion == 2)) {
             if (keyMaterialDao.getKdfVersion(walletId) == 3) {
                 when (val existing = coordinator.readForRecovery(activity, walletId)) {
                     is VaultAccessResult.Success -> {
@@ -159,12 +161,15 @@ class RecoveredKeyRestorer @Inject constructor(
                 }
                 WalletKeyReader.MaterialResult.Cancelled -> return Outcome.Cancelled
                 WalletKeyReader.MaterialResult.KeyInvalidated -> {
+                    if (capturedSource.kdfVersion != 2) return Outcome.Failed("The existing source could not be classified safely; nothing was replaced.")
                     if (!confirmSpendingOnly(activity)) return Outcome.Cancelled
+                    acknowledgment = LegacySourceAcknowledgment(wallet, capturedSource, null)
                 }
                 else -> return Outcome.Failed("Existing seed authentication did not complete. Retry or resolve legacy backup cleanup; nothing was replaced.")
             }
         }
-        return when (coordinator.recoverExisting(activity, walletId, normalized)) {
+        return when (acknowledgment?.let { coordinator.recoverWithAcknowledgedSource(activity, walletId, normalized, it) }
+            ?: coordinator.recoverExisting(activity, walletId, normalized)) {
             is VaultAccessResult.Success -> {
                 recoveryState.removeUnverified(walletId)
                 Outcome.Restored
@@ -182,18 +187,23 @@ class RecoveredKeyRestorer @Inject constructor(
         "Recover spending only", "Cancel") == true
 
     /** Native old-PIN prompt and all decrypted backup material stay inside the foreground operation. */
-    suspend fun restoreLegacyBackup(activity: FragmentActivity, walletId: String): Outcome {
+    suspend fun restoreLegacyBackup(activity: FragmentActivity, walletId: String): Outcome = restoreLegacySources(activity, walletId, false)
+
+    /** Explicit task6 retry route for saved protection whose exact legacy archive still needs cleanup. */
+    suspend fun resumeLegacyCleanup(activity: FragmentActivity, walletId: String): Outcome = restoreLegacySources(activity, walletId, true)
+
+    private suspend fun restoreLegacySources(activity: FragmentActivity, walletId: String, resume: Boolean): Outcome {
         if (walletDao.getById(walletId) == null) return Outcome.NoWalletRow
         recoveryState.addUnverified(walletId)
         recoveryState.markIncomplete()
-        return when (legacyRecovery.recover(activity, walletId)) {
+        return when (if (resume) legacyRecovery.resumeCleanup(activity, walletId) else legacyRecovery.recover(activity, walletId)) {
             is VaultAccessResult.Success -> {
                 recoveryState.removeUnverified(walletId)
                 Outcome.Restored
             }
             VaultAccessResult.Cancelled -> Outcome.Cancelled
             VaultAccessResult.CleanupRequired -> Outcome.Failed("Verified vault saved; unresolved legacy sources remain preserved.")
-            else -> Outcome.Failed("No matching backup authenticated. Keep this wallet read-only and retry the old app PIN or external recovery secret.")
+            else -> Outcome.Failed(if (resume) "Legacy source authentication or cleanup did not complete. Sources remain preserved; retry authentication." else "No matching backup authenticated. Keep this wallet read-only and retry the old app PIN or external recovery secret.")
         }
     }
 

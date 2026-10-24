@@ -18,14 +18,14 @@ import kotlin.coroutines.ContinuationInterceptor
 import org.robolectric.Robolectric
 
 /** Real Room, production-cost crypto and coordinator; native UI/hardware are doubles. */
-class WalletVaultIntegrationFixture(existingDatabase: AppDatabase? = null) : AutoCloseable {
+class WalletVaultIntegrationFixture(existingDatabase: AppDatabase? = null, encryptionOverride: KeystoreEncryptionManager? = null) : AutoCloseable {
     val context = ApplicationProvider.getApplicationContext<Context>()
     val db = existingDatabase ?: Room.inMemoryDatabaseBuilder(context, AppDatabase::class.java).allowMainThreadQueries().build()
     val activityController = Robolectric.buildActivity(FragmentActivity::class.java).setup()
     val activity = activityController.get()
     val crypto = WalletEnvelopeCrypto()
     val store = WalletVaultStore(db, crypto)
-    val encryption = KeystoreEncryptionManager.createForTest()
+    val encryption = encryptionOverride ?: KeystoreEncryptionManager.createForTest()
     val prefs = context.getSharedPreferences("integration_legacy", Context.MODE_PRIVATE).also { it.edit().clear().commit() }
     val legacy = KeyStoreMigrationHelper(db.keyMaterialDao(), encryption, prefs, NoopLogger)
     val v2 = KeystoreV2MigrationHelper(db.keyMaterialDao(), encryption, prefs, logger = NoopLogger)
@@ -38,11 +38,12 @@ class WalletVaultIntegrationFixture(existingDatabase: AppDatabase? = null) : Aut
     val credentials = ArrayDeque<CharArray?>()
     val choices = ArrayDeque<Boolean?>()
     var cleanupOk = true
+    var onChoice: (suspend () -> Unit)? = null
     var onCredential: (suspend () -> Unit)? = null
     val prompt = object : VaultPrompt {
         override suspend fun request(activity: FragmentActivity, title: String, message: String, confirm: Boolean) = run { onCredential?.invoke(); credentials.removeFirstOrNull() }
         override suspend fun requestLegacyPin(activity: FragmentActivity, title: String, message: String) = run { onCredential?.invoke(); credentials.removeFirstOrNull() }
-        override suspend fun choose(activity: FragmentActivity, title: String, message: String, positiveLabel: String, negativeLabel: String): Boolean? = if (choices.isEmpty()) false else choices.removeFirst()
+        override suspend fun choose(activity: FragmentActivity, title: String, message: String, positiveLabel: String, negativeLabel: String): Boolean? { onChoice?.invoke(); return if (choices.isEmpty()) false else choices.removeFirst() }
         override suspend fun notify(activity: FragmentActivity, title: String, message: String) {}
     }
     val device = object : VaultDeviceAuthentication {
@@ -57,6 +58,8 @@ class WalletVaultIntegrationFixture(existingDatabase: AppDatabase? = null) : Aut
     val coordinator = WalletVaultCoordinator(db, store, crypto, WalletSecretValidator(MnemonicManager()), prompt, device, object : VaultLegacyCleanup {
         override suspend fun clean(walletId: String, expectedGeneration: Long, verifiedMaterial: KeyMaterial) =
             cleanupOk && WalletLegacyCleanup(context, backup, db, keyManager, legacy).clean(walletId, expectedGeneration, verifiedMaterial)
+        override suspend fun cleanWithSource(walletId: String, expectedGeneration: Long, verifiedMaterial: KeyMaterial, proof: BoundLegacySourceProof) =
+            cleanupOk && WalletLegacyCleanup(context, backup, db, keyManager, legacy).cleanWithSource(walletId, expectedGeneration, verifiedMaterial, proof)
         override suspend fun cleanWithProof(walletId: String, expectedGeneration: Long, verifiedMaterial: KeyMaterial, proof: BoundLegacyBackupProof) =
             cleanupOk && WalletLegacyCleanup(context, backup, db, keyManager, legacy).cleanWithProof(walletId, expectedGeneration, verifiedMaterial, proof)
     })

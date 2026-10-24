@@ -77,10 +77,15 @@ class WalletDefaultCleanupOwnershipTest {
         WalletVaultIntegrationFixture().use { f ->
             val seed = seedMaterial(); defaultSeedWallet(f, seed)
             f.legacy.migrateWallet("default", seed.privateKey, seed.mnemonic, "mnemonic", true)
-            val file = weak(f)
+            f.backup.writeBackup("default", seed, "111111".toCharArray())
+            val file = File(f.context.cacheDir, "integration-backups/default.enc")
             f.phrase()
-            val result = f.reader.readKeyMaterial(f.activity, "default", "Unlock", "Authenticate") as WalletKeyReader.MaterialResult.Success
-            try { assertEquals(seed.mnemonic, result.mnemonic) } finally { result.privateKey.fill(0) }
+            assertTrue(f.reader.readKeyMaterial(f.activity, "default", "Unlock", "Authenticate") is WalletKeyReader.MaterialResult.NotAvailable)
+            assertTrue(file.exists())
+            f.phrase("111111"); f.phrase()
+            val result = LegacyBackupRecovery(f.db, f.backup, f.coordinator, f.prompt,
+                WalletSecretValidator(MnemonicManager()), f.keyManager, f.reader, f.legacy).recover(f.activity, "default") as VaultAccessResult.Success
+            assertEquals(seed.mnemonic, result.material.mnemonic)
             assertFalse(file.exists()); assertNull(f.db.walletVaultDao().legacy("default"))
             assertFalse(f.store.pendingLegacyCleanup().contains("default"))
         }

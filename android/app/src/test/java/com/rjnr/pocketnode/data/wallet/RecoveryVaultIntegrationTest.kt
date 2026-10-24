@@ -3,6 +3,7 @@ package com.rjnr.pocketnode.data.wallet
 import com.rjnr.pocketnode.core.log.NoopLogger
 import com.rjnr.pocketnode.data.crypto.WalletKeyBundle
 import org.junit.Assert.*
+import io.mockk.*
 import org.junit.Test
 import org.junit.runner.RunWith
 import org.robolectric.RobolectricTestRunner
@@ -14,7 +15,7 @@ class RecoveryVaultIntegrationTest {
     private fun restorer(f: WalletVaultIntegrationFixture) = RecoveredKeyRestorer(
         f.db.walletDao(), f.db.keyMaterialDao(), f.reader, f.keyManager,
         MnemonicManager(), f.recovery, f.backup, NoopLogger, f.coordinator, f.prompt,
-        com.rjnr.pocketnode.data.vault.LegacyBackupRecovery(f.db, f.backup, f.coordinator, f.prompt, com.rjnr.pocketnode.data.vault.WalletSecretValidator(MnemonicManager()), f.keyManager, f.legacy),
+        com.rjnr.pocketnode.data.vault.LegacyBackupRecovery(f.db, f.backup, f.coordinator, f.prompt, com.rjnr.pocketnode.data.vault.WalletSecretValidator(MnemonicManager()), f.keyManager, f.reader, f.legacy),
     )
     @Test fun `missing wallet becomes verified V3 without Android lock or weak fallback consent`() = walletOperationTest {
         WalletVaultIntegrationFixture().use { f ->
@@ -25,14 +26,18 @@ class RecoveryVaultIntegrationTest {
             assertFalse(f.backup.hasAnyBackups())
         }
     }
-    @Test fun `present unusable V2 is replaced only after verified external recovery`() = walletOperationTest {
+    @Test fun `malformed V2 source is preserved and never treated as permanent key loss`() = walletOperationTest {
         WalletVaultIntegrationFixture().use { f ->
             f.wallet(); f.v2.writeNewV2Row("a", WalletKeyBundle(f.material.privateKey, null), f.encryption.newEncryptCipherV2(), "raw_key", false).getOrThrow()
             val unreadable = f.db.keyMaterialDao().getByWalletId("a")!!.copy(encryptedPrivateKey = byteArrayOf(9))
             f.db.keyMaterialDao().upsert(unreadable)
             f.recovery.addUnverified("a"); f.phrase()
-            assertEquals(RecoveredKeyRestorer.Outcome.Restored, restorer(f).restore(f.activity, "a", f.material, false))
-            assertEquals(3, f.db.keyMaterialDao().getKdfVersion("a"))
+            coEvery { f.auth.authenticateForCipher(any(), any(), any(), any(), any(), any()) } coAnswers {
+                com.rjnr.pocketnode.data.auth.AuthManager.CipherAuthResult.Success(secondArg())
+            }
+            assertTrue(restorer(f).restore(f.activity, "a", f.material, false) is RecoveredKeyRestorer.Outcome.Failed)
+            assertEquals(unreadable, f.db.keyMaterialDao().getByWalletId("a"))
+            assertNull(f.store.get("a")); assertTrue("a" in f.recovery.unverifiedWalletIds())
         }
     }
     @Test fun `cancel keeps exact original ciphertext and health marker`() = walletOperationTest {

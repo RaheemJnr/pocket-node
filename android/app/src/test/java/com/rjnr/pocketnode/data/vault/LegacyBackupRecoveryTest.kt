@@ -2,6 +2,8 @@ package com.rjnr.pocketnode.data.vault
 
 import com.rjnr.pocketnode.data.wallet.*
 import java.io.File
+import io.mockk.*
+import com.rjnr.pocketnode.data.auth.AuthManager
 import org.junit.Assert.*
 import org.junit.Test
 import org.junit.runner.RunWith
@@ -11,7 +13,7 @@ import org.robolectric.annotation.Config
 @RunWith(RobolectricTestRunner::class)
 @Config(sdk = [28], manifest = Config.NONE)
 class LegacyBackupRecoveryTest {
-    private fun resolver(f: WalletVaultIntegrationFixture) = LegacyBackupRecovery(f.db, f.backup, f.coordinator, f.prompt, WalletSecretValidator(MnemonicManager()), f.keyManager, f.legacy)
+    private fun resolver(f: WalletVaultIntegrationFixture) = LegacyBackupRecovery(f.db, f.backup, f.coordinator, f.prompt, WalletSecretValidator(MnemonicManager()), f.keyManager, f.reader, f.legacy)
     private fun fixture(f: WalletVaultIntegrationFixture, id: String = "default") = File(f.context.cacheDir, "integration-backups/$id.enc").apply {
         parentFile!!.mkdirs()
         writeBytes(LegacyBackupRecoveryTest::class.java.getResourceAsStream("/legacy-scalar2-pin111111.enc")!!.use { it.readBytes() })
@@ -201,6 +203,9 @@ class LegacyBackupRecoveryTest {
             f.v2.writeNewV2Row("default", com.rjnr.pocketnode.data.crypto.WalletKeyBundle(hex, words), f.encryption.newEncryptCipherV2(), "mnemonic", true).getOrThrow()
             f.backup.writeBackup("default", seed, "111111".toCharArray())
             f.phrase("111111"); f.phrase()
+            coEvery { f.auth.authenticateForCipher(any(), any(), any(), any(), any(), any()) } coAnswers {
+                AuthManager.CipherAuthResult.Success(secondArg())
+            }
             assertEquals(words, (resolver(f).recover(f.activity, "default") as VaultAccessResult.Success).material.mnemonic)
             assertNull(f.db.walletVaultDao().legacy("default")); assertFalse(f.backup.hasBackup("default"))
         }
@@ -229,6 +234,181 @@ class LegacyBackupRecoveryTest {
             } else {
                 assertEquals(words, (result as VaultAccessResult.Success).material.mnemonic)
                 assertFalse(f.backup.hasBackup("a"))
+            }
+        }
+    }
+
+    @Test fun `raw V1 source never proves scoped seed backup capabilities`() = opaqueSeedBackup("a", false)
+    @Test fun `raw V1 source never proves interrupted seed backup capabilities`() = opaqueSeedBackup("a", true)
+    @Test fun `raw V1 source never proves default seed backup capabilities`() = opaqueSeedBackup("default", false)
+    @Test fun `raw V1 source never proves interrupted default seed backup capabilities`() = opaqueSeedBackup("default", true)
+    private fun seedMaterial(): com.rjnr.pocketnode.data.crypto.KeyMaterial {
+        val words = "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about"
+        val key = MnemonicManager().mnemonicToPrivateKey(words.split(" "))
+        val hex = key.joinToString("") { "%02x".format(it) }; key.fill(0)
+        return com.rjnr.pocketnode.data.crypto.KeyMaterial(hex, words, "mnemonic", true)
+    }
+    private suspend fun seedWallet(f: WalletVaultIntegrationFixture, id: String, seed: com.rjnr.pocketnode.data.crypto.KeyMaterial) {
+        val key = seed.privateKey.chunked(2).map { it.toInt(16).toByte() }.toByteArray()
+        val info = try { WalletDerivation.walletInfo(key) } finally { key.fill(0) }
+        f.db.walletDao().insert(com.rjnr.pocketnode.data.database.entity.WalletEntity(id, "Seed wallet", "mnemonic", null, null,
+            mainnetAddress = info.mainnetAddress, testnetAddress = info.testnetAddress))
+    }
+    private fun opaqueSeedBackup(backupId: String, interrupted: Boolean) = walletOperationTest {
+        WalletVaultIntegrationFixture().use { f ->
+            val seed = seedMaterial(); seedWallet(f, "a", seed)
+            f.legacy.migrateWallet("a", seed.privateKey, null, "raw_key", false)
+            if (backupId == "default") f.legacy.migrateWallet("default", seed.privateKey, null, "raw_key", false)
+            f.backup.writeBackup(backupId, seed, "111111".toCharArray())
+            val committed = File(f.context.cacheDir, "integration-backups/$backupId.enc")
+            val file = if (interrupted) File(committed.path + ".tmp").also { assertTrue(committed.renameTo(it)) } else committed
+            val bytes = file.readBytes()
+            f.phrase()
+            assertEquals(VaultAccessResult.CleanupRequired, f.coordinator.recoverExisting(f.activity, "a", seed.copy(mnemonic = null, walletType = "raw_key")))
+            assertArrayEquals(bytes, file.readBytes())
+            assertNotNull(f.db.walletVaultDao().legacy("a"))
+            f.phrase("111111"); f.phrase()
+            assertEquals(seed.mnemonic, (resolver(f).recover(f.activity, "a") as VaultAccessResult.Success).material.mnemonic)
+            assertFalse(file.exists())
+        }
+    }
+
+    @Test fun `native raw backup preserves authenticated scoped V2 seed`() = nativeV2("a", "success")
+    @Test fun `native raw backup preserves authenticated default V2 seed`() = nativeV2("default", "success")
+    @Test fun `native raw backup V2 cancellation aborts without activation`() = nativeV2("a", "cancel")
+    @Test fun `native raw backup V2 temporary auth failure aborts without activation`() = nativeV2("a", "temporary")
+    private fun nativeV2(id: String, authResult: String) = walletOperationTest {
+        WalletVaultIntegrationFixture().use { f ->
+            val seed = seedMaterial(); seedWallet(f, id, seed)
+            f.v2.writeNewV2Row(id, com.rjnr.pocketnode.data.crypto.WalletKeyBundle(seed.privateKey, seed.mnemonic),
+                f.encryption.newEncryptCipherV2(), "mnemonic", true).getOrThrow()
+            val source = f.db.keyMaterialDao().getByWalletId(id)
+            f.backup.writeBackup(id, seed.copy(mnemonic = null, walletType = "raw_key"), "111111".toCharArray())
+            val file = File(f.context.cacheDir, "integration-backups/$id.enc"); val bytes = file.readBytes()
+            coEvery { f.auth.authenticateForCipher(any(), any(), any(), any(), any(), any()) } coAnswers {
+                when (authResult) {
+                    "cancel" -> AuthManager.CipherAuthResult.Cancelled
+                    "temporary" -> AuthManager.CipherAuthResult.Error(1, "Temporarily unavailable")
+                    "changed" -> {
+                        f.db.keyMaterialDao().upsert(source!!.copy(updatedAt = source.updatedAt + 1))
+                        AuthManager.CipherAuthResult.Success(secondArg())
+                    }
+                    else -> AuthManager.CipherAuthResult.Success(secondArg())
+                }
+            }
+            f.phrase("111111"); f.phrase()
+            val result = resolver(f).recover(f.activity, id)
+            if (authResult == "success") {
+                assertEquals(seed.mnemonic, (result as VaultAccessResult.Success).material.mnemonic)
+                assertFalse(file.exists()); assertNull(f.db.walletVaultDao().legacy(id))
+            } else {
+                if (authResult == "cancel") assertEquals(VaultAccessResult.Cancelled, result)
+                else assertTrue(result is VaultAccessResult.Unavailable)
+                assertEquals(if (authResult == "changed") source!!.copy(updatedAt = source.updatedAt + 1) else source, f.db.keyMaterialDao().getByWalletId(id)); assertNull(f.store.get(id))
+                assertArrayEquals(bytes, file.readBytes())
+            }
+            coVerify(exactly = 1) { f.auth.authenticateForCipher(any(), any(), any(), any(), any(), any()) }
+        }
+    }
+
+    @Test fun `invalidated V2 source requires explicit spending only acknowledgment`() = inaccessibleV2(true)
+    @Test fun `declined inaccessible V2 source remains untouched`() = inaccessibleV2(false)
+    @Test fun `cancelled inaccessible V2 source remains untouched`() = inaccessibleV2(null)
+    @Test fun `source changed during inaccessible V2 acknowledgment rejects proof`() = inaccessibleV2(true, true)
+    private fun inaccessibleV2(consent: Boolean?, changeSource: Boolean = false) = walletOperationTest {
+        val encryption = spyk(com.rjnr.pocketnode.data.crypto.KeystoreEncryptionManager.createForTest())
+        WalletVaultIntegrationFixture(encryptionOverride = encryption).use { f ->
+            val seed = seedMaterial(); seedWallet(f, "a", seed)
+            f.v2.writeNewV2Row("a", com.rjnr.pocketnode.data.crypto.WalletKeyBundle(seed.privateKey, seed.mnemonic),
+                encryption.newEncryptCipherV2(), "mnemonic", true).getOrThrow()
+            val source = f.db.keyMaterialDao().getByWalletId("a")!!
+            f.backup.writeBackup("a", seed.copy(mnemonic = null, walletType = "raw_key"), "111111".toCharArray())
+            every { encryption.newDecryptCipherV2(any()) } throws android.security.keystore.KeyPermanentlyInvalidatedException("public test invalidation")
+            f.choices += consent
+            var choices = 0
+            f.onChoice = {
+                choices++
+                if (changeSource) f.db.keyMaterialDao().upsert(source.copy(updatedAt = source.updatedAt + 1))
+            }
+            f.phrase("111111"); f.phrase()
+            val result = resolver(f).recover(f.activity, "a")
+            assertEquals(1, choices)
+            if (consent == true && !changeSource) {
+                assertTrue(result is VaultAccessResult.Success)
+                assertNull((result as VaultAccessResult.Success).material.mnemonic)
+                assertNull(f.db.walletVaultDao().legacy("a")); assertFalse(f.backup.hasBackup("a"))
+            } else {
+                if (changeSource) assertTrue(result is VaultAccessResult.Unavailable) else assertEquals(VaultAccessResult.Cancelled, result)
+                assertNull(f.store.get("a")); assertTrue(f.backup.hasBackup("a"))
+                assertEquals(if (changeSource) source.copy(updatedAt = source.updatedAt + 1) else source, f.db.keyMaterialDao().getByWalletId("a"))
+            }
+        }
+    }
+    @Test fun `fresh authenticated V2 migration retains seed and retires exact source without backups`() = walletOperationTest {
+        for (id in listOf("a", "default")) WalletVaultIntegrationFixture().use { f ->
+            val seed = seedMaterial(); seedWallet(f, id, seed)
+            f.v2.writeNewV2Row(id, com.rjnr.pocketnode.data.crypto.WalletKeyBundle(seed.privateKey, seed.mnemonic),
+                f.encryption.newEncryptCipherV2(), "mnemonic", true).getOrThrow()
+            coEvery { f.auth.authenticateForCipher(any(), any(), any(), any(), any(), any()) } coAnswers {
+                AuthManager.CipherAuthResult.Success(secondArg())
+            }
+            f.phrase()
+            val result = f.reader.readKeyMaterial(f.activity, id, "Read", "Authenticate") as WalletKeyReader.MaterialResult.Success
+            try { assertEquals(seed.mnemonic, result.mnemonic) } finally { result.privateKey.fill(0) }
+            assertNull(f.db.walletVaultDao().legacy(id))
+        }
+    }
+    @Test fun `external raw recovery cannot retire unproven V2 archive without backup`() = walletOperationTest {
+        WalletVaultIntegrationFixture().use { f ->
+            val seed = seedMaterial(); seedWallet(f, "a", seed)
+            f.v2.writeNewV2Row("a", com.rjnr.pocketnode.data.crypto.WalletKeyBundle(seed.privateKey, seed.mnemonic),
+                f.encryption.newEncryptCipherV2(), "mnemonic", true).getOrThrow()
+            val source = f.db.keyMaterialDao().getByWalletId("a")
+            f.phrase()
+            assertEquals(VaultAccessResult.CleanupRequired, f.coordinator.recoverExisting(f.activity, "a", seed.copy(mnemonic = null, walletType = "raw_key")))
+            assertEquals(source, f.db.walletVaultDao().legacy("a")?.source())
+        }
+    }
+
+    @Test fun `native raw backup rejects source changed during V2 authentication`() = nativeV2("a", "changed")
+    @Test fun `failed V2 migration cleanup resumes with fresh archive auth and no backup`() = resumeArchive("success")
+    @Test fun `cancelled V2 archive resume preserves saved vault and source`() = resumeArchive("cancel")
+    @Test fun `temporary V2 archive resume preserves saved vault and source`() = resumeArchive("temporary")
+    @Test fun `generation change during V2 archive resume rejects stale proof`() = resumeArchive("generation")
+    private fun resumeArchive(retry: String) = walletOperationTest {
+        WalletVaultIntegrationFixture().use { f ->
+            val seed = seedMaterial(); seedWallet(f, "a", seed)
+            f.v2.writeNewV2Row("a", com.rjnr.pocketnode.data.crypto.WalletKeyBundle(seed.privateKey, seed.mnemonic),
+                f.encryption.newEncryptCipherV2(), "mnemonic", true).getOrThrow()
+            val source = f.db.keyMaterialDao().getByWalletId("a")
+            var authentications = 0
+            coEvery { f.auth.authenticateForCipher(any(), any(), any(), any(), any(), any()) } coAnswers {
+                authentications++
+                when {
+                    authentications == 1 -> AuthManager.CipherAuthResult.Success(secondArg())
+                    retry == "cancel" -> AuthManager.CipherAuthResult.Cancelled
+                    retry == "temporary" -> AuthManager.CipherAuthResult.Error(1, "Temporary")
+                    retry == "generation" -> {
+                        f.store.rotate(f.pass.toCharArray(), "another public test passphrase".toCharArray())
+                        AuthManager.CipherAuthResult.Success(secondArg())
+                    }
+                    else -> AuthManager.CipherAuthResult.Success(secondArg())
+                }
+            }
+            f.cleanupOk = false; f.phrase()
+            assertTrue(f.reader.readKeyMaterial(f.activity, "a", "Read", "Authenticate") is WalletKeyReader.MaterialResult.NotAvailable)
+            val active = f.db.walletVaultDao().get("a")!!
+            assertEquals(source, f.db.walletVaultDao().legacy("a")?.source())
+            f.cleanupOk = true; f.phrase()
+            val result = resolver(f).resumeCleanup(f.activity, "a")
+            assertEquals(2, authentications)
+            if (retry == "success") {
+                assertEquals(seed.mnemonic, (result as VaultAccessResult.Success).material.mnemonic)
+                assertNull(f.db.walletVaultDao().legacy("a")); assertTrue(f.store.pendingLegacyCleanup().isEmpty())
+            } else {
+                if (retry == "cancel") assertEquals(VaultAccessResult.Cancelled, result) else assertTrue(result is VaultAccessResult.Unavailable)
+                assertEquals(source, f.db.walletVaultDao().legacy("a")?.source())
+                assertEquals(active.generation + if (retry == "generation") 1 else 0, f.db.walletVaultDao().get("a")!!.generation)
             }
         }
     }

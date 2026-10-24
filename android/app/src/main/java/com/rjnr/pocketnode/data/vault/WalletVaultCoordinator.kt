@@ -61,10 +61,23 @@ class WalletVaultCoordinator(
     internal suspend fun recoverWithLegacyProof(activity: FragmentActivity, walletId: String, material: KeyMaterial, proof: LegacyBackupProof): VaultAccessResult =
         enroll(activity, walletId, material, Enrollment.RECOVERY, proof = proof)
 
+    internal suspend fun recoverWithAcknowledgedSource(activity: FragmentActivity, walletId: String,
+        material: KeyMaterial, acknowledgment: LegacySourceAcknowledgment): VaultAccessResult =
+        enroll(activity, walletId, material, Enrollment.RECOVERY, acknowledgment = acknowledgment)
+
+    private suspend fun checkAcknowledgment(id: String, acknowledgment: LegacySourceAcknowledgment) {
+        val source = acknowledgment.source
+        if (source.kdfVersion != 2 || source.walletId != id || acknowledgment.wallet.walletId != id ||
+            db.walletDao().getById(id) != acknowledgment.wallet ||
+            !LegacyBackupProof.sameEnvelope(db.walletVaultDao().get(id), acknowledgment.original) ||
+            (db.keyMaterialDao().getByWalletId(id) != source && db.walletVaultDao().legacy(id)?.source() != source)) throw VaultFailure()
+    }
+
     private suspend fun checkProofSource(id: String, proof: LegacyBackupProof) {
         if (!proof.active || proof.wallet.walletId != id || db.walletDao().getById(id) != proof.wallet ||
             db.keyMaterialDao().getByWalletId(id) != proof.source ||
             !LegacyBackupProof.sameEnvelope(db.walletVaultDao().get(id), proof.original)) throw VaultFailure()
+        proof.acknowledgedInaccessibleSources.forEach { checkAcknowledgment(id, it) }
         for ((sourceId, captured) in proof.legacySources) {
             if (db.keyMaterialDao().getByWalletId(sourceId) != captured.first ||
                 db.walletVaultDao().legacy(sourceId)?.source() != captured.second) throw VaultFailure()
@@ -72,8 +85,9 @@ class WalletVaultCoordinator(
     }
 
     private enum class Enrollment { NEW, LEGACY, RECOVERY }
-    private suspend fun enroll(activity: FragmentActivity, id: String, material: KeyMaterial, mode: Enrollment, expectedLegacyIv: ByteArray? = null, proof: LegacyBackupProof? = null): VaultAccessResult = access(activity) { session ->
+    private suspend fun enroll(activity: FragmentActivity, id: String, material: KeyMaterial, mode: Enrollment, expectedLegacyIv: ByteArray? = null, proof: LegacyBackupProof? = null, acknowledgment: LegacySourceAcknowledgment? = null): VaultAccessResult = access(activity) { session ->
         proof?.let { checkProofSource(id, it) }
+        acknowledgment?.let { checkAcknowledgment(id, it) }
         val wallet = db.walletDao().getById(id)
         if (mode != Enrollment.NEW && wallet == null) throw VaultFailure()
         if (!validate(material, wallet)) throw VaultFailure()
@@ -88,6 +102,7 @@ class WalletVaultCoordinator(
             val protectedMaterial = preserveAccessibleMnemonic(old, material, wallet, phrase)
             val candidate = create(id, old?.let(::nextGeneration) ?: 0, protectedMaterial, phrase)
             proof?.let { checkProofSource(id, it) }
+            acknowledgment?.let { checkAcknowledgment(id, it) }
             if (old == null) {
                 val metadata = source ?: KeyMaterialEntity(id, byteArrayOf(), null, byteArrayOf(), material.walletType,
                     material.mnemonicBackedUp, System.currentTimeMillis())
@@ -99,7 +114,13 @@ class WalletVaultCoordinator(
             // Verify persisted material rather than the candidate held in memory.
             val verified = decrypt(committed, phrase)
             if (!validate(verified, wallet) || verified.privateKey != protectedMaterial.privateKey || verified.mnemonic != protectedMaterial.mnemonic) throw VaultFailure()
-            if (!finishCleanup(id, committed.generation, verified, proof?.let { BoundLegacyBackupProof(it, db.walletVaultDao().get(id) ?: throw VaultFailure()) })) return@access VaultAccessResult.CleanupRequired
+            val committedRow = db.walletVaultDao().get(id) ?: throw VaultFailure()
+            if (!finishCleanup(id, committed.generation, verified, proof?.let { BoundLegacyBackupProof(it, committedRow) },
+                    when {
+                        mode == Enrollment.LEGACY -> source?.let { BoundLegacySourceProof(it, committedRow, LegacySourceAuthority.AUTHENTICATED) }
+                        acknowledgment != null -> BoundLegacySourceProof(acknowledgment.source, committedRow, LegacySourceAuthority.ACKNOWLEDGED_INACCESSIBLE)
+                        else -> null
+                    })) return@access VaultAccessResult.CleanupRequired
             if (device.unavailableReason() == null && prompt.choose(activity, "Use device authentication?",
                     "Your wallet passphrase remains required for recovery. Device authentication is optional.", "Enable", "Passphrase only") == true) {
                 var ownedKey: ByteArray? = null
@@ -275,9 +296,13 @@ class WalletVaultCoordinator(
         if (envelope.generation == Long.MAX_VALUE) throw VaultFailure()
         return envelope.generation + 1
     }
-    private suspend fun finishCleanup(id: String, generation: Long, material: KeyMaterial, proof: BoundLegacyBackupProof? = null): Boolean = try {
+    private suspend fun finishCleanup(id: String, generation: Long, material: KeyMaterial, proof: BoundLegacyBackupProof? = null, sourceAuthorization: BoundLegacySourceProof? = null): Boolean = try {
         if (id !in store.pendingLegacyCleanup()) true
-        else if (!(if (proof == null) cleanup.clean(id, generation, material) else cleanup.cleanWithProof(id, generation, material, proof))) false
+        else if (!(when {
+            proof != null -> cleanup.cleanWithProof(id, generation, material, proof)
+            sourceAuthorization != null -> cleanup.cleanWithSource(id, generation, material, sourceAuthorization)
+            else -> cleanup.clean(id, generation, material)
+        })) false
         else {
             store.markLegacyCleanupComplete(id, generation)
             true

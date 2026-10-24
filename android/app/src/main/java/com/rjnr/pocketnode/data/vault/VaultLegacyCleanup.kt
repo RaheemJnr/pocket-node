@@ -6,4 +6,5 @@ import com.rjnr.pocketnode.data.crypto.KeyMaterial
 fun interface VaultLegacyCleanup {
     suspend fun clean(walletId: String, expectedGeneration: Long, verifiedMaterial: KeyMaterial): Boolean
     suspend fun cleanWithProof(walletId: String, expectedGeneration: Long, verifiedMaterial: KeyMaterial, proof: BoundLegacyBackupProof): Boolean = false
+    suspend fun cleanWithSource(walletId: String, expectedGeneration: Long, verifiedMaterial: KeyMaterial, proof: BoundLegacySourceProof): Boolean = false
 }

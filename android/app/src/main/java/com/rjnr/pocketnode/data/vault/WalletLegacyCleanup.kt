@@ -21,12 +21,15 @@ class WalletLegacyCleanup(
     private val legacy: KeyStoreMigrationHelper,
 ) : VaultLegacyCleanup {
     override suspend fun clean(walletId: String, expectedGeneration: Long, verifiedMaterial: KeyMaterial): Boolean =
-        cleanOwned(walletId, expectedGeneration, verifiedMaterial, null)
+        cleanOwned(walletId, expectedGeneration, verifiedMaterial, null, null)
 
     override suspend fun cleanWithProof(walletId: String, expectedGeneration: Long, verifiedMaterial: KeyMaterial, proof: BoundLegacyBackupProof): Boolean =
-        cleanOwned(walletId, expectedGeneration, verifiedMaterial, proof)
+        cleanOwned(walletId, expectedGeneration, verifiedMaterial, proof, null)
 
-    private suspend fun cleanOwned(walletId: String, expectedGeneration: Long, verifiedMaterial: KeyMaterial, proof: BoundLegacyBackupProof?): Boolean = withContext(Dispatchers.IO) {
+    override suspend fun cleanWithSource(walletId: String, expectedGeneration: Long, verifiedMaterial: KeyMaterial, proof: BoundLegacySourceProof): Boolean =
+        cleanOwned(walletId, expectedGeneration, verifiedMaterial, null, proof)
+
+    private suspend fun cleanOwned(walletId: String, expectedGeneration: Long, verifiedMaterial: KeyMaterial, proof: BoundLegacyBackupProof?, sourceAuthorization: BoundLegacySourceProof?): Boolean = withContext(Dispatchers.IO) {
         try {
             if (!walletId.matches(Regex("[A-Za-z0-9_-]{1,128}"))) return@withContext false
             val vaults = db.walletVaultDao()
@@ -43,6 +46,7 @@ class WalletLegacyCleanup(
 
             if (proof != null && (!proof.proof.active || proof.proof.wallet != wallet ||
                 !LegacyBackupProof.sameEnvelope(proof.committed, target))) return@withContext false
+            if (sourceAuthorization != null && !LegacyBackupProof.sameEnvelope(sourceAuthorization.committed, target)) return@withContext false
             val witnessed = proof?.proof?.copies.orEmpty()
             fun preserved(material: KeyMaterial): Boolean = addresses(material.privateKey) == identity &&
                 (material.mnemonic == null || material.mnemonic == verifiedMaterial.mnemonic)
@@ -54,16 +58,17 @@ class WalletLegacyCleanup(
             val differentDefault = defaultWitness.isNotEmpty() && defaultWitness.all { addresses(it.material.privateKey) != identity }
 
             val scopedArchive = vaults.legacy(walletId)?.source()
+            if (scopedArchive?.kdfVersion == 2 && sourceAuthorization?.source != scopedArchive) {
+                val authenticated = proof?.proof?.authenticatedSources?.get(scopedArchive)
+                val acknowledged = proof?.proof?.acknowledgedInaccessibleSources?.any { it.source == scopedArchive && it.wallet == wallet } == true
+                if (authenticated == null && !acknowledged || authenticated != null && !preserved(authenticated)) return@withContext false
+            }
             val scopedReadable = scopedArchive?.let { legacy.legacySourceForVaultCleanup(it) }
             if (scopedReadable != null && addresses(scopedReadable.privateKeyHex) == identity &&
                 scopedReadable.mnemonic != null && scopedReadable.mnemonic != verifiedMaterial.mnemonic) return@withContext false
             val scopedBackup = backup.cleanupSnapshot(walletId)
-            if (walletId != "default" && scopedBackup.any { it != null } && witnessed[walletId] == null) {
-                val readableSource = scopedReadable
-                    ?: return@withContext false
-                if (addresses(readableSource.privateKeyHex) != identity ||
-                    readableSource.mnemonic != null && readableSource.mnemonic != verifiedMaterial.mnemonic) return@withContext false
-            }
+            // A readable row proves only its own capabilities, never opaque backup contents.
+            if (scopedBackup.any { it != null } && witnessed[walletId] == null) return@withContext false
 
             // Capture exact sources BEFORE reading them. Decryption/derivation is outside Room.
             val defaultRow = keys.getByWalletId("default")
@@ -77,8 +82,11 @@ class WalletLegacyCleanup(
             val readable = listOfNotNull(decoded, global)
             val matching = readable.filter { addresses(it.privateKeyHex) == identity }
             val defaultArtifacts = source != null || globalFiles.any { it != null } || defaultBackup.any { it != null }
+            val authorizedDefaultSource = source != null &&
+                (sourceAuthorization?.source == source || proof?.proof?.authenticatedSources?.get(source)?.let(::preserved) == true ||
+                    proof?.proof?.acknowledgedInaccessibleSources?.any { it.source == source && it.wallet == wallet } == true)
             val ownsDefault = when {
-                matching.isNotEmpty() || witnessedDefault -> true
+                matching.isNotEmpty() || witnessedDefault || authorizedDefaultSource -> true
                 readable.isNotEmpty() || differentDefault -> {
                     // A different source may be skipped only when the target uses another namespace.
                     if (walletId == "default") return@withContext false
@@ -87,9 +95,10 @@ class WalletLegacyCleanup(
                 defaultArtifacts -> return@withContext false // Task 5 must obtain old-PIN ownership proof.
                 else -> false
             }
+            if (ownsDefault && defaultBackup.any { it != null } && !witnessedDefault) return@withContext false
             if (ownsDefault && (readable.any { addresses(it.privateKeyHex) != identity } ||
                 readable.any { it.mnemonic != null && it.mnemonic != verifiedMaterial.mnemonic } ||
-                (source != null && source.kdfVersion != 1 && !witnessedDefault))) return@withContext false
+                (source != null && source.kdfVersion != 1 && !witnessedDefault && !authorizedDefaultSource))) return@withContext false
             if (ownsDefault && source?.kdfVersion == 1 && decoded == null) return@withContext false
 
             db.withTransaction {
