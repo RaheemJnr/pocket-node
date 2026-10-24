@@ -33,7 +33,8 @@ class WalletVaultCoordinatorTest {
     private lateinit var coordinator: WalletVaultCoordinator
     private val crypto = WalletEnvelopeCrypto()
     private val validator = WalletSecretValidator(MnemonicManager())
-    private val activity = Robolectric.buildActivity(FragmentActivity::class.java).setup().get()
+    private val activityController = Robolectric.buildActivity(FragmentActivity::class.java).setup()
+    private val activity = activityController.get()
     private val pass = "  exact long wallet passphrase  "
     private val next = "a different long wallet phrase"
     private val key = ByteArray(32).also { it[31] = 1 }
@@ -48,6 +49,10 @@ class WalletVaultCoordinatorTest {
     private var chooseWrap = false
     private var wrapCancelled = false
     private var onWrap: suspend () -> Unit = {}
+    private var onUnwrap: suspend () -> Unit = {}
+    private var activeWrapKey: ByteArray? = null
+    private var deviceModes = setOf(VaultDevicePromptMode.BIOMETRIC_ONLY)
+    private var lastDeviceMode: VaultDevicePromptMode? = null
     private val prompt = object : VaultPrompt {
         override suspend fun request(activity: FragmentActivity, title: String, message: String, confirm: Boolean): CharArray? =
             credentials.removeFirstOrNull()?.also { issued += it }
@@ -57,16 +62,22 @@ class WalletVaultCoordinatorTest {
     }
     private val device = object : VaultDeviceAuthentication {
         override fun unavailableReason(): String? = if (chooseWrap) null else "no-device-lock"
-        override suspend fun wrap(activity: FragmentActivity, envelope: WalletEnvelope, dataKey: ByteArray): DeviceVaultResult<DeviceKeyWrap> {
+        override fun availablePromptModes() = deviceModes
+        override suspend fun wrap(activity: FragmentActivity, envelope: WalletEnvelope, dataKey: ByteArray, mode: VaultDevicePromptMode): DeviceVaultResult<DeviceKeyWrap> {
             wrapCount++
+            activeWrapKey = dataKey
+            lastDeviceMode = mode
             assertTrue(issued.all { chars -> chars.all { it == '\u0000' } })
             onWrap()
             if (wrapCancelled) return DeviceVaultResult.Cancelled
             deviceKeys[envelope.walletId] = dataKey.copyOf()
             return DeviceVaultResult.Success(DeviceKeyWrap("test-" + envelope.walletId, ByteArray(48), ByteArray(12)))
         }
-        override suspend fun unwrap(activity: FragmentActivity, envelope: WalletEnvelope, title: String, subtitle: String): DeviceVaultResult<ByteArray> =
-            unwrapResult ?: deviceKeys[envelope.walletId]?.let { DeviceVaultResult.Success(it.copyOf()) } ?: DeviceVaultResult.Unavailable("missing-key")
+        override suspend fun unwrap(activity: FragmentActivity, envelope: WalletEnvelope, title: String, subtitle: String, mode: VaultDevicePromptMode): DeviceVaultResult<ByteArray> {
+            lastDeviceMode = mode
+            onUnwrap()
+            return unwrapResult ?: deviceKeys[envelope.walletId]?.let { DeviceVaultResult.Success(it.copyOf()) } ?: DeviceVaultResult.Unavailable("missing-key")
+        }
     }
     private fun operationTest(block: suspend CoroutineScope.() -> Unit) = runBlocking {
         Dispatchers.setMain(coroutineContext[ContinuationInterceptor] as CoroutineDispatcher)
@@ -286,6 +297,78 @@ class WalletVaultCoordinatorTest {
         phrase()
         val read = coordinator.read(activity, "m", "Read", "Auth") as VaultAccessResult.Success
         assertEquals(mnemonic.mnemonic, read.material.mnemonic)
+    }
+    @Test fun `background during pending biometric enrollment cancels and wipes owned DEK`() = operationTest {
+        active(); chooseWrap = true; phrase()
+        val started = CompletableDeferred<Unit>()
+        onWrap = { started.complete(Unit); awaitCancellation() }
+        val running = launch { coordinator.enrollDevice(activity, "a") }
+        try {
+            started.await(); activityController.pause().stop(); yield()
+            withTimeout(1_000) { running.join() }
+            assertTrue(running.isCancelled)
+            assertTrue(activeWrapKey!!.all { it == 0.toByte() }); assertTrue(issued.all { chars -> chars.all { it == '\u0000' } })
+            assertNull(store.get("a")!!.deviceWrap)
+        } finally { running.cancelAndJoin() }
+    }
+    @Test fun `background during pending biometric reset cancels and wipes new passphrase`() = operationTest {
+        active(deviceWrap = true); phrase(next)
+        val started = CompletableDeferred<Unit>()
+        onUnwrap = { started.complete(Unit); awaitCancellation() }
+        val running = launch { coordinator.resetPassphrase(activity) }
+        try {
+            started.await(); activityController.pause().stop(); yield()
+            withTimeout(1_000) { running.join() }
+            assertTrue(running.isCancelled)
+            assertTrue(issued.all { chars -> chars.all { it == '\u0000' } })
+            assertTrue(store.verifyPassphrase(pass.toCharArray())); assertFalse(store.verifyPassphrase(next.toCharArray()))
+        } finally { running.cancelAndJoin() }
+    }
+    @Test fun `phrase only read bypasses available device UI but still checks cleanup and metadata`() = operationTest {
+        wallet(); cleanupOk = false; phrase()
+        assertEquals(VaultAccessResult.CleanupRequired, coordinator.recoverExisting(activity, "a", material))
+        val envelope = store.get("a")!!
+        deviceKeys["a"] = crypto.unwrapDataKey(envelope, "a", pass.toCharArray())
+        store.updateDeviceWrap("a", envelope.generation, DeviceKeyWrap("test-a", ByteArray(48), ByteArray(12)))
+        onUnwrap = { error("Device UI must not run for explicit passphrase route") }
+        phrase()
+        assertEquals(VaultAccessResult.CleanupRequired, coordinator.read(activity, "a", "Read", "Auth", VaultReadPreference.PASSPHRASE))
+        cleanupOk = true; phrase()
+        assertTrue(coordinator.read(activity, "a", "Read", "Auth", VaultReadPreference.PASSPHRASE) is VaultAccessResult.Success)
+        assertTrue(store.pendingLegacyCleanup().isEmpty())
+        val row = db.walletDao().getById("a")!!; db.walletDao().update(row.copy(testnetAddress = "wrong")); phrase()
+        assertTrue(coordinator.read(activity, "a", "Read", "Auth", VaultReadPreference.PASSPHRASE) is VaultAccessResult.Unavailable)
+    }
+    @Test fun `phrase only read migrates retained old profile before release`() = operationTest {
+        active("a", true); active("b", true); deviceKeys.remove("b"); phrase(next)
+        val reset = coordinator.resetPassphrase(activity) as VaultMaintenanceResult.Completed
+        assertEquals(setOf("b"), reset.unrecoveredWalletIds)
+        onUnwrap = { error("Device UI must not run for explicit passphrase route") }
+        phrase(); phrase(next)
+        val read = coordinator.read(activity, "b", "Read", "Auth", VaultReadPreference.PASSPHRASE) as VaultAccessResult.Success
+        assertEquals(material.privateKey, read.material.privateKey)
+        assertTrue(store.snapshot().unrecoveredWalletIds.isEmpty())
+    }
+    @Test @Config(sdk = [30]) fun `credential route captures selected mode and permits only its legitimate handoff`() = operationTest {
+        active(deviceWrap = true)
+        for (preference in listOf(VaultReadPreference.DEFAULT, VaultReadPreference.CREDENTIAL_ONLY)) {
+            deviceModes = if (preference == VaultReadPreference.DEFAULT) setOf(VaultDevicePromptMode.CREDENTIAL_ONLY)
+                else setOf(VaultDevicePromptMode.BIOMETRIC_ONLY, VaultDevicePromptMode.CREDENTIAL_ONLY)
+            val started = CompletableDeferred<Unit>(); val callback = CompletableDeferred<Unit>()
+            onUnwrap = { started.complete(Unit); callback.await() }
+            var stopped = false
+            val running = async { coordinator.read(activity, "a", "Read", "Auth", preference) }
+            try {
+                started.await(); assertEquals(VaultDevicePromptMode.CREDENTIAL_ONLY, lastDeviceMode)
+                activityController.pause().stop(); stopped = true; yield(); assertTrue(running.isActive)
+                callback.complete(Unit); yield(); assertFalse(running.isCompleted)
+                activityController.start().resume(); stopped = false
+                assertTrue(running.await() is VaultAccessResult.Success)
+            } finally {
+                if (stopped) activityController.start().resume()
+                running.cancelAndJoin()
+            }
+        }
     }
     @Test fun `validator rejects malformed derivation and inconsistent mnemonic`() = operationTest {
         val row = wallet()

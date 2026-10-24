@@ -23,21 +23,25 @@ sealed interface DeviceVaultResult<out T> {
     data class Unavailable(val reason: String) : DeviceVaultResult<Nothing>
 }
 
+enum class VaultDevicePromptMode { BIOMETRIC_ONLY, CREDENTIAL_ONLY }
+
 /** Success must follow a fresh CryptoObject authentication, never a UI boolean. */
 interface VaultDeviceAuthentication {
     fun unavailableReason(): String?
-    suspend fun wrap(activity: FragmentActivity, envelope: WalletEnvelope, dataKey: ByteArray): DeviceVaultResult<DeviceKeyWrap>
-    suspend fun unwrap(activity: FragmentActivity, envelope: WalletEnvelope, title: String, subtitle: String): DeviceVaultResult<ByteArray>
+    fun availablePromptModes(): Set<VaultDevicePromptMode> = setOf(VaultDevicePromptMode.BIOMETRIC_ONLY)
+    suspend fun wrap(activity: FragmentActivity, envelope: WalletEnvelope, dataKey: ByteArray, mode: VaultDevicePromptMode = VaultDevicePromptMode.BIOMETRIC_ONLY): DeviceVaultResult<DeviceKeyWrap>
+    suspend fun unwrap(activity: FragmentActivity, envelope: WalletEnvelope, title: String, subtitle: String, mode: VaultDevicePromptMode = VaultDevicePromptMode.BIOMETRIC_ONLY): DeviceVaultResult<ByteArray>
 }
 
 internal interface VaultDeviceCipherStore {
     fun unavailableReason(): String?
+    fun availablePromptModes(): Set<VaultDevicePromptMode> = setOf(VaultDevicePromptMode.BIOMETRIC_ONLY)
     fun encryptionCipher(alias: String): Cipher
     fun decryptionCipher(alias: String, nonce: ByteArray): Cipher?
 }
 
 internal fun interface VaultCipherAuthenticator {
-    suspend fun authenticate(activity: FragmentActivity, cipher: Cipher, title: String, subtitle: String): AuthManager.CipherAuthResult
+    suspend fun authenticate(activity: FragmentActivity, cipher: Cipher, title: String, subtitle: String, mode: VaultDevicePromptMode): AuthManager.CipherAuthResult
 }
 
 /** Android convenience wrapping. The independent passphrase envelope must already be committed. */
@@ -47,15 +51,25 @@ class DeviceVaultKeyStore internal constructor(
 ) : VaultDeviceAuthentication {
     constructor(auth: AuthManager) : this(
         AndroidVaultDeviceCipherStore(auth),
-        VaultCipherAuthenticator { activity, cipher, title, subtitle -> auth.authenticateForCipher(activity, cipher, title, subtitle) },
+        VaultCipherAuthenticator { activity, cipher, title, subtitle, mode ->
+            auth.authenticateForCipher(activity, cipher, title, subtitle, promptMode = when (mode) {
+                VaultDevicePromptMode.BIOMETRIC_ONLY -> AuthManager.CipherPromptMode.BIOMETRIC_ONLY
+                VaultDevicePromptMode.CREDENTIAL_ONLY -> AuthManager.CipherPromptMode.CREDENTIAL_ONLY
+            })
+        },
     )
 
     override fun unavailableReason(): String? = keys.unavailableReason()
+    override fun availablePromptModes(): Set<VaultDevicePromptMode> = keys.availablePromptModes()
 
-    override suspend fun wrap(activity: FragmentActivity, envelope: WalletEnvelope, dataKey: ByteArray): DeviceVaultResult<DeviceKeyWrap> {
+    private fun supports(mode: VaultDevicePromptMode): Boolean =
+        mode in availablePromptModes() && (mode != VaultDevicePromptMode.CREDENTIAL_ONLY || Build.VERSION.SDK_INT >= 30)
+
+    override suspend fun wrap(activity: FragmentActivity, envelope: WalletEnvelope, dataKey: ByteArray, mode: VaultDevicePromptMode): DeviceVaultResult<DeviceKeyWrap> {
         val owned = dataKey.copyOf()
         try {
             unavailableReason()?.let { return DeviceVaultResult.Unavailable(it) }
+            if (!supports(mode)) return DeviceVaultResult.Unavailable("unsupported-device-authentication")
             envelope.validate()
             requireEnvelope(owned.size == 32)
             val id = MessageDigest.getInstance("SHA-256").digest(envelope.walletId.toByteArray())
@@ -63,7 +77,7 @@ class DeviceVaultKeyStore internal constructor(
             val alias = "pocket_node_vault_${id}_${envelope.generation}_${UUID.randomUUID()}"
             val cipher = keys.encryptionCipher(alias)
             cipher.updateAAD(WalletEnvelopeMetadata.device(envelope, alias))
-            return when (val result = authentication.authenticate(activity, cipher, "Enable device authentication", "Your wallet passphrase remains the recovery fallback")) {
+            return when (val result = authentication.authenticate(activity, cipher, "Enable device authentication", "Your wallet passphrase remains the recovery fallback", mode)) {
                 is AuthManager.CipherAuthResult.Success -> {
                     if (result.cipher !== cipher) return DeviceVaultResult.Unavailable("crypto-authentication-failed")
                     DeviceVaultResult.Success(DeviceKeyWrap(alias, cipher.doFinal(owned), cipher.iv))
@@ -76,15 +90,16 @@ class DeviceVaultKeyStore internal constructor(
         finally { owned.fill(0) }
     }
 
-    override suspend fun unwrap(activity: FragmentActivity, envelope: WalletEnvelope, title: String, subtitle: String): DeviceVaultResult<ByteArray> {
+    override suspend fun unwrap(activity: FragmentActivity, envelope: WalletEnvelope, title: String, subtitle: String, mode: VaultDevicePromptMode): DeviceVaultResult<ByteArray> {
         try {
             envelope.validate()
             val wrap = envelope.deviceWrap ?: return DeviceVaultResult.Unavailable("missing-device-wrap")
             unavailableReason()?.let { return DeviceVaultResult.Unavailable(it) }
+            if (!supports(mode)) return DeviceVaultResult.Unavailable("unsupported-device-authentication")
             // Read-only lookup. Never create a key in the decryption path.
             val cipher = keys.decryptionCipher(wrap.alias, wrap.nonce) ?: return DeviceVaultResult.Unavailable("missing-device-key")
             cipher.updateAAD(WalletEnvelopeMetadata.device(envelope, wrap.alias))
-            return when (val result = authentication.authenticate(activity, cipher, title, subtitle)) {
+            return when (val result = authentication.authenticate(activity, cipher, title, subtitle, mode)) {
                 is AuthManager.CipherAuthResult.Success -> {
                     if (result.cipher !== cipher) return DeviceVaultResult.Unavailable("crypto-authentication-failed")
                     val key = cipher.doFinal(wrap.wrappedKey)
@@ -106,6 +121,14 @@ private class AndroidVaultDeviceCipherStore(private val auth: AuthManager) : Vau
         Build.VERSION.SDK_INT < 30 &&
             (!auth.isBiometricEnabled() || !auth.isBiometricEnrolled()) -> "unsupported-device-authentication"
         else -> null
+    }
+
+    override fun availablePromptModes(): Set<VaultDevicePromptMode> {
+        if (!auth.hasDeviceCredential()) return emptySet()
+        return buildSet {
+            if (auth.isBiometricEnabled() && auth.isBiometricEnrolled()) add(VaultDevicePromptMode.BIOMETRIC_ONLY)
+            if (Build.VERSION.SDK_INT >= 30) add(VaultDevicePromptMode.CREDENTIAL_ONLY)
+        }
     }
 
     override fun encryptionCipher(alias: String): Cipher {

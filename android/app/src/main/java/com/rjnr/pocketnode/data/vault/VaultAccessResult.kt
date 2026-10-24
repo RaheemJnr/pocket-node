@@ -17,3 +17,6 @@ sealed interface VaultMaintenanceResult {
     data object Cancelled : VaultMaintenanceResult
     data class Unavailable(val reason: String) : VaultMaintenanceResult
 }
+
+/** Explicit UI choice; cancellation never changes the selected route. */
+enum class VaultReadPreference { DEFAULT, PASSPHRASE, BIOMETRIC_ONLY, CREDENTIAL_ONLY }

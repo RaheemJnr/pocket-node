@@ -25,8 +25,10 @@ class DeviceVaultKeyStoreTest {
     private var authenticated = 0
     private var authSuccess = true
     private var wrongCipher = false
+    private var observedMode: VaultDevicePromptMode? = null
     private val backend = object : VaultDeviceCipherStore {
         override fun unavailableReason(): String? = null
+        override fun availablePromptModes() = setOf(VaultDevicePromptMode.BIOMETRIC_ONLY, VaultDevicePromptMode.CREDENTIAL_ONLY)
         override fun encryptionCipher(alias: String): Cipher {
             created++; assertFalse(aliases.containsKey(alias))
             val key = SecretKeySpec(ByteArray(32).also { java.security.SecureRandom().nextBytes(it) }, "AES")
@@ -37,8 +39,9 @@ class DeviceVaultKeyStoreTest {
             Cipher.getInstance("AES/GCM/NoPadding").apply { init(Cipher.DECRYPT_MODE, it, GCMParameterSpec(128, nonce)) }
         }
     }
-    private val device = DeviceVaultKeyStore(backend, VaultCipherAuthenticator { _, cipher, _, _ ->
+    private val device = DeviceVaultKeyStore(backend, VaultCipherAuthenticator { _, cipher, _, _, mode ->
         authenticated++
+        observedMode = mode
         if (authSuccess) AuthManager.CipherAuthResult.Success(if (wrongCipher) Cipher.getInstance("AES/GCM/NoPadding") else cipher) else AuthManager.CipherAuthResult.Cancelled
     })
     @Test fun `device wrap binds payload metadata and new aliases preserve older wrap`() = runBlocking {
@@ -53,6 +56,17 @@ class DeviceVaultKeyStoreTest {
     @Test fun `success for an unrelated cipher cannot authorize a wrap`() = runBlocking {
         wrongCipher = true
         assertTrue(device.wrap(activity, envelope, dataKey) is DeviceVaultResult.Unavailable)
+    }
+    @Test @Config(sdk = [30]) fun `explicit credential mode reaches the exact crypto authentication prompt`() = runBlocking {
+        val wrap = (device.wrap(activity, envelope, dataKey, VaultDevicePromptMode.CREDENTIAL_ONLY) as DeviceVaultResult.Success).value
+        assertEquals(VaultDevicePromptMode.CREDENTIAL_ONLY, observedMode)
+        val key = (device.unwrap(activity, envelope.copy(deviceWrap = wrap), "Read", "Auth", VaultDevicePromptMode.CREDENTIAL_ONLY) as DeviceVaultResult.Success).value
+        try { assertArrayEquals(dataKey, key); assertEquals(VaultDevicePromptMode.CREDENTIAL_ONLY, observedMode) }
+        finally { key.fill(0) }
+    }
+    @Test fun `API26 rejects explicit credential mode without creating or authenticating a key`() = runBlocking {
+        assertTrue(device.wrap(activity, envelope, dataKey, VaultDevicePromptMode.CREDENTIAL_ONLY) is DeviceVaultResult.Unavailable)
+        assertEquals(0, created); assertEquals(0, authenticated)
     }
     @Test fun `missing decrypt key never generates replacement and cancelled crypto auth cannot wrap`() = runBlocking {
         val missing = envelope.copy(deviceWrap = DeviceKeyWrap("missing", ByteArray(48), ByteArray(12)))

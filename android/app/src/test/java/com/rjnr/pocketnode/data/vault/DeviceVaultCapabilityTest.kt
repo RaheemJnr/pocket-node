@@ -35,6 +35,7 @@ class DeviceVaultCapabilityTest {
         auth.testBiometricManager = mockk { every { canAuthenticate(BiometricManager.Authenticators.BIOMETRIC_STRONG) } returns BiometricManager.BIOMETRIC_SUCCESS }
         auth.setBiometricEnabled(true)
         assertNull(device.unavailableReason())
+        assertEquals(setOf(VaultDevicePromptMode.BIOMETRIC_ONLY), device.availablePromptModes())
     }
     @Test @Config(sdk = [30]) fun `API30 supports credential CryptoObject without biometric enrollment`() {
         val auth = auth()
@@ -43,6 +44,7 @@ class DeviceVaultCapabilityTest {
             every { canAuthenticate(BiometricManager.Authenticators.BIOMETRIC_STRONG) } returns BiometricManager.BIOMETRIC_ERROR_NONE_ENROLLED
         }
         assertNull(DeviceVaultKeyStore(auth).unavailableReason())
+        assertEquals(setOf(VaultDevicePromptMode.CREDENTIAL_ONLY), DeviceVaultKeyStore(auth).availablePromptModes())
         assertEquals(BiometricManager.Authenticators.DEVICE_CREDENTIAL, auth.getAllowedAuthenticators())
     }
 }

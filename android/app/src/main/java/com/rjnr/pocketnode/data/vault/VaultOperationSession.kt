@@ -17,17 +17,32 @@ import kotlin.coroutines.resume
 internal class VaultOperationSession(private val activity: FragmentActivity) {
     private var systemHandoff = false
 
-    suspend fun <T> systemAuthentication(discard: (T) -> Unit = {}, block: suspend () -> T): T {
-        systemHandoff = true
+    suspend fun <T> systemAuthentication(
+        mode: VaultDevicePromptMode = VaultDevicePromptMode.BIOMETRIC_ONLY,
+        discard: (T) -> Unit = {}, block: suspend () -> T,
+    ): T {
+        if (mode == VaultDevicePromptMode.CREDENTIAL_ONLY && android.os.Build.VERSION.SDK_INT < 30) {
+            throw CancellationException("Unsupported credential handoff")
+        }
+        // Only a captured credential-only prompt can leave this host for trusted Android UI.
+        // Biometric-only prompts never receive the exemption, including on API30+.
+        systemHandoff = mode == VaultDevicePromptMode.CREDENTIAL_ONLY
+        class OwnedValue(val value: T)
+        var owned: OwnedValue? = null
         try {
-            val value = block()
-            try {
-                // The system credential screen may deliver its result just before host ON_START.
-                // A Home/background path has only this bounded grace, never an unlocked session.
+            val value = withTimeout(60_000) {
+                val result = block()
+                owned = OwnedValue(result)
+                // Includes callback/ON_START race within the total pending-authentication bound.
                 withTimeout(2_000) { awaitForeground() }
-                return value
-            } catch (error: Throwable) { discard(value); throw error }
-        } finally { systemHandoff = false }
+                result
+            }
+            owned = null
+            return value
+        } finally {
+            owned?.let { discard(it.value) }
+            systemHandoff = false
+        }
     }
 
     private suspend fun awaitForeground() {

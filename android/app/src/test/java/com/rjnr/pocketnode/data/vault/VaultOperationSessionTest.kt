@@ -24,14 +24,14 @@ class VaultOperationSessionTest {
             running.cancelAndJoin()
         } finally { Dispatchers.resetMain() }
     }
-    @Test fun `trusted credential handoff waits for foreground before returning`() = runTest {
+    @Test @Config(sdk = [30]) fun `trusted credential handoff waits for foreground before returning`() = runTest {
         Dispatchers.setMain(UnconfinedTestDispatcher(testScheduler))
         try {
             val controller = Robolectric.buildActivity(FragmentActivity::class.java).setup()
             val callback = CompletableDeferred<ByteArray>()
             var returned = false
             val running = launch { VaultOperationSession.run(controller.get()) { session ->
-                session.systemAuthentication(discard = { it: ByteArray -> it.fill(0) }) { callback.await() }
+                session.systemAuthentication(VaultDevicePromptMode.CREDENTIAL_ONLY, discard = { it: ByteArray -> it.fill(0) }) { callback.await() }
                 returned = true
             } }
             runCurrent(); controller.pause().stop(); callback.complete(byteArrayOf(5)); runCurrent()
@@ -40,18 +40,48 @@ class VaultOperationSessionTest {
             assertTrue(returned)
         } finally { Dispatchers.resetMain() }
     }
-    @Test fun `credential callback while user stays backgrounded discards secret`() = runTest {
+    @Test @Config(sdk = [30]) fun `credential callback while user stays backgrounded discards secret`() = runTest {
         Dispatchers.setMain(UnconfinedTestDispatcher(testScheduler))
         try {
             val controller = Robolectric.buildActivity(FragmentActivity::class.java).setup()
             val callback = CompletableDeferred<ByteArray>(); val secret = byteArrayOf(5)
             var returned = false
             val running = launch { VaultOperationSession.run(controller.get()) { session ->
-                session.systemAuthentication(discard = { it: ByteArray -> it.fill(0) }) { callback.await() }
+                session.systemAuthentication(VaultDevicePromptMode.CREDENTIAL_ONLY, discard = { it: ByteArray -> it.fill(0) }) { callback.await() }
                 returned = true
             } }
             runCurrent(); controller.pause().stop(); callback.complete(secret); advanceUntilIdle()
             assertTrue(running.isCancelled); assertFalse(returned); assertArrayEquals(byteArrayOf(0), secret)
         } finally { Dispatchers.resetMain() }
     }
+    @Test fun `pending biometric authentication cancels immediately on background`() = runTest {
+        Dispatchers.setMain(UnconfinedTestDispatcher(testScheduler))
+        try {
+            val controller = Robolectric.buildActivity(FragmentActivity::class.java).setup()
+            val started = CompletableDeferred<Unit>()
+            val running = launch { VaultOperationSession.run(controller.get()) { session ->
+                session.systemAuthentication(VaultDevicePromptMode.BIOMETRIC_ONLY) { started.complete(Unit); awaitCancellation() }
+            } }
+            try {
+                runCurrent(); started.await(); controller.pause().stop(); runCurrent()
+                assertTrue(running.isCancelled)
+            } finally { running.cancelAndJoin() }
+        } finally { Dispatchers.resetMain() }
+    }
+    @Test @Config(sdk = [30]) fun `pending credential handoff has finite timeout and clears operation owner`() = runTest {
+        Dispatchers.setMain(UnconfinedTestDispatcher(testScheduler))
+        try {
+            val controller = Robolectric.buildActivity(FragmentActivity::class.java).setup()
+            val secret = charArrayOf('s')
+            val running = launch { VaultOperationSession.run(controller.get()) { session ->
+                try { session.systemAuthentication(VaultDevicePromptMode.CREDENTIAL_ONLY) { awaitCancellation() } }
+                finally { secret.fill('\u0000') }
+            } }
+            try {
+                runCurrent(); controller.pause().stop(); advanceTimeBy(60_001); runCurrent()
+                assertTrue(running.isCancelled); assertArrayEquals(charArrayOf('\u0000'), secret)
+            } finally { running.cancelAndJoin() }
+        } finally { Dispatchers.resetMain() }
+    }
+
 }

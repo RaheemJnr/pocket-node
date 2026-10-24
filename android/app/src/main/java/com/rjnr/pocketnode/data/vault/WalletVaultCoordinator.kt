@@ -22,9 +22,9 @@ class WalletVaultCoordinator(
 ) {
     private val json = Json { encodeDefaults = true }
 
-    suspend fun read(activity: FragmentActivity, walletId: String, title: String, subtitle: String): VaultAccessResult = access(activity) { session ->
+    suspend fun read(activity: FragmentActivity, walletId: String, title: String, subtitle: String, preference: VaultReadPreference = VaultReadPreference.DEFAULT): VaultAccessResult = access(activity) { session ->
         var envelope = store.get(walletId) ?: return@access VaultAccessResult.NoVault
-        val material = unlock(activity, session, envelope, title, subtitle) ?: return@access VaultAccessResult.Cancelled
+        val material = unlock(activity, session, envelope, title, subtitle, preference) ?: return@access VaultAccessResult.Cancelled
         validateExisting(walletId, material)
         if (walletId in store.snapshot().unrecoveredWalletIds) {
             val current = credential(activity, false) ?: return@access VaultAccessResult.Cancelled
@@ -84,7 +84,7 @@ class WalletVaultCoordinator(
                     withContext(Dispatchers.IO) { ownedKey = crypto.unwrapDataKey(committed, id, phrase) }
                     val key = ownedKey ?: throw VaultFailure()
                     phrase.fill('\u0000')
-                    when (val result = session.systemAuthentication { device.wrap(activity, committed, key) }) {
+                    when (val result = authenticateDevice(session) { mode -> device.wrap(activity, committed, key, mode) }) {
                         is DeviceVaultResult.Success -> store.updateDeviceWrap(id, committed.generation, result.value)
                         else -> Unit // Independent protection is already committed and verified.
                     }
@@ -95,7 +95,7 @@ class WalletVaultCoordinator(
     }
 
     /** Explicit user-requested re-enrollment; never invoked automatically by a read. */
-    suspend fun enrollDevice(activity: FragmentActivity, walletId: String): VaultAccessResult = access(activity) { session ->
+    suspend fun enrollDevice(activity: FragmentActivity, walletId: String, promptMode: VaultDevicePromptMode? = null): VaultAccessResult = access(activity) { session ->
         val envelope = store.get(walletId) ?: return@access VaultAccessResult.NoVault
         if (walletId in store.snapshot().unrecoveredWalletIds) throw VaultFailure()
         val phrase = credential(activity, false) ?: return@access VaultAccessResult.Cancelled
@@ -109,7 +109,7 @@ class WalletVaultCoordinator(
             withContext(Dispatchers.IO) { ownedKey = crypto.unwrapDataKey(envelope, walletId, phrase) }
             val key = ownedKey ?: throw VaultFailure()
             phrase.fill('\u0000')
-            when (val result = session.systemAuthentication { device.wrap(activity, envelope, key) }) {
+            when (val result = authenticateDevice(session, promptMode) { mode -> device.wrap(activity, envelope, key, mode) }) {
                 is DeviceVaultResult.Success -> {
                     store.updateDeviceWrap(walletId, envelope.generation, result.value)
                     VaultAccessResult.Success(material)
@@ -136,7 +136,7 @@ class WalletVaultCoordinator(
         } finally { old.fill('\u0000') }
     }
 
-    suspend fun resetPassphrase(activity: FragmentActivity): VaultMaintenanceResult = maintenance(activity) { session ->
+    suspend fun resetPassphrase(activity: FragmentActivity, promptMode: VaultDevicePromptMode? = null): VaultMaintenanceResult = maintenance(activity) { session ->
         val snapshot = store.snapshot()
         if (snapshot.profile == null) throw VaultFailure()
         if (prompt.choose(activity, "Reset forgotten wallet passphrase",
@@ -148,9 +148,9 @@ class WalletVaultCoordinator(
             val replacements = mutableListOf<WalletEnvelope>()
             for (envelope in snapshot.envelopes) {
                 if (envelope.deviceWrap == null) continue
-                when (val result = session.systemAuthentication(discard = { value: DeviceVaultResult<ByteArray> ->
+                when (val result = authenticateDevice(session, promptMode, discard = { value: DeviceVaultResult<ByteArray> ->
                     if (value is DeviceVaultResult.Success) value.value.fill(0)
-                }) { device.unwrap(activity, envelope, "Authenticate wallet", "Reset this wallet's passphrase") }) {
+                }) { mode -> device.unwrap(activity, envelope, "Authenticate wallet", "Reset this wallet's passphrase", mode) }) {
                     is DeviceVaultResult.Success -> {
                         val material = decryptDevice(envelope, result.value)
                         validateExisting(envelope.walletId, material)
@@ -169,11 +169,16 @@ class WalletVaultCoordinator(
         } finally { next.fill('\u0000') }
     }
 
-    private suspend fun unlock(activity: FragmentActivity, session: VaultOperationSession, envelope: WalletEnvelope, title: String, subtitle: String): KeyMaterial? {
-        if (envelope.deviceWrap != null) {
-            when (val result = session.systemAuthentication(discard = { value: DeviceVaultResult<ByteArray> ->
+    private suspend fun unlock(activity: FragmentActivity, session: VaultOperationSession, envelope: WalletEnvelope, title: String, subtitle: String, preference: VaultReadPreference): KeyMaterial? {
+        if (envelope.deviceWrap != null && preference != VaultReadPreference.PASSPHRASE) {
+            val promptMode = when (preference) {
+                VaultReadPreference.BIOMETRIC_ONLY -> VaultDevicePromptMode.BIOMETRIC_ONLY
+                VaultReadPreference.CREDENTIAL_ONLY -> VaultDevicePromptMode.CREDENTIAL_ONLY
+                else -> null
+            }
+            when (val result = authenticateDevice(session, promptMode, discard = { value: DeviceVaultResult<ByteArray> ->
                 if (value is DeviceVaultResult.Success) value.value.fill(0)
-            }) { device.unwrap(activity, envelope, title, subtitle) }) {
+            }) { mode -> device.unwrap(activity, envelope, title, subtitle, mode) }) {
                 is DeviceVaultResult.Success -> {
                     return decryptDevice(envelope, result.value)
                 }
@@ -183,6 +188,23 @@ class WalletVaultCoordinator(
         }
         val phrase = credential(activity, false) ?: return null
         try { return decrypt(envelope, phrase) } finally { phrase.fill('\u0000') }
+    }
+
+    private suspend fun <T> authenticateDevice(
+        session: VaultOperationSession,
+        requested: VaultDevicePromptMode? = null,
+        discard: (DeviceVaultResult<T>) -> Unit = {},
+        block: suspend (VaultDevicePromptMode) -> DeviceVaultResult<T>,
+    ): DeviceVaultResult<T> {
+        val available = device.availablePromptModes()
+        val mode = requested ?: when {
+            VaultDevicePromptMode.BIOMETRIC_ONLY in available -> VaultDevicePromptMode.BIOMETRIC_ONLY
+            VaultDevicePromptMode.CREDENTIAL_ONLY in available -> VaultDevicePromptMode.CREDENTIAL_ONLY
+            else -> return DeviceVaultResult.Unavailable(device.unavailableReason() ?: "unsupported-device-authentication")
+        }
+        if (mode !in available) return DeviceVaultResult.Unavailable("unsupported-device-authentication")
+        // Capture once. The exact mode authorizes lifecycle handoff and the actual CryptoObject prompt.
+        return session.systemAuthentication(mode, discard) { block(mode) }
     }
 
     private suspend fun preserveAccessibleMnemonic(
