@@ -53,12 +53,8 @@ import javax.inject.Inject
 // -- ViewModel --
 
 data class MnemonicImportUiState(
-    val words: List<String> = List(12) { "" },
-    val suggestions: Map<Int, List<String>> = emptyMap(),
-    val wordErrors: Set<Int> = emptySet(),
     val isImporting: Boolean = false,
     val importSuccess: Boolean = false,
-    val showPrivateKeyDialog: Boolean = false,
     val showSyncModeDialog: Boolean = false,
     /** #431: an Apply from the sync sheet is in flight; see onSyncModeSelected. */
     val isApplyingSyncChoice: Boolean = false,
@@ -85,6 +81,7 @@ class MnemonicImportViewModel @Inject constructor(
     private val authManager: com.rjnr.pocketnode.data.auth.AuthManager,
     private val logger: Logger,
     private val restoreHintImporter: RestoreHintImporter,
+    private val importOperations: com.rjnr.pocketnode.ui.security.WalletImportOperations,
 ) : ViewModel() {
 
     private val _uiState = MutableStateFlow(MnemonicImportUiState())
@@ -102,18 +99,7 @@ class MnemonicImportViewModel @Inject constructor(
     private var pendingRestoreHint: RestoreHintImporter.Verification.Ready? = null
     private var importedWalletId: String? = null
 
-    /** Seed derivation for hint verification, off the main thread; a test seam. */
-    internal var deriveMnemonicHintSecret: suspend (List<String>) -> RestoreHintSecret = { words ->
-        withContext(Dispatchers.Default) { RestoreHintSecret.fromMnemonic(words) }
-    }
-
     init {
-        // #524: a typed recovery phrase never survives a lock.
-        viewModelScope.onEachReauthLock {
-            _uiState.update {
-                it.copy(words = List(12) { "" }, suggestions = emptyMap(), wordErrors = emptySet())
-            }
-        }
         viewModelScope.launch {
             repository.syncProgress.collect { progress ->
                 _uiState.update { it.copy(tipBlockNumber = progress.tipBlockNumber) }
@@ -121,195 +107,41 @@ class MnemonicImportViewModel @Inject constructor(
         }
     }
 
-    fun updateWord(index: Int, text: String) {
-        val trimmed = text.trim().lowercase()
-        val newWords = _uiState.value.words.toMutableList().apply { set(index, trimmed) }
-        val newSuggestions = _uiState.value.suggestions.toMutableMap()
-        val newErrors = _uiState.value.wordErrors.toMutableSet()
+    private var importOperation: kotlinx.coroutines.Job? = null
+    private var registeredImportId: String? = null
 
-        if (trimmed.length >= 2) {
-            newSuggestions[index] = Bip39WordList.getSuggestions(trimmed)
-        } else {
-            newSuggestions.remove(index)
-        }
-
-        // Mark error if user finished typing (no suggestions match exactly) and word is invalid
-        if (trimmed.isNotEmpty() && !Bip39WordList.isValidWord(trimmed)) {
-            newErrors.add(index)
-        } else {
-            newErrors.remove(index)
-        }
-
-        _uiState.update {
-            it.copy(words = newWords, suggestions = newSuggestions, wordErrors = newErrors)
-        }
+    private suspend fun ensureImportRegistered() {
+        val id = importedWalletId ?: return
+        importOperation?.join()
+        val wallet = walletRepository.getActive()
+        check(wallet?.walletId == id) { "Active wallet changed. Reopen this wallet to sync." }
+        if (registeredImportId == id) return
+        repository.onActiveWalletChanged(wallet!!)
+        registeredImportId = id
     }
 
-    fun selectSuggestion(index: Int, word: String) {
-        val newWords = _uiState.value.words.toMutableList().apply { set(index, word) }
-        val newSuggestions = _uiState.value.suggestions.toMutableMap().apply { remove(index) }
-        val newErrors = _uiState.value.wordErrors.toMutableSet().apply { remove(index) }
-        _uiState.update {
-            it.copy(words = newWords, suggestions = newSuggestions, wordErrors = newErrors)
-        }
-    }
+    fun importMnemonic(activity: FragmentActivity) = importWallet(activity, false)
+    fun importPrivateKey(activity: FragmentActivity) = importWallet(activity, true)
 
-    fun pasteMnemonic(text: String) {
-        val parts = text.trim().lowercase().split("\\s+".toRegex()).take(12)
-        val newWords = List(12) { i -> parts.getOrElse(i) { "" } }
-        val newErrors = newWords.mapIndexedNotNull { i, w ->
-            if (w.isNotEmpty() && !Bip39WordList.isValidWord(w)) i else null
-        }.toSet()
-        _uiState.update {
-            it.copy(words = newWords, suggestions = emptyMap(), wordErrors = newErrors)
-        }
-    }
-
-    fun importMnemonic(activity: FragmentActivity) {
-        val words = _uiState.value.words.map { it.trim().lowercase() }
-
-        if (words.any { it.isEmpty() }) {
-            _uiState.update { it.copy(error = "Please fill in all 12 words") }
-            return
-        }
-
-        if (!mnemonicManager.validateMnemonic(words)) {
-            _uiState.update { it.copy(error = "Invalid mnemonic. Please check your words and try again.") }
-            return
-        }
-
-        // Same V1 software-only fallback as OnboardingViewModel.createNewWallet.
-        // The Welcome screen surfaced an informed-consent "Continue without a
-        // device lock?" dialog before navigating here, so the user has
-        // already opted in. AuthScreen migration loop auto-upgrades the V1
-        // row to V2 when they enable a device lock later (#289 follow-up).
-        val useV1Fallback = !canCreateV2BoundKey()
-        viewModelScope.launch {
+    private fun importWallet(activity: FragmentActivity, privateKey: Boolean) {
+        if (_uiState.value.isImporting || importOperation?.isActive == true) return
+        registeredImportId = null
+        importOperation = viewModelScope.launch {
             _uiState.update { it.copy(isImporting = true, error = null) }
-            val result = walletRepository.importFromMnemonic(
-                words = words,
-                name = "Imported Wallet",
-                persistKeys = { walletId, bundle ->
-                    if (useV1Fallback) {
-                        walletKeyWriter.persistNewWalletV1Fallback(
-                            walletId = walletId,
-                            bundle = bundle,
-                            walletType = KeyManager.WALLET_TYPE_MNEMONIC,
-                            mnemonicBackedUp = true,
-                        )
-                    } else {
-                        walletKeyWriter.persistNewWallet(
-                            activity = activity,
-                            walletId = walletId,
-                            bundle = bundle,
-                            walletType = KeyManager.WALLET_TYPE_MNEMONIC,
-                            // The user just typed the seed phrase in, so by definition
-                            // they hold a copy of it (or know where it is). Skip the
-                            // post-onboarding backup nag.
-                            mnemonicBackedUp = true,
-                        )
-                    }
-                },
-            )
-            result.onSuccess { entity ->
-                logger.d(TAG, "Imported wallet entity: ${entity.walletId}")
-                repository.onActiveWalletChanged(entity)
-                // #431: offer the sync-start picker after every import, on both
-                // networks, it used to be mainnet-only, so a testnet restore
-                // silently kept the RECENT default with no way to widen it here.
-                _uiState.update {
-                    it.copy(isImporting = false, showSyncModeDialog = true)
+            try {
+                when (val result = importOperations.import(activity, privateKey, "Imported Wallet", restoreHintFileText, repository.currentNetwork,
+                    onCommitted = { wallet, _ ->
+                        importedWalletId = wallet.walletId
+                        _uiState.update { it.copy(isImporting = false, showSyncModeDialog = true) }
+                    }) { wallet, _ ->
+                    repository.onActiveWalletChanged(wallet)
+                    registeredImportId = wallet.walletId
+                }) {
+                    is com.rjnr.pocketnode.ui.security.WalletImportOperations.Outcome.Completed -> acceptRestoreHint(result.hint)
+                    is com.rjnr.pocketnode.ui.security.WalletImportOperations.Outcome.Failed -> _uiState.update { it.copy(error = result.message) }
+                    com.rjnr.pocketnode.ui.security.WalletImportOperations.Outcome.Cancelled -> Unit
                 }
-                verifyRestoreHint(entity.walletId) {
-                    deriveMnemonicHintSecret(words)
-                }
-            }.onFailure { error ->
-                logger.e(TAG, "Mnemonic import failed", error)
-                val msg = persistErrorMessageRaw(error)
-                _uiState.update { it.copy(isImporting = false, error = msg) }
-            }
-        }
-    }
-
-    fun showPrivateKeyImport() {
-        _uiState.update { it.copy(showPrivateKeyDialog = true) }
-    }
-
-    fun hidePrivateKeyImport() {
-        _uiState.update { it.copy(showPrivateKeyDialog = false) }
-    }
-
-    fun importPrivateKey(activity: FragmentActivity, hex: String) {
-        val useV1Fallback = !canCreateV2BoundKey()
-        viewModelScope.launch {
-            _uiState.update { it.copy(isImporting = true, showPrivateKeyDialog = false, error = null) }
-            val result = walletRepository.importRawKey(hex, "Imported Wallet") { walletId, bundle ->
-                if (useV1Fallback) {
-                    walletKeyWriter.persistNewWalletV1Fallback(
-                        walletId = walletId,
-                        bundle = bundle,
-                        walletType = KeyManager.WALLET_TYPE_RAW_KEY,
-                        mnemonicBackedUp = false,
-                    )
-                } else {
-                    walletKeyWriter.persistNewWallet(
-                        activity = activity,
-                        walletId = walletId,
-                        bundle = bundle,
-                        walletType = KeyManager.WALLET_TYPE_RAW_KEY,
-                        mnemonicBackedUp = false,
-                    )
-                }
-            }
-            result.onSuccess { entity ->
-                logger.d(TAG, "Imported raw key wallet entity: ${entity.walletId}")
-                repository.onActiveWalletChanged(entity)
-                // #431: same as the mnemonic path, always offer the picker.
-                _uiState.update {
-                    it.copy(isImporting = false, showSyncModeDialog = true)
-                }
-                verifyRestoreHint(entity.walletId) {
-                    val keyBytes = hex.removePrefix("0x").hexToByteArray()
-                    try {
-                        RestoreHintSecret.fromPrivateKey(keyBytes)
-                    } finally {
-                        keyBytes.fill(0)
-                    }
-                }
-            }.onFailure { error ->
-                logger.e(TAG, "Private key import failed", error)
-                val msg = persistErrorMessageRaw(error)
-                _uiState.update { it.copy(isImporting = false, error = msg) }
-            }
-        }
-    }
-
-    /**
-     * Same check as OnboardingViewModel.canCreateV2BoundKey: V2 Keystore key
-     * can only be minted on a device with an enrolled biometric OR a device
-     * lock (PIN/pattern/password). Returning false routes the import through
-     * the V1 software-only fallback.
-     */
-    private fun canCreateV2BoundKey(): Boolean =
-        authManager.isBiometricEnrolled() || authManager.hasDeviceCredential()
-
-    companion object {
-        /**
-         * Same mapping logic as `OnboardingViewModel.persistErrorMessage`
-         * but returns a raw String for the legacy `error: String?` ui-state
-         * shape used by this screen. Cancelled is silent (returns null).
-         */
-        internal fun persistErrorMessageRaw(error: Throwable): String? {
-            val pex = error as? WalletKeyWriter.PersistException
-            return when (val r = pex?.result) {
-                WalletKeyWriter.Result.Cancelled -> null
-                is WalletKeyWriter.Result.AuthError -> "Auth error: ${r.message}"
-                is WalletKeyWriter.Result.WriteFailed ->
-                    "Failed to save wallet: ${r.cause.message ?: "unknown error"}"
-                WalletKeyWriter.Result.KeyInvalidated -> "Wallet keys must be re-imported"
-                null -> error.message
-                else -> error.message
-            }
+            } finally { _uiState.update { it.copy(isImporting = false) } }
         }
     }
 
@@ -326,7 +158,6 @@ class MnemonicImportViewModel @Inject constructor(
             it.copy(isApplyingSyncChoice = true, syncChoiceError = null, restoreHintError = null)
         }
         viewModelScope.launch {
-            beforeResync()
             // #431: apply unconditionally, including RECENT. The old
             // `if (mode != RECENT)` short-circuit assumed RECENT was
             // already registered, but the wallet may have imported with
@@ -336,6 +167,8 @@ class MnemonicImportViewModel @Inject constructor(
             // resyncAccount reports failure through its Result; the catch is
             // a backstop so an unexpected throw still clears the in-flight flag.
             val failure = try {
+                ensureImportRegistered()
+                beforeResync()
                 repository.resyncAccount(mode, customHeight).exceptionOrNull()
             } catch (e: CancellationException) {
                 throw e
@@ -360,8 +193,16 @@ class MnemonicImportViewModel @Inject constructor(
 
     fun skipSyncSelection() {
         if (_uiState.value.isApplyingSyncChoice) return
-        clearRestoreHint()
-        _uiState.update { it.copy(showSyncModeDialog = false, syncChoiceError = null, importSuccess = true) }
+        _uiState.update { it.copy(isApplyingSyncChoice = true) }
+        viewModelScope.launch {
+            try {
+                ensureImportRegistered()
+                clearRestoreHint()
+                _uiState.update { it.copy(showSyncModeDialog = false, syncChoiceError = null, importSuccess = true) }
+            } catch (e: CancellationException) { throw e }
+            catch (_: Exception) { _uiState.update { it.copy(syncChoiceError = "Could not register this wallet. Retry syncing.") } }
+            finally { _uiState.update { it.copy(isApplyingSyncChoice = false) } }
+        }
     }
 
     // -- Restore hint (#559) --
@@ -391,35 +232,16 @@ class MnemonicImportViewModel @Inject constructor(
      * wipes the secret before returning. A re-auth lock while the secret
      * existed discards the result: the lock is meant to end its life.
      */
-    private suspend fun verifyRestoreHint(walletId: String, makeSecret: suspend () -> RestoreHintSecret) {
-        val text = restoreHintFileText ?: return
-        val locksAtStart = ReauthLockEvents.locks.value
-        val secret = try {
-            makeSecret()
-        } catch (e: CancellationException) {
-            throw e
-        } catch (e: Exception) {
-            logger.w(TAG, "Restore hint secret unavailable", e)
-            return
-        }
-        val verification = try {
-            if (ReauthLockEvents.locks.value != locksAtStart) return
-            restoreHintImporter.verify(text, secret, repository.currentNetwork)
-        } finally {
-            secret.wipe()
-        }
+    private fun acceptRestoreHint(verification: RestoreHintImporter.Verification?) {
         val state = _uiState.value
-        if (ReauthLockEvents.locks.value != locksAtStart || !state.showSyncModeDialog || state.isApplyingSyncChoice) {
-            return
-        }
-        importedWalletId = walletId
+        if (!state.showSyncModeDialog || state.isApplyingSyncChoice) return
         when (verification) {
             is RestoreHintImporter.Verification.Ready -> {
                 pendingRestoreHint = verification
                 _uiState.update { it.copy(restoreHintPlan = verification.plan, restoreHintError = null) }
             }
-            is RestoreHintImporter.Verification.Rejected ->
-                _uiState.update { it.copy(restoreHintPlan = null, restoreHintError = verification.reason) }
+            is RestoreHintImporter.Verification.Rejected -> _uiState.update { it.copy(restoreHintPlan = null, restoreHintError = verification.reason) }
+            null -> Unit
         }
     }
 
@@ -455,7 +277,6 @@ fun MnemonicImportScreen(
 ) {
     val uiState by viewModel.uiState.collectAsState()
     val snackbarHostState = remember { SnackbarHostState() }
-    val clipboardManager = LocalClipboardManager.current
 
     // FLAG_SECURE: secret material (mnemonic / raw key) is entered or shown
     // on this screen, block screenshots, screen recording, and the recents
@@ -484,14 +305,6 @@ fun MnemonicImportScreen(
             snackbarHostState.showSnackbar(error)
             viewModel.clearError()
         }
-    }
-
-    // Private key import dialog
-    if (uiState.showPrivateKeyDialog) {
-        PrivateKeyImportDialog(
-            onDismiss = { viewModel.hidePrivateKeyImport() },
-            onImport = { viewModel.importPrivateKey(activity, it) }
-        )
     }
 
     val pickRestoreHint = rememberRestoreHintPicker { text -> viewModel.onRestoreHintFilePicked(text) }
@@ -567,53 +380,19 @@ fun MnemonicImportScreen(
                 onRemove = { viewModel.removeRestoreHintFile() },
             )
 
-            // Paste button
-            OutlinedButton(
-                onClick = {
-                    clipboardManager.getText()?.text?.let { text ->
-                        viewModel.pasteMnemonic(text)
-                    }
-                },
-                modifier = Modifier.fillMaxWidth().uaTestTag("import-paste")
-            ) {
-                Icon(Lucide.ClipboardPaste, contentDescription = null, modifier = Modifier.size(18.dp))
-                Spacer(Modifier.width(8.dp))
-                Text(stringResource(R.string.mnemonic_import_paste))
-            }
-
-            // Adaptive word grid: 2 columns at typical phone widths (≈160dp each),
-            // 3+ on Medium/Expanded so foldable inner displays don't waste space.
-            LazyVerticalGrid(
-                columns = GridCells.Adaptive(minSize = 140.dp),
-                modifier = Modifier.weight(1f),
-                horizontalArrangement = Arrangement.spacedBy(8.dp),
-                verticalArrangement = Arrangement.spacedBy(8.dp)
-            ) {
-                items(12) { index ->
-                    MnemonicWordInput(
-                        index = index,
-                        value = uiState.words[index],
-                        suggestions = uiState.suggestions[index] ?: emptyList(),
-                        isError = uiState.wordErrors.contains(index),
-                        onValueChange = { viewModel.updateWord(index, it) },
-                        onSuggestionSelected = { viewModel.selectSuggestion(index, it) }
-                    )
-                }
-            }
-
             // Private key fallback
             TextButton(
-                onClick = { viewModel.showPrivateKeyImport() },
+                onClick = { viewModel.importPrivateKey(activity) },
                 modifier = Modifier.align(Alignment.CenterHorizontally)
             ) {
                 Text(stringResource(R.string.mnemonic_import_have_private_key))
             }
 
-            // Heads-up that a SYSTEM credential sheet is about to appear , 
+            // Heads-up that a SYSTEM credential sheet is about to appear ,
             // users restoring a seed didn't know which password the
             // "Secure wallet" prompt wanted (knmo, Nervos Talk, 2026-06).
             Text(
-                text = stringResource(R.string.mnemonic_import_screen_lock_notice),
+                text = "Your independent wallet passphrase protects this wallet. Device authentication is optional.",
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                 modifier = Modifier.align(Alignment.CenterHorizontally)
@@ -624,7 +403,7 @@ fun MnemonicImportScreen(
             Button(
                 onClick = { viewModel.importMnemonic(activity) },
                 modifier = Modifier.fillMaxWidth().uaTestTag("import-submit"),
-                enabled = !uiState.isImporting && uiState.words.all { it.isNotBlank() }
+                enabled = !uiState.isImporting
             ) {
                 if (uiState.isImporting) {
                     CircularProgressIndicator(
@@ -638,46 +417,4 @@ fun MnemonicImportScreen(
             }
         }
     }
-}
-
-@Composable
-private fun PrivateKeyImportDialog(
-    onDismiss: () -> Unit,
-    onImport: (String) -> Unit
-) {
-    var privateKey by remember { mutableStateOf("") }
-
-    AlertDialog(
-        onDismissRequest = onDismiss,
-        title = { Text(stringResource(R.string.mnemonic_import_private_key_title), fontWeight = FontWeight.Bold) },
-        text = {
-            Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
-                Text(
-                    "Enter your 64-character private key (hex) to restore your wallet.",
-                    style = MaterialTheme.typography.bodyMedium
-                )
-                OutlinedTextField(
-                    value = privateKey,
-                    onValueChange = { privateKey = it.trim() },
-                    label = { Text(stringResource(R.string.mnemonic_import_private_key_label)) },
-                    placeholder = { Text(stringResource(R.string.mnemonic_import_private_key_placeholder)) },
-                    modifier = Modifier.fillMaxWidth(),
-                    singleLine = true
-                )
-            }
-        },
-        confirmButton = {
-            Button(
-                onClick = { onImport(privateKey) },
-                enabled = privateKey.length >= 64
-            ) {
-                Text(stringResource(R.string.mnemonic_import_private_key_action))
-            }
-        },
-        dismissButton = {
-            TextButton(onClick = onDismiss) {
-                Text(stringResource(R.string.mnemonic_import_cancel))
-            }
-        }
-    )
 }

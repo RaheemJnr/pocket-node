@@ -267,6 +267,7 @@ fun SendScreen(
         onNavigateToScanner = onNavigateToScanner,
         onOpenContactPicker = { showContactPicker = true },
         onSuggestionPicked = { viewModel.selectContact(it) },
+        acknowledgeBulkReconciliation = viewModel::acknowledgeBulkReconciliation,
         updateSendMode = viewModel::updateSendMode,
         updateRecipient = viewModel::updateRecipient,
         updateBulkRecipients = viewModel::updateBulkRecipients,
@@ -295,6 +296,7 @@ private fun SendScreenUI(
     onNavigateBack: () -> Unit,
     uiState: SendUiState,
     onNavigateToScanner: () -> Unit,
+    acknowledgeBulkReconciliation: (String) -> Unit = {},
     onOpenContactPicker: () -> Unit = {},
     onSuggestionPicked: (com.rjnr.pocketnode.data.database.entity.ContactEntity) -> Unit = {},
     updateSendMode: (SendMode) -> Unit,
@@ -591,6 +593,36 @@ private fun SendScreenUI(
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant
                     )
+                }
+                uiState.interruptedBulkSends.forEach { interrupted ->
+                    var expanded by remember(interrupted.id) { mutableStateOf(false) }
+                    var reconcile by remember(interrupted.id) { mutableStateOf(false) }
+                    if (reconcile) AlertDialog(
+                        onDismissRequest = { reconcile = false },
+                        title = { Text("Allow these recipients again?") },
+                        text = { Text("Confirm only after checking the submitted and uncertain batches on the original network. Clearing this record allows another payment to these recipients and may duplicate a payment already accepted. Navigation alone does not clear it.") },
+                        confirmButton = { TextButton(onClick = { acknowledgeBulkReconciliation(interrupted.id); reconcile = false }) { Text("I checked; allow repayment") } },
+                        dismissButton = { TextButton(onClick = { reconcile = false }) { Text("Keep blocked") } },
+                    )
+                    Spacer(modifier = Modifier.height(12.dp))
+                    Card(modifier = Modifier.fillMaxWidth(), shape = RoundedCornerShape(8.dp)) {
+                        Column(modifier = Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                            Text("Interrupted send: ${interrupted.submittedRecipients.size} submitted, ${interrupted.uncertainRecipients.size} uncertain",
+                                style = MaterialTheme.typography.bodyMedium, fontWeight = FontWeight.Medium)
+                            Text("These recipients are excluded from retries. Check Activity and transaction status before sending to them again.",
+                                style = MaterialTheme.typography.bodySmall)
+                            TextButton(onClick = { expanded = !expanded }) { Text(if (expanded) "Hide batch details" else "Review batch details") }
+                            if (expanded) androidx.compose.foundation.text.selection.SelectionContainer {
+                                Text(buildString {
+                                    append("Wallet: ${interrupted.walletId}\nNetwork: ${interrupted.network.name}\nFrom: ${interrupted.fromAddress}\n")
+                                    append("Submitted transaction hashes:\n${interrupted.submittedTxHashes.joinToString("\n")}\n")
+                                    append("Submitted recipients:\n${interrupted.submittedRecipients.joinToString("\n")}\n")
+                                    append("Uncertain recipients (do not retry yet):\n${interrupted.uncertainRecipients.joinToString("\n")}")
+                                }, style = MaterialTheme.typography.bodySmall)
+                            }
+                            if (expanded) TextButton(onClick = { reconcile = true }, enabled = !uiState.isLoading) { Text("Reconcile and allow recipients") }
+                        }
+                    }
                 }
                 if (uiState.bulkSubmittedTxHashes.isNotEmpty() || uiState.bulkFailureMessage != null || uiState.isLoading) {
                     Spacer(modifier = Modifier.height(12.dp))

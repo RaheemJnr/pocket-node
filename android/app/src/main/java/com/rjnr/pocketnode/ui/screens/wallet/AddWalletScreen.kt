@@ -121,15 +121,6 @@ fun AddWalletScreen(
         }
     }
 
-    // F1/F3: no device lock -> warn before persisting at the V1 software
-    // fallback, matching onboarding, instead of silently downgrading.
-    if (uiState.showNoLockConsent) {
-        com.rjnr.pocketnode.ui.components.NoDeviceLockConsentDialog(
-            onConfirm = { viewModel.confirmNoLockConsent() },
-            onDismiss = { viewModel.dismissNoLockConsent() },
-        )
-    }
-
     // #431: post-import sync-start picker, shown after a mnemonic or raw-key
     // import completes, same sheet and copy as the onboarding import path.
     // #559: a verified restore hint replaces the sheet until confirmed or dismissed.
@@ -302,7 +293,6 @@ private fun ImportMnemonicForm(
     activity: androidx.fragment.app.FragmentActivity,
     onPickRestoreHint: () -> Unit,
 ) {
-    val clipboardManager = LocalClipboardManager.current
 
     OutlinedTextField(
         value = uiState.name,
@@ -322,42 +312,12 @@ private fun ImportMnemonicForm(
     )
     Spacer(Modifier.height(12.dp))
 
-    OutlinedButton(
-        onClick = {
-            clipboardManager.getText()?.text?.let { viewModel.pasteImportMnemonic(it) }
-        },
-        modifier = Modifier.fillMaxWidth()
-    ) {
-        Icon(Lucide.ClipboardPaste, contentDescription = null, modifier = Modifier.size(18.dp))
-        Spacer(Modifier.width(8.dp))
-        Text(stringResource(R.string.add_wallet_paste))
-    }
-    Spacer(Modifier.height(12.dp))
-
-    LazyVerticalGrid(
-        columns = GridCells.Adaptive(minSize = 140.dp),
-        modifier = Modifier
-            .fillMaxWidth()
-            .heightIn(max = 480.dp),
-        horizontalArrangement = Arrangement.spacedBy(8.dp),
-        verticalArrangement = Arrangement.spacedBy(8.dp)
-    ) {
-        items(12) { index ->
-            MnemonicWordInput(
-                index = index,
-                value = uiState.importWords[index],
-                suggestions = uiState.importSuggestions[index] ?: emptyList(),
-                isError = uiState.importWordErrors.contains(index),
-                onValueChange = { viewModel.updateImportWord(index, it) },
-                onSuggestionSelected = { viewModel.selectImportSuggestion(index, it) }
-            )
-        }
-    }
+    Text("Enter or paste your recovery phrase in the protected native window.")
     Spacer(Modifier.height(16.dp))
     Button(
         onClick = { viewModel.importMnemonic(activity) },
         modifier = Modifier.fillMaxWidth(),
-        enabled = !uiState.isLoading && uiState.importWords.all { it.isNotBlank() }
+        enabled = !uiState.isLoading
     ) {
         if (uiState.isLoading) {
             CircularProgressIndicator(modifier = Modifier.size(20.dp), strokeWidth = 2.dp)
@@ -391,14 +351,7 @@ private fun ImportKeyForm(
         onRemove = { viewModel.removeRestoreHintFile() },
     )
     Spacer(Modifier.height(8.dp))
-    OutlinedTextField(
-        value = uiState.importPrivateKey,
-        onValueChange = { viewModel.updateImportPrivateKey(it) },
-        label = { Text(stringResource(R.string.add_wallet_private_key_label)) },
-        modifier = Modifier.fillMaxWidth(),
-        singleLine = true,
-        placeholder = { Text(stringResource(R.string.add_wallet_private_key_placeholder)) }
-    )
+    Text("Enter or paste your private key in the protected native window.")
     Spacer(Modifier.height(16.dp))
     Button(
         onClick = { viewModel.importRawKey(activity) },

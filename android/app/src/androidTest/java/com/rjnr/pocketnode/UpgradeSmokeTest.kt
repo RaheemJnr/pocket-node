@@ -113,18 +113,38 @@ class UpgradeSmokeTest {
         // it; best-effort because a lock-enrolled device never shows it.
         clickButton("onboarding-no-lock-continue", "Continue anyway", 5_000L)
 
-        assertTrue(
-            "Import paste button not found",
-            clickButton("import-paste", "Paste from Clipboard", ONBOARDING_TIMEOUT_MS)
-        )
-
-        // Let the 12 fields populate from the clipboard paste.
-        device.waitForIdle(1_500L)
-
-        assertTrue(
-            "Import submit button not found",
-            clickButton("import-submit", "Import Wallet", ONBOARDING_TIMEOUT_MS)
-        )
+        // Pre-#578 uses Compose clipboard fields. Newer builds open a secure
+        // native dialog only after Import; choose by the visible legacy control.
+        val importRoute = ImportRouteSelector.await(ONBOARDING_TIMEOUT_MS,
+            now = { android.os.SystemClock.elapsedRealtime() },
+            pause = { android.os.SystemClock.sleep(it) },
+            legacyVisible = { device.hasObject(By.text("Paste from Clipboard").pkg(PKG)) || device.hasObject(By.res("import-paste")) },
+            nativeVisible = { device.hasObject(By.text("Your independent wallet passphrase protects this wallet. Device authentication is optional.").pkg(PKG)) })
+        assertNotNull("Import screen did not finish navigation", importRoute)
+        if (importRoute == ImportRouteSelector.Route.LEGACY) {
+            assertTrue("Import paste button not found",
+                clickButton("import-paste", "Paste from Clipboard", ONBOARDING_TIMEOUT_MS))
+            device.waitForIdle(1_500L)
+            assertTrue("Import submit button not found",
+                clickButton("import-submit", "Import Wallet", ONBOARDING_TIMEOUT_MS))
+        } else {
+            assertTrue("Import submit button not found",
+                clickButton("import-submit", "Import Wallet", ONBOARDING_TIMEOUT_MS))
+            val input = device.wait(Until.findObject(By.clazz("android.widget.EditText").pkg(PKG)), ONBOARDING_TIMEOUT_MS)
+            assertNotNull("Native recovery input not found", input)
+            input!!.text = TEST_MNEMONIC
+            assertTrue("Native recovery Continue missing", clickButton("android:id/button1", "Continue"))
+            assertTrue("Passphrase setup missing", device.wait(
+                Until.hasObject(By.text("Set wallet passphrase").pkg(PKG)), PIN_INTRO_DEADLINE_MS))
+            val fields = device.findObjects(By.clazz("android.widget.EditText").pkg(PKG))
+            assertTrue("Passphrase confirmation must have two fields", fields.size == 2)
+            fields.forEach { it.text = "public upgrade smoke passphrase" }
+            assertTrue("Passphrase Continue missing", clickButton("android:id/button1", "Continue"))
+            // Lock-enrolled test devices may offer optional convenience wrapping.
+            if (device.wait(Until.hasObject(By.text("Use device authentication?").pkg(PKG)), 5_000L)) {
+                assertTrue("Passphrase-only option missing", clickButton("android:id/button2", "Passphrase only"))
+            }
+        }
 
         // Import → on mainnet the SyncOptionsSheet pops up with default mode
         // RECENT pre-selected. Apply it to dismiss + trigger nav. On testnet

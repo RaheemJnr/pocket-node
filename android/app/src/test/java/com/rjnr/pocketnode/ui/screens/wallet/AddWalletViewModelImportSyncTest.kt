@@ -62,6 +62,7 @@ import org.robolectric.RobolectricTestRunner
 @OptIn(ExperimentalCoroutinesApi::class)
 @RunWith(RobolectricTestRunner::class)
 class AddWalletViewModelImportSyncTest {
+    private val nativeInput = com.rjnr.pocketnode.ui.security.NativeImportFixture()
 
     private val testDispatcher = StandardTestDispatcher()
 
@@ -118,16 +119,15 @@ class AddWalletViewModelImportSyncTest {
         // Real WalletKeyWriter.Result.Success is a plain sealed-class object
         // (not a kotlin.Result), so stubbing it is safe.
         coEvery {
-            walletKeyWriter.persistNewWalletV1Fallback(any(), any(), any(), any())
-        } returns WalletKeyWriter.Result.Success
+            walletKeyWriter.persistCreatedWallet(any(), any(), any(), any(), any(), any(), any())
+        } coAnswers { com.rjnr.pocketnode.data.wallet.persistVerifiedFixture(db, secondArg(), thirdArg(), arg(4)) }
 
         authManager = mockk(relaxed = true)
-        // No secure lock -> AddWalletViewModel routes persistWalletKeys through
-        // the V1 fallback above instead of the Activity/BiometricPrompt path.
+        // Independent wallet protection must work without a device screen lock.
         every { authManager.isBiometricEnrolled() } returns false
         every { authManager.hasDeviceCredential() } returns false
 
-        activity = mockk(relaxed = true)
+        activity = org.robolectric.Robolectric.buildActivity(FragmentActivity::class.java).setup().get()
     }
 
     @After
@@ -148,6 +148,7 @@ class AddWalletViewModelImportSyncTest {
         authManager = authManager,
         logger = NoopLogger,
         restoreHintImporter = mockk(relaxed = true),
+        importOperations = nativeInput.operations(walletRepository, walletKeyWriter, mnemonicManager, mockk(relaxed = true)),
     )
 
     private fun kotlinx.coroutines.test.TestScope.advanceUntil(condition: () -> Boolean) {
@@ -161,10 +162,56 @@ class AddWalletViewModelImportSyncTest {
     private fun AddWalletViewModel.importValidMnemonic(name: String = "Restored") {
         val words = mnemonicManager.generateMnemonic(MnemonicManager.WordCount.TWELVE)
         updateName(name)
-        words.forEachIndexed { index, word -> updateImportWord(index, word) }
+        words.forEachIndexed { index, word -> nativeInput.word(index, word) }
         // consented=true: skip the no-lock consent dialog round trip, it is
         // covered elsewhere; this test is about the post-import sync sheet.
-        importMnemonic(activity, consented = true)
+        importMnemonic(activity)
+    }
+
+    @Test
+    fun `Apply retries registration from public identity after reauth cancels import registration`() = runTest {
+        var started = false
+        var cancelled = false
+        coEvery { gatewayRepository.onActiveWalletChanged(any()) } coAnswers {
+            started = true
+            try { kotlinx.coroutines.awaitCancellation() } finally { cancelled = true }
+        }
+        val vm = newViewModel(); vm.importValidMnemonic(); advanceUntil { started }
+        com.rjnr.pocketnode.ui.screens.auth.ReauthLockEvents.onLocked(); advanceUntilIdle()
+        assertTrue(cancelled)
+        assertTrue(vm.uiState.value.showSyncModeDialog)
+        assertNull(vm.uiState.value.createdWallet)
+        coEvery { gatewayRepository.onActiveWalletChanged(any()) } returns Unit
+        vm.onSyncModeSelected(SyncMode.RECENT, null); advanceUntilIdle()
+        coVerify(exactly = 2) { gatewayRepository.onActiveWalletChanged(any()) }
+        coVerify(exactly = 1) { gatewayRepository.resyncAccount(SyncMode.RECENT, null) }
+        assertTrue(vm.uiState.value.createdWallet != null)
+    }
+
+    @Test
+    fun `Apply waits for pending registration before resync`() = runTest {
+        val release = kotlinx.coroutines.CompletableDeferred<Unit>()
+        var started = false
+        coEvery { gatewayRepository.onActiveWalletChanged(any()) } coAnswers { started = true; release.await() }
+        val vm = newViewModel(); vm.importValidMnemonic(); advanceUntil { started }
+        try {
+            assertTrue(vm.uiState.value.showSyncModeDialog)
+            vm.onSyncModeSelected(SyncMode.RECENT, null); advanceUntilIdle()
+            coVerify(exactly = 0) { gatewayRepository.resyncAccount(any(), any()) }
+            release.complete(Unit); advanceUntilIdle()
+            coVerify(exactly = 1) { gatewayRepository.resyncAccount(SyncMode.RECENT, null) }
+        } finally { release.complete(Unit); advanceUntilIdle() }
+    }
+
+    @Test
+    fun `no device lock starts independent protected creation without downgrade consent`() = runTest {
+        coEvery { walletKeyWriter.persistCreatedWallet(any(), any(), any(), any(), any(), any(), any()) } returns WalletKeyWriter.Result.Cancelled
+        val vm = newViewModel(); advanceUntilIdle(); vm.updateName("Savings")
+        vm.createNewWallet(activity); advanceUntilIdle()
+        coVerify(exactly = 1) { walletKeyWriter.persistCreatedWallet(any(), any(), any(), any(), eq(false), any(), any()) }
+        assertNull(vm.uiState.value.createdWallet)
+        assertFalse(vm.uiState.value.isLoading)
+        assertTrue(walletRepository.getAll().isEmpty())
     }
 
     @Test

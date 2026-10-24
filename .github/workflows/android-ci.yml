@@ -13,7 +13,8 @@ concurrency:
 jobs:
   build:
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    # All three unit-test variants run in this job; allow their combined runtime.
+    timeout-minutes: 45
 
     steps:
       - uses: actions/checkout@v4

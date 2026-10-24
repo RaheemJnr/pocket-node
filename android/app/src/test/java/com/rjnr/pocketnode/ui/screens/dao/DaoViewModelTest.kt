@@ -286,7 +286,7 @@ class DaoViewModelTest {
         coEvery { repository.unlockPreflight(any()) } coAnswers { awaitCancellation() }
         coEvery { repository.getDaoDeposits() } coAnswers { awaitCancellation() } // park the poll
         val vm = DaoViewModel(repository, authManager, pinManager, walletKeyReader, walletRepository)
-        val activity = mockk<FragmentActivity>(relaxed = true)
+        val activity = com.rjnr.pocketnode.data.wallet.ForegroundTestHost().activity
         val deposit = makeDaoDeposit(status = DaoCellStatus.UNLOCKABLE)
 
         vm.unlockWithActivity(activity, deposit)
@@ -308,7 +308,7 @@ class DaoViewModelTest {
         coEvery { walletKeyReader.readPrivateKey(any(), any(), any(), any()) } coAnswers { awaitCancellation() }
         coEvery { repository.getDaoDeposits() } coAnswers { awaitCancellation() } // park the poll
         val vm = DaoViewModel(repository, authManager, pinManager, walletKeyReader, walletRepository)
-        val activity = mockk<FragmentActivity>(relaxed = true)
+        val activity = com.rjnr.pocketnode.data.wallet.ForegroundTestHost().activity
         val deposit = makeDaoDeposit(status = DaoCellStatus.DEPOSITED)
 
         vm.withdrawWithActivity(activity, deposit)
@@ -342,5 +342,26 @@ class DaoViewModelTest {
     fun `rescan prompt ignores deposits the light client can see`() {
         val deposits = listOf(makeDaoDeposit(status = DaoCellStatus.DEPOSITED))
         assertEquals(0, outsideWindowPromptCount(deposits))
+    }    @Test fun `stop after authentication cancels DAO secret work and wipes owned key`() {
+        every { walletRepository.activeWalletIdSnapshot() } returns "wallet-1"
+        val key = ByteArray(32) { 7 }
+        coEvery { walletKeyReader.readPrivateKey(any(), any(), any(), any()) } returns WalletKeyReader.Result.Success(key)
+        coEvery { repository.getDaoDeposits() } coAnswers { awaitCancellation() }
+        var entered = false; var cancelled = false
+        coEvery { repository.withdrawFromDao(any(), any()) } coAnswers {
+            entered = true
+            try { awaitCancellation() } finally { cancelled = true }
+        }
+        val host = com.rjnr.pocketnode.data.wallet.ForegroundTestHost()
+        val vm = DaoViewModel(repository, authManager, pinManager, walletKeyReader, walletRepository)
+        vm.withdrawWithActivity(host.activity, makeDaoDeposit())
+        testDispatcher.scheduler.runCurrent(); assertTrue(entered)
+        host.stopResume(); testDispatcher.scheduler.runCurrent()
+        try {
+            assertTrue(cancelled); assertTrue(key.all { it == 0.toByte() })
+            assertNull(vm.uiState.value.pendingAction)
+        } finally { androidx.lifecycle.ViewModelStore().apply { put("test", vm); clear() }; testDispatcher.scheduler.runCurrent() }
     }
+
+
 }

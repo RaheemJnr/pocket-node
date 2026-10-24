@@ -27,30 +27,6 @@ class WalletManagerViewModel @Inject constructor(
     private val logger: Logger,
 ) : ViewModel() {
 
-    private fun canCreateV2BoundKey(): Boolean =
-        authManager.isBiometricEnrolled() || authManager.hasDeviceCredential()
-
-    // F1/F3: no device lock -> restored sub-accounts persist at the V1 software
-    // fallback. Warn once before the batch, matching onboarding.
-    private var pendingNoLockAction: (() -> Unit)? = null
-
-    private fun requestNoLockConsent(action: () -> Unit) {
-        pendingNoLockAction = action
-        _uiState.update { it.copy(showNoLockConsent = true) }
-    }
-
-    fun confirmNoLockConsent() {
-        val action = pendingNoLockAction
-        pendingNoLockAction = null
-        _uiState.update { it.copy(showNoLockConsent = false) }
-        action?.invoke()
-    }
-
-    fun dismissNoLockConsent() {
-        pendingNoLockAction = null
-        _uiState.update { it.copy(showNoLockConsent = false) }
-    }
-
     private val _uiState = MutableStateFlow(WalletManagerUiState())
     val uiState: StateFlow<WalletManagerUiState> = _uiState.asStateFlow()
 
@@ -91,77 +67,75 @@ class WalletManagerViewModel @Inject constructor(
      */
     fun restoreFoundSubAccounts(
         activity: androidx.fragment.app.FragmentActivity,
-        consented: Boolean = false,
     ) {
         val found = _uiState.value.foundCandidates
         if (found.isEmpty() || _uiState.value.isRestoring) return
-        if (!consented && !canCreateV2BoundKey()) {
-            requestNoLockConsent { restoreFoundSubAccounts(activity, consented = true) }
-            return
-        }
         _uiState.update { it.copy(isRestoring = true) }
         viewModelScope.launch {
-            try {
-                var restored = 0
-                found.groupBy { it.parentWalletId }.forEach { (parentId, candidates) ->
-                    val readResult = walletKeyReader.readKeyMaterial(
-                        activity = activity,
-                        walletId = parentId,
-                        promptTitle = "Authenticate to restore",
-                        promptSubtitle = "Verify your identity to restore discovered sub-accounts.",
-                    )
-                    if (readResult !is com.rjnr.pocketnode.data.wallet.WalletKeyReader.MaterialResult.Success) {
-                        return@forEach
-                    }
-                    val words = readResult.mnemonic?.split(" ")
-                    if (words.isNullOrEmpty()) return@forEach
+            com.rjnr.pocketnode.data.vault.VaultOperationSession.run(activity) owned@ {
+                try {
+                    var restored = 0
+                    found.groupBy { it.parentWalletId }.forEach { (parentId, candidates) ->
+                        val expectedParent = walletRepository.getById(parentId) ?: return@forEach
+                        val lock = com.rjnr.pocketnode.ui.screens.auth.ReauthLockEvents.locks.value
+                        val readResult = walletKeyReader.readKeyMaterial(
+                            activity = activity,
+                            walletId = parentId,
+                            promptTitle = "Authenticate to restore",
+                            promptSubtitle = "Verify your identity to restore discovered sub-accounts.",
+                        )
+                        if (readResult !is com.rjnr.pocketnode.data.wallet.WalletKeyReader.MaterialResult.Success) {
+                            return@forEach
+                        }
+                        readResult.privateKey.fill(0)
+                        val words = readResult.mnemonic?.split(" ")
+                        if (words.isNullOrEmpty()) return@forEach
 
-                    candidates.sortedBy { it.accountIndex }.forEach { candidate ->
-                        walletRepository.createSubAccount(
-                            parentWalletId = parentId,
-                            name = "Sub-account ${candidate.accountIndex}",
-                            parentMnemonic = words,
-                            explicitIndex = candidate.accountIndex,
-                            persistKeys = { newWalletId, bundle ->
-                                if (canCreateV2BoundKey()) {
-                                    walletKeyWriter.persistNewWallet(
-                                        activity = activity,
-                                        walletId = newWalletId,
-                                        bundle = bundle,
-                                        walletType = com.rjnr.pocketnode.data.wallet.KeyManager.WALLET_TYPE_MNEMONIC,
-                                        mnemonicBackedUp = false,
-                                        promptTitle = "Secure restored sub-account",
-                                        promptSubtitle = "Encrypt sub-account ${candidate.accountIndex}'s keys.",
-                                    )
-                                } else {
-                                    // No secure lock; user consented to V1 above.
-                                    walletKeyWriter.persistNewWalletV1Fallback(
-                                        walletId = newWalletId,
-                                        bundle = bundle,
-                                        walletType = com.rjnr.pocketnode.data.wallet.KeyManager.WALLET_TYPE_MNEMONIC,
-                                        mnemonicBackedUp = false,
-                                    )
-                                }
-                            },
-                        ).onSuccess { wallet ->
-                            restored++
-                            gatewayRepository.onActiveWalletChanged(wallet)
-                        }.onFailure { e ->
-                            logger.e(TAG, "Restore failed for $parentId index ${candidate.accountIndex}", e)
+                        if (walletRepository.getById(parentId) != expectedParent) return@forEach
+                        com.rjnr.pocketnode.ui.security.WalletDerivationSession.run(activity, lock) { session ->
+                        candidates.sortedBy { it.accountIndex }.forEach { candidate ->
+                            walletRepository.createSubAccount(
+                                parentWalletId = parentId,
+                                name = "Sub-account ${candidate.accountIndex}",
+                                parentMnemonic = words,
+                                explicitIndex = candidate.accountIndex,
+                                expectedParent = expectedParent,
+                                persistKeys = { newWalletId, bundle ->
+                                    session.persist {
+
+                                        walletKeyWriter.persistCreatedWallet(
+                                            activity = activity,
+                                            walletId = newWalletId,
+                                            bundle = bundle,
+                                            walletType = com.rjnr.pocketnode.data.wallet.KeyManager.WALLET_TYPE_MNEMONIC,
+                                            mnemonicBackedUp = false,
+                                            promptTitle = "Secure restored sub-account",
+                                            promptSubtitle = "Encrypt sub-account ${candidate.accountIndex}'s keys.",
+                                        )
+                                    }
+                                },
+                            ).onSuccess { wallet ->
+                                restored++
+                                gatewayRepository.onActiveWalletChanged(wallet)
+                            }.onFailure { e ->
+                                logger.e(TAG, "Restore failed for $parentId index ${candidate.accountIndex}", e)
+                            }
+                        }
                         }
                     }
-                }
-                if (restored == 0) {
-                    _uiState.update {
-                        it.copy(
-                            error = com.rjnr.pocketnode.ui.util.UiMessage.Raw(
-                                "Could not restore sub-accounts. Authenticate and try again."
+                    if (restored == 0) {
+                        _uiState.update {
+                            it.copy(
+                                error = com.rjnr.pocketnode.ui.util.UiMessage.Raw(
+                                    "Could not restore sub-accounts. Authenticate and try again."
+                                )
                             )
-                        )
+                        }
                     }
+                } finally {
+                    _uiState.update { it.copy(isRestoring = false) }
                 }
-            } finally {
-                _uiState.update { it.copy(isRestoring = false) }
+
             }
         }
     }
@@ -196,7 +170,5 @@ data class WalletManagerUiState(
     /** Discovered-but-unrestored sub-account slots with on-chain history (#82). */
     val foundCandidates: List<com.rjnr.pocketnode.data.database.entity.SubAccountCandidateEntity> = emptyList(),
     val isRestoring: Boolean = false,
-    /** F1/F3: show the no-device-lock consent dialog before V1 restore writes. */
-    val showNoLockConsent: Boolean = false,
     val error: com.rjnr.pocketnode.ui.util.UiMessage? = null,
 )

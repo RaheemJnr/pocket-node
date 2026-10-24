@@ -68,6 +68,7 @@ import org.robolectric.RobolectricTestRunner
 @OptIn(ExperimentalCoroutinesApi::class)
 @RunWith(RobolectricTestRunner::class)
 class AddWalletViewModelCancelAddTest {
+    private val nativeInput = com.rjnr.pocketnode.ui.security.NativeImportFixture()
 
     private val testDispatcher = StandardTestDispatcher()
     private val phrase = List(11) { "abandon" } + "about"
@@ -80,13 +81,10 @@ class AddWalletViewModelCancelAddTest {
     private lateinit var encryptionManager: KeystoreEncryptionManager
     private val gatewayRepository = mockk<GatewayRepository>(relaxed = true)
     private val walletKeyWriter = mockk<WalletKeyWriter>()
-    private val activity = mockk<FragmentActivity>(relaxed = true)
+    private val activity = org.robolectric.Robolectric.buildActivity(FragmentActivity::class.java).setup().get()
 
-    private suspend fun persist(walletId: String, bundle: WalletKeyBundle, type: String): WalletKeyWriter.Result =
-        v2Helper.writeNewV2Row(walletId, bundle, encryptionManager.newEncryptCipherV2(), type, false).fold(
-            onSuccess = { WalletKeyWriter.Result.Success },
-            onFailure = { WalletKeyWriter.Result.WriteFailed(it) },
-        )
+    private suspend fun persist(walletId: WalletRepository.Creation, bundle: WalletKeyBundle, type: String): WalletKeyWriter.Result =
+        com.rjnr.pocketnode.data.wallet.persistVerifiedFixture(db, walletId, bundle)
 
     @Before
     fun setUp() {
@@ -117,8 +115,8 @@ class AddWalletViewModelCancelAddTest {
         )
         importer = RestoreHintImporter(db.subAccountCandidateDao(), discovery, prefs, NoopLogger)
         importer.computeDispatcher = Dispatchers.Unconfined
-        coEvery { walletKeyWriter.persistNewWalletV1Fallback(any(), any(), any(), any()) } coAnswers {
-            persist(firstArg(), secondArg(), thirdArg())
+        coEvery { walletKeyWriter.persistCreatedWallet(any(), any(), any(), any(), any(), any(), any()) } coAnswers {
+            persist(secondArg(), thirdArg(), arg(3))
         }
         every { gatewayRepository.syncProgress } returns MutableStateFlow(SyncProgress())
         every { gatewayRepository.currentNetwork } returns NetworkType.TESTNET
@@ -141,6 +139,7 @@ class AddWalletViewModelCancelAddTest {
         authManager = mockk(relaxed = true),
         logger = NoopLogger,
         restoreHintImporter = importer,
+        importOperations = nativeInput.operations(walletRepository, walletKeyWriter, MnemonicManager(), importer),
     )
 
     /** Two existing wallets with keys and a sync_progress row each; [first] stays active. */
@@ -170,8 +169,8 @@ class AddWalletViewModelCancelAddTest {
 
     private fun AddWalletViewModel.importPhrase() {
         updateName("Restored")
-        phrase.forEachIndexed { i, w -> updateImportWord(i, w) }
-        importMnemonic(activity, consented = true)
+        phrase.forEachIndexed { i, w -> nativeInput.word(i, w) }
+        importMnemonic(activity)
     }
 
     private suspend fun assertOnlyAddedWalletRemoved(first: String, second: String, added: String) {
@@ -187,6 +186,30 @@ class AddWalletViewModelCancelAddTest {
         assertEquals(first, walletRepository.getActive()?.walletId)
         assertEquals(first, prefs.getActiveWalletId())
         assertEquals(2, db.walletDao().count())
+    }
+
+    @Test
+    fun `cancel joins pending registration before rollback and never adopts the removed wallet late`() = runTest {
+        val (first, second) = seedExisting()
+        val release = kotlinx.coroutines.CompletableDeferred<Unit>()
+        var started = false
+        var cancelled = false
+        var lateAdoption = false
+        coEvery { gatewayRepository.onActiveWalletChanged(any()) } coAnswers {
+            started = true
+            try { release.await(); lateAdoption = true } finally { cancelled = true }
+        }
+        val vm = newViewModel(); vm.importPhrase(); drainUntil { started }
+        try {
+            assertTrue(vm.uiState.value.showSyncModeDialog)
+            val added = walletRepository.getActive()!!.walletId
+            vm.cancelAddedWallet(); drainUntil { !vm.uiState.value.showSyncModeDialog }
+            assertTrue(cancelled)
+            release.complete(Unit); advanceUntilIdle()
+            assertFalse(lateAdoption)
+            assertOnlyAddedWalletRemoved(first, second, added)
+            coVerify(exactly = 1) { gatewayRepository.onWalletDeleted(added) }
+        } finally { release.complete(Unit); advanceUntilIdle() }
     }
 
     @Test
@@ -212,8 +235,7 @@ class AddWalletViewModelCancelAddTest {
         assertNull(vm.uiState.value.syncChoiceError)
         assertFalse(vm.uiState.value.cancelRemovesWallet)
         // F6: the abandoned add leaves nothing the user typed behind.
-        assertEquals(List(12) { "" }, vm.uiState.value.importWords)
-        assertTrue(vm.uiState.value.importSuggestions.isEmpty())
+        assertTrue(nativeInput.issued.all { chars -> chars.all { it == '\u0000' } })
         assertEquals("", vm.uiState.value.name)
     }
 
@@ -224,15 +246,15 @@ class AddWalletViewModelCancelAddTest {
         val vm = newViewModel()
         vm.onRestoreHintFilePicked("{}")
         vm.updateName("Key")
-        vm.updateImportPrivateKey(ByteArray(32) { (it + 1).toByte() }.joinToString("") { "%02x".format(it) })
-        vm.importRawKey(activity, consented = true)
+        nativeInput.key(ByteArray(32) { (it + 1).toByte() }.joinToString("") { "%02x".format(it) })
+        vm.importRawKey(activity)
         drainUntil { vm.uiState.value.showSyncModeDialog }
         assertTrue(vm.uiState.value.cancelRemovesWallet)
 
         vm.cancelAddedWallet()
         drainUntil { !vm.uiState.value.showSyncModeDialog }
 
-        assertEquals("", vm.uiState.value.importPrivateKey)
+        assertTrue(nativeInput.issued.all { chars -> chars.all { it == '\u0000' } })
         assertEquals("", vm.uiState.value.name)
         assertFalse(vm.uiState.value.hasRestoreHintFile)
         assertNull(vm.uiState.value.restoreHintError)

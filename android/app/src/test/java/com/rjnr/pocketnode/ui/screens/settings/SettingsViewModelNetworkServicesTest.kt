@@ -17,6 +17,7 @@ import io.ktor.client.HttpClient
 import io.ktor.client.engine.mock.MockEngine
 import io.ktor.client.engine.mock.respond
 import io.ktor.http.HttpStatusCode
+import io.mockk.coEvery
 import io.mockk.every
 import io.mockk.mockk
 import kotlinx.coroutines.Dispatchers
@@ -127,6 +128,38 @@ class SettingsViewModelNetworkServicesTest {
     )
 
     @Test
+    fun `scan aborts if selected wallet changes during authentication`() = runTest(testDispatcher) {
+        val authorizer = mockk<SeedPhraseAuthorizer>()
+        val keys = mockk<KeyMaterialDao>()
+        var selected = "wallet"
+        every { walletRepository.activeWalletIdSnapshot() } answers { selected }
+        coEvery { keys.getKdfVersion("wallet") } returns 2
+        coEvery { authorizer.authorize(any(), "wallet", any(), any()) } answers {
+            selected = "other"
+            SeedPhraseAuthorizer.SeedResult.Words(listOf("abandon"))
+        }
+        val vm = SettingsViewModel(repository, walletPrefs, mockk(relaxed = true), walletRepository,
+            noUpdateAvailableRepository(), authorizer, keys, mockk(relaxed = true))
+        runCurrent(); vm.runGapLimitScan(com.rjnr.pocketnode.data.wallet.ForegroundTestHost().activity); runCurrent()
+        assertTrue(vm.uiState.value.error.toString().contains("wallet changed", ignoreCase = true))
+    }
+
+    @Test
+    fun `gap scan requires actual centrally authenticated seed`() = runTest(testDispatcher) {
+        val authorizer = mockk<SeedPhraseAuthorizer>()
+        val keys = mockk<KeyMaterialDao>()
+        every { walletRepository.activeWalletIdSnapshot() } returns "wallet"
+        coEvery { authorizer.authorize(any(), "wallet", any(), any()) } returns
+        SeedPhraseAuthorizer.SeedResult.Failed("Recovery phrase unavailable for this wallet")
+        val vm = SettingsViewModel(repository, walletPrefs, mockk(relaxed = true), walletRepository,
+            noUpdateAvailableRepository(), authorizer, keys, mockk(relaxed = true))
+        runCurrent()
+        vm.runGapLimitScan(com.rjnr.pocketnode.data.wallet.ForegroundTestHost().activity)
+        runCurrent()
+        assertTrue( vm.uiState.value.error.toString().contains("Recovery phrase unavailable"))
+    }
+
+    @Test
     fun `loadState reflects the WalletPreferences defaults, both on`() = runTest(testDispatcher) {
         val viewModel = newViewModel(noUpdateAvailableRepository())
         runCurrent()
@@ -227,4 +260,22 @@ class SettingsViewModelNetworkServicesTest {
 
         assertEquals(SettingsViewModel.UpdateStatus.Disabled, viewModel.uiState.value.updateStatus)
     }
+    @Test fun `scan suspended after authentication cancels on stop resume before deriving`() = runTest(testDispatcher) {
+        val host = com.rjnr.pocketnode.data.wallet.ForegroundTestHost()
+        val authorizer = mockk<SeedPhraseAuthorizer>()
+        every { walletRepository.activeWalletIdSnapshot() } returns "wallet"
+        coEvery { authorizer.authorize(any(), any(), any(), any()) } returns SeedPhraseAuthorizer.SeedResult.Words(listOf("abandon"))
+        var entered = false; var cancelled = false
+        coEvery { repository.runGapLimitScan(any()) } coAnswers {
+            entered = true
+            try { kotlinx.coroutines.awaitCancellation() } finally { cancelled = true }
+        }
+        val vm = SettingsViewModel(repository, walletPrefs, mockk(relaxed = true), walletRepository,
+            noUpdateAvailableRepository(), authorizer, mockk(relaxed = true), mockk(relaxed = true))
+        runCurrent(); vm.runGapLimitScan(host.activity); runCurrent(); assertTrue(entered)
+        host.stopResume(); runCurrent()
+        try { assertTrue(cancelled) }
+        finally { androidx.lifecycle.ViewModelStore().apply { put("test", vm); clear() } }
+    }
+
 }

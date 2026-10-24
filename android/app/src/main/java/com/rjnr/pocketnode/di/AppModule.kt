@@ -25,6 +25,7 @@ import com.rjnr.pocketnode.data.database.MIGRATION_13_14
 import com.rjnr.pocketnode.data.database.MIGRATION_14_15
 import com.rjnr.pocketnode.data.database.MIGRATION_15_16
 import com.rjnr.pocketnode.data.database.MIGRATION_16_17
+import com.rjnr.pocketnode.data.database.MIGRATION_17_18
 import com.rjnr.pocketnode.data.database.dao.BalanceCacheDao
 import com.rjnr.pocketnode.data.database.dao.ContactDao
 import com.rjnr.pocketnode.data.database.dao.DaoCellDao
@@ -67,6 +68,32 @@ import javax.inject.Singleton
 @Module
 @InstallIn(SingletonComponent::class)
 object AppModule {
+
+    @Provides
+    @Singleton
+    fun provideVaultPrompt(): com.rjnr.pocketnode.data.vault.VaultPrompt = com.rjnr.pocketnode.ui.security.WalletPassphraseDialog()
+
+    @Provides
+    @Singleton
+    fun provideVaultValidator(mnemonicManager: MnemonicManager) = com.rjnr.pocketnode.data.vault.WalletSecretValidator(mnemonicManager)
+
+    @Provides
+    @Singleton
+    fun provideVaultDevice(authManager: AuthManager): com.rjnr.pocketnode.data.vault.VaultDeviceAuthentication =
+        com.rjnr.pocketnode.data.vault.DeviceVaultKeyStore(authManager)
+
+    @Provides
+    @Singleton
+    fun provideVaultCleanup(@ApplicationContext context: Context, backup: KeyBackupManager, db: AppDatabase, keyManager: KeyManager, legacy: KeyStoreMigrationHelper): com.rjnr.pocketnode.data.vault.VaultLegacyCleanup =
+        com.rjnr.pocketnode.data.vault.WalletLegacyCleanup(context, backup, db, keyManager, legacy)
+
+    @Provides
+    @Singleton
+    fun provideVaultCoordinator(db: AppDatabase, store: com.rjnr.pocketnode.data.vault.WalletVaultStore,
+        crypto: com.rjnr.pocketnode.data.vault.WalletEnvelopeCrypto, validator: com.rjnr.pocketnode.data.vault.WalletSecretValidator,
+        prompt: com.rjnr.pocketnode.data.vault.VaultPrompt, device: com.rjnr.pocketnode.data.vault.VaultDeviceAuthentication,
+        cleanup: com.rjnr.pocketnode.data.vault.VaultLegacyCleanup) =
+        com.rjnr.pocketnode.data.vault.WalletVaultCoordinator(db, store, crypto, validator, prompt, device, cleanup)
 
     @Provides
     @Singleton
@@ -136,7 +163,7 @@ object AppModule {
     fun provideAppDatabase(@ApplicationContext context: Context): AppDatabase =
         Room.databaseBuilder(context, AppDatabase::class.java, "pocket_node.db")
             .setJournalMode(RoomDatabase.JournalMode.WRITE_AHEAD_LOGGING)
-            .addMigrations(MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4, MIGRATION_4_5, MIGRATION_5_6, MIGRATION_6_7, MIGRATION_7_8, MIGRATION_8_9, MIGRATION_9_10, MIGRATION_10_11, MIGRATION_11_12, MIGRATION_12_13, MIGRATION_13_14, MIGRATION_14_15, MIGRATION_15_16, MIGRATION_16_17)
+            .addMigrations(MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4, MIGRATION_4_5, MIGRATION_5_6, MIGRATION_6_7, MIGRATION_7_8, MIGRATION_8_9, MIGRATION_9_10, MIGRATION_10_11, MIGRATION_11_12, MIGRATION_12_13, MIGRATION_13_14, MIGRATION_14_15, MIGRATION_15_16, MIGRATION_16_17, MIGRATION_17_18)
             .build()
 
     @Provides
@@ -170,6 +197,9 @@ object AppModule {
 
     @Provides
     fun provideKeyMaterialDao(db: AppDatabase): KeyMaterialDao = db.keyMaterialDao()
+
+    @Provides
+    fun provideWalletVaultDao(db: AppDatabase): com.rjnr.pocketnode.data.database.dao.WalletVaultDao = db.walletVaultDao()
 
     @Provides
     fun provideContactDao(db: AppDatabase): ContactDao = db.contactDao()

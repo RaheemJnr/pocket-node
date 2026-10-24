@@ -27,18 +27,7 @@ import org.junit.runner.RunWith
 import org.robolectric.RobolectricTestRunner
 import org.robolectric.annotation.Config
 
-/**
- * #496: a wallet that has a `key_material` row must never silently serve the
- * legacy plaintext EncryptedSharedPreferences copy when the Room read comes
- * back empty. The read either repairs the row from that legacy copy — loudly,
- * so the inconsistency is gone afterwards — or fails closed. Only genuinely
- * legacy wallets, with no Room row at all, still take the plain fallback.
- *
- * "Room row present but unreadable" is reproduced with an unknown
- * `kdfVersion`, which is the one shape [KeyStoreMigrationHelper.readDecryptedKey]
- * turns into a null return rather than an exception (a corrupt V1 ciphertext
- * lands in the same branch; V2 rows throw before reaching it).
- */
+/** UI-free secret access always requires the foreground reader; legacy and unknown source bytes stay intact. */
 @RunWith(RobolectricTestRunner::class)
 @Config(sdk = [28], manifest = Config.NONE)
 class KeyManagerFailClosedTest {
@@ -114,9 +103,8 @@ class KeyManagerFailClosedTest {
     private inline fun expectUnreadable(block: () -> Unit) {
         try {
             block()
-            fail("expected KeyMaterialUnreadableException")
-        } catch (e: KeyMaterialUnreadableException) {
-            assertEquals("key material present but unreadable for wallet", e.message)
+            fail("expected WalletSecretRequiresAuthenticationException")
+        } catch (e: WalletSecretRequiresAuthenticationException) {
         }
     }
 
@@ -156,32 +144,29 @@ class KeyManagerFailClosedTest {
         expectUnreadable { keyManager.getPrivateKey() }
     }
 
-    // -- Room row present and broken, legacy copy available: repair, don't just serve --
+    // Existing unreadable rows are never silently repaired by UI-free reads.
 
     @Test
-    fun `an unreadable row is repaired from the legacy copy rather than bypassed`() = runTest {
+    fun `an unreadable row and legacy copy are preserved until foreground recovery`() = runTest {
         seedLegacyPrefs("wallet-broken")
         seedUnreadableRow("wallet-broken")
 
-        assertEquals(legacyMnemonic.split(" "), keyManager.getMnemonicForWallet("wallet-broken"))
+        val source = db.keyMaterialDao().getByWalletId("wallet-broken")
+        expectUnreadable { keyManager.getMnemonicForWallet("wallet-broken") }
+        assertEquals(source, db.keyMaterialDao().getByWalletId("wallet-broken"))
+        assertEquals(99, db.keyMaterialDao().getKdfVersion("wallet-broken"))
 
-        // The point of repairing rather than falling back: the row is now
-        // readable, so the next read comes from Room like any other wallet's.
-        val repaired = migrationHelper.readDecryptedKey("wallet-broken")
-        assertNotNull(repaired)
-        assertEquals(legacyKeyHex, repaired!!.privateKeyHex)
-        assertEquals(legacyMnemonic, repaired.mnemonic)
-        assertEquals(1, db.keyMaterialDao().getKdfVersion("wallet-broken"))
     }
 
     @Test
-    fun `a repaired row serves the private key too`() = runTest {
+    fun `an unreadable row cannot release a legacy private key without authentication`() = runTest {
         seedLegacyPrefs("wallet-broken")
         seedUnreadableRow("wallet-broken")
 
-        val key = keyManager.getPrivateKeyForWallet("wallet-broken")
-        assertEquals(legacyKeyHex, key?.joinToString("") { "%02x".format(it) })
-        assertNotNull(migrationHelper.readDecryptedKey("wallet-broken"))
+        val source = db.keyMaterialDao().getByWalletId("wallet-broken")
+        expectUnreadable { keyManager.getPrivateKeyForWallet("wallet-broken") }
+        assertEquals(source, db.keyMaterialDao().getByWalletId("wallet-broken"))
+
     }
 
     @Test
@@ -217,46 +202,46 @@ class KeyManagerFailClosedTest {
         assertEquals(2, db.keyMaterialDao().getKdfVersion("wallet-v2"))
     }
 
-    // -- Genuinely legacy wallet (no Room row): fallback still works --
+    // ESP-only secrets also require foreground authentication.
 
     @Test
-    fun `getMnemonicForWallet falls back to prefs for a wallet with no Room row`() = runTest {
+    fun `getMnemonicForWallet requires authentication for an ESP only wallet`() = runTest {
         seedLegacyPrefs("wallet-legacy")
 
-        assertEquals(legacyMnemonic.split(" "), keyManager.getMnemonicForWallet("wallet-legacy"))
+        expectUnreadable { keyManager.getMnemonicForWallet("wallet-legacy") }
         // Nothing was written: a pre-Room install stays pre-Room until the real
         // ESP-to-Room migration runs.
         assertNull(db.keyMaterialDao().getKdfVersion("wallet-legacy"))
     }
 
     @Test
-    fun `getPrivateKeyForWallet falls back to prefs for a wallet with no Room row`() = runTest {
+    fun `getPrivateKeyForWallet requires authentication for an ESP only wallet`() = runTest {
         seedLegacyPrefs("wallet-legacy")
 
-        val key = keyManager.getPrivateKeyForWallet("wallet-legacy")
-        assertEquals(legacyKeyHex, key?.joinToString("") { "%02x".format(it) })
+        expectUnreadable { keyManager.getPrivateKeyForWallet("wallet-legacy") }
+        assertNull(db.keyMaterialDao().getByWalletId("wallet-legacy"))
     }
 
     @Test
-    fun `active-wallet reads fall back to prefs when default has no Room row`() = runTest {
+    fun `active-wallet ESP reads require foreground authentication`() = runTest {
         seedLegacyPrefs("default")
 
-        assertEquals(legacyMnemonic.split(" "), keyManager.getMnemonic())
-        assertEquals(legacyKeyHex, keyManager.getPrivateKey().joinToString("") { "%02x".format(it) })
+        expectUnreadable { keyManager.getMnemonic() }
+        expectUnreadable { keyManager.getPrivateKey() }
     }
 
     @Test
-    fun `a legacy wallet with no key material at all still returns null`() = runTest {
+    fun `an unauthenticated secret getter does not probe an empty legacy wallet`() = runTest {
         seedLegacyPrefs("wallet-empty", withMaterial = false)
 
-        assertNull(keyManager.getMnemonicForWallet("wallet-empty"))
-        assertNull(keyManager.getPrivateKeyForWallet("wallet-empty"))
+        expectUnreadable { keyManager.getMnemonicForWallet("wallet-empty") }
+        expectUnreadable { keyManager.getPrivateKeyForWallet("wallet-empty") }
     }
 
-    // -- A readable Room row still wins over the legacy copy --
+    // Readable software-encrypted rows remain gated.
 
     @Test
-    fun `a readable Room row is preferred over the legacy prefs copy`() = runTest {
+    fun `even readable legacy Room rows cannot bypass foreground authentication`() = runTest {
         val prefs = seedLegacyPrefs("wallet-migrated")
         val roomKeyHex = "cd".repeat(32)
         val roomMnemonic = "legal winner thank year wave sausage worth useful legal winner thank yellow"
@@ -268,11 +253,9 @@ class KeyManagerFailClosedTest {
             mnemonicBackedUp = false,
         )
 
-        assertEquals(roomMnemonic.split(" "), keyManager.getMnemonicForWallet("wallet-migrated"))
-        assertEquals(
-            roomKeyHex,
-            keyManager.getPrivateKeyForWallet("wallet-migrated")?.joinToString("") { "%02x".format(it) },
-        )
+        expectUnreadable { keyManager.getMnemonicForWallet("wallet-migrated") }
+        expectUnreadable { keyManager.getPrivateKeyForWallet("wallet-migrated") }
+        assertEquals(roomMnemonic, migrationHelper.readDecryptedKey("wallet-migrated")!!.mnemonic)
         assertTrue(migrationHelper.hasKeyMaterialRow("wallet-migrated"))
         verify(exactly = 0) { prefs.getString(any(), any()) }
     }

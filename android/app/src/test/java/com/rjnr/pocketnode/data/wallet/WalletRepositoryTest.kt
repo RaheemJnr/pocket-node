@@ -39,23 +39,11 @@ class WalletRepositoryTest {
     private lateinit var v2Helper: KeystoreV2MigrationHelper
     private lateinit var repo: WalletRepository
 
-    /**
-     * Fake persistKeys closure that mirrors what `WalletKeyWriter` does in
-     * production, encrypt the bundle with a fresh V2 cipher and write
-     * directly to `key_material` at kdfVersion=2. Skips the BiometricPrompt
-     * (the test fixture has no Activity).
-     */
     private suspend fun fakePersistV2(
-        walletId: String,
+        walletId: WalletRepository.Creation,
         bundle: WalletKeyBundle,
         walletType: String = KeyManager.WALLET_TYPE_MNEMONIC,
-    ): WalletKeyWriter.Result {
-        val cipher = encryptionManager.newEncryptCipherV2()
-        return v2Helper.writeNewV2Row(walletId, bundle, cipher, walletType, false).fold(
-            onSuccess = { WalletKeyWriter.Result.Success },
-            onFailure = { WalletKeyWriter.Result.WriteFailed(it) },
-        )
-    }
+    ): WalletKeyWriter.Result = persistVerifiedFixture(db, walletId, bundle)
 
     @Before
     fun setUp() {
@@ -86,14 +74,111 @@ class WalletRepositoryTest {
         db.close()
     }
 
-    private fun newRepo(dao: WalletDao = walletDao, km: KeyManager = keyManager) = WalletRepository(
-        dao, km, walletPreferences, walletPreferences, mnemonicManager, db,
+    private fun newRepo(dao: WalletDao = walletDao, km: KeyManager = keyManager, keys: com.rjnr.pocketnode.data.database.dao.KeyMaterialDao = db.keyMaterialDao(), mnemonics: MnemonicManager = mnemonicManager) = WalletRepository(
+        dao, km, walletPreferences, walletPreferences, mnemonics, db,
         db.transactionDao(), db.balanceCacheDao(), db.daoCellDao(),
-        db.pendingDaoWithdrawDao(), db.pendingDaoUnlockDao(), db.keyMaterialDao(),
-        db.subAccountCandidateDao(), SubAccountDiscovery(mnemonicManager, km), walletPreferences, NoopLogger
+        db.pendingDaoWithdrawDao(), db.pendingDaoUnlockDao(), keys,
+        db.subAccountCandidateDao(), SubAccountDiscovery(mnemonics, km), walletPreferences, NoopLogger
     )
 
+    @Test
+    fun `verified backup witness marks exact protected record without legacy backup fallback`() = runTest {
+        val created = repo.createWallet("Backup", { id, bundle -> fakePersistV2(id, bundle) }).getOrThrow().let { walletDao.getById(it.walletId)!! }
+        val marker = db.keyMaterialDao().getByWalletId(created.walletId)!!
+        val vault = db.walletVaultDao().get(created.walletId)!!
+        val profile = db.walletVaultDao().profile()!!
+        val witness = WalletBackupWitness(created, marker, vault, profile)
+        val noLegacy = io.mockk.spyk(keyManager)
+        io.mockk.coEvery { noLegacy.setMnemonicBackedUpForWallet(any(), any()) } throws AssertionError("Legacy backup writer must never run")
+        assertTrue(newRepo(km = noLegacy).markVerifiedMnemonicBackup(witness))
+        assertTrue(db.keyMaterialDao().getMnemonicBackedUp(created.walletId)!!)
+        assertArrayEquals(vault.envelope, db.walletVaultDao().get(created.walletId)!!.envelope)
+    }
+
+    @Test
+    fun `verified backup witness refuses changed identity marker generation envelope profile and pending cleanup`() = runTest {
+        val created = repo.createWallet("Backup", { id, bundle -> fakePersistV2(id, bundle) }).getOrThrow().let { walletDao.getById(it.walletId)!! }
+        val marker = db.keyMaterialDao().getByWalletId(created.walletId)!!
+        val vault = db.walletVaultDao().get(created.walletId)!!
+        val profile = db.walletVaultDao().profile()!!
+        val witness = WalletBackupWitness(created, marker, vault, profile)
+        val changes: List<suspend () -> Unit> = listOf(
+            { walletDao.update(created.copy(name = "Replacement")) },
+            { db.keyMaterialDao().delete(created.walletId) },
+            { db.keyMaterialDao().upsert(marker.copy(kdfVersion = 1)) },
+            { db.keyMaterialDao().upsert(marker.copy(updatedAt = marker.updatedAt + 1)) },
+            { db.walletVaultDao().update(vault.copy(generation = vault.generation + 1)) },
+            { db.walletVaultDao().update(vault.copy(envelope = vault.envelope.copyOf().also { it[0] = (it[0].toInt() xor 1).toByte() })) },
+            { db.walletVaultDao().update(vault.copy(profileGeneration = vault.profileGeneration + 1)) },
+            { db.walletVaultDao().update(vault.copy(cleanupPending = true)) },
+            { db.walletVaultDao().updateProfile(profile.copy(envelope = profile.envelope.copyOf().also { it[0] = (it[0].toInt() xor 1).toByte() })) },
+        )
+        for (change in changes) {
+            change()
+            assertFalse(repo.markVerifiedMnemonicBackup(witness))
+            assertFalse(db.keyMaterialDao().getMnemonicBackedUp(created.walletId) ?: false)
+            walletDao.update(created); db.keyMaterialDao().upsert(marker)
+            db.walletVaultDao().update(vault); db.walletVaultDao().updateProfile(profile)
+        }
+    }
+
     /** #563 review F3: a switch that fails part-way leaves the old wallet active, never none. */
+    @Test
+    fun `cancelled creation clears derived seed and key after consumer returns`() = runTest {
+        val watched = io.mockk.spyk(mnemonicManager)
+        lateinit var seed: ByteArray
+        lateinit var key: ByteArray
+        io.mockk.every { watched.mnemonicToSeed(any(), any()) } answers { callOriginal().also { seed = it } }
+        io.mockk.every { watched.mnemonicToPrivateKey(any(), any()) } answers { callOriginal().also { key = it } }
+        val result = newRepo(mnemonics = watched).createWallet("Cancelled", { _, _ ->
+            assertTrue("key must survive until its consumer finishes", key.any { it != 0.toByte() })
+            WalletKeyWriter.Result.Cancelled
+        })
+        assertTrue(result.isFailure)
+        assertTrue("derived key cleared", key.all { it == 0.toByte() })
+        assertTrue("intermediate seed cleared", seed.all { it == 0.toByte() })
+        assertEquals(0, walletDao.count())
+        assertTrue(db.walletVaultDao().all().isEmpty())
+    }
+
+    @Test
+    fun `rollback refuses a newer protection generation`() = runTest {
+        val previous = repo.createWallet("Previous", { id, bundle -> fakePersistV2(id, bundle) }).getOrThrow()
+        val added = repo.createWallet("Added", { id, bundle -> fakePersistV2(id, bundle) }).getOrThrow()
+        val crypto = com.rjnr.pocketnode.data.vault.WalletEnvelopeCrypto()
+        val store = com.rjnr.pocketnode.data.vault.WalletVaultStore(db, crypto, kotlinx.coroutines.Dispatchers.Unconfined)
+        store.rotate("public test wallet passphrase".toCharArray(), "rotated test wallet passphrase".toCharArray())
+        val rotated = db.walletVaultDao().get(added.walletId)!!
+        assertTrue(runCatching { repo.rollbackAddedWallet(added, previous.walletId) }.isFailure)
+        assertNotNull(walletDao.getById(added.walletId))
+        assertArrayEquals(rotated.envelope, db.walletVaultDao().get(added.walletId)!!.envelope)
+    }
+
+    @Test
+    fun `selection failure after commit retains referenced wallet and previous selection`() = runTest {
+        val previous = repo.createWallet("Previous", { id, bundle -> fakePersistV2(id, bundle) }).getOrThrow()
+        val failing = object : WalletDao by walletDao {
+            override suspend fun activate(walletId: String) = throw IllegalStateException("disk I/O error")
+        }
+        assertTrue(newRepo(dao = failing).createWallet("New", { id, bundle -> fakePersistV2(id, bundle) }).isFailure)
+        assertEquals(previous.walletId, walletDao.getActive()?.walletId)
+        val retained = walletDao.getAll().single { it.walletId != previous.walletId }
+        assertNotNull(db.walletVaultDao().get(retained.walletId))
+        assertEquals(3, db.keyMaterialDao().getKdfVersion(retained.walletId))
+    }
+
+    @Test
+    fun `rollback refuses a replaced wallet identity`() = runTest {
+        val previous = repo.createWallet("Previous", { id, bundle -> fakePersistV2(id, bundle) }).getOrThrow()
+        val added = repo.createWallet("Added", { id, bundle -> fakePersistV2(id, bundle) }).getOrThrow()
+        val replacement = added.copy(mainnetAddress = "a different identity")
+        walletDao.update(replacement)
+        assertTrue(runCatching { repo.rollbackAddedWallet(added, previous.walletId) }.isFailure)
+        assertEquals(replacement, walletDao.getById(added.walletId))
+        assertNotNull(db.walletVaultDao().get(added.walletId))
+        assertEquals(added.walletId, walletDao.getActive()?.walletId)
+    }
+
     @Test
     fun `a switch that fails part-way leaves the previous wallet active`() = runTest {
         val first = repo.createWallet(
@@ -131,7 +216,7 @@ class WalletRepositoryTest {
             override suspend fun activate(walletId: String) = throw IllegalStateException("disk I/O error")
         }
 
-        val error = runCatching { newRepo(dao = failing).rollbackAddedWallet(added.walletId, previous.walletId) }
+        val error = runCatching { newRepo(dao = failing).rollbackAddedWallet(added, previous.walletId) }
             .exceptionOrNull()
 
         assertTrue(error is IllegalStateException)
@@ -208,7 +293,7 @@ class WalletRepositoryTest {
         // Verify a key_material row exists at kdfVersion=2.
         val keyEntity = db.keyMaterialDao().getByWalletId(wallet.walletId)
         assertNotNull(keyEntity)
-        assertEquals(2, keyEntity!!.kdfVersion)
+        assertEquals(3, keyEntity!!.kdfVersion)
 
         // Verify active wallet pref
         assertEquals(wallet.walletId, walletPreferences.getActiveWalletId())
@@ -252,6 +337,7 @@ class WalletRepositoryTest {
 
         assertNull(walletDao.getById(wallet1.walletId))
         assertNull(db.keyMaterialDao().getByWalletId(wallet1.walletId))
+        assertNull(db.walletVaultDao().get(wallet1.walletId))
 
         // wallet2 should still exist
         assertNotNull(walletDao.getById(wallet2.walletId))
@@ -497,7 +583,7 @@ class WalletRepositoryTest {
         ).getOrThrow()
         assertEquals(added.walletId, walletDao.getActive()?.walletId)
 
-        val active = repo.rollbackAddedWallet(added.walletId, previous.walletId)
+        val active = repo.rollbackAddedWallet(added, previous.walletId)
 
         assertEquals(previous.walletId, active.walletId)
         assertTrue(active.isActive)
@@ -516,7 +602,7 @@ class WalletRepositoryTest {
             persistKeys = { walletId, bundle -> fakePersistV2(walletId, bundle) },
         ).getOrThrow()
 
-        val error = runCatching { repo.rollbackAddedWallet(added.walletId, "no-such-wallet") }.exceptionOrNull()
+        val error = runCatching { repo.rollbackAddedWallet(added, "no-such-wallet") }.exceptionOrNull()
 
         assertTrue(error is IllegalStateException)
         assertEquals(added.walletId, walletDao.getActive()?.walletId)
@@ -849,18 +935,20 @@ class WalletRepositoryTest {
             name = "Stuck keys",
             persistKeys = { walletId, bundle -> fakePersistV2(walletId, bundle) },
         ).getOrThrow()
-        val km = io.mockk.spyk(keyManager)
-        io.mockk.coEvery { km.deleteWalletKeys(any()) } throws IllegalStateException("keystore gone")
+        val failingKeys = object : com.rjnr.pocketnode.data.database.dao.KeyMaterialDao by db.keyMaterialDao() {
+            override suspend fun delete(walletId: String) = throw IllegalStateException("storage unavailable")
+        }
         val pinManager = pinManagerWithPin()
 
         val error = runCatching {
-            localReset(repository = newRepo(km = km), pinManager = pinManager).removeAllWalletsAndPin()
+            localReset(repository = newRepo(keys = failingKeys), pinManager = pinManager).removeAllWalletsAndPin()
         }.exceptionOrNull()
 
-        // The wallet row is gone, its key_material row is not: the PIN stays.
+        // Atomic deletion rolled back metadata and protection together; the PIN stays.
         assertTrue(error is IllegalStateException)
-        assertEquals(0, walletDao.count())
+        assertEquals(1, walletDao.count())
         assertNotNull(db.keyMaterialDao().getByWalletId(stuck.walletId))
+        assertNotNull(db.walletVaultDao().get(stuck.walletId))
         assertTrue(pinManager.hasPin())
     }
 
@@ -905,6 +993,7 @@ class WalletRepositoryTest {
 
         repo.factoryReset()
 
+        assertNull(db.walletVaultDao().profile())
         assertNull(walletDao.getById("orphan-sub"))
         assertNull(walletDao.getById(parent.walletId))
         assertEquals(0, walletDao.count())

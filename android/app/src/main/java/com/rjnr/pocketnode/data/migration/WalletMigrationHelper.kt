@@ -1,6 +1,8 @@
 package com.rjnr.pocketnode.data.migration
 
 import androidx.room.withTransaction
+import com.rjnr.pocketnode.core.crypto.hexToByteArray
+import kotlinx.coroutines.CancellationException
 import com.rjnr.pocketnode.core.log.Logger
 import com.rjnr.pocketnode.data.database.AppDatabase
 import com.rjnr.pocketnode.data.database.dao.SyncProgressDao
@@ -11,7 +13,6 @@ import com.rjnr.pocketnode.data.gateway.models.NetworkType
 import com.rjnr.pocketnode.data.crypto.KeyStoreMigrationHelper
 import com.rjnr.pocketnode.data.wallet.KeyManager
 import com.rjnr.pocketnode.data.wallet.WalletPreferences
-import java.util.UUID
 import javax.inject.Inject
 import javax.inject.Singleton
 
@@ -58,58 +59,73 @@ class WalletMigrationHelper @Inject constructor(
      * regressing the user-facing migration UX.
      */
     suspend fun migrateIfNeeded() {
-        if (walletDao.count() > 0) return  // already migrated
+        if (walletDao.count() > 0) {
+            // A creation or selection transaction can commit before preferences are written.
+            // Room owns selection; recover an interrupted first creation without reading secrets.
+            val selected = database.withTransaction {
+                walletDao.getActive() ?: walletDao.getAll().firstOrNull()?.also {
+                    walletDao.activate(it.walletId)
+                }
+            }
+            selected?.let { walletPreferences.setActiveWalletId(it.walletId) }
+            return
+        }
         if (!keyManager.hasWallet()) return // no legacy wallet to migrate
 
         logger.d(TAG, "Migrating legacy single-wallet to multi-wallet schema")
 
+        var ownedKey: ByteArray? = null
         try {
-            val info = keyManager.getWalletInfo()
-            val privateKey = keyManager.getPrivateKey()
-            val mnemonic = keyManager.getMnemonic()
-            val walletType = keyManager.getWalletType()
-            val walletId = UUID.randomUUID().toString()
-            val mnemonicBackedUp = keyManager.hasMnemonicBackup()
+            val migrated = database.withTransaction {
+                val material = keyManager.legacyDefaultMaterialForMigration(walletDao) ?: return@withTransaction null
+                val privateKey = material.privateKeyHex.hexToByteArray().also { ownedKey = it }
+                val info = keyManager.deriveWalletInfo(privateKey)
+                val walletType = material.walletType
+                val walletId = "default"
+                val mnemonicBackedUp = material.mnemonicBackedUp
 
-            // Write a V1 row directly. See class-level KDoc on migrateIfNeeded
-            // for why we don't go through WalletKeyWriter here.
-            val privateKeyHex = privateKey.joinToString("") { "%02x".format(it) }
-            keyStoreMigrationHelper.migrateWallet(
-                walletId = walletId,
-                privateKeyHex = privateKeyHex,
-                mnemonic = mnemonic?.joinToString(" "),
-                walletType = walletType,
-                mnemonicBackedUp = mnemonicBackedUp,
-            )
+                // Write a V1 row directly. See class-level KDoc on migrateIfNeeded
+                // for why we don't go through WalletKeyWriter here.
+                val privateKeyHex = material.privateKeyHex
+                if (database.keyMaterialDao().getByWalletId(walletId) == null) keyStoreMigrationHelper.migrateWallet(
+                    walletId = walletId,
+                    privateKeyHex = privateKeyHex,
+                    mnemonic = material.mnemonic,
+                    walletType = walletType,
+                    mnemonicBackedUp = mnemonicBackedUp,
+                )
 
-            val entity = WalletEntity(
-                walletId = walletId,
-                name = "Primary Wallet",
-                type = walletType,
-                derivationPath = if (walletType == KeyManager.WALLET_TYPE_MNEMONIC) "m/44'/309'/0'/0/0" else null,
-                parentWalletId = null,
-                accountIndex = 0,
-                mainnetAddress = info.mainnetAddress,
-                testnetAddress = info.testnetAddress,
-                isActive = true,
-                createdAt = System.currentTimeMillis()
-            )
+                val entity = WalletEntity(
+                    walletId = walletId,
+                    name = "Primary Wallet",
+                    type = walletType,
+                    derivationPath = if (walletType == KeyManager.WALLET_TYPE_MNEMONIC) "m/44'/309'/0'/0/0" else null,
+                    parentWalletId = null,
+                    accountIndex = 0,
+                    mainnetAddress = info.mainnetAddress,
+                    testnetAddress = info.testnetAddress,
+                    isActive = true,
+                    createdAt = System.currentTimeMillis()
+                )
 
-            walletDao.insert(entity)
+                walletDao.insert(entity)
 
-            // Backfill walletId in existing cached data
-            val db = database.openHelper.writableDatabase
-            db.execSQL("UPDATE transactions SET walletId = ? WHERE walletId = ''", arrayOf(walletId))
-            db.execSQL("UPDATE balance_cache SET walletId = ? WHERE walletId = ''", arrayOf(walletId))
-            db.execSQL("UPDATE dao_cells SET walletId = ? WHERE walletId = ''", arrayOf(walletId))
+                // Backfill walletId in existing cached data
+                val db = database.openHelper.writableDatabase
+                db.execSQL("UPDATE transactions SET walletId = ? WHERE walletId = ''", arrayOf(walletId))
+                db.execSQL("UPDATE balance_cache SET walletId = ? WHERE walletId = ''", arrayOf(walletId))
+                db.execSQL("UPDATE dao_cells SET walletId = ? WHERE walletId = ''", arrayOf(walletId))
 
-            // Set active wallet ID in preferences
-            walletPreferences.setActiveWalletId(walletId)
-
-            logger.d(TAG, "Migration complete: created wallet $walletId")
+                entity
+            } ?: return
+            // Room key identity, metadata and backfill commit together; preferences follow that commit.
+            walletPreferences.setActiveWalletId(migrated.walletId)
+            logger.d(TAG, "Migration complete: created wallet ${migrated.walletId}")
+        } catch (e: CancellationException) {
+            throw e
         } catch (e: Exception) {
-            logger.e(TAG, "Migration failed — legacy wallet intact, will retry next launch", e)
-        }
+            logger.e(TAG, "Legacy wallet migration failed; source retained for retry", e)
+        } finally { ownedKey?.fill(0) }
     }
 
     /**

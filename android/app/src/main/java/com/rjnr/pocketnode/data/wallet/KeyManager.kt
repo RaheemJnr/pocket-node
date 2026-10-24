@@ -207,87 +207,161 @@ class KeyManager @Inject constructor(
         return "keyMaterial=$total(v1=$v1,v2=$v2) espKey=$espKey"
     }
 
-    /**
-     * Read [walletId]'s key material from Room, failing closed when the
-     * wallet has a `key_material` row that cannot be read (#496).
-     *
-     * Returning null means "this wallet has no Room row at all" -- a
-     * genuinely legacy, pre-Room install whose only copy of the key still
-     * lives in the deprecated EncryptedSharedPreferences file. Those are
-     * the only wallets allowed to take the ESP fallback; for every wallet
-     * Room knows about, an unreadable row is an inconsistency we surface
-     * rather than paper over with the legacy plaintext copy.
-     *
-     * V2 (auth-bound) rows still throw
-     * [com.rjnr.pocketnode.data.crypto.V2KeyMaterialRequiresAuthException]
-     * out of [KeyStoreMigrationHelper.readDecryptedKey] -- that fail-closed
-     * path is unchanged; callers must supply an authenticated Cipher.
-     */
-    private suspend fun readRoomKeyOrFailClosed(walletId: String): DecryptedKeyData? {
-        val helper = keyStoreMigrationHelper ?: return null
-        helper.readDecryptedKey(walletId)?.let { return it }
-        if (helper.hasKeyMaterialRow(walletId)) {
-            // One repair attempt before giving up. ESP-to-Room migration runs
-            // once and is then marked complete, so a row that goes bad
-            // afterwards would otherwise be a permanent hard failure even
-            // though a readable legacy copy is sitting right there. Repairing
-            // re-encrypts that copy into Room, which both serves the read and
-            // removes the inconsistency -- unlike the silent fallback this
-            // replaces, which left the broken row in place forever (#496).
-            repairFromLegacyStore(walletId, helper)?.let { return it }
-            // Never log key material -- walletId and the failure mode only.
-            logger.e(TAG, "key_material row for walletId=$walletId is unreadable and has no legacy copy to repair from")
-            throw KeyMaterialUnreadableException(walletId)
+    /** Startup-only bootstrap, never an authenticated operation or a fallback for a vault marker. */
+    internal suspend fun legacyDefaultMaterialForMigration(walletDao: com.rjnr.pocketnode.data.database.dao.WalletDao): DecryptedKeyData? {
+        check(walletDao.count() == 0) { "Legacy startup migration is already complete." }
+        val helper = keyStoreMigrationHelper ?: throw WalletSecretRequiresAuthenticationException()
+        val version = helper.keyMaterialVersion(DEFAULT_WALLET_ID)
+        check(helper.keyMaterialCounts().first == if (version == null) 0 else 1) {
+            "Legacy startup migration cannot replace existing wallet key storage."
         }
-        logger.w(TAG, "No key_material row for walletId=$walletId; reading legacy prefs (migration pending)")
-        return null
+        if (version != null) {
+            if (version != 1) throw KeyMaterialUnreadableException(DEFAULT_WALLET_ID)
+            return helper.readDecryptedKey(DEFAULT_WALLET_ID)
+        }
+        val hex = prefs.getString(KEY_PRIVATE_KEY, null) ?: return null
+        val mnemonic = prefs.getString(KEY_MNEMONIC, null)
+        val type = prefs.getString(KEY_WALLET_TYPE, null)
+            ?: if (mnemonic == null) WALLET_TYPE_RAW_KEY else WALLET_TYPE_MNEMONIC
+        return DecryptedKeyData(hex, mnemonic, type, prefs.getBoolean(KEY_MNEMONIC_BACKED_UP, false))
     }
 
-    /**
-     * The deprecated EncryptedSharedPreferences file backing [walletId]:
-     * the global one for the legacy "default" bucket, the per-wallet file
-     * otherwise.
-     */
-    @Suppress("DEPRECATION")
-    private fun legacyPrefsFor(walletId: String): SharedPreferences =
-        if (walletId == DEFAULT_WALLET_ID) prefs else getWalletPrefs(walletId)
-
-    /**
-     * Rebuild an unreadable `key_material` row from the legacy prefs copy,
-     * returning the re-read material on success and null when there is
-     * nothing to repair from (or the repair itself fails).
-     *
-     * Deliberately NOT a silent fallback: the row is rewritten, so the next
-     * read comes from Room like every other wallet's, and the repair is
-     * logged. Never logs key material.
-     */
-    private suspend fun repairFromLegacyStore(
-        walletId: String,
-        helper: KeyStoreMigrationHelper,
-    ): DecryptedKeyData? {
-        return try {
-            val legacy = legacyPrefsFor(walletId)
-            val privateKeyHex = legacy.getString(KEY_PRIVATE_KEY, null) ?: return null
-            val mnemonic = legacy.getString(KEY_MNEMONIC, null)
-            val walletType = legacy.getString(KEY_WALLET_TYPE, null)
-                ?: if (mnemonic != null) WALLET_TYPE_MNEMONIC else WALLET_TYPE_RAW_KEY
-            val backedUp = legacy.getBoolean(KEY_MNEMONIC_BACKED_UP, false)
-            helper.migrateWallet(walletId, privateKeyHex, mnemonic, walletType, backedUp)
-            val repaired = helper.readDecryptedKey(walletId) ?: return null
-            logger.w(TAG, "repaired key material for wallet $walletId from legacy store")
-            repaired
-        } catch (e: Exception) {
-            logger.e(TAG, "Repair from legacy store failed for walletId=$walletId", e)
-            null
+    /** Independent XML and backup fingerprints; never opens/restores SharedPreferences. */
+    internal fun preferenceCleanupSnapshot(walletId: String): List<String?> {
+        require(walletId.matches(Regex("[A-Za-z0-9_-]{1,128}")))
+        val name = if (walletId == "default") "ckb_wallet_keys" else "ckb_wallet_keys_$walletId"
+        val file = java.io.File(context.filesDir.parentFile, "shared_prefs/$name.xml")
+        return listOf(file, java.io.File(file.path + ".bak")).map { source ->
+            if (!source.exists()) null else source.inputStream().use { input ->
+                val digest = java.security.MessageDigest.getInstance("SHA-256")
+                val buffer = ByteArray(8192)
+                try {
+                    while (true) {
+                        val count = input.read(buffer)
+                        if (count < 0) break
+                        digest.update(buffer, 0, count)
+                    }
+                    digest.digest().joinToString("") { "%02x".format(it) }
+                } finally { buffer.fill(0) }
+            }
         }
     }
+    internal fun defaultPreferenceCleanupSnapshot() = preferenceCleanupSnapshot("default")
 
-    suspend fun getMnemonic(): List<String>? {
-        readRoomKeyOrFailClosed("default")?.let { return it.mnemonic?.split(" ") }
-        // Fallback to ESP -- legacy wallets with no Room row only (#496)
-        val joined = prefs.getString(KEY_MNEMONIC, null) ?: return null
-        return joined.split(" ")
+    /**
+     * Decrypts each captured XML/.bak independently using Android ESP over immutable preferences.
+     * Never opens the original SharedPreferences, restores a backup, or constructs a MasterKey.
+     * Both keysets must already exist: pinned Tink's existing-keyset path only reads its master
+     * AEAD, while missing keysets (its key-generation path) are rejected before calling ESP.
+     */
+    internal fun preferencesForVaultCleanup(walletId: String): DecryptedKeyData? { return try {
+        val before = preferenceCleanupSnapshot(walletId)
+        val standIn = if (walletId == "default") testPrefs else testWalletPrefs[walletId]
+        val name = if (walletId == "default") "ckb_wallet_keys" else "ckb_wallet_keys_$walletId"
+        val file = java.io.File(context.filesDir.parentFile, "shared_prefs/$name.xml")
+        val copies = listOf(file, java.io.File(file.path + ".bak")).mapIndexedNotNull { index, source ->
+            if (before[index] == null) null else {
+                readCapturedPreference(name, readPreferenceXml(source), standIn != null) ?: return null
+            }
+        }
+        val materials = if (before.all { it == null } && standIn != null) {
+            // Existing plain-preference test seam; never available in production.
+            listOfNotNull(readCapturedPreference(name, standIn.all.filterValues { it != null }.mapValues { it.value!! }, true))
+        } else copies
+        if (preferenceCleanupSnapshot(walletId) != before || materials.isEmpty() ||
+            materials.map { it.privateKeyHex }.distinct().size != 1 ||
+            materials.mapNotNull { it.mnemonic }.distinct().size > 1) null
+        else materials.firstOrNull { it.mnemonic != null } ?: materials.first()
+    } catch (_: Exception) { null } }
+
+    @Suppress("DEPRECATION") // Legacy-only ESP reader; String-alias overload avoids creating a MasterKey.
+    internal fun readCapturedPreference(name: String, entries: Map<String, Any>, plainTestCopy: Boolean = false,
+        masterAlias: String = MasterKey.DEFAULT_MASTER_KEY_ALIAS): DecryptedKeyData? {
+        val frozen = CapturedLegacyPreferences(entries)
+        val source = if (plainTestCopy) frozen else {
+            require(listOf("__androidx_security_crypto_encrypted_prefs_key_keyset__",
+                "__androidx_security_crypto_encrypted_prefs_value_keyset__").all { (entries[it] as? String)?.isNotEmpty() == true })
+            require(java.security.KeyStore.getInstance("AndroidKeyStore").apply { load(null) }.containsAlias(masterAlias))
+            val capturedContext = object : android.content.ContextWrapper(context) {
+                override fun getApplicationContext(): Context = this
+                override fun getSharedPreferences(requested: String, mode: Int): SharedPreferences {
+                    require(requested == name)
+                    return frozen
+                }
+            }
+            EncryptedSharedPreferences.create(name, masterAlias, capturedContext,
+                EncryptedSharedPreferences.PrefKeyEncryptionScheme.AES256_SIV,
+                EncryptedSharedPreferences.PrefValueEncryptionScheme.AES256_GCM)
+        }
+        val hex = source.getString(KEY_PRIVATE_KEY, null) ?: return null
+        val words = source.getString(KEY_MNEMONIC, null)
+        return DecryptedKeyData(hex, words,
+            source.getString(KEY_WALLET_TYPE, null) ?: if (words == null) WALLET_TYPE_RAW_KEY else WALLET_TYPE_MNEMONIC,
+            source.getBoolean(KEY_MNEMONIC_BACKED_UP, false))
     }
+
+    /** ESP can construct its keyset writer, but every attempted write fails without side effects. */
+    private class CapturedLegacyPreferences(entries: Map<String, Any>) : SharedPreferences {
+        private val values = entries.toMap()
+        override fun getAll(): Map<String, *> = values.toMap()
+        override fun contains(key: String) = values.containsKey(key)
+        override fun getString(key: String, defValue: String?): String? = values[key]?.let { it as String } ?: defValue
+        override fun getBoolean(key: String, defValue: Boolean) = values[key]?.let { it as Boolean } ?: defValue
+        override fun getInt(key: String, defValue: Int) = values[key]?.let { it as Int } ?: defValue
+        override fun getLong(key: String, defValue: Long) = values[key]?.let { it as Long } ?: defValue
+        override fun getFloat(key: String, defValue: Float) = values[key]?.let { it as Float } ?: defValue
+        override fun getStringSet(key: String, defValues: MutableSet<String>?): MutableSet<String>? = error("Unsupported captured preference")
+        override fun registerOnSharedPreferenceChangeListener(listener: SharedPreferences.OnSharedPreferenceChangeListener) = Unit
+        override fun unregisterOnSharedPreferenceChangeListener(listener: SharedPreferences.OnSharedPreferenceChangeListener) = Unit
+        override fun edit(): SharedPreferences.Editor = object : SharedPreferences.Editor {
+            override fun putString(key: String?, value: String?) = denied()
+            override fun putStringSet(key: String?, values: MutableSet<String>?) = denied()
+            override fun putInt(key: String?, value: Int) = denied()
+            override fun putLong(key: String?, value: Long) = denied()
+            override fun putFloat(key: String?, value: Float) = denied()
+            override fun putBoolean(key: String?, value: Boolean) = denied()
+            override fun remove(key: String?) = denied()
+            override fun clear() = denied()
+            override fun commit(): Boolean = error("Captured preferences are read only")
+            override fun apply(): Unit = error("Captured preferences are read only")
+            private fun denied(): SharedPreferences.Editor = error("Captured preferences are read only")
+        }
+    }
+
+    internal fun defaultPreferencesForVaultCleanup() = preferencesForVaultCleanup("default")
+
+    /** ESP backing files contain strings; booleans are accepted for the existing test stand-ins. */
+    private fun readPreferenceXml(file: java.io.File): Map<String, Any> = file.inputStream().use { input ->
+        require(file.length() in 1..1_048_576)
+        val parser = android.util.Xml.newPullParser()
+        parser.setInput(input, "UTF-8")
+        val entries = linkedMapOf<String, Any>()
+        var root = false
+        while (parser.next() != org.xmlpull.v1.XmlPullParser.END_DOCUMENT) {
+            require(parser.eventType != org.xmlpull.v1.XmlPullParser.DOCDECL)
+            if (parser.eventType != org.xmlpull.v1.XmlPullParser.START_TAG) continue
+            if (!root) { require(parser.name == "map"); root = true; continue }
+            val name = parser.getAttributeValue(null, "name") ?: error("Invalid preferences")
+            require(name !in entries)
+            entries[name] = when (parser.name) {
+                "string" -> parser.nextText()
+                "boolean" -> parser.getAttributeValue(null, "value").let { require(it == "true" || it == "false"); it == "true" }
+                else -> error("Unsupported preferences")
+            }
+        }
+        require(root)
+        entries
+    }
+
+    /** UI-free access cannot authenticate wallet operations, including legacy software/ESP keys. */
+    private suspend fun requireAuthenticatedReader(walletId: String): Nothing {
+        if (keyStoreMigrationHelper?.keyMaterialVersion(walletId) == 2) {
+            throw com.rjnr.pocketnode.data.crypto.V2KeyMaterialRequiresAuthException(walletId)
+        }
+        throw WalletSecretRequiresAuthenticationException()
+    }
+
+    suspend fun getMnemonic(): List<String>? = requireAuthenticatedReader(DEFAULT_WALLET_ID)
 
     suspend fun getWalletType(): String {
         // Flag-only read: walletType is a plaintext column. Decrypting the
@@ -339,14 +413,7 @@ class KeyManager @Inject constructor(
 
     suspend fun getWalletInfo(): WalletInfo = WalletDerivation.walletInfo(getPrivateKey())
 
-    suspend fun getPrivateKey(): ByteArray {
-        // Try Room first
-        readRoomKeyOrFailClosed("default")?.let { return it.privateKeyHex.hexToByteArray() }
-        // Fallback to ESP -- legacy wallets with no Room row only (#496)
-        val hex = prefs.getString(KEY_PRIVATE_KEY, null)
-            ?: throw IllegalStateException("No wallet found")
-        return hex.hexToByteArray()
-    }
+    suspend fun getPrivateKey(): ByteArray = requireAuthenticatedReader(DEFAULT_WALLET_ID)
 
     fun derivePublicKey(privateKey: ByteArray): ByteArray =
         WalletDerivation.publicKey(privateKey)
@@ -448,19 +515,9 @@ class KeyManager @Inject constructor(
         )
     }
 
-    suspend fun getMnemonicForWallet(walletId: String): List<String>? {
-        readRoomKeyOrFailClosed(walletId)?.let { return it.mnemonic?.split(" ") }
-        // Fallback to ESP -- legacy wallets with no Room row only (#496)
-        val joined = getWalletPrefs(walletId).getString(KEY_MNEMONIC, null) ?: return null
-        return joined.split(" ")
-    }
+    suspend fun getMnemonicForWallet(walletId: String): List<String>? = requireAuthenticatedReader(walletId)
 
-    suspend fun getPrivateKeyForWallet(walletId: String): ByteArray? {
-        readRoomKeyOrFailClosed(walletId)?.let { return it.privateKeyHex.hexToByteArray() }
-        // Fallback to ESP -- legacy wallets with no Room row only (#496)
-        val hex = getWalletPrefs(walletId).getString(KEY_PRIVATE_KEY, null) ?: return null
-        return hex.hexToByteArray()
-    }
+    suspend fun getPrivateKeyForWallet(walletId: String): ByteArray? = requireAuthenticatedReader(walletId)
 
     /**
      * Derive WalletInfo (public key, lock script, addresses) from a raw private key.
@@ -550,7 +607,7 @@ class KeyManager @Inject constructor(
             val wallets = walletDao.getAll()
             for (wallet in wallets) {
                 // Skip if already migrated (idempotent)
-                if (helper.readDecryptedKey(wallet.walletId) != null) continue
+                if (helper.hasKeyMaterialRow(wallet.walletId)) continue
 
                 // Skip Room-only wallets whose ESP file doesn't exist on disk — calling
                 // getWalletPrefs for a non-existent file lazily creates an empty ESP file
@@ -607,31 +664,8 @@ class KeyManager @Inject constructor(
         }
     }
 
-    /**
-     * Delete ESP shared_prefs files after successful Room migration.
-     * Only runs if migration is marked complete. Safe to call multiple times.
-     */
-    fun deleteEspFilesIfSafe() {
-        val helper = keyStoreMigrationHelper ?: return
-        if (!helper.isMigrationComplete()) return
-
-        try {
-            context.deleteSharedPreferences("ckb_wallet_keys")
-        } catch (e: Exception) {
-            logger.w(TAG, "Failed to delete global ESP file", e)
-        }
-
-        val prefsDir = java.io.File(context.filesDir.parent, "shared_prefs")
-        prefsDir.listFiles()
-            ?.filter { it.name.startsWith("ckb_wallet_keys_") }
-            ?.forEach { file ->
-                try { file.delete() } catch (e: Exception) {
-                    logger.w(TAG, "Failed to delete ESP file: ${file.name}", e)
-                }
-            }
-
-        logger.i(TAG, "ESP files deleted after successful Room migration")
-    }
+    /** Legacy sources are now retired per wallet only after verified vault activation. */
+    fun deleteEspFilesIfSafe() = Unit
 
     private fun writeBackupIfPinAvailable(walletId: String, buildMaterial: () -> KeyMaterial) {
         val pin = authManager?.getSessionPin() ?: sessionPin ?: return

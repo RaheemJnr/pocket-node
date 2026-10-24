@@ -2,6 +2,9 @@ package com.rjnr.pocketnode.data.auth
 
 import android.content.Context
 import androidx.test.core.app.ApplicationProvider
+import androidx.biometric.BiometricManager
+import io.mockk.every
+import io.mockk.mockk
 import org.junit.Assert.*
 import org.junit.Before
 import org.junit.Test
@@ -54,4 +57,22 @@ class AuthManagerTest {
     fun `isBiometricEnrolled returns false on emulator`() {
         assertFalse(authManager.isBiometricEnrolled())
     }
+    @Test @Config(sdk = [26]) fun `credential only CryptoObject mode is rejected on API26`() {
+        assertNull(authManager.allowedCipherAuthenticators(AuthManager.CipherPromptMode.CREDENTIAL_ONLY))
+        assertEquals(androidx.biometric.BiometricManager.Authenticators.BIOMETRIC_STRONG,
+            authManager.allowedCipherAuthenticators(AuthManager.CipherPromptMode.BIOMETRIC_ONLY))
+    }
+    @Test @Config(sdk = [30]) fun `explicit credential prompt never includes biometric authenticators`() {
+        authManager.testBiometricManager = mockk {
+            every { canAuthenticate(BiometricManager.Authenticators.BIOMETRIC_STRONG) } returns BiometricManager.BIOMETRIC_SUCCESS
+        }
+        authManager.setBiometricEnabled(true)
+        assertEquals(androidx.biometric.BiometricManager.Authenticators.DEVICE_CREDENTIAL,
+            authManager.allowedCipherAuthenticators(AuthManager.CipherPromptMode.CREDENTIAL_ONLY))
+        assertEquals(androidx.biometric.BiometricManager.Authenticators.BIOMETRIC_STRONG,
+            authManager.allowedCipherAuthenticators(AuthManager.CipherPromptMode.BIOMETRIC_ONLY))
+        assertEquals(BiometricManager.Authenticators.BIOMETRIC_STRONG or BiometricManager.Authenticators.DEVICE_CREDENTIAL,
+            authManager.allowedCipherAuthenticators(AuthManager.CipherPromptMode.DEFAULT))
+    }
+
 }

@@ -60,6 +60,7 @@ class KeyBackupManager @Inject constructor(
         backupDir.mkdirs()
     }
 
+    @Synchronized
     fun writeBackup(walletId: String, material: KeyMaterial, pin: CharArray) {
         val salt = ByteArray(SALT_SIZE).also { SecureRandom().nextBytes(it) }
         val iv = ByteArray(IV_SIZE).also { SecureRandom().nextBytes(it) }
@@ -101,10 +102,14 @@ class KeyBackupManager @Inject constructor(
         val file = backupFile(walletId)
         if (!file.exists()) return null
 
+        return readCapturedBackup(file.readBytes(), pin)
+    }
+
+    /** Decrypt precisely the captured ciphertext; never reopen a mutable file after authentication. */
+    internal fun readCapturedBackup(bytes: ByteArray, pin: CharArray): KeyMaterial? {
         return try {
-            val bytes = file.readBytes()
             if (bytes.size < HEADER_SIZE || !bytes.sliceArray(0 until 4).contentEquals(MAGIC)) {
-                logger.w(TAG, "Backup file for $walletId has invalid magic header")
+                logger.w(TAG, "Legacy backup has invalid magic header")
                 return null
             }
             // Byte 4 selects the KDF: v1 = PBKDF2 (legacy), v2 = Argon2id.
@@ -127,17 +132,62 @@ class KeyBackupManager @Inject constructor(
                 plaintext.fill(0)
             }
         } catch (e: Exception) {
-            logger.w(TAG, "Failed to read backup for $walletId", e)
+            logger.w(TAG, "Failed to read legacy backup")
             null
+        }
+    }
+
+    /** Both committed and interrupted copies are independently authenticated before retirement. */
+    internal fun captureCopies(walletId: String): List<ByteArray?> {
+        require(walletId.matches(Regex("[A-Za-z0-9_-]{1,128}")))
+        return listOf(backupFile(walletId), File(backupDir, "$walletId.enc.tmp")).map { file ->
+            if (!file.exists()) null else {
+                require(file.isFile && file.length() in 1..1_048_576)
+                file.readBytes()
+            }
         }
     }
 
     fun hasBackup(walletId: String): Boolean = backupFile(walletId).exists()
 
+    /** Snapshot both weak copies so cleanup can reject concurrent rewrites. */
+    internal fun cleanupSnapshot(walletId: String): List<String?> =
+        listOf(backupFile(walletId), File(backupDir, "$walletId.enc.tmp")).map { file ->
+            if (!file.exists()) null else file.inputStream().use { input ->
+                val digest = java.security.MessageDigest.getInstance("SHA-256")
+                val buffer = ByteArray(8192)
+                while (true) {
+                    val size = input.read(buffer)
+                    if (size < 0) break
+                    digest.update(buffer, 0, size)
+                }
+                digest.digest().joinToString("") { "%02x".format(it) }
+            }
+        }
+
     fun hasAnyBackups(): Boolean = backupDir.listFiles()?.any { it.extension == "enc" } == true
 
+    @Synchronized
     fun deleteBackup(walletId: String) {
         backupFile(walletId).delete()
+    }
+
+    /** Retire both committed and interrupted weak backups, checking the filesystem result. */
+    @Synchronized
+    fun deleteBackupChecked(walletId: String): Boolean {
+        if (!walletId.matches(Regex("[A-Za-z0-9_-]{1,128}"))) return false
+        val file = backupFile(walletId)
+        val pending = File(file.parentFile, "${file.name}.tmp")
+        file.delete()
+        pending.delete()
+        return !file.exists() && !pending.exists()
+    }
+
+    /** Compare and delete under the same lock used by every app backup writer. */
+    @Synchronized
+    internal fun deleteCapturedCopies(walletId: String, expected: List<String?>): Boolean {
+        if (cleanupSnapshot(walletId) != expected) return false
+        return deleteBackupChecked(walletId)
     }
 
     fun listBackupWalletIds(): List<String> {
@@ -147,6 +197,7 @@ class KeyBackupManager @Inject constructor(
             ?: emptyList()
     }
 
+    @Synchronized
     fun reEncryptAll(oldPin: CharArray, newPin: CharArray): Boolean {
         val backupFiles = backupDir.listFiles()?.filter { it.extension == "enc" } ?: return true
 
@@ -185,6 +236,7 @@ class KeyBackupManager @Inject constructor(
         return true
     }
 
+    @Synchronized
     fun cleanupOrphanedTmpFiles() {
         backupDir.listFiles()
             ?.filter { it.extension == "tmp" }

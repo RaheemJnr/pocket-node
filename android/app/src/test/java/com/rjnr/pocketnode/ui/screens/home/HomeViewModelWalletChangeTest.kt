@@ -73,6 +73,7 @@ class HomeViewModelWalletChangeTest {
     private lateinit var prefs: WalletPreferences
     private lateinit var gateway: GatewayRepository
     private lateinit var walletRepository: WalletRepository
+    private val seedAuthorizer = mockk<com.rjnr.pocketnode.data.wallet.SeedPhraseAuthorizer>()
     private val refreshes = AtomicInteger()
 
     private fun script(byte: String) = Script(
@@ -179,7 +180,7 @@ class HomeViewModelWalletChangeTest {
             cacheManager = mockk(relaxed = true),
             lightClient = homeLight,
             walletPreferences = prefs,
-            seedPhraseAuthorizer = mockk(relaxed = true),
+            seedPhraseAuthorizer = seedAuthorizer,
             keyMaterialDao = db.keyMaterialDao(),
             pendingBroadcastDao = db.pendingBroadcastDao(),
             savedStateHandle = SavedStateHandle(),
@@ -221,6 +222,34 @@ class HomeViewModelWalletChangeTest {
      * read the active wallet id once, so after a wallet change Home kept the
      * old wallet's in-flight sends and never showed the new wallet's.
      */
+    @Test
+    fun `scan and sweep require authenticated seed even without V2 metadata`() {
+        coEvery { seedAuthorizer.authorize(any(), "A", any(), any()) } returns
+            com.rjnr.pocketnode.data.wallet.SeedPhraseAuthorizer.SeedResult.Failed("Protected seed required")
+        val vm = newViewModel()
+        // Initial Room wallet emissions can enqueue refresh(), which clears an old error.
+        // Wait for startup before asserting the result of this explicit user operation.
+        vm.started()
+        vm.runGapLimitScan(com.rjnr.pocketnode.data.wallet.ForegroundTestHost().activity)
+        scheduler.runCurrent()
+        assertTrue(vm.uiState.value.error.toString().contains("Protected seed required"))
+        vm.confirmGapLimitSweep(com.rjnr.pocketnode.data.wallet.ForegroundTestHost().activity)
+        scheduler.runCurrent()
+        assertTrue(vm.uiState.value.error.toString().contains("Protected seed required"))
+        assertTrue(!vm.uiState.value.sweepInProgress)
+    }
+
+    @Test
+    fun `scan aborts when selected wallet changes during authentication`() {
+        coEvery { seedAuthorizer.authorize(any(), "A", any(), any()) } answers {
+            prefs.setActiveWalletId("B")
+            com.rjnr.pocketnode.data.wallet.SeedPhraseAuthorizer.SeedResult.Words(listOf("abandon"))
+        }
+        val vm = newViewModel(); vm.started()
+        vm.runGapLimitScan(com.rjnr.pocketnode.data.wallet.ForegroundTestHost().activity); scheduler.runCurrent()
+        assertTrue(vm.uiState.value.error.toString().contains("wallet changed", ignoreCase = true))
+    }
+
     @Test
     fun `after Home's own switch the new wallet's broadcasts show and the old one's do not`() {
         broadcast("0xa1", "A")
@@ -278,4 +307,27 @@ class HomeViewModelWalletChangeTest {
         assertEquals(1, refreshes.get() - before)
         assertEquals(SyncMode.FULL_HISTORY, vm.uiState.value.currentSyncMode)
     }
+    @Test fun `scan and sweep suspended before derivation cancel and reset progress on stop resume`() {
+        gateway = io.mockk.spyk(gateway)
+        coEvery { seedAuthorizer.authorize(any(), "A", any(), any()) } returns
+            com.rjnr.pocketnode.data.wallet.SeedPhraseAuthorizer.SeedResult.Words(listOf("abandon"))
+        var entered = false; var cancelled = false
+        coEvery { gateway.runGapLimitScan(any<List<String>>()) } coAnswers {
+            entered = true; try { kotlinx.coroutines.awaitCancellation() } finally { cancelled = true }
+        }
+        coEvery { gateway.sweepGapLimitFunds(any<List<String>>()) } coAnswers {
+            entered = true; try { kotlinx.coroutines.awaitCancellation() } finally { cancelled = true }
+        }
+        for (sweep in listOf(false, true)) {
+            val host = com.rjnr.pocketnode.data.wallet.ForegroundTestHost()
+            val vm = newViewModel(); scheduler.runCurrent(); entered = false; cancelled = false
+            if (sweep) vm.confirmGapLimitSweep(host.activity) else vm.runGapLimitScan(host.activity)
+            scheduler.runCurrent(); assertTrue(entered); host.stopResume(); scheduler.runCurrent()
+            try {
+                assertTrue(cancelled)
+                assertTrue(!vm.uiState.value.sweepInProgress); assertTrue(!vm.uiState.value.gapLimitScanning)
+            } finally { androidx.lifecycle.ViewModelStore().apply { put("test", vm); clear() }; scheduler.runCurrent() }
+        }
+    }
+
 }

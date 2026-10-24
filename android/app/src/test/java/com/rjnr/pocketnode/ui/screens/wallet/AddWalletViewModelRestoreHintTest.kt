@@ -59,6 +59,7 @@ import org.robolectric.RobolectricTestRunner
 @OptIn(ExperimentalCoroutinesApi::class)
 @RunWith(RobolectricTestRunner::class)
 class AddWalletViewModelRestoreHintTest {
+    private val nativeInput = com.rjnr.pocketnode.ui.security.NativeImportFixture()
 
     private val testDispatcher = StandardTestDispatcher()
     private val phrase = List(11) { "abandon" } + "about"
@@ -69,7 +70,7 @@ class AddWalletViewModelRestoreHintTest {
     private lateinit var importer: RestoreHintImporter
     private val gatewayRepository = mockk<GatewayRepository>(relaxed = true)
     private val walletKeyWriter = mockk<WalletKeyWriter>()
-    private val activity = mockk<FragmentActivity>(relaxed = true)
+    private val activity = org.robolectric.Robolectric.buildActivity(FragmentActivity::class.java).setup().get()
 
     @Before
     fun setUp() {
@@ -98,8 +99,7 @@ class AddWalletViewModelRestoreHintTest {
         )
         importer = RestoreHintImporter(db.subAccountCandidateDao(), discovery, prefs, NoopLogger)
         importer.computeDispatcher = Dispatchers.Unconfined
-        coEvery { walletKeyWriter.persistNewWalletV1Fallback(any(), any(), any(), any()) } returns
-            WalletKeyWriter.Result.Success
+        coEvery { walletKeyWriter.persistCreatedWallet(any(), any(), any(), any(), any(), any(), any()) } coAnswers { com.rjnr.pocketnode.data.wallet.persistVerifiedFixture(db, secondArg(), thirdArg(), arg(4)) }
         every { gatewayRepository.syncProgress } returns MutableStateFlow(SyncProgress())
         every { gatewayRepository.currentNetwork } returns NetworkType.TESTNET
         coEvery { gatewayRepository.resyncAccount(any(), any()) } returns Result.success(Unit)
@@ -121,6 +121,7 @@ class AddWalletViewModelRestoreHintTest {
         authManager = mockk(relaxed = true),
         logger = NoopLogger,
         restoreHintImporter = importer,
+        importOperations = nativeInput.operations(walletRepository, walletKeyWriter, MnemonicManager(), importer),
     )
 
     private fun hint(secret: RestoreHintSecret, kind: String = RestoreHintKind.MNEMONIC) = RestoreHintCodec.seal(
@@ -154,8 +155,8 @@ class AddWalletViewModelRestoreHintTest {
         ReauthLockEvents.onLocked() // the picker stopped the activity
         advanceUntilIdle()
         vm.updateName("Restored")
-        phrase.forEachIndexed { i, w -> vm.updateImportWord(i, w) }
-        vm.importMnemonic(activity, consented = true)
+        phrase.forEachIndexed { i, w -> nativeInput.word(i, w) }
+        vm.importMnemonic(activity)
         hintResolved(vm)
 
         assertEquals(17_499_000L, vm.uiState.value.restoreHintPlan?.startBlock)
@@ -174,7 +175,7 @@ class AddWalletViewModelRestoreHintTest {
     fun `a re-auth lock while the secret is being derived discards it and the result`() = runTest {
         val vm = newViewModel()
         var derived: RestoreHintSecret? = null
-        vm.deriveMnemonicHintSecret = { words ->
+        nativeInput.deriveMnemonicHintSecret = { words ->
             RestoreHintSecret.fromMnemonic(words).also {
                 derived = it
                 ReauthLockEvents.onLocked()
@@ -182,8 +183,8 @@ class AddWalletViewModelRestoreHintTest {
         }
         vm.onRestoreHintFilePicked(hint(RestoreHintSecret.fromMnemonic(phrase)))
         vm.updateName("Restored")
-        phrase.forEachIndexed { i, w -> vm.updateImportWord(i, w) }
-        vm.importMnemonic(activity, consented = true)
+        phrase.forEachIndexed { i, w -> nativeInput.word(i, w) }
+        vm.importMnemonic(activity)
         drainUntil { derived != null && vm.uiState.value.showSyncModeDialog }
         advanceUntilIdle()
 
@@ -196,8 +197,8 @@ class AddWalletViewModelRestoreHintTest {
         val vm = newViewModel()
         vm.onRestoreHintFilePicked(hint(RestoreHintSecret.fromPrivateKey(privateKey), RestoreHintKind.RAW_KEY))
         vm.updateName("Key")
-        vm.updateImportPrivateKey(privateKey.joinToString("") { "%02x".format(it) })
-        vm.importRawKey(activity, consented = true)
+        nativeInput.key(privateKey.joinToString("") { "%02x".format(it) })
+        vm.importRawKey(activity)
         hintResolved(vm)
 
         assertNotNull(vm.uiState.value.restoreHintPlan)
@@ -210,8 +211,8 @@ class AddWalletViewModelRestoreHintTest {
         val vm = newViewModel()
         vm.onRestoreHintFilePicked(hint(RestoreHintSecret.fromMnemonic(other)))
         vm.updateName("Restored")
-        phrase.forEachIndexed { i, w -> vm.updateImportWord(i, w) }
-        vm.importMnemonic(activity, consented = true)
+        phrase.forEachIndexed { i, w -> nativeInput.word(i, w) }
+        vm.importMnemonic(activity)
         hintResolved(vm)
 
         assertNull(vm.uiState.value.restoreHintPlan)

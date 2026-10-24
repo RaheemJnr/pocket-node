@@ -22,6 +22,16 @@ class SeedPhraseAuthorizerTest {
     )
 
     @Test
+    fun `seed extraction clears unused private key on success and absent seed`() {
+        for (mnemonic in listOf("alpha beta gamma", null)) {
+            val material = success(mnemonic)
+            material.privateKey.fill(9)
+            SeedPhraseAuthorizer.toSeedResult(material)
+            assertTrue("seed-only caller must release the unused private key", material.privateKey.all { it == 0.toByte() })
+        }
+    }
+
+    @Test
     fun `success with a mnemonic yields the split words`() {
         val r = SeedPhraseAuthorizer.toSeedResult(
             success("angle bonus strike comic jelly mom decrease galaxy error tackle together woman")

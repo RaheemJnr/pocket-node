@@ -12,6 +12,7 @@ import com.rjnr.pocketnode.data.database.dao.PendingDaoUnlockDao
 import com.rjnr.pocketnode.data.database.dao.PendingDaoWithdrawDao
 import com.rjnr.pocketnode.data.database.dao.SyncProgressDao
 import com.rjnr.pocketnode.data.database.dao.TransactionDao
+import com.rjnr.pocketnode.data.database.dao.WalletVaultDao
 import com.rjnr.pocketnode.data.database.dao.WalletDao
 import com.rjnr.pocketnode.data.database.entity.BalanceCacheEntity
 import com.rjnr.pocketnode.data.database.entity.ContactEntity
@@ -24,10 +25,16 @@ import com.rjnr.pocketnode.data.database.entity.PendingBroadcastEntity
 import com.rjnr.pocketnode.data.database.entity.PendingDaoUnlockEntity
 import com.rjnr.pocketnode.data.database.entity.SyncProgressEntity
 import com.rjnr.pocketnode.data.database.entity.TransactionEntity
+import com.rjnr.pocketnode.data.database.entity.WalletVaultEntity
+import com.rjnr.pocketnode.data.database.entity.WalletVaultLegacyEntity
+import com.rjnr.pocketnode.data.database.entity.WalletPassphraseProfileEntity
 import com.rjnr.pocketnode.data.database.entity.WalletEntity
 
 @Database(
     entities = [
+        WalletVaultEntity::class,
+        WalletPassphraseProfileEntity::class,
+        WalletVaultLegacyEntity::class,
         TransactionEntity::class,
         BalanceCacheEntity::class,
         HeaderCacheEntity::class,
@@ -86,7 +93,9 @@ import com.rjnr.pocketnode.data.database.entity.WalletEntity
     // in-flight DAO unlock. Without it a just-unlocked position kept offering
     // "Unlock" until the spend was indexed, and the cached dao_cells row was
     // never retired. MIGRATION_16_17 is a single CREATE TABLE + 1 CREATE INDEX.
-    version = 17,
+    // Version 18 adds verified wallet envelopes, the installation passphrase profile,
+    // and retained legacy ciphertext. No existing row is converted by the SQL migration.
+    version = 18,
     // Schema export re-enabled (#149). It was OFF because Room 2.8.4's
     // bundled kotlinx-serialization-core crashed KSP with an AbstractMethodError
     // against the project's kotlinx-serialization-json:1.8.0. Verified clean
@@ -99,6 +108,7 @@ import com.rjnr.pocketnode.data.database.entity.WalletEntity
     exportSchema = true
 )
 abstract class AppDatabase : RoomDatabase() {
+    abstract fun walletVaultDao(): WalletVaultDao
     abstract fun transactionDao(): TransactionDao
     abstract fun balanceCacheDao(): BalanceCacheDao
     abstract fun headerCacheDao(): HeaderCacheDao
