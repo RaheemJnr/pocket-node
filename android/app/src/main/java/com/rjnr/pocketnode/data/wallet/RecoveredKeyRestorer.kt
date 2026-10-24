@@ -124,7 +124,7 @@ class RecoveredKeyRestorer @Inject constructor(
         val capturedVault = vaultDao.get(walletId)
         val archivedV2 = if (capturedSource?.kdfVersion == 3 && capturedVault?.cleanupPending == true)
             vaultDao.legacy(walletId)?.source()?.takeIf { it.kdfVersion == 2 } else null
-        val classifiedV2 = archivedV2 ?: capturedSource?.takeIf { it.kdfVersion == 2 && normalized.mnemonic != null }
+        val classifiedV2 = archivedV2 ?: capturedSource?.takeIf { it.kdfVersion == 2 }
         val replacementSource = archivedV2?.let { WalletVaultSourceSnapshot(it, capturedVault!!, capturedSource!!) }
         var acknowledgment: LegacySourceAcknowledgment? = null
         var authentication: LegacySourceAuthentication? = null

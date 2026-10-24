@@ -886,4 +886,70 @@ class RecoveredKeyRestorerTest {
         if (authenticated) assertTrue(owned.all { it == 0.toByte() })
     }
 
+    @Test fun `passphrase preference live V2 raw external success`() = externalV2Preference(false, false, "success")
+    @Test fun `passphrase preference live V2 raw external cancel`() = externalV2Preference(false, false, "cancel")
+    @Test fun `passphrase preference live V2 raw external invalidated`() = externalV2Preference(false, false, "invalidated")
+    @Test fun `passphrase preference live V2 raw external transient`() = externalV2Preference(false, false, "transient")
+    @Test fun `passphrase preference live V2 phrase external success`() = externalV2Preference(false, true, "success")
+    @Test fun `passphrase preference live V2 phrase external cancel`() = externalV2Preference(false, true, "cancel")
+    @Test fun `passphrase preference live V2 phrase external invalidated`() = externalV2Preference(false, true, "invalidated")
+    @Test fun `passphrase preference live V2 phrase external transient`() = externalV2Preference(false, true, "transient")
+    @Test fun `passphrase preference archived V2 raw external success`() = externalV2Preference(true, false, "success")
+    @Test fun `passphrase preference archived V2 raw external cancel`() = externalV2Preference(true, false, "cancel")
+    @Test fun `passphrase preference archived V2 raw external invalidated`() = externalV2Preference(true, false, "invalidated")
+    @Test fun `passphrase preference archived V2 raw external transient`() = externalV2Preference(true, false, "transient")
+    @Test fun `passphrase preference archived V2 phrase external success`() = externalV2Preference(true, true, "success")
+    @Test fun `passphrase preference archived V2 phrase external cancel`() = externalV2Preference(true, true, "cancel")
+    @Test fun `passphrase preference archived V2 phrase external invalidated`() = externalV2Preference(true, true, "invalidated")
+    @Test fun `passphrase preference archived V2 phrase external transient`() = externalV2Preference(true, true, "transient")
+
+    private fun externalV2Preference(archived: Boolean, full: Boolean, result: String) = walletOperationTest {
+        insertWallet("w1", phraseKeyHex)
+        fixture.v2.writeNewV2Row("w1", com.rjnr.pocketnode.data.crypto.WalletKeyBundle(phraseKeyHex, phrase),
+            fixture.encryption.newEncryptCipherV2(), "mnemonic", true).getOrThrow()
+        val source = keyMaterialDao.getByWalletId("w1")!!
+        if (archived) {
+            fixture.cleanupOk = false
+            assertEquals(com.rjnr.pocketnode.data.vault.VaultAccessResult.CleanupRequired,
+                fixture.coordinator.protectLegacy(activity, "w1", material(), source.iv))
+            fixture.cleanupOk = true
+        }
+        val original = db.walletVaultDao().get("w1")
+        val marker = keyMaterialDao.getByWalletId("w1")
+        fixture.preference.set(com.rjnr.pocketnode.data.vault.VaultReadPreference.PASSPHRASE)
+        secureLock(true)
+        coEvery { authManager.authenticateForCipher(any(), any(), any(), any(), any(), any()) } answers {
+            if (result == "cancel") AuthManager.CipherAuthResult.Cancelled else AuthManager.CipherAuthResult.Success(secondArg())
+        }
+        val encryption = if (result in setOf("invalidated", "transient")) mockk<KeystoreEncryptionManager>().also {
+            every { it.newDecryptCipherV2(any()) } throws if (result == "invalidated")
+                android.security.keystore.KeyPermanentlyInvalidatedException() else java.security.KeyStoreException("temporary")
+        } else fixture.encryption
+        val actual = WalletKeyReader(keyMaterialDao, fixture.legacy, encryption, authManager, state,
+            fixture.coordinator, fixture.pin, fixture.prompt, fixture.preference)
+        if (!archived && result == "success") {
+            // Normal reads continue respecting the stored preference; recovery source proof is explicit.
+            assertTrue(actual.readKeyMaterial(activity, "w1", "Read", "Read") is WalletKeyReader.MaterialResult.NotAvailable)
+            coVerify(exactly = 0) { authManager.authenticateForCipher(any(), any(), any(), any(), any(), any()) }
+        }
+        if (result == "invalidated") fixture.choices += true
+        val outcome = newRestorer(actual).restore(activity, "w1", material(mnemonic = if (full) phrase else null), false)
+        assertEquals(com.rjnr.pocketnode.data.vault.VaultReadPreference.PASSPHRASE, fixture.preference.get())
+        if (result in setOf("success", "invalidated")) {
+            assertEquals(RecoveredKeyRestorer.Outcome.Restored, outcome)
+            assertNull(db.walletVaultDao().legacy("w1"))
+            val read = fixture.coordinator.read(activity, "w1", "Read", "Read", com.rjnr.pocketnode.data.vault.VaultReadPreference.PASSPHRASE) as com.rjnr.pocketnode.data.vault.VaultAccessResult.Success
+            assertEquals(if (full || archived || result == "success") phrase else null, read.material.mnemonic)
+        } else {
+            if (result == "cancel") assertEquals(RecoveredKeyRestorer.Outcome.Cancelled, outcome)
+            else assertTrue(outcome is RecoveredKeyRestorer.Outcome.Failed)
+            assertEquals(marker, keyMaterialDao.getByWalletId("w1"))
+            assertTrue(com.rjnr.pocketnode.data.vault.LegacyBackupProof.sameEnvelope(original, db.walletVaultDao().get("w1")))
+            assertEquals(if (archived) source else null, db.walletVaultDao().legacy("w1")?.source())
+        }
+        coVerify(exactly = if (result in setOf("success", "cancel")) 1 else 0) {
+            authManager.authenticateForCipher(any(), any(), any(), any(), any(), any())
+        }
+    }
+
 }

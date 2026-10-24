@@ -107,12 +107,17 @@ class WalletKeyReader @Inject constructor(
     internal suspend fun authenticateCapturedV2Source(activity: FragmentActivity,
         source: com.rjnr.pocketnode.data.database.entity.KeyMaterialEntity): MaterialResult {
         require(source.kdfVersion == 2)
+        // This explicit legacy-source proof needs Android authentication even when ordinary V3
+        // reads prefer a passphrase. Keep any chosen device mode and never alter the saved preference.
+        val sourcePreference = unlockPreference.get().takeUnless { it == VaultReadPreference.PASSPHRASE }
+            ?: VaultReadPreference.DEFAULT
         return extractLegacy(activity, source.walletId, source, "Preserve existing recovery phrase",
-            "Authenticate the existing wallet source before recovering its old backup.")
+            "Authenticate the existing wallet source before recovering its old backup.", sourcePreference)
     }
 
     private suspend fun extractLegacy(activity: FragmentActivity, walletId: String,
-        source: com.rjnr.pocketnode.data.database.entity.KeyMaterialEntity, promptTitle: String, promptSubtitle: String): MaterialResult {
+        source: com.rjnr.pocketnode.data.database.entity.KeyMaterialEntity, promptTitle: String, promptSubtitle: String,
+        readPreference: VaultReadPreference = unlockPreference.get()): MaterialResult {
         var ownedKey: ByteArray? = null
         try {
             val result = VaultOperationSession.run(activity) { session ->
@@ -136,7 +141,7 @@ class WalletKeyReader @Inject constructor(
                         if (invalidated) { recovery.addUnverified(walletId); recovery.markIncomplete(); return@run MaterialResult.KeyInvalidated }
                         return@run MaterialResult.NotAvailable("Device authentication is temporarily unavailable. Try again.")
                     }
-                    val mode = when (unlockPreference.get()) {
+                    val mode = when (readPreference) {
                         VaultReadPreference.PASSPHRASE -> return@run MaterialResult.NotAvailable("This legacy wallet needs its existing Android authentication or an independent recovery backup before passphrase protection can be set up.")
                         VaultReadPreference.CREDENTIAL_ONLY -> VaultDevicePromptMode.CREDENTIAL_ONLY
                         VaultReadPreference.BIOMETRIC_ONLY -> VaultDevicePromptMode.BIOMETRIC_ONLY
