@@ -79,7 +79,8 @@ class WalletVaultCoordinator(
         enroll(activity, walletId, material, Enrollment.RECOVERY)
 
     internal suspend fun recoverWithLegacyProof(activity: FragmentActivity, walletId: String, material: KeyMaterial, proof: LegacyBackupProof): VaultAccessResult =
-        enroll(activity, walletId, material, Enrollment.RECOVERY, proof = proof)
+        enroll(activity, walletId, material, if (proof.recoveryAuthority == LegacyRecoveryAuthority.FRESH_SOURCE_AUTHENTICATED)
+            Enrollment.RECOVERY else Enrollment.INTERNAL_CLEANUP, proof = proof)
 
     internal suspend fun recoverWithAcknowledgedSource(activity: FragmentActivity, walletId: String,
         material: KeyMaterial, acknowledgment: LegacySourceAcknowledgment): VaultAccessResult =
@@ -104,7 +105,7 @@ class WalletVaultCoordinator(
         }
     }
 
-    private enum class Enrollment { NEW, LEGACY, RECOVERY }
+    private enum class Enrollment { NEW, LEGACY, RECOVERY, INTERNAL_CLEANUP }
     private suspend fun enroll(activity: FragmentActivity, id: String, material: KeyMaterial, mode: Enrollment, expectedLegacyIv: ByteArray? = null, proof: LegacyBackupProof? = null, acknowledgment: LegacySourceAcknowledgment? = null, creation: com.rjnr.pocketnode.data.wallet.WalletRepository.Creation? = null): VaultAccessResult = access(activity) { session ->
         proof?.let { checkProofSource(id, it) }
         acknowledgment?.let { checkAcknowledgment(id, it) }
@@ -114,11 +115,12 @@ class WalletVaultCoordinator(
         if (mode != Enrollment.NEW && wallet == null) throw VaultFailure()
         if (!validate(material, wallet)) throw VaultFailure()
         val old = store.get(id)
-        if (old != null && mode != Enrollment.RECOVERY) throw VaultFailure()
+        if (old != null && mode != Enrollment.RECOVERY && mode != Enrollment.INTERNAL_CLEANUP) throw VaultFailure()
         val source = db.keyMaterialDao().getByWalletId(id)
         if (mode == Enrollment.LEGACY && (source == null || source.kdfVersion !in 1..2 || expectedLegacyIv == null || !source.iv.contentEquals(expectedLegacyIv))) throw VaultFailure()
         if (mode == Enrollment.NEW && source != null) throw VaultFailure()
         val hasProfile = store.hasProfile()
+        if (mode == Enrollment.INTERNAL_CLEANUP && (old == null || !hasProfile)) throw VaultFailure()
         val reset = if (mode == Enrollment.RECOVERY && hasProfile) {
             val snapshot = store.snapshot()
             when (prompt.choose(activity, "Reset wallet passphrase?",
@@ -132,6 +134,11 @@ class WalletVaultCoordinator(
         val phrase = credential(activity, !hasProfile || reset != null) ?: return@access VaultAccessResult.Cancelled
         try {
             checkPhrase(phrase)
+            if (mode == Enrollment.INTERNAL_CLEANUP) {
+                if (!store.verifyPassphrase(phrase)) throw VaultFailure()
+                val previous = decrypt(old ?: throw VaultFailure(), phrase)
+                if (!validate(previous, wallet) || previous.privateKey != material.privateKey) throw VaultFailure()
+            }
             val protectedMaterial = preserveAccessibleMnemonic(old, material, wallet, phrase)
             val candidate = create(id, old?.let(::nextGeneration) ?: 0, protectedMaterial, phrase)
             proof?.let { checkProofSource(id, it) }

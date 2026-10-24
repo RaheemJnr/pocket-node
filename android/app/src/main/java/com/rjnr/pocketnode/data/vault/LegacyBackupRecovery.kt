@@ -82,9 +82,13 @@ class LegacyBackupRecovery @Inject constructor(
                             if (data.mnemonic == null) "raw_key" else "mnemonic", data.mnemonicBackedUp)
                     }?.takeIf { validator.validate(it, wallet) }
                 } else null
-                val authenticatedMaterials = backups + authenticated.values + listOfNotNull(readableArchived)
-                if (authenticatedMaterials.isEmpty()) return@run unavailable(allowArchive)
-                // Read ESP only after real backup or V2 source authentication, bracketed by exact file witnesses.
+                val independentlyAuthenticated = backups + authenticated.values
+                val authority = if (independentlyAuthenticated.isNotEmpty()) LegacyRecoveryAuthority.FRESH_SOURCE_AUTHENTICATED
+                    else LegacyRecoveryAuthority.CURRENT_PROFILE_REQUIRED
+                val matchingMaterials = independentlyAuthenticated + listOfNotNull(readableArchived)
+                if (matchingMaterials.isEmpty()) return@run unavailable(allowArchive)
+                // Internal V1/ESP can add capabilities, but the coordinator must authenticate the
+                // current profile and vault before using it; only fresh PIN/V2 proof grants reset.
                 val globalFiles = preferenceSources.getValue("default")
                 val preferences = preferenceSources.mapValues { (id, capturedFiles) ->
                     if (keyManager.preferenceCleanupSnapshot(id) != capturedFiles) return@run unavailable(allowArchive)
@@ -92,19 +96,19 @@ class LegacyBackupRecovery @Inject constructor(
                     if (keyManager.preferenceCleanupSnapshot(id) != capturedFiles) return@run unavailable(allowArchive)
                     data
                 }
-                LegacyBackupProof(wallet, original, source, legacySources, globalFiles, copies).use { proof ->
+                LegacyBackupProof(wallet, original, source, legacySources, globalFiles, copies, authority).use { proof ->
                     // The authenticated source proves the private key. Preserve any richer readable
                     // V1 source for that exact key and path, including an archive from an earlier attempt.
                     proof.preferenceSources = preferenceSources
                     val preferenceSeeds = preferences.values.mapNotNull { data -> data?.takeIf { it.mnemonic != null }?.let {
                         com.rjnr.pocketnode.data.crypto.KeyMaterial(it.privateKeyHex, it.mnemonic, "mnemonic", it.mnemonicBackedUp)
-                    }?.takeIf { it.privateKey == authenticatedMaterials.first().privateKey && validator.validate(it, wallet) } }
-                    val matches = authenticatedMaterials + preferenceSeeds + withContext(Dispatchers.IO) {
+                    }?.takeIf { it.privateKey == matchingMaterials.first().privateKey && validator.validate(it, wallet) } }
+                    val matches = matchingMaterials + preferenceSeeds + withContext(Dispatchers.IO) {
                         legacySources.values.flatMap { listOfNotNull(it.first, it.second) }.mapNotNull { row ->
                             val data = legacy.legacySourceForVaultCleanup(row) ?: return@mapNotNull null
                             if (data.mnemonic == null) return@mapNotNull null
                             com.rjnr.pocketnode.data.crypto.KeyMaterial(data.privateKeyHex, data.mnemonic, "mnemonic", row.mnemonicBackedUp)
-                                .takeIf { it.privateKey == authenticatedMaterials.first().privateKey && validator.validate(it, wallet) }
+                                .takeIf { it.privateKey == matchingMaterials.first().privateKey && validator.validate(it, wallet) }
                         }
                     }
                     // Only permanent key loss may offer deliberate spending-only recovery, after

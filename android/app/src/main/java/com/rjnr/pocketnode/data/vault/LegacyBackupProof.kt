@@ -14,6 +14,7 @@ class LegacyBackupProof internal constructor(
     internal val legacySources: Map<String, Pair<KeyMaterialEntity?, KeyMaterialEntity?>>,
     internal val globalPreferences: List<String?>,
     internal var copies: Map<String, List<Copy?>>,
+    internal val recoveryAuthority: LegacyRecoveryAuthority,
 ) : AutoCloseable {
     internal class Copy(val fingerprint: String, val material: KeyMaterial)
     internal var authenticatedSources: Map<KeyMaterialEntity, KeyMaterial> = emptyMap()
@@ -58,3 +59,6 @@ internal class LegacySourceAcknowledgment(
     override fun toString() = "LegacySourceAcknowledgment([redacted])"
 }
 internal enum class LegacySourceAuthority { AUTHENTICATED, ACKNOWLEDGED_INACCESSIBLE }
+
+/** Software readability proves capability, never authority to replace an existing passphrase. */
+internal enum class LegacyRecoveryAuthority { CURRENT_PROFILE_REQUIRED, FRESH_SOURCE_AUTHENTICATED }

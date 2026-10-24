@@ -372,6 +372,7 @@ class LegacyBackupRecoveryTest {
 
     @Test fun `native raw backup rejects source changed during V2 authentication`() = nativeV2("a", "changed")
     @Test fun `failed V2 migration cleanup resumes with fresh archive auth and no backup`() = resumeArchive("success")
+    @Test fun `fresh V2 archive authentication can authorize explicit profile reset`() = resumeArchive("reset")
     @Test fun `cancelled V2 archive resume preserves saved vault and source`() = resumeArchive("cancel")
     @Test fun `temporary V2 archive resume preserves saved vault and source`() = resumeArchive("temporary")
     @Test fun `generation change during V2 archive resume rejects stale proof`() = resumeArchive("generation")
@@ -399,10 +400,13 @@ class LegacyBackupRecoveryTest {
             assertTrue(f.reader.readKeyMaterial(f.activity, "a", "Read", "Authenticate") is WalletKeyReader.MaterialResult.NotAvailable)
             val active = f.db.walletVaultDao().get("a")!!
             assertEquals(source, f.db.walletVaultDao().legacy("a")?.source())
-            f.cleanupOk = true; f.phrase()
+            f.cleanupOk = true
+            val next = "public independently authenticated reset phrase"
+            if (retry == "reset") { f.choices += true; f.phrase(next) } else f.phrase()
             val result = resolver(f).resumeCleanup(f.activity, "a")
             assertEquals(2, authentications)
-            if (retry == "success") {
+            if (retry == "success" || retry == "reset") {
+                if (retry == "reset") assertTrue(f.store.verifyPassphrase(next.toCharArray()))
                 assertEquals(seed.mnemonic, (result as VaultAccessResult.Success).material.mnemonic)
                 assertNull(f.db.walletVaultDao().legacy("a")); assertTrue(f.store.pendingLegacyCleanup().isEmpty())
             } else {
@@ -502,6 +506,59 @@ class LegacyBackupRecoveryTest {
             assertTrue(result is VaultAccessResult.Success)
             assertEquals(seed.mnemonic, (result as VaultAccessResult.Success).material.mnemonic)
             assertNull(f.db.walletVaultDao().legacy(id)); assertFalse(f.backup.hasBackup(id))
+        }
+    }
+
+    @Test fun `software readable V1 archive and richer ESP cannot reset profile without current credential`() = walletOperationTest {
+        WalletVaultIntegrationFixture().use { f ->
+            val id = "internal-archive"
+            val words = "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about"
+            val key = MnemonicManager().mnemonicToPrivateKey(words.split(" "))
+            val info = WalletDerivation.walletInfo(key)
+            val raw = f.material.copy(privateKey = key.joinToString("") { "%02x".format(it) }); key.fill(0)
+            f.db.walletDao().insert(com.rjnr.pocketnode.data.database.entity.WalletEntity(id, id, "mnemonic", "m/44'/309'/0'/0/0", null,
+                mainnetAddress = info.mainnetAddress, testnetAddress = info.testnetAddress))
+            val prefs = f.context.getSharedPreferences("ckb_wallet_keys_$id", 0)
+            prefs.edit().putString("private_key", raw.privateKey).putString("mnemonic_words", words).commit()
+            f.keyManager.testWalletPrefs[id] = prefs
+            f.legacy.migrateWallet(id, raw.privateKey, null, "raw_key", false)
+            val source = f.db.keyMaterialDao().getByWalletId(id)!!
+            assertNull("First-time V1 protection starts without an old profile", f.db.walletVaultDao().profile())
+            f.phrase()
+            assertEquals(VaultAccessResult.CleanupRequired, f.coordinator.protectLegacy(f.activity, id, raw, source.iv))
+            val before = f.db.walletVaultDao().get(id)!!
+            val profile = f.db.walletVaultDao().profile()!!
+            val file = File(f.context.filesDir.parentFile, "shared_prefs/ckb_wallet_keys_$id.xml")
+            val fileBytes = file.readBytes()
+            val replacement = "public unauthorized new passphrase"
+            f.choices += true; f.phrase(replacement)
+            val denied = resolver(f).resumeCleanup(f.activity, id)
+            assertTrue("Internal readable sources must not authorize a new profile", denied is VaultAccessResult.Unavailable)
+            assertArrayEquals(before.envelope, f.db.walletVaultDao().get(id)!!.envelope)
+            assertArrayEquals(profile.envelope, f.db.walletVaultDao().profile()!!.envelope)
+            assertEquals(source, f.db.walletVaultDao().legacy(id)!!.source())
+            assertArrayEquals(fileBytes, file.readBytes())
+            assertTrue(f.store.verifyPassphrase(f.pass.toCharArray()))
+            assertFalse(f.store.verifyPassphrase(replacement.toCharArray()))
+            assertEquals("Reset must not be offered for internal archive authority", 1, f.choices.size)
+            f.choices.clear(); f.phrase()
+            val recovered = resolver(f).resumeCleanup(f.activity, id) as VaultAccessResult.Success
+            assertEquals(words, recovered.material.mnemonic)
+            assertTrue(f.store.verifyPassphrase(f.pass.toCharArray()))
+            assertNull(f.db.walletVaultDao().legacy(id)); assertFalse(file.exists())
+        }
+    }
+
+    @Test fun `matching backup PIN authentication can authorize explicit profile reset`() = walletOperationTest {
+        WalletVaultIntegrationFixture().use { f ->
+            f.wallet("pin-reset"); f.phrase()
+            assertTrue(f.coordinator.recoverExisting(f.activity, "pin-reset", f.material) is VaultAccessResult.Success)
+            f.backup.writeBackup("pin-reset", f.material, "111111".toCharArray())
+            val next = "public independently authenticated backup reset"
+            f.phrase("111111"); f.phrase(next); f.choices += true
+            assertTrue(resolver(f).recover(f.activity, "pin-reset") is VaultAccessResult.Success)
+            assertTrue(f.store.verifyPassphrase(next.toCharArray()))
+            assertFalse(f.store.verifyPassphrase(f.pass.toCharArray()))
         }
     }
 
