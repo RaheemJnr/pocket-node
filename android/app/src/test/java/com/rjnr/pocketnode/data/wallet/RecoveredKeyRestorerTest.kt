@@ -717,20 +717,27 @@ class RecoveredKeyRestorerTest {
     @Test fun `external raw recovery acknowledgment cannot retire opaque backup`() = externalV2Acknowledgment(true, backup = true)
     @Test fun `external raw recovery cancels inaccessible V2 acknowledgment`() = externalV2Acknowledgment(null)
     @Test fun `external raw recovery background aborts inaccessible V2 acknowledgment`() = externalV2Acknowledgment(true, background = true)
-    private fun externalV2Acknowledgment(consent: Boolean?, changed: Boolean = false, backup: Boolean = false, background: Boolean = false) = walletOperationTest {
+    @Test fun `external mnemonic recovery honors exact inaccessible V2 acknowledgment`() = externalV2Acknowledgment(true, fullMnemonic = true)
+    @Test fun `external mnemonic recovery declines inaccessible V2 acknowledgment`() = externalV2Acknowledgment(false, fullMnemonic = true)
+    @Test fun `external mnemonic recovery cancels inaccessible V2 acknowledgment`() = externalV2Acknowledgment(null, fullMnemonic = true)
+    @Test fun `external mnemonic recovery rejects changed inaccessible V2 source`() = externalV2Acknowledgment(true, changed = true, fullMnemonic = true)
+    @Test fun `external mnemonic recovery cannot retire opaque old PIN backup`() = externalV2Acknowledgment(true, backup = true, fullMnemonic = true)
+    @Test fun `external mnemonic recovery background aborts inaccessible V2 acknowledgment`() = externalV2Acknowledgment(true, background = true, fullMnemonic = true)
+    private fun externalV2Acknowledgment(consent: Boolean?, changed: Boolean = false, backup: Boolean = false, background: Boolean = false, fullMnemonic: Boolean = false) = walletOperationTest {
         insertWallet("w1", phraseKeyHex)
         fixture.v2.writeNewV2Row("w1", com.rjnr.pocketnode.data.crypto.WalletKeyBundle(phraseKeyHex, phrase),
             fixture.encryption.newEncryptCipherV2(), "mnemonic", true).getOrThrow()
         val source = keyMaterialDao.getByWalletId("w1")!!
         val invalidated = mockk<WalletKeyReader>()
         coEvery { invalidated.readKeyMaterial(any(), any(), any(), any()) } returns WalletKeyReader.MaterialResult.KeyInvalidated
+        coEvery { invalidated.authenticateCapturedV2Source(any(), any()) } returns WalletKeyReader.MaterialResult.KeyInvalidated
         fixture.choices += consent
         fixture.onChoice = {
             if (changed) keyMaterialDao.upsert(source.copy(updatedAt = source.updatedAt + 1))
             if (background) fixture.activityController.pause().stop()
         }
         if (backup) fixture.backup.writeBackup("w1", material(), "111111".toCharArray())
-        val operation = runCatching { newRestorer(invalidated).restore(activity, "w1", material(mnemonic = null), false) }
+        val operation = runCatching { newRestorer(invalidated).restore(activity, "w1", material(mnemonic = if (fullMnemonic) phrase else null), false) }
         if (background) {
             assertTrue(operation.exceptionOrNull() is kotlinx.coroutines.CancellationException)
             assertEquals(source, keyMaterialDao.getByWalletId("w1")); assertNull(fixture.store.get("w1"))
@@ -740,6 +747,13 @@ class RecoveredKeyRestorerTest {
         if (consent == true && !changed && !backup) {
             assertEquals(RecoveredKeyRestorer.Outcome.Restored, result)
             assertNull(db.walletVaultDao().legacy("w1"))
+            if (fullMnemonic) {
+                fixture.phrase()
+                val read = fixture.coordinator.read(activity, "w1", "Read", "Read") as com.rjnr.pocketnode.data.vault.VaultAccessResult.Success
+                assertEquals(phrase, read.material.mnemonic)
+                assertEquals(KeyManager.WALLET_TYPE_MNEMONIC, read.material.walletType)
+                assertTrue(read.material.mnemonicBackedUp)
+            }
         } else if (backup) {
             assertEquals(RecoveredKeyRestorer.Outcome.CleanupRequired, result)
             assertEquals(source, db.walletVaultDao().legacy("w1")?.source())
@@ -749,6 +763,47 @@ class RecoveredKeyRestorerTest {
             assertEquals(if (changed) source.copy(updatedAt = source.updatedAt + 1) else source, keyMaterialDao.getByWalletId("w1"))
             assertNull(fixture.store.get("w1"))
         }
+    }
+
+    @Test fun `external mnemonic preserves full capabilities after actual V2 raw source authentication`() = authenticatedMnemonicV2(false)
+    @Test fun `external mnemonic preserves full capabilities after actual V2 seed source authentication`() = authenticatedMnemonicV2(true)
+    private fun authenticatedMnemonicV2(oldSeed: Boolean) = walletOperationTest {
+        insertWallet("w1", phraseKeyHex)
+        fixture.v2.writeNewV2Row("w1", com.rjnr.pocketnode.data.crypto.WalletKeyBundle(phraseKeyHex, if (oldSeed) phrase else null),
+            fixture.encryption.newEncryptCipherV2(), if (oldSeed) "mnemonic" else "raw_key", oldSeed).getOrThrow()
+        secureLock(true)
+        coEvery { authManager.authenticateForCipher(any(), any(), any(), any(), any(), any()) } answers { AuthManager.CipherAuthResult.Success(secondArg()) }
+        assertEquals(RecoveredKeyRestorer.Outcome.Restored, restorer.restore(activity, "w1", material(), false))
+        coVerify(exactly = 1) { authManager.authenticateForCipher(any(), any(), any(), any(), any(), any()) }
+        assertNull(db.walletVaultDao().legacy("w1"))
+        val read = fixture.coordinator.read(activity, "w1", "Read", "Read") as com.rjnr.pocketnode.data.vault.VaultAccessResult.Success
+        assertEquals(phrase, read.material.mnemonic)
+        assertEquals(KeyManager.WALLET_TYPE_MNEMONIC, read.material.walletType)
+        assertTrue(read.material.mnemonicBackedUp)
+    }
+
+    @Test fun `external mnemonic transient cancelled or changed V2 source cannot activate`() = walletOperationTest {
+        insertWallet("w1", phraseKeyHex)
+        fixture.v2.writeNewV2Row("w1", com.rjnr.pocketnode.data.crypto.WalletKeyBundle(phraseKeyHex, phrase),
+            fixture.encryption.newEncryptCipherV2(), "mnemonic", true).getOrThrow()
+        val source = keyMaterialDao.getByWalletId("w1")!!
+        val boundary = mockk<WalletKeyReader>()
+        for (result in listOf(WalletKeyReader.MaterialResult.AuthError(1, "Temporary"),
+            WalletKeyReader.MaterialResult.NotAvailable("Try again"), WalletKeyReader.MaterialResult.Cancelled)) {
+            coEvery { boundary.authenticateCapturedV2Source(any(), any()) } returns result
+            val outcome = newRestorer(boundary).restore(activity, "w1", material(), false)
+            if (result == WalletKeyReader.MaterialResult.Cancelled) assertEquals(RecoveredKeyRestorer.Outcome.Cancelled, outcome)
+            else assertTrue(outcome is RecoveredKeyRestorer.Outcome.Failed)
+            assertEquals(source, keyMaterialDao.getByWalletId("w1")); assertNull(fixture.store.get("w1")); assertNull(db.walletVaultDao().profile())
+        }
+        val owned = phraseKeyHex.hexToByteArray()
+        coEvery { boundary.authenticateCapturedV2Source(any(), any()) } coAnswers {
+            keyMaterialDao.upsert(source.copy(updatedAt = source.updatedAt + 1))
+            WalletKeyReader.MaterialResult.Success(owned, phrase, "mnemonic", true)
+        }
+        assertTrue(newRestorer(boundary).restore(activity, "w1", material(), false) is RecoveredKeyRestorer.Outcome.Failed)
+        assertTrue(owned.all { it == 0.toByte() })
+        assertNull(fixture.store.get("w1")); assertNull(db.walletVaultDao().profile())
     }
 
 }

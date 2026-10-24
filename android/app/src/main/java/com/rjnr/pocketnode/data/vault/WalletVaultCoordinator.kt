@@ -86,13 +86,20 @@ class WalletVaultCoordinator(
         material: KeyMaterial, acknowledgment: LegacySourceAcknowledgment): VaultAccessResult =
         enroll(activity, walletId, material, Enrollment.RECOVERY, acknowledgment = acknowledgment)
 
-    private suspend fun checkAcknowledgment(id: String, acknowledgment: LegacySourceAcknowledgment) {
-        val source = acknowledgment.source
-        if (source.kdfVersion != 2 || source.walletId != id || acknowledgment.wallet.walletId != id ||
-            db.walletDao().getById(id) != acknowledgment.wallet ||
-            !LegacyBackupProof.sameEnvelope(db.walletVaultDao().get(id), acknowledgment.original) ||
+    internal suspend fun recoverWithAuthenticatedSource(activity: FragmentActivity, walletId: String,
+        material: KeyMaterial, authentication: LegacySourceAuthentication): VaultAccessResult =
+        enroll(activity, walletId, material, Enrollment.RECOVERY, authentication = authentication)
+
+    private suspend fun checkSourceWitness(id: String, wallet: com.rjnr.pocketnode.data.database.entity.WalletEntity,
+        source: KeyMaterialEntity, original: com.rjnr.pocketnode.data.database.entity.WalletVaultEntity?) {
+        if (source.kdfVersion != 2 || source.walletId != id || wallet.walletId != id ||
+            db.walletDao().getById(id) != wallet ||
+            !LegacyBackupProof.sameEnvelope(db.walletVaultDao().get(id), original) ||
             (db.keyMaterialDao().getByWalletId(id) != source && db.walletVaultDao().legacy(id)?.source() != source)) throw VaultFailure()
     }
+
+    private suspend fun checkAcknowledgment(id: String, acknowledgment: LegacySourceAcknowledgment) =
+        checkSourceWitness(id, acknowledgment.wallet, acknowledgment.source, acknowledgment.original)
 
     private suspend fun checkProofSource(id: String, proof: LegacyBackupProof) {
         if (!proof.active || proof.wallet.walletId != id || db.walletDao().getById(id) != proof.wallet ||
@@ -106,9 +113,10 @@ class WalletVaultCoordinator(
     }
 
     private enum class Enrollment { NEW, LEGACY, RECOVERY, INTERNAL_CLEANUP }
-    private suspend fun enroll(activity: FragmentActivity, id: String, material: KeyMaterial, mode: Enrollment, expectedLegacyIv: ByteArray? = null, proof: LegacyBackupProof? = null, acknowledgment: LegacySourceAcknowledgment? = null, creation: com.rjnr.pocketnode.data.wallet.WalletRepository.Creation? = null): VaultAccessResult = access(activity) { session ->
+    private suspend fun enroll(activity: FragmentActivity, id: String, material: KeyMaterial, mode: Enrollment, expectedLegacyIv: ByteArray? = null, proof: LegacyBackupProof? = null, acknowledgment: LegacySourceAcknowledgment? = null, creation: com.rjnr.pocketnode.data.wallet.WalletRepository.Creation? = null, authentication: LegacySourceAuthentication? = null): VaultAccessResult = access(activity) { session ->
         proof?.let { checkProofSource(id, it) }
         acknowledgment?.let { checkAcknowledgment(id, it) }
+        authentication?.let { checkSourceWitness(id, it.wallet, it.source, it.original) }
         val existingWallet = db.walletDao().getById(id)
         if (creation != null && (mode != Enrollment.NEW || existingWallet != null || creation.walletId != id)) throw VaultFailure()
         val wallet = creation?.wallet ?: existingWallet
@@ -143,6 +151,7 @@ class WalletVaultCoordinator(
             val candidate = create(id, old?.let(::nextGeneration) ?: 0, protectedMaterial, phrase)
             proof?.let { checkProofSource(id, it) }
             acknowledgment?.let { checkAcknowledgment(id, it) }
+            authentication?.let { checkSourceWitness(id, it.wallet, it.source, it.original) }
             if (old == null) {
                 val metadata = source ?: KeyMaterialEntity(id, byteArrayOf(), null, byteArrayOf(), creation?.wallet?.type ?: material.walletType,
                     material.mnemonicBackedUp, System.currentTimeMillis())
@@ -163,6 +172,7 @@ class WalletVaultCoordinator(
                     when {
                         mode == Enrollment.LEGACY -> source?.let { BoundLegacySourceProof(it, committedRow, LegacySourceAuthority.AUTHENTICATED) }
                         acknowledgment != null -> BoundLegacySourceProof(acknowledgment.source, committedRow, LegacySourceAuthority.ACKNOWLEDGED_INACCESSIBLE)
+                        authentication != null -> BoundLegacySourceProof(authentication.source, committedRow, LegacySourceAuthority.AUTHENTICATED)
                         else -> null
                     })) return@access VaultAccessResult.CleanupRequired
             if (device.unavailableReason() == null && prompt.choose(activity, "Use device authentication?",

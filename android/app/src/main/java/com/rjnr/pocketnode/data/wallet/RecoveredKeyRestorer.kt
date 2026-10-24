@@ -121,6 +121,30 @@ class RecoveredKeyRestorer @Inject constructor(
         recoveryState.markIncomplete()
         val capturedSource = keyMaterialDao.getByWalletId(walletId)
         var acknowledgment: LegacySourceAcknowledgment? = null
+        var authentication: LegacySourceAuthentication? = null
+        if (normalized.mnemonic != null && capturedSource?.kdfVersion == 2) {
+            // Classify the exact old source before activation. A supplied seed does not prove
+            // the contents or lost capabilities of an unreadable legacy source.
+            when (val existing = keyReader.authenticateCapturedV2Source(activity, capturedSource)) {
+                is WalletKeyReader.MaterialResult.Success -> try {
+                    val previous = KeyMaterial(existing.privateKey.toHexStringNoPrefix(), existing.mnemonic,
+                        existing.walletType, existing.mnemonicBackedUp)
+                    if (!WalletSecretValidator(mnemonicManager).validate(previous, wallet) ||
+                        previous.privateKey != normalized.privateKey ||
+                        previous.mnemonic != null && previous.mnemonic != normalized.mnemonic)
+                        return Outcome.Failed("The existing recovery capabilities do not match. Nothing was replaced.")
+                    authentication = LegacySourceAuthentication(wallet, capturedSource, null)
+                } finally { existing.privateKey.fill(0) }
+                WalletKeyReader.MaterialResult.KeyInvalidated -> {
+                    if (prompt.choose(activity, "Replace inaccessible legacy protection?",
+                        "The old device key is permanently unavailable. This verified recovery phrase restores its matching wallet and derived accounts, but cannot prove that the inaccessible old source had no different recovery phrase or accounts. Continue only if you accept losing those inaccessible capabilities. Surviving old-PIN backups still require authentication and remain preserved.",
+                        "Use verified recovery phrase", "Cancel") != true) return Outcome.Cancelled
+                    acknowledgment = LegacySourceAcknowledgment(wallet, capturedSource, null)
+                }
+                WalletKeyReader.MaterialResult.Cancelled -> return Outcome.Cancelled
+                else -> return Outcome.Failed("Existing source authentication needs a retry. Nothing was replaced.")
+            }
+        }
         if (normalized.mnemonic == null && capturedSource != null &&
             (wallet.type == KeyManager.WALLET_TYPE_MNEMONIC || capturedSource.kdfVersion == 2)) {
             if (keyMaterialDao.getKdfVersion(walletId) == 3) {
@@ -181,6 +205,7 @@ class RecoveredKeyRestorer @Inject constructor(
             }
         }
         return when (acknowledgment?.let { coordinator.recoverWithAcknowledgedSource(activity, walletId, normalized, it) }
+            ?: authentication?.let { coordinator.recoverWithAuthenticatedSource(activity, walletId, normalized, it) }
             ?: coordinator.recoverExisting(activity, walletId, normalized)) {
             is VaultAccessResult.Success -> {
                 recoveryState.removeUnverified(walletId)

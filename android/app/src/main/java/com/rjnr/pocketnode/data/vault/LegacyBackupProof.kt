@@ -58,6 +58,15 @@ internal class LegacySourceAcknowledgment(
 ) {
     override fun toString() = "LegacySourceAcknowledgment([redacted])"
 }
+
+/** Exact V2 source authenticated in this foreground operation, before external recovery activation. */
+internal class LegacySourceAuthentication(
+    val wallet: WalletEntity,
+    val source: KeyMaterialEntity,
+    val original: WalletVaultEntity?,
+) {
+    override fun toString() = "LegacySourceAuthentication([redacted])"
+}
 internal enum class LegacySourceAuthority { AUTHENTICATED, ACKNOWLEDGED_INACCESSIBLE }
 
 /** Software readability proves capability, never authority to replace an existing passphrase. */
