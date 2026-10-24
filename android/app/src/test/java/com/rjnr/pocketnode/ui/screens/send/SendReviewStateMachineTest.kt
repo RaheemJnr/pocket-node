@@ -64,6 +64,8 @@ class SendReviewStateMachineTest {
     private lateinit var errorJournal: ErrorJournal
     private lateinit var uiPreferences: com.rjnr.pocketnode.core.prefs.UiPreferences
 
+    private val foregroundActivity = mockk<FragmentActivity>(relaxed = true)
+
     private val senderAddress = "ckt1qzda0cr08m85hc8jlnfp3zer7xulejywt49kt2rr0vthywaa50xwsqsender"
     private val recipient = "ckt1qzda0cr08m85hc8jlnfp3zer7xulejywt49kt2rr0vthywaa50xwsqrecipient"
     private val balanceShannons = 1_000_00000000L
@@ -130,9 +132,11 @@ class SendReviewStateMachineTest {
         every { walletRepository.activeWalletIdSnapshot() } returns "w1"
 
         walletKeyReader = mockk(relaxed = true)
+        coEvery { walletKeyReader.readPrivateKey(any(), any(), any(), any()) } answers {
+            WalletKeyReader.Result.Success(ByteArray(32) { 7 })
+        }
         keyMaterialDao = mockk(relaxed = true)
-        // V1 wallet: the legacy path, where the auth-before-send setting decides
-        // whether a PIN/biometric gate appears at all.
+        // Every version uses the same authenticated reader boundary.
         coEvery { keyMaterialDao.getKdfVersion(any()) } returns 1
 
         contactRepository = mockk(relaxed = true)
@@ -199,7 +203,7 @@ class SendReviewStateMachineTest {
         vm.fillForm()
         vm.sendTransaction()
         advanceUntilIdle()
-        vm.confirmSend()
+        vm.confirmSend(foregroundActivity)
         advanceUntilIdle()
 
         assertNull(vm.uiState.value.reviewRequest)
@@ -211,35 +215,24 @@ class SendReviewStateMachineTest {
     }
 
     @Test
-    fun `auth on - review comes first, then the auth prompt, then the broadcast`() =
+    fun `auth on - review precedes vault authentication and app PIN callback cannot replace it`() =
         runTest(testDispatcher) {
             every { authManager.isAuthBeforeSendEnabled() } returns true
-            val vm = newViewModel()
-            advanceUntilIdle()
-
-            vm.fillForm()
-            vm.sendTransaction()
-            advanceUntilIdle()
-
-            // Review first — the auth prompt must not pre-empt it.
+            coEvery { walletKeyReader.readPrivateKey(any(), any(), any(), any()) } returns WalletKeyReader.Result.Cancelled
+            val vm = newViewModel(); advanceUntilIdle()
+            vm.fillForm(); vm.sendTransaction(foregroundActivity); advanceUntilIdle()
             assertNotNull(vm.uiState.value.reviewRequest)
             assertFalse(vm.uiState.value.requiresAuth)
-            coVerify(exactly = 0) { repository.prepareAndSend(any(), any(), any(), any(), any()) }
-
-            vm.confirmSend()
-            advanceUntilIdle()
-
-            // Confirm hands over to the single existing auth gate — still no broadcast.
+            coVerify(exactly = 0) { walletKeyReader.readPrivateKey(any(), any(), any(), any()) }
+            vm.confirmSend(foregroundActivity); advanceUntilIdle()
             assertNull(vm.uiState.value.reviewRequest)
-            assertTrue(vm.uiState.value.requiresAuth)
-            assertEquals(AuthMethod.PIN, vm.uiState.value.authMethod)
+            vm.executeSend(); advanceUntilIdle()
             coVerify(exactly = 0) { repository.prepareAndSend(any(), any(), any(), any(), any()) }
-
-            // The screen calls executeSend() once the PIN/biometric check passes.
-            vm.executeSend()
-            advanceUntilIdle()
-
-            assertFalse(vm.uiState.value.requiresAuth)
+            coEvery { walletKeyReader.readPrivateKey(any(), any(), any(), any()) } answers {
+                WalletKeyReader.Result.Success(ByteArray(32) { 7 })
+            }
+            vm.sendTransaction(foregroundActivity); advanceUntilIdle()
+            vm.confirmSend(foregroundActivity); advanceUntilIdle()
             coVerify(exactly = 1) {
                 repository.prepareAndSend(senderAddress, recipient, 100_00000000L, any(), plannedFee)
             }
@@ -308,8 +301,8 @@ class SendReviewStateMachineTest {
 
         // Two taps land before the first send finishes; the second finds no
         // pending review and must be a no-op.
-        vm.confirmSend()
-        vm.confirmSend()
+        vm.confirmSend(foregroundActivity)
+        vm.confirmSend(foregroundActivity)
         advanceUntilIdle()
 
         coVerify(exactly = 1) { repository.prepareAndSend(any(), any(), any(), any(), any()) }
@@ -347,6 +340,37 @@ class SendReviewStateMachineTest {
                 repository.prepareAndSend(senderAddress, recipient, 100_00000000L, any(), plannedFee)
             }
         }
+
+    @Test
+    fun `legacy direct execute callback cannot read secrets or broadcast without foreground vault authentication`() = runTest(testDispatcher) {
+        every { authManager.isAuthBeforeSendEnabled() } returns false
+        val vm = newViewModel(); advanceUntilIdle()
+        vm.fillForm(); vm.executeSend(); advanceUntilIdle()
+        coVerify(exactly = 0) { repository.getPrivateKey() }
+        coVerify(exactly = 0) { repository.prepareAndSend(any(), any(), any(), any(), any()) }
+    }
+
+    @Test
+    fun `legacy wallet cancelled vault setup cannot broadcast with send authentication disabled`() = runTest(testDispatcher) {
+        every { authManager.isAuthBeforeSendEnabled() } returns false
+        coEvery { keyMaterialDao.getKdfVersion(any()) } returns 1
+        coEvery { walletKeyReader.readPrivateKey(any(), any(), any(), any()) } returns WalletKeyReader.Result.Cancelled
+        val activity = mockk<FragmentActivity>(relaxed = true)
+        val vm = newViewModel(); advanceUntilIdle()
+        vm.fillForm(); vm.sendTransaction(activity); advanceUntilIdle()
+        vm.confirmSend(activity); advanceUntilIdle()
+        coVerify(exactly = 0) { repository.prepareAndSend(any(), any(), any(), any(), any()) }
+    }
+
+    @Test
+    fun `legacy wallet without activity cannot broadcast or read UI free secrets`() = runTest(testDispatcher) {
+        every { authManager.isAuthBeforeSendEnabled() } returns false
+        coEvery { keyMaterialDao.getKdfVersion(any()) } returns 1
+        val vm = newViewModel(); advanceUntilIdle()
+        vm.fillForm(); vm.sendTransaction(); advanceUntilIdle()
+        vm.confirmSend(); advanceUntilIdle()
+        coVerify(exactly = 0) { repository.prepareAndSend(any(), any(), any(), any(), any()) }
+    }
 
     @Test
     fun `V2 wallet - a cancelled unlock broadcasts nothing`() = runTest(testDispatcher) {

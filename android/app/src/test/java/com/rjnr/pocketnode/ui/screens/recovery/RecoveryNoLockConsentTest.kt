@@ -104,10 +104,10 @@ class RecoveryNoLockConsentTest {
             argon2MemoryKb = 8
             argon2Parallelism = 1
         }
-        val writer = WalletKeyWriter(db.keyMaterialDao(), v2Helper, v1Helper, encryption, authManager, backups, NoopLogger)
+        val writer = WalletKeyWriter(com.rjnr.pocketnode.data.wallet.WalletVaultIntegrationFixture(db).coordinator)
         state = RecoveryStateStore(ctx)
         state.clear()
-        val reader = WalletKeyReader(db.keyMaterialDao(), v1Helper, encryption, authManager, backups, state, NoopLogger)
+        val reader = WalletKeyReader(db.keyMaterialDao(), v1Helper, encryption, authManager, state, mockk(), mockk(), mockk(), com.rjnr.pocketnode.data.wallet.WalletUnlockPreference(ApplicationProvider.getApplicationContext()))
         restorer = RecoveredKeyRestorer(
             db.walletDao(), db.keyMaterialDao(), writer, reader, authManager, keyManager,
             MnemonicManager(), state, backups, NoopLogger,

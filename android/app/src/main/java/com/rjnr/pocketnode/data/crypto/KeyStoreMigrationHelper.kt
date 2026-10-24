@@ -47,7 +47,7 @@ class KeyStoreMigrationHelper(
     private val logger: Logger,
 ) {
 
-    suspend fun migrateWallet(
+    internal suspend fun migrateWallet(
         walletId: String,
         privateKeyHex: String,
         mnemonic: String?,
@@ -56,6 +56,10 @@ class KeyStoreMigrationHelper(
         // false: refuse to replace an existing row (insert-or-fail).
         overwrite: Boolean = true,
     ) {
+        val source = keyMaterialDao.getByWalletId(walletId)
+        if (source != null && source.kdfVersion != 1) {
+            throw KeyMaterialUnreadableException(walletId)
+        }
         val keyBytes = privateKeyHex.toByteArray(Charsets.UTF_8)
         val keyCipher = encryptionManager.newEncryptCipher()
         val (encryptedKey, iv) = encryptionManager.encryptWithCipher(keyCipher, keyBytes)
@@ -78,7 +82,7 @@ class KeyStoreMigrationHelper(
         )
 
         if (overwrite) {
-            keyMaterialDao.upsert(entity)
+            keyMaterialDao.replaceLegacyV1(entity, source?.iv)
         } else {
             try {
                 keyMaterialDao.insertOrAbort(entity)
@@ -139,14 +143,13 @@ class KeyStoreMigrationHelper(
      * from app code), so this method behaves exactly like v1.6.x for live
      * users.
      */
-    suspend fun readDecryptedKey(walletId: String): DecryptedKeyData? {
+    internal suspend fun readDecryptedKey(walletId: String): DecryptedKeyData? {
         val entity = keyMaterialDao.getByWalletId(walletId) ?: return null
         return when (entity.kdfVersion) {
             1 -> decryptV1Row(entity)
             2 -> throw V2KeyMaterialRequiresAuthException(walletId)
             else -> {
-                logger.e(TAG, "Unknown kdfVersion=${entity.kdfVersion} for walletId=$walletId")
-                null
+                throw KeyMaterialUnreadableException(walletId)
             }
         }
     }
@@ -164,14 +167,13 @@ class KeyStoreMigrationHelper(
      * during migration. Post-migration, every row is V2 and this branch
      * never fires.
      */
-    suspend fun readDecryptedKey(walletId: String, v2DecryptCipher: Cipher): DecryptedKeyData? {
+    internal suspend fun readDecryptedKey(walletId: String, v2DecryptCipher: Cipher): DecryptedKeyData? {
         val entity = keyMaterialDao.getByWalletId(walletId) ?: return null
         return when (entity.kdfVersion) {
             1 -> decryptV1Row(entity)
             2 -> decryptV2Row(entity, v2DecryptCipher)
             else -> {
-                logger.e(TAG, "Unknown kdfVersion=${entity.kdfVersion} for walletId=$walletId")
-                null
+                throw KeyMaterialUnreadableException(walletId)
             }
         }
     }
@@ -239,6 +241,8 @@ class KeyStoreMigrationHelper(
     suspend fun deleteKey(walletId: String) {
         keyMaterialDao.delete(walletId)
     }
+
+    internal suspend fun keyMaterialVersion(walletId: String): Int? = keyMaterialDao.getKdfVersion(walletId)
 
     suspend fun hasAnyKeys(): Boolean {
         return keyMaterialDao.count() > 0

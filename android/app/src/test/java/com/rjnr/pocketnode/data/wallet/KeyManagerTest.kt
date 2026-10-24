@@ -93,7 +93,7 @@ class KeyManagerTest {
     // -- ESP fallback read path (legacy single-wallet, kept for pre-migration installs) --
 
     @Test
-    fun `ESP fallback works when Room has no data`() = runTest {
+    fun `ESP wallet metadata remains readable while secrets require foreground authentication`() = runTest {
         // Simulate a pre-migration user: keys exist only in ESP, not Room.
         // Write directly to the testPrefs (standing in for EncryptedSharedPreferences).
         val context = ApplicationProvider.getApplicationContext<Context>()
@@ -107,7 +107,7 @@ class KeyManagerTest {
 
         // Room is empty — reads should fall back to ESP
         assertTrue(keyManager.hasWallet())
-        assertEquals(testMnemonic, keyManager.getMnemonic())
+        assertTrue(runCatching { keyManager.getMnemonic() }.exceptionOrNull() is WalletSecretRequiresAuthenticationException)
         assertEquals(KeyManager.WALLET_TYPE_MNEMONIC, keyManager.getWalletType())
         assertFalse(keyManager.hasMnemonicBackup())
     }

@@ -25,7 +25,7 @@ class WalletPassphraseDialog : VaultPrompt {
         credentials(activity, title, message, confirm, legacyPin = false)
 
     override suspend fun requestLegacyPin(activity: FragmentActivity, title: String, message: String): CharArray? =
-        credentials(activity, title, "$message\nThis six-digit legacy app PIN only opens an existing old backup. It cannot protect the new wallet vault.", false, legacyPin = true)
+        credentials(activity, title, "$message\nThis six-digit app PIN is only for legacy wallets and backups. It cannot protect the new wallet vault.", false, legacyPin = true)
 
     private suspend fun credentials(activity: FragmentActivity, title: String, message: String, confirm: Boolean, legacyPin: Boolean): CharArray? = withContext(Dispatchers.Main.immediate) {
         if (!activity.lifecycle.currentState.isAtLeast(Lifecycle.State.STARTED)) return@withContext null

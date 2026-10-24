@@ -660,18 +660,11 @@ class SendViewModel @Inject constructor(
         _uiState.update { it.copy(reviewRequest = null, sweepWarningAcknowledged = false) }
 
         viewModelScope.launch {
-            val kdfVersion = peekActiveKdfVersion()
-            if (kdfVersion == 2) {
-                if (activity == null) {
-                    _uiState.update {
-                        it.copy(error = com.rjnr.pocketnode.ui.util.UiMessage.Resource(com.rjnr.pocketnode.R.string.vm_error_send_v2_reopen))
-                    }
-                    return@launch
-                }
-                executeSendV2(activity)
-            } else {
-                sendTransactionV1OrFallback()
+            if (activity == null) {
+                _uiState.update { it.copy(error = com.rjnr.pocketnode.ui.util.UiMessage.Resource(com.rjnr.pocketnode.R.string.vm_error_send_v2_reopen)) }
+                return@launch
             }
+            executeSendV2(activity)
         }
     }
 
@@ -750,23 +743,6 @@ class SendViewModel @Inject constructor(
             return false
         }
         return true
-    }
-
-    private fun sendTransactionV1OrFallback() {
-        if (!validateInputs()) return
-
-        // Check if authentication is required before sending (V1 path).
-        if (authManager.isAuthBeforeSendEnabled() && pinManager.hasPin()) {
-            val method = if (authManager.isBiometricEnabled() && authManager.isBiometricEnrolled()) {
-                AuthMethod.BIOMETRIC
-            } else {
-                AuthMethod.PIN
-            }
-            _uiState.update { it.copy(requiresAuth = true, authMethod = method) }
-            return
-        }
-
-        executeSend()
     }
 
     private suspend fun executeSendV2(activity: FragmentActivity) {
@@ -880,101 +856,10 @@ class SendViewModel @Inject constructor(
         }
     }
 
+    /** Legacy PIN/dashboard callbacks do not authorize vault access. Reopen the foreground review. */
     fun executeSend() {
-        val state = _uiState.value
-        _uiState.update { it.copy(requiresAuth = false, authMethod = null) }
-
-        val amountShannons = parseAmountShannons(state.amountCkb)
-        if (amountShannons == null) {
-            _uiState.update { it.copy(error = com.rjnr.pocketnode.ui.util.UiMessage.Resource(com.rjnr.pocketnode.R.string.vm_error_invalid_amount)) }
-            return
-        }
-
-        // Capture wallet identity upfront to prevent wallet-switch race conditions
-        val capturedAddress = repository.getCurrentAddress()
-
-        if (capturedAddress == null) {
-            _uiState.update { it.copy(error = com.rjnr.pocketnode.ui.util.UiMessage.Resource(com.rjnr.pocketnode.R.string.vm_error_wallet_not_initialized)) }
-            return
-        }
-
-        sendJob = viewModelScope.launch {
-            val capturedKey = try { repository.getPrivateKey() } catch (e: Exception) {
-                _uiState.update { it.copy(error = com.rjnr.pocketnode.ui.util.UiMessage.Resource(com.rjnr.pocketnode.R.string.vm_error_access_keys_failed, listOf(e.message ?: ""))) }
-                return@launch
-            }
-            _uiState.update {
-                it.copy(
-                    isLoading = true,
-                    error = null,
-                    transactionState = TransactionState.SENDING,
-                    statusMessage = "Building transaction..."
-                )
-            }
-
-            try {
-                logger.d(TAG, "Starting send transaction flow")
-                // Recipient + amount + sender together are a full payment
-                // record; logcat is adb/bugreport-readable on debug builds.
-                // Redact the addresses, drop the amount (#321).
-                logger.d(TAG, "  Recipient: ${state.recipientAddress.redactAddress()}")
-                logger.d(TAG, "  From address: ${capturedAddress.redactAddress()}")
-
-                _uiState.update { it.copy(statusMessage = "Broadcasting transaction...") }
-                logger.d(TAG, "📡 prepareAndSend: fetching cells, filtering reserved, building, broadcasting...")
-
-                if (state.sendMode == SendMode.BULK) {
-                    proceedWithBulkSend(amountShannons, capturedAddress, capturedKey)
-                } else {
-                    val recipient = state.recipientAddress
-                    val txHash = repository.prepareAndSend(
-                        fromAddress = capturedAddress,
-                        toAddress = recipient,
-                        amountShannons = amountShannons,
-                        privateKey = capturedKey,
-                        expectedFeeShannons = confirmedFeeShannons,
-                    ).getOrThrow()
-                    logger.d(TAG, "✅ Transaction sent! Hash: $txHash")
-
-                    _uiState.update {
-                        it.copy(
-                            isLoading = false,
-                            txHash = txHash,
-                            recipientAddress = "",
-                            amountCkb = "",
-                            transactionState = TransactionState.PENDING,
-                            statusMessage = "Transaction submitted. Waiting for confirmation..."
-                        )
-                    }
-
-                    // #197: usage bump for saved contacts, save-prompt for new ones.
-                    afterSendBookkeeping(recipient)
-
-                    // Start polling for transaction status using the captured address
-                    startPollingTransactionStatus(txHash, capturedAddress)
-                }
-
-            } catch (e: Exception) {
-                logger.e(TAG, "❌ Transaction failed", e)
-                logger.e(TAG, "  Error type: ${e.javaClass.simpleName}")
-                logger.e(TAG, "  Error message: ${e.message}")
-                e.printStackTrace()
-
-                val userFriendlyError = parseErrorMessage(e)
-                errorJournal.record("send", e.message ?: e.javaClass.simpleName)
-                _uiState.update {
-                    it.copy(
-                        isLoading = false,
-                        error = com.rjnr.pocketnode.ui.util.UiMessage.Raw(userFriendlyError),
-                        errorDetail = e.message,
-                        transactionState = TransactionState.FAILED,
-                        statusMessage = "Transaction failed"
-                    )
-                }
-            } finally {
-                capturedKey.fill(0) // transient signing key — zero after use (#321)
-            }
-        }
+        _uiState.update { it.copy(requiresAuth = false, authMethod = null,
+            error = com.rjnr.pocketnode.ui.util.UiMessage.Resource(com.rjnr.pocketnode.R.string.vm_error_send_v2_reopen)) }
     }
 
     private suspend fun proceedWithBulkSend(

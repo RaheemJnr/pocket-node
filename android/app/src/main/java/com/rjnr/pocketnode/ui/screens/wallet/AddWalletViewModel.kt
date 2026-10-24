@@ -139,7 +139,8 @@ class AddWalletViewModel @Inject constructor(
         promptSubtitle: String = "Use your phone's screen lock to encrypt the new wallet's keys.",
     ): WalletKeyWriter.Result =
         if (!canCreateV2BoundKey()) {
-            walletKeyWriter.persistNewWalletV1Fallback(
+            walletKeyWriter.persistNewWallet(
+                activity = activity,
                 walletId = walletId,
                 bundle = bundle,
                 walletType = walletType,

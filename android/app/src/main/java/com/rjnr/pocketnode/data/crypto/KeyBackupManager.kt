@@ -140,6 +140,16 @@ class KeyBackupManager @Inject constructor(
         backupFile(walletId).delete()
     }
 
+    /** Retire both committed and interrupted weak backups, checking the filesystem result. */
+    fun deleteBackupChecked(walletId: String): Boolean {
+        if (!walletId.matches(Regex("[A-Za-z0-9_-]{1,128}"))) return false
+        val file = backupFile(walletId)
+        val pending = File(file.parentFile, "${file.name}.tmp")
+        file.delete()
+        pending.delete()
+        return !file.exists() && !pending.exists()
+    }
+
     fun listBackupWalletIds(): List<String> {
         return backupDir.listFiles()
             ?.filter { it.extension == "enc" }

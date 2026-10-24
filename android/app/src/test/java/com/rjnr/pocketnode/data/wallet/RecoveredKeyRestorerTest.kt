@@ -92,11 +92,11 @@ class RecoveredKeyRestorerTest {
             authManager.authenticateForCipher(any(), any<Cipher>(), any(), any())
         } answers { AuthManager.CipherAuthResult.Success(args[1] as Cipher) }
         keyBackupManager = mockk(relaxed = true)
-        writer = WalletKeyWriter(keyMaterialDao, v2Helper, v1Helper, encryption, authManager, keyBackupManager, NoopLogger)
+        writer = WalletKeyWriter(WalletVaultIntegrationFixture(db).coordinator)
         keyManager = mockk(relaxed = true)
         state = RecoveryStateStore(ctx)
         state.clear()
-        reader = WalletKeyReader(keyMaterialDao, v1Helper, encryption, authManager, keyBackupManager, state, NoopLogger)
+        reader = WalletKeyReader(keyMaterialDao, v1Helper, encryption, authManager, state, mockk(), mockk(), mockk(), WalletUnlockPreference(ApplicationProvider.getApplicationContext()))
         restorer = newRestorer(reader)
     }
 

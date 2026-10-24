@@ -109,6 +109,9 @@ class SendSweepWarningTest {
         every { walletRepository.activeWalletIdSnapshot() } returns "w1"
 
         walletKeyReader = mockk(relaxed = true)
+        coEvery { walletKeyReader.readPrivateKey(any(), any(), any(), any()) } answers {
+            WalletKeyReader.Result.Success(ByteArray(32) { 7 })
+        }
         keyMaterialDao = mockk(relaxed = true)
         coEvery { keyMaterialDao.getKdfVersion(any()) } returns 1
 
@@ -263,7 +266,7 @@ class SendSweepWarningTest {
         assertTrue(vm.uiState.value.reviewRequest!!.isNearlyFullBalance)
         assertFalse(vm.uiState.value.sweepWarningAcknowledged)
 
-        vm.confirmSend()
+        vm.confirmSend(mockk<androidx.fragment.app.FragmentActivity>(relaxed = true))
         advanceUntilIdle()
 
         // Sheet still up, nothing signed or broadcast.
@@ -271,7 +274,7 @@ class SendSweepWarningTest {
         coVerify(exactly = 0) { repository.prepareAndSend(any(), any(), any(), any(), any()) }
 
         vm.setSweepWarningAcknowledged(true)
-        vm.confirmSend()
+        vm.confirmSend(mockk<androidx.fragment.app.FragmentActivity>(relaxed = true))
         advanceUntilIdle()
 
         assertNull(vm.uiState.value.reviewRequest)
@@ -286,7 +289,7 @@ class SendSweepWarningTest {
         val vm = reviewFor(amount)
         assertFalse(vm.uiState.value.reviewRequest!!.isNearlyFullBalance)
 
-        vm.confirmSend()
+        vm.confirmSend(mockk<androidx.fragment.app.FragmentActivity>(relaxed = true))
         advanceUntilIdle()
 
         assertNull(vm.uiState.value.reviewRequest)
@@ -309,7 +312,7 @@ class SendSweepWarningTest {
 
         assertTrue(vm.uiState.value.reviewRequest!!.isNearlyFullBalance)
         assertFalse("a new draft must be acknowledged again", vm.uiState.value.sweepWarningAcknowledged)
-        vm.confirmSend()
+        vm.confirmSend(mockk<androidx.fragment.app.FragmentActivity>(relaxed = true))
         advanceUntilIdle()
         assertNotNull(vm.uiState.value.reviewRequest)
         coVerify(exactly = 0) { repository.prepareAndSend(any(), any(), any(), any(), any()) }

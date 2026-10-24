@@ -150,11 +150,20 @@ class WalletVaultCoordinatorTest {
     @Test fun `cleanup failure preserves archived source and hides material until retry`() = operationTest {
         wallet(); val source = KeyMaterialEntity("a", byteArrayOf(8), null, byteArrayOf(7), "raw_key", true, 1, 2)
         db.keyMaterialDao().upsert(source); cleanupOk = false; phrase()
-        assertEquals(VaultAccessResult.CleanupRequired, coordinator.protectLegacy(activity, "a", material))
+        assertEquals(VaultAccessResult.CleanupRequired, coordinator.protectLegacy(activity, "a", material, source.iv))
         assertEquals(source, db.walletVaultDao().legacy("a")!!.source())
         cleanupOk = true; phrase()
         assertTrue(coordinator.read(activity, "a", "Read", "Auth") is VaultAccessResult.Success)
         assertNull(db.walletVaultDao().legacy("a")); assertTrue(store.pendingLegacyCleanup().isEmpty())
+    }
+    @Test fun `legacy migration refuses a changed source before starting credential setup`() = operationTest {
+        wallet()
+        val authenticated = KeyMaterialEntity("a", byteArrayOf(8), null, byteArrayOf(7), "raw_key", true, 1, 2)
+        val replacement = authenticated.copy(iv = byteArrayOf(9), encryptedPrivateKey = byteArrayOf(10))
+        db.keyMaterialDao().upsert(replacement); phrase()
+        assertTrue(coordinator.protectLegacy(activity, "a", material, authenticated.iv) is VaultAccessResult.Unavailable)
+        assertEquals(replacement, db.keyMaterialDao().getByWalletId("a"))
+        assertNull(store.get("a"))
     }
     @Test fun `cleanup IO failure is retryable without exposing material`() = operationTest {
         wallet(); phrase(); cleanupThrows = true

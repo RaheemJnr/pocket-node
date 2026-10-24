@@ -108,7 +108,7 @@ class WalletMigrationHelperTest {
             mnemonic = null,
             walletType = KeyManager.WALLET_TYPE_RAW_KEY,
         )
-        val legacyInfo = keyManager.getWalletInfo()
+        val legacyInfo = keyManager.deriveWalletInfo(ByteArray(32) { 0xaa.toByte() })
 
         helper.migrateIfNeeded()
 
@@ -127,7 +127,7 @@ class WalletMigrationHelperTest {
         assertEquals(legacyInfo.testnetAddress, wallet.testnetAddress)
 
         // Keys should be copied to wallet-scoped storage
-        val scopedKey = keyManager.getPrivateKeyForWallet(activeWalletId)
+        val scopedKey = keyStoreMigrationHelper.readDecryptedKey(activeWalletId)?.privateKeyHex
         assertNotNull(scopedKey)
     }
 
@@ -166,7 +166,7 @@ class WalletMigrationHelperTest {
         assertEquals("m/44'/309'/0'/0/0", wallet.derivationPath)
 
         // Mnemonic should be copied
-        val migratedMnemonic = keyManager.getMnemonicForWallet(activeWalletId)
+        val migratedMnemonic = keyStoreMigrationHelper.readDecryptedKey(activeWalletId)?.mnemonic?.split(" ")
         assertNotNull(migratedMnemonic)
         assertTrue(migratedMnemonic!!.size >= 12)
     }

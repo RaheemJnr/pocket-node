@@ -71,6 +71,32 @@ object AppModule {
 
     @Provides
     @Singleton
+    fun provideVaultPrompt(): com.rjnr.pocketnode.data.vault.VaultPrompt = com.rjnr.pocketnode.ui.security.WalletPassphraseDialog()
+
+    @Provides
+    @Singleton
+    fun provideVaultValidator(mnemonicManager: MnemonicManager) = com.rjnr.pocketnode.data.vault.WalletSecretValidator(mnemonicManager)
+
+    @Provides
+    @Singleton
+    fun provideVaultDevice(authManager: AuthManager): com.rjnr.pocketnode.data.vault.VaultDeviceAuthentication =
+        com.rjnr.pocketnode.data.vault.DeviceVaultKeyStore(authManager)
+
+    @Provides
+    @Singleton
+    fun provideVaultCleanup(@ApplicationContext context: Context, backup: KeyBackupManager): com.rjnr.pocketnode.data.vault.VaultLegacyCleanup =
+        com.rjnr.pocketnode.data.vault.WalletLegacyCleanup(context, backup)
+
+    @Provides
+    @Singleton
+    fun provideVaultCoordinator(db: AppDatabase, store: com.rjnr.pocketnode.data.vault.WalletVaultStore,
+        crypto: com.rjnr.pocketnode.data.vault.WalletEnvelopeCrypto, validator: com.rjnr.pocketnode.data.vault.WalletSecretValidator,
+        prompt: com.rjnr.pocketnode.data.vault.VaultPrompt, device: com.rjnr.pocketnode.data.vault.VaultDeviceAuthentication,
+        cleanup: com.rjnr.pocketnode.data.vault.VaultLegacyCleanup) =
+        com.rjnr.pocketnode.data.vault.WalletVaultCoordinator(db, store, crypto, validator, prompt, device, cleanup)
+
+    @Provides
+    @Singleton
     fun provideBlake2b(): Blake2b = Blake2b()
 
     @Provides

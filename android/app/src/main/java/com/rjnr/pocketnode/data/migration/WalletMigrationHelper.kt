@@ -1,6 +1,8 @@
 package com.rjnr.pocketnode.data.migration
 
 import androidx.room.withTransaction
+import com.rjnr.pocketnode.core.crypto.hexToByteArray
+import kotlinx.coroutines.CancellationException
 import com.rjnr.pocketnode.core.log.Logger
 import com.rjnr.pocketnode.data.database.AppDatabase
 import com.rjnr.pocketnode.data.database.dao.SyncProgressDao
@@ -63,21 +65,22 @@ class WalletMigrationHelper @Inject constructor(
 
         logger.d(TAG, "Migrating legacy single-wallet to multi-wallet schema")
 
+        var ownedKey: ByteArray? = null
         try {
-            val info = keyManager.getWalletInfo()
-            val privateKey = keyManager.getPrivateKey()
-            val mnemonic = keyManager.getMnemonic()
-            val walletType = keyManager.getWalletType()
+            val material = keyManager.legacyDefaultMaterialForMigration(walletDao) ?: return
+            val privateKey = material.privateKeyHex.hexToByteArray().also { ownedKey = it }
+            val info = keyManager.deriveWalletInfo(privateKey)
+            val walletType = material.walletType
             val walletId = UUID.randomUUID().toString()
-            val mnemonicBackedUp = keyManager.hasMnemonicBackup()
+            val mnemonicBackedUp = material.mnemonicBackedUp
 
             // Write a V1 row directly. See class-level KDoc on migrateIfNeeded
             // for why we don't go through WalletKeyWriter here.
-            val privateKeyHex = privateKey.joinToString("") { "%02x".format(it) }
+            val privateKeyHex = material.privateKeyHex
             keyStoreMigrationHelper.migrateWallet(
                 walletId = walletId,
                 privateKeyHex = privateKeyHex,
-                mnemonic = mnemonic?.joinToString(" "),
+                mnemonic = material.mnemonic,
                 walletType = walletType,
                 mnemonicBackedUp = mnemonicBackedUp,
             )
@@ -107,9 +110,11 @@ class WalletMigrationHelper @Inject constructor(
             walletPreferences.setActiveWalletId(walletId)
 
             logger.d(TAG, "Migration complete: created wallet $walletId")
+        } catch (e: CancellationException) {
+            throw e
         } catch (e: Exception) {
-            logger.e(TAG, "Migration failed — legacy wallet intact, will retry next launch", e)
-        }
+            logger.e(TAG, "Legacy wallet migration failed; source retained for retry", e)
+        } finally { ownedKey?.fill(0) }
     }
 
     /**

@@ -43,22 +43,22 @@ class WalletVaultCoordinator(
         enroll(activity, walletId, material, Enrollment.NEW)
 
     /** Caller must supply freshly authenticated legacy material, never a cached/dashboard-unlocked key. */
-    suspend fun protectLegacy(activity: FragmentActivity, walletId: String, material: KeyMaterial): VaultAccessResult =
-        enroll(activity, walletId, material, Enrollment.LEGACY)
+    suspend fun protectLegacy(activity: FragmentActivity, walletId: String, material: KeyMaterial, expectedLegacyIv: ByteArray): VaultAccessResult =
+        enroll(activity, walletId, material, Enrollment.LEGACY, expectedLegacyIv.copyOf())
 
     /** External recovery must match existing metadata, including both addresses and derivation. */
     suspend fun recoverExisting(activity: FragmentActivity, walletId: String, material: KeyMaterial): VaultAccessResult =
         enroll(activity, walletId, material, Enrollment.RECOVERY)
 
     private enum class Enrollment { NEW, LEGACY, RECOVERY }
-    private suspend fun enroll(activity: FragmentActivity, id: String, material: KeyMaterial, mode: Enrollment): VaultAccessResult = access(activity) { session ->
+    private suspend fun enroll(activity: FragmentActivity, id: String, material: KeyMaterial, mode: Enrollment, expectedLegacyIv: ByteArray? = null): VaultAccessResult = access(activity) { session ->
         val wallet = db.walletDao().getById(id)
         if (mode != Enrollment.NEW && wallet == null) throw VaultFailure()
         if (!validate(material, wallet)) throw VaultFailure()
         val old = store.get(id)
         if (old != null && mode != Enrollment.RECOVERY) throw VaultFailure()
         val source = db.keyMaterialDao().getByWalletId(id)
-        if (mode == Enrollment.LEGACY && (source == null || source.kdfVersion !in 1..2)) throw VaultFailure()
+        if (mode == Enrollment.LEGACY && (source == null || source.kdfVersion !in 1..2 || expectedLegacyIv == null || !source.iv.contentEquals(expectedLegacyIv))) throw VaultFailure()
         if (mode == Enrollment.NEW && source != null) throw VaultFailure()
         val phrase = credential(activity, !store.hasProfile()) ?: return@access VaultAccessResult.Cancelled
         try {
@@ -68,7 +68,7 @@ class WalletVaultCoordinator(
             if (old == null) {
                 val metadata = source ?: KeyMaterialEntity(id, byteArrayOf(), null, byteArrayOf(), material.walletType,
                     material.mnemonicBackedUp, System.currentTimeMillis())
-                store.activate(metadata, source?.iv, candidate, phrase)
+                store.activate(metadata, if (mode == Enrollment.LEGACY) expectedLegacyIv else source?.iv, candidate, phrase)
             } else {
                 store.replaceAuthenticatedWallet(id, old.generation, candidate, phrase)
             }

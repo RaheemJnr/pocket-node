@@ -582,7 +582,8 @@ class WalletSettingsViewModel @Inject constructor(
                             )
                         } else {
                             // No secure lock; the user consented to V1 above.
-                            walletKeyWriter.persistNewWalletV1Fallback(
+                            walletKeyWriter.persistNewWallet(
+                                activity = activity,
                                 walletId = newWalletId,
                                 bundle = bundle,
                                 walletType = KeyManager.WALLET_TYPE_MNEMONIC,

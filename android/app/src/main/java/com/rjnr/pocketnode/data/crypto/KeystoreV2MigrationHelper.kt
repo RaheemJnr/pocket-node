@@ -101,7 +101,7 @@ class KeystoreV2MigrationHelper(
                 kdfVersion = V2_VERSION,
                 updatedAt = nowProvider()
             )
-            keyMaterialDao.upsert(migrated)
+            keyMaterialDao.replaceLegacyV1(migrated, entity.iv)
 
             logger.i(TAG, "Migrated wallet $walletId from V1 to V2")
         }
@@ -213,7 +213,7 @@ class KeystoreV2MigrationHelper(
                 kdfVersion = V2_VERSION,
                 updatedAt = nowProvider()
             )
-            keyMaterialDao.upsert(migrated)
+            keyMaterialDao.replaceLegacyV1(migrated, entity.iv)
 
             logger.i(TAG, "Migrated wallet $walletId V1→V2 (extracted plaintext for caller)")
             bundle
@@ -221,8 +221,8 @@ class KeystoreV2MigrationHelper(
     }
 
     /**
-     * After every wallet has been migrated, delete the V1 Keystore key and
-     * record the migration-complete flag. Safe to call only when
+     * After every wallet has been migrated, record completion while preserving
+     * the shared key for any retained legacy source archives. Safe to call only when
      * [pendingWalletIds] returns an empty list.
      */
     suspend fun finalize(): Result<Unit> {
@@ -233,7 +233,8 @@ class KeystoreV2MigrationHelper(
                     "Refusing to finalize migration: ${pending.size} wallets still on V1 ($pending)"
                 )
             }
-            encryptionManager.deleteV1Key()
+            // Retained source archives may still require the shared V1 alias.
+            // Per-wallet verified vault cleanup never deletes shared aliases.
             prefs.edit().putBoolean(KEY_MIGRATION_V2_COMPLETE, true).apply()
             logger.i(TAG, "Keystore V2 migration finalized")
         }
