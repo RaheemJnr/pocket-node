@@ -18,14 +18,14 @@ import org.robolectric.annotation.Config
 @RunWith(RobolectricTestRunner::class)
 @Config(sdk = [28], manifest = Config.NONE)
 class WalletDefaultCleanupOwnershipTest {
-    private suspend fun active(f: WalletVaultIntegrationFixture, material: KeyMaterial = f.material) {
+    private suspend fun active(f: WalletVaultIntegrationFixture, material: KeyMaterial = f.material, id: String = "a") {
         val key = material.privateKey.chunked(2).map { it.toInt(16).toByte() }.toByteArray()
         val info = try { WalletDerivation.walletInfo(key) } finally { key.fill(0) }
-        f.db.walletDao().insert(WalletEntity("a", "Wallet", "raw_key", null, null, mainnetAddress = info.mainnetAddress, testnetAddress = info.testnetAddress))
+        f.db.walletDao().insert(WalletEntity(id, "Wallet", material.walletType, null, null, mainnetAddress = info.mainnetAddress, testnetAddress = info.testnetAddress))
         val bytes = Json.encodeToString(material).toByteArray()
         try {
-            val envelope = f.crypto.create("a", 0, bytes, f.pass.toCharArray())
-            f.store.activate(KeyMaterialEntity("a", byteArrayOf(), null, byteArrayOf(), "raw_key", false, 1), null, envelope, f.pass.toCharArray())
+            val envelope = f.crypto.create(id, 0, bytes, f.pass.toCharArray())
+            f.store.activate(KeyMaterialEntity(id, byteArrayOf(), null, byteArrayOf(), "raw_key", false, 1), null, envelope, f.pass.toCharArray())
         } finally { bytes.fill(0) }
     }
     private fun weak(f: WalletVaultIntegrationFixture) = File(f.context.cacheDir, "integration-backups/default.enc").apply {
@@ -34,6 +34,57 @@ class WalletDefaultCleanupOwnershipTest {
     private fun cleanup(f: WalletVaultIntegrationFixture, helper: KeyStoreMigrationHelper = f.legacy) =
         WalletLegacyCleanup(f.context, f.backup, f.db, f.keyManager, helper)
 
+    private fun seedMaterial(): KeyMaterial {
+        val words = "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about"
+        val key = MnemonicManager().mnemonicToPrivateKey(words.split(" "))
+        val hex = try { key.joinToString("") { "%02x".format(it) } } finally { key.fill(0) }
+        return KeyMaterial(hex, words, "mnemonic", true)
+    }
+    private suspend fun defaultSeedWallet(f: WalletVaultIntegrationFixture, material: KeyMaterial) {
+        val key = material.privateKey.chunked(2).map { it.toInt(16).toByte() }.toByteArray()
+        val info = try { WalletDerivation.walletInfo(key) } finally { key.fill(0) }
+        f.db.walletDao().insert(WalletEntity("default", "Wallet", "mnemonic", "m/44'/309'/0'/0/0", null,
+            mainnetAddress = info.mainnetAddress, testnetAddress = info.testnetAddress))
+    }
+    @Test fun `literal default opaque backup still requires ownership proof`() = walletOperationTest {
+        WalletVaultIntegrationFixture().use { f ->
+            active(f, id = "default"); val file = weak(f); val original = file.readBytes()
+            f.phrase()
+            assertEquals(VaultAccessResult.CleanupRequired, f.coordinator.read(f.activity, "default", "Unlock", "Authenticate"))
+            assertArrayEquals(original, file.readBytes())
+            assertTrue(f.store.pendingLegacyCleanup().contains("default"))
+        }
+    }
+    @Test fun `default V2 seed archive and backup survive raw key recovery until foreground proof`() = walletOperationTest {
+        WalletVaultIntegrationFixture().use { f ->
+            val seed = seedMaterial(); defaultSeedWallet(f, seed)
+            f.v2.writeNewV2Row("default", WalletKeyBundle(seed.privateKey, seed.mnemonic),
+                f.encryption.newEncryptCipherV2(), "mnemonic", true).getOrThrow()
+            val source = f.db.keyMaterialDao().getByWalletId("default")!!
+            val pin = "246813".toCharArray()
+            try { f.backup.writeBackup("default", seed, pin) } finally { pin.fill('\u0000') }
+            val file = File(f.context.cacheDir, "integration-backups/default.enc"); val original = file.readBytes()
+            f.phrase()
+            val raw = seed.copy(mnemonic = null, walletType = "raw_key")
+            assertEquals(VaultAccessResult.CleanupRequired, f.coordinator.recoverExisting(f.activity, "default", raw))
+            assertEquals(source, f.db.walletVaultDao().legacy("default")?.source())
+            assertArrayEquals(original, file.readBytes())
+            assertEquals(3, f.db.keyMaterialDao().getKdfVersion("default"))
+            assertTrue(f.store.pendingLegacyCleanup().contains("default"))
+        }
+    }
+    @Test fun `readable default seed preserved in verified replacement allows checked cleanup`() = walletOperationTest {
+        WalletVaultIntegrationFixture().use { f ->
+            val seed = seedMaterial(); defaultSeedWallet(f, seed)
+            f.legacy.migrateWallet("default", seed.privateKey, seed.mnemonic, "mnemonic", true)
+            val file = weak(f)
+            f.phrase()
+            val result = f.reader.readKeyMaterial(f.activity, "default", "Unlock", "Authenticate") as WalletKeyReader.MaterialResult.Success
+            try { assertEquals(seed.mnemonic, result.mnemonic) } finally { result.privateKey.fill(0) }
+            assertFalse(file.exists()); assertNull(f.db.walletVaultDao().legacy("default"))
+            assertFalse(f.store.pendingLegacyCleanup().contains("default"))
+        }
+    }
     @Test fun `opaque default backup without ownership proof blocks cleanup without deleting it`() = walletOperationTest {
         WalletVaultIntegrationFixture().use { f ->
             active(f); val file = weak(f)

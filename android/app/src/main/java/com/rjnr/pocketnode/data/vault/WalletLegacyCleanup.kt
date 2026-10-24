@@ -47,15 +47,18 @@ class WalletLegacyCleanup(
             val matching = readable.filter { addresses(it.privateKeyHex) == identity }
             val defaultArtifacts = source != null || globalFiles.any { it != null } || defaultBackup.any { it != null }
             val ownsDefault = when {
-                walletId == "default" -> true
                 matching.isNotEmpty() -> true
-                readable.isNotEmpty() -> false // Proven unrelated namespace: preserve it without blocking this wallet.
+                readable.isNotEmpty() -> {
+                    // A different source may be skipped only when the target uses another namespace.
+                    if (walletId == "default") return@withContext false
+                    false
+                }
                 defaultArtifacts -> return@withContext false // Task 5 must obtain old-PIN ownership proof.
                 else -> false
             }
             if (ownsDefault && (readable.any { addresses(it.privateKeyHex) != identity } ||
                 readable.any { it.mnemonic != null && it.mnemonic != verifiedMaterial.mnemonic } ||
-                (source != null && source.kdfVersion != 1 && walletId != "default"))) return@withContext false
+                (source != null && source.kdfVersion != 1))) return@withContext false
             if (ownsDefault && source?.kdfVersion == 1 && decoded == null) return@withContext false
 
             db.withTransaction {
