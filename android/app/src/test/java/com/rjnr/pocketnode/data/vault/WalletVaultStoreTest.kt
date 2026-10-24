@@ -284,4 +284,21 @@ class WalletVaultStoreTest {
         assertArrayEquals(material, crypto.decrypt(store.get("a")!!, "a", pass))
     }
 
+    @Test fun `profile rotates after last wallet removal and new wallet requires new passphrase`() = runBlocking {
+        add("a")
+        store.removeWallet("a")
+        assertTrue(store.hasProfile())
+        assertTrue(store.listActive().isEmpty())
+        val priorGeneration = store.snapshot().profile!!.generation
+        store.rotate(pass, nextPass)
+        assertEquals(priorGeneration + 1, store.snapshot().profile!!.generation)
+        assertTrue(store.verifyPassphrase(nextPass))
+        assertFalse(store.verifyPassphrase(pass))
+        rejects { store.activate(metadata("b"), null, envelope("b", pass), pass) }
+        assertNull(store.get("b"))
+        store.activate(metadata("b"), null, envelope("b", nextPass), nextPass)
+        assertArrayEquals(material, crypto.decrypt(store.get("b")!!, "b", nextPass))
+        assertTrue(store.snapshot().unrecoveredWalletIds.isEmpty())
+    }
+
 }

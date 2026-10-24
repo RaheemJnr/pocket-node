@@ -141,7 +141,6 @@ class WalletVaultStore(
                 val previousProfile = profile() ?: throw WalletEnvelopeFormatException()
                 verifyProfile(previousProfile, old)
                 val rows = dao.all()
-                requireEnvelope(rows.isNotEmpty())
                 val staged = rows.map { row ->
                     val previous = decode(row)
                     requireEnvelope(row.profileGeneration == previousProfile.generation)
