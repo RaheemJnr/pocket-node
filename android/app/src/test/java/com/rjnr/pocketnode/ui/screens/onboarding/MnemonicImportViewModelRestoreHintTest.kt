@@ -99,8 +99,7 @@ class MnemonicImportViewModelRestoreHintTest {
             db.subAccountCandidateDao(), discovery, prefs, NoopLogger,
         )
         importer = RestoreHintImporter(db.subAccountCandidateDao(), discovery, prefs, NoopLogger)
-        coEvery { walletKeyWriter.persistNewWalletV1Fallback(any(), any(), any(), any()) } returns
-            WalletKeyWriter.Result.Success
+        coEvery { walletKeyWriter.persistCreatedWallet(any(), any(), any(), any(), any(), any(), any()) } coAnswers { com.rjnr.pocketnode.data.wallet.persistVerifiedFixture(db, secondArg(), thirdArg(), arg(4)) }
         every { authManager.isBiometricEnrolled() } returns false
         every { authManager.hasDeviceCredential() } returns false
         every { repository.syncProgress } returns MutableStateFlow(SyncProgress())

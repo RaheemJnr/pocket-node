@@ -82,11 +82,8 @@ class AddWalletViewModelCancelAddTest {
     private val walletKeyWriter = mockk<WalletKeyWriter>()
     private val activity = mockk<FragmentActivity>(relaxed = true)
 
-    private suspend fun persist(walletId: String, bundle: WalletKeyBundle, type: String): WalletKeyWriter.Result =
-        v2Helper.writeNewV2Row(walletId, bundle, encryptionManager.newEncryptCipherV2(), type, false).fold(
-            onSuccess = { WalletKeyWriter.Result.Success },
-            onFailure = { WalletKeyWriter.Result.WriteFailed(it) },
-        )
+    private suspend fun persist(walletId: WalletRepository.Creation, bundle: WalletKeyBundle, type: String): WalletKeyWriter.Result =
+        com.rjnr.pocketnode.data.wallet.persistVerifiedFixture(db, walletId, bundle)
 
     @Before
     fun setUp() {
@@ -117,8 +114,8 @@ class AddWalletViewModelCancelAddTest {
         )
         importer = RestoreHintImporter(db.subAccountCandidateDao(), discovery, prefs, NoopLogger)
         importer.computeDispatcher = Dispatchers.Unconfined
-        coEvery { walletKeyWriter.persistNewWalletV1Fallback(any(), any(), any(), any()) } coAnswers {
-            persist(firstArg(), secondArg(), thirdArg())
+        coEvery { walletKeyWriter.persistCreatedWallet(any(), any(), any(), any(), any(), any(), any()) } coAnswers {
+            persist(secondArg(), thirdArg(), arg(3))
         }
         every { gatewayRepository.syncProgress } returns MutableStateFlow(SyncProgress())
         every { gatewayRepository.currentNetwork } returns NetworkType.TESTNET

@@ -74,6 +74,12 @@ class WalletVaultIntegrationFixture(existingDatabase: AppDatabase? = null, encry
         preference.set(VaultReadPreference.DEFAULT)
     }
     fun phrase(value: String? = pass) { credentials += value?.toCharArray() }
+    fun creation(id: String = "a"): WalletRepository.Creation {
+        val key = ByteArray(32).also { it[31] = 2 }
+        val info = try { WalletDerivation.walletInfo(key) } finally { key.fill(0) }
+        return WalletRepository.Creation(WalletEntity(id, "Wallet $id", "raw_key", null, null,
+            mainnetAddress = info.mainnetAddress, testnetAddress = info.testnetAddress))
+    }
     suspend fun wallet(id: String = "a", type: String = "raw_key", path: String? = null, parent: String? = null): WalletEntity {
         val key = ByteArray(32).also { it[31] = 2 }
         val info = try { WalletDerivation.walletInfo(key) } finally { key.fill(0) }

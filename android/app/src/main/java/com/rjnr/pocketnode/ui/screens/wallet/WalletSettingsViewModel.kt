@@ -508,7 +508,7 @@ class WalletSettingsViewModel @Inject constructor(
      * V2-aware sub-account creation. Two BiometricPrompts:
      *
      *   1. Read parent's mnemonic via [WalletKeyReader] (one prompt).
-     *   2. Persist new sub-account at V2 via [WalletKeyWriter.persistNewWallet]
+     *   2. Persist new sub-account at V2 via [WalletKeyWriter.persistCreatedWallet]
      *      inside the [WalletRepository.createSubAccount] callback (second
      *      prompt).
      *
@@ -561,6 +561,7 @@ class WalletSettingsViewModel @Inject constructor(
                         it.copy(error = com.rjnr.pocketnode.ui.util.UiMessage.Resource(com.rjnr.pocketnode.R.string.vm_error_biometric_changed_parent))
                     }
                 is WalletKeyReader.MaterialResult.Success -> {
+                    readResult.privateKey.fill(0)
                     val words = readResult.mnemonic?.split(" ")
                     if (words.isNullOrEmpty()) {
                         _uiState.update { it.copy(error = com.rjnr.pocketnode.ui.util.UiMessage.Resource(com.rjnr.pocketnode.R.string.vm_error_parent_no_mnemonic)) }
@@ -571,7 +572,7 @@ class WalletSettingsViewModel @Inject constructor(
                     // not re-confirming the parent unlock from prompt #1.
                     val result = walletRepository.createSubAccount(walletId, name, parentMnemonic = words) { newWalletId, bundle ->
                         if (canCreateV2BoundKey()) {
-                            walletKeyWriter.persistNewWallet(
+                            walletKeyWriter.persistCreatedWallet(
                                 activity = activity,
                                 walletId = newWalletId,
                                 bundle = bundle,
@@ -582,7 +583,7 @@ class WalletSettingsViewModel @Inject constructor(
                             )
                         } else {
                             // No secure lock; the user consented to V1 above.
-                            walletKeyWriter.persistNewWallet(
+                            walletKeyWriter.persistCreatedWallet(
                                 activity = activity,
                                 walletId = newWalletId,
                                 bundle = bundle,

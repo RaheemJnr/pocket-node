@@ -113,6 +113,7 @@ class WalletManagerViewModel @Inject constructor(
                     if (readResult !is com.rjnr.pocketnode.data.wallet.WalletKeyReader.MaterialResult.Success) {
                         return@forEach
                     }
+                    readResult.privateKey.fill(0)
                     val words = readResult.mnemonic?.split(" ")
                     if (words.isNullOrEmpty()) return@forEach
 
@@ -124,7 +125,7 @@ class WalletManagerViewModel @Inject constructor(
                             explicitIndex = candidate.accountIndex,
                             persistKeys = { newWalletId, bundle ->
                                 if (canCreateV2BoundKey()) {
-                                    walletKeyWriter.persistNewWallet(
+                                    walletKeyWriter.persistCreatedWallet(
                                         activity = activity,
                                         walletId = newWalletId,
                                         bundle = bundle,
@@ -135,7 +136,7 @@ class WalletManagerViewModel @Inject constructor(
                                     )
                                 } else {
                                     // No secure lock; user consented to V1 above.
-                                    walletKeyWriter.persistNewWallet(
+                                    walletKeyWriter.persistCreatedWallet(
                                         activity = activity,
                                         walletId = newWalletId,
                                         bundle = bundle,

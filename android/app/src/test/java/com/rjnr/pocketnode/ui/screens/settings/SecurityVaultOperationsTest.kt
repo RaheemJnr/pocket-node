@@ -13,7 +13,7 @@ import org.robolectric.annotation.Config
 class SecurityVaultOperationsTest {
     @Test fun `known passphrase changes all wraps and cancellation preserves old credentials`() = walletOperationTest {
         WalletVaultIntegrationFixture().use { f ->
-            f.wallet(); f.phrase(); assertTrue(f.coordinator.persistNew(f.activity, "a", f.material) is VaultAccessResult.Success)
+            f.wallet(); f.phrase(); assertTrue(f.coordinator.recoverExisting(f.activity, "a", f.material) is VaultAccessResult.Success)
             val operations = SecurityVaultOperations(f.coordinator, f.store, f.db.walletDao())
             f.phrase(null); assertTrue(operations.change(f.activity).message.contains("Cancelled"))
             assertTrue(f.store.verifyPassphrase(f.pass.toCharArray()))
@@ -26,7 +26,7 @@ class SecurityVaultOperationsTest {
     }
     @Test fun `forgotten reset cancelled before credentials preserves active profile`() = walletOperationTest {
         WalletVaultIntegrationFixture().use { f ->
-            f.wallet(); f.phrase(); f.coordinator.persistNew(f.activity, "a", f.material)
+            f.wallet(); f.phrase(); f.coordinator.recoverExisting(f.activity, "a", f.material)
             val original = f.store.get("a")
             val result = SecurityVaultOperations(f.coordinator, f.store, f.db.walletDao()).reset(f.activity, null)
             assertTrue(result.message.contains("Cancelled")); assertArrayEquals(WalletEnvelopeCodec.encode(original!!), WalletEnvelopeCodec.encode(f.store.get("a")!!))
@@ -34,7 +34,7 @@ class SecurityVaultOperationsTest {
     }
     @Test fun `explicit device enrollment without device lock preserves phrase access`() = walletOperationTest {
         WalletVaultIntegrationFixture().use { f ->
-            f.wallet(); f.phrase(); f.coordinator.persistNew(f.activity, "a", f.material)
+            f.wallet(); f.phrase(); f.coordinator.recoverExisting(f.activity, "a", f.material)
             val before = f.store.get("a")
             f.phrase()
             val result = SecurityVaultOperations(f.coordinator, f.store, f.db.walletDao()).enroll(f.activity, "a", VaultDevicePromptMode.CREDENTIAL_ONLY)
@@ -44,8 +44,8 @@ class SecurityVaultOperationsTest {
     }
     @Test fun `partial reset reports each wallet and preserves unrecovered bytes and rotation block`() = walletOperationTest {
         WalletVaultIntegrationFixture().use { f ->
-            f.wallet(); f.wallet("b"); f.phrase(); f.coordinator.persistNew(f.activity, "a", f.material)
-            f.phrase(); f.coordinator.persistNew(f.activity, "b", f.material)
+            f.wallet(); f.wallet("b"); f.phrase(); f.coordinator.recoverExisting(f.activity, "a", f.material)
+            f.phrase(); f.coordinator.recoverExisting(f.activity, "b", f.material)
             val a = f.store.get("a")!!
             f.store.updateDeviceWrap("a", a.generation, DeviceKeyWrap("test-a", ByteArray(48), ByteArray(12)))
             val originalB = WalletEnvelopeCodec.encode(f.store.get("b")!!)
@@ -72,7 +72,7 @@ class SecurityVaultOperationsTest {
     }
     @Test fun `dashboard PIN creation makes no weaker backup and unlock preference persists before decrypt`() = walletOperationTest {
         WalletVaultIntegrationFixture().use { f ->
-            f.wallet(); f.phrase(); f.coordinator.persistNew(f.activity, "a", f.material)
+            f.wallet(); f.phrase(); f.coordinator.recoverExisting(f.activity, "a", f.material)
             val before = WalletEnvelopeCodec.encode(f.store.get("a")!!)
             val vm = SecuritySettingsViewModel(androidx.lifecycle.SavedStateHandle(), f.auth, f.pin, f.backup,
                 f.db.walletDao(), f.preference, SecurityVaultOperations(f.coordinator, f.store, f.db.walletDao()))
@@ -86,7 +86,7 @@ class SecurityVaultOperationsTest {
 
     @Test fun `malformed protection metadata does not hide authentication choices`() = walletOperationTest {
         WalletVaultIntegrationFixture().use { f ->
-            f.wallet(); f.phrase(); f.coordinator.persistNew(f.activity, "a", f.material)
+            f.wallet(); f.phrase(); f.coordinator.recoverExisting(f.activity, "a", f.material)
             val row = f.db.walletVaultDao().profile()!!
             f.db.walletVaultDao().updateProfile(row.copy(envelope = byteArrayOf(1)))
             val status = SecurityVaultOperations(f.coordinator, f.store, f.db.walletDao()).walletNames()

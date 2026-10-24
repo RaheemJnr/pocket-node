@@ -92,6 +92,20 @@ class AddWalletViewModelTest {
     )
 
     @Test
+    fun `mnemonic origin without protected seed refuses derivation and clears unused key`() = runTest {
+        val key = ByteArray(32) { 7 }
+        coEvery { walletKeyReader.readKeyMaterial(any(), eq("parent-id"), any(), any()) } returns
+            WalletKeyReader.MaterialResult.Success(key, null, "mnemonic", false)
+        val vm = newViewModel()
+        vm.selectParent("parent-id"); vm.updateName("sub"); vm.createSubAccount(activity)
+        advanceUntilIdle()
+        assertTrue(key.all { it == 0.toByte() })
+        assertNull(vm.uiState.value.createdWallet)
+        assertFalse(vm.uiState.value.isLoading)
+        assertNotNull(vm.uiState.value.error)
+    }
+
+    @Test
     fun `a re-auth lock clears a typed recovery phrase and private key but keeps the name (#524)`() = runTest {
         val vm = newViewModel()
         advanceUntilIdle()
@@ -133,7 +147,7 @@ class AddWalletViewModelTest {
         // The writer must not be invoked, the repo `createSubAccount` must not be
         // called, and there must be no active-wallet registration.
         coVerify(exactly = 0) {
-            walletKeyWriter.persistNewWallet(any(), any(), any(), any(), any(), any(), any())
+            walletKeyWriter.persistCreatedWallet(any(), any(), any(), any(), any(), any(), any())
         }
         coVerify(exactly = 0) {
             walletRepository.createSubAccount(any(), any(), any(), any(), any())

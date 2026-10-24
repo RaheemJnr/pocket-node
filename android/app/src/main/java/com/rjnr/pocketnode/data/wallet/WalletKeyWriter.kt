@@ -41,25 +41,23 @@ class WalletKeyWriter @Inject constructor(private val coordinator: WalletVaultCo
     class PersistException(val result: Result) :
         Exception("WalletKeyWriter returned non-Success: $result")
 
-    suspend fun persistNewWallet(
+    suspend fun persistCreatedWallet(
         activity: FragmentActivity,
-        walletId: String,
+        walletId: WalletRepository.Creation,
         bundle: WalletKeyBundle,
         walletType: String,
         mnemonicBackedUp: Boolean,
         promptTitle: String = "Secure wallet",
         promptSubtitle: String = "Protect this wallet with your wallet passphrase.",
-    ): Result = when (val result = coordinator.persistNew(activity, walletId,
+    ): Result = when (val result = coordinator.persistCreation(activity, walletId,
         KeyMaterial(bundle.privateKeyHex, bundle.mnemonic, if (bundle.mnemonic == null) "raw_key" else walletType, mnemonicBackedUp))) {
         is VaultAccessResult.Success -> Result.Success
         VaultAccessResult.Cancelled -> Result.Cancelled
-        VaultAccessResult.CleanupRequired -> Result.WriteFailed(IllegalStateException("Legacy backup cleanup needs a retry."))
-        VaultAccessResult.NoVault -> Result.WriteFailed(IllegalStateException("Wallet protection was not saved."))
-        is VaultAccessResult.Unavailable -> Result.WriteFailed(IllegalStateException(result.reason))
+        else -> Result.WriteFailed(IllegalStateException("Wallet protection could not be completed."))
     }
 
     /** Kept as a fail-closed compatibility boundary; creation requires a foreground Activity. */
-    @Deprecated("Use persistNewWallet with an Activity and verified wallet passphrase")
+    @Deprecated("Use persistCreatedWallet with an Activity and verified wallet passphrase")
     suspend fun persistNewWalletV1Fallback(walletId: String, bundle: WalletKeyBundle, walletType: String, mnemonicBackedUp: Boolean): Result =
         Result.WriteFailed(IllegalStateException("Open wallet setup to enter the wallet passphrase."))
 }

@@ -18,7 +18,7 @@ class SecurityVaultOperations @Inject constructor(
         val status = try { store.snapshot() } catch (e: kotlinx.coroutines.CancellationException) { throw e } catch (_: Exception) { null }
         val unrecovered = status?.unrecoveredWalletIds.orEmpty()
         return wallets.getAll().map { WalletSecurityStatus(it.walletId, it.name,
-            if (status == null) "Protection status unavailable — choose authentication or recovery"
+            if (status == null) "Protection status unavailable. choose authentication or recovery"
             else if (it.walletId in unrecovered) "Previous passphrase or external recovery required" else "") }
     }
     suspend fun change(activity: FragmentActivity): VaultSettingsResult = summarize(coordinator.changePassphrase(activity))
@@ -39,7 +39,7 @@ class SecurityVaultOperations @Inject constructor(
             "Updated ${result.completedWalletIds.size} wallet(s); ${result.unrecoveredWalletIds.size} still need their previous passphrase or external recovery secret.",
             wallets.getAll().map { WalletSecurityStatus(it.walletId, it.name, when (it.walletId) {
                 in result.completedWalletIds -> "Passphrase updated"
-                in result.unrecoveredWalletIds -> "Not reset — previous protection preserved; recovery required"
+                in result.unrecoveredWalletIds -> "Not reset. previous protection preserved; recovery required"
                 else -> "Not changed"
             }) })
     }

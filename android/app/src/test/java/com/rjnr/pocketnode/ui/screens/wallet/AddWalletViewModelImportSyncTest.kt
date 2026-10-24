@@ -118,8 +118,8 @@ class AddWalletViewModelImportSyncTest {
         // Real WalletKeyWriter.Result.Success is a plain sealed-class object
         // (not a kotlin.Result), so stubbing it is safe.
         coEvery {
-            walletKeyWriter.persistNewWalletV1Fallback(any(), any(), any(), any())
-        } returns WalletKeyWriter.Result.Success
+            walletKeyWriter.persistCreatedWallet(any(), any(), any(), any(), any(), any(), any())
+        } coAnswers { com.rjnr.pocketnode.data.wallet.persistVerifiedFixture(db, secondArg(), thirdArg(), arg(4)) }
 
         authManager = mockk(relaxed = true)
         // No secure lock -> AddWalletViewModel routes persistWalletKeys through

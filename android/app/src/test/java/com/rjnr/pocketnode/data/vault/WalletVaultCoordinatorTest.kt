@@ -97,6 +97,11 @@ class WalletVaultCoordinatorTest {
     }
     @After fun close() { db.close(); issued.forEach { it.fill('\u0000') }; deviceKeys.values.forEach { it.fill(0) } }
     private fun phrase(value: String? = pass) { credentials += value?.toCharArray() }
+    private fun proposed(id: String): com.rjnr.pocketnode.data.wallet.WalletRepository.Creation {
+        val info = WalletDerivation.walletInfo(key)
+        return com.rjnr.pocketnode.data.wallet.WalletRepository.Creation(WalletEntity(id, "New $id", "raw_key", null, null,
+            mainnetAddress = info.mainnetAddress, testnetAddress = info.testnetAddress))
+    }
     private suspend fun wallet(id: String = "a"): WalletEntity {
         val info = WalletDerivation.walletInfo(key)
         return WalletEntity(id, "Wallet", "raw_key", null, null, mainnetAddress = info.mainnetAddress, testnetAddress = info.testnetAddress).also { db.walletDao().insert(it) }
@@ -113,16 +118,28 @@ class WalletVaultCoordinatorTest {
         }
         bytes.fill(0)
     }
-    @Test fun `no lock creation persists before metadata and verifies passphrase only reads`() = operationTest {
+    @Test fun `creation atomically owns metadata and ignores unrelated cleanup failure`() = operationTest {
+        val info = WalletDerivation.walletInfo(key)
+        val proposed = WalletEntity("fresh", "Fresh", "raw_key", null, null,
+            mainnetAddress = info.mainnetAddress, testnetAddress = info.testnetAddress)
+        cleanupOk = false; phrase()
+        val result = coordinator.persistCreation(activity,
+            com.rjnr.pocketnode.data.wallet.WalletRepository.Creation(proposed), material)
+        assertTrue(result is VaultAccessResult.Success)
+        assertEquals(proposed, db.walletDao().getById("fresh"))
+        assertTrue(store.pendingLegacyCleanup().isEmpty())
         phrase()
-        assertTrue(coordinator.persistNew(activity, "a", material) is VaultAccessResult.Success)
-        assertNotNull(store.get("a")); assertNull(db.walletDao().getById("a"))
-        assertEquals(0, wrapCount)
-        wallet(); phrase()
-        val result = coordinator.read(activity, "a", "Read", "Authenticate") as VaultAccessResult.Success
-        assertEquals(material.privateKey, result.material.privateKey)
-        assertTrue(issued.all { c -> c.all { it == '\u0000' } })
+        assertTrue(coordinator.read(activity, "fresh", "Read", "Authenticate") is VaultAccessResult.Success)
     }
+    @Test fun `creation rejects preexisting metadata even without key material`() = operationTest {
+        val existing = wallet(); phrase()
+        val result = coordinator.persistCreation(activity,
+            com.rjnr.pocketnode.data.wallet.WalletRepository.Creation(existing), material)
+        assertTrue(result is VaultAccessResult.Unavailable)
+        assertNull(store.get("a"))
+        assertEquals(existing, db.walletDao().getById("a"))
+    }
+
     @Test fun `missing Android key falls back to phrase without making a key`() = operationTest {
         active(deviceWrap = true); deviceKeys.clear(); phrase()
         assertTrue(coordinator.read(activity, "a", "Read", "Auth") is VaultAccessResult.Success)
@@ -134,17 +151,17 @@ class WalletVaultCoordinatorTest {
     }
     @Test fun `cancelled passphrase setup does not persist`() = operationTest {
         phrase(null)
-        assertEquals(VaultAccessResult.Cancelled, coordinator.persistNew(activity, "a", material))
+        assertEquals(VaultAccessResult.Cancelled, coordinator.persistCreation(activity, proposed("a"), material))
         assertFalse(store.hasProfile()); assertNull(store.get("a"))
     }
     @Test fun `short app PIN cannot enroll vault`() = operationTest {
         phrase("123456")
-        assertTrue(coordinator.persistNew(activity, "a", material) is VaultAccessResult.Unavailable)
+        assertTrue(coordinator.persistCreation(activity, proposed("a"), material) is VaultAccessResult.Unavailable)
         assertFalse(store.hasProfile())
     }
     @Test fun `existing installation rejects another passphrase without mutation`() = operationTest {
         active(); phrase(next)
-        assertTrue(coordinator.persistNew(activity, "b", material) is VaultAccessResult.Unavailable)
+        assertTrue(coordinator.persistCreation(activity, proposed("b"), material) is VaultAccessResult.Unavailable)
         assertNull(store.get("b")); assertTrue(store.verifyPassphrase(pass.toCharArray()))
     }
     @Test fun `wrong metadata or missing metadata never releases decrypted key`() = operationTest {
@@ -181,7 +198,7 @@ class WalletVaultCoordinatorTest {
     }
     @Test fun `optional device wrap follows independent setup and decrypted material matches`() = operationTest {
         chooseWrap = true; phrase()
-        assertTrue(coordinator.persistNew(activity, "a", material) is VaultAccessResult.Success)
+        assertTrue(coordinator.persistCreation(activity, proposed("a"), material) is VaultAccessResult.Success)
         assertTrue(store.verifyPassphrase(pass.toCharArray())); assertNotNull(store.get("a")!!.deviceWrap)
         wallet()
         val result = coordinator.read(activity, "a", "Read", "Auth") as VaultAccessResult.Success
@@ -314,6 +331,32 @@ class WalletVaultCoordinatorTest {
         val read = coordinator.read(activity, "m", "Read", "Auth") as VaultAccessResult.Success
         assertEquals(mnemonic.mnemonic, read.material.mnemonic)
     }
+    @Test fun `cancelling optional device enrollment still returns committed creation`() = operationTest {
+        chooseWrap = true; wrapCancelled = true; phrase()
+        assertTrue(coordinator.persistCreation(activity, proposed("a"), material) is VaultAccessResult.Success)
+        assertNotNull(db.walletDao().getById("a"))
+        assertNull(store.get("a")!!.deviceWrap)
+        phrase()
+        assertTrue(coordinator.read(activity, "a", "Read", "Authenticate", VaultReadPreference.PASSPHRASE) is VaultAccessResult.Success)
+    }
+
+    @Test fun `background after atomic creation retains referenced independently protected wallet`() = operationTest {
+        chooseWrap = true; phrase()
+        val started = CompletableDeferred<Unit>()
+        onWrap = { started.complete(Unit); awaitCancellation() }
+        val running = launch { coordinator.persistCreation(activity, proposed("a"), material) }
+        try {
+            started.await(); activityController.pause().stop(); yield()
+            withTimeout(1_000) { running.join() }
+            assertTrue(running.isCancelled)
+            assertNotNull(db.walletDao().getById("a")); assertNotNull(store.get("a"))
+            assertTrue(store.pendingLegacyCleanup().isEmpty())
+            assertTrue(activeWrapKey!!.all { it == 0.toByte() })
+            activityController.start().resume(); phrase()
+            assertTrue(coordinator.read(activity, "a", "Read", "Authenticate", VaultReadPreference.PASSPHRASE) is VaultAccessResult.Success)
+        } finally { running.cancelAndJoin() }
+    }
+
     @Test fun `background during pending biometric enrollment cancels and wipes owned DEK`() = operationTest {
         active(); chooseWrap = true; phrase()
         val started = CompletableDeferred<Unit>()

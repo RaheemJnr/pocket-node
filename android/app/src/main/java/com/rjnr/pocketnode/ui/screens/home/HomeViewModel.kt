@@ -997,16 +997,8 @@ class HomeViewModel @Inject constructor(
         _uiState.update { it.copy(showGapLimitBanner = false) }
     }
 
-    /**
-     * Seed acquisition for a key-deriving op (scan/sweep). V1 wallets read the
-     * seed inside the repository via getMnemonic(); V2 (kdfVersion=2) wallets
-     * cannot decrypt without an authenticated Cipher, so we drive a
-     * BiometricPrompt here and hand the words to the repo's words overload
-     * (#408). Only the two banner/settings actions reach this.
-     */
+    /** Every scan/sweep requires a protected mnemonic from the central reader. */
     private sealed interface SeedAcquire {
-        /** V1 wallet: caller runs the no-words repository overload. */
-        object UseV1 : SeedAcquire
         data class Words(val words: List<String>) : SeedAcquire
         object Cancelled : SeedAcquire
         object KeyInvalidated : SeedAcquire
@@ -1020,10 +1012,10 @@ class HomeViewModel @Inject constructor(
     ): SeedAcquire {
         val walletId = walletRepository.activeWalletIdSnapshot()?.takeIf { it.isNotEmpty() }
             ?: return SeedAcquire.Failed("No active wallet")
-        val kdfVersion = runCatching { keyMaterialDao.getKdfVersion(walletId) }.getOrNull()
-        if (kdfVersion != 2) return SeedAcquire.UseV1
         return when (val r = seedPhraseAuthorizer.authorize(activity, walletId, promptTitle, promptSubtitle)) {
-            is com.rjnr.pocketnode.data.wallet.SeedPhraseAuthorizer.SeedResult.Words -> SeedAcquire.Words(r.words)
+            is com.rjnr.pocketnode.data.wallet.SeedPhraseAuthorizer.SeedResult.Words ->
+                if (walletRepository.activeWalletIdSnapshot() == walletId) SeedAcquire.Words(r.words)
+                else SeedAcquire.Failed("Active wallet changed. Try again.")
             com.rjnr.pocketnode.data.wallet.SeedPhraseAuthorizer.SeedResult.Cancelled -> SeedAcquire.Cancelled
             com.rjnr.pocketnode.data.wallet.SeedPhraseAuthorizer.SeedResult.KeyInvalidated -> SeedAcquire.KeyInvalidated
             is com.rjnr.pocketnode.data.wallet.SeedPhraseAuthorizer.SeedResult.Failed -> SeedAcquire.Failed(r.reason)
@@ -1043,7 +1035,6 @@ class HomeViewModel @Inject constructor(
                 "Authenticate to scan",
                 "Verify your identity to scan for funds on other addresses",
             )) {
-                SeedAcquire.UseV1 -> repository.runGapLimitScan()
                 is SeedAcquire.Words -> repository.runGapLimitScan(seed.words)
                 SeedAcquire.Cancelled -> {
                     _uiState.update { it.copy(gapLimitScanning = false, gapLimitScanAvailable = true) }
@@ -1127,7 +1118,6 @@ class HomeViewModel @Inject constructor(
                 "Authenticate to move funds",
                 "Verify your identity to move funds to your main wallet",
             )) {
-                SeedAcquire.UseV1 -> repository.sweepGapLimitFunds()
                 is SeedAcquire.Words -> repository.sweepGapLimitFunds(seed.words)
                 SeedAcquire.Cancelled -> {
                     _uiState.update { it.copy(sweepInProgress = false) }

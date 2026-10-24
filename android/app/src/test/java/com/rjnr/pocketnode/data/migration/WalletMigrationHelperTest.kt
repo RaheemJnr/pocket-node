@@ -94,6 +94,22 @@ class WalletMigrationHelperTest {
     }
 
     @Test
+    fun `startup reconciles committed creation before preferences were selected`() = runTest {
+        val key = "00".repeat(31) + "01"
+        val info = com.rjnr.pocketnode.data.wallet.WalletDerivation.walletInfo(ByteArray(32).also { it[31] = 1 })
+        val proposed = WalletEntity("created", "Created", "raw_key", null, null,
+            mainnetAddress = info.mainnetAddress, testnetAddress = info.testnetAddress)
+        com.rjnr.pocketnode.data.wallet.persistVerifiedFixture(db,
+            com.rjnr.pocketnode.data.wallet.WalletRepository.Creation(proposed),
+            com.rjnr.pocketnode.data.crypto.WalletKeyBundle(key, null))
+        walletPreferences.setActiveWalletId("missing")
+        helper.migrateIfNeeded()
+        assertEquals("created", walletDao.getActive()?.walletId)
+        assertEquals("created", walletPreferences.getActiveWalletId())
+        assertNotNull(db.walletVaultDao().get("created"))
+    }
+
+    @Test
     fun `bootstrap metadata failure rolls back key creation and retries from preserved ESP`() = runTest {
         val context = ApplicationProvider.getApplicationContext<Context>()
         val source = context.getSharedPreferences("ckb_wallet_keys", Context.MODE_PRIVATE)

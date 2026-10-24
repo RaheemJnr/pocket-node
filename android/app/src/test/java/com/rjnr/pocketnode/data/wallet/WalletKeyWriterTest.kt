@@ -35,6 +35,13 @@ class WalletKeyWriterTest {
         mnemonic = "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about"
     )
 
+    private fun creation(id: String): WalletRepository.Creation {
+        val bytes = ByteArray(32) { bundle.privateKeyHex.substring(it * 2, it * 2 + 2).toInt(16).toByte() }
+        val info = try { WalletDerivation.walletInfo(bytes) } finally { bytes.fill(0) }
+        return WalletRepository.Creation(com.rjnr.pocketnode.data.database.entity.WalletEntity(id, id, "mnemonic",
+            "m/44'/309'/0'/0/0", null, mainnetAddress = info.mainnetAddress, testnetAddress = info.testnetAddress))
+    }
+
     @Before
     fun setUp() {
         val ctx = ApplicationProvider.getApplicationContext<Context>()
@@ -56,7 +63,7 @@ class WalletKeyWriterTest {
     fun `persistNewWallet writes a row at kdfVersion=3 with no session PIN (first-wallet path)`() = walletOperationTest {
 
         vaultFixture.phrase()
-        val result = writer.persistNewWallet(activity, "w-1", bundle, "mnemonic", false)
+        val result = writer.persistCreatedWallet(activity, creation("w-1"), bundle, "mnemonic", false)
 
         assertEquals(WalletKeyWriter.Result.Success, result)
         val entity = keyMaterialDao.getByWalletId("w-1")
@@ -69,7 +76,7 @@ class WalletKeyWriterTest {
     fun `persistNewWallet protects independently when no secure lock`() = walletOperationTest {
 
         vaultFixture.phrase()
-        val result = writer.persistNewWallet(activity, "w-nolock", bundle, "mnemonic", false)
+        val result = writer.persistCreatedWallet(activity, creation("w-nolock"), bundle, "mnemonic", false)
 
         assertEquals(WalletKeyWriter.Result.Success, result)
         assertEquals(3, keyMaterialDao.getKdfVersion("w-nolock"))
@@ -78,6 +85,7 @@ class WalletKeyWriterTest {
 
     // Old activity-free persistence cannot bypass passphrase entry.
     @Test
+    @Suppress("DEPRECATION") // Intentional negative compatibility boundary.
     fun `persistNewWalletV1Fallback refuses activity free creation`() = walletOperationTest {
         val result = writer.persistNewWalletV1Fallback("w-v1", bundle, "mnemonic", false)
 
@@ -94,8 +102,8 @@ class WalletKeyWriterTest {
         val original = WalletKeyWriterTest::class.java.getResourceAsStream("/legacy-scalar2-pin111111.enc")!!.use { it.readBytes() }
         oldBackup.writeBytes(original)
         f.phrase()
-        val result = writer.persistNewWallet(activity, "w-2", f.bundle, "raw_key", false)
-        assertTrue(result is WalletKeyWriter.Result.WriteFailed)
+        val result = f.coordinator.recoverExisting(activity, "w-2", f.material)
+        assertTrue(result is com.rjnr.pocketnode.data.vault.VaultAccessResult.CleanupRequired)
         assertEquals(3, keyMaterialDao.getByWalletId("w-2")!!.kdfVersion)
         org.junit.Assert.assertArrayEquals(original, oldBackup.readBytes())
         assertTrue("w-2" in f.store.pendingLegacyCleanup())
@@ -111,7 +119,7 @@ class WalletKeyWriterTest {
     fun `persistNewWallet returns Cancelled when user dismisses passphrase setup, no Room write`() = walletOperationTest {
 
         vaultFixture.phrase(null)
-        val result = writer.persistNewWallet(activity, "w-3", bundle, "mnemonic", false)
+        val result = writer.persistCreatedWallet(activity, creation("w-3"), bundle, "mnemonic", false)
 
         assertEquals(WalletKeyWriter.Result.Cancelled, result)
         assertNull(keyMaterialDao.getByWalletId("w-3"))
@@ -122,7 +130,7 @@ class WalletKeyWriterTest {
 
         db.openHelper.writableDatabase.execSQL("CREATE TRIGGER reject_vault BEFORE INSERT ON wallet_vault BEGIN SELECT RAISE(ABORT, 'simulated full disk'); END")
         vaultFixture.phrase()
-        val result = writer.persistNewWallet(activity, "w-4", bundle, "mnemonic", false)
+        val result = writer.persistCreatedWallet(activity, creation("w-4"), bundle, "mnemonic", false)
 
         assertTrue(result is WalletKeyWriter.Result.WriteFailed)
         // Rollback should have removed the key_material row so we don't leave

@@ -75,9 +75,6 @@ class RestoreHintExporterTest {
         syncPreferences = prefs,
         lightClient = lightClient,
         walletKeyReader = walletKeyReader,
-        keyMaterialDao = keyMaterialDao,
-        authManager = authManager,
-        encryptionManager = encryptionManager,
         json = Json { ignoreUnknownKeys = true },
         logger = NoopLogger,
     )
@@ -261,28 +258,43 @@ class RestoreHintExporterTest {
     }
 
     @Test
-    fun `a V1 export with no screen lock is refused before any key read`() = runTest {
+    fun `every version exports through central passphrase capable reader without device lock`() = runTest {
         db.walletDao().insert(wallet("root", active = true))
-        coEvery { keyMaterialDao.getKdfVersion("root") } returns 1
         every { authManager.isBiometricEnrolled() } returns false
         every { authManager.hasDeviceCredential() } returns false
-
-        assertEquals(RestoreHintExporter.ExportResult.NeedsScreenLock, exporter().export(activity, network))
-        coVerify(exactly = 0) { walletKeyReader.readKeyMaterial(any(), any(), any(), any()) }
+        for (version in listOf(1, 2, 3)) {
+            coEvery { keyMaterialDao.getKdfVersion("root") } returns version
+            val key = ByteArray(32) { 5 }
+            coEvery { walletKeyReader.readKeyMaterial(activity, "root", any(), any()) } returns
+                WalletKeyReader.MaterialResult.Success(key, words.joinToString(" "), "mnemonic", true)
+            val result = exporter().export(activity, network)
+            assertTrue("version $version", result is RestoreHintExporter.ExportResult.Ready)
+            assertTrue(key.all { it == 0.toByte() })
+        }
     }
 
     @Test
-    fun `a V1 export asks for device auth first and stops if it is cancelled`() = runTest {
+    fun `cancelled central authentication aborts export for every version`() = runTest {
         db.walletDao().insert(wallet("root", active = true))
-        coEvery { keyMaterialDao.getKdfVersion("root") } returns 1
-        every { authManager.isBiometricEnrolled() } returns false
-        every { authManager.hasDeviceCredential() } returns true
-        every { encryptionManager.newEncryptCipherV2() } returns mockk(relaxed = true)
-        coEvery { authManager.authenticateForCipher(activity, any(), any(), any()) } returns
-            AuthManager.CipherAuthResult.Cancelled
+        for (version in listOf(1, 2, 3)) {
+            coEvery { keyMaterialDao.getKdfVersion("root") } returns version
+            coEvery { walletKeyReader.readKeyMaterial(activity, "root", any(), any()) } returns WalletKeyReader.MaterialResult.Cancelled
+            assertEquals(RestoreHintExporter.ExportResult.Cancelled, exporter().export(activity, network))
+        }
+    }
 
-        assertEquals(RestoreHintExporter.ExportResult.Cancelled, exporter().export(activity, network))
-        coVerify(exactly = 0) { walletKeyReader.readKeyMaterial(any(), any(), any(), any()) }
+    @Test
+    fun `wallet change during authentication discards export and owned key`() = runTest {
+        db.walletDao().insert(wallet("root", active = true))
+        coEvery { keyMaterialDao.getKdfVersion("root") } returns 2
+        val key = ByteArray(32) { 5 }
+        coEvery { walletKeyReader.readKeyMaterial(activity, "root", any(), any()) } coAnswers {
+            db.walletDao().deactivateAll()
+            db.walletDao().insert(wallet("other", active = true))
+            WalletKeyReader.MaterialResult.Success(key, words.joinToString(" "), "mnemonic", true)
+        }
+        assertTrue(exporter().export(activity, network) is RestoreHintExporter.ExportResult.Failed)
+        assertTrue(key.all { it == 0.toByte() })
     }
 
     @Test

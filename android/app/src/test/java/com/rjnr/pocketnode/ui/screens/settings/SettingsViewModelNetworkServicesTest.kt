@@ -17,6 +17,7 @@ import io.ktor.client.HttpClient
 import io.ktor.client.engine.mock.MockEngine
 import io.ktor.client.engine.mock.respond
 import io.ktor.http.HttpStatusCode
+import io.mockk.coEvery
 import io.mockk.every
 import io.mockk.mockk
 import kotlinx.coroutines.Dispatchers
@@ -125,6 +126,41 @@ class SettingsViewModelNetworkServicesTest {
         keyMaterialDao = mockk<KeyMaterialDao>(relaxed = true),
         restoreHintExporter = mockk(relaxed = true),
     )
+
+    @Test
+    fun `scan aborts if selected wallet changes during authentication`() = runTest(testDispatcher) {
+        val authorizer = mockk<SeedPhraseAuthorizer>()
+        val keys = mockk<KeyMaterialDao>()
+        var selected = "wallet"
+        every { walletRepository.activeWalletIdSnapshot() } answers { selected }
+        coEvery { keys.getKdfVersion("wallet") } returns 2
+        coEvery { authorizer.authorize(any(), "wallet", any(), any()) } answers {
+            selected = "other"
+            SeedPhraseAuthorizer.SeedResult.Words(listOf("abandon"))
+        }
+        val vm = SettingsViewModel(repository, walletPrefs, mockk(relaxed = true), walletRepository,
+            noUpdateAvailableRepository(), authorizer, keys, mockk(relaxed = true))
+        runCurrent(); vm.runGapLimitScan(mockk()); runCurrent()
+        assertTrue(vm.uiState.value.error.toString().contains("wallet changed", ignoreCase = true))
+    }
+
+    @Test
+    fun `gap scan rejects missing seed for every storage version`() = runTest(testDispatcher) {
+        val authorizer = mockk<SeedPhraseAuthorizer>()
+        val keys = mockk<KeyMaterialDao>()
+        every { walletRepository.activeWalletIdSnapshot() } returns "wallet"
+        coEvery { authorizer.authorize(any(), "wallet", any(), any()) } returns
+            SeedPhraseAuthorizer.SeedResult.Failed("Recovery phrase unavailable for this wallet")
+        for (version in listOf(1, 2, 3)) {
+            coEvery { keys.getKdfVersion("wallet") } returns version
+            val vm = SettingsViewModel(repository, walletPrefs, mockk(relaxed = true), walletRepository,
+                noUpdateAvailableRepository(), authorizer, keys, mockk(relaxed = true))
+            runCurrent()
+            vm.runGapLimitScan(mockk())
+            runCurrent()
+            assertTrue("version $version must require actual authenticated seed", vm.uiState.value.error.toString().contains("Recovery phrase unavailable"))
+        }
+    }
 
     @Test
     fun `loadState reflects the WalletPreferences defaults, both on`() = runTest(testDispatcher) {

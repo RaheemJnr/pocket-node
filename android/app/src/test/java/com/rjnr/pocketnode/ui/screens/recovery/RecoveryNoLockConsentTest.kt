@@ -163,8 +163,8 @@ class RecoveryNoLockConsentTest {
 
     @Test fun `old profile wallet remains listed and cannot complete without fresh authentication`() = walletOperationTest {
         WalletVaultIntegrationFixture().use { f ->
-            f.wallet(); f.wallet("b"); f.phrase(); f.coordinator.persistNew(f.activity, "a", f.material)
-            f.phrase(); f.coordinator.persistNew(f.activity, "b", f.material)
+            f.wallet(); f.wallet("b"); f.phrase(); f.coordinator.recoverExisting(f.activity, "a", f.material)
+            f.phrase(); f.coordinator.recoverExisting(f.activity, "b", f.material)
             val before = f.store.snapshot(); val envelope = f.store.get("a")!!
             val nextPhrase = "another independent wallet passphrase".toCharArray()
             val updated = f.crypto.rewrap(envelope, "a", f.pass.toCharArray(), nextPhrase, envelope.generation + 1)

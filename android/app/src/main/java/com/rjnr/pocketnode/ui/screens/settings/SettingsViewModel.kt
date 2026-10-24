@@ -229,18 +229,22 @@ class SettingsViewModel @Inject constructor(
      */
     fun runGapLimitScan(activity: FragmentActivity) {
         viewModelScope.launch {
-            // V1 wallets read the seed in the repository; V2 (kdfVersion=2)
-            // wallets need a BiometricPrompt to unlock it (#408).
             val walletId = walletRepository.activeWalletIdSnapshot()?.takeIf { it.isNotEmpty() }
-            val kdfVersion = walletId?.let { runCatching { keyMaterialDao.getKdfVersion(it) }.getOrNull() }
-            val result: Result<Int> = if (kdfVersion == 2 && walletId != null) {
+                ?: run { emitScanFailed("No wallet selected"); return@launch }
+            val result: Result<Int> =
                 when (val seed = seedPhraseAuthorizer.authorize(
                     activity,
                     walletId,
                     "Authenticate to scan",
                     "Verify your identity to scan for funds on other addresses",
                 )) {
-                    is SeedPhraseAuthorizer.SeedResult.Words -> repository.runGapLimitScan(seed.words)
+                    is SeedPhraseAuthorizer.SeedResult.Words -> {
+                        if (walletRepository.activeWalletIdSnapshot() != walletId) {
+                            emitScanFailed("Active wallet changed. Try again.")
+                            return@launch
+                        }
+                        repository.runGapLimitScan(seed.words)
+                    }
                     SeedPhraseAuthorizer.SeedResult.Cancelled -> return@launch
                     SeedPhraseAuthorizer.SeedResult.KeyInvalidated -> {
                         emitScanFailed("Biometric changed. Re-import this wallet from its recovery phrase.")
@@ -251,9 +255,6 @@ class SettingsViewModel @Inject constructor(
                         return@launch
                     }
                 }
-            } else {
-                repository.runGapLimitScan()
-            }
             result
                 .onSuccess {
                     _uiState.update {

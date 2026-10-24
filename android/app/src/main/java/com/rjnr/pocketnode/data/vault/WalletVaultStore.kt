@@ -93,6 +93,7 @@ class WalletVaultStore(
         expectedLegacyIv: ByteArray?,
         envelope: WalletEnvelope,
         passphrase: CharArray,
+        creation: com.rjnr.pocketnode.data.wallet.WalletRepository.Creation? = null,
     ) {
         // Snapshot before the first suspension, including arrays in metadata and the CAS token.
         val candidate = WalletEnvelopeCodec.encode(envelope)
@@ -108,6 +109,12 @@ class WalletVaultStore(
                 conflictUnless(dao.get(meta.walletId) == null)
                 val source = db.keyMaterialDao().getByWalletId(meta.walletId)
                 conflictUnless(if (expectedIv == null) source == null else source != null && source.iv.contentEquals(expectedIv))
+                if (creation != null) {
+                    conflictUnless(creation.walletId == meta.walletId && expectedIv == null && source == null &&
+                        db.walletDao().getById(meta.walletId) == null && dao.legacy(meta.walletId) == null)
+                    // This context names a newly generated namespace, never a historical recovery target.
+                    db.walletDao().insert(creation.wallet)
+                }
                 source?.let { requireEnvelope(it.kdfVersion == 1 || it.kdfVersion == 2) }
                 requireEnvelope(db.walletDao().getById(PROFILE_ID) == null &&
                     db.keyMaterialDao().getByWalletId(PROFILE_ID) == null)
@@ -122,7 +129,7 @@ class WalletVaultStore(
                         it.encryptedMnemonic, it.iv, it.walletType, it.mnemonicBackedUp, it.updatedAt, it.kdfVersion))
                 }
                 if (existingProfile == null) dao.insertProfile(WalletPassphraseProfileEntity(envelope = WalletEnvelopeCodec.encode(nextProfile)))
-                dao.insert(WalletVaultEntity(value.walletId, value.generation, nextProfile.generation, candidate, true))
+                dao.insert(WalletVaultEntity(value.walletId, value.generation, nextProfile.generation, candidate, creation == null))
                 // Marker has no legacy-decryptable material. Preserve externally visible backup flags.
                 db.keyMaterialDao().upsert((source ?: meta).copy(encryptedPrivateKey = byteArrayOf(),
                     encryptedMnemonic = null, iv = byteArrayOf(), kdfVersion = 3))

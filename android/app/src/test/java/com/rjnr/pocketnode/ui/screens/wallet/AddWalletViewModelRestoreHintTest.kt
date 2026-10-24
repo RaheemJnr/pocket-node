@@ -98,8 +98,7 @@ class AddWalletViewModelRestoreHintTest {
         )
         importer = RestoreHintImporter(db.subAccountCandidateDao(), discovery, prefs, NoopLogger)
         importer.computeDispatcher = Dispatchers.Unconfined
-        coEvery { walletKeyWriter.persistNewWalletV1Fallback(any(), any(), any(), any()) } returns
-            WalletKeyWriter.Result.Success
+        coEvery { walletKeyWriter.persistCreatedWallet(any(), any(), any(), any(), any(), any(), any()) } coAnswers { com.rjnr.pocketnode.data.wallet.persistVerifiedFixture(db, secondArg(), thirdArg(), arg(4)) }
         every { gatewayRepository.syncProgress } returns MutableStateFlow(SyncProgress())
         every { gatewayRepository.currentNetwork } returns NetworkType.TESTNET
         coEvery { gatewayRepository.resyncAccount(any(), any()) } returns Result.success(Unit)

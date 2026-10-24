@@ -59,7 +59,17 @@ class WalletMigrationHelper @Inject constructor(
      * regressing the user-facing migration UX.
      */
     suspend fun migrateIfNeeded() {
-        if (walletDao.count() > 0) return  // already migrated
+        if (walletDao.count() > 0) {
+            // A creation or selection transaction can commit before preferences are written.
+            // Room owns selection; recover an interrupted first creation without reading secrets.
+            val selected = database.withTransaction {
+                walletDao.getActive() ?: walletDao.getAll().firstOrNull()?.also {
+                    walletDao.activate(it.walletId)
+                }
+            }
+            selected?.let { walletPreferences.setActiveWalletId(it.walletId) }
+            return
+        }
         if (!keyManager.hasWallet()) return // no legacy wallet to migrate
 
         logger.d(TAG, "Migrating legacy single-wallet to multi-wallet schema")

@@ -191,7 +191,7 @@ class MnemonicImportViewModel @Inject constructor(
                 name = "Imported Wallet",
                 persistKeys = { walletId, bundle ->
                     if (useV1Fallback) {
-                        walletKeyWriter.persistNewWallet(
+                        walletKeyWriter.persistCreatedWallet(
                             activity = activity,
                             walletId = walletId,
                             bundle = bundle,
@@ -199,7 +199,7 @@ class MnemonicImportViewModel @Inject constructor(
                             mnemonicBackedUp = true,
                         )
                     } else {
-                        walletKeyWriter.persistNewWallet(
+                        walletKeyWriter.persistCreatedWallet(
                             activity = activity,
                             walletId = walletId,
                             bundle = bundle,
@@ -246,7 +246,7 @@ class MnemonicImportViewModel @Inject constructor(
             _uiState.update { it.copy(isImporting = true, showPrivateKeyDialog = false, error = null) }
             val result = walletRepository.importRawKey(hex, "Imported Wallet") { walletId, bundle ->
                 if (useV1Fallback) {
-                    walletKeyWriter.persistNewWallet(
+                    walletKeyWriter.persistCreatedWallet(
                         activity = activity,
                         walletId = walletId,
                         bundle = bundle,
@@ -254,7 +254,7 @@ class MnemonicImportViewModel @Inject constructor(
                         mnemonicBackedUp = false,
                     )
                 } else {
-                    walletKeyWriter.persistNewWallet(
+                    walletKeyWriter.persistCreatedWallet(
                         activity = activity,
                         walletId = walletId,
                         bundle = bundle,

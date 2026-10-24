@@ -73,6 +73,7 @@ class HomeViewModelWalletChangeTest {
     private lateinit var prefs: WalletPreferences
     private lateinit var gateway: GatewayRepository
     private lateinit var walletRepository: WalletRepository
+    private val seedAuthorizer = mockk<com.rjnr.pocketnode.data.wallet.SeedPhraseAuthorizer>()
     private val refreshes = AtomicInteger()
 
     private fun script(byte: String) = Script(
@@ -179,7 +180,7 @@ class HomeViewModelWalletChangeTest {
             cacheManager = mockk(relaxed = true),
             lightClient = homeLight,
             walletPreferences = prefs,
-            seedPhraseAuthorizer = mockk(relaxed = true),
+            seedPhraseAuthorizer = seedAuthorizer,
             keyMaterialDao = db.keyMaterialDao(),
             pendingBroadcastDao = db.pendingBroadcastDao(),
             savedStateHandle = SavedStateHandle(),
@@ -221,6 +222,32 @@ class HomeViewModelWalletChangeTest {
      * read the active wallet id once, so after a wallet change Home kept the
      * old wallet's in-flight sends and never showed the new wallet's.
      */
+    @Test
+    fun `scan and sweep require authenticated seed even without V2 metadata`() {
+        coEvery { seedAuthorizer.authorize(any(), "A", any(), any()) } returns
+            com.rjnr.pocketnode.data.wallet.SeedPhraseAuthorizer.SeedResult.Failed("Protected seed required")
+        val vm = newViewModel()
+        scheduler.runCurrent()
+        vm.runGapLimitScan(mockk())
+        scheduler.runCurrent()
+        assertTrue(vm.uiState.value.error.toString().contains("Protected seed required"))
+        vm.confirmGapLimitSweep(mockk())
+        scheduler.runCurrent()
+        assertTrue(vm.uiState.value.error.toString().contains("Protected seed required"))
+        assertTrue(!vm.uiState.value.sweepInProgress)
+    }
+
+    @Test
+    fun `scan aborts when selected wallet changes during authentication`() {
+        coEvery { seedAuthorizer.authorize(any(), "A", any(), any()) } answers {
+            prefs.setActiveWalletId("B")
+            com.rjnr.pocketnode.data.wallet.SeedPhraseAuthorizer.SeedResult.Words(listOf("abandon"))
+        }
+        val vm = newViewModel(); scheduler.runCurrent()
+        vm.runGapLimitScan(mockk()); scheduler.runCurrent()
+        assertTrue(vm.uiState.value.error.toString().contains("wallet changed", ignoreCase = true))
+    }
+
     @Test
     fun `after Home's own switch the new wallet's broadcasts show and the old one's do not`() {
         broadcast("0xa1", "A")

@@ -44,6 +44,11 @@ class WalletRepository @Inject constructor(
     private val walletPreferences: WalletPreferences,
     private val logger: Logger,
 ) {
+    /** Operation-owned proposed metadata; only new UUID creation paths issue this context. */
+    class Creation internal constructor(internal val wallet: WalletEntity) {
+        val walletId: String get() = wallet.walletId
+    }
+
     val walletsFlow: Flow<List<WalletEntity>> = walletDao.getAllFlow()
 
     /**
@@ -119,69 +124,57 @@ class WalletRepository @Inject constructor(
     }
 
     /**
-     * Create a new mnemonic wallet. Persistence of key material is delegated
-     * to the supplied [persistKeys] closure, which the caller wires to
-     * [WalletKeyWriter.persistNewWallet] (the Activity-aware V2 writer).
-     *
-     * The closure receives the [walletId] generated here (so the writer can
-     * pass it to `writeNewV2Row`) and a plaintext [WalletKeyBundle] produced
-     * via [KeyManager.encodePlaintextBundle]. On non-Success a
-     * [WalletKeyWriter.PersistException] is thrown so callers can dispatch on
-     * the typed [WalletKeyWriter.Result] via `result.onFailure { }`.
-     *
-     * NOTE: this no longer returns the freshly generated mnemonic. Callers
-     * that need to display it must split the flow into mnemonic-first
-     * generation + an explicit import call.
+     * Create a fresh UUID namespace. The foreground writer receives immutable proposed metadata
+     * and commits it together with verified passphrase protection. Selection/preferences follow;
+     * cancellation after commit leaves a discoverable protected wallet, never an orphan vault.
      */
     suspend fun createWallet(
         name: String,
-        persistKeys: suspend (walletId: String, bundle: WalletKeyBundle) -> WalletKeyWriter.Result,
+        persistKeys: suspend (walletId: Creation, bundle: WalletKeyBundle) -> WalletKeyWriter.Result,
         wordCount: MnemonicManager.WordCount = MnemonicManager.WordCount.TWELVE,
     ): Result<WalletEntity> = runCatching {
         validateUniqueName(name)
 
         val words = mnemonicManager.generateMnemonic(wordCount)
         val privateKey = mnemonicManager.mnemonicToPrivateKey(words)
-        val info = keyManager.deriveWalletInfo(privateKey)
-        val walletId = UUID.randomUUID().toString()
-        val now = System.currentTimeMillis()
-        val colorIndex = walletDao.count() % 8
-
-        val bundle = keyManager.encodePlaintextBundle(privateKey, words)
-        val persistResult = persistKeys(walletId, bundle)
-        if (persistResult !is WalletKeyWriter.Result.Success) {
-            throw WalletKeyWriter.PersistException(persistResult)
-        }
-
-        val entity = WalletEntity(
-            walletId = walletId,
-            name = name,
-            type = KeyManager.WALLET_TYPE_MNEMONIC,
-            derivationPath = "m/44'/309'/0'/0/0",
-            parentWalletId = null,
-            accountIndex = 0,
-            mainnetAddress = info.mainnetAddress,
-            testnetAddress = info.testnetAddress,
-            isActive = true,
-            createdAt = now,
-            lastActiveAt = now,
-            colorIndex = colorIndex
-        )
-
         try {
-            walletDao.deactivateAll()
-            walletDao.insert(entity)
-            appStatePreferences.setActiveWalletId(walletId)
-            markFreshWalletSyncMode(walletId)
-        } catch (e: Throwable) {
-            logger.e(TAG, "Post-persist entity insert failed for $walletId; attempting rollback", e)
-            runCatching { keyMaterialDao.delete(walletId) }
-                .onFailure { logger.e(TAG, "Rollback delete failed for $walletId", it) }
-            throw e
-        }
+            val info = keyManager.deriveWalletInfo(privateKey)
+            val walletId = UUID.randomUUID().toString()
+            val now = System.currentTimeMillis()
+            val colorIndex = walletDao.count() % 8
 
-        logger.d(TAG, "Created wallet: ${entity.walletId} (${entity.name})")
-        entity
+            val bundle = keyManager.encodePlaintextBundle(privateKey, words)
+            val entity = WalletEntity(
+                walletId = walletId,
+                name = name,
+                type = KeyManager.WALLET_TYPE_MNEMONIC,
+                derivationPath = "m/44'/309'/0'/0/0",
+                parentWalletId = null,
+                accountIndex = 0,
+                mainnetAddress = info.mainnetAddress,
+                testnetAddress = info.testnetAddress,
+                isActive = true,
+                createdAt = now,
+                lastActiveAt = now,
+                colorIndex = colorIndex
+            )
+
+            val persistResult = persistKeys(Creation(entity.copy(isActive = false)), bundle)
+            if (persistResult !is WalletKeyWriter.Result.Success) {
+                throw WalletKeyWriter.PersistException(persistResult)
+            }
+            check(walletDao.getById(walletId) != null) { "Wallet protection did not commit metadata" }
+            try {
+                switchActiveWallet(walletId)
+                markFreshWalletSyncMode(walletId)
+            } catch (e: Throwable) {
+                logger.e(TAG, "Post-persist selection failed for $walletId; protected wallet remains available", e)
+                throw e
+            }
+
+            logger.d(TAG, "Created wallet: ${entity.walletId} (${entity.name})")
+            entity
+        } finally { privateKey.fill(0) }
     }
 
     /**
@@ -191,76 +184,74 @@ class WalletRepository @Inject constructor(
     suspend fun importFromMnemonic(
         words: List<String>,
         name: String,
-        persistKeys: suspend (walletId: String, bundle: WalletKeyBundle) -> WalletKeyWriter.Result,
+        persistKeys: suspend (walletId: Creation, bundle: WalletKeyBundle) -> WalletKeyWriter.Result,
         passphrase: String = "",
     ): Result<WalletEntity> = runCatching {
         validateUniqueName(name)
         require(mnemonicManager.validateMnemonic(words)) { "Invalid mnemonic" }
         val privateKey = mnemonicManager.mnemonicToPrivateKey(words, passphrase)
-        val info = keyManager.deriveWalletInfo(privateKey)
-        validateUniqueAddress(info.mainnetAddress, info.testnetAddress)
-        val walletId = UUID.randomUUID().toString()
-        val now = System.currentTimeMillis()
-        val colorIndex = walletDao.count() % 8
-
-        val bundle = keyManager.encodePlaintextBundle(privateKey, words)
-        val persistResult = persistKeys(walletId, bundle)
-        if (persistResult !is WalletKeyWriter.Result.Success) {
-            throw WalletKeyWriter.PersistException(persistResult)
-        }
-
-        val entity = WalletEntity(
-            walletId = walletId,
-            name = name,
-            type = KeyManager.WALLET_TYPE_MNEMONIC,
-            derivationPath = "m/44'/309'/0'/0/0",
-            parentWalletId = null,
-            accountIndex = 0,
-            mainnetAddress = info.mainnetAddress,
-            testnetAddress = info.testnetAddress,
-            isActive = true,
-            createdAt = now,
-            lastActiveAt = now,
-            colorIndex = colorIndex
-        )
-
         try {
-            walletDao.deactivateAll()
-            walletDao.insert(entity)
-            appStatePreferences.setActiveWalletId(walletId)
-            markImportedWalletSyncMode(walletId)
-        } catch (e: Throwable) {
-            logger.e(TAG, "Post-persist entity insert failed for $walletId; attempting rollback", e)
-            runCatching { keyMaterialDao.delete(walletId) }
-                .onFailure { logger.e(TAG, "Rollback delete failed for $walletId", it) }
-            throw e
-        }
+            val info = keyManager.deriveWalletInfo(privateKey)
+            validateUniqueAddress(info.mainnetAddress, info.testnetAddress)
+            val walletId = UUID.randomUUID().toString()
+            val now = System.currentTimeMillis()
+            val colorIndex = walletDao.count() % 8
 
-        // #82 phase 1: record derivable sub-account slots while the mnemonic
-        // is in memory. Args only, no keys. Never allowed to fail the import , 
-        // discovery is an enhancement, the wallet row above is the product.
-        // #382 Tier 2 adds the gap-limit slots along account 0's receiving
-        // and change chains: an imported seed may have been used in Neuron or
-        // any standard BIP44 wallet, which spread funds across those paths.
-        runCatching {
-            val now2 = System.currentTimeMillis()
-            val candidates = subAccountDiscovery.deriveCandidates(words, passphrase) +
-                subAccountDiscovery.deriveChainCandidates(words, passphrase)
-            subAccountCandidateDao.insertAll(
-                candidates.map {
-                    com.rjnr.pocketnode.data.database.entity.SubAccountCandidateEntity(
-                        parentWalletId = walletId,
-                        derivationPath = it.derivationPath,
-                        accountIndex = it.accountIndex,
-                        scriptArgs = it.scriptArgs,
-                        createdAt = now2,
-                    )
-                }
+            val bundle = keyManager.encodePlaintextBundle(privateKey, words)
+            val entity = WalletEntity(
+                walletId = walletId,
+                name = name,
+                type = KeyManager.WALLET_TYPE_MNEMONIC,
+                derivationPath = "m/44'/309'/0'/0/0",
+                parentWalletId = null,
+                accountIndex = 0,
+                mainnetAddress = info.mainnetAddress,
+                testnetAddress = info.testnetAddress,
+                isActive = true,
+                createdAt = now,
+                lastActiveAt = now,
+                colorIndex = colorIndex
             )
-        }.onFailure { logger.w(TAG, "Sub-account candidate derivation failed (non-fatal)", it) }
 
-        logger.d(TAG, "Imported wallet: ${entity.walletId} (${entity.name})")
-        entity
+            val persistResult = persistKeys(Creation(entity.copy(isActive = false)), bundle)
+            if (persistResult !is WalletKeyWriter.Result.Success) {
+                throw WalletKeyWriter.PersistException(persistResult)
+            }
+            check(walletDao.getById(walletId) != null) { "Wallet protection did not commit metadata" }
+            try {
+                switchActiveWallet(walletId)
+                markImportedWalletSyncMode(walletId)
+            } catch (e: Throwable) {
+                logger.e(TAG, "Post-persist selection failed for $walletId; protected wallet remains available", e)
+                throw e
+            }
+
+            // #82 phase 1: record derivable sub-account slots while the mnemonic
+            // is in memory. Args only, no keys. Never allowed to fail the import,
+            // discovery is an enhancement, the wallet row above is the product.
+            // #382 Tier 2 adds the gap-limit slots along account 0's receiving
+            // and change chains: an imported seed may have been used in Neuron or
+            // any standard BIP44 wallet, which spread funds across those paths.
+            runCatching {
+                val now2 = System.currentTimeMillis()
+                val candidates = subAccountDiscovery.deriveCandidates(words, passphrase) +
+                    subAccountDiscovery.deriveChainCandidates(words, passphrase)
+                subAccountCandidateDao.insertAll(
+                    candidates.map {
+                        com.rjnr.pocketnode.data.database.entity.SubAccountCandidateEntity(
+                            parentWalletId = walletId,
+                            derivationPath = it.derivationPath,
+                            accountIndex = it.accountIndex,
+                            scriptArgs = it.scriptArgs,
+                            createdAt = now2,
+                        )
+                    }
+                )
+            }.onFailure { logger.w(TAG, "Sub-account candidate derivation failed (non-fatal)", it) }
+
+            logger.d(TAG, "Imported wallet: ${entity.walletId} (${entity.name})")
+            entity
+        } finally { privateKey.fill(0) }
     }
 
     /**
@@ -270,52 +261,50 @@ class WalletRepository @Inject constructor(
     suspend fun importRawKey(
         privateKeyHex: String,
         name: String,
-        persistKeys: suspend (walletId: String, bundle: WalletKeyBundle) -> WalletKeyWriter.Result,
+        persistKeys: suspend (walletId: Creation, bundle: WalletKeyBundle) -> WalletKeyWriter.Result,
     ): Result<WalletEntity> = runCatching {
         validateUniqueName(name)
         val privateKeyBytes = privateKeyHex.hexToByteArray()
-        require(privateKeyBytes.size == 32) { "Private key must be 32 bytes" }
-        val info = keyManager.deriveWalletInfo(privateKeyBytes)
-        validateUniqueAddress(info.mainnetAddress, info.testnetAddress)
-        val walletId = UUID.randomUUID().toString()
-        val now = System.currentTimeMillis()
-        val colorIndex = walletDao.count() % 8
-
-        val bundle = keyManager.encodePlaintextBundle(privateKeyBytes, mnemonic = null)
-        val persistResult = persistKeys(walletId, bundle)
-        if (persistResult !is WalletKeyWriter.Result.Success) {
-            throw WalletKeyWriter.PersistException(persistResult)
-        }
-
-        val entity = WalletEntity(
-            walletId = walletId,
-            name = name,
-            type = KeyManager.WALLET_TYPE_RAW_KEY,
-            derivationPath = null,
-            parentWalletId = null,
-            accountIndex = 0,
-            mainnetAddress = info.mainnetAddress,
-            testnetAddress = info.testnetAddress,
-            isActive = true,
-            createdAt = now,
-            lastActiveAt = now,
-            colorIndex = colorIndex
-        )
-
         try {
-            walletDao.deactivateAll()
-            walletDao.insert(entity)
-            appStatePreferences.setActiveWalletId(walletId)
-            markImportedWalletSyncMode(walletId)
-        } catch (e: Throwable) {
-            logger.e(TAG, "Post-persist entity insert failed for $walletId; attempting rollback", e)
-            runCatching { keyMaterialDao.delete(walletId) }
-                .onFailure { logger.e(TAG, "Rollback delete failed for $walletId", it) }
-            throw e
-        }
+            require(privateKeyBytes.size == 32) { "Private key must be 32 bytes" }
+            val info = keyManager.deriveWalletInfo(privateKeyBytes)
+            validateUniqueAddress(info.mainnetAddress, info.testnetAddress)
+            val walletId = UUID.randomUUID().toString()
+            val now = System.currentTimeMillis()
+            val colorIndex = walletDao.count() % 8
 
-        logger.d(TAG, "Imported raw key wallet: ${entity.walletId} (${entity.name})")
-        entity
+            val bundle = keyManager.encodePlaintextBundle(privateKeyBytes, mnemonic = null)
+            val entity = WalletEntity(
+                walletId = walletId,
+                name = name,
+                type = KeyManager.WALLET_TYPE_RAW_KEY,
+                derivationPath = null,
+                parentWalletId = null,
+                accountIndex = 0,
+                mainnetAddress = info.mainnetAddress,
+                testnetAddress = info.testnetAddress,
+                isActive = true,
+                createdAt = now,
+                lastActiveAt = now,
+                colorIndex = colorIndex
+            )
+
+            val persistResult = persistKeys(Creation(entity.copy(isActive = false)), bundle)
+            if (persistResult !is WalletKeyWriter.Result.Success) {
+                throw WalletKeyWriter.PersistException(persistResult)
+            }
+            check(walletDao.getById(walletId) != null) { "Wallet protection did not commit metadata" }
+            try {
+                switchActiveWallet(walletId)
+                markImportedWalletSyncMode(walletId)
+            } catch (e: Throwable) {
+                logger.e(TAG, "Post-persist selection failed for $walletId; protected wallet remains available", e)
+                throw e
+            }
+
+            logger.d(TAG, "Imported raw key wallet: ${entity.walletId} (${entity.name})")
+            entity
+        } finally { privateKeyBytes.fill(0) }
     }
 
     /**
@@ -335,7 +324,7 @@ class WalletRepository @Inject constructor(
         name: String,
         parentMnemonic: List<String>,
         explicitIndex: Int? = null,
-        persistKeys: suspend (walletId: String, bundle: WalletKeyBundle) -> WalletKeyWriter.Result,
+        persistKeys: suspend (walletId: Creation, bundle: WalletKeyBundle) -> WalletKeyWriter.Result,
     ): Result<WalletEntity> = runCatching {
         val parent = walletDao.getById(parentWalletId)
             ?: throw IllegalArgumentException("Parent wallet not found")
@@ -357,95 +346,94 @@ class WalletRepository @Inject constructor(
             if (existingSubs.isEmpty()) 1 else existingSubs.maxOf { it.accountIndex } + 1
         }
         val seed = mnemonicManager.mnemonicToSeed(parentMnemonic)
-        val privateKey = mnemonicManager.derivePrivateKey(seed, accountIndex = nextIndex)
-        val publicKey = keyManager.derivePublicKey(privateKey)
-        val lockScript = keyManager.deriveLockScript(publicKey)
-        val mainnetAddress = AddressUtils.encode(lockScript, NetworkType.MAINNET)
-        val testnetAddress = AddressUtils.encode(lockScript, NetworkType.TESTNET)
-
-        val walletId = UUID.randomUUID().toString()
-        val now = System.currentTimeMillis()
-        val colorIndex = walletDao.count() % 8
-
-        // Sub-accounts don't store mnemonic, only the parent holds it.
-        val bundle = keyManager.encodePlaintextBundle(privateKey, mnemonic = null)
-        val persistResult = persistKeys(walletId, bundle)
-        if (persistResult !is WalletKeyWriter.Result.Success) {
-            throw WalletKeyWriter.PersistException(persistResult)
-        }
-
-        val entity = WalletEntity(
-            walletId = walletId,
-            name = name,
-            type = KeyManager.WALLET_TYPE_MNEMONIC,
-            derivationPath = "m/44'/309'/$nextIndex'/0/0",
-            parentWalletId = parentWalletId,
-            accountIndex = nextIndex,
-            mainnetAddress = mainnetAddress,
-            testnetAddress = testnetAddress,
-            isActive = true,
-            createdAt = now,
-            lastActiveAt = now,
-            colorIndex = colorIndex
-        )
-
+        val privateKey = try { mnemonicManager.derivePrivateKey(seed, accountIndex = nextIndex) }
+        finally { seed.fill(0) }
         try {
-            walletDao.deactivateAll()
-            walletDao.insert(entity)
-            appStatePreferences.setActiveWalletId(walletId)
-            if (explicitIndex != null) {
-                // Discovery restore: the account has on-chain HISTORY, fresh
-                // from-tip sync would hide exactly what made it discoverable.
-                // Inherit the parent's sync window per network instead.
-                for (net in listOf(NetworkType.MAINNET, NetworkType.TESTNET)) {
-                    syncPreferences.setSyncMode(
-                        syncPreferences.getSyncMode(net, parentWalletId), net, walletId
-                    )
-                    syncPreferences.setCustomBlockHeight(
-                        syncPreferences.getCustomBlockHeight(net, parentWalletId), net, walletId
-                    )
-                }
-                // Also inherit the parent's sync PROGRESS. The candidate
-                // script already scanned the window alongside the parent
-                // during discovery (its matched txs sit in light-client
-                // storage); without a progress row the fresh wallet
-                // registered from the window start and re-scanned ~200k
-                // blocks the device had just covered (device-test 2026-07).
-                runCatching {
-                    val spDao = appDatabase.syncProgressDao()
-                    for (net in listOf(NetworkType.MAINNET, NetworkType.TESTNET)) {
-                        spDao.get(parentWalletId, net.name)?.let { parentRow ->
-                            spDao.upsert(
-                                parentRow.copy(
-                                    walletId = walletId,
-                                    updatedAt = System.currentTimeMillis(),
-                                )
-                            )
-                        }
-                    }
-                }.onFailure { logger.w(TAG, "Progress inherit failed (non-fatal)", it) }
-            } else {
-                markFreshWalletSyncMode(walletId)
-            }
-        } catch (e: Throwable) {
-            logger.e(TAG, "Post-persist sub-account insert failed for $walletId; attempting rollback", e)
-            runCatching { keyMaterialDao.delete(walletId) }
-                .onFailure { logger.e(TAG, "Rollback delete failed for $walletId", it) }
-            throw e
-        }
+            val publicKey = keyManager.derivePublicKey(privateKey)
+            val lockScript = keyManager.deriveLockScript(publicKey)
+            val mainnetAddress = AddressUtils.encode(lockScript, NetworkType.MAINNET)
+            val testnetAddress = AddressUtils.encode(lockScript, NetworkType.TESTNET)
 
-        // Retire the discovery candidate at this index if one exists (any
-        // creation at index N supersedes the candidate row; IGNORE-on-insert
-        // means a plain no-candidate create is a harmless 0-row update).
-        runCatching {
-            subAccountCandidateDao.updateState(
-                parentWalletId, SubAccountDiscovery.accountPath(nextIndex),
-                com.rjnr.pocketnode.data.database.entity.SubAccountCandidateEntity.STATE_RESTORED,
+            val walletId = UUID.randomUUID().toString()
+            val now = System.currentTimeMillis()
+            val colorIndex = walletDao.count() % 8
+
+            // Sub-accounts don't store mnemonic, only the parent holds it.
+            val bundle = keyManager.encodePlaintextBundle(privateKey, mnemonic = null)
+            val entity = WalletEntity(
+                walletId = walletId,
+                name = name,
+                type = KeyManager.WALLET_TYPE_MNEMONIC,
+                derivationPath = "m/44'/309'/$nextIndex'/0/0",
+                parentWalletId = parentWalletId,
+                accountIndex = nextIndex,
+                mainnetAddress = mainnetAddress,
+                testnetAddress = testnetAddress,
+                isActive = true,
+                createdAt = now,
+                lastActiveAt = now,
+                colorIndex = colorIndex
             )
-        }
 
-        logger.d(TAG, "Created sub-account: $walletId (parent: $parentWalletId, index: $nextIndex)")
-        entity
+            val persistResult = persistKeys(Creation(entity.copy(isActive = false)), bundle)
+            if (persistResult !is WalletKeyWriter.Result.Success) {
+                throw WalletKeyWriter.PersistException(persistResult)
+            }
+            check(walletDao.getById(walletId) != null) { "Wallet protection did not commit metadata" }
+            try {
+                switchActiveWallet(walletId)
+                if (explicitIndex != null) {
+                    // Discovery restore: the account has on-chain HISTORY, fresh
+                    // from-tip sync would hide exactly what made it discoverable.
+                    // Inherit the parent's sync window per network instead.
+                    for (net in listOf(NetworkType.MAINNET, NetworkType.TESTNET)) {
+                        syncPreferences.setSyncMode(
+                            syncPreferences.getSyncMode(net, parentWalletId), net, walletId
+                        )
+                        syncPreferences.setCustomBlockHeight(
+                            syncPreferences.getCustomBlockHeight(net, parentWalletId), net, walletId
+                        )
+                    }
+                    // Also inherit the parent's sync PROGRESS. The candidate
+                    // script already scanned the window alongside the parent
+                    // during discovery (its matched txs sit in light-client
+                    // storage); without a progress row the fresh wallet
+                    // registered from the window start and re-scanned ~200k
+                    // blocks the device had just covered (device-test 2026-07).
+                    runCatching {
+                        val spDao = appDatabase.syncProgressDao()
+                        for (net in listOf(NetworkType.MAINNET, NetworkType.TESTNET)) {
+                            spDao.get(parentWalletId, net.name)?.let { parentRow ->
+                                spDao.upsert(
+                                    parentRow.copy(
+                                        walletId = walletId,
+                                        updatedAt = System.currentTimeMillis(),
+                                    )
+                                )
+                            }
+                        }
+                    }.onFailure { logger.w(TAG, "Progress inherit failed (non-fatal)", it) }
+                } else {
+                    markFreshWalletSyncMode(walletId)
+                }
+            } catch (e: Throwable) {
+                logger.e(TAG, "Post-persist sub-account selection failed for $walletId; protected wallet remains available", e)
+                throw e
+            }
+
+            // Retire the discovery candidate at this index if one exists (any
+            // creation at index N supersedes the candidate row; IGNORE-on-insert
+            // means a plain no-candidate create is a harmless 0-row update).
+            runCatching {
+                subAccountCandidateDao.updateState(
+                    parentWalletId, SubAccountDiscovery.accountPath(nextIndex),
+                    com.rjnr.pocketnode.data.database.entity.SubAccountCandidateEntity.STATE_RESTORED,
+                )
+            }
+
+            logger.d(TAG, "Created sub-account: $walletId (parent: $parentWalletId, index: $nextIndex)")
+            entity
+        } finally { privateKey.fill(0) }
     }
 
     /**
@@ -484,7 +472,7 @@ class WalletRepository @Inject constructor(
      * (the Recovery screen removes a wallet whose keys are lost but keeps
      * its backup).
      */
-    suspend fun deleteWallet(walletId: String, keepBackupFile: Boolean = false) {
+    suspend fun deleteWallet(walletId: String, keepBackupFile: Boolean = false, expectedWallet: WalletEntity? = null) {
         val wallet = walletDao.getById(walletId)
             ?: throw IllegalArgumentException("Wallet not found: $walletId")
         if (wallet.isActive || appStatePreferences.getActiveWalletId() == walletId) {
@@ -494,6 +482,13 @@ class WalletRepository @Inject constructor(
         // Only destroy keys after the DB removal commits, otherwise a failure between
         // key destruction and row deletion leaves an orphaned wallet whose keys are gone.
         appDatabase.withTransaction {
+            if (expectedWallet != null) check(ownsInitialCreation(expectedWallet)) {
+                "Added wallet identity changed"
+            }
+            // Store lock order is mutex then Room; use DAOs in this existing transaction.
+            appDatabase.walletVaultDao().deleteVault(walletId)
+            appDatabase.walletVaultDao().deleteLegacy(walletId)
+            keyMaterialDao.delete(walletId)
             walletDao.delete(walletId)
             for (network in listOf("MAINNET", "TESTNET")) {
                 transactionDao.deleteByWalletAndNetwork(walletId, network)
@@ -546,7 +541,7 @@ class WalletRepository @Inject constructor(
     /**
      * #563: undo an Add Wallet whose post-import sync choice was cancelled.
      * Makes [previousActiveWalletId] active again, then removes only
-     * [addedWalletId] (its rows and its keys) through [deleteWallet]. No
+     * [addedWallet] (its rows and its keys) through [deleteWallet]. No
      * other wallet's data is touched.
      *
      * If the delete fails while the added wallet's row still exists, the
@@ -554,15 +549,15 @@ class WalletRepository @Inject constructor(
      * wallet stays added and active, as before the cancel. Returns the
      * wallet that is active afterwards.
      */
-    suspend fun rollbackAddedWallet(addedWalletId: String, previousActiveWalletId: String): WalletEntity {
+    suspend fun rollbackAddedWallet(addedWallet: WalletEntity, previousActiveWalletId: String): WalletEntity {
+        val addedWalletId = addedWallet.walletId
         require(addedWalletId != previousActiveWalletId) { "Nothing to roll back to" }
-        walletDao.getById(addedWalletId)
-            ?: throw IllegalArgumentException("Wallet not found: $addedWalletId")
+        check(ownsInitialCreation(addedWallet)) { "Added wallet identity changed" }
         val previous = walletDao.getById(previousActiveWalletId)
             ?: throw IllegalStateException("Previous wallet not found: $previousActiveWalletId")
         switchActiveWallet(previousActiveWalletId)
         try {
-            deleteWallet(addedWalletId)
+            deleteWallet(addedWalletId, expectedWallet = addedWallet)
         } catch (e: Throwable) {
             if (walletDao.getById(addedWalletId) == null) {
                 // The rows are gone (only a later key or VACUUM step failed):
@@ -577,6 +572,15 @@ class WalletRepository @Inject constructor(
         logger.d(TAG, "Rolled back added wallet $addedWalletId; active again: $previousActiveWalletId")
         return walletDao.getById(previousActiveWalletId) ?: previous
     }
+
+    private suspend fun ownsInitialCreation(expected: WalletEntity): Boolean =
+        sameCreatedIdentity(expected, walletDao.getById(expected.walletId)) &&
+            appDatabase.walletVaultDao().get(expected.walletId)?.let { it.generation == 0L && !it.cleanupPending } == true &&
+            appDatabase.walletVaultDao().legacy(expected.walletId) == null &&
+            keyMaterialDao.getKdfVersion(expected.walletId) == 3
+
+    private fun sameCreatedIdentity(expected: WalletEntity, actual: WalletEntity?): Boolean =
+        actual != null && expected.copy(isActive = actual.isActive, lastActiveAt = actual.lastActiveAt) == actual
 
     suspend fun walletCount(): Int = walletDao.count()
 

@@ -109,7 +109,7 @@ class OnboardingViewModel @Inject constructor(
                         // reach this point. AuthScreen's migration loop
                         // will upgrade the row to V2 the moment the user
                         // enables a device lock and cold-starts the app.
-                        walletKeyWriter.persistNewWallet(
+                        walletKeyWriter.persistCreatedWallet(
                             activity = activity,
                             walletId = walletId,
                             bundle = bundle,
@@ -117,7 +117,7 @@ class OnboardingViewModel @Inject constructor(
                             mnemonicBackedUp = false,
                         )
                     } else {
-                        walletKeyWriter.persistNewWallet(
+                        walletKeyWriter.persistCreatedWallet(
                             activity = activity,
                             walletId = walletId,
                             bundle = bundle,

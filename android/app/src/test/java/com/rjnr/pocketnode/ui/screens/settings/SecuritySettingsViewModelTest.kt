@@ -93,7 +93,7 @@ class SecuritySettingsViewModelTest {
 
         // Pending action staged in SavedStateHandle. The Switch's onCheckedChange
         // staged it and then navigated to PinEntryScreen. The setter MUST NOT
-        // fire yet — the user hasn't verified PIN.
+        // fire yet. the user hasn't verified PIN.
         verify(exactly = 0) { authManager.setAuthBeforeSendEnabled(any()) }
         assertEquals(false, vm.uiState.value.isAuthBeforeSendEnabled)
     }
@@ -159,7 +159,7 @@ class SecuritySettingsViewModelTest {
         val operations = mockk<SecurityVaultOperations>(relaxed = true)
         coEvery { operations.reset(any(), any()) } returns VaultSettingsResult("Partial reset", listOf(
             WalletSecurityStatus("a", "Savings", "Passphrase updated"),
-            WalletSecurityStatus("b", "Other", "Not reset — previous protection preserved; recovery required")))
+            WalletSecurityStatus("b", "Other", "Not reset. previous protection preserved; recovery required")))
         val vm = newViewModel(operations); advanceUntilIdle()
         vm.resetPassphrase(mockk()); advanceUntilIdle()
         assertEquals(false, vm.uiState.value.vaultBusy)

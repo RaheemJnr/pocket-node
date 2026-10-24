@@ -131,7 +131,7 @@ class AddWalletViewModel @Inject constructor(
      */
     private suspend fun persistWalletKeys(
         activity: FragmentActivity,
-        walletId: String,
+        walletId: WalletRepository.Creation,
         bundle: com.rjnr.pocketnode.data.crypto.WalletKeyBundle,
         walletType: String,
         mnemonicBackedUp: Boolean,
@@ -139,7 +139,7 @@ class AddWalletViewModel @Inject constructor(
         promptSubtitle: String = "Use your phone's screen lock to encrypt the new wallet's keys.",
     ): WalletKeyWriter.Result =
         if (!canCreateV2BoundKey()) {
-            walletKeyWriter.persistNewWallet(
+            walletKeyWriter.persistCreatedWallet(
                 activity = activity,
                 walletId = walletId,
                 bundle = bundle,
@@ -147,7 +147,7 @@ class AddWalletViewModel @Inject constructor(
                 mnemonicBackedUp = mnemonicBackedUp,
             )
         } else {
-            walletKeyWriter.persistNewWallet(
+            walletKeyWriter.persistCreatedWallet(
                 activity = activity,
                 walletId = walletId,
                 bundle = bundle,
@@ -335,7 +335,7 @@ class AddWalletViewModel @Inject constructor(
             // (viewModelScope cancelled), or it stays on the removed wallet.
             val rolledBack = withContext(NonCancellable) {
                 val removed = try {
-                    walletRepository.rollbackAddedWallet(wallet.walletId, previousId)
+                    walletRepository.rollbackAddedWallet(wallet, previousId)
                     true
                 } catch (e: Exception) {
                     logger.e(TAG, "Rolling back the added wallet failed", e)
@@ -468,7 +468,7 @@ class AddWalletViewModel @Inject constructor(
      *      (bonus bug fix, the previous flow routed through V1 storage
      *      and crashed on V2 parents).
      *   2. Encrypt + persist the new sub-account's key material via
-     *      [WalletKeyWriter.persistNewWallet] (inside [persistKeys]).
+     *      [WalletKeyWriter.persistCreatedWallet] (inside [persistKeys]).
      */
     fun createSubAccount(activity: FragmentActivity, consented: Boolean = false) {
         if (_uiState.value.isLoading) return // prevent double-tap
@@ -500,6 +500,7 @@ class AddWalletViewModel @Inject constructor(
             )
             val parentMnemonic = when (readResult) {
                 is WalletKeyReader.MaterialResult.Success -> {
+                    readResult.privateKey.fill(0)
                     val words = readResult.mnemonic?.split(" ")
                     if (words.isNullOrEmpty()) {
                         _uiState.update {
