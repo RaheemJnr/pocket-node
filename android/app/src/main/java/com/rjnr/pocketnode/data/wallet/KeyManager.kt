@@ -226,9 +226,11 @@ class KeyManager @Inject constructor(
         return DecryptedKeyData(hex, mnemonic, type, prefs.getBoolean(KEY_MNEMONIC_BACKED_UP, false))
     }
 
-    /** Exact legacy ESP file witness; paired before/after its cleanup-only material read. */
-    internal fun defaultPreferenceCleanupSnapshot(): List<String?> {
-        val file = java.io.File(context.filesDir.parentFile, "shared_prefs/ckb_wallet_keys.xml")
+    /** Independent XML and backup fingerprints; never opens/restores SharedPreferences. */
+    internal fun preferenceCleanupSnapshot(walletId: String): List<String?> {
+        require(walletId.matches(Regex("[A-Za-z0-9_-]{1,128}")))
+        val name = if (walletId == "default") "ckb_wallet_keys" else "ckb_wallet_keys_$walletId"
+        val file = java.io.File(context.filesDir.parentFile, "shared_prefs/$name.xml")
         return listOf(file, java.io.File(file.path + ".bak")).map { source ->
             if (!source.exists()) null else source.inputStream().use { input ->
                 val digest = java.security.MessageDigest.getInstance("SHA-256")
@@ -244,16 +246,111 @@ class KeyManager @Inject constructor(
             }
         }
     }
+    internal fun defaultPreferenceCleanupSnapshot() = preferenceCleanupSnapshot("default")
 
-    /** Cleanup-only source read. Caller must prove identity against a freshly verified vault bundle. */
-    internal fun defaultPreferencesForVaultCleanup(): DecryptedKeyData? {
-        val file = java.io.File(context.filesDir.parentFile, "shared_prefs/ckb_wallet_keys.xml")
-        if (testPrefs == null && !file.exists() && !java.io.File(file.path + ".bak").exists()) return null
-        val hex = prefs.getString(KEY_PRIVATE_KEY, null) ?: return null
-        val mnemonic = prefs.getString(KEY_MNEMONIC, null)
-        val type = prefs.getString(KEY_WALLET_TYPE, null)
-            ?: if (mnemonic == null) WALLET_TYPE_RAW_KEY else WALLET_TYPE_MNEMONIC
-        return DecryptedKeyData(hex, mnemonic, type, prefs.getBoolean(KEY_MNEMONIC_BACKED_UP, false))
+    /**
+     * Decrypts each captured XML/.bak independently using Android ESP over immutable preferences.
+     * Never opens the original SharedPreferences, restores a backup, or constructs a MasterKey.
+     * Both keysets must already exist: pinned Tink's existing-keyset path only reads its master
+     * AEAD, while missing keysets (its key-generation path) are rejected before calling ESP.
+     */
+    internal fun preferencesForVaultCleanup(walletId: String): DecryptedKeyData? { return try {
+        val before = preferenceCleanupSnapshot(walletId)
+        val standIn = if (walletId == "default") testPrefs else testWalletPrefs[walletId]
+        val name = if (walletId == "default") "ckb_wallet_keys" else "ckb_wallet_keys_$walletId"
+        val file = java.io.File(context.filesDir.parentFile, "shared_prefs/$name.xml")
+        val copies = listOf(file, java.io.File(file.path + ".bak")).mapIndexedNotNull { index, source ->
+            if (before[index] == null) null else {
+                readCapturedPreference(name, readPreferenceXml(source), standIn != null) ?: return null
+            }
+        }
+        val materials = if (before.all { it == null } && standIn != null) {
+            // Existing plain-preference test seam; never available in production.
+            listOfNotNull(readCapturedPreference(name, standIn.all.filterValues { it != null }.mapValues { it.value!! }, true))
+        } else copies
+        if (preferenceCleanupSnapshot(walletId) != before || materials.isEmpty() ||
+            materials.map { it.privateKeyHex }.distinct().size != 1 ||
+            materials.mapNotNull { it.mnemonic }.distinct().size > 1) null
+        else materials.firstOrNull { it.mnemonic != null } ?: materials.first()
+    } catch (_: Exception) { null } }
+
+    @Suppress("DEPRECATION") // Legacy-only ESP reader; String-alias overload avoids creating a MasterKey.
+    internal fun readCapturedPreference(name: String, entries: Map<String, Any>, plainTestCopy: Boolean = false,
+        masterAlias: String = MasterKey.DEFAULT_MASTER_KEY_ALIAS): DecryptedKeyData? {
+        val frozen = CapturedLegacyPreferences(entries)
+        val source = if (plainTestCopy) frozen else {
+            require(listOf("__androidx_security_crypto_encrypted_prefs_key_keyset__",
+                "__androidx_security_crypto_encrypted_prefs_value_keyset__").all { (entries[it] as? String)?.isNotEmpty() == true })
+            require(java.security.KeyStore.getInstance("AndroidKeyStore").apply { load(null) }.containsAlias(masterAlias))
+            val capturedContext = object : android.content.ContextWrapper(context) {
+                override fun getApplicationContext(): Context = this
+                override fun getSharedPreferences(requested: String, mode: Int): SharedPreferences {
+                    require(requested == name)
+                    return frozen
+                }
+            }
+            EncryptedSharedPreferences.create(name, masterAlias, capturedContext,
+                EncryptedSharedPreferences.PrefKeyEncryptionScheme.AES256_SIV,
+                EncryptedSharedPreferences.PrefValueEncryptionScheme.AES256_GCM)
+        }
+        val hex = source.getString(KEY_PRIVATE_KEY, null) ?: return null
+        val words = source.getString(KEY_MNEMONIC, null)
+        return DecryptedKeyData(hex, words,
+            source.getString(KEY_WALLET_TYPE, null) ?: if (words == null) WALLET_TYPE_RAW_KEY else WALLET_TYPE_MNEMONIC,
+            source.getBoolean(KEY_MNEMONIC_BACKED_UP, false))
+    }
+
+    /** ESP can construct its keyset writer, but every attempted write fails without side effects. */
+    private class CapturedLegacyPreferences(entries: Map<String, Any>) : SharedPreferences {
+        private val values = entries.toMap()
+        override fun getAll(): Map<String, *> = values.toMap()
+        override fun contains(key: String) = values.containsKey(key)
+        override fun getString(key: String, defValue: String?): String? = values[key]?.let { it as String } ?: defValue
+        override fun getBoolean(key: String, defValue: Boolean) = values[key]?.let { it as Boolean } ?: defValue
+        override fun getInt(key: String, defValue: Int) = values[key]?.let { it as Int } ?: defValue
+        override fun getLong(key: String, defValue: Long) = values[key]?.let { it as Long } ?: defValue
+        override fun getFloat(key: String, defValue: Float) = values[key]?.let { it as Float } ?: defValue
+        override fun getStringSet(key: String, defValues: MutableSet<String>?): MutableSet<String>? = error("Unsupported captured preference")
+        override fun registerOnSharedPreferenceChangeListener(listener: SharedPreferences.OnSharedPreferenceChangeListener) = Unit
+        override fun unregisterOnSharedPreferenceChangeListener(listener: SharedPreferences.OnSharedPreferenceChangeListener) = Unit
+        override fun edit(): SharedPreferences.Editor = object : SharedPreferences.Editor {
+            override fun putString(key: String?, value: String?) = denied()
+            override fun putStringSet(key: String?, values: MutableSet<String>?) = denied()
+            override fun putInt(key: String?, value: Int) = denied()
+            override fun putLong(key: String?, value: Long) = denied()
+            override fun putFloat(key: String?, value: Float) = denied()
+            override fun putBoolean(key: String?, value: Boolean) = denied()
+            override fun remove(key: String?) = denied()
+            override fun clear() = denied()
+            override fun commit(): Boolean = error("Captured preferences are read only")
+            override fun apply(): Unit = error("Captured preferences are read only")
+            private fun denied(): SharedPreferences.Editor = error("Captured preferences are read only")
+        }
+    }
+
+    internal fun defaultPreferencesForVaultCleanup() = preferencesForVaultCleanup("default")
+
+    /** ESP backing files contain strings; booleans are accepted for the existing test stand-ins. */
+    private fun readPreferenceXml(file: java.io.File): Map<String, Any> = file.inputStream().use { input ->
+        require(file.length() in 1..1_048_576)
+        val parser = android.util.Xml.newPullParser()
+        parser.setInput(input, "UTF-8")
+        val entries = linkedMapOf<String, Any>()
+        var root = false
+        while (parser.next() != org.xmlpull.v1.XmlPullParser.END_DOCUMENT) {
+            require(parser.eventType != org.xmlpull.v1.XmlPullParser.DOCDECL)
+            if (parser.eventType != org.xmlpull.v1.XmlPullParser.START_TAG) continue
+            if (!root) { require(parser.name == "map"); root = true; continue }
+            val name = parser.getAttributeValue(null, "name") ?: error("Invalid preferences")
+            require(name !in entries)
+            entries[name] = when (parser.name) {
+                "string" -> parser.nextText()
+                "boolean" -> parser.getAttributeValue(null, "value").let { require(it == "true" || it == "false"); it == "true" }
+                else -> error("Unsupported preferences")
+            }
+        }
+        require(root)
+        entries
     }
 
     /** UI-free access cannot authenticate wallet operations, including legacy software/ESP keys. */

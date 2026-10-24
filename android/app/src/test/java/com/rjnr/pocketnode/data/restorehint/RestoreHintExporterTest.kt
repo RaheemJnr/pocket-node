@@ -23,7 +23,9 @@ import io.mockk.coEvery
 import io.mockk.coVerify
 import io.mockk.every
 import io.mockk.mockk
-import kotlinx.coroutines.test.runTest
+import kotlinx.coroutines.*
+import kotlinx.coroutines.test.*
+import org.robolectric.Robolectric
 import kotlinx.serialization.json.Json
 import org.junit.After
 import org.junit.Assert.assertEquals
@@ -39,6 +41,7 @@ import org.robolectric.RobolectricTestRunner
  * reveal. The phrase is the public BIP-39 test vector.
  */
 @RunWith(RobolectricTestRunner::class)
+@OptIn(kotlinx.coroutines.ExperimentalCoroutinesApi::class)
 class RestoreHintExporterTest {
 
     private val words = (List(11) { "abandon" } + "about")
@@ -54,10 +57,12 @@ class RestoreHintExporterTest {
     private val keyMaterialDao = mockk<KeyMaterialDao>()
     private val authManager = mockk<AuthManager>()
     private val encryptionManager = mockk<KeystoreEncryptionManager>()
-    private val activity = mockk<FragmentActivity>(relaxed = true)
+    private val controller = Robolectric.buildActivity(FragmentActivity::class.java).setup()
+    private val activity = controller.get()
 
     @Before
     fun setUp() {
+        Dispatchers.setMain(StandardTestDispatcher())
         val context = ApplicationProvider.getApplicationContext<Context>()
         db = Room.inMemoryDatabaseBuilder(context, AppDatabase::class.java).allowMainThreadQueries().build()
         prefs = WalletPreferences(context, NoopLogger)
@@ -65,7 +70,7 @@ class RestoreHintExporterTest {
     }
 
     @After
-    fun tearDown() = db.close()
+    fun tearDown() { db.close(); Dispatchers.resetMain() }
 
     private fun exporter() = RestoreHintExporter(
         walletDao = db.walletDao(),
@@ -297,4 +302,23 @@ class RestoreHintExporterTest {
         coEvery { lightClient.getTipHeader() } returns null
         assertEquals(RestoreHintExporter.ExportResult.NoTip, exporter().export(activity, network))
     }
+    @Test fun `stop resume during authenticated identity read wipes key and cannot resume export`() = runTest {
+        val wallets = mockk<com.rjnr.pocketnode.data.database.dao.WalletDao>()
+        val root = wallet("raw", type = "raw_key", active = true)
+        val key = ByteArray(32) { 1 }
+        val entered = CompletableDeferred<Unit>()
+        var reads = 0
+        coEvery { wallets.getActive() } coAnswers {
+            if (++reads > 1) { entered.complete(Unit); awaitCancellation() } else root
+        }
+        coEvery { walletKeyReader.readKeyMaterial(activity, "raw", any(), any()) } returns
+            WalletKeyReader.MaterialResult.Success(key, null, "raw_key", false)
+        val exporter = RestoreHintExporter(wallets, db.syncProgressDao(), db.transactionDao(), db.subAccountCandidateDao(),
+            prefs, lightClient, walletKeyReader, Json { ignoreUnknownKeys = true }, NoopLogger)
+        val running = launch { exporter.export(activity, network) }
+        entered.await(); controller.pause().stop(); controller.start().resume(); runCurrent()
+        try { assertTrue(running.isCancelled); running.join(); assertTrue(key.all { it == 0.toByte() }) }
+        finally { running.cancelAndJoin() }
+    }
+
 }

@@ -25,7 +25,7 @@ class WalletDefaultCleanupOwnershipTest {
         val bytes = Json.encodeToString(material).toByteArray()
         try {
             val envelope = f.crypto.create(id, 0, bytes, f.pass.toCharArray())
-            f.store.activate(KeyMaterialEntity(id, byteArrayOf(), null, byteArrayOf(), "raw_key", false, 1), null, envelope, f.pass.toCharArray())
+            f.store.activate(KeyMaterialEntity(id, byteArrayOf(), null, byteArrayOf(), "raw_key", false, 1), null, envelope, f.pass.toCharArray(), expectedWallet = f.db.walletDao().getById(id))
         } finally { bytes.fill(0) }
     }
     private fun weak(f: WalletVaultIntegrationFixture) = File(f.context.cacheDir, "integration-backups/default.enc").apply {

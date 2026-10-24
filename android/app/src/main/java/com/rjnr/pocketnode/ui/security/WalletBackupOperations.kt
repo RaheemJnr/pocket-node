@@ -24,12 +24,12 @@ class WalletBackupOperations @Inject constructor(
         data object Cancelled : Outcome
         data class Failed(val message: String) : Outcome
     }
-    suspend fun show(activity: FragmentActivity, walletId: String, verify: Boolean): Outcome {
-        val original = wallets.getById(walletId) ?: return Outcome.Failed("Wallet unavailable")
+    suspend fun show(activity: FragmentActivity, walletId: String, verify: Boolean): Outcome = com.rjnr.pocketnode.data.vault.VaultOperationSession.run(activity) owned@ {
+        val original = wallets.getById(walletId) ?: return@owned Outcome.Failed("Wallet unavailable")
         val lock = ReauthLockEvents.locks.value
         fun foreground() = activity.lifecycle.currentState.isAtLeast(Lifecycle.State.STARTED) && ReauthLockEvents.locks.value == lock
-        if (!foreground()) return Outcome.Cancelled
-        return try {
+        if (!foreground()) return@owned Outcome.Cancelled
+        return@owned try {
             when (val material = reader.readKeyMaterial(activity, walletId, "View recovery material", "Authenticate this wallet")) {
                 is WalletKeyReader.MaterialResult.Success -> {
                     val hasMnemonic = !material.mnemonic.isNullOrBlank()

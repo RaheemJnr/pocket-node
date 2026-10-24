@@ -48,25 +48,25 @@ class WalletImportOperations @Inject constructor(
         activity: FragmentActivity, privateKey: Boolean, name: String, hintText: String?, network: NetworkType,
         onCommitted: (WalletEntity, String?) -> Unit = { _, _ -> },
         onImported: suspend (WalletEntity, String?) -> Unit,
-    ): Outcome {
+    ): Outcome = com.rjnr.pocketnode.data.vault.VaultOperationSession.run(activity) owned@ {
         val lock = ReauthLockEvents.locks.value
-        val inputChars = input.requestImport(activity, privateKey) ?: return Outcome.Cancelled
+        val inputChars = input.requestImport(activity, privateKey) ?: return@owned Outcome.Cancelled
         try {
             // This function returns only public data. No recovery words or hint key can
             // survive into the potentially long gateway-registration continuation below.
             val prepared = consume(activity, lock, inputChars, privateKey, name, hintText, network, onCommitted)
-            val wallet = prepared.wallet ?: return prepared.outcome
-            return WalletDerivationSession.run(activity, lock) {
+            val wallet = prepared.wallet ?: return@owned prepared.outcome
+            return@owned WalletDerivationSession.run(activity, lock) {
                 onImported(wallet, prepared.previous)
                 prepared.outcome
             }
         } catch (e: CancellationException) { throw e }
         catch (e: WalletKeyWriter.PersistException) {
-            return if (e.result == WalletKeyWriter.Result.Cancelled) Outcome.Cancelled
+            return@owned if (e.result == WalletKeyWriter.Result.Cancelled) Outcome.Cancelled
                 else Outcome.Failed("Could not protect the imported wallet. Authenticate and try again.")
         } catch (e: Exception) {
             val message = e.message.orEmpty()
-            return Outcome.Failed(if (message.startsWith("A wallet named ") || message.startsWith("This wallet is already imported as ")) message
+            return@owned Outcome.Failed(if (message.startsWith("A wallet named ") || message.startsWith("This wallet is already imported as ")) message
                 else "Could not import this wallet. Check your recovery material and try again.")
         } finally { inputChars.fill('\u0000') }
     }

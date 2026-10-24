@@ -3,6 +3,8 @@ package com.rjnr.pocketnode.data.vault
 import androidx.room.withTransaction
 import com.rjnr.pocketnode.data.database.AppDatabase
 import com.rjnr.pocketnode.data.database.entity.KeyMaterialEntity
+import com.rjnr.pocketnode.data.database.entity.WalletEntity
+import com.rjnr.pocketnode.data.wallet.stableWalletIdentity
 import com.rjnr.pocketnode.data.database.entity.WalletPassphraseProfileEntity
 import com.rjnr.pocketnode.data.database.entity.WalletVaultEntity
 import com.rjnr.pocketnode.data.database.entity.WalletVaultLegacyEntity
@@ -94,6 +96,8 @@ class WalletVaultStore(
         envelope: WalletEnvelope,
         passphrase: CharArray,
         creation: com.rjnr.pocketnode.data.wallet.WalletRepository.Creation? = null,
+        expectedWallet: WalletEntity? = null,
+        resetProfile: WalletVaultSnapshot? = null,
     ) {
         // Snapshot before the first suspension, including arrays in metadata and the CAS token.
         val candidate = WalletEnvelopeCodec.encode(envelope)
@@ -109,6 +113,8 @@ class WalletVaultStore(
                 conflictUnless(dao.get(meta.walletId) == null)
                 val source = db.keyMaterialDao().getByWalletId(meta.walletId)
                 conflictUnless(if (expectedIv == null) source == null else source != null && source.iv.contentEquals(expectedIv))
+                if (creation == null) conflictUnless(
+                    db.walletDao().getById(meta.walletId)?.let(::stableWalletIdentity) == expectedWallet?.let(::stableWalletIdentity))
                 if (creation != null) {
                     conflictUnless(creation.walletId == meta.walletId && expectedIv == null && source == null &&
                         db.walletDao().getById(meta.walletId) == null && dao.legacy(meta.walletId) == null)
@@ -116,20 +122,28 @@ class WalletVaultStore(
                     // This context names a newly generated namespace, never a historical recovery target.
                     db.walletDao().insert(creation.wallet)
                 }
-                source?.let { requireEnvelope(it.kdfVersion == 1 || it.kdfVersion == 2) }
+                source?.let {
+                    conflictUnless(it == meta)
+                    requireEnvelope(it.kdfVersion in 1..2 || it.kdfVersion == 3 && it.encryptedPrivateKey.isEmpty() &&
+                        it.encryptedMnemonic == null && it.iv.isEmpty())
+                }
                 requireEnvelope(db.walletDao().getById(PROFILE_ID) == null &&
                     db.keyMaterialDao().getByWalletId(PROFILE_ID) == null)
                 val existingProfile = profile()
                 val active = dao.all().also { rows -> rows.forEach(::decode) }
                 // A missing profile with active envelopes is corruption, not an invitation to enroll.
                 requireEnvelope(existingProfile != null || active.isEmpty())
-                val nextProfile = existingProfile ?: crypto.create(PROFILE_ID, 0, CONFIRMATION, owned)
+                if (resetProfile != null) checkSnapshot(resetProfile)
+                val nextProfile = if (resetProfile != null) crypto.create(PROFILE_ID,
+                    increment(existingProfile?.generation ?: throw WalletVaultConflictException()), CONFIRMATION, owned)
+                    else existingProfile ?: crypto.create(PROFILE_ID, 0, CONFIRMATION, owned)
                 verifyProfile(nextProfile, owned)
-                source?.let {
+                source?.takeIf { it.kdfVersion in 1..2 }?.let {
                     dao.archive(WalletVaultLegacyEntity(it.walletId, it.encryptedPrivateKey,
                         it.encryptedMnemonic, it.iv, it.walletType, it.mnemonicBackedUp, it.updatedAt, it.kdfVersion))
                 }
                 if (existingProfile == null) dao.insertProfile(WalletPassphraseProfileEntity(envelope = WalletEnvelopeCodec.encode(nextProfile)))
+                else if (resetProfile != null) conflictUnless(dao.updateProfile(WalletPassphraseProfileEntity(envelope = WalletEnvelopeCodec.encode(nextProfile))) == 1)
                 dao.insert(WalletVaultEntity(value.walletId, value.generation, nextProfile.generation, candidate, creation == null))
                 // Marker has no legacy-decryptable material. Preserve externally visible backup flags.
                 db.keyMaterialDao().upsert((source ?: meta).copy(encryptedPrivateKey = byteArrayOf(),
@@ -192,12 +206,14 @@ class WalletVaultStore(
         expectedGeneration: Long,
         replacement: WalletEnvelope,
         currentPassphrase: CharArray,
+        expectedWallet: WalletEntity? = null,
     ) {
         val candidate = WalletEnvelopeCodec.encode(replacement)
         val owned = currentPassphrase.copyOf()
         try {
             boundary {
                 walletIdentity(walletId)
+                conflictUnless(db.walletDao().getById(walletId)?.let(::stableWalletIdentity) == expectedWallet?.let(::stableWalletIdentity))
                 val currentProfile = profile() ?: throw WalletEnvelopeFormatException()
                 verifyProfile(currentProfile, owned)
                 val row = dao.get(walletId) ?: throw WalletVaultConflictException()
@@ -248,6 +264,7 @@ class WalletVaultStore(
         expected: WalletVaultSnapshot,
         replacements: List<WalletEnvelope>,
         newPassphrase: CharArray,
+        expectedWallets: Map<String, WalletEntity> = emptyMap(),
     ) {
         val staged = replacements.map(WalletEnvelopeCodec::encode)
         val next = newPassphrase.copyOf()
@@ -264,6 +281,8 @@ class WalletVaultStore(
                 val profileGeneration = increment(currentProfile.generation)
                 for ((index, value) in candidates.withIndex()) {
                     walletIdentity(value.walletId)
+                    conflictUnless(db.walletDao().getById(value.walletId)?.let(::stableWalletIdentity) ==
+                        expectedWallets[value.walletId]?.let(::stableWalletIdentity))
                     val row = rows.singleOrNull { it.walletId == value.walletId } ?: throw WalletVaultConflictException()
                     requireEnvelope(value.generation > row.generation)
                     conflictUnless(dao.update(row.copy(generation = value.generation, profileGeneration = profileGeneration,
@@ -275,6 +294,14 @@ class WalletVaultStore(
                 verifyProfile(profile() ?: throw WalletEnvelopeFormatException(), next)
             }
         } finally { next.fill('\u0000') }
+    }
+
+    private suspend fun checkSnapshot(expected: WalletVaultSnapshot) {
+        val current = profile() ?: throw WalletVaultConflictException()
+        conflictUnless(same(expected.profile, current))
+        val prior = expected.envelopes.associateBy { it.walletId }
+        val rows = dao.all()
+        conflictUnless(prior.size == rows.size && rows.all { same(prior[it.walletId], decode(it)) })
     }
 
     private suspend fun snapshotInTransaction(): WalletVaultSnapshot {

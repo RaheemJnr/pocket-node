@@ -327,11 +327,11 @@ class DaoViewModel @Inject constructor(
         promptTitle: String,
         promptSubtitle: String,
         crossinline operation: suspend (ByteArray) -> Result<String>,
-    ) {
+    ) = com.rjnr.pocketnode.data.vault.VaultOperationSession.run(activity) owned@ {
         val walletId = walletRepository.activeWalletIdSnapshot()
         if (walletId.isNullOrEmpty()) {
             _uiState.update { it.copy(error = com.rjnr.pocketnode.ui.util.UiMessage.Resource(com.rjnr.pocketnode.R.string.vm_error_no_active_wallet), pendingAction = clearedIfCurrent(pendingAction)) }
-            return
+            return@owned
         }
         _uiState.update {
             it.copy(requiresAuth = false, authMethod = null, pendingAction = pendingAction)
@@ -360,9 +360,13 @@ class DaoViewModel @Inject constructor(
                     )
                 }
             is WalletKeyReader.Result.Success ->
-                operation(read.privateKey).onFailure { e ->
+                try { operation(read.privateKey).onFailure { e ->
+                    if (e is kotlinx.coroutines.CancellationException) throw e
                     _uiState.update { it.copy(error = e.message?.let(com.rjnr.pocketnode.ui.util.UiMessage::Raw), pendingAction = clearedIfCurrent(pendingAction)) }
-                }
+                } } catch (cancelled: kotlinx.coroutines.CancellationException) {
+                    _uiState.update { it.copy(pendingAction = clearedIfCurrent(pendingAction)) }
+                    throw cancelled
+                } finally { read.privateKey.fill(0) }
         }
     }
 

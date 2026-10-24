@@ -63,10 +63,10 @@ class RestoreHintExporter @Inject constructor(
         activity: FragmentActivity,
         network: NetworkType,
         nowMs: Long = System.currentTimeMillis(),
-    ): ExportResult {
-        val active = walletDao.getActive() ?: return ExportResult.Failed("No active wallet")
+    ): ExportResult = com.rjnr.pocketnode.data.vault.VaultOperationSession.run(activity) owned@ {
+        val active = walletDao.getActive() ?: return@owned ExportResult.Failed("No active wallet")
         val root = active.parentWalletId?.let { walletDao.getById(it) } ?: active
-        val tip = readTip() ?: return ExportResult.NoTip
+        val tip = readTip() ?: return@owned ExportResult.NoTip
 
         val material = try {
             walletKeyReader.readKeyMaterial(
@@ -79,24 +79,24 @@ class RestoreHintExporter @Inject constructor(
             throw e
         } catch (e: Exception) {
             logger.e(TAG, "Restore hint key read failed", e)
-            return ExportResult.Failed("key read threw ${e::class.simpleName}")
+            return@owned ExportResult.Failed("key read threw ${e::class.simpleName}")
         }
         val secret = when (material) {
             is WalletKeyReader.MaterialResult.Success -> try {
                 if (walletDao.getActive() != active || walletDao.getById(root.walletId) != root) {
-                    return ExportResult.Failed("Active wallet changed. Try again.")
+                    return@owned ExportResult.Failed("Active wallet changed. Try again.")
                 }
-                secretFor(root, material) ?: return ExportResult.Failed("recovery phrase unavailable")
+                secretFor(root, material) ?: return@owned ExportResult.Failed("recovery phrase unavailable")
             } finally {
                 material.privateKey.fill(0)
             }
-            is WalletKeyReader.MaterialResult.Cancelled -> return ExportResult.Cancelled
-            is WalletKeyReader.MaterialResult.KeyInvalidated -> return ExportResult.KeyInvalidated
-            is WalletKeyReader.MaterialResult.AuthError -> return ExportResult.Failed("auth error ${material.errorCode}")
-            is WalletKeyReader.MaterialResult.NotAvailable -> return ExportResult.Failed(material.reason)
+            is WalletKeyReader.MaterialResult.Cancelled -> return@owned ExportResult.Cancelled
+            is WalletKeyReader.MaterialResult.KeyInvalidated -> return@owned ExportResult.KeyInvalidated
+            is WalletKeyReader.MaterialResult.AuthError -> return@owned ExportResult.Failed("auth error ${material.errorCode}")
+            is WalletKeyReader.MaterialResult.NotAvailable -> return@owned ExportResult.Failed(material.reason)
         }
 
-        return try {
+        return@owned try {
             val payload = buildPayload(root, network, tip.first, tip.second, nowMs)
             ExportResult.Ready(RestoreHintFormat.fileName(network.name), RestoreHintCodec.seal(payload, secret))
         } catch (e: CancellationException) {

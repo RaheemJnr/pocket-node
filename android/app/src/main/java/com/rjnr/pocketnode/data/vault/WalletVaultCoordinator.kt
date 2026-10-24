@@ -39,7 +39,7 @@ class WalletVaultCoordinator(
             try {
                 checkPhrase(current)
                 val replacement = create(walletId, nextGeneration(envelope), material, current)
-                store.replaceAuthenticatedWallet(walletId, envelope.generation, replacement, current)
+                store.replaceAuthenticatedWallet(walletId, envelope.generation, replacement, current, backupWallet)
                 envelope = store.get(walletId) ?: throw VaultFailure()
             } finally { current.fill('\u0000') }
         }
@@ -118,7 +118,18 @@ class WalletVaultCoordinator(
         val source = db.keyMaterialDao().getByWalletId(id)
         if (mode == Enrollment.LEGACY && (source == null || source.kdfVersion !in 1..2 || expectedLegacyIv == null || !source.iv.contentEquals(expectedLegacyIv))) throw VaultFailure()
         if (mode == Enrollment.NEW && source != null) throw VaultFailure()
-        val phrase = credential(activity, !store.hasProfile()) ?: return@access VaultAccessResult.Cancelled
+        val hasProfile = store.hasProfile()
+        val reset = if (mode == Enrollment.RECOVERY && hasProfile) {
+            val snapshot = store.snapshot()
+            when (prompt.choose(activity, "Reset wallet passphrase?",
+                "Use the current wallet passphrase, or explicitly set a new one for this verified recovery. Other wallets keep their old protection and will require their old passphrase or separate recovery. Retained legacy copies still require authentication before cleanup.",
+                "Reset passphrase", "Use current passphrase")) {
+                true -> snapshot
+                false -> null
+                null -> return@access VaultAccessResult.Cancelled
+            }
+        } else null
+        val phrase = credential(activity, !hasProfile || reset != null) ?: return@access VaultAccessResult.Cancelled
         try {
             checkPhrase(phrase)
             val protectedMaterial = preserveAccessibleMnemonic(old, material, wallet, phrase)
@@ -128,9 +139,11 @@ class WalletVaultCoordinator(
             if (old == null) {
                 val metadata = source ?: KeyMaterialEntity(id, byteArrayOf(), null, byteArrayOf(), creation?.wallet?.type ?: material.walletType,
                     material.mnemonicBackedUp, System.currentTimeMillis())
-                store.activate(metadata, if (mode == Enrollment.LEGACY) expectedLegacyIv else source?.iv, candidate, phrase, creation)
+                store.activate(metadata, if (mode == Enrollment.LEGACY) expectedLegacyIv else source?.iv, candidate, phrase, creation, wallet, reset)
+            } else if (reset != null) {
+                store.replaceAfterAuthenticatedReset(reset, listOf(candidate), phrase, mapOf(id to (wallet ?: throw VaultFailure())))
             } else {
-                store.replaceAuthenticatedWallet(id, old.generation, candidate, phrase)
+                store.replaceAuthenticatedWallet(id, old.generation, candidate, phrase, wallet)
             }
             val committed = store.get(id) ?: throw VaultFailure()
             // Verify persisted material rather than the candidate held in memory.
@@ -207,6 +220,7 @@ class WalletVaultCoordinator(
     suspend fun resetPassphrase(activity: FragmentActivity, promptMode: VaultDevicePromptMode? = null): VaultMaintenanceResult = maintenance(activity) { session ->
         val snapshot = store.snapshot()
         if (snapshot.profile == null) throw VaultFailure()
+        val wallets = snapshot.envelopes.associate { it.walletId to (db.walletDao().getById(it.walletId) ?: throw VaultFailure()) }
         if (prompt.choose(activity, "Reset forgotten wallet passphrase",
                 "Each wallet requires fresh device authentication. Inaccessible wallets keep their old protection and need their previous passphrase or recovery phrase/private key.",
                 "Continue", "Cancel") != true) return@maintenance VaultMaintenanceResult.Cancelled
@@ -221,7 +235,7 @@ class WalletVaultCoordinator(
                 }) { mode -> device.unwrap(activity, envelope, "Authenticate wallet", "Reset this wallet's passphrase", mode) }) {
                     is DeviceVaultResult.Success -> {
                         val material = decryptDevice(envelope, result.value)
-                        validateExisting(envelope.walletId, material)
+                        if (!validate(material, wallets.getValue(envelope.walletId))) throw VaultFailure()
                         replacements += create(envelope.walletId, nextGeneration(envelope), material, next)
                     }
                     DeviceVaultResult.Cancelled -> return@maintenance VaultMaintenanceResult.Cancelled
@@ -229,7 +243,7 @@ class WalletVaultCoordinator(
                 }
             }
             if (replacements.isEmpty()) throw VaultFailure()
-            store.replaceAfterAuthenticatedReset(snapshot, replacements, next)
+            store.replaceAfterAuthenticatedReset(snapshot, replacements, next, wallets)
             val completed = replacements.map { it.walletId }.toSet()
             val unrecovered = store.snapshot().unrecoveredWalletIds
             prompt.notify(activity, "Passphrase reset", "Updated ${completed.size} wallet(s). ${unrecovered.size} wallet(s) still require recovery.")

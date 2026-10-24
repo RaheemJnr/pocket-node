@@ -288,65 +288,68 @@ class WalletSettingsViewModel @Inject constructor(
     /** Uses only the authenticated parent seed and atomically binds the new child to that parent. */
     fun addSubAccount(activity: FragmentActivity, name: String) {
         viewModelScope.launch {
-            val expectedParent = walletRepository.getById(walletId) ?: return@launch
-            val lock = ReauthLockEvents.locks.value
-            when (val readResult = walletKeyReader.readKeyMaterial(
-                activity = activity,
-                walletId = walletId,
-                promptTitle = "Authenticate to add account",
-                promptSubtitle = "Verify your identity to derive a new sub-account",
-            )) {
-                is WalletKeyReader.MaterialResult.Cancelled,
-                is WalletKeyReader.MaterialResult.AuthError ->
-                    _uiState.update { it.copy(error = com.rjnr.pocketnode.ui.util.UiMessage.Resource(com.rjnr.pocketnode.R.string.vm_error_auth_cancelled)) }
-                is WalletKeyReader.MaterialResult.NotAvailable ->
-                    _uiState.update { it.copy(error = com.rjnr.pocketnode.ui.util.UiMessage.Resource(com.rjnr.pocketnode.R.string.vm_error_cannot_read_parent, listOf(readResult.reason))) }
-                is WalletKeyReader.MaterialResult.KeyInvalidated ->
-                    _uiState.update {
-                        it.copy(error = com.rjnr.pocketnode.ui.util.UiMessage.Resource(com.rjnr.pocketnode.R.string.vm_error_biometric_changed_parent))
-                    }
-                is WalletKeyReader.MaterialResult.Success -> {
-                    readResult.privateKey.fill(0)
-                    val words = readResult.mnemonic?.split(" ")
-                    if (words.isNullOrEmpty()) {
-                        _uiState.update { it.copy(error = com.rjnr.pocketnode.ui.util.UiMessage.Resource(com.rjnr.pocketnode.R.string.vm_error_parent_no_mnemonic)) }
-                        return@launch
-                    }
-                    if (walletRepository.getById(walletId) != expectedParent) return@launch
-                    com.rjnr.pocketnode.ui.security.WalletDerivationSession.run(activity, lock) { session ->
-                    // Distinct prompt copy for prompt #2 (sub-account encrypt)
-                    // so the user knows this is securing the NEW sub-account,
-                    // not re-confirming the parent unlock from prompt #1.
-                    val result = walletRepository.createSubAccount(walletId, name, parentMnemonic = words, expectedParent = expectedParent) { newWalletId, bundle ->
-                        session.persist {
-
-                            walletKeyWriter.persistCreatedWallet(
-                                activity = activity,
-                                walletId = newWalletId,
-                                bundle = bundle,
-                                walletType = KeyManager.WALLET_TYPE_MNEMONIC,
-                                mnemonicBackedUp = false,
-                                promptTitle = "Secure new sub-account",
-                                promptSubtitle = "Encrypt the new account's keys.",
-                            )
+            com.rjnr.pocketnode.data.vault.VaultOperationSession.run(activity) owned@ {
+                val expectedParent = walletRepository.getById(walletId) ?: return@owned
+                val lock = ReauthLockEvents.locks.value
+                when (val readResult = walletKeyReader.readKeyMaterial(
+                    activity = activity,
+                    walletId = walletId,
+                    promptTitle = "Authenticate to add account",
+                    promptSubtitle = "Verify your identity to derive a new sub-account",
+                )) {
+                    is WalletKeyReader.MaterialResult.Cancelled,
+                    is WalletKeyReader.MaterialResult.AuthError ->
+                        _uiState.update { it.copy(error = com.rjnr.pocketnode.ui.util.UiMessage.Resource(com.rjnr.pocketnode.R.string.vm_error_auth_cancelled)) }
+                    is WalletKeyReader.MaterialResult.NotAvailable ->
+                        _uiState.update { it.copy(error = com.rjnr.pocketnode.ui.util.UiMessage.Resource(com.rjnr.pocketnode.R.string.vm_error_cannot_read_parent, listOf(readResult.reason))) }
+                    is WalletKeyReader.MaterialResult.KeyInvalidated ->
+                        _uiState.update {
+                            it.copy(error = com.rjnr.pocketnode.ui.util.UiMessage.Resource(com.rjnr.pocketnode.R.string.vm_error_biometric_changed_parent))
                         }
-                    }
-                    result.onFailure { e ->
-                        // Cancelled at the persist prompt: silent. Other errors: surface.
-                        val isCancelled = e is WalletKeyWriter.PersistException
-                            && e.result is WalletKeyWriter.Result.Cancelled
-                        if (!isCancelled) {
-                            logger.e(TAG, "Failed to create V2 sub-account", e)
-                            _uiState.update {
-                                it.copy(error = com.rjnr.pocketnode.ui.util.UiMessage.Resource(
-                                    com.rjnr.pocketnode.R.string.vm_error_create_account_failed,
-                                    listOf(e.message ?: "")
-                                ))
+                    is WalletKeyReader.MaterialResult.Success -> {
+                        readResult.privateKey.fill(0)
+                        val words = readResult.mnemonic?.split(" ")
+                        if (words.isNullOrEmpty()) {
+                            _uiState.update { it.copy(error = com.rjnr.pocketnode.ui.util.UiMessage.Resource(com.rjnr.pocketnode.R.string.vm_error_parent_no_mnemonic)) }
+                            return@owned
+                        }
+                        if (walletRepository.getById(walletId) != expectedParent) return@owned
+                        com.rjnr.pocketnode.ui.security.WalletDerivationSession.run(activity, lock) { session ->
+                        // Distinct prompt copy for prompt #2 (sub-account encrypt)
+                        // so the user knows this is securing the NEW sub-account,
+                        // not re-confirming the parent unlock from prompt #1.
+                        val result = walletRepository.createSubAccount(walletId, name, parentMnemonic = words, expectedParent = expectedParent) { newWalletId, bundle ->
+                            session.persist {
+
+                                walletKeyWriter.persistCreatedWallet(
+                                    activity = activity,
+                                    walletId = newWalletId,
+                                    bundle = bundle,
+                                    walletType = KeyManager.WALLET_TYPE_MNEMONIC,
+                                    mnemonicBackedUp = false,
+                                    promptTitle = "Secure new sub-account",
+                                    promptSubtitle = "Encrypt the new account's keys.",
+                                )
                             }
                         }
-                    }
+                        result.onFailure { e ->
+                            // Cancelled at the persist prompt: silent. Other errors: surface.
+                            val isCancelled = e is WalletKeyWriter.PersistException
+                                && e.result is WalletKeyWriter.Result.Cancelled
+                            if (!isCancelled) {
+                                logger.e(TAG, "Failed to create V2 sub-account", e)
+                                _uiState.update {
+                                    it.copy(error = com.rjnr.pocketnode.ui.util.UiMessage.Resource(
+                                        com.rjnr.pocketnode.R.string.vm_error_create_account_failed,
+                                        listOf(e.message ?: "")
+                                    ))
+                                }
+                            }
+                        }
+                        }
                     }
                 }
+
             }
         }
     }

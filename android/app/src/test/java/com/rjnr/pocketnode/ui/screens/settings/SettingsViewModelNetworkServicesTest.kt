@@ -140,7 +140,7 @@ class SettingsViewModelNetworkServicesTest {
         }
         val vm = SettingsViewModel(repository, walletPrefs, mockk(relaxed = true), walletRepository,
             noUpdateAvailableRepository(), authorizer, keys, mockk(relaxed = true))
-        runCurrent(); vm.runGapLimitScan(mockk()); runCurrent()
+        runCurrent(); vm.runGapLimitScan(com.rjnr.pocketnode.data.wallet.ForegroundTestHost().activity); runCurrent()
         assertTrue(vm.uiState.value.error.toString().contains("wallet changed", ignoreCase = true))
     }
 
@@ -154,7 +154,7 @@ class SettingsViewModelNetworkServicesTest {
         val vm = SettingsViewModel(repository, walletPrefs, mockk(relaxed = true), walletRepository,
             noUpdateAvailableRepository(), authorizer, keys, mockk(relaxed = true))
         runCurrent()
-        vm.runGapLimitScan(mockk())
+        vm.runGapLimitScan(com.rjnr.pocketnode.data.wallet.ForegroundTestHost().activity)
         runCurrent()
         assertTrue( vm.uiState.value.error.toString().contains("Recovery phrase unavailable"))
     }
@@ -260,4 +260,22 @@ class SettingsViewModelNetworkServicesTest {
 
         assertEquals(SettingsViewModel.UpdateStatus.Disabled, viewModel.uiState.value.updateStatus)
     }
+    @Test fun `scan suspended after authentication cancels on stop resume before deriving`() = runTest(testDispatcher) {
+        val host = com.rjnr.pocketnode.data.wallet.ForegroundTestHost()
+        val authorizer = mockk<SeedPhraseAuthorizer>()
+        every { walletRepository.activeWalletIdSnapshot() } returns "wallet"
+        coEvery { authorizer.authorize(any(), any(), any(), any()) } returns SeedPhraseAuthorizer.SeedResult.Words(listOf("abandon"))
+        var entered = false; var cancelled = false
+        coEvery { repository.runGapLimitScan(any()) } coAnswers {
+            entered = true
+            try { kotlinx.coroutines.awaitCancellation() } finally { cancelled = true }
+        }
+        val vm = SettingsViewModel(repository, walletPrefs, mockk(relaxed = true), walletRepository,
+            noUpdateAvailableRepository(), authorizer, mockk(relaxed = true), mockk(relaxed = true))
+        runCurrent(); vm.runGapLimitScan(host.activity); runCurrent(); assertTrue(entered)
+        host.stopResume(); runCurrent()
+        try { assertTrue(cancelled) }
+        finally { androidx.lifecycle.ViewModelStore().apply { put("test", vm); clear() } }
+    }
+
 }

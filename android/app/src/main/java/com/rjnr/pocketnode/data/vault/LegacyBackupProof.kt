@@ -18,6 +18,7 @@ class LegacyBackupProof internal constructor(
     internal class Copy(val fingerprint: String, val material: KeyMaterial)
     internal var authenticatedSources: Map<KeyMaterialEntity, KeyMaterial> = emptyMap()
     internal var acknowledgedInaccessibleSources: Set<LegacySourceAcknowledgment> = emptySet()
+    internal var preferenceSources: Map<String, List<String?>> = emptyMap()
     internal var active = true
         private set
     override fun close() { active = false; copies = emptyMap(); authenticatedSources = emptyMap(); acknowledgedInaccessibleSources = emptySet() }

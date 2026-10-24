@@ -391,85 +391,88 @@ class AddWalletViewModel @Inject constructor(
         }
 
         viewModelScope.launch {
-            _uiState.update { it.copy(isLoading = true, error = null) }
-            try {
-                val expectedParent = walletRepository.getById(parentId) ?: return@launch
-                val lock = ReauthLockEvents.locks.value
+            com.rjnr.pocketnode.data.vault.VaultOperationSession.run(activity) owned@ {
+                _uiState.update { it.copy(isLoading = true, error = null) }
+                try {
+                    val expectedParent = walletRepository.getById(parentId) ?: return@owned
+                    val lock = ReauthLockEvents.locks.value
 
-                // Prompt #1: read parent's mnemonic.
-                val readResult = walletKeyReader.readKeyMaterial(
-                    activity = activity,
-                    walletId = parentId,
-                    promptTitle = "Unlock parent wallet",
-                    promptSubtitle = "Authentication required to derive a sub-account.",
-                )
-                val parentMnemonic = when (readResult) {
-                    is WalletKeyReader.MaterialResult.Success -> {
-                        readResult.privateKey.fill(0)
-                        val words = readResult.mnemonic?.split(" ")
-                        if (words.isNullOrEmpty()) {
-                            _uiState.update {
-                                it.copy(isLoading = false, error = UiMessage.Resource(R.string.vm_error_parent_no_mnemonic))
-                            }
-                            return@launch
-                        }
-                        words
-                    }
-                    is WalletKeyReader.MaterialResult.Cancelled -> {
-                        // Silent: user dismissed prompt intentionally.
-                        _uiState.update { it.copy(isLoading = false) }
-                        return@launch
-                    }
-                    is WalletKeyReader.MaterialResult.AuthError -> {
-                        _uiState.update {
-                            it.copy(isLoading = false, error = UiMessage.Raw("Auth error: ${readResult.message}"))
-                        }
-                        return@launch
-                    }
-                    is WalletKeyReader.MaterialResult.KeyInvalidated -> {
-                        _uiState.update {
-                            it.copy(isLoading = false, error = UiMessage.Resource(R.string.vm_error_biometric_changed_parent))
-                        }
-                        return@launch
-                    }
-                    is WalletKeyReader.MaterialResult.NotAvailable -> {
-                        _uiState.update {
-                            it.copy(
-                                isLoading = false,
-                                error = UiMessage.Resource(R.string.vm_error_cannot_read_parent, listOf(readResult.reason)),
-                            )
-                        }
-                        return@launch
-                    }
-                }
-
-                if (_uiState.value.selectedParentId != parentId || walletRepository.getById(parentId) != expectedParent) return@launch
-                com.rjnr.pocketnode.ui.security.WalletDerivationSession.run(activity, lock) { session ->
-                // Persist only against the parent authenticated above.
-                // Distinct title/subtitle from prompt #1 so the user understands
-                // they're securing the NEW sub-account, not re-confirming the parent.
-                val result = walletRepository.createSubAccount(parentId, name, parentMnemonic, expectedParent = expectedParent) { walletId, bundle ->
-                    session.persist {
-                    persistWalletKeys(
+                    // Prompt #1: read parent's mnemonic.
+                    val readResult = walletKeyReader.readKeyMaterial(
                         activity = activity,
-                        walletId = walletId,
-                        bundle = bundle,
-                        walletType = KeyManager.WALLET_TYPE_MNEMONIC,
-                        mnemonicBackedUp = false,
-                        promptTitle = "Secure new sub-account",
-                        promptSubtitle = "Protect the new account with your independent wallet passphrase.",
+                        walletId = parentId,
+                        promptTitle = "Unlock parent wallet",
+                        promptSubtitle = "Authentication required to derive a sub-account.",
                     )
+                    val parentMnemonic = when (readResult) {
+                        is WalletKeyReader.MaterialResult.Success -> {
+                            readResult.privateKey.fill(0)
+                            val words = readResult.mnemonic?.split(" ")
+                            if (words.isNullOrEmpty()) {
+                                _uiState.update {
+                                    it.copy(isLoading = false, error = UiMessage.Resource(R.string.vm_error_parent_no_mnemonic))
+                                }
+                                return@owned
+                            }
+                            words
+                        }
+                        is WalletKeyReader.MaterialResult.Cancelled -> {
+                            // Silent: user dismissed prompt intentionally.
+                            _uiState.update { it.copy(isLoading = false) }
+                            return@owned
+                        }
+                        is WalletKeyReader.MaterialResult.AuthError -> {
+                            _uiState.update {
+                                it.copy(isLoading = false, error = UiMessage.Raw("Auth error: ${readResult.message}"))
+                            }
+                            return@owned
+                        }
+                        is WalletKeyReader.MaterialResult.KeyInvalidated -> {
+                            _uiState.update {
+                                it.copy(isLoading = false, error = UiMessage.Resource(R.string.vm_error_biometric_changed_parent))
+                            }
+                            return@owned
+                        }
+                        is WalletKeyReader.MaterialResult.NotAvailable -> {
+                            _uiState.update {
+                                it.copy(
+                                    isLoading = false,
+                                    error = UiMessage.Resource(R.string.vm_error_cannot_read_parent, listOf(readResult.reason)),
+                                )
+                            }
+                            return@owned
+                        }
                     }
-                }
-                result.onSuccess { wallet ->
-                    gatewayRepository.onActiveWalletChanged(wallet)
-                    _uiState.update { it.copy(isLoading = false, createdWallet = wallet) }
-                }.onFailure { error ->
-                    logger.e(TAG, "Sub-account creation failed", error)
-                    _uiState.update { it.copy(isLoading = false, error = persistErrorMessage(error)) }
-                }
-                }
-            } finally { _uiState.update { it.copy(isLoading = false) } }
+
+                    if (_uiState.value.selectedParentId != parentId || walletRepository.getById(parentId) != expectedParent) return@owned
+                    com.rjnr.pocketnode.ui.security.WalletDerivationSession.run(activity, lock) { session ->
+                    // Persist only against the parent authenticated above.
+                    // Distinct title/subtitle from prompt #1 so the user understands
+                    // they're securing the NEW sub-account, not re-confirming the parent.
+                    val result = walletRepository.createSubAccount(parentId, name, parentMnemonic, expectedParent = expectedParent) { walletId, bundle ->
+                        session.persist {
+                        persistWalletKeys(
+                            activity = activity,
+                            walletId = walletId,
+                            bundle = bundle,
+                            walletType = KeyManager.WALLET_TYPE_MNEMONIC,
+                            mnemonicBackedUp = false,
+                            promptTitle = "Secure new sub-account",
+                            promptSubtitle = "Protect the new account with your independent wallet passphrase.",
+                        )
+                        }
+                    }
+                    result.onSuccess { wallet ->
+                        gatewayRepository.onActiveWalletChanged(wallet)
+                        _uiState.update { it.copy(isLoading = false, createdWallet = wallet) }
+                    }.onFailure { error ->
+                        logger.e(TAG, "Sub-account creation failed", error)
+                        _uiState.update { it.copy(isLoading = false, error = persistErrorMessage(error)) }
+                    }
+                    }
+                } finally { _uiState.update { it.copy(isLoading = false) } }
+
+            }
         }
     }
 
@@ -491,27 +494,36 @@ class AddWalletViewModel @Inject constructor(
         // strategy. Users can create as many wallets as they want; only the
         // first N stay actively synced when ALL_WALLETS is selected.
         viewModelScope.launch {
-            _uiState.update { it.copy(isLoading = true, error = null) }
-            val result = walletRepository.createWallet(
-                name = name,
-                persistKeys = { walletId, bundle ->
-                    persistWalletKeys(
-                        activity = activity,
-                        walletId = walletId,
-                        bundle = bundle,
-                        walletType = KeyManager.WALLET_TYPE_MNEMONIC,
-                        mnemonicBackedUp = false,
+            try {
+                com.rjnr.pocketnode.data.vault.VaultOperationSession.run(activity) owned@ {
+                    _uiState.update { it.copy(isLoading = true, error = null) }
+                    val result = walletRepository.createWallet(
+                        name = name,
+                        persistKeys = { walletId, bundle ->
+                            persistWalletKeys(
+                                activity = activity,
+                                walletId = walletId,
+                                bundle = bundle,
+                                walletType = KeyManager.WALLET_TYPE_MNEMONIC,
+                                mnemonicBackedUp = false,
+                            )
+                        },
                     )
-                },
-            )
-            result.onSuccess { wallet ->
-                gatewayRepository.onActiveWalletChanged(wallet)
-                _uiState.update {
-                    it.copy(isLoading = false, createdWallet = wallet, isNewlyGenerated = true)
+                    result.onSuccess { wallet ->
+                        gatewayRepository.onActiveWalletChanged(wallet)
+                        _uiState.update {
+                            it.copy(isLoading = false, createdWallet = wallet, isNewlyGenerated = true)
+                        }
+                    }.onFailure { error ->
+                        logger.e(TAG, "Wallet creation failed", error)
+                        _uiState.update { it.copy(isLoading = false, error = persistErrorMessage(error)) }
+                    }
+
                 }
-            }.onFailure { error ->
-                logger.e(TAG, "Wallet creation failed", error)
-                _uiState.update { it.copy(isLoading = false, error = persistErrorMessage(error)) }
+
+            } catch (cancelled: kotlinx.coroutines.CancellationException) {
+                _uiState.update { it.copy(isLoading = false) }
+                throw cancelled
             }
         }
     }

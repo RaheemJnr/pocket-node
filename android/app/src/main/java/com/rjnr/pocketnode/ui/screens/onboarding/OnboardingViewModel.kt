@@ -51,30 +51,39 @@ class OnboardingViewModel @Inject constructor(
         if (_uiState.value.isLoading) return
         val trimmed = name.trim().ifBlank { "My Wallet" }
         viewModelScope.launch {
-            _uiState.update { it.copy(isLoading = true, error = null) }
-            val result = walletRepository.createWallet(
-                name = trimmed,
-                persistKeys = { walletId, bundle ->
+            try {
+                com.rjnr.pocketnode.data.vault.VaultOperationSession.run(activity) owned@ {
+                    _uiState.update { it.copy(isLoading = true, error = null) }
+                    val result = walletRepository.createWallet(
+                        name = trimmed,
+                        persistKeys = { walletId, bundle ->
 
-                        walletKeyWriter.persistCreatedWallet(
-                            activity = activity,
-                            walletId = walletId,
-                            bundle = bundle,
-                            walletType = KeyManager.WALLET_TYPE_MNEMONIC,
-                            mnemonicBackedUp = false,
-                        )
+                                walletKeyWriter.persistCreatedWallet(
+                                    activity = activity,
+                                    walletId = walletId,
+                                    bundle = bundle,
+                                    walletType = KeyManager.WALLET_TYPE_MNEMONIC,
+                                    mnemonicBackedUp = false,
+                                )
 
-                },
-            )
-            result.onSuccess { entity ->
-                logger.d(TAG, "Created wallet entity: ${entity.walletId}")
-                repository.onActiveWalletChanged(entity)
-                _uiState.update { it.copy(isLoading = false, isWalletCreated = true) }
-            }.onFailure { error ->
-                logger.e(TAG, "Wallet creation failed", error)
-                _uiState.update {
-                    it.copy(isLoading = false, error = persistErrorMessage(error))
+                        },
+                    )
+                    result.onSuccess { entity ->
+                        logger.d(TAG, "Created wallet entity: ${entity.walletId}")
+                        repository.onActiveWalletChanged(entity)
+                        _uiState.update { it.copy(isLoading = false, isWalletCreated = true) }
+                    }.onFailure { error ->
+                        logger.e(TAG, "Wallet creation failed", error)
+                        _uiState.update {
+                            it.copy(isLoading = false, error = persistErrorMessage(error))
+                        }
+                    }
+
                 }
+
+            } catch (cancelled: kotlinx.coroutines.CancellationException) {
+                _uiState.update { it.copy(isLoading = false) }
+                throw cancelled
             }
         }
     }

@@ -115,8 +115,13 @@ class UpgradeSmokeTest {
 
         // Pre-#578 uses Compose clipboard fields. Newer builds open a secure
         // native dialog only after Import; choose by the visible legacy control.
-        if (device.hasObject(By.text("Paste from Clipboard").pkg(PKG)) ||
-            device.hasObject(By.res("import-paste"))) {
+        val importRoute = ImportRouteSelector.await(ONBOARDING_TIMEOUT_MS,
+            now = { android.os.SystemClock.elapsedRealtime() },
+            pause = { android.os.SystemClock.sleep(it) },
+            legacyVisible = { device.hasObject(By.text("Paste from Clipboard").pkg(PKG)) || device.hasObject(By.res("import-paste")) },
+            nativeVisible = { device.hasObject(By.text("Your independent wallet passphrase protects this wallet. Device authentication is optional.").pkg(PKG)) })
+        assertNotNull("Import screen did not finish navigation", importRoute)
+        if (importRoute == ImportRouteSelector.Route.LEGACY) {
             assertTrue("Import paste button not found",
                 clickButton("import-paste", "Paste from Clipboard", ONBOARDING_TIMEOUT_MS))
             device.waitForIdle(1_500L)

@@ -81,6 +81,10 @@ android {
 
     }
 
+    // Pure upgrade-route polling is exercised by host tests and the device harness.
+    sourceSets.getByName("test").java.srcDir("src/upgradeTestShared/java")
+    sourceSets.getByName("androidTest").java.srcDir("src/upgradeTestShared/java")
+
     testOptions {
         unitTests.all { test ->
             // MockK uses ByteBuddy. On JDK 21+ self-attach is restricted (JEP 451)

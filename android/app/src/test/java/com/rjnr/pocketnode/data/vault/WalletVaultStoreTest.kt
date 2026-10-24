@@ -262,15 +262,14 @@ class WalletVaultStoreTest {
         assertArrayEquals(material, crypto.decrypt(store.get("c")!!, "c", pass))
     }
 
-    @Test fun `activation preserves source flags changed since caller read the metadata`() = runBlocking {
+    @Test fun `activation rejects source flags changed since caller captured metadata`() = runBlocking {
         val stale = metadata("a").copy(mnemonicBackedUp = false, updatedAt = 1)
         val current = metadata("a")
         db.keyMaterialDao().upsert(current)
-        store.activate(stale, stale.iv, envelope("a"), pass)
-        val marker = db.keyMaterialDao().getByWalletId("a")!!
-        assertTrue(marker.mnemonicBackedUp)
-        assertEquals(123L, marker.updatedAt)
-        assertEquals(current, db.walletVaultDao().legacy("a")!!.source())
+        rejects { store.activate(stale, stale.iv, envelope("a"), pass) }
+        assertEquals(current, db.keyMaterialDao().getByWalletId("a"))
+        assertNull(store.get("a")); assertNull(db.walletVaultDao().legacy("a"))
+        assertFalse(store.hasProfile())
     }
 
     @Test fun `cancellation while staging rotation leaves the entire prior generation usable`() = runBlocking {

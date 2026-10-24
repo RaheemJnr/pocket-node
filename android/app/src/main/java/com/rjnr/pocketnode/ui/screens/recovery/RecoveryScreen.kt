@@ -36,7 +36,7 @@ fun RecoveryScreen(onRecoveryComplete: () -> Unit, onContinueReadOnly: () -> Uni
                 if (wallet.hasBackup) OutlinedButton(onClick = { viewModel.restoreBackup(activity, wallet.walletId) }) { Text("Authenticate old backup PIN") }
                 if (wallet.cleanupPending) {
                     Text("Legacy cleanup is pending. Every retained backup must authenticate; copies made with different old PINs may remain unresolved. Recovery data stays preserved.")
-                    if (!wallet.hasBackup && wallet.hasV2Archive) OutlinedButton(onClick = { viewModel.resumeCleanup(activity, wallet.walletId) }) { Text("Resume legacy cleanup") }
+                    if (!wallet.hasBackup && wallet.hasLegacyArchive) OutlinedButton(onClick = { viewModel.resumeCleanup(activity, wallet.walletId) }) { Text("Resume legacy cleanup") }
                 }
                 OutlinedButton(onClick = { viewModel.unlock(activity, wallet.walletId, VaultReadPreference.PASSPHRASE) }) { Text("Use wallet passphrase") }
                 OutlinedButton(onClick = { viewModel.unlock(activity, wallet.walletId, VaultReadPreference.DEFAULT) }) { Text("Use device authentication") }

@@ -192,6 +192,8 @@ class SendPipeline(
         signer: Signer,
         /** Fee the user confirmed on the review sheet; the send aborts if the build no longer matches it (#490). */
         expectedFeeShannons: Long? = null,
+        /** Synchronous last-use notification; never retained. Borrowed signers are untouched by default. */
+        onSigned: () -> Unit = {},
     ): Result<String> = runCatching {
         buildReserveAndSend(ctx, fromAddress) { availableCells, net ->
             verifyExpectedFee(
@@ -206,7 +208,7 @@ class SendPipeline(
                 availableCells = availableCells,
                 signer = signer,
                 network = net
-            )
+            ).also { onSigned() }
         }
     }
 
@@ -439,6 +441,10 @@ class SendPipeline(
         // Bridge broadcast — outside the mutex (long-running, no need to serialize).
         val rawResult = try {
             lightClient.sendTransaction(txJson)
+        } catch (e: CancellationException) {
+            // The bridge may already have accepted the signed transaction. Preserve its exact
+            // pending bytes and reservations for reconciliation/retry; never claim it was unsent.
+            throw e
         } catch (e: Exception) {
             pendingBroadcasts.delete(txHash)
             transactions.deleteTransaction(txHash)

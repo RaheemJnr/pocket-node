@@ -266,20 +266,20 @@ class SendSweepWarningTest {
         assertTrue(vm.uiState.value.reviewRequest!!.isNearlyFullBalance)
         assertFalse(vm.uiState.value.sweepWarningAcknowledged)
 
-        vm.confirmSend(mockk<androidx.fragment.app.FragmentActivity>(relaxed = true))
+        vm.confirmSend(com.rjnr.pocketnode.data.wallet.ForegroundTestHost().activity)
         advanceUntilIdle()
 
         // Sheet still up, nothing signed or broadcast.
         assertNotNull(vm.uiState.value.reviewRequest)
-        coVerify(exactly = 0) { repository.prepareAndSend(any(), any(), any(), any(), any()) }
+        coVerify(exactly = 0) { repository.prepareAndSend(any(), any(), any(), any(), any(), any()) }
 
         vm.setSweepWarningAcknowledged(true)
-        vm.confirmSend(mockk<androidx.fragment.app.FragmentActivity>(relaxed = true))
+        vm.confirmSend(com.rjnr.pocketnode.data.wallet.ForegroundTestHost().activity)
         advanceUntilIdle()
 
         assertNull(vm.uiState.value.reviewRequest)
         coVerify(exactly = 1) {
-            repository.prepareAndSend(senderAddress, recipient, amount, any(), plannedFee)
+            repository.prepareAndSend(senderAddress, recipient, amount, any(), plannedFee, any())
         }
     }
 
@@ -289,12 +289,12 @@ class SendSweepWarningTest {
         val vm = reviewFor(amount)
         assertFalse(vm.uiState.value.reviewRequest!!.isNearlyFullBalance)
 
-        vm.confirmSend(mockk<androidx.fragment.app.FragmentActivity>(relaxed = true))
+        vm.confirmSend(com.rjnr.pocketnode.data.wallet.ForegroundTestHost().activity)
         advanceUntilIdle()
 
         assertNull(vm.uiState.value.reviewRequest)
         coVerify(exactly = 1) {
-            repository.prepareAndSend(senderAddress, recipient, amount, any(), plannedFee)
+            repository.prepareAndSend(senderAddress, recipient, amount, any(), plannedFee, any())
         }
     }
 
@@ -312,9 +312,9 @@ class SendSweepWarningTest {
 
         assertTrue(vm.uiState.value.reviewRequest!!.isNearlyFullBalance)
         assertFalse("a new draft must be acknowledged again", vm.uiState.value.sweepWarningAcknowledged)
-        vm.confirmSend(mockk<androidx.fragment.app.FragmentActivity>(relaxed = true))
+        vm.confirmSend(com.rjnr.pocketnode.data.wallet.ForegroundTestHost().activity)
         advanceUntilIdle()
         assertNotNull(vm.uiState.value.reviewRequest)
-        coVerify(exactly = 0) { repository.prepareAndSend(any(), any(), any(), any(), any()) }
+        coVerify(exactly = 0) { repository.prepareAndSend(any(), any(), any(), any(), any(), any()) }
     }
 }

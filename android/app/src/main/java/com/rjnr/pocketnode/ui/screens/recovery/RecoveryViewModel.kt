@@ -17,7 +17,7 @@ import javax.inject.Inject
 enum class RecoveryStage { RESTORE_FAILED, RESTORING, SUCCESS }
 data class MissingWallet(
     val walletId: String, val name: String, val isRawKey: Boolean,
-    val hasBackup: Boolean = false, val cleanupPending: Boolean = false, val hasV2Archive: Boolean = false,
+    val hasBackup: Boolean = false, val cleanupPending: Boolean = false, val hasLegacyArchive: Boolean = false,
 )
 data class RecoveryUiState(
     val stage: RecoveryStage = RecoveryStage.RESTORE_FAILED,

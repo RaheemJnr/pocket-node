@@ -228,10 +228,10 @@ class HomeViewModelWalletChangeTest {
             com.rjnr.pocketnode.data.wallet.SeedPhraseAuthorizer.SeedResult.Failed("Protected seed required")
         val vm = newViewModel()
         scheduler.runCurrent()
-        vm.runGapLimitScan(mockk())
+        vm.runGapLimitScan(com.rjnr.pocketnode.data.wallet.ForegroundTestHost().activity)
         scheduler.runCurrent()
         assertTrue(vm.uiState.value.error.toString().contains("Protected seed required"))
-        vm.confirmGapLimitSweep(mockk())
+        vm.confirmGapLimitSweep(com.rjnr.pocketnode.data.wallet.ForegroundTestHost().activity)
         scheduler.runCurrent()
         assertTrue(vm.uiState.value.error.toString().contains("Protected seed required"))
         assertTrue(!vm.uiState.value.sweepInProgress)
@@ -244,7 +244,7 @@ class HomeViewModelWalletChangeTest {
             com.rjnr.pocketnode.data.wallet.SeedPhraseAuthorizer.SeedResult.Words(listOf("abandon"))
         }
         val vm = newViewModel(); scheduler.runCurrent()
-        vm.runGapLimitScan(mockk()); scheduler.runCurrent()
+        vm.runGapLimitScan(com.rjnr.pocketnode.data.wallet.ForegroundTestHost().activity); scheduler.runCurrent()
         assertTrue(vm.uiState.value.error.toString().contains("wallet changed", ignoreCase = true))
     }
 
@@ -305,4 +305,27 @@ class HomeViewModelWalletChangeTest {
         assertEquals(1, refreshes.get() - before)
         assertEquals(SyncMode.FULL_HISTORY, vm.uiState.value.currentSyncMode)
     }
+    @Test fun `scan and sweep suspended before derivation cancel and reset progress on stop resume`() {
+        gateway = io.mockk.spyk(gateway)
+        coEvery { seedAuthorizer.authorize(any(), "A", any(), any()) } returns
+            com.rjnr.pocketnode.data.wallet.SeedPhraseAuthorizer.SeedResult.Words(listOf("abandon"))
+        var entered = false; var cancelled = false
+        coEvery { gateway.runGapLimitScan(any<List<String>>()) } coAnswers {
+            entered = true; try { kotlinx.coroutines.awaitCancellation() } finally { cancelled = true }
+        }
+        coEvery { gateway.sweepGapLimitFunds(any<List<String>>()) } coAnswers {
+            entered = true; try { kotlinx.coroutines.awaitCancellation() } finally { cancelled = true }
+        }
+        for (sweep in listOf(false, true)) {
+            val host = com.rjnr.pocketnode.data.wallet.ForegroundTestHost()
+            val vm = newViewModel(); scheduler.runCurrent(); entered = false; cancelled = false
+            if (sweep) vm.confirmGapLimitSweep(host.activity) else vm.runGapLimitScan(host.activity)
+            scheduler.runCurrent(); assertTrue(entered); host.stopResume(); scheduler.runCurrent()
+            try {
+                assertTrue(cancelled)
+                assertTrue(!vm.uiState.value.sweepInProgress); assertTrue(!vm.uiState.value.gapLimitScanning)
+            } finally { androidx.lifecycle.ViewModelStore().apply { put("test", vm); clear() }; scheduler.runCurrent() }
+        }
+    }
+
 }

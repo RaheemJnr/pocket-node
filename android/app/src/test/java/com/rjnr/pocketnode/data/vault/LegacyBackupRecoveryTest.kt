@@ -413,4 +413,96 @@ class LegacyBackupRecoveryTest {
         }
     }
 
+    @Test fun `richer scoped XML seed survives raw backup or raw Room migration`() = walletOperationTest {
+        for (fromBackup in listOf(true, false)) WalletVaultIntegrationFixture().use { f ->
+            val id = if (fromBackup) "backupseed" else "roomseed"
+            val words = "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about"
+            val bytes = MnemonicManager().mnemonicToPrivateKey(words.split(" "))
+            val info = WalletDerivation.walletInfo(bytes)
+            val raw = f.material.copy(privateKey = bytes.joinToString("") { "%02x".format(it) })
+            bytes.fill(0)
+            f.db.walletDao().insert(com.rjnr.pocketnode.data.database.entity.WalletEntity(id, id, "mnemonic", "m/44'/309'/0'/0/0", null,
+                mainnetAddress = info.mainnetAddress, testnetAddress = info.testnetAddress))
+            val prefs = f.context.getSharedPreferences("ckb_wallet_keys_$id", 0)
+            prefs.edit().putString("private_key", raw.privateKey).putString("mnemonic_words", words).putBoolean("mnemonic_backed_up", true).commit()
+            f.keyManager.testWalletPrefs[id] = prefs
+            if (fromBackup) {
+                f.backup.writeBackup(id, raw, "111111".toCharArray()); f.phrase("111111"); f.phrase()
+            } else {
+                f.legacy.migrateWallet(id, raw.privateKey, null, "raw_key", false)
+                val source = f.db.keyMaterialDao().getByWalletId(id)!!
+                f.phrase()
+                assertEquals(VaultAccessResult.CleanupRequired, f.coordinator.protectLegacy(f.activity, id, raw, source.iv))
+                f.phrase()
+            }
+            val result = if (fromBackup) resolver(f).recover(f.activity, id) else resolver(f).resumeCleanup(f.activity, id)
+            assertTrue("richer readable XML must upgrade the replacement (backup=$fromBackup, result=${result::class.simpleName})", result is VaultAccessResult.Success)
+            assertEquals(words, (result as VaultAccessResult.Success).material.mnemonic)
+            f.phrase(); assertEquals(words, (f.coordinator.read(f.activity, id, "Read", "Read") as VaultAccessResult.Success).material.mnemonic)
+            assertFalse(java.io.File(f.context.filesDir.parentFile, "shared_prefs/ckb_wallet_keys_$id.xml").exists())
+        }
+    }
+    @Test fun `independent scoped XML and bak require matching identity and preserve richer seed`() = walletOperationTest {
+        WalletVaultIntegrationFixture().use { f ->
+            val id = "copies"
+            val prefs = f.context.getSharedPreferences("ckb_wallet_keys_$id", 0)
+            prefs.edit().putString("private_key", f.material.privateKey).commit()
+            f.keyManager.testWalletPrefs[id] = prefs
+            val xml = java.io.File(f.context.filesDir.parentFile, "shared_prefs/ckb_wallet_keys_$id.xml")
+            val bak = java.io.File(xml.path + ".bak")
+            val original = xml.readBytes()
+            bak.writeText("<map><string name=\"private_key\">${f.material.privateKey}</string><string name=\"mnemonic_words\">public richer seed</string></map>")
+            assertEquals("public richer seed", f.keyManager.preferencesForVaultCleanup(id)?.mnemonic)
+            assertArrayEquals(original, xml.readBytes())
+            val saved = bak.readBytes()
+            assertArrayEquals(saved, bak.readBytes())
+            bak.writeText("<map><string name=\"private_key\">different public key</string></map>")
+            assertNull(f.keyManager.preferencesForVaultCleanup(id))
+            assertArrayEquals(original, xml.readBytes()); assertTrue(bak.exists())
+            bak.writeText("unreadable independent copy")
+            assertNull(f.keyManager.preferencesForVaultCleanup(id))
+            assertEquals("unreadable independent copy", bak.readText())
+        }
+    }
+
+    @Test fun `independent scoped backup and changed XML are never deleted on backup proof`() = walletOperationTest {
+        for (extension in listOf(".xml", ".xml.bak")) WalletVaultIntegrationFixture().use { f ->
+            f.wallet(); val file = fixture(f, "a")
+            val source = java.io.File(f.context.filesDir.parentFile, "shared_prefs/ckb_wallet_keys_a$extension")
+            source.parentFile!!.mkdirs(); source.writeText("original unproven ciphertext")
+            f.onCredential = { source.writeText("changed independent ciphertext") }
+            f.phrase("111111"); f.phrase()
+            assertFalse(resolver(f).recover(f.activity, "a") is VaultAccessResult.Success)
+            assertEquals("changed independent ciphertext", source.readText()); assertTrue(file.exists())
+        }
+    }
+
+    @Test @Config(sdk = [30]) fun `nested captured V2 credential stop resume preserves seed for backup and archive only recovery`() = walletOperationTest {
+        for (archiveOnly in listOf(false, true)) WalletVaultIntegrationFixture().use { f ->
+            val id = if (archiveOnly) "archive" else "backup"
+            val seed = seedMaterial(); seedWallet(f, id, seed)
+            f.v2.writeNewV2Row(id, com.rjnr.pocketnode.data.crypto.WalletKeyBundle(seed.privateKey, seed.mnemonic),
+                f.encryption.newEncryptCipherV2(), "mnemonic", true).getOrThrow()
+            if (archiveOnly) {
+                f.phrase()
+                assertEquals(VaultAccessResult.CleanupRequired, f.coordinator.recoverExisting(f.activity, id, seed.copy(mnemonic = null, walletType = "raw_key")))
+            } else {
+                f.backup.writeBackup(id, seed.copy(mnemonic = null, walletType = "raw_key"), "111111".toCharArray())
+                f.phrase("111111")
+            }
+            every { f.auth.hasDeviceCredential() } returns true
+            coEvery { f.auth.authenticateForCipher(any(), any(), any(), any(), any(), any()) } coAnswers {
+                f.activityController.pause().stop()
+                kotlinx.coroutines.yield()
+                f.activityController.start().resume()
+                AuthManager.CipherAuthResult.Success(secondArg())
+            }
+            f.phrase()
+            val result = if (archiveOnly) resolver(f).resumeCleanup(f.activity, id) else resolver(f).recover(f.activity, id)
+            assertTrue(result is VaultAccessResult.Success)
+            assertEquals(seed.mnemonic, (result as VaultAccessResult.Success).material.mnemonic)
+            assertNull(f.db.walletVaultDao().legacy(id)); assertFalse(f.backup.hasBackup(id))
+        }
+    }
+
 }

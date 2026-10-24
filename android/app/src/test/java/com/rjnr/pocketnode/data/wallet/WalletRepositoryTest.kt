@@ -993,6 +993,7 @@ class WalletRepositoryTest {
 
         repo.factoryReset()
 
+        assertNull(db.walletVaultDao().profile())
         assertNull(walletDao.getById("orphan-sub"))
         assertNull(walletDao.getById(parent.walletId))
         assertEquals(0, walletDao.count())

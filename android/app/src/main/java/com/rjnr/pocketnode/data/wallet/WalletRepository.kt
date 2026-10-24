@@ -48,7 +48,7 @@ class WalletRepository @Inject constructor(
     class Creation internal constructor(internal val wallet: WalletEntity, internal val expectedParent: WalletEntity? = null) {
         val walletId: String get() = wallet.walletId
         internal fun parentMatches(current: WalletEntity?): Boolean = expectedParent?.let {
-            current != null && parentIdentity(it) == parentIdentity(current)
+            current != null && stableWalletIdentity(it) == stableWalletIdentity(current)
         } ?: (wallet.parentWalletId == null)
     }
 
@@ -342,7 +342,7 @@ class WalletRepository @Inject constructor(
     ): Result<WalletEntity> = runCatching {
         val parent = walletDao.getById(parentWalletId)
             ?: throw IllegalArgumentException("Parent wallet not found")
-        require(expectedParent == null || parentIdentity(expectedParent) == parentIdentity(parent)) { "Parent wallet changed. Authenticate again." }
+        require(expectedParent == null || stableWalletIdentity(expectedParent) == stableWalletIdentity(parent)) { "Parent wallet changed. Authenticate again." }
         require(parent.type == KeyManager.WALLET_TYPE_MNEMONIC) {
             "Sub-accounts require a mnemonic wallet"
         }
@@ -643,9 +643,15 @@ class WalletRepository @Inject constructor(
             runCatching { deleteWallet(wallet.walletId) }
                 .onFailure { logger.w(TAG, "factoryReset: ${wallet.walletId} delete failed again", it) }
         }
+        appDatabase.withTransaction {
+            check(walletDao.count() == 0) { "Wallet reset incomplete" }
+            appDatabase.walletVaultDao().apply {
+                deleteAllVaults(); deleteAllLegacy(); deleteAllMarkers(); deleteProfile()
+            }
+        }
         logger.d(TAG, "factoryReset: ${all.size} wallet(s) wiped")
     }
 }
 
 /** Stable identity excludes presentation and activity changes caused by restoring sibling accounts. */
-private fun parentIdentity(wallet: WalletEntity) = wallet.copy(name = "", isActive = false, lastActiveAt = 0, colorIndex = 0)
+internal fun stableWalletIdentity(wallet: WalletEntity) = wallet.copy(name = "", isActive = false, lastActiveAt = 0, colorIndex = 0)

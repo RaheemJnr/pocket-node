@@ -59,7 +59,7 @@ class RecoveryViewModelTest {
         assertTrue(vm.uiState.value.outcomes.getValue("a").contains("Cancelled"))
     }
     @Test fun `pending cleanup cannot become raw replacement and retry remains deliberate`() = runTest {
-        wallets[0] = wallets[0].copy(cleanupPending = true, hasV2Archive = true)
+        wallets[0] = wallets[0].copy(cleanupPending = true, hasLegacyArchive = true)
         val vm = RecoveryViewModel(operations); advanceUntilIdle()
         vm.recoverExternal(activity, "a", true); advanceUntilIdle()
         coVerify(exactly = 0) { operations.external(any(), any(), any()) }

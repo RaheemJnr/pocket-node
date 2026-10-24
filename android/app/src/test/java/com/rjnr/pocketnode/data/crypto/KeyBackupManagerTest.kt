@@ -236,4 +236,22 @@ class KeyBackupManagerTest {
         assertEquals("c".repeat(64), result!!.privateKey)
         assertFalse(result.mnemonicBackedUp)
     }
+    @Test fun `authenticated malformed payload never forwards serializer exception to logger`() {
+        val logger = io.mockk.mockk<com.rjnr.pocketnode.core.log.Logger>(relaxed = true)
+        val reader = KeyBackupManager(tempDir.root, logger).apply { kdfIterations = 1_000 }
+        val salt = ByteArray(KeyBackupManager.SALT_SIZE)
+        val iv = ByteArray(KeyBackupManager.IV_SIZE)
+        val spec = javax.crypto.spec.PBEKeySpec(testPin, salt, 1_000, KeyBackupManager.KEY_SIZE_BITS)
+        val raw = javax.crypto.SecretKeyFactory.getInstance(KeyBackupManager.KDF_ALGORITHM).generateSecret(spec).encoded
+        val cipher = javax.crypto.Cipher.getInstance(KeyBackupManager.CIPHER_TRANSFORM)
+        cipher.init(javax.crypto.Cipher.ENCRYPT_MODE, javax.crypto.spec.SecretKeySpec(raw, "AES"),
+            javax.crypto.spec.GCMParameterSpec(KeyBackupManager.GCM_TAG_BITS, iv))
+        val bytes = KeyBackupManager.MAGIC + byteArrayOf(KeyBackupManager.FORMAT_VERSION_PBKDF2) + salt + iv +
+            cipher.doFinal("{malformed-public-secret-sentinel".toByteArray())
+        raw.fill(0); spec.clearPassword()
+        assertNull(reader.readCapturedBackup(bytes, testPin))
+        io.mockk.verify(exactly = 0) { logger.w(any(), any(), match { it != null }) }
+        io.mockk.verify { logger.w(any(), "Failed to read legacy backup", null) }
+    }
+
 }

@@ -1029,59 +1029,68 @@ class HomeViewModel @Inject constructor(
      */
     fun runGapLimitScan(activity: FragmentActivity) {
         viewModelScope.launch {
-            _uiState.update { it.copy(gapLimitScanning = true, gapLimitScanAvailable = false) }
-            val result: Result<Int> = when (val seed = acquireSeed(
-                activity,
-                "Authenticate to scan",
-                "Verify your identity to scan for funds on other addresses",
-            )) {
-                is SeedAcquire.Words -> repository.runGapLimitScan(seed.words)
-                SeedAcquire.Cancelled -> {
-                    _uiState.update { it.copy(gapLimitScanning = false, gapLimitScanAvailable = true) }
-                    return@launch
-                }
-                SeedAcquire.KeyInvalidated -> {
-                    _uiState.update {
-                        it.copy(
-                            gapLimitScanning = false, gapLimitScanAvailable = true,
-                            error = com.rjnr.pocketnode.ui.util.UiMessage.Resource(
-                                com.rjnr.pocketnode.R.string.gap_limit_scan_failed,
-                                listOf("Biometric changed. Re-import this wallet from its recovery phrase."),
-                            ),
-                        )
+            try {
+                com.rjnr.pocketnode.data.vault.VaultOperationSession.run(activity) owned@ {
+                    _uiState.update { it.copy(gapLimitScanning = true, gapLimitScanAvailable = false) }
+                    val result: Result<Int> = when (val seed = acquireSeed(
+                        activity,
+                        "Authenticate to scan",
+                        "Verify your identity to scan for funds on other addresses",
+                    )) {
+                        is SeedAcquire.Words -> repository.runGapLimitScan(seed.words)
+                        SeedAcquire.Cancelled -> {
+                            _uiState.update { it.copy(gapLimitScanning = false, gapLimitScanAvailable = true) }
+                            return@owned
+                        }
+                        SeedAcquire.KeyInvalidated -> {
+                            _uiState.update {
+                                it.copy(
+                                    gapLimitScanning = false, gapLimitScanAvailable = true,
+                                    error = com.rjnr.pocketnode.ui.util.UiMessage.Resource(
+                                        com.rjnr.pocketnode.R.string.gap_limit_scan_failed,
+                                        listOf("Biometric changed. Re-import this wallet from its recovery phrase."),
+                                    ),
+                                )
+                            }
+                            return@owned
+                        }
+                        is SeedAcquire.Failed -> {
+                            _uiState.update {
+                                it.copy(
+                                    gapLimitScanning = false, gapLimitScanAvailable = true,
+                                    error = com.rjnr.pocketnode.ui.util.UiMessage.Resource(
+                                        com.rjnr.pocketnode.R.string.gap_limit_scan_failed, listOf(seed.reason),
+                                    ),
+                                )
+                            }
+                            return@owned
+                        }
                     }
-                    return@launch
+                    result
+                        .onSuccess {
+                            logger.i(TAG, "gap-limit scan started (window $it)")
+                            refreshTransactionsOnly(silent = true)
+                        }
+                        .onFailure { e ->
+                            logger.e(TAG, "gap-limit scan failed", e)
+                            _uiState.update {
+                                it.copy(
+                                    gapLimitScanning = false,
+                                    gapLimitScanAvailable = true,
+                                    error = com.rjnr.pocketnode.ui.util.UiMessage.Resource(
+                                        com.rjnr.pocketnode.R.string.gap_limit_scan_failed,
+                                        listOf(e.message ?: "")
+                                    ),
+                                )
+                            }
+                        }
+
                 }
-                is SeedAcquire.Failed -> {
-                    _uiState.update {
-                        it.copy(
-                            gapLimitScanning = false, gapLimitScanAvailable = true,
-                            error = com.rjnr.pocketnode.ui.util.UiMessage.Resource(
-                                com.rjnr.pocketnode.R.string.gap_limit_scan_failed, listOf(seed.reason),
-                            ),
-                        )
-                    }
-                    return@launch
-                }
+
+            } catch (cancelled: kotlinx.coroutines.CancellationException) {
+                _uiState.update { it.copy(gapLimitScanning = false, gapLimitScanAvailable = true) }
+                throw cancelled
             }
-            result
-                .onSuccess {
-                    logger.i(TAG, "gap-limit scan started (window $it)")
-                    refreshTransactionsOnly(silent = true)
-                }
-                .onFailure { e ->
-                    logger.e(TAG, "gap-limit scan failed", e)
-                    _uiState.update {
-                        it.copy(
-                            gapLimitScanning = false,
-                            gapLimitScanAvailable = true,
-                            error = com.rjnr.pocketnode.ui.util.UiMessage.Resource(
-                                com.rjnr.pocketnode.R.string.gap_limit_scan_failed,
-                                listOf(e.message ?: "")
-                            ),
-                        )
-                    }
-                }
         }
     }
 
@@ -1112,65 +1121,74 @@ class HomeViewModel @Inject constructor(
 
     fun confirmGapLimitSweep(activity: FragmentActivity) {
         viewModelScope.launch {
-            _uiState.update { it.copy(sweepPreview = null, sweepInProgress = true) }
-            val result: Result<String> = when (val seed = acquireSeed(
-                activity,
-                "Authenticate to move funds",
-                "Verify your identity to move funds to your main wallet",
-            )) {
-                is SeedAcquire.Words -> repository.sweepGapLimitFunds(seed.words)
-                SeedAcquire.Cancelled -> {
-                    _uiState.update { it.copy(sweepInProgress = false) }
-                    return@launch
-                }
-                SeedAcquire.KeyInvalidated -> {
-                    _uiState.update {
-                        it.copy(
-                            sweepInProgress = false,
-                            error = com.rjnr.pocketnode.ui.util.UiMessage.Resource(
-                                com.rjnr.pocketnode.R.string.sweep_failed,
-                                listOf("Biometric changed. Re-import this wallet from its recovery phrase."),
-                            ),
-                        )
+            try {
+                com.rjnr.pocketnode.data.vault.VaultOperationSession.run(activity) owned@ {
+                    _uiState.update { it.copy(sweepPreview = null, sweepInProgress = true) }
+                    val result: Result<String> = when (val seed = acquireSeed(
+                        activity,
+                        "Authenticate to move funds",
+                        "Verify your identity to move funds to your main wallet",
+                    )) {
+                        is SeedAcquire.Words -> repository.sweepGapLimitFunds(seed.words)
+                        SeedAcquire.Cancelled -> {
+                            _uiState.update { it.copy(sweepInProgress = false) }
+                            return@owned
+                        }
+                        SeedAcquire.KeyInvalidated -> {
+                            _uiState.update {
+                                it.copy(
+                                    sweepInProgress = false,
+                                    error = com.rjnr.pocketnode.ui.util.UiMessage.Resource(
+                                        com.rjnr.pocketnode.R.string.sweep_failed,
+                                        listOf("Biometric changed. Re-import this wallet from its recovery phrase."),
+                                    ),
+                                )
+                            }
+                            return@owned
+                        }
+                        is SeedAcquire.Failed -> {
+                            _uiState.update {
+                                it.copy(
+                                    sweepInProgress = false,
+                                    error = com.rjnr.pocketnode.ui.util.UiMessage.Resource(
+                                        com.rjnr.pocketnode.R.string.sweep_failed, listOf(seed.reason),
+                                    ),
+                                )
+                            }
+                            return@owned
+                        }
                     }
-                    return@launch
+                    result
+                        .onSuccess { txHash ->
+                            logger.i(TAG, "sweep broadcast: ${txHash.take(16)}...")
+                            _uiState.update {
+                                it.copy(
+                                    sweepInProgress = false,
+                                    error = com.rjnr.pocketnode.ui.util.UiMessage.Resource(
+                                        com.rjnr.pocketnode.R.string.sweep_broadcast
+                                    ),
+                                )
+                            }
+                            refresh()
+                        }
+                        .onFailure { e ->
+                            logger.e(TAG, "sweep failed", e)
+                            _uiState.update {
+                                it.copy(
+                                    sweepInProgress = false,
+                                    error = com.rjnr.pocketnode.ui.util.UiMessage.Resource(
+                                        com.rjnr.pocketnode.R.string.sweep_failed, listOf(e.message ?: "")
+                                    ),
+                                )
+                            }
+                        }
+
                 }
-                is SeedAcquire.Failed -> {
-                    _uiState.update {
-                        it.copy(
-                            sweepInProgress = false,
-                            error = com.rjnr.pocketnode.ui.util.UiMessage.Resource(
-                                com.rjnr.pocketnode.R.string.sweep_failed, listOf(seed.reason),
-                            ),
-                        )
-                    }
-                    return@launch
-                }
+
+            } catch (cancelled: kotlinx.coroutines.CancellationException) {
+                _uiState.update { it.copy(sweepInProgress = false) }
+                throw cancelled
             }
-            result
-                .onSuccess { txHash ->
-                    logger.i(TAG, "sweep broadcast: ${txHash.take(16)}...")
-                    _uiState.update {
-                        it.copy(
-                            sweepInProgress = false,
-                            error = com.rjnr.pocketnode.ui.util.UiMessage.Resource(
-                                com.rjnr.pocketnode.R.string.sweep_broadcast
-                            ),
-                        )
-                    }
-                    refresh()
-                }
-                .onFailure { e ->
-                    logger.e(TAG, "sweep failed", e)
-                    _uiState.update {
-                        it.copy(
-                            sweepInProgress = false,
-                            error = com.rjnr.pocketnode.ui.util.UiMessage.Resource(
-                                com.rjnr.pocketnode.R.string.sweep_failed, listOf(e.message ?: "")
-                            ),
-                        )
-                    }
-                }
         }
     }
 

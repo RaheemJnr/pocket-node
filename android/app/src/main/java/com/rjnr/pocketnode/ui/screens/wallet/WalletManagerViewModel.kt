@@ -72,67 +72,70 @@ class WalletManagerViewModel @Inject constructor(
         if (found.isEmpty() || _uiState.value.isRestoring) return
         _uiState.update { it.copy(isRestoring = true) }
         viewModelScope.launch {
-            try {
-                var restored = 0
-                found.groupBy { it.parentWalletId }.forEach { (parentId, candidates) ->
-                    val expectedParent = walletRepository.getById(parentId) ?: return@forEach
-                    val lock = com.rjnr.pocketnode.ui.screens.auth.ReauthLockEvents.locks.value
-                    val readResult = walletKeyReader.readKeyMaterial(
-                        activity = activity,
-                        walletId = parentId,
-                        promptTitle = "Authenticate to restore",
-                        promptSubtitle = "Verify your identity to restore discovered sub-accounts.",
-                    )
-                    if (readResult !is com.rjnr.pocketnode.data.wallet.WalletKeyReader.MaterialResult.Success) {
-                        return@forEach
-                    }
-                    readResult.privateKey.fill(0)
-                    val words = readResult.mnemonic?.split(" ")
-                    if (words.isNullOrEmpty()) return@forEach
+            com.rjnr.pocketnode.data.vault.VaultOperationSession.run(activity) owned@ {
+                try {
+                    var restored = 0
+                    found.groupBy { it.parentWalletId }.forEach { (parentId, candidates) ->
+                        val expectedParent = walletRepository.getById(parentId) ?: return@forEach
+                        val lock = com.rjnr.pocketnode.ui.screens.auth.ReauthLockEvents.locks.value
+                        val readResult = walletKeyReader.readKeyMaterial(
+                            activity = activity,
+                            walletId = parentId,
+                            promptTitle = "Authenticate to restore",
+                            promptSubtitle = "Verify your identity to restore discovered sub-accounts.",
+                        )
+                        if (readResult !is com.rjnr.pocketnode.data.wallet.WalletKeyReader.MaterialResult.Success) {
+                            return@forEach
+                        }
+                        readResult.privateKey.fill(0)
+                        val words = readResult.mnemonic?.split(" ")
+                        if (words.isNullOrEmpty()) return@forEach
 
-                    if (walletRepository.getById(parentId) != expectedParent) return@forEach
-                    com.rjnr.pocketnode.ui.security.WalletDerivationSession.run(activity, lock) { session ->
-                    candidates.sortedBy { it.accountIndex }.forEach { candidate ->
-                        walletRepository.createSubAccount(
-                            parentWalletId = parentId,
-                            name = "Sub-account ${candidate.accountIndex}",
-                            parentMnemonic = words,
-                            explicitIndex = candidate.accountIndex,
-                            expectedParent = expectedParent,
-                            persistKeys = { newWalletId, bundle ->
-                                session.persist {
+                        if (walletRepository.getById(parentId) != expectedParent) return@forEach
+                        com.rjnr.pocketnode.ui.security.WalletDerivationSession.run(activity, lock) { session ->
+                        candidates.sortedBy { it.accountIndex }.forEach { candidate ->
+                            walletRepository.createSubAccount(
+                                parentWalletId = parentId,
+                                name = "Sub-account ${candidate.accountIndex}",
+                                parentMnemonic = words,
+                                explicitIndex = candidate.accountIndex,
+                                expectedParent = expectedParent,
+                                persistKeys = { newWalletId, bundle ->
+                                    session.persist {
 
-                                    walletKeyWriter.persistCreatedWallet(
-                                        activity = activity,
-                                        walletId = newWalletId,
-                                        bundle = bundle,
-                                        walletType = com.rjnr.pocketnode.data.wallet.KeyManager.WALLET_TYPE_MNEMONIC,
-                                        mnemonicBackedUp = false,
-                                        promptTitle = "Secure restored sub-account",
-                                        promptSubtitle = "Encrypt sub-account ${candidate.accountIndex}'s keys.",
-                                    )
-                                }
-                            },
-                        ).onSuccess { wallet ->
-                            restored++
-                            gatewayRepository.onActiveWalletChanged(wallet)
-                        }.onFailure { e ->
-                            logger.e(TAG, "Restore failed for $parentId index ${candidate.accountIndex}", e)
+                                        walletKeyWriter.persistCreatedWallet(
+                                            activity = activity,
+                                            walletId = newWalletId,
+                                            bundle = bundle,
+                                            walletType = com.rjnr.pocketnode.data.wallet.KeyManager.WALLET_TYPE_MNEMONIC,
+                                            mnemonicBackedUp = false,
+                                            promptTitle = "Secure restored sub-account",
+                                            promptSubtitle = "Encrypt sub-account ${candidate.accountIndex}'s keys.",
+                                        )
+                                    }
+                                },
+                            ).onSuccess { wallet ->
+                                restored++
+                                gatewayRepository.onActiveWalletChanged(wallet)
+                            }.onFailure { e ->
+                                logger.e(TAG, "Restore failed for $parentId index ${candidate.accountIndex}", e)
+                            }
+                        }
                         }
                     }
-                    }
-                }
-                if (restored == 0) {
-                    _uiState.update {
-                        it.copy(
-                            error = com.rjnr.pocketnode.ui.util.UiMessage.Raw(
-                                "Could not restore sub-accounts. Authenticate and try again."
+                    if (restored == 0) {
+                        _uiState.update {
+                            it.copy(
+                                error = com.rjnr.pocketnode.ui.util.UiMessage.Raw(
+                                    "Could not restore sub-accounts. Authenticate and try again."
+                                )
                             )
-                        )
+                        }
                     }
+                } finally {
+                    _uiState.update { it.copy(isRestoring = false) }
                 }
-            } finally {
-                _uiState.update { it.copy(isRestoring = false) }
+
             }
         }
     }

@@ -21,7 +21,7 @@ class LegacyBackupRecovery @Inject constructor(
 ) {
     suspend fun recover(activity: FragmentActivity, walletId: String): VaultAccessResult = recoverSources(activity, walletId, false)
 
-    /** Fresh authentication of a retained scoped V2 archive, including when no backup remains. */
+    /** Fresh authentication and preservation of a retained scoped legacy archive, including when no backup remains. */
     suspend fun resumeCleanup(activity: FragmentActivity, walletId: String): VaultAccessResult = recoverSources(activity, walletId, true)
 
     private suspend fun recoverSources(activity: FragmentActivity, walletId: String, allowArchive: Boolean): VaultAccessResult = try {
@@ -32,6 +32,7 @@ class LegacyBackupRecovery @Inject constructor(
             val legacySources = setOf(walletId, "default").associateWith {
                 db.keyMaterialDao().getByWalletId(it) to db.walletVaultDao().legacy(it)?.source()
             }
+            val preferenceSources = setOf(walletId, "default").associateWith { keyManager.preferenceCleanupSnapshot(it) }
             val captured = withContext(Dispatchers.IO) {
                 setOf(walletId, "default").associateWith { backup.captureCopies(it) }
             }
@@ -39,7 +40,7 @@ class LegacyBackupRecovery @Inject constructor(
                 val hasBackup = captured.values.flatten().any { it != null }
                 val scoped = legacySources.getValue(walletId)
                 val v2Sources = listOfNotNull(scoped.first, scoped.second).distinct().filter { it.kdfVersion == 2 }
-                if (!hasBackup && (!allowArchive || original == null || scoped.second?.kdfVersion != 2)) return@run unavailable(allowArchive)
+                if (!hasBackup && (!allowArchive || original == null || scoped.second?.kdfVersion !in 1..2)) return@run unavailable(allowArchive)
                 val copies: Map<String, List<LegacyBackupProof.Copy?>>? = if (hasBackup) {
                     val pin = prompt.requestLegacyPin(activity, "Old backup PIN for ${wallet.name}",
                         "Enter the app PIN used when this backup was created. It may differ from your current app PIN. Cancel keeps all recovery data.")
@@ -75,19 +76,30 @@ class LegacyBackupRecovery @Inject constructor(
                         else -> return@run VaultAccessResult.Unavailable("Existing wallet authentication must finish before recovery. No source was replaced.")
                     }
                 }
-                val authenticatedMaterials = backups + authenticated.values
+                val readableArchived = if (allowArchive && original != null) scoped.second?.takeIf { it.kdfVersion == 1 }?.let { row ->
+                    legacy.legacySourceForVaultCleanup(row)?.let { data ->
+                        com.rjnr.pocketnode.data.crypto.KeyMaterial(data.privateKeyHex, data.mnemonic,
+                            if (data.mnemonic == null) "raw_key" else "mnemonic", data.mnemonicBackedUp)
+                    }?.takeIf { validator.validate(it, wallet) }
+                } else null
+                val authenticatedMaterials = backups + authenticated.values + listOfNotNull(readableArchived)
                 if (authenticatedMaterials.isEmpty()) return@run unavailable(allowArchive)
                 // Read ESP only after real backup or V2 source authentication, bracketed by exact file witnesses.
-                val globalFiles = keyManager.defaultPreferenceCleanupSnapshot()
-                val global = keyManager.defaultPreferencesForVaultCleanup()
-                if (keyManager.defaultPreferenceCleanupSnapshot() != globalFiles) return@run unavailable(allowArchive)
+                val globalFiles = preferenceSources.getValue("default")
+                val preferences = preferenceSources.mapValues { (id, capturedFiles) ->
+                    if (keyManager.preferenceCleanupSnapshot(id) != capturedFiles) return@run unavailable(allowArchive)
+                    val data = keyManager.preferencesForVaultCleanup(id)
+                    if (keyManager.preferenceCleanupSnapshot(id) != capturedFiles) return@run unavailable(allowArchive)
+                    data
+                }
                 LegacyBackupProof(wallet, original, source, legacySources, globalFiles, copies).use { proof ->
                     // The authenticated source proves the private key. Preserve any richer readable
                     // V1 source for that exact key and path, including an archive from an earlier attempt.
-                    val globalSeed = global?.takeIf { it.mnemonic != null }?.let {
+                    proof.preferenceSources = preferenceSources
+                    val preferenceSeeds = preferences.values.mapNotNull { data -> data?.takeIf { it.mnemonic != null }?.let {
                         com.rjnr.pocketnode.data.crypto.KeyMaterial(it.privateKeyHex, it.mnemonic, "mnemonic", it.mnemonicBackedUp)
-                    }?.takeIf { it.privateKey == authenticatedMaterials.first().privateKey && validator.validate(it, wallet) }
-                    val matches = authenticatedMaterials + listOfNotNull(globalSeed) + withContext(Dispatchers.IO) {
+                    }?.takeIf { it.privateKey == authenticatedMaterials.first().privateKey && validator.validate(it, wallet) } }
+                    val matches = authenticatedMaterials + preferenceSeeds + withContext(Dispatchers.IO) {
                         legacySources.values.flatMap { listOfNotNull(it.first, it.second) }.mapNotNull { row ->
                             val data = legacy.legacySourceForVaultCleanup(row) ?: return@mapNotNull null
                             if (data.mnemonic == null) return@mapNotNull null

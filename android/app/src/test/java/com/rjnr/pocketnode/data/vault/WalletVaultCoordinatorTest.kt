@@ -53,10 +53,12 @@ class WalletVaultCoordinatorTest {
     private var activeWrapKey: ByteArray? = null
     private var deviceModes = setOf(VaultDevicePromptMode.BIOMETRIC_ONLY)
     private var lastDeviceMode: VaultDevicePromptMode? = null
+    private var resetExternal = false
+    private var onCredential: suspend () -> Unit = {}
     private val prompt = object : VaultPrompt {
         override suspend fun request(activity: FragmentActivity, title: String, message: String, confirm: Boolean): CharArray? =
-            credentials.removeFirstOrNull()?.also { issued += it }
-        override suspend fun choose(activity: FragmentActivity, title: String, message: String, positiveLabel: String, negativeLabel: String): Boolean? = if (positiveLabel == "Continue") true else chooseWrap
+            run { onCredential(); credentials.removeFirstOrNull()?.also { issued += it } }
+        override suspend fun choose(activity: FragmentActivity, title: String, message: String, positiveLabel: String, negativeLabel: String): Boolean? = if (positiveLabel == "Reset passphrase") resetExternal else if (positiveLabel == "Continue") true else chooseWrap
         override suspend fun notify(activity: FragmentActivity, title: String, message: String) {}
         override suspend fun requestLegacyPin(activity: FragmentActivity, title: String, message: String): CharArray? = error("App PIN must never be used")
     }
@@ -110,7 +112,7 @@ class WalletVaultCoordinatorTest {
         wallet(id)
         val bytes = Json.encodeToString(material).toByteArray()
         val envelope = crypto.create(id, 0, bytes, pass.toCharArray())
-        store.activate(KeyMaterialEntity(id, byteArrayOf(), null, byteArrayOf(), "raw_key", false, 0), null, envelope, pass.toCharArray())
+        store.activate(KeyMaterialEntity(id, byteArrayOf(), null, byteArrayOf(), "raw_key", false, 0), null, envelope, pass.toCharArray(), expectedWallet = db.walletDao().getById(id))
         store.markLegacyCleanupComplete(id, 0)
         if (deviceWrap) {
             deviceKeys[id] = crypto.unwrapDataKey(envelope, id, pass.toCharArray())
@@ -322,7 +324,7 @@ class WalletVaultCoordinatorTest {
         val (mnemonic, row) = mnemonicFixture(); db.walletDao().insert(row)
         val bytes = Json.encodeToString(mnemonic).toByteArray()
         val envelope = try { crypto.create("m", 0, bytes, pass.toCharArray()) } finally { bytes.fill(0) }
-        store.activate(KeyMaterialEntity("m", byteArrayOf(), null, byteArrayOf(), "mnemonic", false, 0), null, envelope, pass.toCharArray())
+        store.activate(KeyMaterialEntity("m", byteArrayOf(), null, byteArrayOf(), "mnemonic", false, 0), null, envelope, pass.toCharArray(), expectedWallet = db.walletDao().getById("m"))
         store.markLegacyCleanupComplete("m", 0)
         phrase()
         val recovered = coordinator.recoverExisting(activity, "m", material.copy(privateKey = mnemonic.privateKey)) as VaultAccessResult.Success
@@ -464,4 +466,60 @@ class WalletVaultCoordinatorTest {
             (coordinator.readForRecovery(activity, "a") as VaultAccessResult.Unavailable).kind)
         assertArrayEquals(byteArrayOf(0), db.walletVaultDao().get("a")!!.envelope)
     }
+    @Test fun `existing recovery rejects metadata deletion at credential prompt without orphan state`() = operationTest {
+        wallet(); phrase()
+        onCredential = { db.walletDao().delete("a") }
+        assertFalse(coordinator.recoverExisting(activity, "a", material) is VaultAccessResult.Success)
+        assertNull(db.walletVaultDao().get("a")); assertNull(db.walletVaultDao().profile())
+        assertNull(db.keyMaterialDao().getByWalletId("a")); assertNull(db.walletVaultDao().legacy("a"))
+    }
+    @Test fun `existing legacy recovery rejects replacement metadata at credential prompt`() = operationTest {
+        val before = wallet(); phrase()
+        val source = KeyMaterialEntity("a", byteArrayOf(1), null, byteArrayOf(2), "raw_key", false, 0, 1)
+        db.keyMaterialDao().upsert(source)
+        onCredential = { db.walletDao().insert(before.copy(mainnetAddress = "replacement")) }
+        assertFalse(coordinator.protectLegacy(activity, "a", material, source.iv) is VaultAccessResult.Success)
+        assertNull(db.walletVaultDao().get("a")); assertNull(db.walletVaultDao().profile())
+        assertEquals(source, db.keyMaterialDao().getByWalletId("a")); assertNull(db.walletVaultDao().legacy("a"))
+    }
+
+    @Test fun `external secret can establish new profile without forgotten credential and preserves sibling wrap`() = operationTest {
+        active(); active("b")
+        val sibling = db.walletVaultDao().get("b")!!
+        resetExternal = true; phrase(next)
+        assertTrue(coordinator.recoverExisting(activity, "a", material) is VaultAccessResult.Success)
+        assertTrue(store.verifyPassphrase(next.toCharArray())); assertFalse(store.verifyPassphrase(pass.toCharArray()))
+        assertArrayEquals(sibling.envelope, db.walletVaultDao().get("b")!!.envelope)
+        assertEquals(setOf("b"), store.snapshot().unrecoveredWalletIds)
+    }
+    @Test fun `external recovery repairs exact empty V3 marker without archiving it`() = operationTest {
+        wallet(); phrase()
+        db.keyMaterialDao().upsert(KeyMaterialEntity("a", byteArrayOf(), null, byteArrayOf(), "raw_key", false, 0, 3))
+        assertTrue(coordinator.recoverExisting(activity, "a", material) is VaultAccessResult.Success)
+        assertNotNull(store.get("a")); assertNull(db.walletVaultDao().legacy("a"))
+    }
+    @Test fun `missing key recovery rejects replaced identity without creating any secret state`() = operationTest {
+        val before = wallet(); phrase()
+        onCredential = { db.walletDao().insert(before.copy(testnetAddress = "different public identity")) }
+        assertFalse(coordinator.recoverExisting(activity, "a", material) is VaultAccessResult.Success)
+        assertNull(db.walletVaultDao().get("a")); assertNull(db.walletVaultDao().profile())
+        assertNull(db.keyMaterialDao().getByWalletId("a")); assertNull(db.walletVaultDao().legacy("a"))
+    }
+    @Test fun `presentation changes do not invalidate captured wallet identity`() = operationTest {
+        val before = wallet(); phrase()
+        onCredential = { db.walletDao().insert(before.copy(name = "Renamed", colorIndex = 3, lastActiveAt = 123)) }
+        assertTrue(coordinator.recoverExisting(activity, "a", material) is VaultAccessResult.Success)
+        assertEquals("Renamed", db.walletDao().getById("a")!!.name)
+    }
+    @Test fun `external reset rejects concurrent wallet creation and preserves previous profile`() = operationTest {
+        active(); val before = db.walletVaultDao().get("a")!!
+        resetExternal = true; phrase(next)
+        onCredential = { active("concurrent") }
+        assertFalse(coordinator.recoverExisting(activity, "a", material) is VaultAccessResult.Success)
+        assertTrue(store.verifyPassphrase(pass.toCharArray()))
+        assertArrayEquals(before.envelope, db.walletVaultDao().get("a")!!.envelope)
+        assertNotNull(store.get("concurrent"))
+    }
+
+
 }

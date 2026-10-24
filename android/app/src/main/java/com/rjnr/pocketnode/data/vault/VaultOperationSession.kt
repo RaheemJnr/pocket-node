@@ -12,9 +12,16 @@ import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeout
 import kotlin.coroutines.resume
+import kotlin.coroutines.AbstractCoroutineContextElement
+import kotlin.coroutines.CoroutineContext
+import kotlinx.coroutines.CoroutineStart
+import kotlinx.coroutines.launch
+import com.rjnr.pocketnode.ui.screens.auth.ReauthLockEvents
 
 /** Only a currently active CryptoObject system handoff can temporarily outlive host ON_STOP. */
-internal class VaultOperationSession(private val activity: FragmentActivity) {
+internal class VaultOperationSession(private val activity: FragmentActivity, private val parent: VaultOperationSession?) :
+    AbstractCoroutineContextElement(Key) {
+
     private var systemHandoff = false
 
     suspend fun <T> systemAuthentication(
@@ -26,7 +33,9 @@ internal class VaultOperationSession(private val activity: FragmentActivity) {
         }
         // Only a captured credential-only prompt can leave this host for trusted Android UI.
         // Biometric-only prompts never receive the exemption, including on API30+.
-        systemHandoff = mode == VaultDevicePromptMode.CREDENTIAL_ONLY
+        val lineage = generateSequence(this) { it.parent }.toList()
+        check(lineage.none { it.systemHandoff }) { "Concurrent credential handoff" }
+        lineage.forEach { it.systemHandoff = mode == VaultDevicePromptMode.CREDENTIAL_ONLY }
         class OwnedValue(val value: T)
         var owned: OwnedValue? = null
         try {
@@ -41,7 +50,7 @@ internal class VaultOperationSession(private val activity: FragmentActivity) {
             return value
         } finally {
             owned?.let { discard(it.value) }
-            systemHandoff = false
+            lineage.forEach { it.systemHandoff = false }
         }
     }
 
@@ -60,19 +69,28 @@ internal class VaultOperationSession(private val activity: FragmentActivity) {
         } finally { observer?.let { activity.lifecycle.removeObserver(it) } }
     }
 
-    companion object {
+    companion object Key : CoroutineContext.Key<VaultOperationSession> {
         suspend fun <T> run(activity: FragmentActivity, block: suspend (VaultOperationSession) -> T): T = withContext(Dispatchers.Main.immediate) {
             coroutineScope {
                 if (!activity.lifecycle.currentState.isAtLeast(Lifecycle.State.STARTED)) throw CancellationException("Wallet operation requires foreground")
-                val session = VaultOperationSession(activity)
+                val parent = currentCoroutineContext()[Key]
+                require(parent == null || parent.activity === activity) { "Wallet operation host changed" }
+                val session = VaultOperationSession(activity, parent)
                 val job = currentCoroutineContext()[Job]!!
                 val observer = LifecycleEventObserver { _, event ->
                     if (event == Lifecycle.Event.ON_DESTROY || event == Lifecycle.Event.ON_STOP && !session.systemHandoff) {
                         job.cancel(CancellationException("Wallet operation ended"))
                     }
                 }
-                activity.lifecycle.addObserver(observer)
-                try { block(session) } finally { activity.lifecycle.removeObserver(observer) }
+                val lock = ReauthLockEvents.locks.value
+                val locks = launch(start = CoroutineStart.UNDISPATCHED) {
+                    ReauthLockEvents.locks.collect { if (it != lock) job.cancel(CancellationException("Wallet operation locked")) }
+                }
+                try {
+                    activity.lifecycle.addObserver(observer)
+                    withContext(session) { block(session) }
+                }
+                finally { activity.lifecycle.removeObserver(observer); locks.cancel() }
             }
         }
     }

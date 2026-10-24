@@ -42,7 +42,7 @@ class WalletLegacyCleanup(
             if (envelope.walletId != walletId || envelope.generation != expectedGeneration) return@withContext false
             val identity = addresses(verifiedMaterial.privateKey)
             val wallet = db.walletDao().getById(walletId)
-            if (wallet != null && (wallet.mainnetAddress != identity.first || wallet.testnetAddress != identity.second)) return@withContext false
+            if (wallet == null || wallet.mainnetAddress != identity.first || wallet.testnetAddress != identity.second) return@withContext false
 
             if (proof != null && (!proof.proof.active || proof.proof.wallet != wallet ||
                 !LegacyBackupProof.sameEnvelope(proof.committed, target))) return@withContext false
@@ -70,6 +70,14 @@ class WalletLegacyCleanup(
             // A readable row proves only its own capabilities, never opaque backup contents.
             if (scopedBackup.any { it != null } && witnessed[walletId] == null) return@withContext false
 
+            val scopedFiles = keyManager.preferenceCleanupSnapshot(walletId)
+            if (proof != null && proof.proof.preferenceSources[walletId]?.let { it != scopedFiles } == true) return@withContext false
+            val scopedPreferences = keyManager.preferencesForVaultCleanup(walletId)
+            if (keyManager.preferenceCleanupSnapshot(walletId) != scopedFiles) return@withContext false
+            if (scopedFiles.any { it != null } && (scopedPreferences == null ||
+                addresses(scopedPreferences.privateKeyHex) != identity ||
+                scopedPreferences.mnemonic != null && scopedPreferences.mnemonic != verifiedMaterial.mnemonic)) return@withContext false
+
             // Capture exact sources BEFORE reading them. Decryption/derivation is outside Room.
             val defaultRow = keys.getByWalletId("default")
             val archived = vaults.legacy("default")?.source()
@@ -95,6 +103,8 @@ class WalletLegacyCleanup(
                 defaultArtifacts -> return@withContext false // Task 5 must obtain old-PIN ownership proof.
                 else -> false
             }
+            // Ownership of a row/backup never proves an independent unreadable ESP copy.
+            if (ownsDefault && globalFiles.any { it != null } && global == null) return@withContext false
             if (ownsDefault && defaultBackup.any { it != null } && !witnessedDefault) return@withContext false
             if (ownsDefault && (readable.any { addresses(it.privateKeyHex) != identity } ||
                 readable.any { it.mnemonic != null && it.mnemonic != verifiedMaterial.mnemonic } ||
@@ -103,6 +113,8 @@ class WalletLegacyCleanup(
 
             db.withTransaction {
                 val current = vaults.get(walletId)
+                if (keyManager.preferenceCleanupSnapshot(walletId) != scopedFiles ||
+                    keyManager.preferencesForVaultCleanup(walletId) != scopedPreferences) return@withTransaction false
                 if (vaults.legacy(walletId)?.source() != scopedArchive || backup.cleanupSnapshot(walletId) != scopedBackup) return@withTransaction false
                 if (current == null || current.generation != target.generation || current.profileGeneration != target.profileGeneration ||
                     !current.envelope.contentEquals(target.envelope) || keys.getByWalletId(walletId) != marker ||

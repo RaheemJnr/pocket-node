@@ -21,6 +21,7 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.test.StandardTestDispatcher
 import kotlinx.coroutines.test.advanceUntilIdle
 import kotlinx.coroutines.test.resetMain
+import kotlinx.coroutines.test.runCurrent
 import kotlinx.coroutines.test.runTest
 import kotlinx.coroutines.test.setMain
 import org.junit.After
@@ -60,7 +61,7 @@ class AddWalletViewModelTest {
         // Device state must not authorize secret extraction or weaker persistence.
         io.mockk.every { authManager.isBiometricEnrolled() } returns true
         io.mockk.every { authManager.hasDeviceCredential() } returns true
-        activity = mockk(relaxed = true)
+        activity = com.rjnr.pocketnode.data.wallet.ForegroundTestHost().activity
     }
 
     @After
@@ -154,4 +155,19 @@ class AddWalletViewModelTest {
     // WalletRepository instead of a mocked one, mocking
     // `importFromMnemonic`'s `kotlin.Result<WalletEntity>` return hits the
     // exact same MockK inline-value-class crash documented above.
+    @Test fun `fresh creation stop before writer cancels generation owner`() = runTest {
+        val host = com.rjnr.pocketnode.data.wallet.ForegroundTestHost()
+        var entered = false
+        val owned = ByteArray(32) { 3 }
+        coEvery { walletRepository.createWallet(any(), any(), any()) } coAnswers {
+            entered = true
+            try { kotlinx.coroutines.awaitCancellation() } finally { owned.fill(0) }
+        }
+        val vm = newViewModel(); advanceUntilIdle(); vm.updateName("Fresh")
+        vm.createNewWallet(host.activity); runCurrent()
+        assertTrue(entered); host.stopResume(); runCurrent()
+        try { assertTrue(owned.all { it == 0.toByte() }); assertFalse(vm.uiState.value.isLoading); coVerify(exactly = 0) { walletKeyWriter.persistCreatedWallet(any(), any(), any(), any(), any(), any(), any()) } }
+        finally { androidx.lifecycle.ViewModelStore().apply { put("test", vm); clear() } }
+    }
+
 }

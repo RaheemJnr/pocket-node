@@ -387,7 +387,7 @@ class GatewayRepository @Inject constructor(
     suspend fun switchNetwork(target: NetworkType): Result<Unit> = nodeLifecycle.switchNetwork(target)
 
     /**
-     * Initialize wallet by loading existing one. 
+     * Initialize wallet by loading existing one.
      * Does NOT auto-generate a new one anymore (Onboarding flow handles that).
      */
     suspend fun initializeWallet(): Result<WalletInfo> = runCatching {
@@ -935,7 +935,7 @@ class GatewayRepository @Inject constructor(
     // Simplified Account Status - JNI doesn't give sync progress easily
     override suspend fun getAccountStatus(): Result<AccountStatusResponse> = runCatching {
         val addr = getCurrentAddress() ?: throw Exception("No wallet")
-        
+
         // Tip header plus the status of ALL registered scripts, read and
         // decoded by the shared sync engine. Same two bridge calls,
         // same hex parsing, same null-degrades-to-empty contract.
@@ -1051,8 +1051,8 @@ class GatewayRepository @Inject constructor(
      * identity (captured by SendViewModel before this call) and is trusted
      * over live repository globals.
      *
-     * The key is wrapped in a [PrivateKeySigner] and NOT wiped here: the
-     * caller still owns it (SendViewModel zeroes it in a `finally`).
+     * The caller retains key ownership; onSigned lets its owner wipe after the last
+     * signature, before persistence/broadcast. Owners also wipe in finally on failure.
      */
     suspend fun prepareAndSend(
         fromAddress: String,
@@ -1061,12 +1061,14 @@ class GatewayRepository @Inject constructor(
         privateKey: ByteArray,
         /** Fee the user confirmed on the review sheet; the send aborts if the build no longer matches it (#490). */
         expectedFeeShannons: Long? = null,
+        onSigned: () -> Unit = {},
     ): Result<String> = sendPipeline.prepareAndSend(
         ctx = sendContext(),
         fromAddress = fromAddress,
         toAddress = toAddress,
         amountShannons = amountShannons,
         signer = PrivateKeySigner(privateKey),
+        onSigned = onSigned,
         expectedFeeShannons = expectedFeeShannons,
     )
 

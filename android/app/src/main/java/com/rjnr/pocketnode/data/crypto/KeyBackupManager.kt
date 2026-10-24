@@ -132,7 +132,7 @@ class KeyBackupManager @Inject constructor(
                 plaintext.fill(0)
             }
         } catch (e: Exception) {
-            logger.w(TAG, "Failed to read legacy backup", e)
+            logger.w(TAG, "Failed to read legacy backup")
             null
         }
     }

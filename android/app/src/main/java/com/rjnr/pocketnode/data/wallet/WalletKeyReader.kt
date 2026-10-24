@@ -92,8 +92,9 @@ class WalletKeyReader @Inject constructor(
             is VaultAccessResult.Success -> {
                 recovery.removeUnverified(walletId)
                 val material = access.material
+                val backedUp = keyMaterialDao.getMnemonicBackedUp(walletId) ?: material.mnemonicBackedUp
                 MaterialResult.Success(material.privateKey.hexToByteArray(), material.mnemonic, material.walletType,
-                    keyMaterialDao.getMnemonicBackedUp(walletId) ?: material.mnemonicBackedUp, access.backupWitness)
+                    backedUp, access.backupWitness)
             }
             VaultAccessResult.Cancelled -> MaterialResult.Cancelled
             VaultAccessResult.CleanupRequired -> MaterialResult.NotAvailable("Wallet protection is saved, but legacy backup cleanup needs a retry. Unlock again to finish.")

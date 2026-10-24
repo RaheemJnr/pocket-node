@@ -43,7 +43,7 @@ class RecoveryOperations @Inject constructor(
                 }
             }
             MissingWallet(wallet.walletId, wallet.name, wallet.type == "raw_key", hasBackup,
-                wallet.walletId in pending, db.walletVaultDao().legacy(wallet.walletId)?.kdfVersion == 2)
+                wallet.walletId in pending, db.walletVaultDao().legacy(wallet.walletId)?.kdfVersion in 1..2)
         }
     }
     fun markIncomplete() = restorer.markIncomplete()
@@ -73,26 +73,26 @@ class RecoveryOperations @Inject constructor(
             else -> RecoveredKeyRestorer.Outcome.Failed("Authentication did not complete. Retry the selected method or use an external recovery secret; all saved sources are preserved.")
         }
     }
-    suspend fun external(activity: FragmentActivity, id: String, privateKey: Boolean): RecoveredKeyRestorer.RekeyResult {
+    suspend fun external(activity: FragmentActivity, id: String, privateKey: Boolean): RecoveredKeyRestorer.RekeyResult = com.rjnr.pocketnode.data.vault.VaultOperationSession.run(activity) owned@ {
         // Check persisted cleanup state again; stale UI never authorizes replacement.
-        if (id in db.walletVaultDao().pendingCleanup()) return RecoveredKeyRestorer.RekeyResult.Done(mapOf(id to RecoveredKeyRestorer.Outcome.CleanupRequired))
+        if (id in db.walletVaultDao().pendingCleanup()) return@owned RecoveredKeyRestorer.RekeyResult.Done(mapOf(id to RecoveredKeyRestorer.Outcome.CleanupRequired))
         val secret = input.request(activity, privateKey)
-            ?: return RecoveredKeyRestorer.RekeyResult.Done(mapOf(id to RecoveredKeyRestorer.Outcome.Cancelled))
+            ?: return@owned RecoveredKeyRestorer.RekeyResult.Done(mapOf(id to RecoveredKeyRestorer.Outcome.Cancelled))
         try {
             recoveryState.addUnverified(id)
             recoveryState.markIncomplete()
             if (!activity.lifecycle.currentState.isAtLeast(Lifecycle.State.STARTED))
-                return RecoveredKeyRestorer.RekeyResult.Done(mapOf(id to RecoveredKeyRestorer.Outcome.Cancelled))
+                return@owned RecoveredKeyRestorer.RekeyResult.Done(mapOf(id to RecoveredKeyRestorer.Outcome.Cancelled))
             if (privateKey) {
                 val bytes = runCatching { secret.concatToString().trim().hexToByteArray() }.getOrNull()
-                    ?: return RecoveredKeyRestorer.RekeyResult.InvalidInput
+                    ?: return@owned RecoveredKeyRestorer.RekeyResult.InvalidInput
                 secret.fill('\u0000')
-                return try { restorer.rekeyFromPrivateKey(activity, id, bytes, false) } finally { bytes.fill(0) }
+                return@owned try { restorer.rekeyFromPrivateKey(activity, id, bytes, false) } finally { bytes.fill(0) }
             }
             // BIP39 conversion requires immutable JVM Strings; they remain operation-local, never UI state.
             val words = secret.concatToString().trim().lowercase(Locale.ROOT).split(Regex("\\s+"))
             secret.fill('\u0000')
-            return restorer.rekeyFromPhrase(activity, id, words, false)
+            return@owned restorer.rekeyFromPhrase(activity, id, words, false)
         } finally { secret.fill('\u0000') }
     }
 }

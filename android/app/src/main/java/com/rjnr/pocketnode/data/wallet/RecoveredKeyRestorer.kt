@@ -151,6 +151,14 @@ class RecoveredKeyRestorer @Inject constructor(
                             null -> return Outcome.Cancelled
                         }
                     }
+                    VaultAccessResult.NoVault -> {
+                        // Only the known empty V3 migration marker can be replaced without a vault.
+                        // Coordinator activation compares this exact source again transactionally.
+                        if (capturedSource.kdfVersion != 3 || capturedSource.encryptedPrivateKey.isNotEmpty() ||
+                            capturedSource.encryptedMnemonic != null || capturedSource.iv.isNotEmpty())
+                            return Outcome.Failed("Existing source is not an empty wallet marker.")
+                        if (!confirmSpendingOnly(activity)) return Outcome.Cancelled
+                    }
                     VaultAccessResult.CleanupRequired -> return Outcome.CleanupRequired
                     else -> return Outcome.Failed("Existing seed authentication did not complete.")
                 }

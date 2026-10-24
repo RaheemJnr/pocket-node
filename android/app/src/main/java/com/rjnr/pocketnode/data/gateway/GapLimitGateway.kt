@@ -337,7 +337,7 @@ class GapLimitGateway(
             // rather than signing with a mismatched key.
             val seed = keyManager.mnemonicToSeed(words)
             val keys = mutableMapOf<String, ByteArray>()
-            try {
+            val signed = try {
                 plan.inputLockArgs.distinct().forEach { args ->
                     val path = pathByArgs[args]
                         ?: throw Exception("No derivation path recorded for a sweep input")
@@ -352,7 +352,12 @@ class GapLimitGateway(
                     keys[args] = key
                 }
                 if (ctx.walletId() != wId) throw Exception("Wallet changed during the sweep; try again")
-                val signed = transactionBuilder.signSweep(plan.transaction, plan.inputLockArgs, keys).getOrThrow()
+                transactionBuilder.signSweep(plan.transaction, plan.inputLockArgs, keys).getOrThrow()
+            } finally {
+                keys.values.forEach { it.fill(0) }
+                seed.fill(0)
+            }
+            run {
                 // #538 review: every output of a sweep lands on the main
                 // script, so sendTransaction's own recipient-amount insert
                 // (which only sums outputs NOT locked to us) would otherwise
@@ -380,9 +385,6 @@ class GapLimitGateway(
                 walletPreferences.addSweepTxHash(wId, sweepNetwork.name, txHash, plan.feeShannons)
                 logger.i(TAG, "gap-limit sweep broadcast: ${plan.inputLockArgs.size} inputs, ${keys.size} groups")
                 txHash
-            } finally {
-                keys.values.forEach { it.fill(0) }
-                seed.fill(0)
             }
         } finally {
             gapLimitScanMutex.unlock()

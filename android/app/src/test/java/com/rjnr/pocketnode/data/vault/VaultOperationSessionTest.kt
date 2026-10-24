@@ -84,4 +84,59 @@ class VaultOperationSessionTest {
         } finally { Dispatchers.resetMain() }
     }
 
+    @Test @Config(sdk = [30]) fun `nested credential owner delegates only active handoff to outer owner`() = runTest {
+        Dispatchers.setMain(UnconfinedTestDispatcher(testScheduler))
+        try {
+            val controller = Robolectric.buildActivity(FragmentActivity::class.java).setup()
+            val callback = CompletableDeferred<Unit>()
+            var authenticated = false
+            val running = launch { VaultOperationSession.run(controller.get()) {
+                VaultOperationSession.run(controller.get()) { inner ->
+                    inner.systemAuthentication(VaultDevicePromptMode.CREDENTIAL_ONLY) { callback.await() }
+                }
+                authenticated = true
+                awaitCancellation()
+            } }
+            runCurrent(); controller.pause().stop(); callback.complete(Unit); runCurrent()
+            assertTrue("outer must permit the nested trusted prompt", running.isActive)
+            controller.start().resume(); runCurrent(); assertTrue(authenticated)
+            controller.pause().stop(); runCurrent()
+            assertTrue("ordinary stop after callback still cancels", running.isCancelled)
+        } finally { Dispatchers.resetMain() }
+    }
+    @Test fun `reauth cancels owner and clears operation buffer`() = runTest {
+        Dispatchers.setMain(UnconfinedTestDispatcher(testScheduler))
+        try {
+            val controller = Robolectric.buildActivity(FragmentActivity::class.java).setup()
+            val secret = byteArrayOf(9)
+            val running = launch { VaultOperationSession.run(controller.get()) {
+                try { awaitCancellation() } finally { secret.fill(0) }
+            } }
+            runCurrent(); com.rjnr.pocketnode.ui.screens.auth.ReauthLockEvents.onLocked(); runCurrent()
+            try { assertTrue(running.isCancelled); assertArrayEquals(byteArrayOf(0), secret) }
+            finally { running.cancelAndJoin() }
+        } finally { Dispatchers.resetMain() }
+    }
+    @Test @Config(sdk = [30]) fun `nested credential exemption never covers a sibling operation`() = runTest {
+        Dispatchers.setMain(UnconfinedTestDispatcher(testScheduler))
+        try {
+            val controller = Robolectric.buildActivity(FragmentActivity::class.java).setup()
+            val callback = CompletableDeferred<Unit>(); var siblingCancelled = false
+            val running = launch { VaultOperationSession.run(controller.get()) {
+                kotlinx.coroutines.coroutineScope {
+                    launch { VaultOperationSession.run(controller.get()) {
+                        try { awaitCancellation() } finally { siblingCancelled = true }
+                    } }
+                    VaultOperationSession.run(controller.get()) { inner ->
+                        inner.systemAuthentication(VaultDevicePromptMode.CREDENTIAL_ONLY) { callback.await() }
+                    }
+                }
+            } }
+            runCurrent(); controller.pause().stop(); runCurrent()
+            assertTrue(siblingCancelled); assertTrue(running.isActive)
+            callback.complete(Unit); controller.start().resume(); runCurrent(); running.join()
+        } finally { Dispatchers.resetMain() }
+    }
+
+
 }

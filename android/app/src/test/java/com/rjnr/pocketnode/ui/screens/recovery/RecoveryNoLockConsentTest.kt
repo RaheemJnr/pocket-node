@@ -147,7 +147,7 @@ class RecoveryNoLockConsentTest {
             assertTrue(f.reader.readKeyMaterial(f.activity, "a", "Read", "Auth") is WalletKeyReader.MaterialResult.NotAvailable)
             val source = f.db.walletVaultDao().legacy("a")
             val ops = operations(f); val status = ops.wallets().single()
-            assertTrue(status.hasV2Archive); assertTrue(status.cleanupPending); assertFalse(status.hasBackup)
+            assertTrue(status.hasLegacyArchive); assertTrue(status.cleanupPending); assertFalse(status.hasBackup)
             f.cleanupOk = true
             coEvery { f.auth.authenticateForCipher(any(), any(), any(), any(), any(), any()) } returns com.rjnr.pocketnode.data.auth.AuthManager.CipherAuthResult.Cancelled
             assertEquals(RecoveredKeyRestorer.Outcome.Cancelled, ops.cleanup(f.activity, "a"))
@@ -168,13 +168,54 @@ class RecoveryNoLockConsentTest {
             val before = f.store.snapshot(); val envelope = f.store.get("a")!!
             val nextPhrase = "another independent wallet passphrase".toCharArray()
             val updated = f.crypto.rewrap(envelope, "a", f.pass.toCharArray(), nextPhrase, envelope.generation + 1)
-            f.store.replaceAfterAuthenticatedReset(before, listOf(updated), nextPhrase); nextPhrase.fill('\u0000')
+            f.store.replaceAfterAuthenticatedReset(before, listOf(updated), nextPhrase, mapOf("a" to f.db.walletDao().getById("a")!!)); nextPhrase.fill('\u0000')
             val ops = operations(f)
             assertEquals(listOf("b"), ops.wallets().map { it.walletId })
             assertFalse(ops.complete())
             f.phrase(); f.phrase("another independent wallet passphrase")
             assertEquals(RecoveredKeyRestorer.Outcome.Restored, ops.unlock(f.activity, "b", VaultReadPreference.PASSPHRASE))
             assertTrue(ops.complete())
+        }
+    }
+
+    @Test fun `external input owner cancels suspended consumer on stop resume destroy and reauth`() = walletOperationTest {
+        for (event in listOf("stop", "destroy", "reauth")) WalletVaultIntegrationFixture().use { f ->
+            val input = mockk<RecoverySecretDialog>()
+            val restorer = mockk<RecoveredKeyRestorer>()
+            val chars = f.material.privateKey.toCharArray()
+            var bytes: ByteArray? = null
+            val entered = CompletableDeferred<Unit>()
+            coEvery { input.request(f.activity, true) } returns chars
+            coEvery { restorer.rekeyFromPrivateKey(f.activity, "a", any(), false) } coAnswers {
+                bytes = thirdArg(); entered.complete(Unit); awaitCancellation()
+            }
+            val ops = RecoveryOperations(restorer, f.db, f.backup, input, f.coordinator, f.recovery, f.store)
+            val running = launch { ops.external(f.activity, "a", true) }
+            entered.await()
+            when (event) {
+                "stop" -> { f.activityController.pause().stop(); f.activityController.start().resume() }
+                "destroy" -> f.activityController.pause().stop().destroy()
+                else -> com.rjnr.pocketnode.ui.screens.auth.ReauthLockEvents.onLocked()
+            }
+            repeat(10) { yield() }
+            try {
+                assertTrue("$event must cancel the suspended secret consumer", running.isCancelled)
+                running.join(); assertTrue(bytes!!.all { it == 0.toByte() }); assertTrue(chars.all { it == '\u0000' })
+            } finally { running.cancelAndJoin() }
+        }
+    }
+
+    @Test fun `external private key repairs surviving empty V3 marker for mnemonic origin with explicit spending consent`() = walletOperationTest {
+        WalletVaultIntegrationFixture().use { f ->
+            f.wallet(type = "mnemonic")
+            f.db.keyMaterialDao().upsert(com.rjnr.pocketnode.data.database.entity.KeyMaterialEntity("a", byteArrayOf(), null, byteArrayOf(), "mnemonic", false, 0, 3))
+            f.recovery.addUnverified("a")
+            val input = mockk<RecoverySecretDialog>()
+            coEvery { input.request(f.activity, true) } returns f.material.privateKey.toCharArray()
+            f.choices += true; f.phrase()
+            val result = operations(f, input).external(f.activity, "a", true) as RecoveredKeyRestorer.RekeyResult.Done
+            assertEquals(RecoveredKeyRestorer.Outcome.Restored, result.outcomes["a"])
+            assertNotNull(f.store.get("a")); assertNull(f.db.walletVaultDao().legacy("a"))
         }
     }
 

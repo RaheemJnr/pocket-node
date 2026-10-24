@@ -40,7 +40,7 @@ class RecoveryScreenNavigationTest {
     }
     @Test fun `pending cleanup offers archive retry and hides external replacement`() {
         val operations = mockk<RecoveryOperations>(relaxed = true)
-        coEvery { operations.wallets() } returns listOf(MissingWallet("a", "Savings", false, cleanupPending = true, hasV2Archive = true))
+        coEvery { operations.wallets() } returns listOf(MissingWallet("a", "Savings", false, cleanupPending = true, hasLegacyArchive = true))
         val vm = RecoveryViewModel(operations)
         compose.setContent { RecoveryScreen({}, {}, vm) }
         compose.onNodeWithText("Resume legacy cleanup").performScrollTo().assertExists()
