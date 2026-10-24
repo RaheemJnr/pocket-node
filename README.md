@@ -1,8 +1,6 @@
 [![Google Play](https://img.shields.io/badge/Google%20Play-Available-brightgreen?logo=google-play&logoColor=white)](https://play.google.com/store/apps/details?id=com.rjnr.pocketnode)
 [![Downloads](https://img.shields.io/github/downloads/RaheemJnr/pocket-node/total?label=downloads&color=success)](https://github.com/RaheemJnr/pocket-node/releases)
 [![Latest Release](https://img.shields.io/github/v/release/RaheemJnr/pocket-node?label=latest)](https://github.com/RaheemJnr/pocket-node/releases/latest)
-![CI](https://github.com/RaheemJnr/pocket-node/actions/workflows/android-ci.yml/badge.svg)
-[![License](https://img.shields.io/github/license/RaheemJnr/pocket-node?color=lightgrey)](LICENSE)
 [![X](https://img.shields.io/badge/X-%40PocketNodeCKB-black?logo=x&logoColor=white)](https://x.com/PocketNodeCKB)
 [![Buy Me a Coffee](https://img.shields.io/badge/Buy%20Me%20a%20Coffee-support-yellow?logo=buymeacoffee&logoColor=black)](https://www.buymeacoffee.com/rjnr)
 
