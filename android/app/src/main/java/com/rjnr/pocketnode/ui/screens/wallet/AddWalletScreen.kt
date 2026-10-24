@@ -121,10 +121,6 @@ fun AddWalletScreen(
         }
     }
 
-    // F1/F3: no device lock -> warn before persisting at the V1 software
-    // fallback, matching onboarding, instead of silently downgrading.
-
-
     // #431: post-import sync-start picker, shown after a mnemonic or raw-key
     // import completes, same sheet and copy as the onboarding import path.
     // #559: a verified restore hint replaces the sheet until confirmed or dismissed.

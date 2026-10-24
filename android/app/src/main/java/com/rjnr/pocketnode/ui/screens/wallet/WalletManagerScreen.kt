@@ -66,10 +66,6 @@ fun WalletManagerScreen(
     val snackbarHostState = remember { SnackbarHostState() }
     val context = androidx.compose.ui.platform.LocalContext.current
 
-    // F1/F3: no device lock -> warn before restoring sub-accounts at the V1
-    // software fallback, matching onboarding.
-
-
     LaunchedEffect(uiState.error) {
         uiState.error?.let { msg ->
             snackbarHostState.showSnackbar(msg.resolveString(context))

@@ -169,6 +169,41 @@ class AddWalletViewModelImportSyncTest {
     }
 
     @Test
+    fun `Apply retries registration from public identity after reauth cancels import registration`() = runTest {
+        var started = false
+        var cancelled = false
+        coEvery { gatewayRepository.onActiveWalletChanged(any()) } coAnswers {
+            started = true
+            try { kotlinx.coroutines.awaitCancellation() } finally { cancelled = true }
+        }
+        val vm = newViewModel(); vm.importValidMnemonic(); advanceUntil { started }
+        com.rjnr.pocketnode.ui.screens.auth.ReauthLockEvents.onLocked(); advanceUntilIdle()
+        assertTrue(cancelled)
+        assertTrue(vm.uiState.value.showSyncModeDialog)
+        assertNull(vm.uiState.value.createdWallet)
+        coEvery { gatewayRepository.onActiveWalletChanged(any()) } returns Unit
+        vm.onSyncModeSelected(SyncMode.RECENT, null); advanceUntilIdle()
+        coVerify(exactly = 2) { gatewayRepository.onActiveWalletChanged(any()) }
+        coVerify(exactly = 1) { gatewayRepository.resyncAccount(SyncMode.RECENT, null) }
+        assertTrue(vm.uiState.value.createdWallet != null)
+    }
+
+    @Test
+    fun `Apply waits for pending registration before resync`() = runTest {
+        val release = kotlinx.coroutines.CompletableDeferred<Unit>()
+        var started = false
+        coEvery { gatewayRepository.onActiveWalletChanged(any()) } coAnswers { started = true; release.await() }
+        val vm = newViewModel(); vm.importValidMnemonic(); advanceUntil { started }
+        try {
+            assertTrue(vm.uiState.value.showSyncModeDialog)
+            vm.onSyncModeSelected(SyncMode.RECENT, null); advanceUntilIdle()
+            coVerify(exactly = 0) { gatewayRepository.resyncAccount(any(), any()) }
+            release.complete(Unit); advanceUntilIdle()
+            coVerify(exactly = 1) { gatewayRepository.resyncAccount(SyncMode.RECENT, null) }
+        } finally { release.complete(Unit); advanceUntilIdle() }
+    }
+
+    @Test
     fun `no device lock starts independent protected creation without downgrade consent`() = runTest {
         coEvery { walletKeyWriter.persistCreatedWallet(any(), any(), any(), any(), any(), any(), any()) } returns WalletKeyWriter.Result.Cancelled
         val vm = newViewModel(); advanceUntilIdle(); vm.updateName("Savings")

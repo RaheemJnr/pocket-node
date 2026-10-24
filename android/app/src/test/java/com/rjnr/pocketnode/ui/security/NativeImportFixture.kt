@@ -7,6 +7,7 @@ import com.rjnr.pocketnode.data.wallet.WalletKeyWriter
 import com.rjnr.pocketnode.data.wallet.WalletRepository
 import io.mockk.coEvery
 import io.mockk.mockk
+import kotlinx.coroutines.ensureActive
 
 /** Test-only input device. Public fixture text never enters the production ViewModel. */
 class NativeImportFixture {
@@ -20,7 +21,17 @@ class NativeImportFixture {
         coEvery { input.requestImport(any(), any()) } coAnswers {
             (if (secondArg<Boolean>()) key else phrase.joinToString(" ")).toCharArray().also { issued += it }
         }
-        coEvery { deriver.derive(any()) } coAnswers { deriveMnemonicHintSecret(firstArg()) }
+        coEvery { deriver.derive(any()) } coAnswers {
+            var owned: RestoreHintSecret? = null
+            try {
+                val result = deriveMnemonicHintSecret(firstArg()).also { owned = it }
+                // Model the production deriver's cancellation-safe dispatcher handoff:
+                // MockK must not discard a newly allocated secret as a cancelled return.
+                kotlinx.coroutines.currentCoroutineContext().ensureActive()
+                owned = null
+                result
+            } finally { owned?.wipe() }
+        }
     }
     fun word(index: Int, text: String) { phrase[index] = text }
     fun phrase(text: String) { phrase = text.trim().split(Regex("\\s+")).toMutableList() }

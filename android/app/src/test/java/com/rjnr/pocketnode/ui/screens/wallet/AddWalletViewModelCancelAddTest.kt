@@ -189,6 +189,30 @@ class AddWalletViewModelCancelAddTest {
     }
 
     @Test
+    fun `cancel joins pending registration before rollback and never adopts the removed wallet late`() = runTest {
+        val (first, second) = seedExisting()
+        val release = kotlinx.coroutines.CompletableDeferred<Unit>()
+        var started = false
+        var cancelled = false
+        var lateAdoption = false
+        coEvery { gatewayRepository.onActiveWalletChanged(any()) } coAnswers {
+            started = true
+            try { release.await(); lateAdoption = true } finally { cancelled = true }
+        }
+        val vm = newViewModel(); vm.importPhrase(); drainUntil { started }
+        try {
+            assertTrue(vm.uiState.value.showSyncModeDialog)
+            val added = walletRepository.getActive()!!.walletId
+            vm.cancelAddedWallet(); drainUntil { !vm.uiState.value.showSyncModeDialog }
+            assertTrue(cancelled)
+            release.complete(Unit); advanceUntilIdle()
+            assertFalse(lateAdoption)
+            assertOnlyAddedWalletRemoved(first, second, added)
+            coVerify(exactly = 1) { gatewayRepository.onWalletDeleted(added) }
+        } finally { release.complete(Unit); advanceUntilIdle() }
+    }
+
+    @Test
     fun `cancel removes only the added wallet and restores the previously active one`() = runTest {
         val (first, second) = seedExisting()
         val vm = newViewModel()

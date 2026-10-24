@@ -118,6 +118,17 @@ class AddWalletViewModel @Inject constructor(
     // #563: the wallet that was active before the pending import, restored
     // if the user cancels the sync choice. Null when there was none.
     private var previousActiveWalletId: String? = null
+    private var importOperation: kotlinx.coroutines.Job? = null
+    private var registeredImportId: String? = null
+
+    private suspend fun ensureImportRegistered(wallet: WalletEntity?) {
+        if (wallet == null) return
+        importOperation?.join()
+        check(walletRepository.getActive()?.walletId == wallet.walletId) { "Active wallet changed. Reopen this wallet to sync." }
+        if (registeredImportId == wallet.walletId) return
+        gatewayRepository.onActiveWalletChanged(wallet)
+        registeredImportId = wallet.walletId
+    }
 
     /**
      * #559: the restore hint picked on the import form, as text. It is picked
@@ -176,11 +187,12 @@ class AddWalletViewModel @Inject constructor(
             it.copy(isApplyingSyncChoice = true, syncChoiceError = null, restoreHintError = null)
         }
         viewModelScope.launch {
-            beforeResync()
             // resyncAccount reports failure through its Result; the catch is
             // a backstop so an unexpected throw still clears the in-flight
             // flag instead of leaving Apply disabled for good.
             val failure = try {
+                ensureImportRegistered(wallet)
+                beforeResync()
                 gatewayRepository.resyncAccount(mode, customHeight).exceptionOrNull()
             } catch (e: CancellationException) {
                 throw e
@@ -218,19 +230,19 @@ class AddWalletViewModel @Inject constructor(
 
     /** Dismissing the sheet leaves the RECENT default from import in place. */
     fun skipSyncSelection() {
-        // An Apply in flight owns the pending wallet and publishes it itself.
         if (_uiState.value.isApplyingSyncChoice) return
         val wallet = pendingImportedWallet
-        pendingImportedWallet = null
-        previousActiveWalletId = null
-        clearRestoreHint()
-        _uiState.update {
-            it.copy(
-                showSyncModeDialog = false,
-                syncChoiceError = null,
-                cancelRemovesWallet = false,
-                createdWallet = wallet,
-            )
+        _uiState.update { it.copy(isApplyingSyncChoice = true) }
+        viewModelScope.launch {
+            try {
+                ensureImportRegistered(wallet)
+                pendingImportedWallet = null
+                previousActiveWalletId = null
+                clearRestoreHint()
+                _uiState.update { it.copy(showSyncModeDialog = false, syncChoiceError = null, cancelRemovesWallet = false, createdWallet = wallet) }
+            } catch (e: CancellationException) { throw e }
+            catch (_: Exception) { _uiState.update { it.copy(syncChoiceError = UiMessage.Raw("Could not register this wallet. Retry syncing.")) } }
+            finally { _uiState.update { it.copy(isApplyingSyncChoice = false) } }
         }
     }
 
@@ -253,6 +265,8 @@ class AddWalletViewModel @Inject constructor(
             it.copy(isApplyingSyncChoice = true, syncChoiceError = null, restoreHintError = null)
         }
         viewModelScope.launch {
+            importOperation?.cancel()
+            importOperation?.join()
             // #563 review F2: once the rollback commits, the gateway must
             // switch back even if the user leaves the screen
             // (viewModelScope cancelled), or it stays on the removed wallet.
@@ -506,20 +520,24 @@ class AddWalletViewModel @Inject constructor(
     fun importRawKey(activity: FragmentActivity) = importWallet(activity, true)
 
     private fun importWallet(activity: FragmentActivity, privateKey: Boolean) {
-        if (_uiState.value.isLoading) return
+        if (_uiState.value.isLoading || importOperation?.isActive == true) return
         val name = _uiState.value.name.trim()
         if (name.isBlank()) {
             _uiState.update { it.copy(error = UiMessage.Resource(R.string.vm_error_enter_wallet_name)) }
             return
         }
-        viewModelScope.launch {
+        registeredImportId = null
+        importOperation = viewModelScope.launch {
             _uiState.update { it.copy(isLoading = true, error = null) }
             try {
-                when (val result = importOperations.import(activity, privateKey, name, restoreHintFileText, gatewayRepository.currentNetwork) { wallet, previous ->
+                when (val result = importOperations.import(activity, privateKey, name, restoreHintFileText, gatewayRepository.currentNetwork,
+                    onCommitted = { wallet, previous ->
+                        pendingImportedWallet = wallet
+                        previousActiveWalletId = previous?.takeIf { it != wallet.walletId }
+                        _uiState.update { it.copy(isLoading = false, showSyncModeDialog = true, cancelRemovesWallet = previousActiveWalletId != null) }
+                    }) { wallet, _ ->
                     gatewayRepository.onActiveWalletChanged(wallet)
-                    pendingImportedWallet = wallet
-                    previousActiveWalletId = previous?.takeIf { it != wallet.walletId }
-                    _uiState.update { it.copy(isLoading = false, showSyncModeDialog = true, cancelRemovesWallet = previousActiveWalletId != null) }
+                    registeredImportId = wallet.walletId
                 }) {
                     is com.rjnr.pocketnode.ui.security.WalletImportOperations.Outcome.Completed -> acceptRestoreHint(result.hint)
                     is com.rjnr.pocketnode.ui.security.WalletImportOperations.Outcome.Failed -> _uiState.update { it.copy(error = UiMessage.Raw(result.message)) }

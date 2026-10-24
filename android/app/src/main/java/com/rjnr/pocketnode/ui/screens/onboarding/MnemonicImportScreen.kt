@@ -107,18 +107,35 @@ class MnemonicImportViewModel @Inject constructor(
         }
     }
 
+    private var importOperation: kotlinx.coroutines.Job? = null
+    private var registeredImportId: String? = null
+
+    private suspend fun ensureImportRegistered() {
+        val id = importedWalletId ?: return
+        importOperation?.join()
+        val wallet = walletRepository.getActive()
+        check(wallet?.walletId == id) { "Active wallet changed. Reopen this wallet to sync." }
+        if (registeredImportId == id) return
+        repository.onActiveWalletChanged(wallet!!)
+        registeredImportId = id
+    }
+
     fun importMnemonic(activity: FragmentActivity) = importWallet(activity, false)
     fun importPrivateKey(activity: FragmentActivity) = importWallet(activity, true)
 
     private fun importWallet(activity: FragmentActivity, privateKey: Boolean) {
-        if (_uiState.value.isImporting) return
-        viewModelScope.launch {
+        if (_uiState.value.isImporting || importOperation?.isActive == true) return
+        registeredImportId = null
+        importOperation = viewModelScope.launch {
             _uiState.update { it.copy(isImporting = true, error = null) }
             try {
-                when (val result = importOperations.import(activity, privateKey, "Imported Wallet", restoreHintFileText, repository.currentNetwork) { wallet, _ ->
+                when (val result = importOperations.import(activity, privateKey, "Imported Wallet", restoreHintFileText, repository.currentNetwork,
+                    onCommitted = { wallet, _ ->
+                        importedWalletId = wallet.walletId
+                        _uiState.update { it.copy(isImporting = false, showSyncModeDialog = true) }
+                    }) { wallet, _ ->
                     repository.onActiveWalletChanged(wallet)
-                    importedWalletId = wallet.walletId
-                    _uiState.update { it.copy(isImporting = false, showSyncModeDialog = true) }
+                    registeredImportId = wallet.walletId
                 }) {
                     is com.rjnr.pocketnode.ui.security.WalletImportOperations.Outcome.Completed -> acceptRestoreHint(result.hint)
                     is com.rjnr.pocketnode.ui.security.WalletImportOperations.Outcome.Failed -> _uiState.update { it.copy(error = result.message) }
@@ -141,7 +158,6 @@ class MnemonicImportViewModel @Inject constructor(
             it.copy(isApplyingSyncChoice = true, syncChoiceError = null, restoreHintError = null)
         }
         viewModelScope.launch {
-            beforeResync()
             // #431: apply unconditionally, including RECENT. The old
             // `if (mode != RECENT)` short-circuit assumed RECENT was
             // already registered, but the wallet may have imported with
@@ -151,6 +167,8 @@ class MnemonicImportViewModel @Inject constructor(
             // resyncAccount reports failure through its Result; the catch is
             // a backstop so an unexpected throw still clears the in-flight flag.
             val failure = try {
+                ensureImportRegistered()
+                beforeResync()
                 repository.resyncAccount(mode, customHeight).exceptionOrNull()
             } catch (e: CancellationException) {
                 throw e
@@ -175,8 +193,16 @@ class MnemonicImportViewModel @Inject constructor(
 
     fun skipSyncSelection() {
         if (_uiState.value.isApplyingSyncChoice) return
-        clearRestoreHint()
-        _uiState.update { it.copy(showSyncModeDialog = false, syncChoiceError = null, importSuccess = true) }
+        _uiState.update { it.copy(isApplyingSyncChoice = true) }
+        viewModelScope.launch {
+            try {
+                ensureImportRegistered()
+                clearRestoreHint()
+                _uiState.update { it.copy(showSyncModeDialog = false, syncChoiceError = null, importSuccess = true) }
+            } catch (e: CancellationException) { throw e }
+            catch (_: Exception) { _uiState.update { it.copy(syncChoiceError = "Could not register this wallet. Retry syncing.") } }
+            finally { _uiState.update { it.copy(isApplyingSyncChoice = false) } }
+        }
     }
 
     // -- Restore hint (#559) --
