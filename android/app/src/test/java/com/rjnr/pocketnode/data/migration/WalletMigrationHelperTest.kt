@@ -94,6 +94,39 @@ class WalletMigrationHelperTest {
     }
 
     @Test
+    fun `bootstrap metadata failure rolls back key creation and retries from preserved ESP`() = runTest {
+        val context = ApplicationProvider.getApplicationContext<Context>()
+        val source = context.getSharedPreferences("ckb_wallet_keys", Context.MODE_PRIVATE)
+        source.edit().clear().putString("private_key", "aa".repeat(32))
+            .putString("wallet_type", "raw_key").putBoolean("mnemonic_backed_up", true).commit()
+        keyManager.testPrefs = source
+        db.openHelper.writableDatabase.execSQL("CREATE TRIGGER reject_bootstrap BEFORE INSERT ON wallets BEGIN SELECT RAISE(ABORT, 'metadata failure'); END")
+        helper.migrateIfNeeded()
+        assertEquals(0, walletDao.count()); assertEquals(0, db.keyMaterialDao().count())
+        assertTrue(source.contains("private_key"))
+        db.openHelper.writableDatabase.execSQL("DROP TRIGGER reject_bootstrap")
+        helper.migrateIfNeeded()
+        assertEquals(1, walletDao.count()); assertEquals(1, db.keyMaterialDao().count())
+        assertEquals("default", walletDao.getActive()!!.walletId)
+        assertTrue(db.keyMaterialDao().getByWalletId("default")!!.mnemonicBackedUp)
+    }
+
+    @Test
+    fun `bootstrap retains default source identity and exact ciphertext through metadata failure and retry`() = runTest {
+        seedLegacyDefaultWallet("aa".repeat(32), null, "raw_key")
+        val original = db.keyMaterialDao().getByWalletId("default")!!
+        db.openHelper.writableDatabase.execSQL("CREATE TRIGGER reject_bootstrap BEFORE INSERT ON wallets BEGIN SELECT RAISE(ABORT, 'metadata failure'); END")
+        helper.migrateIfNeeded()
+        assertEquals(0, walletDao.count()); assertEquals(1, db.keyMaterialDao().count())
+        assertEquals(original, db.keyMaterialDao().getByWalletId("default"))
+        db.openHelper.writableDatabase.execSQL("DROP TRIGGER reject_bootstrap")
+        helper.migrateIfNeeded()
+        assertEquals("default", walletDao.getActive()!!.walletId)
+        assertEquals(1, db.keyMaterialDao().count())
+        assertEquals(original, db.keyMaterialDao().getByWalletId("default"))
+    }
+
+    @Test
     fun `no-op when no legacy wallet exists`() = runTest {
         // No wallet in KeyManager
         helper.migrateIfNeeded()

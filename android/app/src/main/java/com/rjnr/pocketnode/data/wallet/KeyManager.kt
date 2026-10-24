@@ -226,6 +226,17 @@ class KeyManager @Inject constructor(
         return DecryptedKeyData(hex, mnemonic, type, prefs.getBoolean(KEY_MNEMONIC_BACKED_UP, false))
     }
 
+    /** Cleanup-only source read. Caller must prove identity against a freshly verified vault bundle. */
+    internal fun defaultPreferencesForVaultCleanup(): DecryptedKeyData? {
+        val file = java.io.File(context.filesDir.parentFile, "shared_prefs/ckb_wallet_keys.xml")
+        if (testPrefs == null && !file.exists() && !java.io.File(file.path + ".bak").exists()) return null
+        val hex = prefs.getString(KEY_PRIVATE_KEY, null) ?: return null
+        val mnemonic = prefs.getString(KEY_MNEMONIC, null)
+        val type = prefs.getString(KEY_WALLET_TYPE, null)
+            ?: if (mnemonic == null) WALLET_TYPE_RAW_KEY else WALLET_TYPE_MNEMONIC
+        return DecryptedKeyData(hex, mnemonic, type, prefs.getBoolean(KEY_MNEMONIC_BACKED_UP, false))
+    }
+
     /** UI-free access cannot authenticate wallet operations, including legacy software/ESP keys. */
     private suspend fun requireAuthenticatedReader(walletId: String): Nothing {
         if (keyStoreMigrationHelper?.keyMaterialVersion(walletId) == 2) {

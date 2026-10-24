@@ -48,7 +48,11 @@ class WalletVaultIntegrationFixture(existingDatabase: AppDatabase? = null) : Aut
         override suspend fun wrap(activity: FragmentActivity, envelope: WalletEnvelope, dataKey: ByteArray, mode: VaultDevicePromptMode): DeviceVaultResult<DeviceKeyWrap> = DeviceVaultResult.Unavailable("no-device-lock")
         override suspend fun unwrap(activity: FragmentActivity, envelope: WalletEnvelope, title: String, subtitle: String, mode: VaultDevicePromptMode): DeviceVaultResult<ByteArray> = DeviceVaultResult.Unavailable("missing-key")
     }
-    val coordinator = WalletVaultCoordinator(db, store, crypto, WalletSecretValidator(MnemonicManager()), prompt, device, VaultLegacyCleanup { cleanupOk && WalletLegacyCleanup(context, backup).clean(it) })
+    val keyManager = KeyManager(context, MnemonicManager(), NoopLogger).also {
+        it.keyStoreMigrationHelper = legacy
+        it.testPrefs = context.getSharedPreferences("ckb_wallet_keys", 0)
+    }
+    val coordinator = WalletVaultCoordinator(db, store, crypto, WalletSecretValidator(MnemonicManager()), prompt, device, VaultLegacyCleanup { id, generation, material -> cleanupOk && WalletLegacyCleanup(context, backup, db, keyManager, legacy).clean(id, generation, material) })
     val reader = WalletKeyReader(db.keyMaterialDao(), legacy, encryption, auth, recovery, coordinator, pin, prompt, preference)
     val writer = WalletKeyWriter(coordinator)
     val material = KeyMaterial("00".repeat(31) + "02", walletType = "raw_key", mnemonicBackedUp = false)

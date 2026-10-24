@@ -84,8 +84,8 @@ object AppModule {
 
     @Provides
     @Singleton
-    fun provideVaultCleanup(@ApplicationContext context: Context, backup: KeyBackupManager): com.rjnr.pocketnode.data.vault.VaultLegacyCleanup =
-        com.rjnr.pocketnode.data.vault.WalletLegacyCleanup(context, backup)
+    fun provideVaultCleanup(@ApplicationContext context: Context, backup: KeyBackupManager, db: AppDatabase, keyManager: KeyManager, legacy: KeyStoreMigrationHelper): com.rjnr.pocketnode.data.vault.VaultLegacyCleanup =
+        com.rjnr.pocketnode.data.vault.WalletLegacyCleanup(context, backup, db, keyManager, legacy)
 
     @Provides
     @Singleton

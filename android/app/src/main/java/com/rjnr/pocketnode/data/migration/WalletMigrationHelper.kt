@@ -13,7 +13,6 @@ import com.rjnr.pocketnode.data.gateway.models.NetworkType
 import com.rjnr.pocketnode.data.crypto.KeyStoreMigrationHelper
 import com.rjnr.pocketnode.data.wallet.KeyManager
 import com.rjnr.pocketnode.data.wallet.WalletPreferences
-import java.util.UUID
 import javax.inject.Inject
 import javax.inject.Singleton
 
@@ -67,49 +66,51 @@ class WalletMigrationHelper @Inject constructor(
 
         var ownedKey: ByteArray? = null
         try {
-            val material = keyManager.legacyDefaultMaterialForMigration(walletDao) ?: return
-            val privateKey = material.privateKeyHex.hexToByteArray().also { ownedKey = it }
-            val info = keyManager.deriveWalletInfo(privateKey)
-            val walletType = material.walletType
-            val walletId = UUID.randomUUID().toString()
-            val mnemonicBackedUp = material.mnemonicBackedUp
+            val migrated = database.withTransaction {
+                val material = keyManager.legacyDefaultMaterialForMigration(walletDao) ?: return@withTransaction null
+                val privateKey = material.privateKeyHex.hexToByteArray().also { ownedKey = it }
+                val info = keyManager.deriveWalletInfo(privateKey)
+                val walletType = material.walletType
+                val walletId = "default"
+                val mnemonicBackedUp = material.mnemonicBackedUp
 
-            // Write a V1 row directly. See class-level KDoc on migrateIfNeeded
-            // for why we don't go through WalletKeyWriter here.
-            val privateKeyHex = material.privateKeyHex
-            keyStoreMigrationHelper.migrateWallet(
-                walletId = walletId,
-                privateKeyHex = privateKeyHex,
-                mnemonic = material.mnemonic,
-                walletType = walletType,
-                mnemonicBackedUp = mnemonicBackedUp,
-            )
+                // Write a V1 row directly. See class-level KDoc on migrateIfNeeded
+                // for why we don't go through WalletKeyWriter here.
+                val privateKeyHex = material.privateKeyHex
+                if (database.keyMaterialDao().getByWalletId(walletId) == null) keyStoreMigrationHelper.migrateWallet(
+                    walletId = walletId,
+                    privateKeyHex = privateKeyHex,
+                    mnemonic = material.mnemonic,
+                    walletType = walletType,
+                    mnemonicBackedUp = mnemonicBackedUp,
+                )
 
-            val entity = WalletEntity(
-                walletId = walletId,
-                name = "Primary Wallet",
-                type = walletType,
-                derivationPath = if (walletType == KeyManager.WALLET_TYPE_MNEMONIC) "m/44'/309'/0'/0/0" else null,
-                parentWalletId = null,
-                accountIndex = 0,
-                mainnetAddress = info.mainnetAddress,
-                testnetAddress = info.testnetAddress,
-                isActive = true,
-                createdAt = System.currentTimeMillis()
-            )
+                val entity = WalletEntity(
+                    walletId = walletId,
+                    name = "Primary Wallet",
+                    type = walletType,
+                    derivationPath = if (walletType == KeyManager.WALLET_TYPE_MNEMONIC) "m/44'/309'/0'/0/0" else null,
+                    parentWalletId = null,
+                    accountIndex = 0,
+                    mainnetAddress = info.mainnetAddress,
+                    testnetAddress = info.testnetAddress,
+                    isActive = true,
+                    createdAt = System.currentTimeMillis()
+                )
 
-            walletDao.insert(entity)
+                walletDao.insert(entity)
 
-            // Backfill walletId in existing cached data
-            val db = database.openHelper.writableDatabase
-            db.execSQL("UPDATE transactions SET walletId = ? WHERE walletId = ''", arrayOf(walletId))
-            db.execSQL("UPDATE balance_cache SET walletId = ? WHERE walletId = ''", arrayOf(walletId))
-            db.execSQL("UPDATE dao_cells SET walletId = ? WHERE walletId = ''", arrayOf(walletId))
+                // Backfill walletId in existing cached data
+                val db = database.openHelper.writableDatabase
+                db.execSQL("UPDATE transactions SET walletId = ? WHERE walletId = ''", arrayOf(walletId))
+                db.execSQL("UPDATE balance_cache SET walletId = ? WHERE walletId = ''", arrayOf(walletId))
+                db.execSQL("UPDATE dao_cells SET walletId = ? WHERE walletId = ''", arrayOf(walletId))
 
-            // Set active wallet ID in preferences
-            walletPreferences.setActiveWalletId(walletId)
-
-            logger.d(TAG, "Migration complete: created wallet $walletId")
+                entity
+            } ?: return
+            // Room key identity, metadata and backfill commit together; preferences follow that commit.
+            walletPreferences.setActiveWalletId(migrated.walletId)
+            logger.d(TAG, "Migration complete: created wallet ${migrated.walletId}")
         } catch (e: CancellationException) {
             throw e
         } catch (e: Exception) {

@@ -86,7 +86,7 @@ class WalletVaultCoordinatorTest {
     @Before fun setup() {
         db = Room.inMemoryDatabaseBuilder(ApplicationProvider.getApplicationContext<Context>(), AppDatabase::class.java).allowMainThreadQueries().build()
         store = WalletVaultStore(db, crypto)
-        coordinator = WalletVaultCoordinator(db, store, crypto, validator, prompt, device, VaultLegacyCleanup { if (cleanupThrows) error("simulated cleanup IO failure"); cleanupOk })
+        coordinator = WalletVaultCoordinator(db, store, crypto, validator, prompt, device, VaultLegacyCleanup { _, _, _ -> if (cleanupThrows) error("simulated cleanup IO failure"); cleanupOk })
     }
     @After fun close() { db.close(); issued.forEach { it.fill('\u0000') }; deviceKeys.values.forEach { it.fill(0) } }
     private fun phrase(value: String? = pass) { credentials += value?.toCharArray() }

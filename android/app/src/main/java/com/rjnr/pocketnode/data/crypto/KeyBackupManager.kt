@@ -134,6 +134,21 @@ class KeyBackupManager @Inject constructor(
 
     fun hasBackup(walletId: String): Boolean = backupFile(walletId).exists()
 
+    /** Snapshot both weak copies so cleanup can reject concurrent rewrites. */
+    internal fun cleanupSnapshot(walletId: String): List<String?> =
+        listOf(backupFile(walletId), File(backupDir, "$walletId.enc.tmp")).map { file ->
+            if (!file.exists()) null else file.inputStream().use { input ->
+                val digest = java.security.MessageDigest.getInstance("SHA-256")
+                val buffer = ByteArray(8192)
+                while (true) {
+                    val size = input.read(buffer)
+                    if (size < 0) break
+                    digest.update(buffer, 0, size)
+                }
+                digest.digest().joinToString("") { "%02x".format(it) }
+            }
+        }
+
     fun hasAnyBackups(): Boolean = backupDir.listFiles()?.any { it.extension == "enc" } == true
 
     fun deleteBackup(walletId: String) {

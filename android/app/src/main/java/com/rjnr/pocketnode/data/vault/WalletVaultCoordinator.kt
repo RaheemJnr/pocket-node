@@ -35,7 +35,7 @@ class WalletVaultCoordinator(
                 envelope = store.get(walletId) ?: throw VaultFailure()
             } finally { current.fill('\u0000') }
         }
-        if (!finishCleanup(walletId, envelope.generation)) VaultAccessResult.CleanupRequired
+        if (!finishCleanup(walletId, envelope.generation, material)) VaultAccessResult.CleanupRequired
         else VaultAccessResult.Success(material)
     }
 
@@ -76,7 +76,7 @@ class WalletVaultCoordinator(
             // Verify persisted material rather than the candidate held in memory.
             val verified = decrypt(committed, phrase)
             if (!validate(verified, wallet) || verified.privateKey != protectedMaterial.privateKey || verified.mnemonic != protectedMaterial.mnemonic) throw VaultFailure()
-            if (!finishCleanup(id, committed.generation)) return@access VaultAccessResult.CleanupRequired
+            if (!finishCleanup(id, committed.generation, verified)) return@access VaultAccessResult.CleanupRequired
             if (device.unavailableReason() == null && prompt.choose(activity, "Use device authentication?",
                     "Your wallet passphrase remains required for recovery. Device authentication is optional.", "Enable", "Passphrase only") == true) {
                 var ownedKey: ByteArray? = null
@@ -104,7 +104,7 @@ class WalletVaultCoordinator(
             if (!store.verifyPassphrase(phrase)) throw VaultFailure()
             val material = decrypt(envelope, phrase)
             validateExisting(walletId, material)
-            if (!finishCleanup(walletId, envelope.generation)) return@access VaultAccessResult.CleanupRequired
+            if (!finishCleanup(walletId, envelope.generation, material)) return@access VaultAccessResult.CleanupRequired
             device.unavailableReason()?.let { return@access VaultAccessResult.Unavailable(it) }
             withContext(Dispatchers.IO) { ownedKey = crypto.unwrapDataKey(envelope, walletId, phrase) }
             val key = ownedKey ?: throw VaultFailure()
@@ -244,9 +244,9 @@ class WalletVaultCoordinator(
         if (envelope.generation == Long.MAX_VALUE) throw VaultFailure()
         return envelope.generation + 1
     }
-    private suspend fun finishCleanup(id: String, generation: Long): Boolean = try {
+    private suspend fun finishCleanup(id: String, generation: Long, material: KeyMaterial): Boolean = try {
         if (id !in store.pendingLegacyCleanup()) true
-        else if (!cleanup.clean(id)) false
+        else if (!cleanup.clean(id, generation, material)) false
         else {
             store.markLegacyCleanupComplete(id, generation)
             true
