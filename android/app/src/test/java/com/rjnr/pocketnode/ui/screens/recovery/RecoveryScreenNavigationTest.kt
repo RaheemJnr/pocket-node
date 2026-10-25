@@ -33,6 +33,8 @@ class RecoveryScreenNavigationTest {
         val vm = RecoveryViewModel(operations)
         var completed = 0; var readOnly = 0
         compose.setContent { RecoveryScreen({ completed++ }, { readOnly++ }, vm) }
+        compose.onNodeWithText("Why keep a recovery backup?").performScrollTo().performClick()
+        compose.onNodeWithText("A new passphrase cannot recreate a lost wallet key.", substring = true).assertExists()
         compose.onNodeWithText("Keep wallets read-only and continue").performScrollTo().performClick()
         compose.runOnIdle { assertEquals(1, readOnly); assertEquals(0, completed); assertEquals(RecoveryStage.RESTORE_FAILED, vm.uiState.value.stage) }
         coVerify(exactly = 0) { operations.complete() }
@@ -44,6 +46,8 @@ class RecoveryScreenNavigationTest {
         val vm = RecoveryViewModel(operations)
         compose.setContent { RecoveryScreen({}, {}, vm) }
         compose.onNodeWithText("Resume legacy cleanup").performScrollTo().assertExists()
+        compose.onNodeWithText("Use recovery phrase").assertDoesNotExist()
+        compose.onNodeWithText("Other recovery methods").performScrollTo().performClick()
         compose.onNodeWithText("Use recovery phrase").performScrollTo().performClick()
         coVerify(exactly = 1) { operations.external(any(), "a", false) }
         compose.onNodeWithText("Use private key (spending only)").assertExists()

@@ -322,7 +322,8 @@ class WalletVaultCoordinator(
 
     private suspend fun credential(activity: FragmentActivity, setup: Boolean) = prompt.request(activity,
         if (setup) "Set wallet passphrase" else "Wallet passphrase",
-        "Use at least 16 characters, including spaces if desired. This is separate from your app PIN, Android PIN and recovery phrase. Keep an external seed/private-key backup; this vault does not survive uninstall or device loss.", setup)
+        if (setup) "Create an independent wallet passphrase of at least 16 characters. Spaces are welcome. This is separate from your app PIN, Android PIN and recovery phrase."
+        else "Enter your wallet passphrase to continue. This is separate from your app PIN and Android PIN.", setup)
     private fun checkPhrase(phrase: CharArray) { if (!WalletPassphrasePolicy.validate(phrase)) throw VaultFailure() }
     private suspend fun validateExisting(id: String, material: KeyMaterial) {
         val wallet = db.walletDao().getById(id) ?: throw VaultFailure()

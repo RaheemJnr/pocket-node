@@ -165,30 +165,15 @@ fun SecuritySettingsScreen(
         ) {
             val activity = context as androidx.fragment.app.FragmentActivity
             DisposableEffect(viewModel) { onDispose { viewModel.cancelVaultOperation() } }
-            Text("Wallet authentication", style = MaterialTheme.typography.titleLarge)
-            Text("Biometrics are optional convenience. Choose a wallet passphrase or Android credential before unlocking any secret. Cancel always aborts.")
-            for ((preference, label) in listOf(
-                com.rjnr.pocketnode.data.vault.VaultReadPreference.DEFAULT to "Biometrics when available (default)",
-                com.rjnr.pocketnode.data.vault.VaultReadPreference.PASSPHRASE to "Wallet passphrase",
-                com.rjnr.pocketnode.data.vault.VaultReadPreference.CREDENTIAL_ONLY to "Android screen lock",
-            )) {
-                OutlinedButton(onClick = { viewModel.selectUnlockPreference(preference) }, enabled = !uiState.vaultBusy) {
-                    Text(if (uiState.unlockPreference == preference) "Selected: $label" else label)
-                }
-            }
-            Text("Your app PIN only opens the dashboard. The wallet passphrase protects this installation; it does not replace an external recovery phrase/private-key backup for uninstall, data clearing or device loss.")
-            Button(onClick = { viewModel.changePassphrase(activity) }, enabled = !uiState.vaultBusy) { Text("Change known wallet passphrase") }
-            OutlinedButton(onClick = { viewModel.resetPassphrase(activity) }, enabled = !uiState.vaultBusy) { Text("Reset forgotten passphrase with device authentication") }
-            OutlinedButton(onClick = { viewModel.resetPassphrase(activity, com.rjnr.pocketnode.data.vault.VaultDevicePromptMode.CREDENTIAL_ONLY) }, enabled = !uiState.vaultBusy) { Text("Reset using Android screen lock") }
-            Text("Reset authenticates every accessible wallet. Other wallets retain their previous protection and must be recovered before a later known-passphrase change.")
-            uiState.vaultMessage?.let { Text(it) }
-            uiState.vaultWallets.forEach { wallet ->
-                Text("${wallet.name}: ${wallet.message}")
-                OutlinedButton(onClick = { viewModel.enrollDevice(activity, wallet.walletId) }, enabled = !uiState.vaultBusy) { Text("Re-enroll device for ${wallet.name}") }
-                OutlinedButton(onClick = { viewModel.enrollDevice(activity, wallet.walletId, com.rjnr.pocketnode.data.vault.VaultDevicePromptMode.CREDENTIAL_ONLY) }, enabled = !uiState.vaultBusy) { Text("Enroll Android screen lock for ${wallet.name}") }
-            }
-            if (uiState.vaultBusy) TextButton(onClick = viewModel::cancelVaultOperation) { Text("Cancel") }
-            Spacer(Modifier.height(16.dp))
+            WalletProtectionSettings(
+                state = uiState,
+                selectPreference = viewModel::selectUnlockPreference,
+                change = { viewModel.changePassphrase(activity) },
+                reset = { mode -> viewModel.resetPassphrase(activity, mode) },
+                enroll = { id, mode -> viewModel.enrollDevice(activity, id, mode) },
+                cancel = viewModel::cancelVaultOperation,
+            )
+            Spacer(Modifier.height(24.dp))
             // PIN Section
             Card(
                 modifier = Modifier.fillMaxWidth(),
@@ -231,7 +216,7 @@ fun SecuritySettingsScreen(
                         }
                     } else {
                         Text(
-                            text = "No PIN set. Set a PIN to lock your wallet on launch.",
+                            text = "No PIN set. Set a PIN to lock the dashboard on launch.",
                             style = MaterialTheme.typography.bodyMedium,
                             color = MaterialTheme.colorScheme.onSurfaceVariant
                         )
