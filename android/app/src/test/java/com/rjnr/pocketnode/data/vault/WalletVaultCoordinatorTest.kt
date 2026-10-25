@@ -147,6 +147,54 @@ class WalletVaultCoordinatorTest {
             db.walletVaultDao().get("seed"), db.walletVaultDao().profile()))
     }
 
+    @Test fun `retained replacement never blesses profile changed during original unlock`() = operationTest {
+        retainedMnemonic()
+        phrase(pass); phrase(next)
+        var requests = 0
+        onCredential = {
+            if (++requests == 1) {
+                val snapshot = store.snapshot()
+                val old = store.get("a")!!
+                val replacement = crypto.create("a", old.generation + 1, Json.encodeToString(material).toByteArray(), next.toCharArray())
+                store.replaceAfterAuthenticatedReset(snapshot, listOf(replacement), next.toCharArray(),
+                    mapOf("a" to db.walletDao().getById("a")!!))
+            }
+        }
+        val result = coordinator.read(activity, "seed", "Backup", "Authenticate") as VaultAccessResult.Success
+        assertEquals("Both original and current profile credentials were requested", 2, requests)
+        assertNull("A profile changed since operation capture cannot gain a backup witness", result.backupWitness)
+        assertFalse(store.snapshot().unrecoveredWalletIds.contains("seed"))
+    }
+
+    @Test fun `retained replacement never blesses envelope changed between capture and authenticated load`() = operationTest {
+        retainedMnemonic()
+        val dao = db.walletVaultDao()
+        var changed = false
+        val observedDao = object : com.rjnr.pocketnode.data.database.dao.WalletVaultDao by dao {
+            override suspend fun get(walletId: String): com.rjnr.pocketnode.data.database.entity.WalletVaultEntity? {
+                val captured = dao.get(walletId)
+                if (walletId == "seed" && !changed) {
+                    changed = true
+                    store.updateDeviceWrap("seed", 0, DeviceKeyWrap("concurrent-before-load", ByteArray(48), ByteArray(12)))
+                }
+                return captured
+            }
+        }
+        // Only coordinate the timing gap; all storage, crypto and mutation work stays real.
+        val observedDb = io.mockk.mockk<AppDatabase>()
+        io.mockk.every { observedDb.walletDao() } returns db.walletDao()
+        io.mockk.every { observedDb.keyMaterialDao() } returns db.keyMaterialDao()
+        io.mockk.every { observedDb.walletVaultDao() } returns observedDao
+        val reader = WalletVaultCoordinator(observedDb, store, crypto, validator, prompt, device, object : VaultLegacyCleanup {
+            override suspend fun clean(walletId: String, expectedGeneration: Long, verifiedMaterial: KeyMaterial) = true
+        })
+        phrase(pass); phrase(next)
+        val result = reader.read(activity, "seed", "Backup", "Authenticate", VaultReadPreference.PASSPHRASE) as VaultAccessResult.Success
+        assertTrue("The capture/load gap must actually contain a mutation", changed)
+        assertNull("A different authenticated envelope cannot inherit the captured backup row", result.backupWitness)
+        assertFalse(store.snapshot().unrecoveredWalletIds.contains("seed"))
+    }
+
     @Test fun `retained profile replacement rejects a concurrent same generation envelope change`() = operationTest {
         retainedMnemonic()
         phrase(pass); phrase(next)
@@ -194,7 +242,9 @@ class WalletVaultCoordinatorTest {
             db.keyMaterialDao().upsert(source)
             chooseWrap = true; phrase()
             val previousProfile = db.walletVaultDao().profile()
+            var wrapTriggered = false
             onWrap = {
+                wrapTriggered = true
                 when (mutation) {
                     0 -> db.keyMaterialDao().upsert(db.keyMaterialDao().getByWalletId(id)!!.copy(mnemonicBackedUp = true))
                     1 -> { val profile = db.walletVaultDao().profile()!!; db.walletVaultDao().updateProfile(profile.copy(envelope = profile.envelope + 0)) }
@@ -203,8 +253,16 @@ class WalletVaultCoordinatorTest {
                 }
             }
             val result = coordinator.protectLegacy(activity, id, seed, source.iv)
-            if (result is VaultAccessResult.Success) assertFalse(result.backupWitness?.matches(
-                db.walletDao().getById(id), db.keyMaterialDao().getByWalletId(id), db.walletVaultDao().get(id), db.walletVaultDao().profile()) == true)
+            assertTrue("Mutation $mutation must run inside the device prompt", wrapTriggered)
+            if (mutation == 2) {
+                assertTrue("Same-generation envelope changes must reject enrollment", result is VaultAccessResult.Unavailable)
+            } else {
+                assertTrue("Mutation $mutation must preserve access but invalidate marking", result is VaultAccessResult.Success)
+                val witness = (result as VaultAccessResult.Success).backupWitness
+                assertNotNull("Mutation $mutation must test the originally captured witness", witness)
+                assertFalse(witness!!.matches(db.walletDao().getById(id), db.keyMaterialDao().getByWalletId(id),
+                    db.walletVaultDao().get(id), db.walletVaultDao().profile()))
+            }
             if (mutation == 1) db.walletVaultDao().updateProfile(previousProfile!!)
         }
     }

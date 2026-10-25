@@ -31,23 +31,29 @@ class WalletVaultCoordinator(
         val backupWallet = db.walletDao().getById(walletId)
         val backupMarker = db.keyMaterialDao().getByWalletId(walletId)
         var backupRow = db.walletVaultDao().get(walletId)
-        var backupProfile = db.walletVaultDao().profile()
+        val backupProfile = db.walletVaultDao().profile()
         var envelope = store.get(walletId) ?: return@access VaultAccessResult.NoVault
         val material = unlock(activity, session, envelope, title, subtitle, preference, allowPhraseFallback) ?: return@access VaultAccessResult.Cancelled
         validateExisting(walletId, material)
         if (walletId in store.snapshot().unrecoveredWalletIds) {
             val replacementProfile = db.walletVaultDao().profile() ?: throw VaultFailure()
+            // Replacing an authenticated envelope cannot authorize state that changed since capture.
+            val capturedSourceMatches = backupRow?.let { row ->
+                row.walletId == envelope.walletId && row.generation == envelope.generation &&
+                    row.envelope.contentEquals(WalletEnvelopeCodec.encode(envelope))
+            } == true && backupProfile?.let { profile ->
+                profile.id == replacementProfile.id && profile.envelope.contentEquals(replacementProfile.envelope)
+            } == true
             val current = credential(activity, false) ?: return@access VaultAccessResult.Cancelled
             try {
                 checkPhrase(current)
                 val replacement = create(walletId, nextGeneration(envelope), material, current)
                 store.replaceAuthenticatedWallet(walletId, envelope.generation, replacement, current, backupWallet,
                     expectedEnvelope = envelope, expectedProfile = replacementProfile)
-                // Advance only the known replacement, never adopt a fresh unrelated row.
-                backupRow = backupRow?.copy(generation = replacement.generation,
+                // Advance only a capture bound to the original authenticated source and profile.
+                backupRow = if (capturedSourceMatches) backupRow?.copy(generation = replacement.generation,
                     profileGeneration = WalletEnvelopeCodec.decode(replacementProfile.envelope).generation,
-                    envelope = WalletEnvelopeCodec.encode(replacement))
-                backupProfile = replacementProfile
+                    envelope = WalletEnvelopeCodec.encode(replacement)) else null
                 envelope = replacement
             } finally { current.fill('\u0000') }
         }
