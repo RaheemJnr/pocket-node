@@ -108,7 +108,6 @@ internal class SecureWalletSheet(
             hint = if (numeric) "Enter six-digit PIN" else label
             inputType = if (numeric) InputType.TYPE_CLASS_NUMBER or InputType.TYPE_NUMBER_VARIATION_PASSWORD
                 else InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_VARIATION_PASSWORD or InputType.TYPE_TEXT_FLAG_NO_SUGGESTIONS
-            transformationMethod = PasswordTransformationMethod.getInstance()
             imeOptions = EditorInfo.IME_FLAG_NO_EXTRACT_UI or EditorInfo.IME_FLAG_NO_PERSONALIZED_LEARNING
             filters = arrayOf(InputFilter.LengthFilter(maximum))
             isSaveEnabled = false
@@ -120,6 +119,8 @@ internal class SecureWalletSheet(
             setPadding(dp(12), dp(12), dp(4), dp(12))
             minHeight = dp(52)
             setSingleLine(true)
+            // Single-line mode replaces the transformation; apply masking last.
+            transformationMethod = PasswordTransformationMethod.getInstance()
         }
         content.addView(text(label, 13f, ink, true).apply { labelFor = field.id; setPadding(0, dp(14), 0, dp(8)) })
         val row = LinearLayout(host).apply { gravity = Gravity.CENTER_VERTICAL; background = shape(surface, 12f, outline) }

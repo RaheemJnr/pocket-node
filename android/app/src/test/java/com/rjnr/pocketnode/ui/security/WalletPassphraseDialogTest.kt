@@ -23,6 +23,28 @@ import org.robolectric.shadows.ShadowDialog
 class WalletPassphraseDialogTest {
     private fun allViews(view: View): List<View> = listOf(view) + if (view is ViewGroup) (0 until view.childCount).flatMap { allViews(view.getChildAt(it)) } else emptyList()
 
+    @Test fun `all credential kinds start masked and reveal toggles preserve input flags`() {
+        val activity = Robolectric.buildActivity(FragmentActivity::class.java).setup().get()
+        val sheet = SecureWalletSheet(activity, "Public fixture", "", "Continue")
+        try {
+            listOf("Wallet passphrase", "Confirm passphrase", "Old backup PIN", "Recovery phrase", "Private key").forEach { label ->
+                val field = sheet.credential(label, 1024, label == "Old backup PIN")
+                field.setText(if (label == "Old backup PIN") "123456" else "public fixture only")
+                val originalType = field.inputType
+                assertTrue("$label must start masked", field.transformationMethod is android.text.method.PasswordTransformationMethod)
+                val masked = field.transformationMethod.getTransformation(field.text, field).toString()
+                assertNotEquals(field.text.toString(), masked)
+                allViews(sheet.window!!.decorView).single { it.contentDescription == "Show $label" }.performClick()
+                assertNull(field.transformationMethod)
+                assertEquals(originalType, field.inputType)
+                allViews(sheet.window!!.decorView).single { it.contentDescription == "Hide $label" }.performClick()
+                assertTrue(field.transformationMethod is android.text.method.PasswordTransformationMethod)
+                assertEquals(originalType, field.inputType)
+                field.text.clear()
+            }
+        } finally { sheet.dismiss() }
+    }
+
     @Test fun `revealing a field preserves secure input flags and reauth lock cancels it`() = runTest {
         Dispatchers.setMain(UnconfinedTestDispatcher(testScheduler))
         try {
