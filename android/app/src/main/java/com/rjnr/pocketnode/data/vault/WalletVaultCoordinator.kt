@@ -30,18 +30,25 @@ class WalletVaultCoordinator(
         preference: VaultReadPreference, allowPhraseFallback: Boolean): VaultAccessResult = access(activity) { session ->
         val backupWallet = db.walletDao().getById(walletId)
         val backupMarker = db.keyMaterialDao().getByWalletId(walletId)
-        val backupRow = db.walletVaultDao().get(walletId)
-        val backupProfile = db.walletVaultDao().profile()
+        var backupRow = db.walletVaultDao().get(walletId)
+        var backupProfile = db.walletVaultDao().profile()
         var envelope = store.get(walletId) ?: return@access VaultAccessResult.NoVault
         val material = unlock(activity, session, envelope, title, subtitle, preference, allowPhraseFallback) ?: return@access VaultAccessResult.Cancelled
         validateExisting(walletId, material)
         if (walletId in store.snapshot().unrecoveredWalletIds) {
+            val replacementProfile = db.walletVaultDao().profile() ?: throw VaultFailure()
             val current = credential(activity, false) ?: return@access VaultAccessResult.Cancelled
             try {
                 checkPhrase(current)
                 val replacement = create(walletId, nextGeneration(envelope), material, current)
-                store.replaceAuthenticatedWallet(walletId, envelope.generation, replacement, current, backupWallet)
-                envelope = store.get(walletId) ?: throw VaultFailure()
+                store.replaceAuthenticatedWallet(walletId, envelope.generation, replacement, current, backupWallet,
+                    expectedEnvelope = envelope, expectedProfile = replacementProfile)
+                // Advance only the known replacement, never adopt a fresh unrelated row.
+                backupRow = backupRow?.copy(generation = replacement.generation,
+                    profileGeneration = WalletEnvelopeCodec.decode(replacementProfile.envelope).generation,
+                    envelope = WalletEnvelopeCodec.encode(replacement))
+                backupProfile = replacementProfile
+                envelope = replacement
             } finally { current.fill('\u0000') }
         }
         if (!finishCleanup(walletId, envelope.generation, material)) VaultAccessResult.CleanupRequired
@@ -177,6 +184,7 @@ class WalletVaultCoordinator(
                         authentication != null -> BoundLegacySourceProof(authentication.source, committedRow, LegacySourceAuthority.AUTHENTICATED)
                         else -> null
                     })) return@access VaultAccessResult.CleanupRequired
+            var backupEnvelope = committed
             if (device.unavailableReason() == null && prompt.choose(activity, "Use device authentication?",
                     "Your wallet passphrase remains required for recovery. Device authentication is optional.", "Enable", "Passphrase only") == true) {
                 var ownedKey: ByteArray? = null
@@ -185,12 +193,15 @@ class WalletVaultCoordinator(
                     val key = ownedKey ?: throw VaultFailure()
                     phrase.fill('\u0000')
                     when (val result = authenticateDevice(session) { mode -> device.wrap(activity, committed, key, mode) }) {
-                        is DeviceVaultResult.Success -> store.updateDeviceWrap(id, committed.generation, result.value)
+                        is DeviceVaultResult.Success -> {
+                            store.updateDeviceWrap(id, committed.generation, result.value, expectedEnvelope = committed)
+                            backupEnvelope = committed.copy(deviceWrap = result.value)
+                        }
                         else -> Unit // Independent protection is already committed and verified.
                     }
                 } finally { ownedKey?.fill(0) }
             }
-            VaultAccessResult.Success(verified, backupWitness(wallet, backupMarker, committedRow, backupProfile, committed, verified))
+            VaultAccessResult.Success(verified, backupWitness(wallet, backupMarker, committedRow.copy(envelope = WalletEnvelopeCodec.encode(backupEnvelope)), backupProfile, backupEnvelope, verified))
         } finally { phrase.fill('\u0000') }
     }
 

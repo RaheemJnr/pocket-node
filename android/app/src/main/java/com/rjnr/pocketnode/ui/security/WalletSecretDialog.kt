@@ -1,13 +1,12 @@
 package com.rjnr.pocketnode.ui.security
 
-import android.app.AlertDialog
+import android.widget.GridLayout
+import android.widget.Button
 import android.os.Build
 import android.view.View
 import android.view.WindowManager
-import android.widget.LinearLayout
 import android.widget.RadioButton
 import android.widget.RadioGroup
-import android.widget.ScrollView
 import android.widget.TextView
 import androidx.fragment.app.FragmentActivity
 import androidx.lifecycle.Lifecycle
@@ -43,28 +42,30 @@ class WalletSecretDialog @Inject constructor() {
                     isSaveEnabled = false
                     setSaveFromParentEnabled(false)
                     setTextIsSelectable(false)
+                    if (Build.VERSION.SDK_INT >= 30) importantForContentCapture = View.IMPORTANT_FOR_CONTENT_CAPTURE_NO_EXCLUDE_DESCENDANTS
                     if (Build.VERSION.SDK_INT >= 26) importantForAutofill = View.IMPORTANT_FOR_AUTOFILL_NO_EXCLUDE_DESCENDANTS
                     sensitiveViews.add(this)
                 }
-                val layout = LinearLayout(activity).apply {
-                    orientation = LinearLayout.VERTICAL
-                    setPadding(32, 16, 32, 16)
-                    isSaveEnabled = false
-                    setSaveFromParentEnabled(false)
+                val dialog = SecureWalletSheet(activity,
+                    if (mnemonic) "Save your recovery phrase" else "Private key",
+                    if (mnemonic) "Write these words down in order. Anyone with this phrase can spend your funds."
+                    else "This key backs up this account only. Anyone with this key can spend its funds.",
+                    if (positions.isNotEmpty()) "I’ve written it down" else "Close",
+                    if (positions.isNotEmpty()) "Cancel" else null)
+                val layout = dialog.body
+                if (mnemonic) {
+                    val grid = GridLayout(activity).apply { columnCount = 2; isSaveEnabled = false; setSaveFromParentEnabled(false) }
+                    words.forEachIndexed { index, word ->
+                        grid.addView(dialog.word("${index + 1}. $word").secure(), GridLayout.LayoutParams().apply {
+                            width = 0; columnSpec = GridLayout.spec(index % 2, 1f); rowSpec = GridLayout.spec(index / 2)
+                            setMargins(0, 0, (8 * activity.resources.displayMetrics.density).toInt(), (8 * activity.resources.displayMetrics.density).toInt())
+                        })
+                    }
+                    layout.addView(grid)
+                } else {
+                    layout.addView(dialog.word(secret.concatToString()).secure())
+                    layout.addView(dialog.secondary("Copy private key").apply { id = android.R.id.button3 })
                 }
-                val reveal = TextView(activity).secure().apply {
-                    text = if (mnemonic) words.mapIndexed { i, word -> "${i + 1}. $word" }.joinToString("\n") else secret.concatToString()
-                    textSize = 18f
-                }
-                layout.addView(reveal)
-                val scroll = ScrollView(activity).apply { addView(layout); isSaveEnabled = false; setSaveFromParentEnabled(false) }
-                val dialog = AlertDialog.Builder(activity)
-                    .setTitle(if (mnemonic) "Recovery phrase" else "Private key")
-                    .setMessage("Write this down privately. Anyone with this secret can spend your funds.")
-                    .setView(scroll)
-                    .setPositiveButton(if (positions.isNotEmpty()) "Verify backup" else "Close", null)
-                    .setNegativeButton("Cancel", null)
-                    .apply { if (!mnemonic) setNeutralButton("Copy private key", null) }.create()
                 lateinit var observer: LifecycleEventObserver
                 fun wipeViews() { sensitiveViews.forEach { it.text = "" }; sensitiveViews.clear() }
                 fun finish(verified: Boolean) {
@@ -88,31 +89,44 @@ class WalletSecretDialog @Inject constructor() {
                 dialog.window?.addFlags(WindowManager.LayoutParams.FLAG_SECURE)
                 dialog.show()
                 dialog.window?.addFlags(WindowManager.LayoutParams.FLAG_SECURE)
-                if (!mnemonic) dialog.getButton(AlertDialog.BUTTON_NEUTRAL).setOnClickListener {
+                if (!mnemonic) dialog.findViewById<Button>(android.R.id.button3).setOnClickListener {
                     com.rjnr.pocketnode.ui.util.SensitiveClipboard.copyWithTimeout(activity, secret.concatToString())
-                    dialog.setMessage("Private key copied. Clipboard will clear in 60 seconds.")
+                    dialog.presentation("Private key", "This key backs up this account only. Copied: clipboard will clear in 60 seconds.")
                 }
-                dialog.getButton(AlertDialog.BUTTON_NEGATIVE).setOnClickListener { finish(false) }
-                dialog.getButton(AlertDialog.BUTTON_POSITIVE).setOnClickListener {
+                dialog.negative?.setOnClickListener { finish(false) }
+                dialog.positive.setOnClickListener {
                     if (positions.isEmpty()) {
                         finish(false)
                     } else if (!quiz) {
                         quiz = true
                         wipeViews(); layout.removeAllViews()
+                        dialog.presentation("Check your backup", "Select the words you wrote down. Keep your phrase private.")
+                        val progress = dialog.label("0 of 3 selected")
+                        val error = dialog.label("", error = true).apply { visibility = View.GONE }
                         positions.forEach { position ->
-                            layout.addView(TextView(activity).apply { text = "Word ${position + 1}" })
-                            val group = RadioGroup(activity).apply { tag = position; isSaveEnabled = false; setSaveFromParentEnabled(false) }
-                            // Preserve shuffled multi-choice verification, including nontrivial decoys for repeated-word phrases.
+                            val card = dialog.card()
+                            card.addView(dialog.label("Word ${position + 1}"))
+                            val group = BackupChoiceGroup(activity).apply {
+                                tag = position; isSaveEnabled = false; setSaveFromParentEnabled(false)
+                                if (Build.VERSION.SDK_INT >= 26) importantForAutofill = View.IMPORTANT_FOR_AUTOFILL_NO_EXCLUDE_DESCENDANTS
+                                if (Build.VERSION.SDK_INT >= 30) importantForContentCapture = View.IMPORTANT_FOR_CONTENT_CAPTURE_NO_EXCLUDE_DESCENDANTS
+                            }
                             val decoys = (words.filter { it != words[position] }.distinct() + Bip39WordList.WORDS)
                                 .distinct().filter { it != words[position] }.shuffled(random).take(3)
                             (decoys + words[position]).shuffled(random).forEach { word ->
-                                group.addView(RadioButton(activity).apply { id = View.generateViewId(); text = word; secure() })
+                                group.addView(dialog.choice(word).apply { id = View.generateViewId(); secure() })
                             }
-                            groups.add(group); layout.addView(group)
+                            groups.add(group); card.addView(group); layout.addView(card)
+                            group.setOnCheckedChangeListener { _, _ ->
+                                val selected = groups.count { it.checkedRadioButtonId != -1 }
+                                progress.text = "$selected of 3 selected"
+                                dialog.positive.isEnabled = selected == 3
+                            }
                         }
-                        dialog.setTitle("Verify your backup")
-                        dialog.setMessage("Select the words you wrote down.")
-                        dialog.getButton(AlertDialog.BUTTON_POSITIVE).text = "Verify"
+                        layout.addView(progress); layout.addView(error)
+                        error.tag = "backup-error"
+                        dialog.positive.text = "Verify backup"
+                        dialog.positive.isEnabled = false
                     } else {
                         val correct = groups.size == 3 && groups.all { group ->
                             group.findViewById<RadioButton>(group.checkedRadioButtonId)?.text?.toString() == words[group.tag as Int]
@@ -120,11 +134,50 @@ class WalletSecretDialog @Inject constructor() {
                         if (correct) finish(true)
                         else {
                             groups.forEach { it.clearCheck() }
-                            dialog.setMessage("Some words are incorrect. Please try again.")
+                            layout.findViewWithTag<TextView>("backup-error").apply {
+                                text = "Some words are incorrect. Please try again."; visibility = View.VISIBLE
+                            }
                         }
                     }
                 }
             }
         }
     } finally { secret.fill('\u0000') }
+}
+
+/** Direct radio children preserve native mutual exclusion, with two columns at normal font sizes. */
+private class BackupChoiceGroup(activity: FragmentActivity) : RadioGroup(activity) {
+    private val columns get() = if (resources.configuration.fontScale > 1.3f) 1 else 2
+    private val heights = mutableListOf<Int>()
+    private val gap get() = (8 * resources.displayMetrics.density).toInt()
+    override fun onMeasure(widthMeasureSpec: Int, heightMeasureSpec: Int) {
+        val width = View.MeasureSpec.getSize(widthMeasureSpec)
+        val count = columns
+        heights.clear()
+        for (start in 0 until childCount step count) {
+            var height = 0
+            for (index in start until minOf(start + count, childCount)) {
+                getChildAt(index).measure(View.MeasureSpec.makeMeasureSpec((width - gap * (count - 1)) / count, View.MeasureSpec.EXACTLY),
+                    View.MeasureSpec.makeMeasureSpec(0, View.MeasureSpec.UNSPECIFIED))
+                height = maxOf(height, getChildAt(index).measuredHeight)
+            }
+            heights.add(height)
+        }
+        setMeasuredDimension(width, heights.sum() + gap * (heights.size - 1).coerceAtLeast(0))
+    }
+    override fun onLayout(changed: Boolean, left: Int, top: Int, right: Int, bottom: Int) {
+        val count = columns
+        var y = 0
+        heights.forEachIndexed { row, height ->
+            for (column in 0 until count) {
+                val index = row * count + column
+                if (index < childCount) {
+                    val cellWidth = (width - gap * (count - 1)) / count
+                    val x = column * (cellWidth + gap)
+                    getChildAt(index).layout(x, y, x + cellWidth, y + height)
+                }
+            }
+            y += height + gap
+        }
+    }
 }

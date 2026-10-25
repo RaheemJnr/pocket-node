@@ -48,6 +48,9 @@ internal class SecureWalletSheet(
     private val semibold = runCatching { ResourcesCompat.getFont(host, R.font.inter_semibold) }.getOrNull() ?: Typeface.DEFAULT_BOLD
     private val content = LinearLayout(host).apply { orientation = LinearLayout.VERTICAL }
     private val errors = mutableMapOf<EditText, TextView>()
+    private val heading: TextView
+    private val description: TextView
+    val body = LinearLayout(host).apply { orientation = LinearLayout.VERTICAL }
     val positive: Button
     val negative: Button?
 
@@ -72,6 +75,7 @@ internal class SecureWalletSheet(
             background = shape(surface, 28f)
             isSaveEnabled = false
             setSaveFromParentEnabled(false)
+            if (Build.VERSION.SDK_INT >= 30) importantForContentCapture = View.IMPORTANT_FOR_CONTENT_CAPTURE_NO_EXCLUDE_DESCENDANTS
             if (Build.VERSION.SDK_INT >= 26) importantForAutofill = View.IMPORTANT_FOR_AUTOFILL_NO_EXCLUDE_DESCENDANTS
         }
         val handle = View(host).apply { background = shape(outline, 4f) }
@@ -84,8 +88,11 @@ internal class SecureWalletSheet(
         }
         val scroll = ScrollView(host).apply { isFillViewport = false; addView(scrollBody) }
         root.addView(scroll, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f))
-        content.addView(text(title, 23f, ink, true).apply { accessibilityHeadingCompat() })
-        if (message.isNotBlank()) content.addView(text(message, 14f, muted).apply { setPadding(0, dp(10), 0, dp(12)) })
+        heading = text(title, 23f, ink, true).apply { accessibilityHeadingCompat() }
+        description = text(message, 14f, muted).apply { setPadding(0, dp(10), 0, dp(12)); visibility = if (message.isBlank()) View.GONE else View.VISIBLE }
+        content.addView(heading)
+        content.addView(description)
+        content.addView(body)
         positive = button(positiveLabel, true).apply { id = android.R.id.button1 }
         negative = negativeLabel?.let { button(it, false).apply { id = android.R.id.button2 } }
         scrollBody.addView(positive, fullWidth().apply { topMargin = dp(14) })
@@ -102,6 +109,30 @@ internal class SecureWalletSheet(
         }
     }
 
+    fun presentation(title: String, message: String) { heading.text = title; description.text = message }
+    fun label(value: String, error: Boolean = false) = text(value, 14f, if (error) errorColor else muted).apply {
+        setPadding(0, dp(8), 0, dp(8))
+        accessibilityLiveRegion = View.ACCESSIBILITY_LIVE_REGION_POLITE
+    }
+    fun word(value: String) = text(value, 15f, ink, true).apply {
+        background = shape(surface, 12f, outline)
+        setPadding(dp(12), dp(14), dp(12), dp(14))
+    }
+    fun choice(value: String) = RadioButton(host).apply {
+        text = value; textSize = 14f; typeface = regular; setTextColor(ink)
+        buttonTintList = android.content.res.ColorStateList.valueOf(accent)
+        minHeight = dp(48); setPadding(dp(6), dp(8), dp(6), dp(8))
+        background = shape(surface, 10f, outline)
+        setOnCheckedChangeListener { _, checked -> background = shape(surface, 10f, if (checked) accent else outline) }
+    }
+    fun card() = LinearLayout(host).apply {
+        orientation = LinearLayout.VERTICAL
+        background = shape(Color.parseColor(if (dark) "#242424" else "#F5F6FA"), 16f, outline)
+        setPadding(dp(12), dp(4), dp(12), dp(12))
+        layoutParams = fullWidth().apply { topMargin = dp(10) }
+    }
+    fun secondary(label: String) = button(label, false)
+
     fun credential(label: String, maximum: Int, numeric: Boolean = false): EditText {
         val field = EditText(host).apply {
             id = View.generateViewId()
@@ -113,7 +144,7 @@ internal class SecureWalletSheet(
             isSaveEnabled = false
             setSaveFromParentEnabled(false)
             if (Build.VERSION.SDK_INT >= 26) importantForAutofill = View.IMPORTANT_FOR_AUTOFILL_NO_EXCLUDE_DESCENDANTS
-            if (Build.VERSION.SDK_INT >= 29) importantForContentCapture = View.IMPORTANT_FOR_CONTENT_CAPTURE_NO_EXCLUDE_DESCENDANTS
+            if (Build.VERSION.SDK_INT >= 30) importantForContentCapture = View.IMPORTANT_FOR_CONTENT_CAPTURE_NO_EXCLUDE_DESCENDANTS
             setTextColor(ink); setHintTextColor(muted); textSize = 15f; typeface = regular
             background = null
             setPadding(dp(12), dp(12), dp(4), dp(12))
@@ -166,8 +197,12 @@ internal class SecureWalletSheet(
         text = label; isAllCaps = false; textSize = 14f; typeface = semibold
         minHeight = dp(48); minimumHeight = dp(48)
         setPadding(dp(14), dp(12), dp(14), dp(12))
-        setTextColor(if (primary) { if (dark) Color.BLACK else Color.WHITE } else accent)
-        background = shape(if (primary) accent else surface, 12f)
+        val enabledInk = if (primary) { if (dark) Color.BLACK else Color.WHITE } else accent
+        setTextColor(android.content.res.ColorStateList(arrayOf(intArrayOf(-android.R.attr.state_enabled), intArrayOf()), intArrayOf(muted, enabledInk)))
+        background = android.graphics.drawable.StateListDrawable().apply {
+            addState(intArrayOf(-android.R.attr.state_enabled), shape(outline, 12f))
+            addState(intArrayOf(), shape(if (primary) accent else surface, 12f))
+        }
     }
     private fun text(value: String, size: Float, color: Int, bold: Boolean = false) = TextView(host).apply {
         text = value; textSize = size; setTextColor(color); typeface = if (bold) semibold else regular
