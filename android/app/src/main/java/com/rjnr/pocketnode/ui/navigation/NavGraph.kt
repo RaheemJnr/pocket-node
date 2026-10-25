@@ -405,7 +405,9 @@ fun CkbNavGraph(
                 onNavigateToPinVerify = {
                     navController.navigate(Screen.PinEntry.createRoute("verify"))
                 },
-                viewModel = viewModel
+                viewModel = viewModel,
+                onNavigateToBackup = { walletId -> navController.navigate(Screen.MnemonicBackup.createRoute(walletId = walletId)) },
+                onNavigateToRecovery = { navController.navigate(Screen.Recovery.route) }
             )
         }
 
@@ -536,14 +538,10 @@ fun CkbNavGraph(
             RecoveryScreen(
                 // The keys are already written back and verified by the screen.
                 onRecoveryComplete = {
-                    navController.navigate(destinationAfterWalletReady()) {
-                        popUpTo(Screen.Recovery.route) { inclusive = true }
-                    }
+                    navController.exitRecovery(destinationAfterWalletReady())
                 },
                 onContinueReadOnly = {
-                    navController.navigate(Screen.Main.route) {
-                        popUpTo(Screen.Recovery.route) { inclusive = true }
-                    }
+                    navController.exitRecovery(Screen.Main.route)
                 }
             )
         }

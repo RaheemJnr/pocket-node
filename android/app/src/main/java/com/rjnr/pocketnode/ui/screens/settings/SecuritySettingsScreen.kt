@@ -26,8 +26,11 @@ import androidx.compose.material3.SnackbarHostState
 import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
-import androidx.compose.material3.TopAppBar
+import androidx.compose.material3.LargeTopAppBar
 import androidx.compose.material3.TopAppBarDefaults
+import androidx.activity.compose.BackHandler
+import androidx.compose.runtime.saveable.rememberSaveable
+import androidx.compose.runtime.key
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
@@ -38,6 +41,7 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.input.nestedscroll.nestedScroll
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.unit.dp
 import androidx.hilt.lifecycle.viewmodel.compose.hiltViewModel
@@ -50,10 +54,16 @@ fun SecuritySettingsScreen(
     onNavigateBack: () -> Unit = {},
     onNavigateToPinSetup: () -> Unit = {},
     onNavigateToPinVerify: () -> Unit = {},
-    viewModel: SecuritySettingsViewModel = hiltViewModel()
+    viewModel: SecuritySettingsViewModel = hiltViewModel(),
+    onNavigateToBackup: (String) -> Unit = {},
+    onNavigateToRecovery: () -> Unit = {},
 ) {
     val uiState by viewModel.uiState.collectAsState()
     val snackbarHostState = remember { SnackbarHostState() }
+    var section by rememberSaveable { mutableStateOf(ProtectionSection.OVERVIEW) }
+    val scrollBehavior = key(section) { TopAppBarDefaults.exitUntilCollapsedScrollBehavior() }
+    val navigateBack = { if (section != ProtectionSection.OVERVIEW) section = ProtectionSection.OVERVIEW else onNavigateBack() }
+    BackHandler(enabled = section != ProtectionSection.OVERVIEW) { section = ProtectionSection.OVERVIEW }
     var showRemoveDialog by remember { mutableStateOf(false) }
     var optimisticBiometric by remember { mutableStateOf<Boolean?>(null) }
     var optimisticAuthBeforeSend by remember { mutableStateOf<Boolean?>(null) }
@@ -66,6 +76,7 @@ fun SecuritySettingsScreen(
         optimisticAuthBeforeSend = null
     }
 
+    DisposableEffect(viewModel) { onDispose { viewModel.cancelVaultOperation() } }
     val context = androidx.compose.ui.platform.LocalContext.current
     LaunchedEffect(uiState.error) {
         uiState.error?.let { msg ->
@@ -140,23 +151,25 @@ fun SecuritySettingsScreen(
     }
 
     Scaffold(
+        modifier = Modifier.nestedScroll(scrollBehavior.nestedScrollConnection),
         containerColor = MaterialTheme.colorScheme.surface,
         topBar = {
-            TopAppBar(
-                title = { Text(stringResource(R.string.security_settings_title)) },
+            LargeTopAppBar(
+                title = { Text(section.title) },
                 navigationIcon = {
-                    IconButton(onClick = onNavigateBack) {
+                    IconButton(onClick = navigateBack) {
                         Icon(Lucide.ArrowLeft, "Back")
                     }
                 },
-                colors = TopAppBarDefaults.topAppBarColors(
+                scrollBehavior = scrollBehavior,
+                colors = TopAppBarDefaults.largeTopAppBarColors(
                     containerColor = MaterialTheme.colorScheme.surface
                 )
             )
         },
         snackbarHost = { SnackbarHost(snackbarHostState) }
     ) { padding ->
-        Column(
+        key(section) { Column(
             modifier = Modifier
                 .fillMaxSize()
                 .padding(padding)
@@ -164,7 +177,6 @@ fun SecuritySettingsScreen(
                 .verticalScroll(rememberScrollState())
         ) {
             val activity = context as androidx.fragment.app.FragmentActivity
-            DisposableEffect(viewModel) { onDispose { viewModel.cancelVaultOperation() } }
             WalletProtectionSettings(
                 state = uiState,
                 selectPreference = viewModel::selectUnlockPreference,
@@ -172,170 +184,177 @@ fun SecuritySettingsScreen(
                 reset = { mode -> viewModel.resetPassphrase(activity, mode) },
                 enroll = { id, mode -> viewModel.enrollDevice(activity, id, mode) },
                 cancel = viewModel::cancelVaultOperation,
+                section = section,
+                navigate = { section = it },
+                backup = onNavigateToBackup,
+                recover = onNavigateToRecovery,
             )
-            Spacer(Modifier.height(24.dp))
-            // PIN Section
-            Card(
-                modifier = Modifier.fillMaxWidth(),
-                colors = CardDefaults.cardColors(
-                    containerColor = MaterialTheme.colorScheme.surfaceVariant
-                )
-            ) {
-                Column(modifier = Modifier.padding(16.dp)) {
-                    Text(
-                        text = "Dashboard PIN lock",
-                        style = MaterialTheme.typography.titleMedium
+            if (section == ProtectionSection.APP_LOCK) {
+                Text("Control access to the app dashboard.", color = MaterialTheme.colorScheme.onSurfaceVariant)
+                Spacer(Modifier.height(16.dp))
+                // PIN Section
+                Card(
+                    modifier = Modifier.fillMaxWidth(),
+                    colors = CardDefaults.cardColors(
+                        containerColor = MaterialTheme.colorScheme.surfaceVariant
                     )
-
-                    Spacer(modifier = Modifier.height(12.dp))
-
-                    if (uiState.hasPin) {
-                        Row(verticalAlignment = Alignment.CenterVertically) {
-                            Icon(
-                                Lucide.CircleCheck,
-                                contentDescription = null,
-                                tint = MaterialTheme.colorScheme.primary,
-                                modifier = Modifier.padding(end = 8.dp)
-                            )
-                            Text(stringResource(R.string.security_settings_pin_enabled))
-                        }
+                ) {
+                    Column(modifier = Modifier.padding(16.dp)) {
+                        Text(
+                            text = "App PIN",
+                            style = MaterialTheme.typography.titleMedium
+                        )
 
                         Spacer(modifier = Modifier.height(12.dp))
 
-                        Row {
-                            OutlinedButton(onClick = onNavigateToPinSetup) {
-                                Text(stringResource(R.string.security_settings_change_pin))
+                        if (uiState.hasPin) {
+                            Row(verticalAlignment = Alignment.CenterVertically) {
+                                Icon(
+                                    Lucide.CircleCheck,
+                                    contentDescription = null,
+                                    tint = MaterialTheme.colorScheme.primary,
+                                    modifier = Modifier.padding(end = 8.dp)
+                                )
+                                Text(stringResource(R.string.security_settings_pin_enabled))
                             }
-                            Spacer(modifier = Modifier.width(8.dp))
-                            TextButton(onClick = { showRemoveDialog = true }) {
+
+                            Spacer(modifier = Modifier.height(12.dp))
+
+                            Row {
+                                OutlinedButton(onClick = onNavigateToPinSetup) {
+                                    Text(stringResource(R.string.security_settings_change_pin))
+                                }
+                                Spacer(modifier = Modifier.width(8.dp))
+                                TextButton(onClick = { showRemoveDialog = true }) {
+                                    Text(
+                                        "Remove PIN",
+                                        color = MaterialTheme.colorScheme.error
+                                    )
+                                }
+                            }
+                        } else {
+                            Text(
+                                text = "No PIN set. Set a PIN to lock the dashboard on launch.",
+                                style = MaterialTheme.typography.bodyMedium,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+
+                            Spacer(modifier = Modifier.height(12.dp))
+
+                            Button(onClick = onNavigateToPinSetup) {
+                                Text(stringResource(R.string.security_settings_set_pin))
+                            }
+                        }
+                    }
+                }
+
+                Spacer(modifier = Modifier.height(16.dp))
+
+                // Biometric Section
+                Card(
+                    modifier = Modifier.fillMaxWidth(),
+                    colors = CardDefaults.cardColors(
+                        containerColor = MaterialTheme.colorScheme.surfaceVariant
+                    )
+                ) {
+                    Column(modifier = Modifier.padding(16.dp)) {
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Column(modifier = Modifier.weight(1f)) {
                                 Text(
-                                    "Remove PIN",
-                                    color = MaterialTheme.colorScheme.error
+                                    text = "Biometric app unlock",
+                                    style = MaterialTheme.typography.titleMedium
+                                )
+                                Spacer(modifier = Modifier.height(4.dp))
+                                Text(
+                                    text = uiState.biometricStatusText,
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant
                                 )
                             }
-                        }
-                    } else {
-                        Text(
-                            text = "No PIN set. Set a PIN to lock the dashboard on launch.",
-                            style = MaterialTheme.typography.bodyMedium,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant
-                        )
 
-                        Spacer(modifier = Modifier.height(12.dp))
-
-                        Button(onClick = onNavigateToPinSetup) {
-                            Text(stringResource(R.string.security_settings_set_pin))
-                        }
-                    }
-                }
-            }
-
-            Spacer(modifier = Modifier.height(16.dp))
-
-            // Biometric Section
-            Card(
-                modifier = Modifier.fillMaxWidth(),
-                colors = CardDefaults.cardColors(
-                    containerColor = MaterialTheme.colorScheme.surfaceVariant
-                )
-            ) {
-                Column(modifier = Modifier.padding(16.dp)) {
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
-                        Column(modifier = Modifier.weight(1f)) {
-                            Text(
-                                text = "Biometric Unlock",
-                                style = MaterialTheme.typography.titleMedium
+                            Switch(
+                                checked = optimisticBiometric ?: uiState.isBiometricEnabled,
+                                onCheckedChange = { enabled ->
+                                    optimisticBiometric = enabled
+                                    val action = if (enabled) PendingSecurityAction.ENABLE_BIOMETRIC
+                                        else PendingSecurityAction.DISABLE_BIOMETRIC
+                                    viewModel.setPendingAction(action)
+                                    onNavigateToPinVerify()
+                                },
+                                enabled = uiState.isBiometricAvailable && uiState.hasPin
                             )
-                            Spacer(modifier = Modifier.height(4.dp))
+                        }
+
+                        if (!uiState.hasPin && uiState.isBiometricAvailable) {
+                            Spacer(modifier = Modifier.height(8.dp))
                             Text(
-                                text = uiState.biometricStatusText,
+                                text = "Set a PIN first to enable biometric unlock",
                                 style = MaterialTheme.typography.bodySmall,
                                 color = MaterialTheme.colorScheme.onSurfaceVariant
                             )
                         }
-
-                        Switch(
-                            checked = optimisticBiometric ?: uiState.isBiometricEnabled,
-                            onCheckedChange = { enabled ->
-                                optimisticBiometric = enabled
-                                val action = if (enabled) PendingSecurityAction.ENABLE_BIOMETRIC
-                                    else PendingSecurityAction.DISABLE_BIOMETRIC
-                                viewModel.setPendingAction(action)
-                                onNavigateToPinVerify()
-                            },
-                            enabled = uiState.isBiometricAvailable && uiState.hasPin
-                        )
-                    }
-
-                    if (!uiState.hasPin && uiState.isBiometricAvailable) {
-                        Spacer(modifier = Modifier.height(8.dp))
-                        Text(
-                            text = "Set a PIN first to enable biometric unlock",
-                            style = MaterialTheme.typography.bodySmall,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant
-                        )
                     }
                 }
-            }
 
-            Spacer(modifier = Modifier.height(16.dp))
+                Spacer(modifier = Modifier.height(16.dp))
 
-            // Transaction Security Section
-            Card(
-                modifier = Modifier.fillMaxWidth(),
-                colors = CardDefaults.cardColors(
-                    containerColor = MaterialTheme.colorScheme.surfaceVariant
-                )
-            ) {
-                Column(modifier = Modifier.padding(16.dp)) {
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
-                        Column(modifier = Modifier.weight(1f)) {
-                            Text(
-                                text = "Authenticate before sending",
-                                style = MaterialTheme.typography.titleMedium
+                // Transaction Security Section
+                Card(
+                    modifier = Modifier.fillMaxWidth(),
+                    colors = CardDefaults.cardColors(
+                        containerColor = MaterialTheme.colorScheme.surfaceVariant
+                    )
+                ) {
+                    Column(modifier = Modifier.padding(16.dp)) {
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Column(modifier = Modifier.weight(1f)) {
+                                Text(
+                                    text = "Authenticate before sending",
+                                    style = MaterialTheme.typography.titleMedium
+                                )
+                                Spacer(modifier = Modifier.height(4.dp))
+                                Text(
+                                    text = "Additional dashboard authentication. Vault signing always requires wallet authentication.",
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                                )
+                            }
+
+                            Switch(
+                                checked = optimisticAuthBeforeSend ?: uiState.isAuthBeforeSendEnabled,
+                                onCheckedChange = { enabled ->
+                                    // Per-operation auth toggle is itself a security state
+                                    // change. Both enable AND disable route through
+                                    // PinEntryScreen so a local attacker with a brief
+                                    // unlocked-session window cannot turn the gate off
+                                    // and immediately send (#292).
+                                    optimisticAuthBeforeSend = enabled
+                                    val action = if (enabled) PendingSecurityAction.ENABLE_AUTH_BEFORE_SEND
+                                        else PendingSecurityAction.DISABLE_AUTH_BEFORE_SEND
+                                    viewModel.setPendingAction(action)
+                                    onNavigateToPinVerify()
+                                },
+                                enabled = uiState.hasPin
                             )
-                            Spacer(modifier = Modifier.height(4.dp))
+                        }
+
+                        if (!uiState.hasPin) {
+                            Spacer(modifier = Modifier.height(8.dp))
                             Text(
-                                text = "Additional dashboard authentication. Vault signing always requires wallet authentication.",
+                                text = "Set a PIN first to enable send authentication",
                                 style = MaterialTheme.typography.bodySmall,
                                 color = MaterialTheme.colorScheme.onSurfaceVariant
                             )
                         }
-
-                        Switch(
-                            checked = optimisticAuthBeforeSend ?: uiState.isAuthBeforeSendEnabled,
-                            onCheckedChange = { enabled ->
-                                // Per-operation auth toggle is itself a security state
-                                // change. Both enable AND disable route through
-                                // PinEntryScreen so a local attacker with a brief
-                                // unlocked-session window cannot turn the gate off
-                                // and immediately send (#292).
-                                optimisticAuthBeforeSend = enabled
-                                val action = if (enabled) PendingSecurityAction.ENABLE_AUTH_BEFORE_SEND
-                                    else PendingSecurityAction.DISABLE_AUTH_BEFORE_SEND
-                                viewModel.setPendingAction(action)
-                                onNavigateToPinVerify()
-                            },
-                            enabled = uiState.hasPin
-                        )
-                    }
-
-                    if (!uiState.hasPin) {
-                        Spacer(modifier = Modifier.height(8.dp))
-                        Text(
-                            text = "Set a PIN first to enable send authentication",
-                            style = MaterialTheme.typography.bodySmall,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant
-                        )
                     }
                 }
             }
-        }
+        } }
     }
 }

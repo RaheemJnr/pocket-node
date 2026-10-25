@@ -1,6 +1,11 @@
 package com.rjnr.pocketnode.ui.screens.onboarding
 
 import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
+import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Modifier
@@ -13,6 +18,7 @@ import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.rjnr.pocketnode.data.wallet.WalletRepository
 import com.rjnr.pocketnode.ui.security.WalletBackupOperations
+import com.rjnr.pocketnode.ui.security.ProtectionNotice
 import dagger.hilt.android.lifecycle.HiltViewModel
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Job
@@ -78,18 +84,72 @@ fun MnemonicBackupScreen(
     val state by viewModel.uiState.collectAsState()
     val activity = LocalContext.current as FragmentActivity
     DisposableEffect(viewModel) { onDispose { viewModel.cancel() } }
-    Scaffold(topBar = { TopAppBar(title = { Text(if (state.currentStep == 3) "Backup complete" else "Back up your wallet") }) }) { padding ->
-        Column(Modifier.fillMaxSize().padding(padding).padding(24.dp), verticalArrangement = Arrangement.spacedBy(16.dp)) {
+    Scaffold(
+        topBar = {
+            TopAppBar(
+                title = { Text(if (state.currentStep == 3) "Backup complete" else "Back up your wallet") },
+                navigationIcon = {
+                    IconButton(onClick = onNavigateBack) {
+                        Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "Back")
+                    }
+                },
+            )
+        },
+    ) { padding ->
+        Column(
+            Modifier.fillMaxSize().padding(padding).consumeWindowInsets(padding)
+                .verticalScroll(rememberScrollState()).padding(24.dp),
+            verticalArrangement = Arrangement.spacedBy(20.dp),
+        ) {
             if (state.currentStep == 3) {
-                Text("Your recovery phrase backup was verified. Keep it private and separate from your wallet passphrase.")
-                Button(onClick = onNavigateToHome) { Text("Continue") }
+                Text("Keep your backup safe", style = MaterialTheme.typography.headlineSmall)
+                Card(shape = RoundedCornerShape(16.dp), modifier = Modifier.fillMaxWidth()) {
+                    Text(
+                        when (state.hasMnemonic) {
+                            true -> "Your recovery phrase backup was verified. Keep it private and separate from your wallet passphrase."
+                            false -> "Keep your private key safe. Saving a key backs up this account only; viewing it does not verify an external backup."
+                            null -> "Keep your recovery material private and separate from your wallet passphrase."
+                        },
+                        modifier = Modifier.padding(20.dp),
+                    )
+                }
+                Button(onClick = onNavigateToHome, modifier = Modifier.fillMaxWidth()) { Text("Continue") }
             } else {
-                Text("Authenticate to view your recovery material in a protected window. A recovery phrase backup is completed only after checking three randomly selected words.")
-                if (state.hasMnemonic == false) Text("This protected wallet contains a private key, not a recovery phrase. Saving a key backs up this account only.")
-                state.error?.let { Text(it, color = MaterialTheme.colorScheme.error) }
-                Button(onClick = { viewModel.backup(activity) }, enabled = !state.isLoading) { Text(if (state.isLoading) "Working…" else "Authenticate and back up") }
-                TextButton(onClick = onNavigateBack) { Text("Back") }
+                Text("Keep a way back in", style = MaterialTheme.typography.headlineSmall)
+                Text("Create an external backup in case you lose access to this device.", color = MaterialTheme.colorScheme.onSurfaceVariant)
+                Card(shape = RoundedCornerShape(16.dp), modifier = Modifier.fillMaxWidth()) {
+                    Column(Modifier.padding(20.dp), verticalArrangement = Arrangement.spacedBy(16.dp)) {
+                        BackupStep("1. Authenticate", "Authenticate to view your recovery material.")
+                        HorizontalDivider()
+                        BackupStep("2. Record your recovery material", if (state.hasMnemonic == false)
+                            "Save your private key somewhere safe. Saving a key backs up this account only."
+                        else "Write down your phrase or save your private key outside this app.")
+                        HorizontalDivider()
+                        BackupStep("3. Check your backup", when (state.hasMnemonic) {
+                            true -> "Confirm three randomly selected words to verify your recovery phrase backup."
+                            false -> "Keep a readable copy of your private key. Viewing it does not verify an external backup."
+                            null -> "For a recovery phrase, confirm three randomly selected words."
+                        })
+                    }
+                }
+                ProtectionNotice("Keep it private", "Anyone with your recovery phrase or private key can access your funds.")
+                state.error?.let { ProtectionNotice("Backup did not complete", it, error = true) }
+                if (state.isLoading) LinearProgressIndicator(Modifier.fillMaxWidth())
+                Button(
+                    onClick = { viewModel.backup(activity) },
+                    enabled = !state.isLoading,
+                    modifier = Modifier.fillMaxWidth(),
+                ) { Text(if (state.isLoading) "Working…" else "Authenticate and back up") }
+                if (state.isLoading) TextButton(onClick = viewModel::cancel, modifier = Modifier.fillMaxWidth()) { Text("Cancel") }
             }
         }
+    }
+}
+
+@Composable
+private fun BackupStep(title: String, detail: String) {
+    Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+        Text(title, style = MaterialTheme.typography.titleSmall)
+        Text(detail, style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
     }
 }

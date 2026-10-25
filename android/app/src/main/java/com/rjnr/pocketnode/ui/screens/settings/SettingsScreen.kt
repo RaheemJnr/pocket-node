@@ -6,10 +6,15 @@ import android.content.Intent
 import android.content.pm.PackageManager
 import android.net.Uri
 import android.os.Build
+import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.background
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.RowScope
@@ -29,6 +34,8 @@ import androidx.compose.material3.Button
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
+import androidx.compose.material3.IconButton
+import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.SnackbarHost
@@ -62,6 +69,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.core.content.ContextCompat
 import androidx.hilt.lifecycle.viewmodel.compose.hiltViewModel
+import com.composables.icons.lucide.ArrowLeft
 import com.composables.icons.lucide.ChevronRight
 import com.composables.icons.lucide.CircleDollarSign
 import com.composables.icons.lucide.CircleHelp
@@ -246,10 +254,10 @@ fun SettingsScreen(
 
     // Sync strategy selection dialog
     if (uiState.showSyncStrategyDialog) {
-        AlertDialog(
-            onDismissRequest = { viewModel.hideSyncStrategyDialog() },
-            title = { Text(stringResource(R.string.settings_sync_strategy_title)) },
-            text = {
+        SettingsChoiceSheet(
+            onDismiss = { viewModel.hideSyncStrategyDialog() },
+            title = stringResource(R.string.settings_sync_strategy_title),
+            content = {
                 androidx.compose.foundation.layout.Column {
                     SyncStrategy.entries.forEach { strategy ->
                         Row(
@@ -278,17 +286,16 @@ fun SettingsScreen(
                         }
                     }
                 }
-            },
-            confirmButton = {}
+            }
         )
     }
 
     // Theme selection dialog
     if (uiState.showThemeDialog) {
-        AlertDialog(
-            onDismissRequest = { viewModel.hideThemeDialog() },
-            title = { Text(stringResource(R.string.settings_theme_title)) },
-            text = {
+        SettingsChoiceSheet(
+            onDismiss = { viewModel.hideThemeDialog() },
+            title = stringResource(R.string.settings_theme_title),
+            content = {
                 androidx.compose.foundation.layout.Column {
                     ThemeMode.entries.forEach { mode ->
                         Row(
@@ -313,8 +320,7 @@ fun SettingsScreen(
                         }
                     }
                 }
-            },
-            confirmButton = {}
+            }
         )
     }
 
@@ -393,7 +399,7 @@ fun SettingsScreen(
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-private fun SettingsScreenUI(
+internal fun SettingsScreenUI(
     snackbarHostState: SnackbarHostState,
     onNavigateToSecuritySettings: () -> Unit,
     uiState: SettingsViewModel.UiState,
@@ -414,11 +420,18 @@ private fun SettingsScreenUI(
     onTogglePriceService: (Boolean) -> Unit = {},
     onToggleUpdateService: (Boolean) -> Unit = {}
 ) {
+    var destination by rememberSaveable { mutableStateOf<String?>(null) }
+    BackHandler(enabled = destination != null) { destination = null }
     Scaffold(
         containerColor = MaterialTheme.colorScheme.surface,
         topBar = {
             TopAppBar(
-                title = { Text(stringResource(R.string.settings_title), fontWeight = FontWeight.SemiBold) },
+                title = { Text(destination ?: stringResource(R.string.settings_title), fontWeight = FontWeight.SemiBold) },
+                navigationIcon = {
+                    if (destination != null) IconButton(onClick = { destination = null }) {
+                        Icon(Lucide.ArrowLeft, contentDescription = stringResource(R.string.common_back_cd))
+                    }
+                },
                 colors = TopAppBarDefaults.topAppBarColors(
                     containerColor = MaterialTheme.colorScheme.surface
                 )
@@ -434,101 +447,73 @@ private fun SettingsScreenUI(
             verticalArrangement = Arrangement.spacedBy(0.dp)
         )
         {
-            // ── SECURITY ──────────────────────────────────────────────────
-            item { SectionHeader("SECURITY") }
-
-            item {
-                SettingsLinkRow(
-                    icon = Lucide.Shield,
-                    title = "Pin & Biometrics",
-                    onClick = onNavigateToSecuritySettings
-                )
-            }
-
-            // ── WALLET ────────────────────────────────────────────────────
-            item { SectionHeader("WALLET") }
-
-            item {
-                SettingsLinkRow(
-                    icon = Lucide.Wallet,
-                    title = "Manage Wallets",
-                    onClick = onNavigateToWalletManager
-                )
-            }
-
-            item {
-                SettingsLinkRow(
-                    icon = Lucide.Users,
-                    title = stringResource(R.string.settings_address_book),
-                    onClick = onNavigateToContacts,
-                )
-            }
-
-            // "Backup Wallet" and "Import Wallet" used to sit here. Both are
-            // duplicates of Manage Wallets, which backs up a chosen wallet
-            // (WalletSettingsScreen → "Backup wallet") and imports into a new
-            // one (AddWalletScreen → "Import Wallet"). The Settings rows acted
-            // on the *active* wallet only, which read as a whole-app action
-            // and had no wallet picker.
-            item {
-                SettingsLinkRow(
-                    icon = Lucide.RefreshCw,
-                    title = "Sync Options",
-                    badgeText = syncModeLabel(uiState.syncMode),
-                    onClick = { showSyncDialog() }
-                )
-            }
-
-            // #382 Tier 2: explicit gap-limit scan. Recovery path for wallets
-            // whose Home banner was dismissed, and the window-extension entry
-            // (20 -> 40 -> 60) when the boundary slot showed activity.
-            item {
-                SettingsLinkRow(
-                    icon = Lucide.Wallet,
-                    title = stringResource(R.string.settings_scan_other_addresses),
-                    onClick = onScanOtherAddresses
-                )
-            }
-
-            // #559: restore hint for a faster phrase restore on a new phone.
-            item {
-                SettingsLinkRow(
-                    icon = Lucide.FileText,
-                    title = stringResource(R.string.restore_hint_export_title),
-                    onClick = onExportRestoreHint
-                )
-            }
-            item {
-                Text(
-                    text = stringResource(R.string.restore_hint_export_explainer),
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    modifier = Modifier
-                        .padding(horizontal = 16.dp)
-                        .padding(top = 4.dp, bottom = 8.dp)
-                )
-            }
-
-            // Background sync is powered by the foreground service, which is
-            // compiled out of the Play build (BG_FGS_ENABLED=false, #338). Hide
-            // the toggle there so we don't offer a control that does nothing;
-            // the GitHub/website release still shows it.
-            if (BuildConfig.BG_FGS_ENABLED) {
+            if (destination == null) {
                 item {
-                    SettingsSwitchRow(
-                        icon = Lucide.RefreshCw,
-                        title = "Background Sync",
-                        checked = uiState.isBackgroundSyncEnabled,
-                        onCheckedChange = onToggleBackgroundSync
+                    SettingsDestinationGroup {
+                        SettingsDestinationRow(Lucide.Shield, "Wallet protection", "Passphrase, unlock and recovery", onNavigateToSecuritySettings)
+                        SettingsDestinationRow(Lucide.Wallet, "Wallets", "Manage wallets and accounts", onNavigateToWalletManager)
+                        SettingsDestinationRow(Lucide.Users, stringResource(R.string.settings_address_book), onClick = onNavigateToContacts)
+                    }
+                }
+                item {
+                    SettingsDestinationGroup {
+                        SettingsDestinationRow(Lucide.RefreshCw, "Sync & network", "${uiState.currentNetwork.displayName} · Sync preferences", { destination = "Sync & network" })
+                        SettingsDestinationRow(Lucide.ShieldCheck, "Privacy & services", "Optional external connections", { destination = "Privacy & services" })
+                        SettingsDestinationRow(Lucide.Moon, "Appearance", "${uiState.themeMode.name.lowercase().replaceFirstChar { it.uppercase() }} theme", showThemeDialog)
+                    }
+                }
+                item {
+                    SettingsDestinationGroup {
+                        SettingsDestinationRow(Lucide.CircleHelp, "Help & about", "Help, version and updates", { destination = "Help & about" })
+                    }
+                }
+            }
+            if (destination == "Sync & network") {
+                item {
+                    val isTestnet = uiState.currentNetwork == NetworkType.TESTNET
+                    SettingsValueRow(
+                        icon = Lucide.Network,
+                        title = "Current Network",
+                        value = "CKB ${uiState.currentNetwork.displayName}",
+                        valueColor = if (isTestnet) ColorAmber else MaterialTheme.colorScheme.primary,
+                        onClick = {
+                            val target = if (isTestnet) NetworkType.MAINNET else NetworkType.TESTNET
+                            requestNetworkSwitch(target)
+                        }
                     )
                 }
 
-                // #286: one-line tradeoff blurb at the point of choice.
+                item {
+                    SettingsLinkRow(
+                        icon = Lucide.RefreshCw,
+                        title = "Sync Options",
+                        badgeText = syncModeLabel(uiState.syncMode),
+                        onClick = { showSyncDialog() }
+                    )
+                }
+
+                // #382 Tier 2: explicit gap-limit scan. Recovery path for wallets
+                // whose Home banner was dismissed, and the window-extension entry
+                // (20 -> 40 -> 60) when the boundary slot showed activity.
+                item {
+                    SettingsLinkRow(
+                        icon = Lucide.Wallet,
+                        title = stringResource(R.string.settings_scan_other_addresses),
+                        onClick = onScanOtherAddresses
+                    )
+                }
+
+                // #559: restore hint for a faster phrase restore on a new phone.
+                item {
+                    SettingsLinkRow(
+                        icon = Lucide.FileText,
+                        title = stringResource(R.string.restore_hint_export_title),
+                        onClick = onExportRestoreHint
+                    )
+                }
                 item {
                     Text(
-                        text = "Keeps your balance fresh while the app is closed, with a small " +
-                            "ongoing notification. Android may still pause it after extended " +
-                            "background time.",
+                        text = stringResource(R.string.restore_hint_export_explainer),
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                         modifier = Modifier
@@ -536,219 +521,255 @@ private fun SettingsScreenUI(
                             .padding(top = 4.dp, bottom = 8.dp)
                     )
                 }
-            }
 
-            item {
-                SettingsValueRow(
-                    icon = Lucide.RefreshCw,
-                    title = "Wallet Sync Strategy",
-                    value = syncStrategyLabel(uiState.syncStrategy),
-                    onClick = { showSyncStrategyDialog() }
-                )
-            }
+                // Background sync is powered by the foreground service, which is
+                // compiled out of the Play build (BG_FGS_ENABLED=false, #338). Hide
+                // the toggle there so we don't offer a control that does nothing;
+                // the GitHub/website release still shows it.
+                if (BuildConfig.BG_FGS_ENABLED) {
+                    item {
+                        SettingsSwitchRow(
+                            icon = Lucide.RefreshCw,
+                            title = "Background Sync",
+                            checked = uiState.isBackgroundSyncEnabled,
+                            onCheckedChange = onToggleBackgroundSync
+                        )
+                    }
 
-            // ── APPEARANCE ────────────────────────────────────────────────
-            item { SectionHeader("APPEARANCE") }
-
-            item {
-                val themeLabel = when (uiState.themeMode) {
-                    ThemeMode.SYSTEM -> "System"
-                    ThemeMode.LIGHT -> "Light"
-                    ThemeMode.DARK -> "Dark"
+                    // #286: one-line tradeoff blurb at the point of choice.
+                    item {
+                        Text(
+                            text = "Keeps your balance fresh while the app is closed, with a small " +
+                            "ongoing notification. Android may still pause it after extended " +
+                            "background time.",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            modifier = Modifier
+                                .padding(horizontal = 16.dp)
+                                .padding(top = 4.dp, bottom = 8.dp)
+                        )
+                    }
                 }
-                SettingsValueRow(
-                    icon = Lucide.Moon,
-                    title = "Theme",
-                    value = themeLabel,
-                    onClick = { showThemeDialog() }
-                )
-            }
 
-            // ── NETWORK ───────────────────────────────────────────────────
-            item { SectionHeader("NETWORK") }
-
-            item {
-                val isTestnet = uiState.currentNetwork == NetworkType.TESTNET
-                SettingsValueRow(
-                    icon = Lucide.Network,
-                    title = "Current Network",
-                    value = "CKB ${uiState.currentNetwork.displayName}",
-                    valueColor = if (isTestnet) ColorAmber else MaterialTheme.colorScheme.primary,
-                    onClick = {
-                        val target = if (isTestnet) NetworkType.MAINNET else NetworkType.TESTNET
-                        requestNetworkSwitch(target)
-                    }
-                )
-            }
-
-            item {
-                SettingsLinkRow(
-                    icon = Lucide.Terminal,
-                    title = "Node Status & Logs",
-                    onClick = onNavigateToNodeStatus
-                )
-            }
-
-            // ── NETWORK SERVICES ─────────────────────────────────────────
-            // Pocket Node talks to CKB through its embedded light client, not
-            // through company servers. These two optional features are the
-            // only outbound requests the app makes on its own, with no user
-            // tap (#531). Each gets its own switch; one line under the header
-            // says what they receive. Explorer links the user taps to open a
-            // browser do not count and are not listed here.
-            item { SectionHeader("NETWORK SERVICES") }
-            item {
-                Text(
-                    text = "These services see your IP address.",
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    modifier = Modifier
-                        .padding(horizontal = 16.dp)
-                        .padding(bottom = 8.dp)
-                )
-            }
-
-            item {
-                SettingsSwitchRow(
-                    icon = Lucide.CircleDollarSign,
-                    title = "Fiat price",
-                    checked = uiState.isPriceServiceEnabled,
-                    onCheckedChange = onTogglePriceService
-                )
-            }
-            item {
-                Text(
-                    text = "Run by CoinGecko and Binance. Shows your balance in USD.",
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    modifier = Modifier
-                        .padding(horizontal = 16.dp)
-                        .padding(top = 4.dp, bottom = 8.dp)
-                )
-            }
-
-            item {
-                SettingsSwitchRow(
-                    icon = Lucide.RefreshCw,
-                    title = "Update checks",
-                    checked = uiState.isUpdateServiceEnabled,
-                    onCheckedChange = onToggleUpdateService
-                )
-            }
-            item {
-                Text(
-                    text = "Checks GitHub for a new release on launch.",
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    modifier = Modifier
-                        .padding(horizontal = 16.dp)
-                        .padding(top = 4.dp, bottom = 8.dp)
-                )
-            }
-
-            // ── ABOUT ─────────────────────────────────────────────────────
-            item { SectionHeader("ABOUT") }
-
-            item {
-                SettingsLinkRow(
-                    icon = Lucide.CircleHelp,
-                    title = stringResource(R.string.settings_help_faq),
-                    onClick = onNavigateToFaq
-                )
-            }
-
-            item {
-                val updateStatus = uiState.updateStatus
-                val available = updateStatus as? SettingsViewModel.UpdateStatus.Available
-                SettingsValueRow(
-                    icon = Lucide.Info,
-                    title = "Version",
-                    value = BuildConfig.VERSION_NAME,
-                    // Tapping counts toward the hidden bulk-airdrop unlock
-                    // (7 taps, dev-options style). When an update also exists,
-                    // the tap additionally opens the release to grab it.
-                    onClick = {
-                        onVersionTap()
-                        available?.let { com.rjnr.pocketnode.ui.util.openInBrowser(context, it.url) }
-                    },
-                    trailing = when {
-                        available != null -> {
-                            {
-                                Text(
-                                    text = "Update available",
-                                    color = MaterialTheme.colorScheme.primary,
-                                    fontSize = 12.sp,
-                                    fontWeight = FontWeight.SemiBold
-                                )
-                            }
-                        }
-                        BuildConfig.DEBUG -> {
-                            { DebugBuildPill(gitSha = BuildConfig.GIT_SHA) }
-                        }
-                        else -> null
-                    }
-                )
-            }
-
-            // Self-update lives only in GitHub-distributed builds. Play updates
-            // through the store, so the Play build has no updater and hides this row.
-            if (BuildConfig.UPDATER_ENABLED) {
                 item {
-                    val updateStatus = uiState.updateStatus
-                    val statusText = when (updateStatus) {
-                        is SettingsViewModel.UpdateStatus.Checking -> "Checking..."
-                        is SettingsViewModel.UpdateStatus.UpToDate -> "Up to date"
-                        is SettingsViewModel.UpdateStatus.Available ->
-                            "Version ${updateStatus.version} available"
-                        is SettingsViewModel.UpdateStatus.Failed -> "Couldn't check. Tap to retry"
-                        // #531: the "Update checks" switch above is off.
-                        is SettingsViewModel.UpdateStatus.Disabled -> "Update checks are off"
-                        is SettingsViewModel.UpdateStatus.Idle -> null
-                    }
                     SettingsValueRow(
                         icon = Lucide.RefreshCw,
-                        title = "Check for updates",
-                        value = statusText.orEmpty(),
-                        valueColor = MaterialTheme.colorScheme.onSurfaceVariant,
+                        title = "Wallet Sync Strategy",
+                        value = syncStrategyLabel(uiState.syncStrategy),
+                        onClick = { showSyncStrategyDialog() }
+                    )
+                }
+
+                item {
+                    SettingsLinkRow(
+                        icon = Lucide.Terminal,
+                        title = "Node Status & Logs",
+                        onClick = onNavigateToNodeStatus
+                    )
+                }
+
+            }
+            if (destination == "Privacy & services") {
+                // ── NETWORK SERVICES ─────────────────────────────────────────
+                // Pocket Node talks to CKB through its embedded light client, not
+                // through company servers. These two optional features are the
+                // only outbound requests the app makes on its own, with no user
+                // tap (#531). Each gets its own switch; one line under the header
+                // says what they receive. Explorer links the user taps to open a
+                // browser do not count and are not listed here.
+                item { SectionHeader("NETWORK SERVICES") }
+                item {
+                    Text(
+                        text = "These services see your IP address.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        modifier = Modifier
+                            .padding(horizontal = 16.dp)
+                            .padding(bottom = 8.dp)
+                    )
+                }
+
+                item {
+                    SettingsSwitchRow(
+                        icon = Lucide.CircleDollarSign,
+                        title = "Fiat price",
+                        checked = uiState.isPriceServiceEnabled,
+                        onCheckedChange = onTogglePriceService
+                    )
+                }
+                item {
+                    Text(
+                        text = "Run by CoinGecko and Binance. Shows your balance in USD.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        modifier = Modifier
+                            .padding(horizontal = 16.dp)
+                            .padding(top = 4.dp, bottom = 8.dp)
+                    )
+                }
+
+                item {
+                    SettingsSwitchRow(
+                        icon = Lucide.RefreshCw,
+                        title = "Update checks",
+                        checked = uiState.isUpdateServiceEnabled,
+                        onCheckedChange = onToggleUpdateService
+                    )
+                }
+                item {
+                    Text(
+                        text = "Checks GitHub for a new release on launch.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        modifier = Modifier
+                            .padding(horizontal = 16.dp)
+                            .padding(top = 4.dp, bottom = 8.dp)
+                    )
+                }
+
+            }
+            if (destination == "Help & about") {
+                // ── ABOUT ─────────────────────────────────────────────────────
+                item { SectionHeader("ABOUT") }
+
+                item {
+                    SettingsLinkRow(
+                        icon = Lucide.CircleHelp,
+                        title = stringResource(R.string.settings_help_faq),
+                        onClick = onNavigateToFaq
+                    )
+                }
+
+                item {
+                    val updateStatus = uiState.updateStatus
+                    val available = updateStatus as? SettingsViewModel.UpdateStatus.Available
+                    SettingsValueRow(
+                        icon = Lucide.Info,
+                        title = "Version",
+                        value = BuildConfig.VERSION_NAME,
+                        // Tapping counts toward the hidden bulk-airdrop unlock
+                        // (7 taps, dev-options style). When an update also exists,
+                        // the tap additionally opens the release to grab it.
                         onClick = {
-                            val available = updateStatus as? SettingsViewModel.UpdateStatus.Available
-                            when {
-                                available != null ->
-                                    com.rjnr.pocketnode.ui.util.openInBrowser(context, available.url)
-                                // Nothing to check while the switch above is off.
-                                updateStatus is SettingsViewModel.UpdateStatus.Disabled -> Unit
-                                else -> onCheckForUpdate()
+                            onVersionTap()
+                            available?.let { com.rjnr.pocketnode.ui.util.openInBrowser(context, it.url) }
+                        },
+                        trailing = when {
+                            available != null -> {
+                                {
+                                    Text(
+                                        text = "Update available",
+                                        color = MaterialTheme.colorScheme.primary,
+                                        fontSize = 12.sp,
+                                        fontWeight = FontWeight.SemiBold
+                                    )
+                                }
                             }
+                            BuildConfig.DEBUG -> {
+                                { DebugBuildPill(gitSha = BuildConfig.GIT_SHA) }
+                            }
+                            else -> null
                         }
                     )
                 }
-            }
 
-            item {
-                SettingsLinkRow(
-                    icon = Lucide.Github,
-                    title = "Open Source",
-                    badgeText = "Github",
-                    onClick = {
-                        // Custom Tabs keeps the GitHub round-trip inside the app
-                        // task, same reasoning as the explorer launches (#138).
-                        com.rjnr.pocketnode.ui.util.openInBrowser(context, GITHUB_URL)
+                // Self-update lives only in GitHub-distributed builds. Play updates
+                // through the store, so the Play build has no updater and hides this row.
+                if (BuildConfig.UPDATER_ENABLED) {
+                    item {
+                        val updateStatus = uiState.updateStatus
+                        val statusText = when (updateStatus) {
+                            is SettingsViewModel.UpdateStatus.Checking -> "Checking..."
+                            is SettingsViewModel.UpdateStatus.UpToDate -> "Up to date"
+                            is SettingsViewModel.UpdateStatus.Available ->
+                            "Version ${updateStatus.version} available"
+                            is SettingsViewModel.UpdateStatus.Failed -> "Couldn't check. Tap to retry"
+                            // #531: the "Update checks" switch above is off.
+                            is SettingsViewModel.UpdateStatus.Disabled -> "Update checks are off"
+                            is SettingsViewModel.UpdateStatus.Idle -> null
+                        }
+                        SettingsValueRow(
+                            icon = Lucide.RefreshCw,
+                            title = "Check for updates",
+                            value = statusText.orEmpty(),
+                            valueColor = MaterialTheme.colorScheme.onSurfaceVariant,
+                            onClick = {
+                                val available = updateStatus as? SettingsViewModel.UpdateStatus.Available
+                                when {
+                                    available != null ->
+                                    com.rjnr.pocketnode.ui.util.openInBrowser(context, available.url)
+                                    // Nothing to check while the switch above is off.
+                                    updateStatus is SettingsViewModel.UpdateStatus.Disabled -> Unit
+                                    else -> onCheckForUpdate()
+                                }
+                            }
+                        )
                     }
-                )
-            }
+                }
 
-            item {
-                SettingsLinkRow(
-                    icon = Lucide.ShieldCheck,
-                    title = stringResource(R.string.settings_privacy_policy),
-                    onClick = {
-                        com.rjnr.pocketnode.ui.util.openInBrowser(context, PRIVACY_URL)
-                    }
-                )
-            }
+                item {
+                    SettingsLinkRow(
+                        icon = Lucide.Github,
+                        title = "Open Source",
+                        badgeText = "Github",
+                        onClick = {
+                            // Custom Tabs keeps the GitHub round-trip inside the app
+                            // task, same reasoning as the explorer launches (#138).
+                            com.rjnr.pocketnode.ui.util.openInBrowser(context, GITHUB_URL)
+                        }
+                    )
+                }
 
+                item {
+                    SettingsLinkRow(
+                        icon = Lucide.ShieldCheck,
+                        title = stringResource(R.string.settings_privacy_policy),
+                        onClick = {
+                            com.rjnr.pocketnode.ui.util.openInBrowser(context, PRIVACY_URL)
+                        }
+                    )
+                }
+
+            }
             item { Spacer(Modifier.height(24.dp)) }
         }
+    }
+}
+
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun SettingsChoiceSheet(title: String, onDismiss: () -> Unit, content: @Composable () -> Unit) {
+    ModalBottomSheet(onDismissRequest = onDismiss) {
+        Column(Modifier.fillMaxWidth().verticalScroll(rememberScrollState()).padding(horizontal = 20.dp).padding(bottom = 32.dp)) {
+            Text(title, style = MaterialTheme.typography.headlineSmall, modifier = Modifier.padding(bottom = 16.dp))
+            content()
+        }
+    }
+}
+
+@Composable
+internal fun SettingsDestinationGroup(content: @Composable androidx.compose.foundation.layout.ColumnScope.() -> Unit) {
+    Surface(
+        modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 8.dp),
+        shape = RoundedCornerShape(24.dp),
+        color = MaterialTheme.colorScheme.surfaceVariant,
+    ) { Column(content = content) }
+}
+
+@Composable
+internal fun SettingsDestinationRow(icon: ImageVector, title: String, subtitle: String? = null, onClick: () -> Unit) {
+    Row(
+        Modifier.fillMaxWidth().clickable(onClick = onClick).padding(horizontal = 16.dp, vertical = 18.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Icon(icon, contentDescription = null, tint = MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.size(22.dp))
+        Spacer(Modifier.width(12.dp))
+        Column(Modifier.weight(1f)) {
+            Text(title, style = MaterialTheme.typography.bodyLarge, fontWeight = FontWeight.Medium)
+            if (subtitle != null) Text(subtitle, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.padding(top = 4.dp))
+        }
+        Spacer(Modifier.width(8.dp))
+        Icon(Lucide.ChevronRight, contentDescription = null, modifier = Modifier.size(20.dp), tint = MaterialTheme.colorScheme.onSurfaceVariant)
     }
 }
 
@@ -816,14 +837,14 @@ fun SettingsLinkRow(
     Row(
         modifier = Modifier
             .fillMaxWidth()
-            .height(56.dp)
+            .heightIn(min = 56.dp)
             .background(MaterialTheme.colorScheme.surfaceVariant)
             .clickable { onClick?.invoke() }
             .padding(horizontal = com.rjnr.pocketnode.ui.util.screenHorizontalPadding()),
         verticalAlignment = Alignment.CenterVertically,
         horizontalArrangement = Arrangement.SpaceBetween
     ) {
-        Row(verticalAlignment = Alignment.CenterVertically) {
+        Row(modifier = Modifier.weight(1f), verticalAlignment = Alignment.CenterVertically) {
             Icon(
                 icon,
                 null,
@@ -833,6 +854,7 @@ fun SettingsLinkRow(
             Spacer(modifier = Modifier.width(12.dp))
             Text(
                 title,
+                modifier = Modifier.weight(1f).padding(vertical = 12.dp),
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                 fontSize = 15.sp,
                 fontWeight = FontWeight.Medium
@@ -874,41 +896,21 @@ fun SettingsValueRow(
     trailing: (@Composable RowScope.() -> Unit)? = null
 ) {
     Row(
-        modifier = Modifier
-            .fillMaxWidth()
-            .height(56.dp)
+        modifier = Modifier.fillMaxWidth().heightIn(min = 64.dp)
             .background(MaterialTheme.colorScheme.surfaceVariant)
-            .clickable(onClick = { onClick?.invoke() })
-            .padding(horizontal = com.rjnr.pocketnode.ui.util.screenHorizontalPadding()),
+            .clickable { onClick?.invoke() }
+            .padding(horizontal = com.rjnr.pocketnode.ui.util.screenHorizontalPadding(), vertical = 12.dp),
         verticalAlignment = Alignment.CenterVertically,
-        horizontalArrangement = Arrangement.SpaceBetween
     ) {
-        Row(verticalAlignment = Alignment.CenterVertically) {
-            Icon(
-                icon,
-                null,
-                tint = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.6f),
-                modifier = Modifier.size(24.dp)
-            )
-            Spacer(modifier = Modifier.width(12.dp))
-            Text(
-                title,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                fontSize = 15.sp,
-                fontWeight = FontWeight.Medium
-            )
+        Icon(icon, contentDescription = null, tint = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = .6f), modifier = Modifier.size(24.dp))
+        Spacer(Modifier.width(12.dp))
+        Column(Modifier.weight(1f)) {
+            Text(title, color = MaterialTheme.colorScheme.onSurfaceVariant, fontSize = 15.sp, fontWeight = FontWeight.Medium)
+            if (value.isNotBlank()) Text(value, color = valueColor, fontSize = 14.sp, modifier = Modifier.padding(top = 4.dp))
         }
-        Row(verticalAlignment = Alignment.CenterVertically) {
-            Text(
-                value,
-                color = valueColor,
-                fontSize = 14.sp,
-                fontWeight = FontWeight.Medium
-            )
-            if (trailing != null) {
-                Spacer(modifier = Modifier.width(8.dp))
-                trailing()
-            }
+        if (trailing != null) {
+            Spacer(Modifier.width(8.dp))
+            trailing()
         }
     }
     HorizontalDivider(color = MaterialTheme.colorScheme.surfaceVariant, thickness = 1.dp)
@@ -945,13 +947,13 @@ fun SettingsSwitchRow(
     Row(
         modifier = Modifier
             .fillMaxWidth()
-            .height(56.dp)
+            .heightIn(min = 56.dp)
             .background(MaterialTheme.colorScheme.surfaceVariant)
             .padding(horizontal = com.rjnr.pocketnode.ui.util.screenHorizontalPadding()),
         verticalAlignment = Alignment.CenterVertically,
         horizontalArrangement = Arrangement.SpaceBetween
     ) {
-        Row(verticalAlignment = Alignment.CenterVertically) {
+        Row(modifier = Modifier.weight(1f), verticalAlignment = Alignment.CenterVertically) {
             Icon(
                 icon,
                 null,
@@ -961,6 +963,7 @@ fun SettingsSwitchRow(
             Spacer(modifier = Modifier.width(12.dp))
             Text(
                 title,
+                modifier = Modifier.weight(1f).padding(vertical = 12.dp),
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                 fontSize = 15.sp,
                 fontWeight = FontWeight.Medium

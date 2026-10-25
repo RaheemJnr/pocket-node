@@ -53,4 +53,47 @@ class RecoveryScreenNavigationTest {
         compose.onNodeWithText("Use private key (spending only)").assertExists()
         compose.onNodeWithText("Authenticate old backup PIN").assertDoesNotExist()
     }
+    @Test fun `empty recovery list offers neutral continuation without marking recovery complete`() {
+        val operations = mockk<RecoveryOperations>(relaxed = true)
+        coEvery { operations.wallets() } returns emptyList()
+        val vm = RecoveryViewModel(operations)
+        var completed = 0; var continued = 0
+        compose.setContent { RecoveryScreen({ completed++ }, { continued++ }, vm) }
+        compose.onNodeWithText("No wallets currently need recovery").assertExists()
+        compose.onNodeWithText("Keep wallets read-only and continue").assertDoesNotExist()
+        compose.onNodeWithText("Done").performClick()
+        compose.runOnIdle { assertEquals(1, continued); assertEquals(0, completed) }
+        coVerify(exactly = 0) { operations.complete() }
+    }
+
+    @Test fun `pending recovery check never claims wallets need no recovery`() {
+        val response = kotlinx.coroutines.CompletableDeferred<List<MissingWallet>>()
+        val operations = mockk<RecoveryOperations>(relaxed = true)
+        coEvery { operations.wallets() } coAnswers { response.await() }
+        val vm = RecoveryViewModel(operations)
+        compose.setContent { RecoveryScreen({}, {}, vm) }
+        compose.onNodeWithText("Checking wallet recovery…").assertExists()
+        compose.onNodeWithText("No wallets currently need recovery").assertDoesNotExist()
+        compose.runOnIdle { response.complete(emptyList()) }
+        compose.onNodeWithText("No wallets currently need recovery").assertExists()
+    }
+
+    @Test fun `empty list while completion suspends remains restoring and can cancel`() {
+        val completion = kotlinx.coroutines.CompletableDeferred<Boolean>()
+        val operations = mockk<RecoveryOperations>(relaxed = true)
+        coEvery { operations.wallets() } returnsMany listOf(listOf(MissingWallet("a", "Savings", false)), emptyList())
+        coEvery { operations.unlock(any(), "a", any()) } returns com.rjnr.pocketnode.data.wallet.RecoveredKeyRestorer.Outcome.Restored
+        coEvery { operations.complete() } coAnswers { completion.await() }
+        val vm = RecoveryViewModel(operations)
+        var completed = 0; var continued = 0
+        compose.setContent { RecoveryScreen({ completed++ }, { continued++ }, vm) }
+        compose.onNodeWithText("Use wallet passphrase").performClick()
+        compose.onNodeWithText("Restoring wallet access…").assertExists()
+        compose.onNodeWithText("Done").assertDoesNotExist()
+        compose.onNodeWithText("Keep wallets read-only and continue").assertIsNotEnabled()
+        compose.onNodeWithText("Cancel").performScrollTo().performClick()
+        compose.runOnIdle { assertEquals(RecoveryStage.RESTORE_FAILED, vm.uiState.value.stage); assertEquals(0, completed); assertEquals(0, continued) }
+        compose.onNodeWithText("Done").assertExists()
+    }
+
 }

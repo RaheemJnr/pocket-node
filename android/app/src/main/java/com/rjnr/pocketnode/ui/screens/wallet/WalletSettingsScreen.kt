@@ -1,5 +1,6 @@
 package com.rjnr.pocketnode.ui.screens.wallet
 
+import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
@@ -22,6 +23,8 @@ import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
+import androidx.compose.material3.ModalBottomSheet
+import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
@@ -39,6 +42,7 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -52,6 +56,13 @@ import com.composables.icons.lucide.ChevronRight
 import com.composables.icons.lucide.Lucide
 import com.composables.icons.lucide.Pencil
 import com.composables.icons.lucide.Plus
+import com.composables.icons.lucide.Wallet
+import com.composables.icons.lucide.ShieldCheck
+import com.composables.icons.lucide.KeyRound
+import com.composables.icons.lucide.Users
+import com.composables.icons.lucide.Info
+import com.rjnr.pocketnode.ui.screens.settings.SettingsDestinationGroup
+import com.rjnr.pocketnode.ui.screens.settings.SettingsDestinationRow
 import androidx.compose.ui.res.stringResource
 import com.rjnr.pocketnode.R
 import com.rjnr.pocketnode.data.database.entity.WalletEntity
@@ -169,236 +180,144 @@ fun WalletSettingsScreen(
         )
     }
 
+    WalletSettingsContent(uiState, snackbarHostState, viewModel.hasMnemonic(), onNavigateBack,
+        onNavigateToBackup, ::unlockSensitive, { viewModel.requestDelete() },
+        { viewModel.startEditing() }, { viewModel.updateEditName(it) },
+        { viewModel.cancelEditing() }, { viewModel.saveName() }, { showAddAccountDialog = true })
+}
+
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+internal fun WalletSettingsContent(
+    uiState: WalletSettingsUiState,
+    snackbarHostState: SnackbarHostState = remember { SnackbarHostState() },
+    canAddAccounts: Boolean = uiState.hasMnemonic == true && uiState.wallet?.parentWalletId == null,
+    onNavigateBack: () -> Unit = {},
+    onNavigateToBackup: () -> Unit = {},
+    onRecovery: () -> Unit = {},
+    onRemove: () -> Unit = {},
+    onStartEditing: () -> Unit = {},
+    onEditName: (String) -> Unit = {},
+    onCancelEditing: () -> Unit = {},
+    onSaveName: () -> Unit = {},
+    onAddAccount: () -> Unit = {},
+) {
+    var showAccounts by rememberSaveable { mutableStateOf(false) }
+    var sheet by rememberSaveable { mutableStateOf<String?>(null) }
+    val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
+    val scope = rememberCoroutineScope()
+    fun dismissThen(action: () -> Unit) {
+        scope.launch {
+            sheetState.hide()
+            sheet = null
+            action()
+        }
+    }
+    BackHandler(enabled = showAccounts && sheet == null && !uiState.isEditing) { showAccounts = false }
+    val wallet = uiState.wallet ?: return
+    if (sheet != null || uiState.isEditing) {
+        ModalBottomSheet(
+            onDismissRequest = { sheet = null; if (uiState.isEditing) onCancelEditing() },
+            sheetState = sheetState,
+        ) {
+            Column(Modifier.fillMaxWidth().verticalScroll(rememberScrollState()).padding(horizontal = 20.dp).padding(bottom = 32.dp), verticalArrangement = Arrangement.spacedBy(16.dp)) {
+                when {
+                    uiState.isEditing -> {
+                        Text("Wallet name", style = MaterialTheme.typography.headlineSmall)
+                        OutlinedTextField(value = uiState.editName, onValueChange = onEditName,
+                            label = { Text(stringResource(R.string.wallet_settings_wallet_name_label)) },
+                            singleLine = true, modifier = Modifier.fillMaxWidth())
+                        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                            OutlinedButton(onClick = { dismissThen(onCancelEditing) }) { Text(stringResource(R.string.wallet_settings_cancel)) }
+                            Button(onClick = onSaveName, enabled = uiState.editName.isNotBlank()) { Text(stringResource(R.string.wallet_settings_save)) }
+                        }
+                    }
+                    sheet == "details" -> {
+                        Text("Wallet details", style = MaterialTheme.typography.headlineSmall)
+                        SettingsRow("Source", when {
+                            wallet.parentWalletId != null -> "Sub-Account"
+                            wallet.type == "mnemonic" -> "Seed Phrase"
+                            wallet.type == "raw_key" -> "Imported Key"
+                            else -> wallet.type
+                        })
+                        wallet.derivationPath?.let { SettingsRow("Derivation Path", it) }
+                        TextButton(onClick = { dismissThen {} }) { Text("Done") }
+                    }
+                    sheet == "guide" -> {
+                        Text("How wallet protection works", style = MaterialTheme.typography.headlineSmall)
+                        com.rjnr.pocketnode.ui.security.WalletProtectionEducation(onOpenBackup = { dismissThen(onNavigateToBackup) })
+                        TextButton(onClick = { dismissThen {} }) { Text("Done") }
+                    }
+                }
+            }
+        }
+    }
     Scaffold(
         topBar = {
             TopAppBar(
-                title = { Text(stringResource(R.string.wallet_settings_title)) },
+                title = { Text(if (showAccounts) "Accounts" else stringResource(R.string.wallet_settings_title)) },
                 navigationIcon = {
-                    IconButton(onClick = onNavigateBack) {
+                    IconButton(onClick = { if (showAccounts) showAccounts = false else onNavigateBack() }) {
                         Icon(Lucide.ArrowLeft, contentDescription = stringResource(R.string.common_back_cd))
                     }
                 },
-                actions = {
-                    TextButton(onClick = { viewModel.requestDelete() }) {
-                        Text(
-                            text = "Remove",
-                            color = MaterialTheme.colorScheme.error
-                        )
-                    }
-                },
-                colors = TopAppBarDefaults.topAppBarColors(
-                    containerColor = MaterialTheme.colorScheme.surface
-                )
+                colors = TopAppBarDefaults.topAppBarColors(containerColor = MaterialTheme.colorScheme.surface)
             )
         },
         snackbarHost = { SnackbarHost(snackbarHostState) }
     ) { paddingValues ->
-        val wallet = uiState.wallet ?: return@Scaffold
-
         Column(
-            modifier = Modifier
-                .fillMaxSize()
-                .padding(paddingValues)
-                .verticalScroll(rememberScrollState())
+            Modifier.fillMaxSize().padding(paddingValues).verticalScroll(rememberScrollState()).padding(bottom = 32.dp)
         ) {
-            // -- Wallet avatar + editable name --
-            Column(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .padding(vertical = 24.dp),
-                horizontalAlignment = Alignment.CenterHorizontally
-            ) {
-                WalletAvatar(
-                    name = wallet.name,
-                    colorIndex = wallet.colorIndex,
-                    size = 64.dp
-                )
-                Spacer(Modifier.height(12.dp))
-
-                if (uiState.isEditing) {
-                    OutlinedTextField(
-                        value = uiState.editName,
-                        onValueChange = { viewModel.updateEditName(it) },
-                        label = { Text(stringResource(R.string.wallet_settings_wallet_name_label)) },
-                        singleLine = true,
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .padding(horizontal = 48.dp)
-                    )
-                    Spacer(Modifier.height(8.dp))
-                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                        OutlinedButton(onClick = { viewModel.cancelEditing() }) {
-                            Text(stringResource(R.string.wallet_settings_cancel))
-                        }
-                        Button(
-                            onClick = { viewModel.saveName() },
-                            enabled = uiState.editName.isNotBlank()
-                        ) {
-                            Text(stringResource(R.string.wallet_settings_save))
-                        }
-                    }
-                } else {
-                    Row(
-                        verticalAlignment = Alignment.CenterVertically,
-                        modifier = Modifier.clickable { viewModel.startEditing() }
-                    ) {
-                        Text(
-                            text = wallet.name,
-                            style = MaterialTheme.typography.titleLarge,
-                            fontWeight = FontWeight.SemiBold
-                        )
+            if (showAccounts && canAddAccounts) {
+                Column(Modifier.padding(horizontal = 20.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                    TextButton(onClick = onAddAccount) {
+                        Icon(Lucide.Plus, contentDescription = null, modifier = Modifier.size(16.dp))
                         Spacer(Modifier.width(4.dp))
-                        Icon(
-                            Lucide.Pencil,
-                            contentDescription = stringResource(R.string.wallet_settings_edit_name_cd),
-                            modifier = Modifier.size(16.dp),
-                            tint = MaterialTheme.colorScheme.onSurfaceVariant
-                        )
+                        Text(stringResource(R.string.wallet_settings_add_account))
                     }
-                }
-            }
-
-            HorizontalDivider(modifier = Modifier.padding(horizontal = 16.dp))
-
-            // -- Info section --
-            Column(modifier = Modifier.padding(horizontal = 16.dp)) {
-                Spacer(Modifier.height(16.dp))
-
-                SettingsRow(
-                    label = "Source",
-                    value = when {
-                        wallet.parentWalletId != null -> "Sub-Account"
-                        wallet.type == "mnemonic" -> "Seed Phrase"
-                        wallet.type == "raw_key" -> "Imported Key"
-                        else -> wallet.type
-                    }
-                )
-
-                if (wallet.derivationPath != null) {
-                    SettingsRow(
-                        label = "Derivation Path",
-                        value = wallet.derivationPath
-                    )
-                }
-            }
-
-            HorizontalDivider(modifier = Modifier.padding(horizontal = 16.dp))
-
-            Column(modifier = Modifier.padding(horizontal = 16.dp)) {
-                com.rjnr.pocketnode.ui.security.WalletProtectionEducation(onOpenBackup = onNavigateToBackup)
-                Spacer(Modifier.height(16.dp))
-                SettingsActionRow(label = "Backup wallet", value = if (uiState.isBackedUp) "Completed" else "Pending", onClick = onNavigateToBackup)
-                SettingsActionRow(label = "View recovery material", onClick = { unlockSensitive() })
-                if (uiState.hasMnemonic == false) Text("This protected wallet has a private key but no recovery phrase. It cannot derive new accounts.")
-            }
-            HorizontalDivider(modifier = Modifier.padding(horizontal = 16.dp))
-
-            // -- Accounts section (mnemonic wallets only, not sub-accounts themselves) --
-            if (viewModel.hasMnemonic()) {
-                Column(modifier = Modifier.padding(horizontal = 16.dp)) {
-                    Spacer(Modifier.height(16.dp))
-
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.SpaceBetween,
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
-                        Text(
-                            text = "Accounts",
-                            style = MaterialTheme.typography.titleMedium,
-                            fontWeight = FontWeight.SemiBold
-                        )
-                        TextButton(onClick = { showAddAccountDialog = true }) {
-                            Icon(
-                                Lucide.Plus,
-                                contentDescription = null,
-                                modifier = Modifier.size(16.dp)
-                            )
-                            Spacer(Modifier.width(4.dp))
-                            Text(stringResource(R.string.wallet_settings_add_account))
-                        }
-                    }
-
-                    Spacer(Modifier.height(8.dp))
-
                     if (uiState.subAccounts.isEmpty()) {
-                        Text(
-                            text = "No sub-accounts yet",
-                            style = MaterialTheme.typography.bodyMedium,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant,
-                            modifier = Modifier.padding(vertical = 8.dp)
-                        )
-                    } else {
-                        uiState.subAccounts.forEach { subAccount ->
-                            SubAccountRow(subAccount, uiState.network)
-                        }
+                        Text("No sub-accounts yet", color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    } else uiState.subAccounts.forEach { SubAccountRow(it, uiState.network) }
+                }
+            } else {
+                Column(Modifier.fillMaxWidth().padding(vertical = 24.dp, horizontal = 20.dp), horizontalAlignment = Alignment.CenterHorizontally) {
+                    WalletAvatar(name = wallet.name, colorIndex = wallet.colorIndex, size = 64.dp)
+                    Spacer(Modifier.height(12.dp))
+                    Text(wallet.name, style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.SemiBold)
+                }
+                SettingsDestinationGroup {
+                    SettingsDestinationRow(Lucide.Pencil, "Wallet name", wallet.name, onStartEditing)
+                    SettingsDestinationRow(Lucide.ShieldCheck, "Backup wallet", if (uiState.isBackedUp) "Completed" else "Pending", onNavigateToBackup)
+                    SettingsDestinationRow(Lucide.KeyRound, "View recovery material", "Authentication required", onRecovery)
+                }
+                SettingsDestinationGroup {
+                    if (canAddAccounts) SettingsDestinationRow(Lucide.Users, "Accounts", "Manage or add accounts", { showAccounts = true })
+                    SettingsDestinationRow(Lucide.Info, "Wallet details", "Source and derivation path", { sheet = "details" })
+                }
+                if (uiState.hasMnemonic == false) Text("This protected wallet has a private key but no recovery phrase. It cannot derive new accounts.",
+                    style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.padding(horizontal = 20.dp, vertical = 8.dp))
+                Card(Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 12.dp),
+                    colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.primary.copy(alpha = .08f))) {
+                    Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                        Text("Keep an external backup", style = MaterialTheme.typography.titleSmall)
+                        Text("Your wallet passphrase protects this installation. Keep your recovery phrase or private key safe.", style = MaterialTheme.typography.bodySmall)
                     }
-
-                    Spacer(Modifier.height(16.dp))
+                }
+                TextButton(onClick = { sheet = "guide" }, modifier = Modifier.padding(horizontal = 16.dp)) { Text("How wallet protection works") }
+                TextButton(onClick = onRemove, modifier = Modifier.padding(horizontal = 16.dp)) {
+                    Text("Remove this wallet", color = MaterialTheme.colorScheme.error)
                 }
             }
-
-            Spacer(Modifier.height(32.dp))
         }
     }
 }
 
 @Composable
 private fun SettingsRow(label: String, value: String) {
-    Row(
-        modifier = Modifier
-            .fillMaxWidth()
-            .padding(vertical = 12.dp),
-        horizontalArrangement = Arrangement.SpaceBetween,
-        verticalAlignment = Alignment.CenterVertically
-    ) {
-        Text(
-            text = label,
-            style = MaterialTheme.typography.bodyMedium,
-            color = MaterialTheme.colorScheme.onSurfaceVariant
-        )
-        Text(
-            text = value,
-            style = MaterialTheme.typography.bodyMedium
-        )
-    }
-}
-
-@Composable
-private fun SettingsActionRow(
-    label: String,
-    value: String? = null,
-    valueColor: androidx.compose.ui.graphics.Color = MaterialTheme.colorScheme.onSurface,
-    onClick: () -> Unit
-) {
-    Row(
-        modifier = Modifier
-            .fillMaxWidth()
-            .clickable(onClick = onClick)
-            .padding(vertical = 12.dp),
-        horizontalArrangement = Arrangement.SpaceBetween,
-        verticalAlignment = Alignment.CenterVertically
-    ) {
-        Text(
-            text = label,
-            style = MaterialTheme.typography.bodyMedium
-        )
-        Row(verticalAlignment = Alignment.CenterVertically) {
-            if (value != null) {
-                Text(
-                    text = value,
-                    style = MaterialTheme.typography.bodyMedium,
-                    color = valueColor
-                )
-                Spacer(Modifier.width(4.dp))
-            }
-            Icon(
-                Lucide.ChevronRight,
-                contentDescription = null,
-                modifier = Modifier.size(16.dp),
-                tint = MaterialTheme.colorScheme.onSurfaceVariant
-            )
-        }
+    Column(Modifier.fillMaxWidth().padding(vertical = 8.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+        Text(label, style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
+        Text(value, style = MaterialTheme.typography.bodyMedium)
     }
 }
 
