@@ -229,7 +229,7 @@ internal fun WalletSettingsContent(
                             singleLine = true, modifier = Modifier.fillMaxWidth())
                         Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                             OutlinedButton(onClick = { dismissThen(onCancelEditing) }) { Text(stringResource(R.string.wallet_settings_cancel)) }
-                            Button(onClick = { dismissThen(onSaveName) }, enabled = uiState.editName.isNotBlank()) { Text(stringResource(R.string.wallet_settings_save)) }
+                            Button(onClick = onSaveName, enabled = uiState.editName.isNotBlank()) { Text(stringResource(R.string.wallet_settings_save)) }
                         }
                     }
                     sheet == "details" -> {

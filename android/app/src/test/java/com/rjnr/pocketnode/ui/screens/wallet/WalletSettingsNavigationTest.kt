@@ -39,7 +39,7 @@ class WalletSettingsNavigationTest {
         click("Wallet name"); click("Backup wallet"); click("View recovery material")
         click("Wallet details")
         compose.onNodeWithText("m/44'/309'/0'").assertExists()
-        compose.onNodeWithText("Done").performClick()
+        compose.onNodeWithText("Done").performSemanticsAction(SemanticsActions.OnClick) { it() }
         click("Accounts"); click("wallet_settings_add_account")
         compose.onNodeWithContentDescription("common_back_cd").performClick()
         click("How wallet protection works")
@@ -61,16 +61,49 @@ class WalletSettingsNavigationTest {
             onSaveName = { saved = state.editName; state = state.copy(isEditing = false) }) }
         click("Wallet name")
         compose.onNode(hasSetTextAction()).performTextReplacement("Trip")
-        compose.onNodeWithText("wallet_settings_save").performClick()
+        compose.onNodeWithText("wallet_settings_save").performSemanticsAction(SemanticsActions.OnClick) { it() }
         compose.mainClock.advanceTimeBy(1_000)
         compose.waitForIdle()
         compose.waitUntil { saved == "Trip" }
         compose.onNode(hasSetTextAction()).assertDoesNotExist()
         click("Wallet name")
-        compose.onNodeWithText("wallet_settings_cancel").performClick()
+        compose.onNodeWithText("wallet_settings_cancel").performSemanticsAction(SemanticsActions.OnClick) { it() }
         compose.mainClock.advanceTimeBy(1_000)
         compose.waitForIdle()
         compose.waitUntil { !state.isEditing }
+        compose.onNode(hasSetTextAction()).assertDoesNotExist()
+    }
+    @Test fun `failed or pending rename keeps editor visible for retry and cancellation`() {
+        var state by mutableStateOf(WalletSettingsUiState(wallet = wallet))
+        var attempts = 0
+        compose.setContent { WalletSettingsContent(state,
+            onStartEditing = { state = state.copy(isEditing = true, editName = wallet.name) },
+            onEditName = { state = state.copy(editName = it) },
+            onCancelEditing = { state = state.copy(isEditing = false) },
+            onSaveName = { attempts++; if (attempts == 3) state = state.copy(isEditing = false) }) }
+        click("Wallet name")
+        compose.onNode(hasSetTextAction()).performTextReplacement("Trip")
+        repeat(2) { attempt ->
+            compose.onNodeWithText("wallet_settings_save").performSemanticsAction(SemanticsActions.OnClick) { it() }
+            compose.mainClock.advanceTimeBy(1_000)
+            compose.waitForIdle()
+            compose.runOnIdle { assertEquals(attempt + 1, attempts) }
+            compose.onNode(hasSetTextAction()).assertIsDisplayed().assertTextContains("Trip")
+            compose.onNodeWithText("wallet_settings_cancel").assertIsDisplayed()
+        }
+        compose.onNodeWithText("wallet_settings_cancel").performSemanticsAction(SemanticsActions.OnClick) { it() }
+        compose.mainClock.advanceTimeBy(1_000)
+        compose.waitForIdle()
+        compose.onNode(hasSetTextAction()).assertDoesNotExist()
+        click("Wallet details")
+        compose.onNodeWithText("m/44'/309'/0'").assertExists()
+        compose.onNodeWithText("Done").performSemanticsAction(SemanticsActions.OnClick) { it() }
+        compose.mainClock.advanceTimeBy(1_000)
+        compose.waitForIdle()
+        click("Wallet name")
+        compose.onNodeWithText("wallet_settings_save").performSemanticsAction(SemanticsActions.OnClick) { it() }
+        compose.waitForIdle()
+        compose.runOnIdle { assertEquals(3, attempts) }
         compose.onNode(hasSetTextAction()).assertDoesNotExist()
     }
     @Test fun `wallet detail sheet survives saved state restoration`() {
