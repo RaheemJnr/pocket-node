@@ -405,7 +405,9 @@ fun CkbNavGraph(
                 onNavigateToPinVerify = {
                     navController.navigate(Screen.PinEntry.createRoute("verify"))
                 },
-                viewModel = viewModel
+                viewModel = viewModel,
+                onNavigateToBackup = { walletId -> navController.navigate(Screen.MnemonicBackup.createRoute(walletId = walletId)) },
+                onNavigateToRecovery = { navController.navigate(Screen.Recovery.route) }
             )
         }
 

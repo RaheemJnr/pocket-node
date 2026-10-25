@@ -25,6 +25,7 @@ data class RecoveryUiState(
     val outcomes: Map<String, String> = emptyMap(),
     val restoredWalletCount: Int = 0,
     val error: String? = null,
+    val walletsLoaded: Boolean = false,
 ) {
     val missingWalletNames get() = missingWallets.map { it.name }
 }
@@ -36,12 +37,16 @@ class RecoveryViewModel @Inject constructor(private val operations: RecoveryOper
     val uiState: StateFlow<RecoveryUiState> = _uiState
     private val restored = mutableSetOf<String>()
     private var operation: Job? = null
-    init { viewModelScope.launch { refresh() } }
+    init { viewModelScope.launch {
+        try { refresh() }
+        catch (e: CancellationException) { throw e }
+        catch (_: Exception) { _uiState.update { it.copy(error = "Could not check wallet recovery. Keep your app data and try again.") } }
+    } }
 
     private suspend fun refresh() {
         val wallets = operations.wallets()
         if (wallets.isNotEmpty()) operations.markIncomplete()
-        _uiState.update { it.copy(missingWallets = wallets, restoredWalletCount = restored.size) }
+        _uiState.update { it.copy(missingWallets = wallets, restoredWalletCount = restored.size, walletsLoaded = true) }
     }
     fun requestMissingRestore() { if (operation?.isActive != true) viewModelScope.launch { refresh() } }
     fun restoreBackup(activity: FragmentActivity, id: String) = run(id) { operations.backup(activity, id) }
