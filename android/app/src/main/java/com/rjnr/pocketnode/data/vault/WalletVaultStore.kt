@@ -183,12 +183,13 @@ class WalletVaultStore(
      * Caller must cryptographically authenticate the new device wrap for this exact envelope/AAD.
      * This operation cannot establish wallet/passphrase protection by itself.
      */
-    suspend fun updateDeviceWrap(walletId: String, expectedGeneration: Long, wrap: DeviceKeyWrap) {
+    suspend fun updateDeviceWrap(walletId: String, expectedGeneration: Long, wrap: DeviceKeyWrap, expectedEnvelope: WalletEnvelope? = null) {
         val owned = wrap.copy(wrappedKey = wrap.wrappedKey.copyOf(), nonce = wrap.nonce.copyOf())
         boundary {
             walletIdentity(walletId)
             val row = dao.get(walletId) ?: throw WalletVaultConflictException()
             val value = decode(row)
+            expectedEnvelope?.let { conflictUnless(row.envelope.contentEquals(WalletEnvelopeCodec.encode(it))) }
             conflictUnless(value.generation == expectedGeneration)
             val encoded = WalletEnvelopeCodec.encode(value.copy(deviceWrap = owned))
             conflictUnless(dao.update(row.copy(envelope = encoded)) == 1)
@@ -208,6 +209,8 @@ class WalletVaultStore(
         currentPassphrase: CharArray,
         expectedWallet: WalletEntity? = null,
         expectedSource: WalletVaultSourceSnapshot? = null,
+        expectedEnvelope: WalletEnvelope? = null,
+        expectedProfile: WalletPassphraseProfileEntity? = null,
     ) {
         val candidate = WalletEnvelopeCodec.encode(replacement)
         val owned = currentPassphrase.copyOf()
@@ -217,9 +220,11 @@ class WalletVaultStore(
                 expectedSource?.let { checkRecoverySource(it, walletId) }
                 conflictUnless(db.walletDao().getById(walletId)?.let(::stableWalletIdentity) == expectedWallet?.let(::stableWalletIdentity))
                 val currentProfile = profile() ?: throw WalletEnvelopeFormatException()
+                expectedProfile?.let { conflictUnless(WalletEnvelopeCodec.encode(currentProfile).contentEquals(it.envelope)) }
                 verifyProfile(currentProfile, owned)
                 val row = dao.get(walletId) ?: throw WalletVaultConflictException()
                 decode(row)
+                expectedEnvelope?.let { conflictUnless(row.envelope.contentEquals(WalletEnvelopeCodec.encode(it))) }
                 conflictUnless(row.generation == expectedGeneration)
                 val value = WalletEnvelopeCodec.decode(candidate)
                 requireEnvelope(value.walletId == walletId && value.generation > expectedGeneration)
