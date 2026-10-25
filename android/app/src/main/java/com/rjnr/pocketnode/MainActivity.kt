@@ -45,7 +45,10 @@ import kotlinx.coroutines.runBlocking
 import javax.inject.Inject
 
 @AndroidEntryPoint
-class MainActivity : FragmentActivity() {
+class MainActivity : FragmentActivity(), com.rjnr.pocketnode.ui.security.WalletSheetThemeOwner {
+    override val walletSheetThemeMode: com.rjnr.pocketnode.core.prefs.ThemeMode
+        get() = walletPreferences.getThemeMode()
+
     @Inject
     lateinit var repository: GatewayRepository
 

@@ -5,6 +5,7 @@ import android.view.View
 import android.view.ViewGroup
 import android.view.WindowManager
 import android.widget.EditText
+import android.widget.Button
 import androidx.fragment.app.FragmentActivity
 import kotlinx.coroutines.*
 import kotlinx.coroutines.test.*
@@ -14,7 +15,7 @@ import org.junit.runner.RunWith
 import org.robolectric.Robolectric
 import org.robolectric.RobolectricTestRunner
 import org.robolectric.annotation.Config
-import org.robolectric.shadows.ShadowAlertDialog
+import org.robolectric.shadows.ShadowDialog
 
 @OptIn(ExperimentalCoroutinesApi::class)
 @RunWith(RobolectricTestRunner::class)
@@ -31,10 +32,10 @@ class RecoverySecretDialogTest {
             val activity = Robolectric.buildActivity(FragmentActivity::class.java).setup().get()
             for ((key, value) in listOf(true to "00".repeat(31) + "02", false to "abandon ".repeat(11) + "about")) {
                 val result = async { RecoverySecretDialog().request(activity, key) }; runCurrent()
-                val dialog = ShadowAlertDialog.getLatestAlertDialog(); val field = inputs(dialog.window!!.decorView).single()
+                val dialog = ShadowDialog.getLatestDialog(); val field = inputs(dialog.window!!.decorView).single()
                 assertTrue(dialog.window!!.attributes.flags and WindowManager.LayoutParams.FLAG_SECURE != 0)
                 assertFalse(field.isSaveEnabled); assertEquals(View.IMPORTANT_FOR_AUTOFILL_NO_EXCLUDE_DESCENDANTS, field.importantForAutofill)
-                field.setText(value); dialog.getButton(AlertDialog.BUTTON_POSITIVE).performClick(); runCurrent()
+                field.setText(value); dialog.findViewById<Button>(android.R.id.button1).performClick(); runCurrent()
                 val owned = result.await()!!; assertArrayEquals(value.toCharArray(), owned); owned.fill('\u0000')
                 assertEquals(0, field.text.length); assertFalse(dialog.isShowing)
             }
@@ -47,11 +48,11 @@ class RecoverySecretDialogTest {
             for (privateKey in listOf(false, true)) {
                 val result = async { RecoverySecretDialog().requestImport(activity, privateKey) }; runCurrent()
                 assertFalse("Import must wait for native user input", result.isCompleted)
-                val dialog = ShadowAlertDialog.getLatestAlertDialog()
+                val dialog = ShadowDialog.getLatestDialog()
                 val field = inputs(dialog.window!!.decorView).single()
                 assertFalse(field.isSaveEnabled)
                 field.setText(if (privateKey) "00".repeat(31) + "02" else "abandon ".repeat(11) + "about")
-                dialog.getButton(AlertDialog.BUTTON_POSITIVE).performClick(); runCurrent()
+                dialog.findViewById<Button>(android.R.id.button1).performClick(); runCurrent()
                 val owned = result.await()!!
                 assertTrue(owned.isNotEmpty()); owned.fill('\u0000')
                 assertEquals(0, field.text.length)
@@ -65,12 +66,12 @@ class RecoverySecretDialogTest {
             val activity = Robolectric.buildActivity(FragmentActivity::class.java).setup().get()
             val result = async { RecoverySecretDialog().requestImport(activity, false) }; runCurrent()
             assertFalse("Import must wait for native user input", result.isCompleted)
-            val dialog = ShadowAlertDialog.getLatestAlertDialog()
+            val dialog = ShadowDialog.getLatestDialog()
             val field = inputs(dialog.window!!.decorView).single()
             field.setText("abandon ability")
             com.rjnr.pocketnode.ui.screens.auth.ReauthLockEvents.onLocked(); runCurrent()
             val cancelled = result.isCompleted
-            if (!cancelled) dialog.getButton(AlertDialog.BUTTON_NEGATIVE).performClick()
+            if (!cancelled) dialog.findViewById<Button>(android.R.id.button2).performClick()
             runCurrent(); assertNull(result.await())
             assertTrue("Lock must cancel native input", cancelled)
             assertEquals(0, field.text.length); assertFalse(dialog.isShowing)
@@ -83,10 +84,10 @@ class RecoverySecretDialogTest {
             for (mode in 0..2) {
                 val controller = Robolectric.buildActivity(FragmentActivity::class.java).setup()
                 val result = async { RecoverySecretDialog().request(controller.get(), true) }; runCurrent()
-                val dialog = ShadowAlertDialog.getLatestAlertDialog(); val field = inputs(dialog.window!!.decorView).single()
+                val dialog = ShadowDialog.getLatestDialog(); val field = inputs(dialog.window!!.decorView).single()
                 field.setText("ab".repeat(32))
                 when (mode) {
-                    0 -> dialog.getButton(AlertDialog.BUTTON_NEGATIVE).performClick()
+                    0 -> dialog.findViewById<Button>(android.R.id.button2).performClick()
                     1 -> controller.pause().stop()
                     else -> result.cancel()
                 }

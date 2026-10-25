@@ -285,6 +285,8 @@ fun WalletSettingsScreen(
             HorizontalDivider(modifier = Modifier.padding(horizontal = 16.dp))
 
             Column(modifier = Modifier.padding(horizontal = 16.dp)) {
+                com.rjnr.pocketnode.ui.security.WalletProtectionEducation(onOpenBackup = onNavigateToBackup)
+                Spacer(Modifier.height(16.dp))
                 SettingsActionRow(label = "Backup wallet", value = if (uiState.isBackedUp) "Completed" else "Pending", onClick = onNavigateToBackup)
                 SettingsActionRow(label = "View recovery material", onClick = { unlockSensitive() })
                 if (uiState.hasMnemonic == false) Text("This protected wallet has a private key but no recovery phrase. It cannot derive new accounts.")
