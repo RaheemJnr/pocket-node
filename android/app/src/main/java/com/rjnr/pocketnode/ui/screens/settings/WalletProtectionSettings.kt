@@ -28,7 +28,6 @@ internal fun WalletProtectionSettings(
     var resetExpanded by remember { mutableStateOf(false) }
     var devicesExpanded by remember { mutableStateOf(false) }
     Column(verticalArrangement = Arrangement.spacedBy(16.dp)) {
-        Text("Wallet protection", style = MaterialTheme.typography.headlineSmall)
         Text("Your passphrase is the fallback. Choose how you unlock day to day.", style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
         Text("Preferred unlock method", style = MaterialTheme.typography.titleSmall)
         Card(shape = RoundedCornerShape(16.dp)) {

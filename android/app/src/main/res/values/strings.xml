@@ -362,7 +362,7 @@
     <!-- endregion -->
 
     <!-- region: SecuritySettings -->
-    <string name="security_settings_title">Security Settings</string>
+    <string name="security_settings_title">Wallet protection</string>
     <string name="security_settings_continue">Continue</string>
     <string name="security_settings_cancel">Cancel</string>
     <string name="security_settings_pin_required_title">PIN is required</string>

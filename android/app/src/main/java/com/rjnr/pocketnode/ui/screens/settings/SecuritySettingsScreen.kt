@@ -26,7 +26,7 @@ import androidx.compose.material3.SnackbarHostState
 import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
-import androidx.compose.material3.TopAppBar
+import androidx.compose.material3.LargeTopAppBar
 import androidx.compose.material3.TopAppBarDefaults
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.Composable
@@ -38,6 +38,7 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.input.nestedscroll.nestedScroll
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.unit.dp
 import androidx.hilt.lifecycle.viewmodel.compose.hiltViewModel
@@ -54,6 +55,7 @@ fun SecuritySettingsScreen(
 ) {
     val uiState by viewModel.uiState.collectAsState()
     val snackbarHostState = remember { SnackbarHostState() }
+    val scrollBehavior = TopAppBarDefaults.exitUntilCollapsedScrollBehavior()
     var showRemoveDialog by remember { mutableStateOf(false) }
     var optimisticBiometric by remember { mutableStateOf<Boolean?>(null) }
     var optimisticAuthBeforeSend by remember { mutableStateOf<Boolean?>(null) }
@@ -140,16 +142,18 @@ fun SecuritySettingsScreen(
     }
 
     Scaffold(
+        modifier = Modifier.nestedScroll(scrollBehavior.nestedScrollConnection),
         containerColor = MaterialTheme.colorScheme.surface,
         topBar = {
-            TopAppBar(
+            LargeTopAppBar(
                 title = { Text(stringResource(R.string.security_settings_title)) },
                 navigationIcon = {
                     IconButton(onClick = onNavigateBack) {
                         Icon(Lucide.ArrowLeft, "Back")
                     }
                 },
-                colors = TopAppBarDefaults.topAppBarColors(
+                scrollBehavior = scrollBehavior,
+                colors = TopAppBarDefaults.largeTopAppBarColors(
                     containerColor = MaterialTheme.colorScheme.surface
                 )
             )

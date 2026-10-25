@@ -440,7 +440,7 @@ private fun SettingsScreenUI(
             item {
                 SettingsLinkRow(
                     icon = Lucide.Shield,
-                    title = "Pin & Biometrics",
+                    title = "Wallet protection",
                     onClick = onNavigateToSecuritySettings
                 )
             }
