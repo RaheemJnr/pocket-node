@@ -78,4 +78,22 @@ class RecoveryScreenNavigationTest {
         compose.onNodeWithText("No wallets currently need recovery").assertExists()
     }
 
+    @Test fun `empty list while completion suspends remains restoring and can cancel`() {
+        val completion = kotlinx.coroutines.CompletableDeferred<Boolean>()
+        val operations = mockk<RecoveryOperations>(relaxed = true)
+        coEvery { operations.wallets() } returnsMany listOf(listOf(MissingWallet("a", "Savings", false)), emptyList())
+        coEvery { operations.unlock(any(), "a", any()) } returns com.rjnr.pocketnode.data.wallet.RecoveredKeyRestorer.Outcome.Restored
+        coEvery { operations.complete() } coAnswers { completion.await() }
+        val vm = RecoveryViewModel(operations)
+        var completed = 0; var continued = 0
+        compose.setContent { RecoveryScreen({ completed++ }, { continued++ }, vm) }
+        compose.onNodeWithText("Use wallet passphrase").performClick()
+        compose.onNodeWithText("Restoring wallet access…").assertExists()
+        compose.onNodeWithText("Done").assertDoesNotExist()
+        compose.onNodeWithText("Keep wallets read-only and continue").assertIsNotEnabled()
+        compose.onNodeWithText("Cancel").performScrollTo().performClick()
+        compose.runOnIdle { assertEquals(RecoveryStage.RESTORE_FAILED, vm.uiState.value.stage); assertEquals(0, completed); assertEquals(0, continued) }
+        compose.onNodeWithText("Done").assertExists()
+    }
+
 }

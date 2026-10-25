@@ -110,7 +110,7 @@ internal fun WalletProtectionSettings(
                         Text("Unlock wallet with", style = MaterialTheme.typography.headlineSmall)
                         Text("Choose your everyday method. Your wallet passphrase remains available.")
                         Column(Modifier.selectableGroup()) {
-                            listOf(VaultReadPreference.DEFAULT to "Biometrics when available", VaultReadPreference.PASSPHRASE to "Wallet passphrase", VaultReadPreference.CREDENTIAL_ONLY to "Android screen lock").forEach { (preference, label) ->
+                            listOf(VaultReadPreference.DEFAULT to "Biometrics when available", VaultReadPreference.BIOMETRIC_ONLY to "Biometrics only", VaultReadPreference.PASSPHRASE to "Wallet passphrase", VaultReadPreference.CREDENTIAL_ONLY to "Android screen lock").forEach { (preference, label) ->
                                 Row(Modifier.fillMaxWidth().selectable(state.unlockPreference == preference, enabled = enabled, role = Role.RadioButton, onClick = { selectPreference(preference) }).padding(vertical = 12.dp), verticalAlignment = Alignment.CenterVertically) {
                                     Text(label, Modifier.weight(1f))
                                     RadioButton(selected = state.unlockPreference == preference, onClick = null, enabled = enabled)

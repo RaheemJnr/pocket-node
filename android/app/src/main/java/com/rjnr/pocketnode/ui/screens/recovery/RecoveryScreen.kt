@@ -30,7 +30,7 @@ fun RecoveryScreen(onRecoveryComplete: () -> Unit, onContinueReadOnly: () -> Uni
                 if (state.error != null) ProtectionNotice("Recovery check unavailable", state.error!!, error = true)
                 else { LinearProgressIndicator(Modifier.fillMaxWidth()); Text("Checking wallet recovery…") }
                 TextButton(onClick = onContinueReadOnly) { Text("Done") }
-            } else if (state.missingWallets.isEmpty() && state.stage != RecoveryStage.SUCCESS) {
+            } else if (state.missingWallets.isEmpty() && state.stage == RecoveryStage.RESTORE_FAILED) {
                 ProtectionNotice("No wallets currently need recovery", "Keep your external recovery backups safe. This check does not verify your backups.")
                 state.error?.let { ProtectionNotice("Recovery did not complete", it, error = true) }
                 TextButton(onClick = onContinueReadOnly) { Text("Done") }

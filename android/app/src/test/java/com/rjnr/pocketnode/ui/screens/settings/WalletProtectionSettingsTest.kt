@@ -77,4 +77,18 @@ class WalletProtectionSettingsTest {
         compose.runOnIdle { assertEquals(listOf("a", "a"), ids); assertEquals(listOf(VaultDevicePromptMode.CREDENTIAL_ONLY, null), modes) }
     }
 
+    @Test fun `saved biometrics only remains selected and can be selected again`() {
+        val preference = androidx.compose.runtime.mutableStateOf(com.rjnr.pocketnode.data.vault.VaultReadPreference.BIOMETRIC_ONLY)
+        val selections = mutableListOf<com.rjnr.pocketnode.data.vault.VaultReadPreference>()
+        compose.setContent {
+            WalletProtectionSettings(SecuritySettingsUiState(unlockPreference = preference.value), { selections.add(it); preference.value = it }, {}, {}, { _, _ -> }, {})
+        }
+        compose.onNodeWithText("Unlock wallet with").performSemanticsAction(SemanticsActions.OnClick) { it() }
+        compose.onNode(hasText("Biometrics only") and SemanticsMatcher.keyIsDefined(androidx.compose.ui.semantics.SemanticsProperties.Selected)).assertIsSelected()
+        compose.onNode(hasText("Wallet passphrase") and SemanticsMatcher.keyIsDefined(androidx.compose.ui.semantics.SemanticsProperties.Selected)).performSemanticsAction(SemanticsActions.OnClick) { it() }
+        compose.onNode(hasText("Biometrics only") and SemanticsMatcher.keyIsDefined(androidx.compose.ui.semantics.SemanticsProperties.Selected)).assertIsNotSelected().performSemanticsAction(SemanticsActions.OnClick) { it() }
+        compose.onNode(hasText("Biometrics only") and SemanticsMatcher.keyIsDefined(androidx.compose.ui.semantics.SemanticsProperties.Selected)).assertIsSelected()
+        compose.runOnIdle { assertEquals(listOf(com.rjnr.pocketnode.data.vault.VaultReadPreference.PASSPHRASE, com.rjnr.pocketnode.data.vault.VaultReadPreference.BIOMETRIC_ONLY), selections) }
+    }
+
 }
