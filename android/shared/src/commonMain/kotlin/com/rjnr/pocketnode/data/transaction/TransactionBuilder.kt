@@ -140,11 +140,12 @@ class TransactionBuilder(
      * and a 1-input fee assumption underestimates the fee on fragmented
      * wallets, making the subsequent Max send fail with insufficient funds.
      *
-     * Cells with malformed capacity hex are skipped from both the sum and the
-     * input count: buildTransfer could not spend them either.
+     * Only observed-empty untyped cells are eligible. Source-aware callers first
+     * restrict the lock. Cells with malformed capacity hex are skipped from
+     * both the sum and the input count: buildTransfer could not spend them either.
      */
     fun calculateMaxSendable(cells: List<Cell>): Long {
-        val capacities = cells.mapNotNull { it.capacity.removePrefix("0x").toLongOrNull(16) }
+        val capacities = cells.filter { it.isPlainCapacity() }.mapNotNull { it.capacity.removePrefix("0x").toLongOrNull(16) }
         if (capacities.isEmpty()) return 0L
         val total = capacities.sum()
         val fee = estimateTransferFee(inputCount = capacities.size, outputCount = 1)
@@ -313,7 +314,8 @@ class TransactionBuilder(
      * `estimateTransferFee(1, n)` suggests (#490).
      *
      * Throws the same selection errors the build throws, so a preview fails
-     * where the send would fail.
+     * where the send would fail. This source-free entry requires callers to
+     * restrict cells to the source lock; prepareMultiTransfer rechecks it.
      */
     fun planTransfer(
         recipients: List<RecipientOutput>,
@@ -425,7 +427,7 @@ class TransactionBuilder(
         logger.d(TAG, "  Network: ${network.name}")
         logger.d(TAG, "  Using SECP256K1 cell dep: $secp256k1TxHash")
 
-        val plan = planTransfer(recipients, availableCells)
+        val plan = planTransfer(recipients, availableCells.filter { it.isPlainCapacity(senderScript) })
         val selectedCells = plan.selectedCells
         val change = plan.changeShannons
 
@@ -565,7 +567,7 @@ class TransactionBuilder(
             "Minimum DAO deposit is ${DaoConstants.MIN_DEPOSIT_SHANNONS / 100_000_000} CKB"
         }
 
-        val (selectedCells, totalInput) = selectCells(availableCells, amountShannons + DEFAULT_FEE)
+        val (selectedCells, totalInput) = selectCells(availableCells.filter { it.isPlainCapacity(senderScript) }, amountShannons + DEFAULT_FEE)
         if (totalInput < amountShannons + DEFAULT_FEE) {
             throw Exception("Insufficient balance. Need ${amountShannons + DEFAULT_FEE}, have $totalInput")
         }
@@ -657,7 +659,7 @@ class TransactionBuilder(
         // The previous implementation used the deposit cell as the only input,
         // making `inputs == outputs`, so the network rejected the tx and the
         // JNI bridge returned null ("send failed - native returned null", #119).
-        val (feeCells, feeTotal) = selectCells(availableCells, DEFAULT_FEE + MIN_CELL_CAPACITY)
+        val (feeCells, feeTotal) = selectCells(availableCells.filter { it.isPlainCapacity(senderScript) }, DEFAULT_FEE + MIN_CELL_CAPACITY)
 
         // DEFAULT_FEE above is the selection reservation (a generous upper
         // bound), not the fee. Paying it flat charged 100,000 shannons for a
@@ -852,7 +854,7 @@ class TransactionBuilder(
         minChange: Long = MIN_CELL_CAPACITY,
     ): Pair<List<Cell>, Long> {
         val sortedCells = cells
-            .filter { it.type == null }
+            .filter { it.isPlainCapacity() }
             // Malformed capacity hex from the node: skip the cell rather than
             // abort the whole selection — same treatment as
             // calculateMaxSendable (#321).

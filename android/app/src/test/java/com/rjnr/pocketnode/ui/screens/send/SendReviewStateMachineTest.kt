@@ -85,6 +85,7 @@ class SendReviewStateMachineTest {
                 capacity = "0x${(70_00000000L).toString(16)}",
                 blockNumber = "0x100",
                 lock = Script(Script.SECP256K1_CODE_HASH, "type", "0x" + "aa".repeat(20)),
+                data = "0x",
             )
         },
         totalInput = 280_00000000L,
@@ -765,6 +766,52 @@ class SendReviewStateMachineTest {
             gate.complete(Unit); runCurrent()
             assertEquals("100", vm.uiState.value.amountCkb)
         } finally { androidx.lifecycle.ViewModelStore().apply { put("max", vm); clear() }; runCurrent() }
+    }
+
+    @Test fun `MAX quotes only observed empty cells at its captured source lock`() = runTest(testDispatcher) {
+        transactionBuilder = TransactionBuilder(com.rjnr.pocketnode.data.validation.NetworkValidator())
+        val base = plannedTransfer.selectedCells.first()
+        val protected = listOf(base.copy(data = "0x01"), base.copy(data = "0x00"), base.copy(data = ""),
+            base.copy(type = base.lock), base.copy(lock = base.lock.copy(args = "0x" + "bb".repeat(20))))
+        coEvery { repository.getCells() } coAnswers {
+            // Force the suspend resume path so MockK does not double-box inline Result.
+            kotlinx.coroutines.yield()
+            Result.success(com.rjnr.pocketnode.data.gateway.models.CellsResponse(plannedTransfer.selectedCells + protected, null))
+        }
+        val vm = newViewModel(); runCurrent()
+        try {
+            vm.setMaxAmount(); runCurrent()
+            assertNull("MAX read must succeed: ${vm.uiState.value.error}", vm.uiState.value.error)
+            // Four empty 70 CKB cells minus the 1000-shannon fee, with exact integer accounting.
+            assertEquals("279.99999", vm.uiState.value.amountCkb)
+        } finally { androidx.lifecycle.ViewModelStore().apply { put("plainMax", vm); clear() }; runCurrent() }
+    }
+
+    @Test fun `failed MAX preserves amount and reports unresolved cells`() = runTest(testDispatcher) {
+        coEvery { repository.getCells() } returns Result.failure(IllegalStateException("Cell data unavailable"))
+        val vm = newViewModel(); runCurrent()
+        try {
+            vm.updateAmount("123")
+            vm.setMaxAmount(); runCurrent()
+            assertEquals("123", vm.uiState.value.amountCkb)
+            assertNotNull(vm.uiState.value.error)
+        } finally { androidx.lifecycle.ViewModelStore().apply { put("maxError", vm); clear() }; runCurrent() }
+    }
+
+    @Test fun `late failed MAX cannot replace new draft or publish error`() = runTest(testDispatcher) {
+        val gate = kotlinx.coroutines.CompletableDeferred<Unit>()
+        coEvery { repository.getCells() } coAnswers {
+            kotlinx.coroutines.withContext(kotlinx.coroutines.NonCancellable) { gate.await() }
+            Result.failure(IllegalStateException("Cell data unavailable"))
+        }
+        val vm = newViewModel(); runCurrent()
+        try {
+            vm.setMaxAmount(); runCurrent()
+            vm.updateAmount("123")
+            gate.complete(Unit); runCurrent()
+            assertEquals("123", vm.uiState.value.amountCkb)
+            assertNull(vm.uiState.value.error)
+        } finally { androidx.lifecycle.ViewModelStore().apply { put("lateMaxError", vm); clear() }; runCurrent() }
     }
 
     /** Only the transport/storage are doubles: real ledger, planner, review validator and signing serializer. */

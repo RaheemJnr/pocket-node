@@ -148,7 +148,7 @@ final class SendViewModel {
 
     private(set) var review: SendReview?
     @ObservationIgnored private let draftGeneration = SharedValueBox<Int64>(0)
-    @ObservationIgnored private var maxRequest: Task<Int64, Never>?
+    @ObservationIgnored private var maxRequest: Task<Int64, Error>?
 
     private func invalidateDraft() {
         draftGeneration.update { $0 += 1 }
@@ -298,9 +298,17 @@ final class SendViewModel {
         let source = service.fromAddress
         let wallet = service.walletId
         let network = service.network
-        let request = Task { await service.maxSendableShannons() }
+        let request = Task { try await service.maxSendableShannons() }
         maxRequest = request
-        let spendable = await request.value
+        let spendable: Int64
+        do {
+            spendable = try await request.value
+        } catch {
+            guard !Task.isCancelled, draftGeneration.get() == generation, service.fromAddress == source,
+                  service.walletId == wallet, service.network == network else { return }
+            alert = Self.alert(for: error)
+            return
+        }
         // Clamped to the balance ``validate()`` measures against. The two are
         // read from different places on purpose: the pipeline prices MAX over
         // the cells a send would select, which include the change in-flight

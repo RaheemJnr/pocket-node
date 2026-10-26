@@ -25,6 +25,7 @@ final class FakeSendService: SendServicing {
 
     /// What ``maxSendableShannons()`` answers.
     var maxSendable: Int64 = 0
+    var maxError: Error?
     var onMax: (@MainActor () async -> Void)?
 
     /// What ``send(from:to:amount:expectedFee:)`` answers.
@@ -50,7 +51,11 @@ final class FakeSendService: SendServicing {
         Int64(outputCount) * 50_000
     }
 
-    func maxSendableShannons() async -> Int64 { await onMax?(); return maxSendable }
+    func maxSendableShannons() async throws -> Int64 {
+        await onMax?()
+        if let maxError { throw maxError }
+        return maxSendable
+    }
 
     func preview(from: String, recipients: [RecipientOutput]) async throws -> TransferPlan {
         previewCalls.append((from, recipients))

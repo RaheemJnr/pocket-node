@@ -134,6 +134,6 @@ data class JniCell(
         blockNumber = blockNumber,
         lock = output.lock,
         type = output.type,
-        data = outputData ?: "0x"
+        data = outputData ?: ""
     )
 }

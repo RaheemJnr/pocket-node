@@ -117,7 +117,7 @@ protocol SendServicing: AnyObject {
     func estimateFee(inputCount: Int, outputCount: Int) -> Int64
 
     /// The MAX pill: the largest amount a single transfer can carry right now.
-    func maxSendableShannons() async -> Int64
+    func maxSendableShannons() async throws -> Int64
 
     /// Price the transfer the review sheet is about to show. Throws whatever
     /// selection throws, which the caller surfaces instead of opening the
@@ -301,20 +301,12 @@ final class SendService: SendServicing {
         builder.estimateTransferFee(inputCount: Int32(inputCount), outputCount: Int32(outputCount))
     }
 
-    func maxSendableShannons() async -> Int64 {
-        guard let from = fromAddress, let context = makeContext() else { return 0 }
-        do {
-            let largest = try await pipeline.maxSendable(ctx: context, fromAddress: from)
-            return largest.int64Value
-        } catch {
-            // The same fallback Android takes when the cell fetch fails: the
-            // displayed balance minus a one-input estimate. It can overshoot
-            // on a fragmented wallet, which the send then refuses with a
-            // message; quoting nothing at all would be worse.
-            logger.error("maxSendable failed: \(error.localizedDescription, privacy: .public)")
-            let fee = estimateFee(inputCount: 1, outputCount: 1)
-            return Swift.max(availableShannons - fee, 0)
+    func maxSendableShannons() async throws -> Int64 {
+        guard let from = fromAddress, let context = makeContext() else {
+            throw SendError(message: "Wallet not initialized")
         }
+        let largest = try await pipeline.maxSendable(ctx: context, fromAddress: from)
+        return largest.int64Value
     }
 
     func preview(from: String, recipients: [RecipientOutput]) async throws -> TransferPlan {

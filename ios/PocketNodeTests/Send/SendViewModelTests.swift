@@ -760,4 +760,30 @@ final class SendViewModelTests: XCTestCase {
         XCTAssertEqual(model.review?.amountShannons, 100 * ckb)
     }
 
+    func testFailedMaxPreservesAmountAndShowsReadError() async {
+        model.updateAmount("123")
+        service.maxError = SendError(message: "Cell data unavailable")
+        await model.setMaxAmount()
+        XCTAssertEqual(model.amount, "123")
+        XCTAssertNotNil(model.alert)
+    }
+
+    func testLateFailedMaxCannotPublishAnErrorIntoANewDraft() async {
+        service.maxError = SendError(message: "Cell data unavailable")
+        service.onMax = { [weak self] in
+            await Task { @MainActor in self?.model.updateAmount("123") }.value
+        }
+        await model.setMaxAmount()
+        XCTAssertEqual(model.amount, "123")
+        XCTAssertNil(model.alert)
+    }
+
+    func testSuccessfulEmptyMaxRemainsDistinctFromAnUnresolvedRead() async {
+        model.updateAmount("123")
+        service.maxSendable = 0
+        await model.setMaxAmount()
+        XCTAssertEqual(model.amount, "0")
+        XCTAssertNil(model.alert)
+    }
+
 }

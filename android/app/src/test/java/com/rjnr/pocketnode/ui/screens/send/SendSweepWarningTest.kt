@@ -162,6 +162,7 @@ class SendSweepWarningTest {
                     capacity = "0x${balanceShannons.toString(16)}",
                     blockNumber = "0x100",
                     lock = Script(Script.SECP256K1_CODE_HASH, "type", "0x" + "aa".repeat(20)),
+                    data = "0x",
                 )
             ),
             totalInput = balanceShannons,

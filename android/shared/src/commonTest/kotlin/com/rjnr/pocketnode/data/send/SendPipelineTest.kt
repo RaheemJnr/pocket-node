@@ -666,6 +666,20 @@ class SendPipelineTest {
         }
     }
 
+    @Test fun syntheticPendingDataCannotBecomeSpendableCapacity() = runTest {
+        for (data in listOf(listOf("0x01"), listOf("0x00"), emptyList())) {
+            val store = FakePendingBroadcastStore()
+            val tx = PENDING_TX.copy(outputsData = data)
+            val hash = TransactionBuilder(NetworkValidator()).computeTxHash(tx)
+            store.insert(pendingRow(hash, "BROADCASTING", LIVE_CELLS.map { it.outPoint }, json.encodeToString(tx)))
+            val pipeline = pipelineOver(api(sendAnswer = "\"$hash\""), store)
+            pipeline.sendTransaction(ctx(this), tx).getOrThrow()
+            assertEquals(0L, pipeline.maxSendable(ctx(this), FROM_ADDRESS))
+            assertTrue(runCatching { pipeline.previewTransfer(ctx(this), FROM_ADDRESS,
+                listOf(RecipientOutput(TO_ADDRESS, 100_00000000L))) }.isFailure)
+        }
+    }
+
     /**
      * Parks the FIRST compare-and-set on [gate]. That is the first suspension
      * point after the broadcast, so holding it holds a send exactly where the
