@@ -8,6 +8,7 @@ import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
 import androidx.test.uiautomator.By
 import androidx.test.uiautomator.Direction
+import androidx.test.uiautomator.UiObject2
 import androidx.test.uiautomator.UiDevice
 import androidx.test.uiautomator.Until
 import org.junit.Assert.assertNotNull
@@ -211,10 +212,7 @@ class UpgradeSmokeTest {
         // post-migration: reuse its longer timeout instead of the plain
         // onboarding one. 3 of the last 4 CI first-attempt failures (#330)
         // were this exact assertion timing out at the shorter 15 s bound.
-        val balanceRow = device.wait(
-            Until.findObject(By.res("home-balance-row")),
-            POST_UPGRADE_HOME_TIMEOUT_MS
-        )
+        val balanceRow = waitForHomeBalance()
         assertNotNull("Home balance row not found after onboarding", balanceRow)
     }
 
@@ -242,10 +240,7 @@ class UpgradeSmokeTest {
             }
         }
 
-        val balanceRow = device.wait(
-            Until.findObject(By.res("home-balance-row")),
-            POST_UPGRADE_HOME_TIMEOUT_MS
-        )
+        val balanceRow = waitForHomeBalance()
         assertNotNull(
             "Home balance row not visible within ${POST_UPGRADE_HOME_TIMEOUT_MS}ms after upgrade",
             balanceRow
@@ -290,6 +285,22 @@ class UpgradeSmokeTest {
                 10_000L
             )
         )
+    }
+
+    /** A published release may cover Home on the older baseline APK. Defer only
+     * that app-owned update prompt; never install a different APK during smoke.
+     * Unknown dialogs still fail the normal Home assertion and are captured.
+     */
+    private fun waitForHomeBalance(): UiObject2? {
+        val deadline = android.os.SystemClock.elapsedRealtime() + POST_UPGRADE_HOME_TIMEOUT_MS
+        while (android.os.SystemClock.elapsedRealtime() < deadline) {
+            if (device.hasObject(By.text("Update Available").pkg(PKG))) {
+                device.findObject(By.text("Later").pkg(PKG))?.click()
+            }
+            val home = device.wait(Until.findObject(By.res("home-balance-row")), 500L)
+            if (home != null) return home
+        }
+        return null
     }
 
     /**
