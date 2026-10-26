@@ -291,9 +291,10 @@ object AppModule {
         transactionBuilder: TransactionBuilder,
         sendPipeline: com.rjnr.pocketnode.data.send.SendPipeline,
         logger: Logger,
+        verificationCacheGate: com.rjnr.pocketnode.data.gateway.VerificationCacheGate,
     ): com.rjnr.pocketnode.data.gateway.DaoGateway = com.rjnr.pocketnode.data.gateway.DaoGateway(
         appDatabase, daoSyncManager, daoDepositReader, daoHeaderResolver,
-        lightClient, transactionBuilder, sendPipeline, logger,
+        lightClient, transactionBuilder, sendPipeline, logger, verificationCacheGate,
     )
 
     @Provides
