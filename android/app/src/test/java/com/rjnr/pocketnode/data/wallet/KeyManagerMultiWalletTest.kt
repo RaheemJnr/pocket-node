@@ -53,8 +53,8 @@ class KeyManagerMultiWalletTest {
         encryptionManager = KeystoreEncryptionManager.createForTest()
         val migrationPrefs = context.getSharedPreferences("test_multi_migration", Context.MODE_PRIVATE)
         migrationPrefs.edit().clear().commit()
-        val migrationHelper = KeyStoreMigrationHelper(db.keyMaterialDao(), encryptionManager, migrationPrefs, NoopLogger)
-        v2Helper = KeystoreV2MigrationHelper(db.keyMaterialDao(), encryptionManager, migrationPrefs, logger = NoopLogger)
+        val migrationHelper = KeyStoreMigrationHelper(db.keyMaterialDao(), encryptionManager, migrationPrefs, NoopLogger, database = db)
+        v2Helper = KeystoreV2MigrationHelper(db.keyMaterialDao(), encryptionManager, migrationPrefs, logger = NoopLogger, database = db)
 
         val mnemonicManager = MnemonicManager()
         keyManager = KeyManager(context, mnemonicManager, NoopLogger)

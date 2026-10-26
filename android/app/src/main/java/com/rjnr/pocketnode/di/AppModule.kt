@@ -119,7 +119,7 @@ object AppModule {
     fun provideKeyBackupManager(
         @ApplicationContext context: Context,
         logger: Logger,
-    ): KeyBackupManager = KeyBackupManager(File(context.filesDir, "key_backups"), logger)
+    ): KeyBackupManager = KeyBackupManager(File(context.filesDir, "key_backups"), logger, com.rjnr.pocketnode.data.wallet.WalletStorageBoundary(context))
 
     @Provides
     @Singleton
@@ -224,22 +224,24 @@ object AppModule {
     @Provides
     @Singleton
     fun provideKeyStoreMigrationHelper(
+        database: AppDatabase,
         keyMaterialDao: KeyMaterialDao,
         encryptionManager: KeystoreEncryptionManager,
         @Named("migrationPrefs") migrationPrefs: SharedPreferences,
         logger: Logger,
-    ): KeyStoreMigrationHelper = KeyStoreMigrationHelper(keyMaterialDao, encryptionManager, migrationPrefs, logger)
+    ): KeyStoreMigrationHelper = KeyStoreMigrationHelper(keyMaterialDao, encryptionManager, migrationPrefs, logger, database)
 
     @Provides
     @Singleton
     fun provideKeystoreV2MigrationHelper(
+        database: AppDatabase,
         keyMaterialDao: KeyMaterialDao,
         encryptionManager: KeystoreEncryptionManager,
         @Named("migrationPrefs") migrationPrefs: SharedPreferences,
         logger: Logger,
     ): com.rjnr.pocketnode.data.crypto.KeystoreV2MigrationHelper =
         com.rjnr.pocketnode.data.crypto.KeystoreV2MigrationHelper(
-            keyMaterialDao, encryptionManager, migrationPrefs, logger = logger
+            keyMaterialDao, encryptionManager, migrationPrefs, logger = logger, database = database
         )
 
     @Provides

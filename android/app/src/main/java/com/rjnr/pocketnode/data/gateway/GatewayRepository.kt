@@ -170,7 +170,7 @@ class GatewayRepository @Inject constructor(
                 // Copy per-wallet lastSyncedBlock from SharedPreferences to Room sync_progress (#105)
                 walletMigrationHelper.migrateSyncProgressToRoomIfNeeded()
                 // Migrate key material from ESP to Room (one-time, for upgrading users)
-                keyManager.migrateEspToRoomIfNeeded(walletDao)
+                keyManager.migrateEspToRoomIfNeeded(appDatabase)
                 // Delete ESP files after successful migration
                 keyManager.deleteEspFilesIfSafe()
                 reassignActiveWallet(walletPreferences.getActiveWalletId() ?: "")

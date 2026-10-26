@@ -41,7 +41,7 @@ class KeyBackupManagerTest {
 
     @Before
     fun setUp() {
-        manager = KeyBackupManager(tempDir.root, NoopLogger)
+        manager = KeyBackupManager(tempDir.root, NoopLogger, com.rjnr.pocketnode.data.wallet.WalletStorageBoundary(androidx.test.core.app.ApplicationProvider.getApplicationContext()))
         // Use low cost factors for fast tests. Production uses PBKDF2 600_000
         // (legacy reads) and Argon2id 64 MB / t=3 / p=4 (current writes).
         manager.kdfIterations = 1_000
@@ -238,7 +238,7 @@ class KeyBackupManagerTest {
     }
     @Test fun `authenticated malformed payload never forwards serializer exception to logger`() {
         val logger = io.mockk.mockk<com.rjnr.pocketnode.core.log.Logger>(relaxed = true)
-        val reader = KeyBackupManager(tempDir.root, logger).apply { kdfIterations = 1_000 }
+        val reader = KeyBackupManager(tempDir.root, logger, com.rjnr.pocketnode.data.wallet.WalletStorageBoundary(androidx.test.core.app.ApplicationProvider.getApplicationContext())).apply { kdfIterations = 1_000 }
         val salt = ByteArray(KeyBackupManager.SALT_SIZE)
         val iv = ByteArray(KeyBackupManager.IV_SIZE)
         val spec = javax.crypto.spec.PBEKeySpec(testPin, salt, 1_000, KeyBackupManager.KEY_SIZE_BITS)

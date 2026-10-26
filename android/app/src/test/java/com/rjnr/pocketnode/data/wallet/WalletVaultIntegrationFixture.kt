@@ -27,9 +27,9 @@ class WalletVaultIntegrationFixture(existingDatabase: AppDatabase? = null, encry
     val store = WalletVaultStore(db, crypto)
     val encryption = encryptionOverride ?: KeystoreEncryptionManager.createForTest()
     val prefs = context.getSharedPreferences("integration_legacy", Context.MODE_PRIVATE).also { it.edit().clear().commit() }
-    val legacy = KeyStoreMigrationHelper(db.keyMaterialDao(), encryption, prefs, NoopLogger)
-    val v2 = KeystoreV2MigrationHelper(db.keyMaterialDao(), encryption, prefs, logger = NoopLogger)
-    val backup = KeyBackupManager(java.io.File(context.cacheDir, "integration-backups"), NoopLogger)
+    val legacy = KeyStoreMigrationHelper(db.keyMaterialDao(), encryption, prefs, NoopLogger, database = db)
+    val v2 = KeystoreV2MigrationHelper(db.keyMaterialDao(), encryption, prefs, logger = NoopLogger, database = db)
+    val backup = KeyBackupManager(java.io.File(context.cacheDir, "integration-backups"), NoopLogger, com.rjnr.pocketnode.data.wallet.WalletStorageBoundary(androidx.test.core.app.ApplicationProvider.getApplicationContext()))
     val auth = mockk<AuthManager>(relaxed = true)
     val pin = mockk<PinManager>()
     val recovery = RecoveryStateStore(context)

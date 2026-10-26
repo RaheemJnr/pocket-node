@@ -176,6 +176,14 @@ class PinManager @Inject constructor(
 
     fun hasPin(): Boolean = policy.hasPin()
 
+    /** Reset has already verified every secret store empty; persist removal before process restart. */
+    internal fun removePinDurablyForReset() {
+        check(prefs.edit().remove(KEY_PIN_HASH).remove(KEY_SALT).remove(KEY_KDF_VERSION)
+            .remove(KEY_FAILED_ATTEMPTS).remove(KEY_LAST_FAILED_AT).remove(KEY_LOCKOUT_UNTIL).commit()) {
+            "PIN reset could not be persisted."
+        }
+    }
+
     fun removePin(force: Boolean = false) {
         if (!force && backupChecker?.invoke() == true) {
             throw IllegalStateException(

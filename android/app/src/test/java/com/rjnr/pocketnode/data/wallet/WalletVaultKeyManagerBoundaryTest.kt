@@ -50,7 +50,7 @@ class WalletVaultKeyManagerBoundaryTest {
                 kotlinx.coroutines.runBlocking { f.db.keyMaterialDao().upsert(marker) }
                 callOriginal()
             }
-            val helper = com.rjnr.pocketnode.data.crypto.KeyStoreMigrationHelper(f.db.keyMaterialDao(), encryption, f.prefs, NoopLogger)
+            val helper = com.rjnr.pocketnode.data.crypto.KeyStoreMigrationHelper(f.db.keyMaterialDao(), encryption, f.prefs, NoopLogger, database = f.db)
             var denied = false
             try { helper.migrateWallet("a", f.material.privateKey, null, "raw_key", false) }
             catch (_: IllegalStateException) { denied = true }
@@ -69,7 +69,7 @@ class WalletVaultKeyManagerBoundaryTest {
                     kotlinx.coroutines.runBlocking { f.db.keyMaterialDao().upsert(marker) }
                     callOriginal()
                 }
-                val helper = com.rjnr.pocketnode.data.crypto.KeystoreV2MigrationHelper(f.db.keyMaterialDao(), encryption, f.prefs, logger = NoopLogger)
+                val helper = com.rjnr.pocketnode.data.crypto.KeystoreV2MigrationHelper(f.db.keyMaterialDao(), encryption, f.prefs, logger = NoopLogger, database = f.db)
                 val result = if (extract) helper.migrateWalletAndExtract("a", f.encryption.newEncryptCipherV2())
                     else helper.migrateWallet("a", f.encryption.newEncryptCipherV2())
                 assertTrue("V1 to V2 migration replaced a concurrent V3 vault", result.isFailure)

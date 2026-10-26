@@ -1,5 +1,7 @@
 package com.rjnr.pocketnode.data.crypto
 
+import androidx.room.withTransaction
+import com.rjnr.pocketnode.data.database.AppDatabase
 import android.content.SharedPreferences
 import android.database.sqlite.SQLiteConstraintException
 import com.rjnr.pocketnode.core.log.Logger
@@ -41,6 +43,7 @@ class KeystoreV2MigrationHelper(
     private val prefs: SharedPreferences,
     private val nowProvider: () -> Long = { System.currentTimeMillis() },
     private val logger: Logger,
+    private val database: AppDatabase,
 ) {
 
     private val json = Json {
@@ -101,7 +104,10 @@ class KeystoreV2MigrationHelper(
                 kdfVersion = V2_VERSION,
                 updatedAt = nowProvider()
             )
-            keyMaterialDao.replaceLegacyV1(migrated, entity.iv)
+            database.withTransaction {
+                database.walletStorage.requireOpen()
+                keyMaterialDao.replaceLegacyV1(migrated, entity.iv)
+            }
 
             logger.i(TAG, "Migrated wallet $walletId from V1 to V2")
         }
@@ -148,7 +154,10 @@ class KeystoreV2MigrationHelper(
                 kdfVersion = V2_VERSION,
             )
             try {
-                keyMaterialDao.insertOrAbort(entity)
+                database.withTransaction {
+                    database.walletStorage.requireOpen()
+                    keyMaterialDao.insertOrAbort(entity)
+                }
             } catch (e: SQLiteConstraintException) {
                 throw IllegalStateException(
                     "walletId=$walletId already exists in key_material; refuse to overwrite",
@@ -213,7 +222,10 @@ class KeystoreV2MigrationHelper(
                 kdfVersion = V2_VERSION,
                 updatedAt = nowProvider()
             )
-            keyMaterialDao.replaceLegacyV1(migrated, entity.iv)
+            database.withTransaction {
+                database.walletStorage.requireOpen()
+                keyMaterialDao.replaceLegacyV1(migrated, entity.iv)
+            }
 
             logger.i(TAG, "Migrated wallet $walletId V1→V2 (extracted plaintext for caller)")
             bundle

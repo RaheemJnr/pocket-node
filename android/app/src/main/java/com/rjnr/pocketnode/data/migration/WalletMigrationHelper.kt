@@ -58,7 +58,12 @@ class WalletMigrationHelper @Inject constructor(
      * upgrades through V1 → V2 keeps this path Activity-free without
      * regressing the user-facing migration UX.
      */
-    suspend fun migrateIfNeeded() {
+    suspend fun migrateIfNeeded() = database.withTransaction {
+        if (keyManager.walletStorage.isClosed()) return@withTransaction
+        migrateOpenInstallation()
+    }
+
+    private suspend fun migrateOpenInstallation() {
         if (walletDao.count() > 0) {
             // A creation or selection transaction can commit before preferences are written.
             // Room owns selection; recover an interrupted first creation without reading secrets.

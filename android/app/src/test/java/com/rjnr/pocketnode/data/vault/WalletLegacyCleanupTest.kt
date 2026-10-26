@@ -63,7 +63,7 @@ class WalletLegacyCleanupTest {
         val context = fixture.context
         val blocked = File(folder.root, "a.enc").apply { mkdir() }
         File(blocked, "child").writeText("cannot remove nonempty directory")
-        val cleanup = WalletLegacyCleanup(context, KeyBackupManager(folder.root, NoopLogger), fixture.db, fixture.keyManager, fixture.legacy)
+        val cleanup = WalletLegacyCleanup(context, KeyBackupManager(folder.root, NoopLogger, com.rjnr.pocketnode.data.wallet.WalletStorageBoundary(androidx.test.core.app.ApplicationProvider.getApplicationContext())), fixture.db, fixture.keyManager, fixture.legacy)
         assertFalse(cleanup.clean("a", 0, fixture.material)); assertTrue(blocked.exists())
         File(blocked, "child").delete(); blocked.delete()
         assertTrue(cleanup.clean("a", 0, fixture.material))

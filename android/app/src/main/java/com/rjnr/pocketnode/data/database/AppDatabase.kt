@@ -108,6 +108,14 @@ import com.rjnr.pocketnode.data.database.entity.WalletEntity
     exportSchema = true
 )
 abstract class AppDatabase : RoomDatabase() {
+    lateinit var walletStorage: com.rjnr.pocketnode.data.wallet.WalletStorageBoundary
+        private set
+
+    override fun init(configuration: androidx.room.DatabaseConfiguration) {
+        super.init(configuration)
+        walletStorage = com.rjnr.pocketnode.data.wallet.WalletStorageBoundary(configuration.context)
+    }
+
     abstract fun walletVaultDao(): WalletVaultDao
     abstract fun transactionDao(): TransactionDao
     abstract fun balanceCacheDao(): BalanceCacheDao

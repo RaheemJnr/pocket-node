@@ -115,8 +115,7 @@ class ReauthOverlayTest {
             )
             PinViewModel::class.java -> PinViewModel(pinManager, authManager)
             ForgotPinViewModel::class.java -> ForgotPinViewModel(
-                mockk(relaxed = true), mockk(relaxed = true), pinManager, mockk(relaxed = true),
-                mockk(relaxed = true), NoopLogger,
+                mockk(relaxed = true), mockk(relaxed = true), NoopLogger,
             )
             else -> error("unexpected $modelClass")
         }.also { created += it } as T

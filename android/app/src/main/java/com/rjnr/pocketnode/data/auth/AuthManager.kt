@@ -24,18 +24,19 @@ class AuthManager @Inject constructor(
     @VisibleForTesting
     internal var testPrefs: SharedPreferences? = null
 
+    private val walletStorage = com.rjnr.pocketnode.data.wallet.WalletStorageBoundary(context)
     private var sessionPin: CharArray? = null
 
-    fun setSessionPin(pin: CharArray) {
+    fun setSessionPin(pin: CharArray) = walletStorage.readOrWriteFiles {
         clearSession()
         sessionPin = pin.copyOf()
     }
 
-    fun getSessionPin(): CharArray? = sessionPin?.copyOf()
+    fun getSessionPin(): CharArray? = walletStorage.files { sessionPin?.copyOf() }
 
-    fun hasSessionPin(): Boolean = sessionPin != null
+    fun hasSessionPin(): Boolean = walletStorage.files { sessionPin != null }
 
-    fun clearSession() {
+    fun clearSession() = walletStorage.files {
         sessionPin?.let { java.util.Arrays.fill(it, '\u0000') }
         sessionPin = null
     }

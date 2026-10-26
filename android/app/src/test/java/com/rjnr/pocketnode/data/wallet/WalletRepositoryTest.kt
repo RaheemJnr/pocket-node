@@ -58,8 +58,8 @@ class WalletRepositoryTest {
         encryptionManager = KeystoreEncryptionManager.createForTest()
         val migrationPrefs = context.getSharedPreferences("test_repo_migration", Context.MODE_PRIVATE)
         migrationPrefs.edit().clear().commit()
-        keyManager.keyStoreMigrationHelper = KeyStoreMigrationHelper(db.keyMaterialDao(), encryptionManager, migrationPrefs, NoopLogger)
-        v2Helper = KeystoreV2MigrationHelper(db.keyMaterialDao(), encryptionManager, migrationPrefs, logger = NoopLogger)
+        keyManager.keyStoreMigrationHelper = KeyStoreMigrationHelper(db.keyMaterialDao(), encryptionManager, migrationPrefs, NoopLogger, database = db)
+        v2Helper = KeystoreV2MigrationHelper(db.keyMaterialDao(), encryptionManager, migrationPrefs, logger = NoopLogger, database = db)
         walletPreferences = WalletPreferences(context, NoopLogger)
         repo = WalletRepository(
             walletDao, keyManager, walletPreferences, walletPreferences, mnemonicManager, db,
@@ -808,8 +808,7 @@ class WalletRepositoryTest {
 
     private val backups by lazy {
         com.rjnr.pocketnode.data.crypto.KeyBackupManager(
-            java.nio.file.Files.createTempDirectory("reset_backups").toFile(), NoopLogger,
-        ).apply {
+            java.nio.file.Files.createTempDirectory("reset_backups").toFile(), NoopLogger, com.rjnr.pocketnode.data.wallet.WalletStorageBoundary(androidx.test.core.app.ApplicationProvider.getApplicationContext())).apply {
             argon2Iterations = 1
             argon2MemoryKb = 8
             argon2Parallelism = 1
@@ -915,16 +914,14 @@ class WalletRepositoryTest {
             name = "Stuck",
             persistKeys = { walletId, bundle -> fakePersistV2(walletId, bundle) },
         ).getOrThrow()
-        val stuckDao = object : WalletDao by walletDao {
-            override suspend fun delete(walletId: String) = throw IllegalStateException("disk I/O error")
-        }
+        db.openHelper.writableDatabase.execSQL("CREATE TRIGGER refuse_wallet_delete BEFORE DELETE ON wallets BEGIN SELECT RAISE(ABORT, 'disposable I/O failure'); END")
         val pinManager = pinManagerWithPin()
 
         val error = runCatching {
-            localReset(repository = newRepo(dao = stuckDao), pinManager = pinManager).removeAllWalletsAndPin()
+            localReset(pinManager = pinManager).removeAllWalletsAndPin()
         }.exceptionOrNull()
 
-        assertTrue(error is IllegalStateException)
+        assertNotNull(error)
         assertEquals(1, walletDao.count())
         assertTrue(pinManager.hasPin())
     }
@@ -935,17 +932,15 @@ class WalletRepositoryTest {
             name = "Stuck keys",
             persistKeys = { walletId, bundle -> fakePersistV2(walletId, bundle) },
         ).getOrThrow()
-        val failingKeys = object : com.rjnr.pocketnode.data.database.dao.KeyMaterialDao by db.keyMaterialDao() {
-            override suspend fun delete(walletId: String) = throw IllegalStateException("storage unavailable")
-        }
+        db.openHelper.writableDatabase.execSQL("CREATE TRIGGER refuse_key_delete BEFORE DELETE ON key_material BEGIN SELECT RAISE(ABORT, 'disposable I/O failure'); END")
         val pinManager = pinManagerWithPin()
 
         val error = runCatching {
-            localReset(repository = newRepo(keys = failingKeys), pinManager = pinManager).removeAllWalletsAndPin()
+            localReset(pinManager = pinManager).removeAllWalletsAndPin()
         }.exceptionOrNull()
 
         // Atomic deletion rolled back metadata and protection together; the PIN stays.
-        assertTrue(error is IllegalStateException)
+        assertNotNull(error)
         assertEquals(1, walletDao.count())
         assertNotNull(db.keyMaterialDao().getByWalletId(stuck.walletId))
         assertNotNull(db.walletVaultDao().get(stuck.walletId))
@@ -956,7 +951,7 @@ class WalletRepositoryTest {
     fun `LocalWalletReset keeps the PIN when a backup file is left`() = runTest {
         legacyPrefs
         val stuckBackups = io.mockk.spyk(backups)
-        io.mockk.every { stuckBackups.deleteBackup(any()) } returns Unit
+        io.mockk.every { stuckBackups.deleteAllChecked() } returns Unit
         backups.writeBackup("default", backupMaterial(), "123456".toCharArray())
         val pinManager = pinManagerWithPin()
         recoveryState.markIncomplete()
@@ -972,6 +967,33 @@ class WalletRepositoryTest {
         assertTrue(pinManager.hasPin())
         // Something is left: recovery is not over.
         assertTrue(recoveryState.isIncomplete())
+    }
+
+    @Test
+    fun `factoryReset removes orphaned default preferences without wallet rows`() = runTest {
+        val context = ApplicationProvider.getApplicationContext<Context>()
+        val legacy = context.getSharedPreferences("ckb_wallet_keys", Context.MODE_PRIVATE)
+        legacy.edit().putString("private_key", "00".repeat(31) + "02").commit()
+        keyManager.testPrefs = legacy
+        assertTrue(keyManager.hasWallet())
+        assertEquals(0, walletDao.count())
+        repo.factoryReset()
+        val fresh = KeyManager(context, mnemonicManager, NoopLogger).also { it.testPrefs = legacy }
+        assertFalse("reset must remove legacy fallback even without a wallet row", fresh.hasWallet())
+        assertFalse(legacy.contains("private_key"))
+    }
+
+    @Test
+    fun `factoryReset removes orphaned unreadable preference and backup copies`() = runTest {
+        val context = ApplicationProvider.getApplicationContext<Context>()
+        val copies = listOf(
+            java.io.File(context.filesDir.parentFile, "shared_prefs/ckb_wallet_keys_default.xml.bak"),
+            java.io.File(context.filesDir.parentFile, "shared_prefs/ckb_wallet_keys_orphan.xml"),
+            java.io.File(context.filesDir, "key_backups/orphan.enc.tmp"),
+        )
+        copies.forEach { it.parentFile!!.mkdirs(); it.writeText("unreadable disposable fixture") }
+        repo.factoryReset()
+        copies.forEach { assertFalse("reset left an app-owned copy: ${it.name}", it.exists()) }
     }
 
     @Test

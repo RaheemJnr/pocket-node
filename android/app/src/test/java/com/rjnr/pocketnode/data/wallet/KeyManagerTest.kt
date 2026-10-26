@@ -58,7 +58,7 @@ class KeyManagerTest {
         val encryptionManager = KeystoreEncryptionManager.createForTest()
         val migrationPrefs = context.getSharedPreferences("test_migration", Context.MODE_PRIVATE)
         migrationPrefs.edit().clear().commit()
-        migrationHelper = KeyStoreMigrationHelper(db.keyMaterialDao(), encryptionManager, migrationPrefs, NoopLogger)
+        migrationHelper = KeyStoreMigrationHelper(db.keyMaterialDao(), encryptionManager, migrationPrefs, NoopLogger, database = db)
         keyManager.keyStoreMigrationHelper = migrationHelper
 
         keyManager.deleteWallet()

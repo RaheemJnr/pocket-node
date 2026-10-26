@@ -67,6 +67,12 @@ class MainActivity : FragmentActivity(), com.rjnr.pocketnode.ui.security.WalletS
     lateinit var walletRepository: WalletRepository
 
     @Inject
+    lateinit var localWalletReset: com.rjnr.pocketnode.data.gateway.LocalWalletReset
+
+    @Inject
+    lateinit var appRestarter: com.rjnr.pocketnode.util.AppRestarter
+
+    @Inject
     lateinit var keyBackupManager: KeyBackupManager
 
     @Inject
@@ -144,7 +150,10 @@ class MainActivity : FragmentActivity(), com.rjnr.pocketnode.ui.security.WalletS
         // This is the ONE acceptable runBlocking site — it runs once during cold start
         // on the main thread before any UI is shown.
         val startDestination = runBlocking {
-            cachedHasWallet = repository.hasWallet()
+            val resetStartup = localWalletReset.prepareStartup()
+            if (resetStartup == com.rjnr.pocketnode.data.gateway.LocalWalletReset.Startup.RESTART) appRestarter.restart()
+            val resetPending = resetStartup != com.rjnr.pocketnode.data.gateway.LocalWalletReset.Startup.READY
+            cachedHasWallet = !resetPending && repository.hasWallet()
             @Suppress("DEPRECATION")
             val wasReset = keyManager.wasResetDueToCorruption()
             // Suppressed, not removed: the corruption flag guards the ESP
@@ -154,6 +163,7 @@ class MainActivity : FragmentActivity(), com.rjnr.pocketnode.ui.security.WalletS
             // marker and whenever a wallet row lacks keys.
             val hasPin = pinManager.hasPin()
             val decision = StartupRouter.route(
+                resetPending = resetPending,
                 corruptionFlag = wasReset,
                 markerSet = recoveredKeyRestorer.isMarkedIncomplete(),
                 hasWallet = cachedHasWallet,
@@ -165,6 +175,7 @@ class MainActivity : FragmentActivity(), com.rjnr.pocketnode.ui.security.WalletS
             )
             val recoveryPending = decision.recoveryPending
             val route = when (decision.route) {
+                StartupRouter.Route.RESET_RETRY -> Screen.ForgotPin.route
                 StartupRouter.Route.RECOVERY -> Screen.Recovery.route
                 StartupRouter.Route.ONBOARDING -> Screen.Onboarding.route
                 StartupRouter.Route.PIN_SETUP -> Screen.InitialPinSetup.route
@@ -182,7 +193,7 @@ class MainActivity : FragmentActivity(), com.rjnr.pocketnode.ui.security.WalletS
             // line from exactly the signed builds the reporter runs (a debug
             // build can't overwrite their release-signed install). println is not
             // in that strip list, so it survives R8 and still reaches logcat.
-            runCatching {
+            if (!resetPending) runCatching {
                 Log.println(
                     Log.INFO,
                     "StartupGate",
@@ -222,7 +233,10 @@ class MainActivity : FragmentActivity(), com.rjnr.pocketnode.ui.security.WalletS
                     // While locked the nav graph is not composed at all (see
                     // ReauthGateHost); the hoisted NavController keeps the
                     // back stack and its ViewModels.
-                    ReauthGateHost(
+                    if (startDestination == Screen.ForgotPin.route) {
+                        // A saved navigation stack must not bypass a pending installation reset.
+                        com.rjnr.pocketnode.ui.screens.auth.ForgotPinScreen(onBack = { finish() })
+                    } else ReauthGateHost(
                         locked = reauthGate.locked,
                         content = {
                             CkbNavGraph(

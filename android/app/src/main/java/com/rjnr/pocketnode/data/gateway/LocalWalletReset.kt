@@ -9,24 +9,7 @@ import com.rjnr.pocketnode.data.wallet.WalletRepository
 import javax.inject.Inject
 import javax.inject.Singleton
 
-/**
- * Removes every wallet and key from this app and clears the app PIN, so the
- * app can start again as a fresh install. Used by the Recovery screen's
- * "Start fresh with a recovery phrase" step, offered once the app PIN is
- * permanently locked.
- *
- * Only the app's own data is touched:
- *  - every wallet through [WalletRepository.factoryReset] (the per-wallet
- *    delete path: its Room rows and its key material),
- *  - every PIN-encrypted backup file,
- *  - the legacy single-wallet key store ([KeyManager.deleteWallet]),
- *  - the remaining Room caches.
- *
- * The PIN goes next to last, and only once nothing above is left: no wallet row, no
- * key_material row, no backup file and no legacy key. Otherwise this throws
- * and the PIN stays, so keys are never left behind without it. Last, the
- * Recovery screen's "recovery incomplete" marker is cleared.
- */
+/** Verified installation reset shared by Forgot PIN and Recovery. The PIN is removed last. */
 @Singleton
 class LocalWalletReset @Inject constructor(
     private val walletRepository: WalletRepository,
@@ -38,24 +21,47 @@ class LocalWalletReset @Inject constructor(
     private val pinManager: PinManager,
     private val recoveryState: RecoveryStateStore,
 ) {
+    enum class Startup { READY, RESTART, RETRY }
+
+    /** Called before legacy probing or normal startup routing. Never interprets a corrupt marker as consent. */
+    suspend fun prepareStartup(): Startup {
+        val boundary = walletRepository.resetBoundary
+        return try {
+            when (boundary.status()) {
+                com.rjnr.pocketnode.data.wallet.WalletStorageBoundary.Status.NONE -> if (boundary.isClosed()) Startup.RETRY else Startup.READY
+                com.rjnr.pocketnode.data.wallet.WalletStorageBoundary.Status.INVALID -> Startup.RETRY
+                com.rjnr.pocketnode.data.wallet.WalletStorageBoundary.Status.PENDING -> {
+                    removeAllWalletsAndPin()
+                    Startup.RESTART
+                }
+                com.rjnr.pocketnode.data.wallet.WalletStorageBoundary.Status.COMPLETE -> {
+                    if (!boundary.canFinishAtStartup()) Startup.RESTART
+                    else {
+                        verifyEmpty()
+                        check(!pinManager.hasPin()) { "PIN reset is incomplete." }
+                        boundary.finishCompletedStartup()
+                        Startup.READY
+                    }
+                }
+            }
+        } catch (cancel: kotlinx.coroutines.CancellationException) { throw cancel }
+        catch (_: Exception) { Startup.RETRY }
+    }
+
+    private suspend fun verifyEmpty() {
+        walletRepository.verifyResetEmpty()
+        check(keyMaterialDao.count() == 0) { "Wallet key records remain." }
+        check(!keyBackupManager.hasAnyBackups()) { "Wallet backup copies remain." }
+    }
+
     suspend fun removeAllWalletsAndPin() {
         walletRepository.factoryReset()
-        for (id in keyBackupManager.listBackupWalletIds()) keyBackupManager.deleteBackup(id)
-        keyManager.deleteWallet()
+        keyBackupManager.deleteAllChecked()
         cacheManager.clearAll()
         daoSyncManager.clearAll()
-
-        // factoryReset logs and skips a wallet or key it cannot delete.
-        val wallets = walletRepository.walletCount()
-        check(wallets == 0) { "$wallets wallet(s) could not be removed" }
-        val keys = keyMaterialDao.count()
-        check(keys == 0) { "$keys key record(s) could not be removed" }
-        check(!keyBackupManager.hasAnyBackups()) { "Backup files could not be removed" }
-        check(!keyManager.hasWallet()) { "The legacy key could not be removed" }
-
-        // force: the PIN-encrypted backups were removed above.
-        pinManager.removePin(force = true)
-        // Nothing is left to recover: the restarted app is a fresh install.
+        verifyEmpty()
+        pinManager.removePinDurablyForReset()
         recoveryState.clear()
+        walletRepository.resetBoundary.completeReset()
     }
 }
