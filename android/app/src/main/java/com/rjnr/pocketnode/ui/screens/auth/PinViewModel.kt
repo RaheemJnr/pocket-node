@@ -65,6 +65,12 @@ class PinViewModel @Inject constructor(
         }
     }
 
+    internal fun hasPersistedPin(): Boolean = pinManager.hasPin()
+
+    /** A restored setup destination may consume fresh overlay auth, never PIN existence alone. */
+    internal fun canCompleteInitialSetup(): Boolean =
+        pinManager.hasPin() && authManager.hasSessionPin()
+
     fun setMode(mode: PinMode) {
         val (title, subtitle) = when (mode) {
             PinMode.SETUP -> "Create PIN" to "Choose a 6-digit PIN"

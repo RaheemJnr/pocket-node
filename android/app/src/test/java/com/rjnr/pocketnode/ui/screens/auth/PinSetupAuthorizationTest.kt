@@ -47,6 +47,17 @@ class PinSetupAuthorizationTest {
         assertFalse(auth.hasSessionPin())
     }
 
+    @Test fun `setup handoff requires current session and rejects it after revocation`() {
+        manager.setPin("123456")
+        val vm = PinViewModel(manager, auth)
+        assertTrue(vm.hasPersistedPin())
+        assertFalse(vm.canCompleteInitialSetup())
+        auth.setSessionPin("123456".toCharArray())
+        assertTrue(vm.canCompleteInitialSetup())
+        auth.clearSession()
+        assertFalse(vm.canCompleteInitialSetup())
+    }
+
     @Test fun `first PIN setup creates credential and session`() {
         val vm = confirm("654321")
         assertTrue(vm.uiState.value.pinComplete)

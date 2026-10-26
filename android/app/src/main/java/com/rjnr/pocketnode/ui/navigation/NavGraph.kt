@@ -635,6 +635,7 @@ fun CkbNavGraph(
 
         composable(Screen.InitialPinSetup.route) {
             InitialPinSetupScreen(
+                onForgotPin = { navController.navigate(Screen.ForgotPin.route) },
                 onPinCreated = {
                     onAuthUnlocked()
                     // #286: surface background sync at the point of choice,
