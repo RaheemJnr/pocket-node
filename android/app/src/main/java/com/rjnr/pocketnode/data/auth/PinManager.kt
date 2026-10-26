@@ -53,6 +53,8 @@ class PinManager @Inject constructor(
     @VisibleForTesting
     internal var testPrefs: SharedPreferences? = null
 
+    private val walletStorage = com.rjnr.pocketnode.data.wallet.WalletStorageBoundary(context)
+
     private var backupChecker: (() -> Boolean)? = null
 
     @VisibleForTesting
@@ -151,7 +153,9 @@ class PinManager @Inject constructor(
         get() = argon2Params.parallelism
         set(value) = setArgon2Params(argon2Params.copy(parallelism = value))
 
-    fun setPin(pin: String) {
+    /** Setup is create-only, including concurrent requests and both public input forms. */
+    fun setPin(pin: String) = walletStorage.readOrWriteFiles {
+        check(!policy.hasPin()) { "A PIN already exists. Setup cannot replace it." }
         // Deliberately wider than the policy's own check, which accepts only
         // ASCII 0-9 bytes: `Char.isDigit()` also passes Arabic-Indic and other
         // Unicode digits. The PIN keypad emits ASCII only, so in practice the
@@ -163,7 +167,8 @@ class PinManager @Inject constructor(
         policy.setPin(pin.toByteArray(Charsets.UTF_8))
     }
 
-    fun setPinFromChars(pin: CharArray) {
+    fun setPinFromChars(pin: CharArray) = walletStorage.readOrWriteFiles {
+        check(!policy.hasPin()) { "A PIN already exists. Setup cannot replace it." }
         require(pin.size == PIN_LENGTH && pin.all { it.isDigit() }) {
             "PIN must be exactly $PIN_LENGTH digits"
         }

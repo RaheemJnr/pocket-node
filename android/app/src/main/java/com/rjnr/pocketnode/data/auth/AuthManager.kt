@@ -26,17 +26,30 @@ class AuthManager @Inject constructor(
 
     private val walletStorage = com.rjnr.pocketnode.data.wallet.WalletStorageBoundary(context)
     private var sessionPin: CharArray? = null
+    private var generation = 0L
 
     fun setSessionPin(pin: CharArray) = walletStorage.readOrWriteFiles {
         clearSession()
         sessionPin = pin.copyOf()
     }
 
+    internal fun sessionGeneration(): Long = walletStorage.files { generation }
+
+    /** Atomically reject an authentication result started before session revocation. */
+    internal fun setSessionPinIfCurrent(pin: CharArray, expectedGeneration: Long): Boolean =
+        walletStorage.readOrWriteFiles {
+            if (generation != expectedGeneration) false else {
+                setSessionPin(pin)
+                true
+            }
+        }
+
     fun getSessionPin(): CharArray? = walletStorage.files { sessionPin?.copyOf() }
 
     fun hasSessionPin(): Boolean = walletStorage.files { sessionPin != null }
 
     fun clearSession() = walletStorage.files {
+        generation++
         sessionPin?.let { java.util.Arrays.fill(it, '\u0000') }
         sessionPin = null
     }

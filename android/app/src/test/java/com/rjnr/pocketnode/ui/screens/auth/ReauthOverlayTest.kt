@@ -98,6 +98,7 @@ class ReauthOverlayTest {
     private val authManager = mockk<AuthManager>(relaxed = true).apply {
         every { isBiometricEnrolled() } returns false
         every { isBiometricEnabled() } returns false
+        every { setSessionPinIfCurrent(any(), any()) } returns true
     }
     private val migrationHelper = mockk<KeystoreV2MigrationHelper>(relaxed = true).apply {
         coEvery { pendingWalletIds() } returns emptyList()
@@ -316,7 +317,7 @@ class ReauthOverlayTest {
         Thread.sleep(200)
         idle()
 
-        verify(exactly = 0) { authManager.setSessionPin(any()) }
+        verify(exactly = 0) { authManager.setSessionPinIfCurrent(any(), any()) }
         assertLockedOnBiometricLevel()
     }
 

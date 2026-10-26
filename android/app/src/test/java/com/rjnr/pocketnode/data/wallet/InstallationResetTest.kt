@@ -111,10 +111,10 @@ class InstallationResetTest {
 
     @Test fun `corrupt marker requires explicit retry without reading or deleting source`() = runBlocking {
         val marker = File(context.noBackupFilesDir, "wallet_reset")
+        Installation(context).use { it.pin.setPin("123456") }
         marker.writeText("invalid")
-        Installation(context).use { app ->
+        Installation(restartedContext()).use { app ->
             app.legacyPrefs.edit().putString("private_key", "disposable").commit()
-            app.pin.setPin("123456")
             assertEquals(LocalWalletReset.Startup.RETRY, app.reset.prepareStartup())
             app.migrator().migrateIfNeeded()
             assertTrue(app.legacyPrefs.contains("private_key")); assertTrue(app.pin.hasPin())
@@ -210,9 +210,10 @@ class InstallationResetTest {
 
     @Test fun `failure to persist reset intent leaves wallet source and PIN intact`() = runBlocking {
         val marker = File(context.noBackupFilesDir, "wallet_reset")
+        Installation(context).use { it.pin.setPin("123456") }
         marker.mkdirs(); File(marker, "child").writeText("disposable")
-        Installation(context).use { app ->
-            app.legacyPrefs.edit().putString("private_key", "disposable").commit(); app.pin.setPin("123456")
+        Installation(restartedContext()).use { app ->
+            app.legacyPrefs.edit().putString("private_key", "disposable").commit()
             assertTrue(runCatching { app.reset.removeAllWalletsAndPin() }.isFailure)
             assertTrue(app.legacyPrefs.contains("private_key")); assertTrue(app.pin.hasPin())
             assertTrue(app.boundary.isClosed())

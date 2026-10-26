@@ -67,6 +67,7 @@ class AuthViewModel @Inject constructor(
      * follow-up bug found during v1.7.3 testing).
      */
     fun onPinUnlockSuccess() {
+        if (!authManager.hasSessionPin()) return
         _uiState.update { it.copy(authSuccess = true) }
     }
 

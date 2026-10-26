@@ -101,4 +101,29 @@ class WalletKeyReaderTest {
             db.close()
         }
     }
+    @Test fun `replacement PIN cannot authorize reading a legacy software source`() = runTest {
+        val context = ApplicationProvider.getApplicationContext<Context>()
+        val pin = com.rjnr.pocketnode.data.auth.PinManager(context,
+            com.rjnr.pocketnode.data.crypto.Blake2b(), NoopLogger).apply {
+            testPrefs = context.getSharedPreferences("entry_legacy_pin", Context.MODE_PRIVATE)
+            argon2Iterations = 1; argon2MemoryKb = 8; argon2Parallelism = 1
+        }
+        pin.setPin("123456")
+        runCatching { pin.setPin("654321") }
+        val dao = mockk<com.rjnr.pocketnode.data.database.dao.KeyMaterialDao>()
+        coEvery { dao.getByWalletId("fixture") } returns KeyMaterialEntity(
+            "fixture", byteArrayOf(1), null, ByteArray(12), "raw_key", false, 0, 1)
+        val legacy = mockk<com.rjnr.pocketnode.data.crypto.KeyStoreMigrationHelper>()
+        var readAttempted = false
+        coEvery { legacy.readDecryptedKey("fixture") } answers { readAttempted = true; null }
+        val prompt = mockk<com.rjnr.pocketnode.data.vault.VaultPrompt>()
+        coEvery { prompt.requestLegacyPin(any(), any(), any()) } returns "654321".toCharArray()
+        val reader = WalletKeyReader(dao, legacy, mockk(), mockk(), mockk(relaxed = true), mockk(), pin,
+            prompt, WalletUnlockPreference(context))
+        val activity = org.robolectric.Robolectric.buildActivity(FragmentActivity::class.java).setup().get()
+        val result = reader.readPrivateKey(activity, "fixture", "Fixture", "Fixture")
+        assertTrue(result is WalletKeyReader.Result.NotAvailable)
+        assertFalse("Replacement PIN passed the legacy source authorization gate", readAttempted)
+    }
+
 }
