@@ -44,6 +44,7 @@ class NodeLifecycle @Inject constructor(
     private val cacheManager: CacheManager,
     private val daoSyncManager: DaoSyncManager,
     private val logger: Logger,
+    private val verificationCacheGate: VerificationCacheGate,
 ) {
 
     private val _nodeStatus = MutableStateFlow("Stopped")
@@ -195,6 +196,7 @@ class NodeLifecycle @Inject constructor(
                     return
                 }
 
+                verificationCacheGate.reconcile(lightClient, targetNetwork)
                 val startResult = lightClient.start()
                 if (startResult) {
                     logger.d(TAG, "Node started successfully on ${targetNetwork.name} (attempt $attempt)")
@@ -230,6 +232,7 @@ class NodeLifecycle @Inject constructor(
      * network from NetworkPreferences. Data directories are isolated per network.
      */
     suspend fun switchNetwork(target: NetworkType): Result<Unit> = runCatching {
+        verificationCacheGate.close()
         if (target == currentNetwork) return@runCatching
         if (_isSwitchingNetwork.value) throw Exception("Network switch already in progress")
 

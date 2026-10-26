@@ -6,7 +6,10 @@ use ckb_types::{
 };
 use log::{debug, error};
 
-use crate::{protocols::light_client::components::verify_extra_hash, storage::HeaderWithExtension};
+use crate::{
+    protocols::light_client::components::{verify_extra_hash, verify_legacy_extra_hash},
+    storage::{HeaderWithExtension, LightClientStorage},
+};
 
 use super::{
     super::{LightClientProtocol, Status, StatusCode},
@@ -54,6 +57,37 @@ impl<'a> SendTransactionsProofProcess<'a> {
         };
 
         let last_header: VerifiableHeader = self.message.last_header().to_entity().into();
+        let filtered_blocks_len = self.message.filtered_blocks().len();
+        // Parse the V1 extra fields with a verifying reader up front, before any
+        // early return, so that all later access is over validated bytes and can
+        // never panic on malformed/unchecked input.
+        let message_v1 = if self.message.count_extra_fields() >= 2 {
+            match packed::SendTransactionsProofV1Reader::from_compatible_slice(
+                self.message.as_slice(),
+            ) {
+                Ok(message_v1) => {
+                    let uncle_hashes_len = message_v1.blocks_uncles_hash().len();
+                    let extensions_len = message_v1.blocks_extension().len();
+                    if uncle_hashes_len != filtered_blocks_len
+                        || extensions_len != filtered_blocks_len
+                    {
+                        let error_message = format!(
+                            "SendTransactionsProof v1 field length mismatch: \
+                             filtered_blocks={}, uncle_hashes={}, extensions={}",
+                            filtered_blocks_len, uncle_hashes_len, extensions_len
+                        );
+                        return StatusCode::MalformedProtocolMessage.with_context(error_message);
+                    }
+                    Some(message_v1)
+                }
+                Err(_) => {
+                    return StatusCode::MalformedProtocolMessage
+                        .with_context("SendTransactionsProof v1 extra fields are malformed");
+                }
+            }
+        } else {
+            None
+        };
 
         // Update the last state if the response contains a new one.
         if original_request.last_hash() != last_header.header().hash() {
@@ -106,7 +140,7 @@ impl<'a> SendTransactionsProofProcess<'a> {
         }
 
         // If all transactions are missing.
-        if self.message.filtered_blocks().is_empty() {
+        if filtered_blocks.is_empty() {
             if !self.message.proof().is_empty() {
                 error!(
                     "peer {} send a proof when all transactions are missing",
@@ -119,16 +153,12 @@ impl<'a> SendTransactionsProofProcess<'a> {
             return_if_failed!(self.protocol.check_pow_for_headers(headers.iter()));
 
             // Check extra hash for blocks
-            let is_v1 = self.message.count_extra_fields() >= 2;
-            let extensions = if is_v1 {
-                let message_v1 =
-                    packed::SendTransactionsProofV1Reader::new_unchecked(self.message.as_slice());
+            let extensions = if let Some(message_v1) = message_v1 {
                 let uncle_hashes: Vec<_> = message_v1
                     .blocks_uncles_hash()
                     .iter()
                     .map(|uncle_hashes| uncle_hashes.to_entity())
                     .collect();
-
                 let extensions: Vec<_> = message_v1
                     .blocks_extension()
                     .iter()
@@ -138,6 +168,12 @@ impl<'a> SendTransactionsProofProcess<'a> {
                 return_if_failed!(verify_extra_hash(&headers, &uncle_hashes, &extensions));
                 extensions
             } else {
+                // A legacy (v0) response carries neither uncle hashes nor
+                // block extensions. Only accept it for headers which commit
+                // to no such data; otherwise a malicious peer could omit a
+                // CKB2023 block extension and the client would verify
+                // transactions against incomplete data.
+                return_if_failed!(verify_legacy_extra_hash(&headers));
                 vec![None; headers.len()]
             };
 

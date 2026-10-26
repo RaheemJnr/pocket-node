@@ -26,6 +26,7 @@ pub mod lifecycle;
 pub mod query;
 pub mod rpc;
 pub mod store_version;
+pub mod verification_epoch;
 pub mod types;
 
 pub use error::BridgeError;

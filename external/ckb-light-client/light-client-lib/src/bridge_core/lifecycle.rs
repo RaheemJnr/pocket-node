@@ -28,6 +28,7 @@
 //! app relaunches instead — see #218 for the app-side mitigation on network
 //! switch, and [`stop`] for why it no longer waits on `ckb-stop-handler` (#487).
 
+use crate::storage::LightClientStorage;
 use super::error::BridgeError;
 use super::store_version::ensure_store_version;
 use super::types::*;
@@ -156,6 +157,7 @@ pub fn init(
     // Initialize storage
     info!("Initializing storage...");
     let storage = Storage::new(&run_env.store.path);
+    super::verification_epoch::initialize_fresh(&storage)?;
 
     // Load chain spec
     info!("Loading chain spec for: {}", run_env.chain);

@@ -185,7 +185,7 @@ class RoomKmpTransactionStore(
 
     /** One row by hash, for the retry path and for tests. */
     suspend fun getByHash(txHash: String, network: String): TransactionRecord? =
-        dao.getByHash(txHash, network)?.toRecord()
+        dao.getByHash(txHash, network)?.takeUnless { it.status == "UNVERIFIED" }?.toRecord()
 
     override suspend fun cachedDirectionAndFee(txHash: String, network: String): Pair<String, Long?>? =
         dao.getByHash(txHash, network)?.let { it.direction to it.feeShannons }

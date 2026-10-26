@@ -1,5 +1,6 @@
 use crate::protocols::FilterProtocol;
 use crate::protocols::{Status, StatusCode};
+use crate::storage::LightClientStorage;
 use crate::utils::network::prove_or_download_matched_blocks;
 use ckb_constant::sync::INIT_BLOCKS_IN_TRANSIT_PER_PEER;
 use ckb_network::{BoxedCKBProtocolContext, PeerIndex};
@@ -69,7 +70,14 @@ impl<'a> BlockFiltersProcess<'a> {
 
         let min_filtered_block_number = self.filter.storage.get_min_filtered_block_number();
         debug!("current min filtered block number: {min_filtered_block_number}");
-        if min_filtered_block_number + 1 != start_number {
+        let Some(expected_start_number) = min_filtered_block_number.checked_add(1) else {
+            info!(
+                "ignoring, min_filtered_block_number overflow: {}",
+                min_filtered_block_number
+            );
+            return Status::ok();
+        };
+        if expected_start_number != start_number {
             info!(
                 "ignoring, the start_number of block_filters message {} is not continuous with min_filtered_block_number: {}",
                 start_number,
@@ -141,16 +149,28 @@ impl<'a> BlockFiltersProcess<'a> {
                     return StatusCode::Ignore.with_context(errmsg);
                 }
                 if start_number == cached_check_point_number + 1 {
-                    let cached_check_point = self
+                    let Some(cached_check_point) = self
                         .filter
                         .storage
                         .get_check_points(cached_check_point_index, 1)
                         .first()
                         .cloned()
-                        .expect("all check points before finalized should be existed");
+                    else {
+                        let error_message =
+                            format!("check point at index {cached_check_point_index} is missing");
+                        return StatusCode::InternalError.with_context(error_message);
+                    };
                     (cached_check_point, cached_block_filter_hashes)
                 } else {
                     let start_index = (start_number - cached_check_point_number) as usize - 2;
+                    if start_index >= cached_block_filter_hashes.len() {
+                        let errmsg = format!(
+                            "cached block filter hashes index {start_index} out of bounds, \
+                             len: {}",
+                            cached_block_filter_hashes.len()
+                        );
+                        return StatusCode::Ignore.with_context(errmsg);
+                    }
                     let parent_hash = cached_block_filter_hashes[start_index].clone();
                     cached_block_filter_hashes.drain(..=start_index);
                     (parent_hash, cached_block_filter_hashes)
@@ -188,7 +208,7 @@ impl<'a> BlockFiltersProcess<'a> {
             .filters()
             .into_iter()
             .take(limit)
-            .zip(expected_block_filter_hashes.into_iter())
+            .zip(expected_block_filter_hashes)
             .enumerate()
         {
             let current_hash = calc_filter_hash(&parent_block_filter_hash, &filter).pack();
@@ -205,7 +225,8 @@ impl<'a> BlockFiltersProcess<'a> {
             parent_block_filter_hash = current_hash;
         }
 
-        let possible_match_blocks = self.filter.check_filters_data(block_filters, limit);
+        let possible_match_blocks =
+            return_if_failed!(self.filter.check_filters_data(block_filters, limit));
         let possible_match_blocks_len = possible_match_blocks.len();
         trace!(
             "peer {}, matched blocks: {}",
@@ -214,7 +235,16 @@ impl<'a> BlockFiltersProcess<'a> {
         );
         let actual_blocks_count = blocks_count.min(limit);
         let tip_header = self.filter.storage.get_tip_header();
-        let filtered_block_number = start_number - 1 + actual_blocks_count as BlockNumber;
+        let Some(filtered_block_number) = start_number
+            .checked_sub(1)
+            .and_then(|n| n.checked_add(actual_blocks_count as BlockNumber))
+        else {
+            let errmsg = format!(
+                "overflow computing filtered_block_number: \
+                 start_number={start_number}, actual_blocks_count={actual_blocks_count}"
+            );
+            return StatusCode::Ignore.with_context(errmsg);
+        };
 
         if possible_match_blocks_len != 0 {
             let blocks = possible_match_blocks

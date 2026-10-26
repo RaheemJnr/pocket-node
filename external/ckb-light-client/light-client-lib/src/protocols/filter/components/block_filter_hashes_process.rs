@@ -4,6 +4,7 @@ use log::{debug, trace};
 use rand::seq::SliceRandom as _;
 
 use crate::protocols::{FilterProtocol, Status, StatusCode};
+use crate::storage::LightClientStorage;
 
 pub struct BlockFilterHashesProcess<'a> {
     message: packed::BlockFilterHashesReader<'a>,
@@ -130,7 +131,13 @@ impl<'a> BlockFilterHashesProcess<'a> {
                 // This branch must be satisfied `start_number > cached_check_point_number + 1`.
                 let diff = start_number - cached_check_point_number;
                 let index = diff as usize - 2;
-                let cached_hash = &cached_hashes[index];
+                let Some(cached_hash) = cached_hashes.get(index) else {
+                    let errmsg = format!(
+                        "cached hash index {index} out of bounds, len: {}",
+                        cached_hashes.len()
+                    );
+                    return StatusCode::Ignore.with_context(errmsg);
+                };
                 if *cached_hash != parent_block_filter_hash {
                     let errmsg = format!(
                         "cached hash for block {} is {:#x} but parent hash is {:#x}",
@@ -141,10 +148,31 @@ impl<'a> BlockFilterHashesProcess<'a> {
                     return StatusCode::Ignore.with_context(errmsg);
                 }
             };
-            let end_number = start_number + block_filter_hashes.len() as BlockNumber - 1;
+            let Some(end_number) = start_number
+                .checked_add(block_filter_hashes.len() as BlockNumber)
+                .and_then(|n| n.checked_sub(1))
+            else {
+                let errmsg = format!(
+                    "overflow computing end_number: start_number={}, len={}",
+                    start_number,
+                    block_filter_hashes.len()
+                );
+                return StatusCode::Ignore.with_context(errmsg);
+            };
             if end_number > next_cached_check_point_number {
                 let diff = end_number - next_cached_check_point_number;
-                let index = block_filter_hashes.len() - (diff as usize) - 1;
+                let Some(index) = block_filter_hashes
+                    .len()
+                    .checked_sub(diff as usize)
+                    .and_then(|n| n.checked_sub(1))
+                else {
+                    let errmsg = format!(
+                        "underflow computing block filter hash index: \
+                         len={}, diff={diff}",
+                        block_filter_hashes.len(),
+                    );
+                    return StatusCode::Ignore.with_context(errmsg);
+                };
                 let new_hash = &block_filter_hashes[index];
                 if next_cached_check_point != *new_hash {
                     let errmsg = format!(
@@ -155,6 +183,13 @@ impl<'a> BlockFilterHashesProcess<'a> {
                 }
             }
             let index_offset = (start_number - (cached_check_point_number + 1)) as usize;
+            if index_offset > cached_hashes.len() {
+                let errmsg = format!(
+                    "cached hash offset {index_offset} out of bounds, len: {}",
+                    cached_hashes.len()
+                );
+                return StatusCode::Ignore.with_context(errmsg);
+            }
             for (index, (old_hash, new_hash)) in cached_hashes[index_offset..]
                 .iter()
                 .zip(block_filter_hashes.iter())

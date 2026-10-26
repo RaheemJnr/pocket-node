@@ -103,8 +103,7 @@ class ActivityViewModelExportTest {
         pendingBroadcastDao = pendingBroadcastDao,
         appStatePreferences = appStatePreferences,
         uiPreferences = uiPreferences,
-        logger = NoopLogger,
-    ).also { it.exportIo = Dispatchers.Unconfined }
+        logger = NoopLogger, verificationCacheGate = com.rjnr.pocketnode.data.gateway.readyVerificationGate()).also { it.exportIo = Dispatchers.Unconfined }
 
     @Test
     fun `the export is written from the ViewModel after the screen state is recreated`() = runTest(testDispatcher) {

@@ -18,18 +18,18 @@ interface TransactionDao {
      */
     @Query(
         "SELECT txHash, fee_shannons AS feeShannons FROM transactions " +
-            "WHERE txHash IN (:hashes) AND fee_shannons IS NOT NULL"
+            "WHERE txHash IN (:hashes) AND fee_shannons IS NOT NULL AND status != 'UNVERIFIED'"
     )
     suspend fun getKnownFees(hashes: List<String>): List<TxFeeRow>
 
-    @Query("SELECT * FROM transactions WHERE network = :network ORDER BY CASE WHEN status = 'PENDING' THEN 0 ELSE 1 END, timestamp DESC LIMIT :limit")
+    @Query("SELECT * FROM transactions WHERE status != 'UNVERIFIED' AND network = :network ORDER BY CASE WHEN status = 'PENDING' THEN 0 ELSE 1 END, timestamp DESC LIMIT :limit")
     suspend fun getByNetwork(network: String, limit: Int = 50): List<TransactionEntity>
 
-    @Query("SELECT * FROM transactions WHERE network = :network AND status = 'PENDING'")
+    @Query("SELECT * FROM transactions WHERE status != 'UNVERIFIED' AND network = :network AND status = 'PENDING'")
     suspend fun getPending(network: String): List<TransactionEntity>
 
     /** #382: hex block numbers of every cached tx for a wallet — anchors the gap-limit candidate scan depth. */
-    @Query("SELECT blockNumber FROM transactions WHERE walletId = :walletId AND network = :network")
+    @Query("SELECT blockNumber FROM transactions WHERE status != 'UNVERIFIED' AND walletId = :walletId AND network = :network")
     suspend fun getBlockNumbers(walletId: String, network: String): List<String>
 
     @Query("SELECT * FROM transactions WHERE txHash = :txHash")
@@ -63,13 +63,13 @@ interface TransactionDao {
 
     // -- Wallet-scoped queries --
 
-    @Query("SELECT * FROM transactions WHERE walletId = :walletId AND network = :network ORDER BY CASE WHEN status = 'PENDING' THEN 0 ELSE 1 END, timestamp DESC LIMIT :limit")
+    @Query("SELECT * FROM transactions WHERE status != 'UNVERIFIED' AND walletId = :walletId AND network = :network ORDER BY CASE WHEN status = 'PENDING' THEN 0 ELSE 1 END, timestamp DESC LIMIT :limit")
     suspend fun getByWalletAndNetwork(walletId: String, network: String, limit: Int = 50): List<TransactionEntity>
 
-    @Query("SELECT * FROM transactions WHERE walletId = :walletId AND network = :network ORDER BY timestamp DESC")
+    @Query("SELECT * FROM transactions WHERE status != 'UNVERIFIED' AND walletId = :walletId AND network = :network ORDER BY timestamp DESC")
     suspend fun getAllByWalletAndNetwork(walletId: String, network: String): List<TransactionEntity>
 
-    @Query("SELECT * FROM transactions WHERE walletId = :walletId AND network = :network AND status = 'PENDING'")
+    @Query("SELECT * FROM transactions WHERE status != 'UNVERIFIED' AND walletId = :walletId AND network = :network AND status = 'PENDING'")
     suspend fun getPendingByWallet(walletId: String, network: String): List<TransactionEntity>
 
     /**
@@ -77,7 +77,7 @@ interface TransactionDao {
      * the home list — the JNI feed only carries on-chain (confirmed) txs, so
      * pending/failed rows must be merged in from cache.
      */
-    @Query("SELECT * FROM transactions WHERE walletId = :walletId AND network = :network AND status IN ('PENDING', 'FAILED')")
+    @Query("SELECT * FROM transactions WHERE status != 'UNVERIFIED' AND walletId = :walletId AND network = :network AND status IN ('PENDING', 'FAILED')")
     suspend fun getNonConfirmedByWallet(walletId: String, network: String): List<TransactionEntity>
 
     /**
@@ -88,7 +88,7 @@ interface TransactionDao {
      */
     @Query(
         "SELECT txHash FROM transactions " +
-            "WHERE walletId = :walletId AND network = :network AND status = 'PENDING' " +
+            "WHERE status != 'UNVERIFIED' AND walletId = :walletId AND network = :network AND status = 'PENDING' " +
             "AND txHash NOT IN (SELECT txHash FROM pending_broadcasts)"
     )
     suspend fun getOrphanPendingHashes(walletId: String, network: String): List<String>
@@ -96,12 +96,12 @@ interface TransactionDao {
     @Query("DELETE FROM transactions WHERE walletId = :walletId AND network = :network")
     suspend fun deleteByWalletAndNetwork(walletId: String, network: String)
 
-    @Query("SELECT * FROM transactions WHERE walletId = :walletId AND network = :network ORDER BY CASE WHEN status = 'PENDING' THEN 0 ELSE 1 END, timestamp DESC")
+    @Query("SELECT * FROM transactions WHERE status != 'UNVERIFIED' AND walletId = :walletId AND network = :network ORDER BY CASE WHEN status = 'PENDING' THEN 0 ELSE 1 END, timestamp DESC")
     fun getTransactionsPaged(walletId: String, network: String): PagingSource<Int, TransactionEntity>
 
-    @Query("SELECT * FROM transactions WHERE walletId = :walletId AND network = :network AND direction IN ('in', 'dao_unlock') ORDER BY CASE WHEN status = 'PENDING' THEN 0 ELSE 1 END, timestamp DESC")
+    @Query("SELECT * FROM transactions WHERE status != 'UNVERIFIED' AND walletId = :walletId AND network = :network AND direction IN ('in', 'dao_unlock') ORDER BY CASE WHEN status = 'PENDING' THEN 0 ELSE 1 END, timestamp DESC")
     fun getReceivedTransactionsPaged(walletId: String, network: String): PagingSource<Int, TransactionEntity>
 
-    @Query("SELECT * FROM transactions WHERE walletId = :walletId AND network = :network AND direction IN ('out', 'self', 'dao_deposit', 'dao_withdraw') ORDER BY CASE WHEN status = 'PENDING' THEN 0 ELSE 1 END, timestamp DESC")
+    @Query("SELECT * FROM transactions WHERE status != 'UNVERIFIED' AND walletId = :walletId AND network = :network AND direction IN ('out', 'self', 'dao_deposit', 'dao_withdraw') ORDER BY CASE WHEN status = 'PENDING' THEN 0 ELSE 1 END, timestamp DESC")
     fun getSentTransactionsPaged(walletId: String, network: String): PagingSource<Int, TransactionEntity>
 }

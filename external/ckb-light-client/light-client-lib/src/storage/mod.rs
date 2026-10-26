@@ -15,13 +15,26 @@ use ckb_types::{
     H256,
 };
 
+mod backend;
 mod db;
+#[cfg(not(target_arch = "wasm32"))]
+pub use db::{IteratorMode, Direction};
+mod storage_trait;
+
+// Re-export storage backend trait (low-level KV operations)
+pub use backend::{BatchWriter, FilterMapFn, StorageBackend, TakeWhileFn};
+
+// Re-export storage trait (high-level business logic)
+pub use storage_trait::LightClientStorage;
+
+// Re-export iterator types from db module
+pub use db::{IteratorDirection, IteratorStart, KVPair};
 
 #[cfg(target_arch = "wasm32")]
-pub use db::{Batch, CursorDirection, Storage};
+pub use db::{Batch, Storage};
 
 #[cfg(not(target_arch = "wasm32"))]
-pub use db::{Batch, Storage, IteratorMode, Direction};
+pub use db::{Batch, Storage};
 
 use crate::{
     protocols::{Peers, PendingTxs},
@@ -215,7 +228,7 @@ impl CellProvider for StorageWithChainData {
     }
 }
 
-#[cfg(target_arch = "wasm32")]
+// Cell data is loaded eagerly in CellProvider::cell(), so these methods are never called
 impl CellDataProvider for StorageWithChainData {
     fn get_cell_data(&self, _out_point: &OutPoint) -> Option<Bytes> {
         unreachable!()
@@ -226,21 +239,9 @@ impl CellDataProvider for StorageWithChainData {
     }
 }
 
-#[cfg(not(target_arch = "wasm32"))]
-impl CellDataProvider for StorageWithChainData {
-    fn get_cell_data(&self, out_point: &OutPoint) -> Option<Bytes> {
-        self.storage.get_cell_data(out_point)
-    }
-
-    fn get_cell_data_hash(&self, out_point: &OutPoint) -> Option<Byte32> {
-        self.storage.get_cell_data_hash(out_point)
-    }
-}
-
 impl HeaderProvider for StorageWithChainData {
     fn get_header(&self, hash: &Byte32) -> Option<HeaderView> {
-        self.storage
-            .get_header(hash)
+        LightClientStorage::get_header(&self.storage, hash)
             .or_else(|| self.peers.find_header_in_proved_state(hash))
     }
 }

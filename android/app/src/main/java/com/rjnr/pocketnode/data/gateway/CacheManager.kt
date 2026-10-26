@@ -16,12 +16,16 @@ class CacheManager @Inject constructor(
     private val transactionDao: TransactionDao,
     private val balanceCacheDao: BalanceCacheDao,
     private val logger: Logger,
+    private val verificationCacheGate: VerificationCacheGate,
 ) {
     // --- Balance cache ---
 
     suspend fun getCachedBalance(network: String, walletId: String = ""): BalanceResponse? {
+        val revision = verificationCacheGate.currentRevision()
+        if (!verificationCacheGate.isReady(network)) return null
         return try {
             balanceCacheDao.getByWalletAndNetwork(walletId, network)?.toBalanceResponse()
+                ?.takeIf { verificationCacheGate.isReady(network) && verificationCacheGate.currentRevision() == revision }
         } catch (e: CancellationException) {
             throw e
         } catch (e: Exception) {

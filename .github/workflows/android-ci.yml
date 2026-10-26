@@ -42,9 +42,8 @@ jobs:
           key: gradle-${{ hashFiles('android/**/*.gradle.kts', 'android/gradle/libs.versions.toml') }}
           restore-keys: gradle-
 
-      # JNI library build is skipped — Rust workspace has a missing dependency
-      # (light-client-db-common). Full JNI CI will be restored in Issue #7.
-      # For now, CI validates Kotlin compilation and unit tests.
+      # This job validates Kotlin compilation and unit tests. Native release
+      # ABI compilation remains a separate mobile integration check.
 
       - name: Create dummy google-services.json
         run: |
@@ -105,6 +104,11 @@ jobs:
             external/ckb-light-client/target
           key: cargo-rust-tests-${{ hashFiles('external/ckb-light-client/Cargo.lock', 'external/ckb-light-client/rust-toolchain') }}
           restore-keys: cargo-rust-tests-
+
+      - name: Verify pinned embedded client and mobile overlay
+        run: |
+          curl --fail --location --retry 3 https://codeload.github.com/nervosnetwork/ckb-light-client/tar.gz/9ce5fc6507ce1379dd8bd4b947426078bb2062e8 --output "$RUNNER_TEMP/ckb-light-client.tar.gz"
+          python3 tools/embedded-client/verify.py --archive "$RUNNER_TEMP/ckb-light-client.tar.gz"
 
       - name: Run ckb-light-client-lib unit tests
         working-directory: external/ckb-light-client

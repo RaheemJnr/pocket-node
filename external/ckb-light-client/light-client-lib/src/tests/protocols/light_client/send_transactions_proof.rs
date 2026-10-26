@@ -14,6 +14,7 @@ use crate::{
         light_client::constant::{FETCH_HEADER_TX_TOKEN, REFRESH_PEERS_TOKEN},
         FetchInfo, StatusCode,
     },
+    storage::LightClientStorage,
     tests::{
         prelude::*,
         utils::{MockChain, MockNetworkContext},
@@ -97,14 +98,39 @@ async fn test_send_txs_proof_ok() {
             let last_number = last_header.header().raw().number().unpack();
             chain.build_proof_by_numbers(last_number, &block_numbers)
         };
+        let snapshot = chain.shared().snapshot();
+        let uncles_hashes = block_numbers
+            .iter()
+            .map(|n| {
+                snapshot
+                    .get_block_by_number(*n)
+                    .expect("block stored")
+                    .calc_uncles_hash()
+            })
+            .collect::<Vec<_>>();
+        let extensions = block_numbers
+            .iter()
+            .map(|n| {
+                packed::BytesOpt::new_builder()
+                    .set(
+                        snapshot
+                            .get_block_by_number(*n)
+                            .expect("block stored")
+                            .extension(),
+                    )
+                    .build()
+            })
+            .collect::<Vec<_>>();
         let items = packed::FilteredBlockVec::new_builder()
             .set(filtered_blocks)
             .build();
-        let content = packed::SendTransactionsProof::new_builder()
+        let content = packed::SendTransactionsProofV1::new_builder()
             .last_header(last_header.clone())
             .proof(proof.pack())
             .filtered_blocks(items)
             .missing_tx_hashes(missing_tx_hashes.clone().pack())
+            .blocks_uncles_hash(uncles_hashes.pack())
+            .blocks_extension(extensions)
             .build();
         packed::LightClientMessage::new_builder()
             .set(content)
@@ -235,13 +261,38 @@ async fn test_send_txs_proof_invalid_mmr_proof() {
             // NOTE: this is invalid mmr proof
             chain.build_proof_by_numbers(last_number, &block_numbers[0..block_numbers.len() - 1])
         };
+        let snapshot = chain.shared().snapshot();
+        let uncles_hashes = block_numbers
+            .iter()
+            .map(|n| {
+                snapshot
+                    .get_block_by_number(*n)
+                    .expect("block stored")
+                    .calc_uncles_hash()
+            })
+            .collect::<Vec<_>>();
+        let extensions = block_numbers
+            .iter()
+            .map(|n| {
+                packed::BytesOpt::new_builder()
+                    .set(
+                        snapshot
+                            .get_block_by_number(*n)
+                            .expect("block stored")
+                            .extension(),
+                    )
+                    .build()
+            })
+            .collect::<Vec<_>>();
         let items = packed::FilteredBlockVec::new_builder()
             .set(filtered_blocks)
             .build();
-        let content = packed::SendTransactionsProof::new_builder()
+        let content = packed::SendTransactionsProofV1::new_builder()
             .last_header(last_header.clone())
             .proof(proof.pack())
             .filtered_blocks(items)
+            .blocks_uncles_hash(uncles_hashes.pack())
+            .blocks_extension(extensions)
             .build();
         packed::LightClientMessage::new_builder()
             .set(content)
@@ -365,13 +416,38 @@ async fn test_send_txs_proof_invalid_merkle_proof() {
             let last_number = last_header.header().raw().number().unpack();
             chain.build_proof_by_numbers(last_number, &block_numbers)
         };
+        let snapshot = chain.shared().snapshot();
+        let uncles_hashes = block_numbers
+            .iter()
+            .map(|n| {
+                snapshot
+                    .get_block_by_number(*n)
+                    .expect("block stored")
+                    .calc_uncles_hash()
+            })
+            .collect::<Vec<_>>();
+        let extensions = block_numbers
+            .iter()
+            .map(|n| {
+                packed::BytesOpt::new_builder()
+                    .set(
+                        snapshot
+                            .get_block_by_number(*n)
+                            .expect("block stored")
+                            .extension(),
+                    )
+                    .build()
+            })
+            .collect::<Vec<_>>();
         let items = packed::FilteredBlockVec::new_builder()
             .set(filtered_blocks)
             .build();
-        let content = packed::SendTransactionsProof::new_builder()
+        let content = packed::SendTransactionsProofV1::new_builder()
             .last_header(last_header.clone())
             .proof(proof.pack())
             .filtered_blocks(items)
+            .blocks_uncles_hash(uncles_hashes.pack())
+            .blocks_extension(extensions)
             .build();
         packed::LightClientMessage::new_builder()
             .set(content)
@@ -412,7 +488,123 @@ async fn test_send_txs_proof_invalid_merkle_proof() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn legacy_txs_proof_for_extension_block_is_rejected() {
+    let chain = MockChain::new_with_dummy_pow("test-send-txs-legacy-ext").start();
+    let nc = MockNetworkContext::new(SupportProtocols::LightClient);
+    let peer_index = PeerIndex::new(3);
+
+    chain.mine_to(20);
+    let tx = chain.get_cellbase_as_input(13);
+    chain.mine_block(|block| {
+        let ids = vec![tx.proposal_short_id()];
+        block.as_advanced_builder().proposals(ids).build()
+    });
+    chain.mine_blocks(1);
+    chain.mine_block(|block| block.as_advanced_builder().transaction(tx.clone()).build());
+    chain.mine_blocks(1);
+
+    let tx_hash = tx.hash();
+    let (tx, tx_info) = chain
+        .shared()
+        .snapshot()
+        .get_transaction_with_info(&tx_hash)
+        .unwrap();
+    let block = chain
+        .shared()
+        .snapshot()
+        .get_block(&tx_info.block_hash)
+        .unwrap();
+    let block_number = block.number();
+    let witnesses_root = block.calc_witnesses_root();
+
+    // Every block mined by the mock chain carries an extension, so a legacy
+    // (v0) message which withholds the V1 fields must be rejected.
+    let header = block.header();
+
+    let merkle_proof = CBMT::build_merkle_proof(
+        &block
+            .transactions()
+            .iter()
+            .map(|tx| tx.hash())
+            .collect::<Vec<_>>(),
+        &[tx_info.index as u32],
+    )
+    .unwrap();
+    let filtered_block = packed::FilteredBlock::new_builder()
+        .header(header.data())
+        .witnesses_root(witnesses_root)
+        .transactions(vec![tx.data()].pack())
+        .proof(
+            packed::MerkleProof::new_builder()
+                .indices(merkle_proof.indices().to_owned().pack())
+                .lemmas(merkle_proof.lemmas().to_owned().pack())
+                .build(),
+        )
+        .build();
+
+    let last_header = chain
+        .shared()
+        .snapshot()
+        .get_verifiable_header_by_number(block_number + 1)
+        .unwrap();
+    let message = {
+        let proof = {
+            let last_number = last_header.header().raw().number().unpack();
+            chain.build_proof_by_numbers(last_number, &[block_number])
+        };
+        let items = packed::FilteredBlockVec::new_builder()
+            .set(vec![filtered_block])
+            .build();
+        let content = packed::SendTransactionsProof::new_builder()
+            .last_header(last_header.clone())
+            .proof(proof.pack())
+            .filtered_blocks(items)
+            .build();
+        packed::LightClientMessage::new_builder()
+            .set(content)
+            .build()
+    };
+
+    let peers = {
+        let peers = chain.create_peers();
+        let txs_proof_request = packed::GetTransactionsProof::new_builder()
+            .last_hash(last_header.header().calc_header_hash())
+            .tx_hashes(vec![tx_hash.clone()].pack())
+            .build();
+        peers.add_peer(peer_index);
+        peers
+            .mock_prove_state(peer_index, last_header.into())
+            .unwrap();
+        peers.update_txs_proof_request(peer_index, Some(txs_proof_request));
+        peers
+    };
+
+    peers.add_fetch_tx(tx_hash.clone(), 111);
+
+    let mut protocol = chain.create_light_client_protocol(Arc::clone(&peers));
+    protocol
+        .received(nc.context(), peer_index, message.as_bytes())
+        .await;
+
+    assert!(nc.banned_since(peer_index, StatusCode::InvalidProof));
+    assert!(nc.sent_messages().borrow().is_empty());
+    assert!(chain
+        .client_storage()
+        .get_transaction_with_header(&tx_hash)
+        .is_none());
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn test_send_txs_proof_is_empty() {
+    test_empty_txs_proof(false, false).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn rejects_v1_fields_before_processing_changed_last_state() {
+    test_empty_txs_proof(true, true).await;
+}
+
+async fn test_empty_txs_proof(with_unexpected_extension: bool, last_state_changed: bool) {
     let chain = MockChain::new_with_dummy_pow("test-send-txs").start();
     let nc = MockNetworkContext::new(SupportProtocols::LightClient);
     let peer_index = PeerIndex::new(3);
@@ -424,7 +616,18 @@ async fn test_send_txs_proof_is_empty() {
         .snapshot()
         .get_verifiable_header_by_number(20)
         .unwrap();
-    let message = {
+    let message = if with_unexpected_extension {
+        let unexpected_extension = packed::BytesOpt::new_builder()
+            .set(Some(packed::Bytes::default()))
+            .build();
+        let content = packed::SendTransactionsProofV1::new_builder()
+            .last_header(last_header.clone())
+            .blocks_extension(vec![unexpected_extension])
+            .build();
+        packed::LightClientMessage::new_builder()
+            .set(content)
+            .build()
+    } else {
         let content = packed::SendTransactionsProof::new_builder()
             .last_header(last_header.clone())
             .build();
@@ -432,6 +635,86 @@ async fn test_send_txs_proof_is_empty() {
             .set(content)
             .build()
     };
+
+    let peers = {
+        let peers = chain.create_peers();
+        let txs_proof_request = packed::GetTransactionsProof::new_builder()
+            .last_hash(if last_state_changed {
+                packed::Byte32::default()
+            } else {
+                last_header.header().calc_header_hash()
+            })
+            .build();
+        peers.add_peer(peer_index);
+        peers
+            .mock_prove_state(peer_index, last_header.into())
+            .unwrap();
+        peers.update_txs_proof_request(peer_index, Some(txs_proof_request));
+        peers
+    };
+
+    let mut protocol = chain.create_light_client_protocol(Arc::clone(&peers));
+    protocol
+        .received(nc.context(), peer_index, message.as_bytes())
+        .await;
+
+    if with_unexpected_extension {
+        assert!(nc.banned_since(peer_index, StatusCode::MalformedProtocolMessage));
+    } else {
+        assert!(nc.not_banned(peer_index));
+    }
+    assert!(nc.sent_messages().borrow().is_empty());
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn rejects_malformed_v1_extra_fields() {
+    // A V1 proof whose trailing `blocks_extension` field is too short to hold a
+    // Molecule Vec header (total_size + item_count). The base message still
+    // parses, so the response reaches the handler, but the V1 extra field is
+    // structurally invalid. Under the previous `new_unchecked` + `.len()` path
+    // this panicked inside `unpack_number`; with the validating reader it must
+    // be rejected as a malformed protocol message instead.
+    let chain = MockChain::new_with_dummy_pow("test-send-txs").start();
+    let nc = MockNetworkContext::new(SupportProtocols::LightClient);
+    let peer_index = PeerIndex::new(3);
+
+    chain.mine_to(20);
+    let last_header = chain
+        .shared()
+        .snapshot()
+        .get_verifiable_header_by_number(20)
+        .unwrap();
+
+    // Build a structurally valid V1 message, then truncate its trailing field.
+    let extension = packed::BytesOpt::new_builder()
+        .set(Some(packed::Bytes::default()))
+        .build();
+    let content = packed::SendTransactionsProofV1::new_builder()
+        .last_header(last_header.clone())
+        .blocks_extension(vec![extension])
+        .build();
+
+    let mut bytes = content.as_slice().to_vec();
+    {
+        // `blocks_extension` is the last field, so it occupies the tail
+        // `[extension_offset, total_size)` of the table.
+        let reader = packed::SendTransactionsProofV1Reader::new_unchecked(&bytes);
+        let extension_len = reader.blocks_extension().as_slice().len();
+        let mut header = [0u8; 4];
+        header.copy_from_slice(&bytes[0..4]);
+        let total_size = u32::from_le_bytes(header) as usize;
+        let extension_offset = total_size - extension_len;
+        // Keep only 2 bytes of the trailing field: too short for a Vec header,
+        // so `from_compatible_slice` rejects it while the base message still
+        // parses.
+        bytes.truncate(extension_offset + 2);
+        let new_total = bytes.len() as u32;
+        bytes[0..4].copy_from_slice(&new_total.to_le_bytes());
+    }
+    let malformed = packed::SendTransactionsProofV1::new_unchecked(bytes.into());
+    let message = packed::LightClientMessage::new_builder()
+        .set(malformed)
+        .build();
 
     let peers = {
         let peers = chain.create_peers();
@@ -451,7 +734,7 @@ async fn test_send_txs_proof_is_empty() {
         .received(nc.context(), peer_index, message.as_bytes())
         .await;
 
-    assert!(nc.not_banned(peer_index));
+    assert!(nc.banned_since(peer_index, StatusCode::MalformedProtocolMessage));
     assert!(nc.sent_messages().borrow().is_empty());
 }
 
@@ -527,4 +810,39 @@ async fn test_send_headers_txs_request() {
 
     assert_eq!(peers.get_txs_to_fetch().len(), 1);
     assert_eq!(peers.get_headers_to_fetch().len(), 1);
+}
+
+
+#[tokio::test(flavor = "multi_thread")]
+async fn deduplicated_transaction_proof_retains_legitimate_repeated_enqueues() {
+    let chain = MockChain::new_with_dummy_pow("duplicate-tx-enqueue").start();
+    let nc = MockNetworkContext::new(SupportProtocols::LightClient);
+    let peers = chain.create_peers();
+    let peer_index = PeerIndex::new(3);
+    let a: packed::Byte32 = h256!("0x1").pack();
+    let b: packed::Byte32 = h256!("0x2").pack();
+    let c: packed::Byte32 = h256!("0x3").pack();
+    // Real enqueue API: the map itself coalesces repeated requests. This
+    // verifies observable request behavior, not an artificial duplicate Vec.
+    for hash in [a.clone(), b.clone(), a.clone(), c.clone(), b.clone()] {
+        peers.fetching_txs().insert(hash, FetchInfo::new(111, 0, false, false));
+    }
+    let tip = VerifiableHeader::new(chain.client_storage().get_tip_header().into_view(),
+        Default::default(), None, Default::default());
+    peers.add_peer(peer_index);
+    peers.mock_prove_state(peer_index, tip).unwrap();
+    let mut protocol = chain.create_light_client_protocol(Arc::clone(&peers));
+    protocol.notify(nc.context(), FETCH_HEADER_TX_TOKEN).await;
+    let messages = nc.sent_messages();
+    let messages = messages.borrow();
+    assert_eq!(messages.len(), 1);
+    let message = packed::LightClientMessage::from_slice(&messages[0].2).unwrap();
+    let packed::LightClientMessageUnion::GetTransactionsProof(request) = message.to_enum() else {
+        panic!("expected transaction proof request");
+    };
+    let hashes = request.tx_hashes().into_iter().collect::<Vec<_>>();
+    assert_eq!(hashes.len(), 3);
+    assert_eq!(hashes.into_iter().collect::<std::collections::HashSet<_>>(),
+        [a, b, c].into_iter().collect());
+    assert!(peers.get_txs_to_fetch().is_empty(), "all unique requests marked in flight");
 }

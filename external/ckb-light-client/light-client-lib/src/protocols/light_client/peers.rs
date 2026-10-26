@@ -12,12 +12,11 @@ use ckb_types::{
     packed::Byte32,
     prelude::*,
     utilities::merkle_mountain_range::VerifiableHeader,
-    H256, U256,
+    H256,
 };
 use dashmap::DashMap;
 use governor::{clock::DefaultClock, state::keyed::DefaultKeyedStateStore, Quota, RateLimiter};
 
-use super::prelude::*;
 use crate::{
     mutex_lock,
     protocols::{Status, StatusCode, BAD_MESSAGE_ALLOWED_EACH_HOUR, MESSAGE_TIMEOUT},
@@ -256,14 +255,6 @@ impl LastState {
         }
     }
 
-    pub(crate) fn total_difficulty(&self) -> U256 {
-        self.as_ref().total_difficulty()
-    }
-
-    pub(crate) fn header(&self) -> &HeaderView {
-        self.as_ref().header()
-    }
-
     pub(crate) fn update_ts(&self) -> u64 {
         self.update_ts
     }
@@ -380,28 +371,6 @@ impl ProveState {
             reorg_last_headers,
             last_headers,
         }
-    }
-
-    pub(crate) fn new_child(&self, child_last_state: LastState, last_n_blocks: usize) -> Self {
-        let parent_header = self.get_last_header().header();
-        let mut last_headers = self.last_headers.clone();
-        let reorg_last_headers = self.reorg_last_headers.clone();
-        // To avoid unlimited memory growth.
-        if last_headers.len() >= last_n_blocks {
-            last_headers.remove(0);
-        }
-        last_headers.push(parent_header.clone());
-        Self {
-            last_state: child_last_state,
-            reorg_last_headers,
-            last_headers,
-        }
-    }
-
-    pub(crate) fn is_parent_of(&self, child_last_state: &LastState) -> bool {
-        self.get_last_header()
-            .header()
-            .is_parent_of(child_last_state.header())
     }
 
     pub fn get_last_header(&self) -> &VerifiableHeader {
@@ -687,18 +656,32 @@ impl LatestBlockFilterHashes {
             );
             return Err(StatusCode::Ignore.with_context(errmsg));
         }
-        let mut end_number = start_number + block_filter_hashes.len() as BlockNumber - 1;
-        if finalized_check_point_number >= end_number {
-            let errmsg = format!(
-                "finalized check point ({}) is not less than end number ({})",
-                finalized_check_point_number, end_number,
-            );
-            return Err(StatusCode::Ignore.with_context(errmsg));
-        }
         if start_number > last_proved_number {
             let errmsg = format!(
                 "start number ({}) is greater than the proved number ({})",
                 start_number, last_proved_number
+            );
+            return Err(StatusCode::Ignore.with_context(errmsg));
+        }
+        let mut end_number = match block_filter_hashes
+            .len()
+            .checked_add(start_number as usize)
+            .and_then(|v| v.checked_sub(1))
+        {
+            Some(v) => v as BlockNumber,
+            None => {
+                let errmsg = format!(
+                    "overflow computing end number: start_number ({}) + len ({}) - 1",
+                    start_number,
+                    block_filter_hashes.len()
+                );
+                return Err(StatusCode::Ignore.with_context(errmsg));
+            }
+        };
+        if finalized_check_point_number >= end_number {
+            let errmsg = format!(
+                "finalized check point ({}) is not less than end number ({})",
+                finalized_check_point_number, end_number,
             );
             return Err(StatusCode::Ignore.with_context(errmsg));
         }
@@ -743,7 +726,13 @@ impl LatestBlockFilterHashes {
         } else {
             let diff = start_number - finalized_check_point_number;
             let index = diff as usize - 2;
-            let filter_hash = &self.inner[index];
+            let Some(filter_hash) = self.inner.get(index) else {
+                let errmsg = format!(
+                    "filter hash index {index} out of bounds, inner len: {}",
+                    self.inner.len()
+                );
+                return Err(StatusCode::Ignore.with_context(errmsg));
+            };
             if filter_hash != parent_block_filter_hash {
                 let errmsg = format!(
                     "filter hash for block {} is {:#x} but parent hash is {:#}",
@@ -1898,7 +1887,7 @@ impl Peers {
                 .get_latest_block_filter_hashes(finalized_check_point_index)
                 .len();
             finalized_check_point_number + latest_block_filter_hashes_count as BlockNumber
-                >= min_filtered_block_number + 1
+                > min_filtered_block_number
         } else {
             // Check:
             // - If cached block filter hashes is same check point as the required,
@@ -2065,4 +2054,21 @@ fn if_verifiable_headers_are_same(lhs: &VerifiableHeader, rhs: &VerifiableHeader
                     .expect("checked: is not none")
                     .as_slice()))
         && lhs.total_difficulty() == rhs.total_difficulty()
+}
+
+#[cfg(test)]
+mod filter_range_regressions {
+    use super::*;
+
+    #[test]
+    fn overflowing_filter_range_is_ignored_without_mutating_cached_hashes() {
+        let mut hashes = LatestBlockFilterHashes::new(0);
+        let hash = packed::Byte32::default();
+        let error = hashes.update_latest_block_filter_hashes(
+            u64::MAX, 0, &hash, u64::MAX, &hash, &[hash.clone(), hash.clone()],
+        ).unwrap_err();
+        assert_eq!(error.code(), StatusCode::Ignore);
+        assert!(hashes.get_hashes().is_empty());
+        assert_eq!(hashes.get_last_number(), 0);
+    }
 }

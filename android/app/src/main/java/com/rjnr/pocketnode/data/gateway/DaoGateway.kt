@@ -115,10 +115,14 @@ class DaoGateway(
         for (p in pending) {
             val k = key(p.depositTxHash, p.depositIndex)
             val stillDeposited = k in depositedKeys
-            val txStatus = runCatching {
-                appDatabase.transactionDao().getByTxHash(p.withdrawTxHash)?.status
+            val cached = runCatching {
+                appDatabase.transactionDao().getByTxHash(p.withdrawTxHash)
             }.getOrNull()
-            when (resolvePendingWithdraw(stillDeposited, txStatus)) {
+            val inclusionVerified = cached.hasVerifiedBlockAssociation(network)
+            val verdict = if (!inclusionVerified && cached?.status != "FAILED") {
+                chainVerdictFor(ctx, p.withdrawTxHash)
+            } else DaoUnlockChainVerdict.UNKNOWN
+            when (resolvePendingWithdraw(stillDeposited, cached?.status, verdict, inclusionVerified)) {
                 PendingWithdrawResolution.OVERLAY -> if (stillDeposited) overlayKeys.add(k)
                 PendingWithdrawResolution.CLEAR_CONFIRMED,
                 PendingWithdrawResolution.CLEAR_FAILED ->
@@ -200,17 +204,16 @@ class DaoGateway(
             .toSet()
         val now = System.currentTimeMillis()
         return rows.map { row ->
-            val status = runCatching {
-                appDatabase.transactionDao().getByTxHash(row.unlockTxHash)?.status
+            val cached = runCatching {
+                appDatabase.transactionDao().getByTxHash(row.unlockTxHash)
             }.getOrNull()
+            val status = cached?.status
+            val inclusionVerified = cached.hasVerifiedBlockAssociation(ctx.network().name)
             val ageMs = (now - row.createdAt).coerceAtLeast(0L)
-            // Only an old marker the local cache never scored is worth a chain
-            // round trip, and only then can a marker be promoted to CONFIRMED.
-            // CacheManager swallows a failed pending-transaction insert and the
-            // watchdog scores only while the app is running, so "no local row"
-            // says nothing at all about what happened on chain.
+            // Quarantined or status-only confirmations need fresh inclusion.
+            // An unavailable node is not evidence to erase a local marker.
             val verdict = if (
-                ageMs >= DAO_UNLOCK_MARKER_GRACE_MS && status != "CONFIRMED" && status != "FAILED"
+                (ageMs >= DAO_UNLOCK_MARKER_GRACE_MS || status == "UNVERIFIED" || status == "CONFIRMED") && !inclusionVerified && status != "FAILED"
             ) {
                 chainVerdictFor(ctx, row.unlockTxHash)
             } else {
@@ -222,6 +225,7 @@ class DaoGateway(
                     unlockTxStatus = status,
                     markerAgeMs = ageMs,
                     chainVerdict = verdict,
+                    cacheInclusionVerified = inclusionVerified,
                 ),
                 stillLive = normalizedOutPointKey(row.withdrawingTxHash, row.withdrawingIndex) in liveKeys,
             )
@@ -856,3 +860,10 @@ class DaoGateway(
             "${txHash.lowercase()}:${index.removePrefix("0x").toLongOrNull(16) ?: index}"
     }
 }
+
+
+/** Epoch cleanup clears these fields, so only subsequently indexed evidence qualifies. */
+private fun com.rjnr.pocketnode.data.database.entity.TransactionEntity?.hasVerifiedBlockAssociation(network: String): Boolean =
+    this != null && this.network == network && status == "CONFIRMED" && confirmations > 0 &&
+        blockHash.isNotBlank() && blockHash != "0x" &&
+        (blockNumber.removePrefix("0x").toLongOrNull(16) ?: 0L) > 0L

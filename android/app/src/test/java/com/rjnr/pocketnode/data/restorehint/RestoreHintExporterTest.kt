@@ -81,8 +81,7 @@ class RestoreHintExporterTest {
         lightClient = lightClient,
         walletKeyReader = walletKeyReader,
         json = Json { ignoreUnknownKeys = true },
-        logger = NoopLogger,
-    )
+        logger = NoopLogger, verificationCacheGate = com.rjnr.pocketnode.data.gateway.readyVerificationGate())
 
     private fun wallet(id: String, type: String = KeyManager.WALLET_TYPE_MNEMONIC, parent: String? = null, index: Int = 0, active: Boolean = false) =
         WalletEntity(
@@ -314,7 +313,7 @@ class RestoreHintExporterTest {
         coEvery { walletKeyReader.readKeyMaterial(activity, "raw", any(), any()) } returns
             WalletKeyReader.MaterialResult.Success(key, null, "raw_key", false)
         val exporter = RestoreHintExporter(wallets, db.syncProgressDao(), db.transactionDao(), db.subAccountCandidateDao(),
-            prefs, lightClient, walletKeyReader, Json { ignoreUnknownKeys = true }, NoopLogger)
+            prefs, lightClient, walletKeyReader, Json { ignoreUnknownKeys = true }, NoopLogger, verificationCacheGate = com.rjnr.pocketnode.data.gateway.readyVerificationGate())
         val running = launch { exporter.export(activity, network) }
         entered.await(); controller.pause().stop(); controller.start().resume(); runCurrent()
         try { assertTrue(running.isCancelled); running.join(); assertTrue(key.all { it == 0.toByte() }) }

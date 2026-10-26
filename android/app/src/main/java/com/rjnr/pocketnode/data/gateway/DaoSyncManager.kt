@@ -19,12 +19,14 @@ class DaoSyncManager @Inject constructor(
     private val pendingDaoWithdrawDao: PendingDaoWithdrawDao,
     private val pendingDaoUnlockDao: PendingDaoUnlockDao,
     private val logger: Logger,
+    private val verificationCacheGate: VerificationCacheGate,
 ) {
     // --- Header cache (permanent — block headers are immutable) ---
 
     suspend fun getCachedHeader(blockHash: String): HeaderCacheEntity? {
+        val revision = verificationCacheGate.currentRevision()
         return try {
-            headerCacheDao.getByBlockHash(blockHash)
+            headerCacheDao.getByBlockHash(blockHash)?.takeIf { verificationCacheGate.isReady(it.network) && verificationCacheGate.currentRevision() == revision }
         } catch (e: CancellationException) {
             throw e
         } catch (e: Exception) {
@@ -46,9 +48,11 @@ class DaoSyncManager @Inject constructor(
     // --- DAO cell lifecycle ---
 
     suspend fun getActiveDeposits(network: String, walletId: String): List<DaoCellEntity> {
+        val revision = verificationCacheGate.currentRevision()
         require(walletId.isNotBlank()) { "walletId is required" }
         return try {
-            daoCellDao.getActiveByWalletAndNetwork(walletId, network)
+            if (verificationCacheGate.isReady(network)) daoCellDao.getActiveByWalletAndNetwork(walletId, network)
+                .takeIf { verificationCacheGate.isReady(network) && verificationCacheGate.currentRevision() == revision } ?: emptyList() else emptyList()
         } catch (e: CancellationException) {
             throw e
         } catch (e: Exception) {
@@ -58,9 +62,11 @@ class DaoSyncManager @Inject constructor(
     }
 
     suspend fun getCompletedDeposits(network: String, walletId: String): List<DaoCellEntity> {
+        val revision = verificationCacheGate.currentRevision()
         require(walletId.isNotBlank()) { "walletId is required" }
         return try {
-            daoCellDao.getCompletedByWalletAndNetwork(walletId, network)
+            if (verificationCacheGate.isReady(network)) daoCellDao.getCompletedByWalletAndNetwork(walletId, network)
+                .takeIf { verificationCacheGate.isReady(network) && verificationCacheGate.currentRevision() == revision } ?: emptyList() else emptyList()
         } catch (e: CancellationException) {
             throw e
         } catch (e: Exception) {
@@ -70,8 +76,9 @@ class DaoSyncManager @Inject constructor(
     }
 
     suspend fun getByOutPoint(txHash: String, index: String): DaoCellEntity? {
+        val revision = verificationCacheGate.currentRevision()
         return try {
-            daoCellDao.getByOutPoint(txHash, index)
+            daoCellDao.getByOutPoint(txHash, index)?.takeIf { verificationCacheGate.isReady(it.network) && verificationCacheGate.currentRevision() == revision }
         } catch (e: CancellationException) {
             throw e
         } catch (e: Exception) {
