@@ -25,6 +25,9 @@ import javax.inject.Singleton
 
 private const val TAG = "WalletRepository"
 
+/** Wallet rows are already removed. The durable cleanup intent remains for a later retry. */
+class WalletCleanupPendingException : IllegalStateException("Wallet removed; local key cleanup still needs a retry.")
+
 @Singleton
 class WalletRepository @Inject constructor(
     private val walletDao: WalletDao,
@@ -487,7 +490,8 @@ class WalletRepository @Inject constructor(
     }
 
     /**
-     * Delete a wallet and its keys. Runs VACUUM afterward to reclaim freed pages.
+     * Delete a wallet and its scoped keys. Unknown global legacy sources remain recoverable;
+     * only installation reset erases every scope. Runs VACUUM to reclaim freed pages.
      * Refuses to delete the active wallet, callers must switch first.
      * [keepBackupFile]: leave the wallet's PIN-encrypted backup file on disk
      * (the Recovery screen removes a wallet whose keys are lost but keeps
@@ -507,6 +511,10 @@ class WalletRepository @Inject constructor(
             if (expectedWallet != null) check(ownsInitialCreation(expectedWallet)) {
                 "Added wallet identity changed"
             }
+            // Retry intent must survive a crash immediately after this transaction commits.
+            appDatabase.walletPendingCleanupDao().insert(
+                com.rjnr.pocketnode.data.database.entity.WalletPendingCleanupEntity(walletId, keepBackupFile)
+            )
             // Store lock order is mutex then Room; use DAOs in this existing transaction.
             appDatabase.walletVaultDao().deleteVault(walletId)
             appDatabase.walletVaultDao().deleteLegacy(walletId)
@@ -532,24 +540,7 @@ class WalletRepository @Inject constructor(
             // Its send records (pending, broadcast and failed) go with it.
             appDatabase.pendingBroadcastDao().deleteForWallet(walletId)
         }
-        // The rows are gone, so the wallet is deleted whatever happens to its
-        // keys. A transient failure (#563 review F4) is retried once; if it
-        // still fails the key_material row is left behind and logged.
-        for (attempt in 1..2) {
-            try {
-                keyManager.deleteWalletKeys(walletId, keepBackup = keepBackupFile)
-                break
-            } catch (e: kotlinx.coroutines.CancellationException) {
-                throw e
-            } catch (e: Exception) {
-                // Type only: the message could carry key-store details.
-                if (attempt == 1) {
-                    logger.w(TAG, "Key deletion for $walletId failed (${e.javaClass.simpleName}); retrying once")
-                } else {
-                    logger.e(TAG, "Key deletion for $walletId failed again (${e.javaClass.simpleName}); key material left behind")
-                }
-            }
-        }
+        val cleanupComplete = retryWalletCleanup(walletId)
         // #538 review: a deleted wallet's gap-limit sweep markers must not
         // outlive it (they are keyed by walletId, but nothing else ever
         // reads or prunes them otherwise).
@@ -557,7 +548,43 @@ class WalletRepository @Inject constructor(
         // VACUUM must run outside the transaction above, SQLite rejects VACUUM
         // when a transaction is open on the same connection.
         DatabaseMaintenanceUtil.vacuum(appDatabase)
+        if (!cleanupComplete) throw WalletCleanupPendingException()
         logger.d(TAG, "Deleted wallet and caches: $walletId")
+    }
+
+    /** Startup retries explicit committed removals only; unknown legacy copies are never swept. */
+    suspend fun retryPendingWalletCleanup(): Boolean {
+        keyManager.walletStorage.requireOpen()
+        var complete = true
+        for (intent in appDatabase.walletPendingCleanupDao().all()) {
+            if (!retryWalletCleanup(intent.walletId)) complete = false
+        }
+        return complete
+    }
+
+    private suspend fun retryWalletCleanup(walletId: String): Boolean {
+        repeat(2) {
+            try {
+                return appDatabase.withTransaction {
+                    keyManager.walletStorage.requireOpen()
+                    val pending = appDatabase.walletPendingCleanupDao()
+                    val intent = pending.get(walletId) ?: return@withTransaction true
+                    // Hold the Room writer transaction through file cleanup. A replacement commit
+                    // cannot race this ownership check, and an already reused ID is never cleaned.
+                    if (walletDao.getById(walletId) != null || keyMaterialDao.getByWalletId(walletId) != null ||
+                        appDatabase.walletVaultDao().get(walletId) != null || appDatabase.walletVaultDao().legacy(walletId) != null)
+                        return@withTransaction false
+                    keyManager.deleteWalletKeys(walletId, keepBackup = intent.keepBackup)
+                    pending.delete(walletId)
+                    true
+                }
+            } catch (cancelled: kotlinx.coroutines.CancellationException) {
+                throw cancelled
+            } catch (failure: Exception) {
+                logger.w(TAG, "Local wallet cleanup remains pending (${failure.javaClass.simpleName})")
+            }
+        }
+        return false
     }
 
     /**
@@ -634,7 +661,7 @@ class WalletRepository @Inject constructor(
 
     private companion object {
         val SECRET_TABLES = listOf("wallets", "key_material", "wallet_vault", "wallet_vault_legacy", "wallet_passphrase_profile")
-        val RESET_TABLES = SECRET_TABLES + listOf("transactions", "balance_cache", "dao_cells", "pending_dao_withdraws",
+        val RESET_TABLES = SECRET_TABLES + listOf("wallet_pending_cleanup", "transactions", "balance_cache", "dao_cells", "pending_dao_withdraws",
             "pending_dao_unlocks", "sync_progress", "sub_account_candidates", "pending_broadcasts")
     }
 

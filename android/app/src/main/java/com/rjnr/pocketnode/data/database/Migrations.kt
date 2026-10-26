@@ -631,3 +631,10 @@ val MIGRATION_17_18 = object : Migration(17, 18) {
         """.trimIndent())
     }
 }
+
+/** Records future explicit deletion intent only; never guesses ownership of existing orphan files. */
+val MIGRATION_18_19 = object : Migration(18, 19) {
+    override fun migrate(db: SupportSQLiteDatabase) {
+        db.execSQL("CREATE TABLE IF NOT EXISTS `wallet_pending_cleanup` (`walletId` TEXT NOT NULL, `keepBackup` INTEGER NOT NULL, PRIMARY KEY(`walletId`))")
+    }
+}

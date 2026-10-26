@@ -78,4 +78,13 @@ class MissingWalletRemoverTest {
 
         coVerify(exactly = 0) { walletRepository.deleteWallet(any(), any()) }
     }
+    @Test
+    fun `pending cleanup still completes recovery bookkeeping and registration`() = runTest {
+        setUp(listOf(wallet("lost"), wallet("ok", active = true)), missing = listOf("lost"), activeId = "ok")
+        coEvery { walletRepository.deleteWallet("lost", keepBackupFile = true) } throws com.rjnr.pocketnode.data.wallet.WalletCleanupPendingException()
+        assertEquals("REMOVED_CLEANUP_PENDING", remover.remove("lost").name)
+        verify(exactly = 1) { state.removeUnverified("lost") }
+        coVerify(exactly = 1) { gateway.onWalletDeleted("lost") }
+    }
+
 }

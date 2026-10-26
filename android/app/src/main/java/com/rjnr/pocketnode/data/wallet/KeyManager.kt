@@ -412,27 +412,13 @@ class KeyManager @Inject constructor(
     }
 
     suspend fun setMnemonicBackedUp(backedUp: Boolean) {
-        // Flip the plaintext flag in Room without re-encrypting the
-        // bundle — V2 rows cannot be decrypted without an authenticated
-        // Cipher, and this call site has none. The PIN backup blob keeps
-        // its previous mnemonicBackedUp value until the next mnemonic
-        // reveal (which carries a fresh Cipher and refreshes the blob).
+        // Metadata only. Legacy PIN-only ciphertext is never refreshed or created.
         val helper = keyStoreMigrationHelper
         if (helper != null && helper.setMnemonicBackedUpFlag("default", backedUp)) {
             return
         }
         // ESP fallback
         walletStorage.readOrWriteFiles { check(prefs.edit().putBoolean(KEY_MNEMONIC_BACKED_UP, backedUp).commit()) }
-        val pk = prefs.getString(KEY_PRIVATE_KEY, null) ?: return
-        val espWalletType = prefs.getString(KEY_WALLET_TYPE, WALLET_TYPE_RAW_KEY) ?: WALLET_TYPE_RAW_KEY
-        writeBackupIfPinAvailable("default") {
-            KeyMaterial(
-                privateKey = pk,
-                mnemonic = prefs.getString(KEY_MNEMONIC, null),
-                walletType = espWalletType,
-                mnemonicBackedUp = backedUp
-            )
-        }
     }
 
     // -- Shared methods --
@@ -552,15 +538,6 @@ class KeyManager @Inject constructor(
         }
         // ESP fallback
         walletStorage.readOrWriteFiles { check(getWalletPrefs(walletId).edit().putBoolean(KEY_MNEMONIC_BACKED_UP, backedUp).commit()) }
-        writeBackupIfPinAvailable(walletId) {
-            val walletPrefs = getWalletPrefs(walletId)
-            KeyMaterial(
-                privateKey = walletPrefs.getString(KEY_PRIVATE_KEY, null) ?: "",
-                mnemonic = walletPrefs.getString(KEY_MNEMONIC, null),
-                walletType = walletPrefs.getString(KEY_WALLET_TYPE, WALLET_TYPE_RAW_KEY) ?: WALLET_TYPE_RAW_KEY,
-                mnemonicBackedUp = backedUp
-            )
-        }
     }
 
     suspend fun hasMnemonicBackupForWallet(walletId: String): Boolean {
@@ -579,7 +556,10 @@ class KeyManager @Inject constructor(
     /** [keepBackup]: leave the PIN-encrypted backup file in place (Recovery's remove). */
     suspend fun deleteWalletKeys(walletId: String, keepBackup: Boolean = false) {
         walletStorage.files {
-            if (!keepBackup) check(keyBackupManager?.deleteBackupChecked(walletId) != false) { "Wallet backup could not be removed." }
+            if (!keepBackup) {
+                val backups = keyBackupManager ?: KeyBackupManager(java.io.File(context.filesDir, "key_backups"), logger, walletStorage)
+                check(backups.deleteBackupChecked(walletId)) { "Wallet backup could not be removed." }
+            }
             val standIn = if (walletId == DEFAULT_WALLET_ID) testPrefs else testWalletPrefs[walletId]
             standIn?.let { check(it.edit().clear().commit()) }
             legacyFiles.deleteWallet(walletId)
@@ -682,19 +662,6 @@ class KeyManager @Inject constructor(
 
     /** Legacy sources are now retired per wallet only after verified vault activation. */
     fun deleteEspFilesIfSafe() = Unit
-
-    private fun writeBackupIfPinAvailable(walletId: String, buildMaterial: () -> KeyMaterial) {
-        val pin = authManager?.getSessionPin() ?: sessionPin ?: return
-        val manager = keyBackupManager ?: return
-        try {
-            // Hand KeyBackupManager its own copy — if writeBackup defensively zeroes
-            // the PIN array after use, our cached session PIN must stay intact for
-            // later backup writes in the same session.
-            manager.writeBackup(walletId, buildMaterial(), pin.copyOf())
-        } catch (e: Exception) {
-            logger.w(TAG, "Backup write failed for $walletId", e)
-        }
-    }
 
     companion object {
         private const val TAG = "KeyManager"

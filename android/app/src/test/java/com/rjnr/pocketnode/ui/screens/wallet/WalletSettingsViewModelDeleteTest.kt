@@ -193,6 +193,28 @@ class WalletSettingsViewModelDeleteTest {
     }
 
     @Test
+    fun `postcommit cleanup failure still refreshes gateway and waits for removal acknowledgement`() {
+        seed("C", entity("A", "aa", false), entity("C", "cc", true))
+        coEvery { keyManager.deleteWalletKeys("C", false) } throws IllegalStateException("synthetic file obstruction")
+        runTest(testDispatcher) {
+            deletedId = "C"
+            val vm = newViewModel("C")
+            advanceUntilIdle()
+            vm.confirmDelete()
+            advanceUntilIdle()
+            assertNull(db.walletDao().getById("C"))
+            assertEquals(script("aa"), gateway.walletInfo.value?.script)
+            assertNull("Postcommit cleanup is not a failed wallet removal", vm.uiState.value.error)
+            assertTrue(!vm.uiState.value.deleted)
+            assertTrue(vm.uiState.value.cleanupPending)
+            vm.acknowledgeCleanupPending()
+            assertTrue(vm.uiState.value.deleted)
+            assertTrue(!vm.uiState.value.cleanupPending)
+        }
+        assertRegisteredOnlyAfterDelete()
+    }
+
+    @Test
     fun `deleting the active wallet moves the gateway onto the new active wallet`() {
         seed(
             "C",

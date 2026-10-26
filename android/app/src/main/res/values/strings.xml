@@ -622,4 +622,6 @@
     <string name="restore_hint_unreadable">This file could not be read.</string>
     <!-- endregion -->
 
+    <string name="wallet_removed_cleanup_pending">Wallet removed. Some local key copies could not be removed. Restart the app to retry cleanup.</string>
+    <string name="wallet_removed_title">Wallet removed</string>
 </resources>

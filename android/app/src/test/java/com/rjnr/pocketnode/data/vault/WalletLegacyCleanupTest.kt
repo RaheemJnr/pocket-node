@@ -1,5 +1,7 @@
 package com.rjnr.pocketnode.data.vault
 
+import com.rjnr.pocketnode.data.crypto.writeBackup
+
 import android.content.Context
 import androidx.test.core.app.ApplicationProvider
 import com.rjnr.pocketnode.core.log.NoopLogger

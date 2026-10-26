@@ -123,11 +123,10 @@ class InstallationResetTest {
         }
     }
 
-    @Test fun `late wallet activation and backup writes cannot commit after reset`() = runBlocking {
+    @Test fun `late wallet activation metadata writes and legacy reads are fenced after reset`() = runBlocking {
         Installation(context).use { app ->
             val crypto = WalletEnvelopeCrypto()
             val store = WalletVaultStore(app.db, crypto)
-            val material = KeyMaterial("00".repeat(31) + "02", walletType = "raw_key", mnemonicBackedUp = false)
             val creation = WalletRepository.Creation(com.rjnr.pocketnode.data.database.entity.WalletEntity("late", "Late", "raw_key", null, null))
             val pass = "disposable wallet passphrase".toCharArray()
             val envelope = crypto.create("late", 0, byteArrayOf(1, 2), pass)
@@ -136,7 +135,7 @@ class InstallationResetTest {
                 store.activate(KeyMaterialEntity("late", byteArrayOf(), null, byteArrayOf(), "raw_key", false, 0),
                     null, envelope, pass, creation)
             }.isFailure)
-            assertTrue(runCatching { app.backup.writeBackup("late", material, "123456".toCharArray()) }.isFailure)
+            assertTrue(runCatching { app.backup.readBackup("late", "123456".toCharArray()) }.isFailure)
             assertTrue(runCatching { app.keys.setMnemonicBackedUpForWallet("late", true) }.isFailure)
             assertEquals(0, app.db.walletDao().count()); assertEquals(0, app.db.keyMaterialDao().count())
             assertFalse(app.backup.hasAnyBackups())

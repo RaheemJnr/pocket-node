@@ -25,7 +25,6 @@ import com.rjnr.pocketnode.data.auth.AuthManager
 import com.rjnr.pocketnode.data.auth.PinManager
 import com.rjnr.pocketnode.data.gateway.GatewayRepository
 import com.rjnr.pocketnode.data.sync.SyncWorkScheduler
-import com.rjnr.pocketnode.data.crypto.KeyBackupManager
 import com.rjnr.pocketnode.data.wallet.KeyManager
 import com.rjnr.pocketnode.data.wallet.RecoveredKeyRestorer
 import com.rjnr.pocketnode.ui.navigation.CkbNavGraph
@@ -72,9 +71,6 @@ class MainActivity : FragmentActivity(), com.rjnr.pocketnode.ui.security.WalletS
 
     @Inject
     lateinit var appRestarter: com.rjnr.pocketnode.util.AppRestarter
-
-    @Inject
-    lateinit var keyBackupManager: KeyBackupManager
 
     @Inject
     lateinit var authManager: AuthManager
@@ -128,8 +124,7 @@ class MainActivity : FragmentActivity(), com.rjnr.pocketnode.ui.security.WalletS
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
 
-        // Clean up any orphaned .tmp files from interrupted PIN re-encryption
-        keyBackupManager.cleanupOrphanedTmpFiles()
+        // Interrupted legacy backups remain intact until authenticated migration or explicit deletion.
 
         // #370: reset the PIN failed-attempt counter once after an overwrite
         // install / version upgrade, BEFORE the startup gate below reads the
@@ -155,6 +150,9 @@ class MainActivity : FragmentActivity(), com.rjnr.pocketnode.ui.security.WalletS
             val resetStartup = localWalletReset.prepareStartup()
             if (resetStartup == com.rjnr.pocketnode.data.gateway.LocalWalletReset.Startup.RESTART) appRestarter.restart()
             val resetPending = resetStartup != com.rjnr.pocketnode.data.gateway.LocalWalletReset.Startup.READY
+            if (!resetPending && !walletRepository.retryPendingWalletCleanup()) {
+                android.widget.Toast.makeText(this@MainActivity, R.string.wallet_removed_cleanup_pending, android.widget.Toast.LENGTH_LONG).show()
+            }
             cachedHasWallet = !resetPending && repository.hasWallet()
             @Suppress("DEPRECATION")
             val wasReset = keyManager.wasResetDueToCorruption()

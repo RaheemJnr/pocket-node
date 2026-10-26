@@ -43,18 +43,11 @@ class KeyBackupManagerTest {
     fun setUp() {
         manager = KeyBackupManager(tempDir.root, NoopLogger, com.rjnr.pocketnode.data.wallet.WalletStorageBoundary(androidx.test.core.app.ApplicationProvider.getApplicationContext()))
         // Use low cost factors for fast tests. Production uses PBKDF2 600_000
-        // (legacy reads) and Argon2id 64 MB / t=3 / p=4 (current writes).
+        // (legacy reads) and Argon2id 64 MB / t=3 / p=4 (legacy reads).
         manager.kdfIterations = 1_000
         manager.argon2Iterations = 1
         manager.argon2MemoryKb = 8
         manager.argon2Parallelism = 1
-    }
-
-    @Test
-    fun `new backups are written with Argon2id (format v2)`() {
-        manager.writeBackup("wallet1", mnemonicMaterial(), testPin)
-        val versionByte = File(tempDir.root, "wallet1.enc").readBytes()[4]
-        assertEquals(KeyBackupManager.FORMAT_VERSION_ARGON2, versionByte)
     }
 
     @Test
@@ -93,7 +86,7 @@ class KeyBackupManagerTest {
     }
 
     @Test
-    fun `writeBackup and readBackup round-trip for mnemonic wallet`() {
+    fun `legacy Argon2id backup remains readable for mnemonic wallet`() {
         val material = mnemonicMaterial()
         manager.writeBackup("wallet1", material, testPin)
 
@@ -109,7 +102,7 @@ class KeyBackupManagerTest {
     }
 
     @Test
-    fun `writeBackup and readBackup round-trip for raw-key wallet`() {
+    fun `legacy Argon2id backup remains readable for raw-key wallet`() {
         val material = rawKeyMaterial()
         manager.writeBackup("wallet_raw", material, testPin)
 
@@ -153,7 +146,7 @@ class KeyBackupManagerTest {
         manager.writeBackup("wallet1", mnemonicMaterial(), testPin)
         assertTrue(manager.hasBackup("wallet1"))
 
-        manager.deleteBackup("wallet1")
+        assertTrue(manager.deleteBackupChecked("wallet1"))
         assertFalse(manager.hasBackup("wallet1"))
     }
 
@@ -169,46 +162,28 @@ class KeyBackupManagerTest {
     }
 
     @Test
-    fun `reEncryptAll re-encrypts with new PIN`() {
-        val newPin = "654321".toCharArray()
+    fun `startup preserves interrupted backup with independent seed capability`() {
         manager.writeBackup("wallet1", mnemonicMaterial(), testPin)
-        manager.writeBackup("wallet2", rawKeyMaterial(), testPin)
-
-        val success = manager.reEncryptAll(testPin, newPin)
-
-        assertTrue(success)
-        // Old PIN should no longer work
-        assertNull(manager.readBackup("wallet1", testPin))
-        assertNull(manager.readBackup("wallet2", testPin))
-        // New PIN should work
-        assertNotNull(manager.readBackup("wallet1", newPin))
-        assertNotNull(manager.readBackup("wallet2", newPin))
-    }
-
-    @Test
-    fun `reEncryptAll returns false if old PIN is wrong`() {
-        manager.writeBackup("wallet1", mnemonicMaterial(), testPin)
-
-        val success = manager.reEncryptAll(wrongPin, "newpin".toCharArray())
-
-        assertFalse(success)
-        // Original backup should still be readable with the correct PIN
-        assertNotNull(manager.readBackup("wallet1", testPin))
-    }
-
-    @Test
-    fun `cleanupOrphanedTmpFiles removes tmp files`() {
-        // Create fake .tmp files
-        File(tempDir.root, "wallet1.enc.tmp").writeText("junk")
-        File(tempDir.root, "orphan.tmp").writeText("junk")
-        // Create a real .enc file that should survive
-        manager.writeBackup("wallet1", mnemonicMaterial(), testPin)
-
+        val pending = File(tempDir.root, "wallet1.enc.tmp")
+        manager.writeBackup("wallet1", rawKeyMaterial(), testPin)
+        // Restore a distinct captured seed copy after the old writer's rename.
+        manager.writeBackup("seed", mnemonicMaterial(), testPin)
+        File(tempDir.root, "seed.enc").copyTo(pending, overwrite = true)
         manager.cleanupOrphanedTmpFiles()
+        assertTrue("Interrupted copy may hold unrecovered seed capability", pending.exists())
+        assertEquals(mnemonicMaterial().mnemonic, manager.readCapturedBackup(pending.readBytes(), testPin)!!.mnemonic)
+    }
 
-        assertFalse(File(tempDir.root, "wallet1.enc.tmp").exists())
-        assertFalse(File(tempDir.root, "orphan.tmp").exists())
-        assertTrue(manager.hasBackup("wallet1"))
+    @Test
+    fun `checked retirement reports blocked pending file and succeeds on retry`() {
+        manager.writeBackup("wallet1", rawKeyMaterial(), testPin)
+        val pending = File(tempDir.root, "wallet1.enc.tmp").apply { mkdir() }
+        File(pending, "blocker").writeText("synthetic")
+        assertFalse(manager.deleteBackupChecked("wallet1"))
+        assertTrue(manager.hasAnyBackups())
+        pending.deleteRecursively()
+        assertTrue(manager.deleteBackupChecked("wallet1"))
+        assertFalse(manager.hasAnyBackups())
     }
 
     @Test
@@ -223,19 +198,6 @@ class KeyBackupManagerTest {
         assertTrue(ids.contains("beta"))
     }
 
-    @Test
-    fun `writeBackup overwrites existing backup`() {
-        val original = mnemonicMaterial()
-        val updated = original.copy(privateKey = "c".repeat(64), mnemonicBackedUp = false)
-
-        manager.writeBackup("wallet1", original, testPin)
-        manager.writeBackup("wallet1", updated, testPin)
-
-        val result = manager.readBackup("wallet1", testPin)
-        assertNotNull(result)
-        assertEquals("c".repeat(64), result!!.privateKey)
-        assertFalse(result.mnemonicBackedUp)
-    }
     @Test fun `authenticated malformed payload never forwards serializer exception to logger`() {
         val logger = io.mockk.mockk<com.rjnr.pocketnode.core.log.Logger>(relaxed = true)
         val reader = KeyBackupManager(tempDir.root, logger, com.rjnr.pocketnode.data.wallet.WalletStorageBoundary(androidx.test.core.app.ApplicationProvider.getApplicationContext())).apply { kdfIterations = 1_000 }
