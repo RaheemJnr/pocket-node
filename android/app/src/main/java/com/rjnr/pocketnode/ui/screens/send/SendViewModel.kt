@@ -1,6 +1,8 @@
 package com.rjnr.pocketnode.ui.screens.send
 
 import com.rjnr.pocketnode.data.send.DestinationPolicy
+import com.rjnr.pocketnode.data.send.SendStatusPoller
+import com.rjnr.pocketnode.data.send.hasSendInclusionFor
 import androidx.fragment.app.FragmentActivity
 import com.rjnr.pocketnode.core.log.Logger
 import androidx.lifecycle.ViewModel
@@ -34,8 +36,6 @@ import java.math.BigDecimal
 import java.math.RoundingMode
 import com.rjnr.pocketnode.data.auth.AuthMethod
 import javax.inject.Inject
-import com.rjnr.pocketnode.util.redactAddress
-import com.rjnr.pocketnode.util.redactHash
 
 enum class TransactionState {
     IDLE,           // No transaction in progress
@@ -43,7 +43,8 @@ enum class TransactionState {
     PENDING,        // Transaction submitted, waiting for confirmation
     PROPOSED,       // Transaction in proposal stage
     CONFIRMED,      // Transaction confirmed on chain
-    FAILED          // Transaction failed
+    FAILED,         // Explicit rejection or pre-broadcast failure
+    TIMED_OUT       // Poll ended; transaction outcome remains unknown
 }
 
 enum class SendMode {
@@ -214,6 +215,9 @@ class SendViewModel @Inject constructor(
     val uiState: StateFlow<SendUiState> = _uiState.asStateFlow()
 
     private var pollingJob: Job? = null
+    private var pollingGeneration = 0
+    private data class StatusWatch(val hash: String, val address: String, val walletId: String?, val network: NetworkType)
+    private var statusWatch: StatusWatch? = null
     private var sendJob: Job? = null
     private var bulkHistoryUnavailable = false
 
@@ -827,7 +831,7 @@ class SendViewModel @Inject constructor(
             }
             // #197: bump useCount for saved contacts, queue save-prompt for new addresses.
             afterSendBookkeeping(recipient)
-            startPollingTransactionStatus(txHash, capturedAddress)
+            startPollingTransactionStatus(txHash, capturedAddress, intent.walletId, intent.network)
         } catch (cancelled: kotlinx.coroutines.CancellationException) { throw cancelled }
         catch (e: Exception) {
             logger.e(TAG, "V2 send failed", e)
@@ -967,101 +971,65 @@ class SendViewModel @Inject constructor(
      */
     private fun parseErrorMessage(e: Exception): String = mapSendErrorMessage(e.message)
 
-    private fun startPollingTransactionStatus(txHash: String, address: String) {
+    /** Resume only status reads for a retained hash; never sign or broadcast again. */
+    fun retryStatusCheck() {
+        val watch = statusWatch ?: return
+        if (_uiState.value.transactionState != TransactionState.TIMED_OUT ||
+            _uiState.value.txHash != watch.hash || walletPreferencesActiveId() != watch.walletId ||
+            !isCurrentSource(watch)) return
+        startPollingTransactionStatus(watch.hash, watch.address, watch.walletId, watch.network)
+    }
+
+    private fun isCurrentSource(watch: StatusWatch): Boolean =
+        walletPreferencesActiveId() == watch.walletId && repository.currentNetwork == watch.network &&
+            _uiState.value.networkType == watch.network && repository.getCurrentAddress() == watch.address
+
+    private fun startPollingTransactionStatus(txHash: String, address: String, walletId: String?, network: NetworkType) {
         pollingJob?.cancel()
+        val epoch = ++pollingGeneration
+        val watch = StatusWatch(txHash, address, walletId, network)
+        statusWatch = watch
+        _uiState.update { it.copy(transactionState = TransactionState.PENDING, confirmations = 0,
+            statusMessage = SendStatusPoller.SUBMITTED) }
         pollingJob = viewModelScope.launch {
             var attempts = 0
-            var consecutiveUnknowns = 0
             val previousBalance = _uiState.value.availableBalance
-
-            logger.d(TAG, "🔄 Starting to poll for tx status: ${txHash.redactHash()} (previous balance: $previousBalance)")
-
+            suspend fun current(): Boolean {
+                kotlinx.coroutines.currentCoroutineContext().ensureActive()
+                return epoch == pollingGeneration && _uiState.value.txHash == txHash &&
+                    isCurrentSource(watch)
+            }
             while (attempts < MAX_POLLING_ATTEMPTS) {
                 delay(POLLING_INTERVAL_MS)
+                if (!current()) return@launch
                 attempts++
-
-                logger.d(TAG, "🔄 Polling attempt #$attempts for $txHash")
-
-                try {
-                    val statusResult = repository.getTransactionStatus(txHash)
-                    statusResult.onSuccess { status ->
-                        logger.d(TAG, "📊 Poll result: status=${status.status}, confirmations=${status.confirmations}")
-
-                        // Handle "unknown" status - tx might be in network mempool
-                        if (status.isUnknown()) {
-                            consecutiveUnknowns++
-                            logger.d(TAG, "⏳ Unknown status (attempt $consecutiveUnknowns) - tx likely in network mempool")
-
-                            // Update UI to show we're waiting for network confirmation
-                            _uiState.update {
-                                it.copy(
-                                    transactionState = TransactionState.PENDING,
-                                    statusMessage = "Transaction broadcast. Waiting for network confirmation..."
-                                )
-                            }
-
-                            // After many unknown responses, the tx was likely already confirmed
-                            // but the light client hasn't synced that block yet
-                            if (consecutiveUnknowns > 20) {
-                                logger.d(TAG, "✅ Many unknowns - assuming tx confirmed on network")
-                                // Poll for balance until light client syncs the change output
-                                pollForBalanceUpdate(address, previousBalance)
-                                _uiState.update {
-                                    it.copy(
-                                        transactionState = TransactionState.CONFIRMED,
-                                        confirmations = 1,
-                                        statusMessage = "Transaction confirmed ✓"
-                                    )
-                                }
-                                return@launch
-                            }
-                            return@onSuccess
-                        }
-
-                        // Reset counter when we get a non-unknown status
-                        consecutiveUnknowns = 0
-                        updateTransactionStatus(status)
-
-                        // Stop polling only after reaching required confirmations
-                        if (status.isConfirmed() && (status.confirmations ?: 0) >= REQUIRED_CONFIRMATIONS) {
-                            logger.d(TAG, "✅ Transaction fully confirmed with ${status.confirmations} confirmations")
-                            // Poll for balance until light client syncs the change output
-                            pollForBalanceUpdate(address, previousBalance)
-                            _uiState.update {
-                                it.copy(
-                                    statusMessage = "Fully confirmed with ${status.confirmations} confirmations ✓"
-                                )
-                            }
-                            return@launch
-                        }
-                    }.onFailure { e ->
-                        logger.w(TAG, "⚠️ Poll failed: ${e.message}")
-                        // Continue polling on failure
-                    }
+                val status = try {
+                    repository.getTransactionStatus(txHash).getOrThrow()
+                } catch (cancelled: kotlinx.coroutines.CancellationException) {
+                    throw cancelled
                 } catch (e: Exception) {
-                    logger.e(TAG, "❌ Poll exception: ${e.message}")
-                    // Continue polling on exception
+                    logger.w(TAG, "Status unavailable: ${e.message}")
+                    null
+                }
+                if (!current()) return@launch
+                if (status == null || status.txHash != txHash) continue
+                if (status.status == "rejected") {
+                    _uiState.update { it.copy(transactionState = TransactionState.FAILED,
+                        confirmations = 0, statusMessage = SendStatusPoller.REJECTED) }
+                    return@launch
+                }
+                updateTransactionStatus(status, txHash)
+                if (status.hasSendInclusionFor(txHash) && (status.confirmations ?: 0) >= REQUIRED_CONFIRMATIONS) {
+                    pollForBalanceUpdate(address, previousBalance, ::current)
+                    if (!current()) return@launch
+                    _uiState.update { it.copy(statusMessage = "Fully confirmed with ${status.confirmations} confirmations ✓") }
+                    return@launch
                 }
             }
-
-            // Max attempts reached
-            logger.d(TAG, "⏰ Polling timed out after $attempts attempts")
-
-            // If we got here and got lots of unknowns, tx probably went through
-            if (consecutiveUnknowns > 10) {
-                pollForBalanceUpdate(address, previousBalance)
-                _uiState.update {
-                    it.copy(
-                        transactionState = TransactionState.CONFIRMED,
-                        statusMessage = "Transaction sent successfully ✓"
-                    )
-                }
-            } else {
-                _uiState.update {
-                    it.copy(
-                        statusMessage = "Status check timed out. Transaction may still confirm."
-                    )
-                }
+            if (!current()) return@launch
+            if (_uiState.value.transactionState != TransactionState.CONFIRMED) {
+                _uiState.update { it.copy(transactionState = TransactionState.TIMED_OUT,
+                    confirmations = 0, statusMessage = SendStatusPoller.TIMED_OUT) }
             }
         }
     }
@@ -1069,10 +1037,10 @@ class SendViewModel @Inject constructor(
     /**
      * Poll for balance update after a transaction.
      * The light client needs to sync the block containing the change output before
-     * the new balance is visible. This function polls until balance is non-zero
-     * or a reasonable timeout is reached.
+     * the new balance is visible. After evidenced inclusion, refresh until the
+     * balance changes or the bounded wait ends; neither outcome supplies evidence.
      */
-    private suspend fun pollForBalanceUpdate(address: String, previousBalance: Long) {
+    private suspend fun pollForBalanceUpdate(address: String, previousBalance: Long, current: suspend () -> Boolean) {
         logger.d(TAG, "💰 Starting balance polling (previous: $previousBalance shannons)")
 
         var balanceAttempts = 0
@@ -1080,9 +1048,12 @@ class SendViewModel @Inject constructor(
 
         while (balanceAttempts < maxBalanceAttempts) {
             delay(POLLING_INTERVAL_MS)
+            if (!current()) return
             balanceAttempts++
 
-            repository.refreshBalance(address).onSuccess { balance ->
+            val balanceResult = repository.refreshBalance(address)
+            if (!current()) return
+            balanceResult.onSuccess { balance ->
                 val newBalance = balance.capacityAsLong()
                 logger.d(TAG, "💰 Balance poll #$balanceAttempts: $newBalance shannons (${balance.capacityCkb} CKB)")
 
@@ -1093,28 +1064,32 @@ class SendViewModel @Inject constructor(
                     return
                 }
             }.onFailure { e ->
+                if (e is kotlinx.coroutines.CancellationException) throw e
                 logger.w(TAG, "⚠️ Balance poll failed: ${e.message}")
             }
         }
 
         logger.w(TAG, "⏰ Balance polling timed out - balance may update later when light client syncs")
         // Do one final refresh attempt
-        repository.refreshBalance(address)
+        repository.refreshBalance(address).exceptionOrNull()?.let {
+            if (it is kotlinx.coroutines.CancellationException) throw it
+        }
+        if (!current()) return
     }
 
-    private fun updateTransactionStatus(status: TransactionStatusResponse) {
+    private fun updateTransactionStatus(status: TransactionStatusResponse, txHash: String) {
         val newState = when {
-            status.isConfirmed() -> TransactionState.CONFIRMED
+            status.hasSendInclusionFor(txHash) -> TransactionState.CONFIRMED
             status.status == "proposed" -> TransactionState.PROPOSED
             status.isPending() -> TransactionState.PENDING
             status.isUnknown() -> TransactionState.PENDING // Treat unknown as pending initially
             else -> TransactionState.PENDING
         }
 
-        val confirmations = status.confirmations ?: 0
+        val confirmations = if (newState == TransactionState.CONFIRMED) status.confirmations ?: 0 else 0
 
         val message = when (newState) {
-            TransactionState.PENDING -> "Transaction pending..."
+            TransactionState.PENDING -> if (status.isUnknown()) SendStatusPoller.AWAITING_NETWORK else SendStatusPoller.PENDING
             TransactionState.PROPOSED -> "Transaction in proposal stage..."
             TransactionState.CONFIRMED -> when {
                 confirmations >= REQUIRED_CONFIRMATIONS ->
@@ -1137,6 +1112,8 @@ class SendViewModel @Inject constructor(
     }
 
     fun clearTxHash() {
+        pollingGeneration++
+        statusWatch = null
         pollingJob?.cancel()
         _uiState.update {
             it.copy(

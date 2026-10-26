@@ -78,6 +78,7 @@ import com.composables.icons.lucide.Check
 import com.composables.icons.lucide.ChevronLeft
 import com.composables.icons.lucide.CircleAlert
 import com.composables.icons.lucide.CircleCheck
+import com.composables.icons.lucide.Clock
 import com.composables.icons.lucide.Lucide
 import com.composables.icons.lucide.ScanLine
 import com.composables.icons.lucide.TriangleAlert
@@ -198,6 +199,7 @@ fun SendScreen(
             statusMessage = uiState.statusMessage,
             confirmations = uiState.confirmations,
             networkType = uiState.networkType,
+            onRetryStatus = viewModel::retryStatusCheck,
             onDismiss = {
                 viewModel.clearTxHash()
                 if (uiState.transactionState == TransactionState.CONFIRMED) {
@@ -1020,15 +1022,17 @@ fun TransactionStatusDialog(
     statusMessage: String,
     confirmations: Int,
     networkType: NetworkType = NetworkType.MAINNET,
+    onRetryStatus: () -> Unit = {},
     onDismiss: () -> Unit
 ) {
+    val isTimedOut = transactionState == TransactionState.TIMED_OUT
     val isConfirmed = transactionState == TransactionState.CONFIRMED
     val isFailed = transactionState == TransactionState.FAILED
 
     AlertDialog(
         onDismissRequest = {
-            // Only allow dismissing if confirmed or failed
-            if (isConfirmed || isFailed) {
+            // A finished local poll can be closed even when its outcome is unknown.
+            if (isConfirmed || isFailed || isTimedOut) {
                 onDismiss()
             }
         },
@@ -1051,6 +1055,10 @@ fun TransactionStatusDialog(
                     }
                 }
 
+                isTimedOut -> {
+                    Icon(imageVector = Lucide.Clock, contentDescription = "Not confirmed yet",
+                        modifier = Modifier.size(48.dp), tint = MaterialTheme.colorScheme.onSurfaceVariant)
+                }
                 isFailed -> {
                     Box(
                         modifier = Modifier
@@ -1082,6 +1090,7 @@ fun TransactionStatusDialog(
                 text = when (transactionState) {
                     TransactionState.CONFIRMED -> "Transaction Confirmed!"
                     TransactionState.FAILED -> "Transaction Failed"
+                    TransactionState.TIMED_OUT -> "Not Confirmed Yet"
                     TransactionState.SENDING -> "Sending..."
                     TransactionState.PENDING -> "Waiting for Confirmation"
                     TransactionState.PROPOSED -> "Processing..."
@@ -1105,8 +1114,8 @@ fun TransactionStatusDialog(
                     color = MaterialTheme.colorScheme.onSurfaceVariant
                 )
 
-                // Progress steps (only show when not confirmed/failed)
-                if (!isConfirmed && !isFailed) {
+                // Stop animating once the local poll has finished.
+                if (!isConfirmed && !isFailed && !isTimedOut) {
                     StatusSteps(currentState = transactionState)
                 }
 
@@ -1189,6 +1198,8 @@ fun TransactionStatusDialog(
                 ) {
                     Text(stringResource(R.string.send_done))
                 }
+            } else if (isTimedOut) {
+                Button(onClick = onRetryStatus) { Text("Check status again") }
             } else if (isFailed) {
                 Button(onClick = onDismiss) {
                     Text(stringResource(R.string.send_close))
@@ -1196,7 +1207,9 @@ fun TransactionStatusDialog(
             }
         },
         dismissButton = {
-            if (!isConfirmed && !isFailed) {
+            if (isTimedOut) {
+                TextButton(onClick = onDismiss) { Text(stringResource(R.string.send_close)) }
+            } else if (!isConfirmed && !isFailed) {
                 TextButton(
                     onClick = onDismiss,
                     colors = ButtonDefaults.textButtonColors(

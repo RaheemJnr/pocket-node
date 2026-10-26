@@ -28,6 +28,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.test.StandardTestDispatcher
+import kotlinx.coroutines.test.advanceTimeBy
 import kotlinx.coroutines.test.advanceUntilIdle
 import kotlinx.coroutines.test.resetMain
 import kotlinx.coroutines.test.runCurrent
@@ -898,6 +899,247 @@ class SendReviewStateMachineTest {
             assertEquals(1, signed.size)
             assertEquals(100_00000000L, signed.single().cellOutputs.first().capacity.removePrefix("0x").toLong(16))
         } finally { androidx.lifecycle.ViewModelStore().apply { put("retry", vm); clear() }; runCurrent() }
+    }
+
+    private val evidenceHash = "0x" + "ab".repeat(32)
+    private fun evidenceStatus(status: String, hash: String = evidenceHash, block: String? = null, confirmations: Int = 0) =
+        com.rjnr.pocketnode.data.gateway.models.TransactionStatusResponse(hash, status, confirmations, blockHash = block)
+
+    /** MockK double-boxes inline Result on this delegated suspend method. Return its
+     * underlying JVM payload at the external repository seam, not a boxed Result. */
+    @Suppress("UNCHECKED_CAST")
+    private fun statusReads(answer: suspend () -> com.rjnr.pocketnode.data.gateway.models.TransactionStatusResponse) {
+        val raw = coEvery { repository.getTransactionStatus(evidenceHash) } as io.mockk.MockKStubScope<Any?, Any?>
+        raw.coAnswers { answer() }
+    }
+
+    private suspend fun broadcastForStatusTest(): SendViewModel {
+        coEvery { repository.getCells() } throws kotlinx.coroutines.CancellationException("skip unrelated preview")
+        coEvery { repository.sendReviewed(any(), any(), any(), any()) } returns evidenceHash
+        val vm = newViewModel()
+        testDispatcher.scheduler.runCurrent()
+        vm.fillForm(); vm.sendTransaction()
+        testDispatcher.scheduler.runCurrent()
+        vm.confirmSend(foregroundActivity)
+        testDispatcher.scheduler.runCurrent()
+        assertEquals(evidenceHash, vm.uiState.value.txHash)
+        return vm
+    }
+
+    private fun disposeStatusTest(vm: SendViewModel) {
+        androidx.lifecycle.ViewModelStore().apply { put("status", vm); clear() }
+    }
+
+    @Test fun `status more than twenty unknowns never confirms despite balance movement`() = runTest(testDispatcher) {
+        statusReads { evidenceStatus("unknown") }
+        coEvery { repository.refreshBalance(any()) } returns Result.success(BalanceResponse(senderAddress, "0x1", "0.00000001", "0x2"))
+        val vm = broadcastForStatusTest()
+        try {
+            advanceTimeBy(25 * 3000L + 1)
+            assertEquals(TransactionState.PENDING, vm.uiState.value.transactionState)
+            assertEquals(evidenceHash, vm.uiState.value.txHash)
+            assertEquals(0, vm.uiState.value.confirmations)
+            coVerify(exactly = 25) { repository.getTransactionStatus(evidenceHash) }
+            coVerify(exactly = 1) { repository.sendReviewed(any(), any(), any(), any()) }
+        } finally { disposeStatusTest(vm); runCurrent() }
+    }
+
+    @Test fun `status timeout after fifteen unknowns preserves hash without declaring failure`() = runTest(testDispatcher) {
+        var reads = 0
+        statusReads {
+            reads++; evidenceStatus(if (reads <= 105) "pending" else "unknown")
+        }
+        val vm = broadcastForStatusTest()
+        try {
+            advanceTimeBy(123 * 3000L)
+            assertEquals("TIMED_OUT", vm.uiState.value.transactionState.name)
+            assertEquals(evidenceHash, vm.uiState.value.txHash)
+            assertEquals(0, vm.uiState.value.confirmations)
+            coVerify(exactly = 120) { repository.getTransactionStatus(evidenceHash) }
+        } finally { disposeStatusTest(vm); runCurrent() }
+    }
+
+    @Test fun `status unavailable then delayed inclusion alone confirms submitted hash`() = runTest(testDispatcher) {
+        var reads = 0
+        statusReads {
+            reads++
+            when {
+                reads <= 2 -> throw IllegalStateException("node unavailable")
+                reads <= 27 -> evidenceStatus("unknown")
+                else -> evidenceStatus("committed", block = "0x" + "bb".repeat(32), confirmations = 3)
+            }
+        }
+        val vm = broadcastForStatusTest()
+        try {
+            advanceTimeBy(27 * 3000L + 1)
+            assertEquals(TransactionState.PENDING, vm.uiState.value.transactionState)
+            advanceTimeBy(3000L)
+            assertEquals(TransactionState.CONFIRMED, vm.uiState.value.transactionState)
+            assertEquals(3, vm.uiState.value.confirmations)
+            assertEquals(evidenceHash, vm.uiState.value.txHash)
+            coVerify(exactly = 1) { repository.sendReviewed(any(), any(), any(), any()) }
+        } finally { disposeStatusTest(vm); runCurrent() }
+    }
+
+    @Test fun `status wrong hash or missing inclusion cannot confirm`() = runTest(testDispatcher) {
+        var reads = 0
+        statusReads {
+            reads++
+            if (reads == 1) evidenceStatus("committed", hash = "0xother", block = "0x" + "bb".repeat(32), confirmations = 3)
+            else evidenceStatus("committed", confirmations = 3)
+        }
+        val vm = broadcastForStatusTest()
+        try {
+            advanceTimeBy(121 * 3000L)
+            assertEquals("TIMED_OUT", vm.uiState.value.transactionState.name)
+            assertEquals(evidenceHash, vm.uiState.value.txHash)
+            assertEquals(0, vm.uiState.value.confirmations)
+        } finally { disposeStatusTest(vm); runCurrent() }
+    }
+
+    @Test fun `status explicit rejection is terminal and retains original hash`() = runTest(testDispatcher) {
+        statusReads { evidenceStatus("rejected") }
+        val vm = broadcastForStatusTest()
+        try {
+            advanceTimeBy(125 * 3000L)
+            assertEquals(TransactionState.FAILED, vm.uiState.value.transactionState)
+            assertEquals(evidenceHash, vm.uiState.value.txHash)
+            assertEquals(0, vm.uiState.value.confirmations)
+            coVerify(exactly = 1) { repository.getTransactionStatus(evidenceHash) }
+        } finally { disposeStatusTest(vm); runCurrent() }
+    }
+
+    @Test fun `status cancelled read cannot overwrite cleared state or cause another broadcast`() = runTest(testDispatcher) {
+        val entered = kotlinx.coroutines.CompletableDeferred<Unit>()
+        statusReads {
+            entered.complete(Unit)
+            kotlinx.coroutines.awaitCancellation()
+        }
+        val vm = broadcastForStatusTest()
+        try {
+            advanceTimeBy(3001L)
+            assertTrue(entered.isCompleted)
+            vm.clearTxHash(); runCurrent()
+            advanceTimeBy(125 * 3000L)
+            assertEquals(TransactionState.IDLE, vm.uiState.value.transactionState)
+            assertNull(vm.uiState.value.txHash)
+            coVerify(exactly = 1) { repository.getTransactionStatus(evidenceHash) }
+            coVerify(exactly = 1) { repository.sendReviewed(any(), any(), any(), any()) }
+        } finally { disposeStatusTest(vm); runCurrent() }
+    }
+
+    @Test fun `status retry resumes unavailable hash without signing or broadcasting twice`() = runTest(testDispatcher) {
+        var available = false
+        statusReads {
+            if (!available) throw IllegalStateException("bridge unavailable")
+            evidenceStatus("committed", block = "0x" + "bb".repeat(32), confirmations = 3)
+        }
+        val vm = broadcastForStatusTest()
+        try {
+            advanceTimeBy(121 * 3000L)
+            assertEquals("TIMED_OUT", vm.uiState.value.transactionState.name)
+            assertEquals(evidenceHash, vm.uiState.value.txHash)
+            available = true
+            vm.retryStatusCheck(); vm.retryStatusCheck(); runCurrent()
+            advanceTimeBy(3001L)
+            assertEquals(TransactionState.CONFIRMED, vm.uiState.value.transactionState)
+            assertEquals(evidenceHash, vm.uiState.value.txHash)
+            assertEquals(3, vm.uiState.value.confirmations)
+            coVerify(exactly = 121) { repository.getTransactionStatus(evidenceHash) }
+            coVerify(exactly = 1) { repository.sendReviewed(any(), any(), any(), any()) }
+            coVerify(exactly = 1) { walletKeyReader.readPrivateKey(any(), any(), any(), any()) }
+        } finally { disposeStatusTest(vm); runCurrent() }
+    }
+
+    @Test fun `status retry refuses a different wallet without new reads or broadcast`() = runTest(testDispatcher) {
+        statusReads { evidenceStatus("unknown") }
+        val vm = broadcastForStatusTest()
+        try {
+            advanceTimeBy(121 * 3000L)
+            assertEquals("TIMED_OUT", vm.uiState.value.transactionState.name)
+            every { walletRepository.activeWalletIdSnapshot() } returns "other-wallet"
+            vm.retryStatusCheck(); runCurrent(); advanceTimeBy(6001L)
+            assertEquals("TIMED_OUT", vm.uiState.value.transactionState.name)
+            assertEquals(evidenceHash, vm.uiState.value.txHash)
+            coVerify(exactly = 120) { repository.getTransactionStatus(evidenceHash) }
+            coVerify(exactly = 1) { repository.sendReviewed(any(), any(), any(), any()) }
+        } finally { disposeStatusTest(vm); runCurrent() }
+    }
+
+    @Test fun `status late inclusion read cannot overwrite cancellation`() = runTest(testDispatcher) {
+        val release = kotlinx.coroutines.CompletableDeferred<Unit>()
+        statusReads {
+            kotlinx.coroutines.withContext(kotlinx.coroutines.NonCancellable) {
+                release.await()
+                evidenceStatus("committed", block = "0x" + "bb".repeat(32), confirmations = 1)
+            }
+        }
+        val vm = broadcastForStatusTest()
+        try {
+            advanceTimeBy(3001L)
+            vm.clearTxHash(); release.complete(Unit); runCurrent()
+            assertEquals(TransactionState.IDLE, vm.uiState.value.transactionState)
+            assertEquals(0, vm.uiState.value.confirmations)
+            assertEquals("", vm.uiState.value.statusMessage)
+            assertNull(vm.uiState.value.txHash)
+            coVerify(exactly = 1) { repository.getTransactionStatus(evidenceHash) }
+        } finally { release.complete(Unit); disposeStatusTest(vm); runCurrent() }
+    }
+
+    @Test fun `status late balance read cannot rewrite cleared progress`() = runTest(testDispatcher) {
+        statusReads { evidenceStatus("committed", block = "0x" + "bb".repeat(32), confirmations = 3) }
+        val release = kotlinx.coroutines.CompletableDeferred<Unit>()
+        coEvery { repository.refreshBalance(any()) } coAnswers {
+            kotlinx.coroutines.withContext(kotlinx.coroutines.NonCancellable) {
+                release.await()
+                Result.success(BalanceResponse(senderAddress, "0x1", "0.00000001", "0x2"))
+            }
+        }
+        val vm = broadcastForStatusTest()
+        try {
+            advanceTimeBy(6001L)
+            vm.clearTxHash(); release.complete(Unit); runCurrent()
+            assertEquals(TransactionState.IDLE, vm.uiState.value.transactionState)
+            assertEquals("", vm.uiState.value.statusMessage)
+            assertNull(vm.uiState.value.txHash)
+        } finally { release.complete(Unit); disposeStatusTest(vm); runCurrent() }
+    }
+
+    private suspend fun retryRefusesChangedSource(change: () -> Unit) {
+        statusReads { evidenceStatus("unknown") }
+        val vm = broadcastForStatusTest()
+        try {
+            testDispatcher.scheduler.advanceTimeBy(121 * 3000L)
+            assertEquals("TIMED_OUT", vm.uiState.value.transactionState.name)
+            change()
+            vm.retryStatusCheck(); testDispatcher.scheduler.runCurrent()
+            testDispatcher.scheduler.advanceTimeBy(6001L)
+            assertEquals("TIMED_OUT", vm.uiState.value.transactionState.name)
+            assertEquals(evidenceHash, vm.uiState.value.txHash)
+            coVerify(exactly = 120) { repository.getTransactionStatus(evidenceHash) }
+            coVerify(exactly = 1) { repository.sendReviewed(any(), any(), any(), any()) }
+        } finally { disposeStatusTest(vm); testDispatcher.scheduler.runCurrent() }
+    }
+
+    @Test fun `status retry refuses changed native network before UI catches up`() = runTest(testDispatcher) {
+        retryRefusesChangedSource { every { repository.currentNetwork } returns NetworkType.MAINNET }
+    }
+
+    @Test fun `status retry refuses changed sender on the same wallet`() = runTest(testDispatcher) {
+        retryRefusesChangedSource { every { repository.getCurrentAddress() } returns recipient }
+    }
+
+    @Test fun `status bridge cancellation retains pending hash and stops further reads`() = runTest(testDispatcher) {
+        statusReads { throw kotlinx.coroutines.CancellationException("stop status check") }
+        val vm = broadcastForStatusTest()
+        try {
+            advanceTimeBy(125 * 3000L)
+            assertEquals(TransactionState.PENDING, vm.uiState.value.transactionState)
+            assertEquals(evidenceHash, vm.uiState.value.txHash)
+            assertEquals(0, vm.uiState.value.confirmations)
+            coVerify(exactly = 1) { repository.getTransactionStatus(evidenceHash) }
+            coVerify(exactly = 1) { repository.sendReviewed(any(), any(), any(), any()) }
+        } finally { disposeStatusTest(vm); runCurrent() }
     }
 
 }
