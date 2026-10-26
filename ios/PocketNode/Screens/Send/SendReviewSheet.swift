@@ -29,12 +29,19 @@ struct SendReviewSheet: View {
                     .foregroundStyle(.secondary)
                     .padding(.top, 4)
 
-                row(
-                    label: "Recipient",
-                    value: Self.truncate(review.recipient),
-                    monospaced: true,
-                    identifier: "review.recipient"
-                )
+                VStack(alignment: .leading, spacing: 8) {
+                    Text("Recipient")
+                        .font(.subheadline)
+                        .foregroundStyle(.secondary)
+                    Text(review.recipient)
+                        .font(.subheadline.weight(.medium))
+                        .fontDesign(.monospaced)
+                        .lineLimit(nil)
+                        .fixedSize(horizontal: false, vertical: true)
+                        .textSelection(.enabled)
+                        .accessibilityIdentifier("review.recipient")
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
                 .padding(.top, 20)
 
                 row(
@@ -134,12 +141,6 @@ struct SendReviewSheet: View {
                 .multilineTextAlignment(.trailing)
                 .accessibilityIdentifier(identifier)
         }
-    }
-
-    /// The same 10 and 6 the activity list truncates to.
-    static func truncate(_ address: String) -> String {
-        guard address.count > 20 else { return address }
-        return "\(address.prefix(10))...\(address.suffix(6))"
     }
 }
 

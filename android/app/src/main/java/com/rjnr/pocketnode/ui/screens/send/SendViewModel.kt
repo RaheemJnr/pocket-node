@@ -67,7 +67,7 @@ private data class BulkParseResult(
 data class SendReview(
     val isBulk: Boolean,
     val transfers: List<ReviewedTransfer> = emptyList(),
-    /** Empty in bulk mode — [recipientCount] carries the payload instead. */
+    /** Empty in bulk mode; the full ordered recipients are in [transfers]. */
     val recipientAddress: String,
     /** Address-book name for [recipientAddress], when the address is saved. */
     val recipientName: String?,
