@@ -146,6 +146,7 @@ class SendPipeline(
         fromAddress: String,
         recipients: List<RecipientOutput>,
     ): TransferPlan {
+        recipients.forEach { DestinationPolicy.requireRecipient(it, ctx.network) }
         val senderNetwork = ctx.network
         val walletId = ctx.walletId
         return sendMutex.withLock {
@@ -198,6 +199,7 @@ class SendPipeline(
         onSigned: () -> Unit = {},
     ): Result<String> = runCatching {
         val recipients = listOf(RecipientOutput(toAddress, amountShannons))
+        recipients.forEach { DestinationPolicy.requireRecipient(it, ctx.network) }
         buildReserveAndSend(ctx, fromAddress) { cells, net ->
             verifyExpectedFee(recipients, cells, expectedFeeShannons)
             val prepared = transactionBuilder.prepareMultiTransfer(fromAddress, recipients, cells, net)
@@ -211,6 +213,7 @@ class SendPipeline(
     @Throws(Throwable::class)
     suspend fun previewBatches(ctx: SendContext, fromAddress: String, batches: List<List<RecipientOutput>>): List<Long> =
         sendMutex.withLock {
+            batches.flatten().forEach { DestinationPolicy.requireRecipient(it, ctx.network) }
             var cells = resolveSpendableCells(fromAddress, ctx.network, ctx.walletId, ctx.network.name)
             val sender = requireNotNull(AddressUtils.parseAddress(fromAddress))
             batches.map { recipients ->
@@ -287,6 +290,7 @@ class SendPipeline(
         signer: Signer,
     ): Result<String> = runCatching {
         val frozenRecipients = recipients.map { it.copy() }
+        frozenRecipients.forEach { DestinationPolicy.requireRecipient(it, ctx.network) }
         val txHash = buildReserveAndSend(ctx, fromAddress) { cells, net ->
             val prepared = transactionBuilder.prepareMultiTransfer(fromAddress, frozenRecipients, cells, net)
             val fee = transactionBuilder.planTransfer(frozenRecipients, cells).feeShannons

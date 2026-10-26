@@ -140,6 +140,40 @@ class SendPipelineTest {
     private fun signer() = PrivateKeySigner(TEST_KEY.copyOf())
 
 
+    @Test fun contradictoryDestinationIsRejectedBySingleBulkPreviewAndReviewedEntryPoints() = runTest {
+        val malformed = AddressUtils.encode(FROM_SCRIPT.copy(hashType = "data"), NetworkType.TESTNET)
+        val recipients = listOf(RecipientOutput(malformed, 100_00000000L))
+        val pipeline = pipelineOver(api())
+        kotlin.test.assertFailsWith<IllegalArgumentException> { pipeline.previewTransfer(ctx(this), FROM_ADDRESS, recipients) }
+        kotlin.test.assertFailsWith<IllegalArgumentException> { pipeline.previewBatches(ctx(this), FROM_ADDRESS, listOf(recipients)) }
+        assertTrue(pipeline.prepareAndSend(ctx(this), FROM_ADDRESS, malformed, 100_00000000L, signer()).exceptionOrNull() is IllegalArgumentException)
+        assertTrue(pipeline.prepareAndSendBulk(ctx(this), FROM_ADDRESS, recipients, signer()).exceptionOrNull() is IllegalArgumentException)
+        kotlin.test.assertFailsWith<IllegalArgumentException> {
+            ReviewedTransfer(WALLET, FROM_ADDRESS, NetworkType.TESTNET, recipients, 1000, 1)
+        }
+        assertTrue(broadcasts.byHash.isEmpty())
+    }
+
+    @Test fun customDestinationStaysSendableThroughSingleBulkAndReviewedPaths() = runTest {
+        val customScript = FROM_SCRIPT.copy(codeHash = "0x" + "42".repeat(32), hashType = "data2")
+        val custom = AddressUtils.encode(customScript, NetworkType.TESTNET)
+        val outputs = listOf(RecipientOutput(custom, 100_00000000L))
+        val plan = pipelineOver(api()).previewTransfer(ctx(backgroundScope), FROM_ADDRESS, outputs)
+        for (mode in 0..2) {
+            val store = FakePendingBroadcastStore()
+            val pipeline = pipelineOver(api(sendAnswer = "\"$PENDING_HASH\""), store)
+            val hash = when (mode) {
+                0 -> pipeline.prepareAndSend(ctx(backgroundScope), FROM_ADDRESS, custom, 100_00000000L, signer()).getOrThrow()
+                1 -> pipeline.prepareAndSendBulk(ctx(backgroundScope), FROM_ADDRESS, outputs, signer()).getOrThrow()
+                else -> pipeline.sendReviewed(ctx(backgroundScope),
+                    ReviewedTransfer(WALLET, FROM_ADDRESS, NetworkType.TESTNET, outputs, plan.feeShannons, 1), signer(), { true })
+            }
+            val sent = json.decodeFromString<Transaction>(assertNotNull(store.byHash[hash]).signedTxJson)
+            assertEquals(customScript, sent.cellOutputs.first().lock)
+            assertEquals(100_00000000L, sent.cellOutputs.first().capacity.removePrefix("0x").toLong(16))
+        }
+    }
+
     @Test fun cancellationAtBroadcastPreservesExactPendingSignedTransaction() = runTest {
         val bridge = object : FakeLightClientApi() {
             override fun sendTransaction(txJson: String): String? {

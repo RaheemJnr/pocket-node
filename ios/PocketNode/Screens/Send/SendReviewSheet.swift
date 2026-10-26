@@ -44,6 +44,15 @@ struct SendReviewSheet: View {
                 .frame(maxWidth: .infinity, alignment: .leading)
                 .padding(.top, 20)
 
+                if let guidance = review.destinationGuidance {
+                    Text(guidance)
+                        .font(.footnote)
+                        .foregroundStyle(Theme.pendingAmber)
+                        .fixedSize(horizontal: false, vertical: true)
+                        .padding(.top, 8)
+                        .accessibilityIdentifier("review.destinationGuidance")
+                }
+
                 row(
                     label: "Amount",
                     value: "\(formatCkbAmount(shannons: review.amountShannons, groupSeparator: ",", decimalSeparator: ".")) CKB",

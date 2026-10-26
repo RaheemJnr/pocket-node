@@ -45,7 +45,7 @@ final class SendViewModelTests: XCTestCase {
     func testAnAddressOnTheSelectedNetworkReadsAsValid() {
         model.updateRecipient(SendFixtures.testnetAddress)
 
-        XCTAssertEqual(model.addressIndicator?.message, "Valid CKB testnet address")
+        XCTAssertEqual(model.addressIndicator?.message, "Recognized address format")
         XCTAssertEqual(model.addressIndicator?.isProblem, false)
     }
 
@@ -70,6 +70,29 @@ final class SendViewModelTests: XCTestCase {
             model.addressIndicator?.message,
             "This is a testnet address on mainnet"
         )
+    }
+
+    func testCustomDestinationWarnsInEntryAndFrozenReviewWithoutBlocking() async throws {
+        let custom = AddressUtils.shared.encode(script: Script(codeHash: "0x" + String(repeating: "42", count: 32), hashType: "data2", args: "0x" + String(repeating: "11", count: 20)), network: .testnet)
+        model.updateRecipient(custom)
+        model.updateAmount("100")
+        XCTAssertEqual(model.addressIndicator?.message, DestinationPolicy.shared.CUSTOM_GUIDANCE)
+        XCTAssertEqual(model.addressIndicator?.isProblem, true)
+        await model.submit()
+        let review = try XCTUnwrap(model.review)
+        XCTAssertEqual(review.intent.destinationAssessments.first?.message, DestinationPolicy.shared.CUSTOM_GUIDANCE)
+        XCTAssertEqual(review.destinationGuidance, DestinationPolicy.shared.CUSTOM_GUIDANCE)
+        XCTAssertTrue(service.sendCalls.isEmpty)
+    }
+
+    func testContradictoryBuiltinDoesNotOpenReview() async {
+        let bad = AddressUtils.shared.encode(script: Script(codeHash: Script.companion.SECP256K1_CODE_HASH, hashType: "data", args: "0x" + String(repeating: "11", count: 20)), network: .testnet)
+        model.updateRecipient(bad)
+        model.updateAmount("100")
+        await model.submit()
+        XCTAssertNil(model.review)
+        XCTAssertNotNil(model.alert)
+        XCTAssertTrue(service.sendCalls.isEmpty)
     }
 
     // MARK: - Amount entry

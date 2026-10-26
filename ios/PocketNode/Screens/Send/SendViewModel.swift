@@ -11,6 +11,7 @@ enum AddressIndicator: Equatable {
     case invalid
     case wrongNetwork(scanned: String, selected: String)
     case valid(network: String)
+    case policy(message: String, canSend: Bool)
 
     var message: String {
         switch self {
@@ -18,8 +19,10 @@ enum AddressIndicator: Equatable {
             return "Invalid address format"
         case let .wrongNetwork(scanned, selected):
             return "This is a \(scanned) address on \(selected)"
-        case let .valid(network):
-            return "Valid CKB \(network) address"
+        case .valid:
+            return "Recognized address format"
+        case let .policy(message, _):
+            return message
         }
     }
 
@@ -44,6 +47,10 @@ struct SendReview: Equatable {
     let sweep: SweepNotice?
 
     var totalShannons: Int64 { amountShannons + feeShannons }
+    var destinationGuidance: String? {
+        guard let assessment = intent.destinationAssessments.first, assessment.isCustom else { return nil }
+        return assessment.message
+    }
 }
 
 /// The leave-something-behind warning, already worded.
@@ -245,6 +252,10 @@ final class SendViewModel {
                 scanned: Self.name(of: scanned),
                 selected: Self.name(of: selected)
             )
+        }
+        let assessment = DestinationPolicy.shared.assess(address: trimmed, network: selected)
+        if assessment.isCustom || !assessment.canSend {
+            return .policy(message: assessment.message, canSend: assessment.canSend)
         }
         return .valid(network: Self.name(of: selected))
     }
@@ -470,6 +481,11 @@ final class SendViewModel {
     private func validate() -> Int64? {
         if recipient.isEmpty {
             alert = SendAlert(message: "Please enter recipient address", detail: nil, canRetry: false)
+            return nil
+        }
+        let assessment = DestinationPolicy.shared.assess(address: recipient, network: network)
+        guard assessment.canSend else {
+            alert = SendAlert(message: assessment.message, detail: nil, canRetry: false)
             return nil
         }
         if amount.isEmpty {

@@ -99,6 +99,32 @@ class SendReviewSheetTest {
         rule.onNodeWithText("Cancel").assertIsDisplayed()
     }
 
+    @Test fun `custom entry indicator gives guidance without claiming validity`() {
+        val custom = AddressUtils.encode(Script("0x" + "42".repeat(32), "data2", "0x" + "11".repeat(20)), NetworkType.TESTNET)
+        rule.setContent { MaterialTheme { AddressValidationIndicator(custom, NetworkType.TESTNET) } }
+        rule.onNodeWithText(com.rjnr.pocketnode.data.send.DestinationPolicy.CUSTOM_GUIDANCE).assertIsDisplayed()
+    }
+
+    @Test fun `single review displays custom guidance from its frozen transfer`() {
+        val custom = AddressUtils.encode(Script("0x" + "42".repeat(32), "data2", "0x" + "11".repeat(20)), NetworkType.TESTNET)
+        val intent = ReviewedTransfer("fixture", address(0x55), NetworkType.TESTNET,
+            listOf(RecipientOutput(custom, 100_00000000L)), 1000, 1)
+        rule.setContent { MaterialTheme { SendReviewSheet(review(custom).copy(transfers = listOf(intent)), {}, {}) } }
+        assertFullWrappedAddress(custom)
+        rule.onNodeWithText(com.rjnr.pocketnode.data.send.DestinationPolicy.CUSTOM_GUIDANCE).performScrollTo().assertIsDisplayed()
+    }
+
+    @Test fun `custom guidance follows each frozen recipient in bulk review`() {
+        val custom = AddressUtils.encode(Script("0x" + "42".repeat(32), "data2", "0x" + "11".repeat(20)), NetworkType.TESTNET)
+        val outputs = listOf(RecipientOutput(address(0x22), 100_00000000L), RecipientOutput(custom, 100_00000000L))
+        val intent = ReviewedTransfer("fixture", address(0x55), NetworkType.TESTNET, outputs, 1000, 1, true)
+        val frozen = SendReview(isBulk = true, transfers = listOf(intent), recipientAddress = "", recipientName = null,
+            recipientCount = 2, amountShannons = 200_00000000L, feeShannons = 1000, totalShannons = 200_00001000L)
+        rule.setContent { MaterialTheme { SendReviewSheet(frozen, {}, {}) } }
+        assertFullWrappedAddress(custom)
+        rule.onNodeWithText(com.rjnr.pocketnode.data.send.DestinationPolicy.CUSTOM_GUIDANCE).performScrollTo().assertIsDisplayed()
+    }
+
     @Test fun `every frozen bulk recipient and individual amount can be inspected across batches`() {
         val recipients = (1..8).map { RecipientOutput(address(it), (100L + it) * 100_000_000) }
         val batches = recipients.chunked(3).map {

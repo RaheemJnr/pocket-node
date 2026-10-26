@@ -1,5 +1,6 @@
 package com.rjnr.pocketnode.ui.screens.send
 
+import com.rjnr.pocketnode.data.send.DestinationAssessment
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
@@ -97,17 +98,20 @@ fun SendReviewSheet(
                 )
                 // Use the same frozen ordered outputs that will be signed,
                 // including recipients from every batch.
-                review.transfers.flatMap { it.recipients }.forEach { recipient ->
-                    Spacer(Modifier.height(16.dp))
-                    ReviewRecipient(address = recipient.address)
-                    Spacer(Modifier.height(8.dp))
-                    ReviewRow(
-                        label = stringResource(R.string.send_review_amount),
-                        value = stringResource(R.string.send_review_ckb, formatReviewCkb(recipient.amountShannons)),
-                    )
+                review.transfers.forEach { transfer ->
+                    transfer.recipients.forEachIndexed { index, recipient ->
+                        Spacer(Modifier.height(16.dp))
+                        ReviewRecipient(address = recipient.address, assessment = transfer.destinationAssessments[index])
+                        Spacer(Modifier.height(8.dp))
+                        ReviewRow(
+                            label = stringResource(R.string.send_review_amount),
+                            value = stringResource(R.string.send_review_ckb, formatReviewCkb(recipient.amountShannons)),
+                        )
+                    }
                 }
             } else {
-                ReviewRecipient(address = review.recipientAddress, name = review.recipientName)
+                ReviewRecipient(address = review.recipientAddress, name = review.recipientName,
+                    assessment = review.transfers.singleOrNull()?.destinationAssessments?.singleOrNull())
             }
 
             Spacer(Modifier.height(12.dp))
@@ -234,7 +238,7 @@ private fun SweepWarning(
 
 /** Keep the destination on its own full-width line, even for a named contact. */
 @Composable
-private fun ReviewRecipient(address: String, name: String? = null) {
+private fun ReviewRecipient(address: String, name: String? = null, assessment: DestinationAssessment? = null) {
     Column(modifier = Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(8.dp)) {
         Text(
             text = stringResource(R.string.send_review_recipient),
@@ -251,6 +255,10 @@ private fun ReviewRecipient(address: String, name: String? = null) {
                 fontFamily = FontFamily.Monospace,
                 modifier = Modifier.fillMaxWidth(),
             )
+        }
+        if (assessment?.isCustom == true) {
+            Text(assessment.message, style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.error)
         }
     }
 }

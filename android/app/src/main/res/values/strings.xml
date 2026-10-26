@@ -536,7 +536,7 @@
     <string name="send_bulk_cta">Send Bulk Airdrop</string>
     <string name="send_bulk_recipients_label">Recipient Addresses</string>
     <string name="send_bulk_recipients_placeholder">Paste one CKB address per line</string>
-    <string name="send_bulk_summary">%1$d valid · %2$d duplicates removed · %3$d invalid · %4$d batches</string>
+    <string name="send_bulk_summary">%1$d recipients · %2$d duplicates removed · %3$d invalid · %4$d batches</string>
     <string name="send_bulk_total_amount">Total send amount: %1$s CKB</string>
     <!-- #490: pre-broadcast review sheet -->
     <string name="send_review_title">Review transaction</string>

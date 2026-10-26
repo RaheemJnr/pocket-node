@@ -1,5 +1,6 @@
 package com.rjnr.pocketnode.data.transaction
 
+import com.rjnr.pocketnode.data.send.DestinationPolicy
 import com.rjnr.pocketnode.core.crypto.Blake2b
 import com.rjnr.pocketnode.core.crypto.Secp256k1Signer
 import com.rjnr.pocketnode.core.crypto.hexToByteArray
@@ -319,6 +320,7 @@ class TransactionBuilder(
         availableCells: List<Cell>,
     ): TransferPlan {
         require(recipients.isNotEmpty()) { "At least one recipient is required" }
+        recipients.forEach { DestinationPolicy.requireRecipient(it) }
         val totalRecipientAmount = recipients.sumOf { it.amountShannons }
 
         // Select cells with generous fee to ensure we gather enough inputs
@@ -412,8 +414,7 @@ class TransactionBuilder(
             ?: throw IllegalArgumentException("Invalid sender address")
 
         val recipientScripts = recipients.map { recipient ->
-            val script = AddressUtils.parseAddress(recipient.address)
-                ?: throw IllegalArgumentException("Invalid recipient address")
+            val script = DestinationPolicy.requireRecipient(recipient, network)
             networkValidator.validateTransferAddresses(fromAddress, recipient.address, network)
                 .getOrThrow()
             script

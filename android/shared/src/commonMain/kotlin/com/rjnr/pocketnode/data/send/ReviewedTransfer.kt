@@ -20,7 +20,10 @@ class ReviewedTransfer @Throws(Throwable::class) constructor(
 ) {
     val sourceScript: Script = requireNotNull(AddressUtils.parseAddress(fromAddress)) { "Invalid sender address" }
     private val outputs = recipients.map { it.copy() }
-    private val scripts = outputs.map { requireNotNull(AddressUtils.parseAddress(it.address)) { "Invalid recipient address" } }
+    private val scripts = outputs.map { DestinationPolicy.requireRecipient(it, network) }
+    /** One immutable classification per ordered recipient, captured with the approved outputs. */
+    private val assessments = outputs.map { DestinationPolicy.assess(it.address, network) }
+    val destinationAssessments: List<DestinationAssessment> get() = assessments.toList()
     val recipients: List<RecipientOutput> get() = outputs.toList()
     val amountShannons: Long = outputs.fold(0L) { total, output ->
         require(output.amountShannons >= TransactionBuilder.MIN_CELL_CAPACITY)

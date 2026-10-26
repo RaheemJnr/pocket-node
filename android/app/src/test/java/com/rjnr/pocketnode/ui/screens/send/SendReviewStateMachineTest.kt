@@ -174,6 +174,28 @@ class SendReviewStateMachineTest {
         updateAmount(amount)
     }
 
+    @Test fun `single and bulk reject contradictory locks while custom review preserves guidance`() = runTest(testDispatcher) {
+        val bad = com.rjnr.pocketnode.data.wallet.AddressUtils.encode(
+            Script(Script.SECP256K1_CODE_HASH, "data", "0x" + "bb".repeat(20)), NetworkType.TESTNET)
+        val custom = com.rjnr.pocketnode.data.wallet.AddressUtils.encode(
+            Script("0x" + "42".repeat(32), "data2", "0x" + "bb".repeat(20)), NetworkType.TESTNET)
+        coEvery { repository.getCells() } throws kotlinx.coroutines.CancellationException("public fixture skips unrelated cell-count preview")
+        val vm = newViewModel(); advanceUntilIdle()
+        try {
+            vm.updateRecipient(bad); vm.updateAmount("100"); vm.sendTransaction(); advanceUntilIdle()
+            assertNull(vm.uiState.value.reviewRequest)
+            assertNotNull(vm.uiState.value.error)
+            coVerify(exactly = 0) { repository.previewTransfer(any(), any()) }
+            vm.updateRecipient(custom); vm.sendTransaction(); advanceUntilIdle()
+            val transfer = vm.uiState.value.reviewRequest!!.transfers.single()
+            assertTrue(transfer.destinationAssessments.single().isCustom)
+            assertEquals(custom, transfer.recipients.single().address)
+            vm.updateSendMode(SendMode.BULK); vm.updateBulkRecipients("$bad\n$custom"); advanceUntilIdle()
+            assertEquals(listOf(custom), vm.uiState.value.bulkValidRecipients)
+            assertTrue(vm.uiState.value.bulkInvalidEntries.single().contains("Invalid built-in lock parameters"))
+        } finally { androidx.lifecycle.ViewModelStore().apply { put("test", vm); clear() } }
+    }
+
     @Test
     fun `auth off - send shows review and broadcasts nothing`() = runTest(testDispatcher) {
         every { authManager.isAuthBeforeSendEnabled() } returns false

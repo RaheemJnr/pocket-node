@@ -1,5 +1,6 @@
 package com.rjnr.pocketnode.ui.screens.send
 
+import com.rjnr.pocketnode.data.send.DestinationPolicy
 import androidx.fragment.app.FragmentActivity
 import com.rjnr.pocketnode.core.log.Logger
 import androidx.lifecycle.ViewModel
@@ -686,6 +687,11 @@ class SendViewModel @Inject constructor(
             _uiState.update { it.copy(error = com.rjnr.pocketnode.ui.util.UiMessage.Resource(com.rjnr.pocketnode.R.string.vm_error_enter_recipient)) }
             return false
         }
+        val destination = DestinationPolicy.assess(state.recipientAddress, state.networkType)
+        if (!destination.canSend) {
+            _uiState.update { it.copy(error = com.rjnr.pocketnode.ui.util.UiMessage.Raw(destination.message)) }
+            return false
+        }
         if (state.amountCkb.isBlank()) {
             _uiState.update { it.copy(error = com.rjnr.pocketnode.ui.util.UiMessage.Resource(com.rjnr.pocketnode.R.string.vm_error_enter_amount)) }
             return false
@@ -1232,6 +1238,7 @@ class SendViewModel @Inject constructor(
             when {
                 !AddressUtils.isValid(line) -> invalid += "Line ${index + 1}: invalid address"
                 AddressUtils.getNetwork(line) != network -> invalid += "Line ${index + 1}: wrong network"
+                !DestinationPolicy.assess(line, network).canSend -> invalid += "Line ${index + 1}: ${DestinationPolicy.assess(line, network).message}"
                 !unique.add(line) -> duplicates++
             }
         }

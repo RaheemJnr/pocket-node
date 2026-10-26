@@ -1,5 +1,7 @@
 package com.rjnr.pocketnode.ui.screens.send
 
+import com.rjnr.pocketnode.data.send.DestinationPolicy
+import com.rjnr.pocketnode.data.send.DestinationKind
 import android.content.Intent
 import android.net.Uri
 import com.rjnr.pocketnode.data.auth.AuthMethod
@@ -583,6 +585,14 @@ private fun SendScreenUI(
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant
                 )
+                uiState.bulkInvalidEntries.forEach { reason ->
+                    Text(reason, style = MaterialTheme.typography.bodySmall, color = ColorInvalidRed)
+                }
+                val customCount = uiState.bulkValidRecipients.count { DestinationPolicy.assess(it, uiState.networkType).isCustom }
+                if (customCount > 0) {
+                    Text("$customCount custom recipients. ${DestinationPolicy.CUSTOM_GUIDANCE}",
+                        style = MaterialTheme.typography.bodySmall, color = ColorWarnAmber)
+                }
                 if (uiState.bulkValidRecipients.isNotEmpty() && uiState.amountCkb.isNotBlank()) {
                     Spacer(modifier = Modifier.height(6.dp))
                     Text(
@@ -838,28 +848,13 @@ fun AddressValidationIndicator(
 ) {
     if (address.isBlank()) return
 
-    val (isValid, addressNetwork) = remember(address) {
-        val valid = AddressUtils.isValid(address)
-        Pair(valid, if (valid) AddressUtils.getNetwork(address) else null)
+    val assessment = remember(address, currentNetwork) { DestinationPolicy.assess(address, currentNetwork) }
+    val (symbol, color) = when (assessment.kind) {
+        DestinationKind.INVALID_FORMAT, DestinationKind.KNOWN_INVALID -> Lucide.X to ColorInvalidRed
+        DestinationKind.WRONG_NETWORK, DestinationKind.CUSTOM -> Lucide.TriangleAlert to ColorWarnAmber
+        DestinationKind.RECOGNIZED -> Lucide.Check to MaterialTheme.colorScheme.primary
     }
-
-    val (symbol, message, color) = when {
-        !isValid -> Triple(Lucide.X, "Invalid address format", ColorInvalidRed)
-        addressNetwork != null && addressNetwork != currentNetwork -> {
-            val networkLabel = if (addressNetwork == NetworkType.TESTNET) "testnet" else "mainnet"
-            Triple(
-                Lucide.TriangleAlert,
-                "This is a $networkLabel address on ${currentNetwork.name.lowercase()}",
-                ColorWarnAmber
-            )
-        }
-
-        else -> Triple(
-            Lucide.Check,
-            "Valid CKB ${currentNetwork.name.lowercase()} address",
-            MaterialTheme.colorScheme.primary
-        )
-    }
+    val message = assessment.message
     // Validation
     Row(
         modifier = Modifier.padding(top = 8.dp, start = 4.dp),
