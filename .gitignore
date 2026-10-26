@@ -239,7 +239,10 @@ CLAUDE.md
 *.temp
 *.orig
 .vercel
+# Superpowers working notes are local only; never force-add these paths.
 .superpowers/
+.superpower/
+/docs/superpowers/
 
 # Room schema dumps re-enabled and committed under android/app/schemas/ (#149).
 android/app/src/debug/assets/
