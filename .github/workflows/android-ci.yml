@@ -18,29 +18,32 @@ jobs:
     timeout-minutes: 60
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      - name: Validate Gradle wrapper
+        uses: gradle/actions/wrapper-validation@ed408507eac070d1f99cc633dbcf757c94c7933a # v4
 
       - name: Set up JDK 17
-        uses: actions/setup-java@v4
+        uses: actions/setup-java@cf277c60eb25467037889841efdb72551f06f6c3 # v4
         with:
           java-version: '17'
           distribution: 'temurin'
 
       - name: Setup Android SDK
-        uses: android-actions/setup-android@v3
+        uses: android-actions/setup-android@9fc6c4e9069bf8d3d10b2204b1fb8f6ef7065407 # v3
         with:
           # The legacy 'tools' package (the action's default) no longer exists in
           # cmdline-tools 16+ on the GitHub runner image; only platform-tools is needed.
           packages: platform-tools
 
       - name: Cache Gradle
-        uses: actions/cache@v4
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
         with:
           path: |
             ~/.gradle/caches
             ~/.gradle/wrapper
-          key: gradle-${{ hashFiles('android/**/*.gradle.kts', 'android/gradle/libs.versions.toml') }}
-          restore-keys: gradle-
+          key: ci-android-ci-${{ runner.os }}-gradle-${{ hashFiles('android/**/*.gradle.kts', 'android/gradle/libs.versions.toml', 'android/gradle/verification-metadata.xml', 'android/gradle/wrapper/gradle-wrapper.properties') }}
+          restore-keys: ci-android-ci-${{ runner.os }}-gradle-
 
       # This job validates Kotlin compilation and unit tests. Native release
       # ABI compilation remains a separate mobile integration check.
@@ -76,7 +79,7 @@ jobs:
 
       - name: Upload test results
         if: failure()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: test-results
           path: |
@@ -89,21 +92,21 @@ jobs:
     timeout-minutes: 30
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
 
       - name: Install pinned Rust toolchain
         working-directory: external/ckb-light-client
         run: rustup show
 
       - name: Cache Cargo
-        uses: actions/cache@v4
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
         with:
           path: |
             ~/.cargo/registry
             ~/.cargo/git
             external/ckb-light-client/target
-          key: cargo-rust-tests-${{ hashFiles('external/ckb-light-client/Cargo.lock', 'external/ckb-light-client/rust-toolchain') }}
-          restore-keys: cargo-rust-tests-
+          key: ci-android-ci-${{ runner.os }}-cargo-rust-tests-${{ hashFiles('external/ckb-light-client/Cargo.lock', 'external/ckb-light-client/rust-toolchain') }}
+          restore-keys: ci-android-ci-${{ runner.os }}-cargo-rust-tests-
 
       - name: Verify pinned embedded client and mobile overlay
         run: |
@@ -121,16 +124,19 @@ jobs:
     timeout-minutes: 45
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      - name: Validate Gradle wrapper
+        uses: gradle/actions/wrapper-validation@ed408507eac070d1f99cc633dbcf757c94c7933a # v4
 
       - name: Set up JDK 17
-        uses: actions/setup-java@v4
+        uses: actions/setup-java@cf277c60eb25467037889841efdb72551f06f6c3 # v4
         with:
           java-version: '17'
           distribution: 'temurin'
 
       - name: Setup Android SDK
-        uses: android-actions/setup-android@v3
+        uses: android-actions/setup-android@9fc6c4e9069bf8d3d10b2204b1fb8f6ef7065407 # v3
         with:
           # The legacy 'tools' package (the action's default) no longer exists in
           # cmdline-tools 16+ on the GitHub runner image; only platform-tools is needed.
@@ -142,38 +148,39 @@ jobs:
         # sdkmanager produced partial installs missing the llvm toolchain
         # ("clang not found in NDK").
         id: setup-ndk
-        uses: nttld/setup-ndk@v1
+        uses: nttld/setup-ndk@ed92fe6cadad69be94a966a7ee3271275e62f779 # v1
         with:
           ndk-version: r27c
           add-to-path: false
       - name: Export ANDROID_NDK_HOME
         env:
           NDK_PATH: ${{ steps.setup-ndk.outputs.ndk-path }}
-        run: echo "ANDROID_NDK_HOME=$NDK_PATH" >> $GITHUB_ENV
+        run: echo "ANDROID_NDK_HOME=$NDK_PATH" >> "$GITHUB_ENV"
 
-      - name: Set up Rust (stable + Android targets)
-        uses: dtolnay/rust-toolchain@stable
+      - name: Set up pinned Rust with Android targets
+        uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
         with:
+          toolchain: "1.95.0"
           targets: aarch64-linux-android,armv7-linux-androideabi,x86_64-linux-android
 
       - name: Cache Gradle
-        uses: actions/cache@v4
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
         with:
           path: |
             ~/.gradle/caches
             ~/.gradle/wrapper
-          key: gradle-jni-${{ hashFiles('android/**/*.gradle.kts', 'android/gradle/libs.versions.toml') }}
-          restore-keys: gradle-jni-
+          key: ci-android-ci-${{ runner.os }}-gradle-jni-${{ hashFiles('android/**/*.gradle.kts', 'android/gradle/libs.versions.toml', 'android/gradle/verification-metadata.xml', 'android/gradle/wrapper/gradle-wrapper.properties') }}
+          restore-keys: ci-android-ci-${{ runner.os }}-gradle-jni-
 
       - name: Cache Cargo target
-        uses: actions/cache@v4
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
         with:
           path: |
             ~/.cargo/registry
             ~/.cargo/git
             external/ckb-light-client/target
-          key: cargo-${{ hashFiles('external/ckb-light-client/Cargo.lock') }}
-          restore-keys: cargo-
+          key: ci-android-ci-${{ runner.os }}-cargo-${{ hashFiles('external/ckb-light-client/Cargo.lock') }}
+          restore-keys: ci-android-ci-${{ runner.os }}-cargo-
 
       - name: Create dummy google-services.json
         run: |
@@ -192,7 +199,7 @@ jobs:
         run: ./gradlew assembleDebug
 
       - name: Upload prev-jni APK
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: pocketnode-prev-jni-debug
           path: android/app/build/outputs/apk/debug/app-debug.apk
