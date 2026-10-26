@@ -294,8 +294,15 @@ class UpgradeSmokeTest {
     private fun waitForHomeBalance(): UiObject2? {
         val deadline = android.os.SystemClock.elapsedRealtime() + POST_UPGRADE_HOME_TIMEOUT_MS
         while (android.os.SystemClock.elapsedRealtime() < deadline) {
-            if (device.hasObject(By.text("Update Available").pkg(PKG))) {
-                device.findObject(By.text("Later").pkg(PKG))?.click()
+            try {
+                if (device.hasObject(By.text("Update Available").pkg(PKG))) {
+                    val later = device.findObject(
+                        By.clickable(true).pkg(PKG).hasDescendant(By.text("Later"))
+                    ) ?: device.findObject(By.text("Later").pkg(PKG))
+                    later?.click()
+                }
+            } catch (_: androidx.test.uiautomator.StaleObjectException) {
+                // Reacquire the dialog on the next bounded polling iteration.
             }
             val home = device.wait(Until.findObject(By.res("home-balance-row")), 500L)
             if (home != null) return home
