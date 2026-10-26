@@ -1046,6 +1046,19 @@ class GatewayRepository @Inject constructor(
         recipients: List<RecipientOutput>,
     ): TransferPlan = sendPipeline.previewTransfer(sendContext(), fromAddress, recipients)
 
+    suspend fun previewBatches(fromAddress: String, batches: List<List<RecipientOutput>>): List<Long> =
+        sendPipeline.previewBatches(sendContext(), fromAddress, batches)
+
+    suspend fun sendReviewed(
+        review: com.rjnr.pocketnode.data.send.ReviewedTransfer,
+        privateKey: ByteArray,
+        isCurrent: () -> Boolean,
+        onSigned: () -> Unit = {},
+    ): String = sendPipeline.sendReviewed(sendContext(), review, PrivateKeySigner(privateKey), {
+        val current = sendContext()
+        isCurrent() && current.walletId == review.walletId && current.network == review.network && current.activeScript == review.sourceScript
+    }, onSigned)
+
     /**
      * Plain secp256k1 transfer. fromAddress is the authoritative sender
      * identity (captured by SendViewModel before this call) and is trusted

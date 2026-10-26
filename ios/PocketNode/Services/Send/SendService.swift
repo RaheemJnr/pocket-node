@@ -104,6 +104,7 @@ protocol SendServicing: AnyObject {
 
     /// The wallet's address on the selected network, nil with no wallet.
     var fromAddress: String? { get }
+    var walletId: String? { get }
 
     /// The network the wallet is on, which the address indicator compares
     /// against.
@@ -126,6 +127,7 @@ protocol SendServicing: AnyObject {
     /// Authenticate, sign and broadcast. Nothing is built before this is
     /// called.
     func send(from: String, to: String, amount: Int64, expectedFee: Int64) async -> Result<String, SendError>
+    func sendReviewed(_ review: ReviewedTransfer, isCurrent: @escaping @Sendable () -> Bool) async -> Result<String, SendError>
 
     /// Re-broadcast a FAILED row's original signed bytes.
     func retry(txHash: String) async -> Result<String, SendError>
@@ -284,6 +286,7 @@ final class SendService: SendServicing {
     // MARK: - Wallet identity
 
     var network: NetworkType { preferences.getSelectedNetwork() }
+    var walletId: String? { walletStore.load()?.id }
 
     var fromAddress: String? {
         guard let record = walletStore.load() else { return nil }
@@ -331,6 +334,16 @@ final class SendService: SendServicing {
         amount: Int64,
         expectedFee: Int64
     ) async -> Result<String, SendError> {
+        guard let walletId else { return .failure(SendError(message: "Wallet not initialized")) }
+        guard let review = try? ReviewedTransfer(walletId: walletId, fromAddress: from, network: network,
+            recipients: [RecipientOutput(address: to, amountShannons: amount)], feeShannons: expectedFee,
+            generation: 0, isBulk: false) else { return .failure(SendError(message: "Invalid payment. Review the payment again.")) }
+        return await sendReviewed(review, isCurrent: { true })
+    }
+
+    func sendReviewed(_ review: ReviewedTransfer, isCurrent: @escaping @Sendable () -> Bool) async -> Result<String, SendError> {
+        let stillCurrent = Self.reviewValidator(walletURL: walletStore.fileURL, networkReader: preferences.selectedNetworkReader(), review: review, isCurrent: isCurrent)
+        guard stillCurrent().boolValue, !Task.isCancelled else { return .failure(.cancelled) }
         guard let context = makeContext() else {
             return .failure(SendError(message: "Wallet not initialized"))
         }
@@ -341,6 +354,7 @@ final class SendService: SendServicing {
             return .failure(.cancelled)
         }
 
+        guard stillCurrent().boolValue, !Task.isCancelled else { return .failure(.cancelled) }
         poller.markBuilding()
         balanceAtSend.set(BalanceReading(shannons: availableShannons, isCached: sync.balance.isCached))
 
@@ -393,20 +407,39 @@ final class SendService: SendServicing {
 
         poller.markBroadcasting()
         do {
-            let hash = try await pipeline.prepareAndSendOrThrow(
-                ctx: context,
-                fromAddress: from,
-                toAddress: to,
-                amountShannons: amount,
-                signer: signer,
-                expectedFeeShannons: KotlinLong(longLong: expectedFee)
-            )
+            guard stillCurrent().boolValue, !Task.isCancelled else {
+                poller.reset()
+                return .failure(.cancelled)
+            }
+            let hash = try await pipeline.sendReviewed(ctx: context, review: review, signer: signer,
+                isCurrent: Self.reviewValidator(walletURL: walletStore.fileURL, networkReader: preferences.selectedNetworkReader(), review: review, isCurrent: isCurrent),
+                onSigned: Self.lastUse(signer: signer))
             poller.start(txHash: hash)
             return .success(hash)
         } catch {
             poller.markFailed()
             return .failure(Self.sendFailure(error))
         }
+    }
+
+    // Created outside actor isolation. Only immutable metadata location and a live,
+    // read-only defaults handle cross into Kotlin; missing/replaced metadata rejects.
+    nonisolated static func reviewValidator(walletURL: URL, networkReader: NetworkSelectionReader,
+        review: ReviewedTransfer, isCurrent: @escaping @Sendable () -> Bool) -> @Sendable () -> KotlinBoolean {
+        {
+            guard let data = try? Data(contentsOf: walletURL),
+                  let record = try? JSONDecoder().decode(WalletRecord.self, from: data) else {
+                return KotlinBoolean(bool: false)
+            }
+            let network = networkReader.read()
+            let address = network == "MAINNET" ? record.mainnetAddress : record.testnetAddress
+            return KotlinBoolean(bool: isCurrent() && record.id == review.walletId &&
+                network == review.network.name && address == review.fromAddress)
+        }
+    }
+
+    nonisolated private static func lastUse(signer: PrivateKeySigner) -> @Sendable () -> Void {
+        { signer.close() }
     }
 
     func retry(txHash: String) async -> Result<String, SendError> {

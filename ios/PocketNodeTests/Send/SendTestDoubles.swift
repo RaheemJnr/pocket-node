@@ -14,6 +14,7 @@ import PocketNodeCore
 final class FakeSendService: SendServicing {
 
     var status = SendStatus()
+    var walletId: String? = "test-wallet"
     var fromAddress: String? = SendFixtures.testnetAddress
     var network: NetworkType = NetworkType.testnet
     var availableShannons: Int64 = 1_000 * SendFixtures.ckb
@@ -24,6 +25,7 @@ final class FakeSendService: SendServicing {
 
     /// What ``maxSendableShannons()`` answers.
     var maxSendable: Int64 = 0
+    var onMax: (@MainActor () async -> Void)?
 
     /// What ``send(from:to:amount:expectedFee:)`` answers.
     var sendResult: Result<String, SendError> = .success(SendFixtures.txHash)
@@ -48,7 +50,7 @@ final class FakeSendService: SendServicing {
         Int64(outputCount) * 50_000
     }
 
-    func maxSendableShannons() async -> Int64 { maxSendable }
+    func maxSendableShannons() async -> Int64 { await onMax?(); return maxSendable }
 
     func preview(from: String, recipients: [RecipientOutput]) async throws -> TransferPlan {
         previewCalls.append((from, recipients))
@@ -73,6 +75,12 @@ final class FakeSendService: SendServicing {
         sendCalls.append((from, to, amount, expectedFee))
         await onSend?()
         return sendResult
+    }
+
+    func sendReviewed(_ review: ReviewedTransfer, isCurrent: @escaping @Sendable () -> Bool) async -> Result<String, SendError> {
+        guard isCurrent() else { return .failure(.cancelled) }
+        return await send(from: review.fromAddress, to: review.recipients[0].address,
+            amount: review.amountShannons, expectedFee: review.feeShannons)
     }
 
     func retry(txHash: String) async -> Result<String, SendError> {

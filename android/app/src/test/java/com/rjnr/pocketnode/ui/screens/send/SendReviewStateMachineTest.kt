@@ -14,6 +14,7 @@ import com.rjnr.pocketnode.data.gateway.models.NetworkType
 import com.rjnr.pocketnode.data.gateway.models.Cell
 import com.rjnr.pocketnode.data.gateway.models.OutPoint
 import com.rjnr.pocketnode.data.gateway.models.Script
+import com.rjnr.pocketnode.data.send.ReviewedTransfer
 import com.rjnr.pocketnode.data.transaction.TransactionBuilder
 import com.rjnr.pocketnode.data.transaction.TransferPlan
 import com.rjnr.pocketnode.data.wallet.KeyManager
@@ -70,8 +71,8 @@ class SendReviewStateMachineTest {
     private val host = com.rjnr.pocketnode.data.wallet.ForegroundTestHost()
     private val foregroundActivity = host.activity
 
-    private val senderAddress = "ckt1qzda0cr08m85hc8jlnfp3zer7xulejywt49kt2rr0vthywaa50xwsqsender"
-    private val recipient = "ckt1qzda0cr08m85hc8jlnfp3zer7xulejywt49kt2rr0vthywaa50xwsqrecipient"
+    private val senderAddress = com.rjnr.pocketnode.data.wallet.AddressUtils.encode(Script(Script.SECP256K1_CODE_HASH, "type", "0x" + "aa".repeat(20)), NetworkType.TESTNET)
+    private val recipient = com.rjnr.pocketnode.data.wallet.AddressUtils.encode(Script(Script.SECP256K1_CODE_HASH, "type", "0x" + "bb".repeat(20)), NetworkType.TESTNET)
     private val balanceShannons = 1_000_00000000L
 
     /** What the repository's dry-run plan reports: a fragmented wallet, 4 inputs, 4,321 shannons. */
@@ -96,6 +97,8 @@ class SendReviewStateMachineTest {
         Dispatchers.setMain(testDispatcher)
 
         repository = mockk(relaxed = true)
+        coEvery { repository.sendReviewed(any(), any(), any(), any()) } throws IllegalStateException("sequencing-only fixture stops before broadcast")
+        coEvery { repository.previewBatches(any(), any()) } answers { arg<List<List<com.rjnr.pocketnode.data.transaction.RecipientOutput>>>(1).map { 1000L } }
         every { repository.balance } returns MutableStateFlow(
             BalanceResponse(
                 address = senderAddress,
@@ -108,14 +111,8 @@ class SendReviewStateMachineTest {
         every { repository.currentNetwork } returns NetworkType.TESTNET
         every { repository.getCurrentAddress() } returns senderAddress
         coEvery { repository.getPrivateKey() } returns ByteArray(32) { 1 }
-        // NOTE: `prepareAndSend` returns `kotlin.Result<String>` and MockK
-        // 1.13.16 cannot round-trip an inline-value-class return through the
-        // suspend resume boundary (same limitation documented in
-        // AddWalletViewModelTest). These tests therefore assert on the CALL —
-        // whether a broadcast was attempted, and when — which is exactly the
-        // sequencing contract #490 is about. The relaxed mock's return value
-        // lands in the ViewModel's own catch block; the post-broadcast states
-        // (txHash, polling) are covered elsewhere.
+        // Sequencing fixtures stop explicitly at the repository boundary. Race tests below
+        // assemble real transactions and inspect semantic outputs independently.
 
         // The review sheet is priced by the real plan, not the form's
         // 1-input estimate (#490 review item 1).
@@ -196,7 +193,7 @@ class SendReviewStateMachineTest {
         assertEquals(review.amountShannons + review.feeShannons, review.totalShannons)
         assertEquals(plannedFee, vm.uiState.value.estimatedFee)
         assertFalse(vm.uiState.value.requiresAuth)
-        coVerify(exactly = 0) { repository.prepareAndSend(any(), any(), any(), any(), any(), any()) }
+        coVerify(exactly = 0) { repository.sendReviewed(any(), any(), any(), any()) }
     }
 
     @Test
@@ -215,7 +212,7 @@ class SendReviewStateMachineTest {
         // The fee the user confirmed travels with the broadcast so the
         // repository can refuse if a re-plan disagrees.
         coVerify(exactly = 1) {
-            repository.prepareAndSend(senderAddress, recipient, 100_00000000L, any(), plannedFee, any())
+            repository.sendReviewed(match { it.fromAddress == senderAddress && it.recipients.single().address == recipient && it.amountShannons == 100_00000000L && it.feeShannons == plannedFee }, any(), any(), any())
         }
     }
 
@@ -232,14 +229,14 @@ class SendReviewStateMachineTest {
             vm.confirmSend(foregroundActivity); advanceUntilIdle()
             assertNull(vm.uiState.value.reviewRequest)
             vm.executeSend(); advanceUntilIdle()
-            coVerify(exactly = 0) { repository.prepareAndSend(any(), any(), any(), any(), any(), any()) }
+            coVerify(exactly = 0) { repository.sendReviewed(any(), any(), any(), any()) }
             coEvery { walletKeyReader.readPrivateKey(any(), any(), any(), any()) } answers {
                 WalletKeyReader.Result.Success(ByteArray(32) { 7 })
             }
             vm.sendTransaction(foregroundActivity); advanceUntilIdle()
             vm.confirmSend(foregroundActivity); advanceUntilIdle()
             coVerify(exactly = 1) {
-                repository.prepareAndSend(senderAddress, recipient, 100_00000000L, any(), plannedFee, any())
+                repository.sendReviewed(match { it.fromAddress == senderAddress && it.recipients.single().address == recipient && it.amountShannons == 100_00000000L && it.feeShannons == plannedFee }, any(), any(), any())
             }
         }
 
@@ -261,7 +258,7 @@ class SendReviewStateMachineTest {
         assertEquals(recipient, vm.uiState.value.recipientAddress)
         assertEquals("100", vm.uiState.value.amountCkb)
         assertEquals(TransactionState.IDLE, vm.uiState.value.transactionState)
-        coVerify(exactly = 0) { repository.prepareAndSend(any(), any(), any(), any(), any(), any()) }
+        coVerify(exactly = 0) { repository.sendReviewed(any(), any(), any(), any()) }
     }
 
     @Test
@@ -274,7 +271,7 @@ class SendReviewStateMachineTest {
         vm.confirmSend()
         advanceUntilIdle()
 
-        coVerify(exactly = 0) { repository.prepareAndSend(any(), any(), any(), any(), any(), any()) }
+        coVerify(exactly = 0) { repository.sendReviewed(any(), any(), any(), any()) }
     }
 
     @Test
@@ -291,7 +288,7 @@ class SendReviewStateMachineTest {
 
             assertNull(vm.uiState.value.reviewRequest)
             assertNotNull(vm.uiState.value.error)
-            coVerify(exactly = 0) { repository.prepareAndSend(any(), any(), any(), any(), any(), any()) }
+            coVerify(exactly = 0) { repository.sendReviewed(any(), any(), any(), any()) }
         }
 
     @Test
@@ -310,7 +307,7 @@ class SendReviewStateMachineTest {
         vm.confirmSend(foregroundActivity)
         advanceUntilIdle()
 
-        coVerify(exactly = 1) { repository.prepareAndSend(any(), any(), any(), any(), any(), any()) }
+        coVerify(exactly = 1) { repository.sendReviewed(any(), any(), any(), any()) }
     }
 
     @Test
@@ -334,7 +331,7 @@ class SendReviewStateMachineTest {
 
             assertNotNull(vm.uiState.value.reviewRequest)
             coVerify(exactly = 0) { walletKeyReader.readPrivateKey(any(), any(), any(), any()) }
-            coVerify(exactly = 0) { repository.prepareAndSend(any(), any(), any(), any(), any(), any()) }
+            coVerify(exactly = 0) { repository.sendReviewed(any(), any(), any(), any()) }
 
             vm.confirmSend(activity)
             advanceUntilIdle()
@@ -342,7 +339,7 @@ class SendReviewStateMachineTest {
             assertNull(vm.uiState.value.reviewRequest)
             coVerify(exactly = 1) { walletKeyReader.readPrivateKey(any(), any(), any(), any()) }
             coVerify(exactly = 1) {
-                repository.prepareAndSend(senderAddress, recipient, 100_00000000L, any(), plannedFee, any())
+                repository.sendReviewed(match { it.fromAddress == senderAddress && it.recipients.single().address == recipient && it.amountShannons == 100_00000000L && it.feeShannons == plannedFee }, any(), any(), any())
             }
         }
 
@@ -352,7 +349,7 @@ class SendReviewStateMachineTest {
         val vm = newViewModel(); advanceUntilIdle()
         vm.fillForm(); vm.executeSend(); advanceUntilIdle()
         coVerify(exactly = 0) { repository.getPrivateKey() }
-        coVerify(exactly = 0) { repository.prepareAndSend(any(), any(), any(), any(), any(), any()) }
+        coVerify(exactly = 0) { repository.sendReviewed(any(), any(), any(), any()) }
     }
 
     @Test
@@ -364,7 +361,7 @@ class SendReviewStateMachineTest {
         val vm = newViewModel(); advanceUntilIdle()
         vm.fillForm(); vm.sendTransaction(activity); advanceUntilIdle()
         vm.confirmSend(activity); advanceUntilIdle()
-        coVerify(exactly = 0) { repository.prepareAndSend(any(), any(), any(), any(), any(), any()) }
+        coVerify(exactly = 0) { repository.sendReviewed(any(), any(), any(), any()) }
     }
 
     @Test
@@ -374,7 +371,7 @@ class SendReviewStateMachineTest {
         val vm = newViewModel(); advanceUntilIdle()
         vm.fillForm(); vm.sendTransaction(); advanceUntilIdle()
         vm.confirmSend(); advanceUntilIdle()
-        coVerify(exactly = 0) { repository.prepareAndSend(any(), any(), any(), any(), any(), any()) }
+        coVerify(exactly = 0) { repository.sendReviewed(any(), any(), any(), any()) }
     }
 
     @Test
@@ -395,7 +392,7 @@ class SendReviewStateMachineTest {
         vm.confirmSend(activity)
         advanceUntilIdle()
 
-        coVerify(exactly = 0) { repository.prepareAndSend(any(), any(), any(), any(), any(), any()) }
+        coVerify(exactly = 0) { repository.sendReviewed(any(), any(), any(), any()) }
     }
 
     @Test
@@ -416,7 +413,7 @@ class SendReviewStateMachineTest {
 
             assertNotNull(vm.uiState.value.error)
             assertNull(vm.uiState.value.reviewRequest)
-            coVerify(exactly = 0) { repository.prepareAndSend(any(), any(), any(), any(), any(), any()) }
+            coVerify(exactly = 0) { repository.sendReviewed(any(), any(), any(), any()) }
         }
 
     @Test
@@ -436,14 +433,14 @@ class SendReviewStateMachineTest {
         assertNull(vm.uiState.value.reviewRequest)
         assertNotNull(vm.uiState.value.error)
         assertFalse(vm.uiState.value.isLoading)
-        coVerify(exactly = 0) { repository.prepareAndSend(any(), any(), any(), any(), any(), any()) }
+        coVerify(exactly = 0) { repository.sendReviewed(any(), any(), any(), any()) }
     }
     @Test fun `stop resume before signing cancels send and clears authenticated bytes`() = runTest(testDispatcher) {
         val key = ByteArray(32) { 7 }
         coEvery { walletKeyReader.readPrivateKey(any(), any(), any(), any()) } returns WalletKeyReader.Result.Success(key)
         var entered = false
         var cancelled = false
-        coEvery { repository.prepareAndSend(any(), any(), any(), any(), any(), any()) } coAnswers {
+        coEvery { repository.sendReviewed(any(), any(), any(), any()) } coAnswers {
             entered = true
             try { kotlinx.coroutines.awaitCancellation() } finally { cancelled = true }
         }
@@ -457,8 +454,8 @@ class SendReviewStateMachineTest {
         val key = ByteArray(32) { 7 }
         coEvery { walletKeyReader.readPrivateKey(any(), any(), any(), any()) } returns WalletKeyReader.Result.Success(key)
         var signed = false
-        coEvery { repository.prepareAndSend(any(), any(), any(), any(), any(), any()) } coAnswers {
-            arg<() -> Unit>(5).invoke(); signed = true
+        coEvery { repository.sendReviewed(any(), any(), any(), any()) } coAnswers {
+            arg<() -> Unit>(3).invoke(); signed = true
             assertTrue(key.all { it == 0.toByte() })
             kotlinx.coroutines.awaitCancellation()
         }
@@ -480,7 +477,7 @@ class SendReviewStateMachineTest {
         // Cell-count preview is a separate job; MockK cannot unbox its suspend Result.
         coEvery { repository.getCells() } throws kotlinx.coroutines.CancellationException("public fixture skips cell-count preview")
         var batches = 0
-        coEvery { repository.prepareAndSendBulkOrThrow(any(), any(), any(), any(), any()) } coAnswers {
+        coEvery { repository.sendReviewed(any(), any(), any(), any()) } coAnswers {
             assertTrue(key.all { it == 7.toByte() }); batches++
             // A public signed batch is now pending; cancellation cannot authorize another signature.
             host.stopResume()
@@ -511,7 +508,7 @@ class SendReviewStateMachineTest {
             val host = com.rjnr.pocketnode.data.wallet.ForegroundTestHost()
             fun cancelHost() { if (lock) com.rjnr.pocketnode.ui.screens.auth.ReauthLockEvents.onLocked() else host.stopResume() }
             coEvery { walletKeyReader.readPrivateKey(any(), any(), any(), any()) } returns WalletKeyReader.Result.Success(key)
-            coEvery { repository.prepareAndSendBulkOrThrow(any(), any(), any(), any(), any()) } coAnswers {
+            coEvery { repository.sendReviewed(any(), any(), any(), any()) } coAnswers {
                 assertTrue(key.all { it == 7.toByte() }); calls++
                 if (calls == 1) {
                     if (betweenBatches) cancelHost()
@@ -576,8 +573,8 @@ class SendReviewStateMachineTest {
                     try { kotlinx.coroutines.awaitCancellation() } finally { authCancelled = true }
                 } else WalletKeyReader.Result.Success(key)
             }
-            coEvery { repository.prepareAndSendBulkOrThrow(any(), any(), any(), any(), any()) } coAnswers {
-                assertEquals("w1", arg<String>(3)); assertEquals(NetworkType.TESTNET, arg<NetworkType>(4))
+            coEvery { repository.sendReviewed(any(), any(), any(), any()) } coAnswers {
+                assertEquals("w1", arg<ReviewedTransfer>(0).walletId); assertEquals(NetworkType.TESTNET, arg<ReviewedTransfer>(0).network)
                 calls++
                 network.value = NetworkType.MAINNET
                 if (phase == "broadcast") kotlinx.coroutines.awaitCancellation() else "submitted-before-switch"
@@ -613,7 +610,7 @@ class SendReviewStateMachineTest {
             coEvery { repository.getCells() } throws kotlinx.coroutines.CancellationException("skip public preview")
             val key = ByteArray(32) { 7 }
             coEvery { walletKeyReader.readPrivateKey(any(), any(), any(), any()) } returns WalletKeyReader.Result.Success(key)
-            coEvery { repository.prepareAndSendBulkOrThrow(any(), any(), any(), any(), any()) } coAnswers { assertTrue(key.all { it == 7.toByte() }); calls++; "public-hash-$calls" }
+            coEvery { repository.sendReviewed(any(), any(), any(), any()) } coAnswers { assertTrue(key.all { it == 7.toByte() }); calls++; "public-hash-$calls" }
             val addresses = (1..26).map { index -> com.rjnr.pocketnode.data.wallet.AddressUtils.encode(
                 Script(Script.SECP256K1_CODE_HASH, "type", "0x" + "%040x".format(index)), NetworkType.TESTNET) }
             val vm = newViewModel(store); advanceUntilIdle()
@@ -657,7 +654,7 @@ class SendReviewStateMachineTest {
                     assertTrue(key.all { it == 0.toByte() })
                     assertTrue(com.rjnr.pocketnode.data.transaction.BulkSendQuarantineStore(context).load().isEmpty())
                 }
-                coVerify(exactly = 0) { repository.prepareAndSendBulkOrThrow(any(), any(), any(), any(), any()) }
+                coVerify(exactly = 0) { repository.sendReviewed(any(), any(), any(), any()) }
             } finally { androidx.lifecycle.ViewModelStore().apply { put("before-first", vm); clear() }; runCurrent() }
         }
     }
@@ -668,7 +665,7 @@ class SendReviewStateMachineTest {
         every { repository.balance } returns MutableStateFlow(BalanceResponse(senderAddress,
             "0x${100_000_00000000L.toString(16)}", "100000", "0x1"))
         coEvery { repository.getCells() } throws kotlinx.coroutines.CancellationException("skip public preview")
-        coEvery { repository.prepareAndSendBulkOrThrow(any(), any(), any(), any(), any()) } throws IllegalStateException("public broadcast failure")
+        coEvery { repository.sendReviewed(any(), any(), any(), any()) } throws IllegalStateException("public broadcast failure")
         val addresses = (1..26).map { index -> com.rjnr.pocketnode.data.wallet.AddressUtils.encode(
             Script(Script.SECP256K1_CODE_HASH, "type", "0x" + "%040x".format(index)), NetworkType.TESTNET) }
         val vm = newViewModel(store); advanceUntilIdle()
@@ -694,6 +691,191 @@ class SendReviewStateMachineTest {
             assertNotNull("Successful explicit reconciliation must allow reviewed repayment", vm.uiState.value.reviewRequest)
             assertTrue(vm.uiState.value.interruptedBulkSends.isEmpty())
         } finally { androidx.lifecycle.ViewModelStore().apply { put("reconcile", vm); clear() }; runCurrent() }
+    }
+
+    // Real transaction assembly at the signing seam: equal fees cannot conceal changed outputs.
+    @Test fun `auth edit cannot substitute same fee recipient output`() = runTest(testDispatcher) {
+        val builder = TransactionBuilder(com.rjnr.pocketnode.data.validation.NetworkValidator())
+        val from = com.rjnr.pocketnode.data.wallet.AddressUtils.encode(plannedTransfer.selectedCells.first().lock, NetworkType.TESTNET)
+        val original = com.rjnr.pocketnode.data.wallet.AddressUtils.encode(Script(Script.SECP256K1_CODE_HASH, "type", "0x" + "bb".repeat(20)), NetworkType.TESTNET)
+        val replacement = com.rjnr.pocketnode.data.wallet.AddressUtils.encode(Script(Script.SECP256K1_CODE_HASH, "type", "0x" + "cc".repeat(20)), NetworkType.TESTNET)
+        every { repository.getCurrentAddress() } returns from
+        coEvery { repository.previewTransfer(any(), any()) } answers { builder.planTransfer(arg(1), plannedTransfer.selectedCells) }
+        val gate = kotlinx.coroutines.CompletableDeferred<Unit>()
+        coEvery { walletKeyReader.readPrivateKey(any(), any(), any(), any()) } coAnswers {
+            gate.await(); WalletKeyReader.Result.Success(ByteArray(32) { 7 })
+        }
+        var signed: com.rjnr.pocketnode.data.gateway.models.Transaction? = null
+        coEvery { repository.sendReviewed(any(), any(), any(), any()) } coAnswers {
+            val intent = arg<ReviewedTransfer>(0)
+            signed = builder.buildTransfer(intent.fromAddress, intent.recipients.single().address, intent.amountShannons, plannedTransfer.selectedCells,
+                object : com.rjnr.pocketnode.data.transaction.Signer {
+                    override fun signRecoverable(messageHash: ByteArray) = ByteArray(65)
+                }, NetworkType.TESTNET)
+            kotlinx.coroutines.awaitCancellation()
+        }
+        val vm = newViewModel(); runCurrent()
+        try {
+            vm.updateRecipient(original); vm.updateAmount("100"); vm.sendTransaction(); runCurrent()
+            assertEquals(1000L, vm.uiState.value.reviewRequest!!.feeShannons)
+            vm.confirmSend(foregroundActivity); runCurrent()
+            vm.updateRecipient(replacement); vm.updateAmount("150"); gate.complete(Unit); runCurrent()
+            signed?.let {
+                assertEquals("same fee must never authorize another script", "0x" + "bb".repeat(20), it.cellOutputs.first().lock.args)
+                assertEquals(100_00000000L, it.cellOutputs.first().capacity.removePrefix("0x").toLong(16))
+            }
+        } finally { androidx.lifecycle.ViewModelStore().apply { put("race", vm); clear() }; runCurrent() }
+    }
+
+    @Test fun `late non cooperative MAX cannot replace manual reviewed amount`() = runTest(testDispatcher) {
+        val gate = kotlinx.coroutines.CompletableDeferred<Unit>()
+        coEvery { repository.getCells() } coAnswers {
+            kotlinx.coroutines.withContext(kotlinx.coroutines.NonCancellable) { gate.await() }
+            Result.success(com.rjnr.pocketnode.data.gateway.models.CellsResponse(plannedTransfer.selectedCells, null))
+        }
+        every { transactionBuilder.calculateMaxSendable(any()) } returns 279_99999000L
+        val vm = newViewModel(); runCurrent()
+        try {
+            vm.setMaxAmount(); runCurrent()
+            vm.fillForm(); vm.sendTransaction(); runCurrent()
+            assertEquals(100_00000000L, vm.uiState.value.reviewRequest!!.amountShannons)
+            gate.complete(Unit); runCurrent()
+            assertEquals("100", vm.uiState.value.amountCkb)
+        } finally { androidx.lifecycle.ViewModelStore().apply { put("max", vm); clear() }; runCurrent() }
+    }
+
+    /** Only the transport/storage are doubles: real ledger, planner, review validator and signing serializer. */
+    private fun recordingPipeline(scope: kotlinx.coroutines.CoroutineScope, signed: MutableList<com.rjnr.pocketnode.data.gateway.models.Transaction>): com.rjnr.pocketnode.data.send.SendPipeline {
+        val json = kotlinx.serialization.json.Json { encodeDefaults = true }
+        val api = mockk<com.rjnr.pocketnode.data.gateway.LightClientApi>(relaxed = true)
+        every { api.getTipHeader() } returns null
+        every { api.getTransactions(any(), any(), any(), any()) } returns "{\"objects\":[],\"last_cursor\":\"\"}"
+        val page = com.rjnr.pocketnode.data.gateway.models.JniPagination(
+            plannedTransfer.selectedCells.map { com.rjnr.pocketnode.data.gateway.models.JniCell(
+                com.rjnr.pocketnode.data.gateway.models.CellOutput(it.capacity, it.lock), "0x", it.outPoint, it.blockNumber, "0x0") }, "")
+        every { api.getCells(any(), any(), any(), any()) } returns json.encodeToString(com.rjnr.pocketnode.data.gateway.models.JniPagination.serializer(com.rjnr.pocketnode.data.gateway.models.JniCell.serializer()), page)
+        every { api.sendTransaction(any()) } answers {
+            signed += json.decodeFromString<com.rjnr.pocketnode.data.gateway.models.Transaction>(arg(0))
+            throw kotlinx.coroutines.CancellationException("fixture stops after observing exact signed broadcast bytes")
+        }
+        val ledger = com.rjnr.pocketnode.data.gateway.LedgerReader(api, mockk(relaxed = true), mockk(relaxed = true), mockk(relaxed = true),
+            mockk(relaxed = true), mockk(relaxed = true), mockk(relaxed = true), uiPreferences, json, NoopLogger)
+        // Exercise the real repository getCells body without starting its node-owning constructor.
+        GatewayRepository::class.java.getDeclaredField("ledgerReader").apply { isAccessible = true }.set(repository, ledger)
+        GatewayRepository::class.java.getDeclaredField("_walletInfo").apply { isAccessible = true }.set(repository,
+            MutableStateFlow(com.rjnr.pocketnode.data.wallet.WalletInfo("", plannedTransfer.selectedCells.first().lock, senderAddress,
+                com.rjnr.pocketnode.data.wallet.AddressUtils.encode(plannedTransfer.selectedCells.first().lock, NetworkType.MAINNET))))
+        coEvery { repository.getCells() } coAnswers {
+            kotlinx.coroutines.yield()
+            // MockK's generic callOriginal boxes inline Result incorrectly; the raw invocation
+            // returns the real body's success payload, boxed exactly once here at the seam.
+            Result.success(invocation.originalCall() as com.rjnr.pocketnode.data.gateway.models.CellsResponse)
+        }
+        val pending = mockk<com.rjnr.pocketnode.data.storage.PendingBroadcastStore>(relaxed = true)
+        coEvery { pending.getActive(any(), any()) } returns emptyList()
+        val pipeline = com.rjnr.pocketnode.data.send.SendPipeline(api,
+            TransactionBuilder(com.rjnr.pocketnode.data.validation.NetworkValidator()), ledger, pending,
+            mockk(relaxed = true), mockk(relaxed = true), mockk(relaxed = true), uiPreferences, json, NoopLogger, queryContext = testDispatcher)
+        coEvery { repository.previewTransfer(any(), any()) } coAnswers {
+            pipeline.previewTransfer(com.rjnr.pocketnode.data.send.SendContext(NetworkType.TESTNET, "w1", plannedTransfer.selectedCells.first().lock, { false }, scope), arg(0), arg(1))
+        }
+        coEvery { repository.sendReviewed(any(), any(), any(), any()) } coAnswers {
+            pipeline.sendReviewed(com.rjnr.pocketnode.data.send.SendContext(NetworkType.TESTNET, "w1", plannedTransfer.selectedCells.first().lock, { false }, scope),
+                arg(0), object : com.rjnr.pocketnode.data.transaction.Signer {
+                    override fun signRecoverable(messageHash: ByteArray) = ByteArray(65)
+                }, arg(2), arg(3))
+        }
+        return pipeline
+    }
+
+    @Test fun `late MAX followed by double confirm signs exactly the reviewed payment`() = runTest(testDispatcher) {
+        val gate = kotlinx.coroutines.CompletableDeferred<Unit>()
+        transactionBuilder = TransactionBuilder(com.rjnr.pocketnode.data.validation.NetworkValidator())
+        val signed = mutableListOf<com.rjnr.pocketnode.data.gateway.models.Transaction>()
+        recordingPipeline(backgroundScope, signed)
+        coEvery { repository.getCells() } coAnswers {
+            kotlinx.coroutines.withContext(kotlinx.coroutines.NonCancellable) { gate.await() }
+            Result.success(invocation.originalCall() as com.rjnr.pocketnode.data.gateway.models.CellsResponse)
+        }
+        val vm = newViewModel(); runCurrent()
+        try {
+            vm.setMaxAmount(); runCurrent(); vm.fillForm(); vm.sendTransaction(); runCurrent()
+            assertEquals(1000L, vm.uiState.value.reviewRequest!!.feeShannons)
+            gate.complete(Unit); runCurrent()
+            vm.confirmSend(foregroundActivity); vm.confirmSend(foregroundActivity); runCurrent()
+            assertEquals(1, signed.size)
+            assertEquals("0x" + "bb".repeat(20), signed.single().cellOutputs.first().lock.args)
+            assertEquals(100_00000000L, signed.single().cellOutputs.first().capacity.removePrefix("0x").toLong(16))
+            assertEquals(1000L, 210_00000000L - signed.single().cellOutputs.sumOf { it.capacity.removePrefix("0x").toLong(16) })
+        } finally { androidx.lifecycle.ViewModelStore().apply { put("integration", vm); clear() }; runCurrent() }
+    }
+
+    @Test fun `stale preview after edit cancel or newer review is discarded`() = runTest(testDispatcher) {
+        val gate = kotlinx.coroutines.CompletableDeferred<Unit>()
+        var calls = 0
+        coEvery { repository.previewTransfer(any(), any()) } coAnswers {
+            calls++
+            if (calls == 1) kotlinx.coroutines.withContext(kotlinx.coroutines.NonCancellable) { gate.await() }
+            plannedTransfer
+        }
+        val vm = newViewModel(); runCurrent()
+        try {
+            vm.fillForm(); vm.sendTransaction(); runCurrent()
+            vm.updateAmount("150"); vm.sendTransaction(); runCurrent()
+            assertEquals(150_00000000L, vm.uiState.value.reviewRequest!!.amountShannons)
+            gate.complete(Unit); runCurrent()
+            assertEquals(150_00000000L, vm.uiState.value.reviewRequest!!.amountShannons)
+            vm.cancelReview(); vm.confirmSend(foregroundActivity); runCurrent()
+            assertNull(vm.uiState.value.reviewRequest)
+        } finally { androidx.lifecycle.ViewModelStore().apply { put("preview", vm); clear() }; runCurrent() }
+    }
+
+    @Test fun `wallet network amount and bulk edits during auth abort and wipe before signing`() = runTest(testDispatcher) {
+        for (edit in listOf("wallet", "network", "amount", "bulk")) {
+            val signed = mutableListOf<com.rjnr.pocketnode.data.gateway.models.Transaction>()
+            recordingPipeline(backgroundScope, signed)
+            var wallet = "w1"
+            var network = NetworkType.TESTNET
+            every { walletRepository.activeWalletIdSnapshot() } answers { wallet }
+            every { repository.currentNetwork } answers { network }
+            val gate = kotlinx.coroutines.CompletableDeferred<Unit>()
+            val key = ByteArray(32) { 7 }
+            coEvery { walletKeyReader.readPrivateKey(any(), any(), any(), any()) } coAnswers {
+                kotlinx.coroutines.withContext(kotlinx.coroutines.NonCancellable) { gate.await() }
+                WalletKeyReader.Result.Success(key)
+            }
+            val vm = newViewModel(); runCurrent()
+            try {
+                vm.fillForm()
+                if (edit == "bulk") { vm.updateSendMode(SendMode.BULK); vm.updateBulkRecipients(recipient) }
+                vm.sendTransaction(); runCurrent(); assertNotNull(vm.uiState.value.reviewRequest)
+                vm.confirmSend(foregroundActivity); runCurrent()
+                when (edit) {
+                    "wallet" -> wallet = "other"
+                    "network" -> network = NetworkType.MAINNET
+                    "amount" -> vm.updateAmount("150")
+                    "bulk" -> vm.updateBulkRecipients(senderAddress)
+                }
+                gate.complete(Unit); runCurrent()
+                assertTrue("$edit must not sign", signed.isEmpty())
+                assertTrue("$edit must wipe returned key", key.all { it == 0.toByte() })
+            } finally { androidx.lifecycle.ViewModelStore().apply { put("auth-$edit", vm); clear() }; runCurrent() }
+        }
+    }
+
+    @Test fun `cancelled auth requires fresh review and retry signs only once`() = runTest(testDispatcher) {
+        val signed = mutableListOf<com.rjnr.pocketnode.data.gateway.models.Transaction>()
+        recordingPipeline(backgroundScope, signed)
+        coEvery { walletKeyReader.readPrivateKey(any(), any(), any(), any()) } returns WalletKeyReader.Result.Cancelled
+        val vm = newViewModel(); runCurrent()
+        try {
+            vm.fillForm(); vm.sendTransaction(); runCurrent(); vm.confirmSend(foregroundActivity); runCurrent()
+            vm.confirmSend(foregroundActivity); runCurrent(); assertTrue(signed.isEmpty())
+            coEvery { walletKeyReader.readPrivateKey(any(), any(), any(), any()) } returns WalletKeyReader.Result.Success(ByteArray(32) { 7 })
+            vm.sendTransaction(); runCurrent(); vm.confirmSend(foregroundActivity); vm.confirmSend(foregroundActivity); runCurrent()
+            assertEquals(1, signed.size)
+            assertEquals(100_00000000L, signed.single().cellOutputs.first().capacity.removePrefix("0x").toLong(16))
+        } finally { androidx.lifecycle.ViewModelStore().apply { put("retry", vm); clear() }; runCurrent() }
     }
 
 }

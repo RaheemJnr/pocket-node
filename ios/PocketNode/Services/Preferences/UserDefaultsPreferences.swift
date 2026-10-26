@@ -22,6 +22,11 @@ final class UserDefaultsPreferences: SyncPreferences, UiPreferences, NetworkPref
         self.defaults = defaults
     }
 
+    /// Narrow live read handle for the pre-signing check on a Kotlin thread.
+    func selectedNetworkReader() -> NetworkSelectionReader {
+        NetworkSelectionReader(defaults: defaults, key: Keys.selectedNetwork)
+    }
+
     // MARK: - Network selection (global, not namespaced)
     // Android key: "selected_network"
 
@@ -349,4 +354,12 @@ final class UserDefaultsPreferences: SyncPreferences, UiPreferences, NetworkPref
         static let biometricEnabled = "biometric_enabled"
         static let authBeforeSend = "auth_before_send"
     }
+}
+
+/// Only reads one UserDefaults key. UserDefaults synchronizes concurrent reads/writes;
+/// this handle does not expose preference mutations or the owner's other operations.
+struct NetworkSelectionReader: @unchecked Sendable {
+    fileprivate let defaults: UserDefaults
+    fileprivate let key: String
+    func read() -> String { defaults.string(forKey: key) ?? "MAINNET" }
 }

@@ -700,4 +700,41 @@ final class SendViewModelTests: XCTestCase {
         model.updateAmount(amount)
         await model.submit()
     }
+    func testEditedPreviewCannotPublishStalePayment() async {
+        model.updateRecipient(SendFixtures.testnetAddress)
+        model.updateAmount("100")
+        service.onPreview = { [weak self] in self?.model.updateAmount("150") }
+        await model.submit()
+        XCTAssertNil(model.review)
+        await model.confirm()
+        XCTAssertTrue(service.sendCalls.isEmpty)
+    }
+
+    func testSourceChangedAfterReviewRequiresAnotherReview() async {
+        model.updateRecipient(SendFixtures.testnetAddress)
+        model.updateAmount("100")
+        await model.submit()
+        XCTAssertNotNil(model.review)
+        service.fromAddress = SendFixtures.mainnetAddress
+        service.network = .mainnet
+        await model.confirm()
+        XCTAssertTrue(service.sendCalls.isEmpty)
+    }
+
+    func testLateMaxCannotReplaceReviewedManualAmount() async {
+        model.updateRecipient(SendFixtures.testnetAddress)
+        service.maxSendable = 999 * ckb
+        service.onMax = { [weak self] in
+            // Manual UI edits run in their own task, independently of the MAX request
+            // they cancel. The MAX fixture deliberately still returns its old result.
+            await Task { @MainActor in
+                self?.model.updateAmount("100")
+                await self?.model.submit()
+            }.value
+        }
+        await model.setMaxAmount()
+        XCTAssertEqual(model.amount, "100")
+        XCTAssertEqual(model.review?.amountShannons, 100 * ckb)
+    }
+
 }

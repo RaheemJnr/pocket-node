@@ -15,6 +15,7 @@ import com.rjnr.pocketnode.data.gateway.models.NetworkType
 import com.rjnr.pocketnode.data.gateway.models.TransactionStatusResponse
 import com.rjnr.pocketnode.data.transaction.BulkSendQuarantineStore
 import com.rjnr.pocketnode.data.transaction.InterruptedBulkSend
+import com.rjnr.pocketnode.data.send.ReviewedTransfer
 import com.rjnr.pocketnode.data.transaction.RecipientOutput
 import com.rjnr.pocketnode.data.transaction.TransactionBuilder
 import com.rjnr.pocketnode.data.wallet.AddressUtils
@@ -65,6 +66,7 @@ private data class BulkParseResult(
  */
 data class SendReview(
     val isBulk: Boolean,
+    val transfers: List<ReviewedTransfer> = emptyList(),
     /** Empty in bulk mode — [recipientCount] carries the payload instead. */
     val recipientAddress: String,
     /** Address-book name for [recipientAddress], when the address is saved. */
@@ -214,14 +216,20 @@ class SendViewModel @Inject constructor(
     private var sendJob: Job? = null
     private var bulkHistoryUnavailable = false
 
-    /**
-     * Fee shown on the review sheet the user just confirmed, for a single
-     * send. Passed down to the broadcast so the repository can refuse if a
-     * re-plan under the send mutex no longer agrees (#490). Null for bulk
-     * (several transactions, no single fee) and whenever no review is in
-     * flight.
-     */
-    private var confirmedFeeShannons: Long? = null
+    private var generation = 0L
+    private var maxJob: Job? = null
+    private var reviewJob: Job? = null
+
+    private fun invalidateDraft() {
+        generation++
+        maxJob?.cancel()
+        reviewJob?.cancel()
+        _uiState.update { it.copy(reviewRequest = null, sweepWarningAcknowledged = false, isLoading = false) }
+    }
+
+    private fun isCurrent(review: ReviewedTransfer): Boolean =
+        generation == review.generation && walletPreferencesActiveId() == review.walletId &&
+            repository.currentNetwork == review.network && repository.getCurrentAddress() == review.fromAddress
 
     /**
      * Addresses the user has explicitly dismissed the "Save to contacts?"
@@ -295,7 +303,14 @@ class SendViewModel @Inject constructor(
 
         // Load other wallets for "My Wallets" shortcut (excludes active wallet)
         viewModelScope.launch {
+            var previousWalletId = walletPreferencesActiveId()
             walletRepository.walletsFlow.collect { wallets ->
+                val currentWalletId = walletPreferencesActiveId()
+                if (previousWalletId != currentWalletId) {
+                    invalidateDraft()
+                    sendJob?.cancel(kotlinx.coroutines.CancellationException("Wallet changed"))
+                    previousWalletId = currentWalletId
+                }
                 val active = wallets.find { it.isActive }
                 val others = wallets.filter { it.walletId != active?.walletId }
                 _uiState.update { it.copy(otherWallets = others).refreshBulkPreview() }
@@ -306,6 +321,7 @@ class SendViewModel @Inject constructor(
         viewModelScope.launch {
             repository.network.collect { network ->
                 if (network != _uiState.value.networkType) {
+                    invalidateDraft()
                     sendJob?.cancel(kotlinx.coroutines.CancellationException("Network changed"))
                     pollingJob?.cancel()
                     _uiState.update { it.copy(networkType = network, reviewRequest = null,
@@ -320,6 +336,7 @@ class SendViewModel @Inject constructor(
     private var suggestionsJob: kotlinx.coroutines.Job? = null
 
     fun updateRecipient(address: String) {
+        invalidateDraft()
         _uiState.update { it.copy(recipientAddress = address, error = null) }
         // Debounced autocomplete + saved-contact lookup. Cancel any in-flight
         // search so each keystroke supersedes the previous one. (#196)
@@ -343,6 +360,7 @@ class SendViewModel @Inject constructor(
     }
 
     fun updateSendMode(mode: SendMode) {
+        invalidateDraft()
         _uiState.update {
             it.copy(
                 sendMode = mode,
@@ -368,6 +386,7 @@ class SendViewModel @Inject constructor(
     }
 
     fun updateBulkRecipients(text: String) {
+        invalidateDraft()
         _uiState.update {
             it.copy(
                 bulkRecipientsText = text,
@@ -383,6 +402,7 @@ class SendViewModel @Inject constructor(
      * dismisses.
      */
     fun selectContact(contact: ContactEntity) {
+        invalidateDraft()
         suggestionsJob?.cancel()
         _uiState.update {
             it.copy(
@@ -418,6 +438,7 @@ class SendViewModel @Inject constructor(
 
     fun updateAmount(amount: String) {
         val sanitized = sanitizeAmount(amount) ?: return  // silently reject invalid chars
+        invalidateDraft()
         val amountShannons = try {
             if (sanitized.isEmpty()) 0L
             else BigDecimal(sanitized).setScale(8, RoundingMode.DOWN)
@@ -463,7 +484,12 @@ class SendViewModel @Inject constructor(
     }
 
     fun setMaxAmount() {
-        viewModelScope.launch {
+        invalidateDraft()
+        val request = generation
+        val walletId = walletPreferencesActiveId()
+        val network = repository.currentNetwork
+        val address = repository.getCurrentAddress()
+        maxJob = viewModelScope.launch {
             // Sending max consumes EVERY spendable cell, so the fee must be
             // estimated for all of them as inputs — the old 1-input estimate
             // undershot on fragmented wallets and the Max send then failed
@@ -487,7 +513,8 @@ class SendViewModel @Inject constructor(
                 .movePointLeft(8)
                 .stripTrailingZeros()
                 .toPlainString()
-            updateAmount(formatted)
+            if (generation == request && walletPreferencesActiveId() == walletId &&
+                repository.currentNetwork == network && repository.getCurrentAddress() == address) updateAmount(formatted)
         }
     }
 
@@ -498,7 +525,9 @@ class SendViewModel @Inject constructor(
      * [sendTransaction] overload that accepts an activity.
      */
     fun sendTransaction() {
-        viewModelScope.launch {
+        if (sendJob?.isActive == true) return
+        invalidateDraft()
+        reviewJob = viewModelScope.launch {
             if (!validateInputs()) return@launch
             showReview()
         }
@@ -517,12 +546,7 @@ class SendViewModel @Inject constructor(
      * confirmation rather than replacing it, so "Authenticate before
      * sending = off" no longer means "no confirmation at all".
      */
-    fun sendTransaction(activity: FragmentActivity) {
-        viewModelScope.launch {
-            if (!validateInputs()) return@launch
-            showReview()
-        }
-    }
+    fun sendTransaction(activity: FragmentActivity) = sendTransaction()
 
     /**
      * Builds the review snapshot from already-validated inputs.
@@ -534,84 +558,47 @@ class SendViewModel @Inject constructor(
      * than that guess — the sheet must not quote it (#490).
      */
     private suspend fun showReview() {
-        confirmedFeeShannons = null
-        _uiState.update { it.copy(sweepWarningAcknowledged = false) }
+        val request = generation
         val state = _uiState.value
-        val amountShannons = parseAmountShannons(state.amountCkb) ?: return
-
-        if (state.sendMode == SendMode.BULK) {
-            // A bulk send is several transactions (BULK_BATCH_SIZE recipients
-            // each), so there is no single transaction to price. The sheet
-            // quotes the per-batch estimate and the confirm path skips the
-            // fee re-check.
-            val preview = state.refreshBulkPreview(amountShannonsOverride = amountShannons)
-            _uiState.update {
-                it.copy(
-                    reviewRequest = withSweepWarning(
-                        SendReview(
-                            isBulk = true,
-                            recipientAddress = "",
-                            recipientName = null,
-                            recipientCount = preview.bulkValidRecipients.size,
-                            amountShannons = preview.bulkTotalAmountShannons,
-                            feeShannons = preview.estimatedFee,
-                            totalShannons = preview.bulkTotalAmountShannons + preview.estimatedFee,
-                        ),
-                        balanceShannons = preview.availableBalance,
-                    ),
-                    error = null,
-                )
-            }
-            return
-        }
-
-        val fromAddress = repository.getCurrentAddress()
-        if (fromAddress == null) {
+        val amount = parseAmountShannons(state.amountCkb) ?: return
+        val from = repository.getCurrentAddress() ?: run {
             _uiState.update { it.copy(error = com.rjnr.pocketnode.ui.util.UiMessage.Resource(com.rjnr.pocketnode.R.string.vm_error_wallet_not_initialized)) }
             return
         }
-
-        _uiState.update { it.copy(isLoading = true, statusMessage = "Preparing transaction...") }
-        val plan = runCatching {
-            repository.previewTransfer(
-                fromAddress = fromAddress,
-                recipients = listOf(RecipientOutput(state.recipientAddress, amountShannons)),
-            )
+        val walletId = walletPreferencesActiveId() ?: run {
+            _uiState.update { it.copy(error = com.rjnr.pocketnode.ui.util.UiMessage.Resource(com.rjnr.pocketnode.R.string.vm_error_no_active_wallet)) }
+            return
         }
-        _uiState.update { it.copy(isLoading = false, statusMessage = "") }
-
-        plan.onFailure { e ->
-            logger.e(TAG, "Send preview failed", e)
-            _uiState.update {
-                it.copy(
-                    error = com.rjnr.pocketnode.ui.util.UiMessage.Raw(mapSendErrorMessage(e.message)),
-                    errorDetail = e.message,
-                )
+        val network = repository.currentNetwork
+        val recipients = if (state.sendMode == SendMode.BULK)
+            state.refreshBulkPreview(amount).bulkValidRecipients.map { RecipientOutput(it, amount) }
+        else listOf(RecipientOutput(state.recipientAddress, amount))
+        val batches = recipients.chunked(BULK_BATCH_SIZE)
+        fun current() = generation == request && walletPreferencesActiveId() == walletId &&
+            repository.currentNetwork == network && repository.getCurrentAddress() == from
+        _uiState.update { it.copy(isLoading = true, statusMessage = "Preparing transaction...") }
+        try {
+            val fees = if (state.sendMode == SendMode.BULK) repository.previewBatches(from, batches)
+                else listOf(repository.previewTransfer(from, recipients).feeShannons)
+            if (!current()) return
+            require(fees.size == batches.size)
+            val transfers = batches.zip(fees).map { (batch, fee) ->
+                ReviewedTransfer(walletId, from, network, batch, fee, request, state.sendMode == SendMode.BULK)
             }
-        }.onSuccess { transferPlan ->
-            _uiState.update {
-                it.copy(
-                    reviewRequest = withSweepWarning(
-                        SendReview(
-                            isBulk = false,
-                            recipientAddress = state.recipientAddress,
-                            recipientName = state.matchedContact
-                                ?.takeIf { contact -> contact.address == state.recipientAddress }?.name,
-                            recipientCount = 1,
-                            amountShannons = amountShannons,
-                            feeShannons = transferPlan.feeShannons,
-                            totalShannons = amountShannons + transferPlan.feeShannons,
-                        ),
-                        // `it` is the state being copied, so the balance is the
-                        // freshest one the repository has pushed.
-                        balanceShannons = it.availableBalance,
-                    ),
-                    // The form's fee line was the 1-input guess; replace it with
-                    // the planned fee so both surfaces agree.
-                    estimatedFee = transferPlan.feeShannons,
-                    error = null,
-                )
-            }
+            val totalAmount = transfers.fold(0L) { total, transfer -> Math.addExact(total, transfer.amountShannons) }
+            val totalFee = fees.fold(0L, Math::addExact)
+            _uiState.update { it.copy(reviewRequest = withSweepWarning(SendReview(
+                isBulk = state.sendMode == SendMode.BULK, transfers = transfers,
+                recipientAddress = if (state.sendMode == SendMode.SINGLE) recipients.single().address else "",
+                recipientName = state.matchedContact?.takeIf { it.address == state.recipientAddress }?.name,
+                recipientCount = recipients.size, amountShannons = totalAmount, feeShannons = totalFee,
+                totalShannons = Math.addExact(totalAmount, totalFee)), it.availableBalance),
+                estimatedFee = totalFee, error = null) }
+        } catch (cancelled: kotlinx.coroutines.CancellationException) { throw cancelled }
+        catch (e: Exception) {
+            if (current()) _uiState.update { it.copy(error = com.rjnr.pocketnode.ui.util.UiMessage.Raw(mapSendErrorMessage(e.message)), errorDetail = e.message) }
+        } finally {
+            if (current()) _uiState.update { it.copy(isLoading = false, statusMessage = "") }
         }
     }
 
@@ -637,8 +624,7 @@ class SendViewModel @Inject constructor(
 
     /** Review dismissed without sending: back to the form, nothing broadcast. */
     fun cancelReview() {
-        confirmedFeeShannons = null
-        _uiState.update { it.copy(reviewRequest = null, sweepWarningAcknowledged = false) }
+        invalidateDraft()
     }
 
     /** Confirm from the review sheet — V2-capable (Compose) caller. */
@@ -654,19 +640,19 @@ class SendViewModel @Inject constructor(
         // The sheet disables Confirm until the box is ticked; enforce it here
         // too so the warning cannot be skipped by a caller that doesn't (#447).
         if (review.isNearlyFullBalance && !_uiState.value.sweepWarningAcknowledged) return
-        // The fee the user actually agreed to. The send re-plans under the
-        // send mutex and aborts if this no longer matches, so the broadcast
-        // can never pay a number the sheet did not show (#490).
-        confirmedFeeShannons = review.feeShannons.takeIf { !review.isBulk }
+        if (sendJob?.isActive == true) return
+        if (review.transfers.isEmpty() || review.transfers.any { !isCurrent(it) }) {
+            invalidateDraft()
+            return
+        }
         _uiState.update { it.copy(reviewRequest = null, sweepWarningAcknowledged = false) }
 
-        if (sendJob?.isActive == true) return
         sendJob = viewModelScope.launch(start = kotlinx.coroutines.CoroutineStart.LAZY) {
             if (activity == null) {
                 _uiState.update { it.copy(error = com.rjnr.pocketnode.ui.util.UiMessage.Resource(com.rjnr.pocketnode.R.string.vm_error_send_v2_reopen)) }
                 return@launch
             }
-            try { executeSendV2(activity) }
+            try { executeSendV2(activity, review.transfers) }
             catch (cancelled: kotlinx.coroutines.CancellationException) {
                 _uiState.update { it.copy(isLoading = false, error = null, errorDetail = null,
                     transactionState = TransactionState.IDLE,
@@ -758,21 +744,10 @@ class SendViewModel @Inject constructor(
         return true
     }
 
-    private suspend fun executeSendV2(activity: FragmentActivity) = com.rjnr.pocketnode.data.vault.VaultOperationSession.run(activity) owned@ {
-        val state = _uiState.value
-        val amountShannons = parseAmountShannons(state.amountCkb)
-            ?: error("Invalid amount state before authenticated send")
-
-        val capturedAddress = repository.getCurrentAddress()
-        if (capturedAddress == null) {
-            _uiState.update { it.copy(error = com.rjnr.pocketnode.ui.util.UiMessage.Resource(com.rjnr.pocketnode.R.string.vm_error_wallet_not_initialized)) }
-            return@owned
-        }
-
-        val walletId = walletPreferencesActiveId() ?: run {
-            _uiState.update { it.copy(error = com.rjnr.pocketnode.ui.util.UiMessage.Resource(com.rjnr.pocketnode.R.string.vm_error_no_active_wallet)) }
-            return@owned
-        }
+    private suspend fun executeSendV2(activity: FragmentActivity, transfers: List<ReviewedTransfer>) = com.rjnr.pocketnode.data.vault.VaultOperationSession.run(activity) owned@ {
+        val intent = transfers.first()
+        if (!isCurrent(intent)) return@owned
+        val walletId = intent.walletId
 
         when (val readResult = walletKeyReader.readPrivateKey(
             activity = activity,
@@ -807,24 +782,20 @@ class SendViewModel @Inject constructor(
             }
             is WalletKeyReader.Result.Success -> try {
                 kotlinx.coroutines.currentCoroutineContext().ensureActive()
-                if (repository.currentNetwork != state.networkType || walletPreferencesActiveId() != walletId) {
+                if (!isCurrent(intent)) {
                     throw kotlinx.coroutines.CancellationException("Send source changed")
                 }
-                if (state.sendMode == SendMode.BULK) {
-                    proceedWithBulkSend(amountShannons, capturedAddress, readResult.privateKey, walletId, state.networkType)
-                } else {
-                    proceedWithSend(amountShannons, capturedAddress, readResult.privateKey)
-                }
+                if (intent.isBulk) proceedWithBulkSend(transfers, readResult.privateKey)
+                else proceedWithSend(intent, readResult.privateKey)
             } finally { readResult.privateKey.fill(0) }
         }
     }
 
     private suspend fun proceedWithSend(
-        amountShannons: Long,
-        capturedAddress: String,
+        intent: ReviewedTransfer,
         privateKey: ByteArray,
     ) {
-        val state = _uiState.value
+        val capturedAddress = intent.fromAddress
         _uiState.update {
             it.copy(
                 isLoading = true,
@@ -835,15 +806,9 @@ class SendViewModel @Inject constructor(
         }
         try {
             _uiState.update { it.copy(statusMessage = "Broadcasting transaction...") }
-            val recipient = state.recipientAddress
-            val txHash = repository.prepareAndSend(
-                fromAddress = capturedAddress,
-                toAddress = recipient,
-                amountShannons = amountShannons,
-                privateKey = privateKey,
-                expectedFeeShannons = confirmedFeeShannons,
-                onSigned = { privateKey.fill(0) },
-            ).getOrThrow()
+            val recipient = intent.recipients.single().address
+            val txHash = repository.sendReviewed(intent, privateKey,
+                isCurrent = { isCurrent(intent) }, onSigned = { privateKey.fill(0) })
             _uiState.update {
                 it.copy(
                     isLoading = false,
@@ -881,16 +846,13 @@ class SendViewModel @Inject constructor(
             error = com.rjnr.pocketnode.ui.util.UiMessage.Resource(com.rjnr.pocketnode.R.string.vm_error_send_v2_reopen)) }
     }
 
-    private suspend fun proceedWithBulkSend(
-        amountShannons: Long,
-        capturedAddress: String,
-        privateKey: ByteArray,
-        capturedWalletId: String,
-        capturedNetwork: NetworkType,
-    ) {
-        val initialState = _uiState.value.refreshBulkPreview(amountShannonsOverride = amountShannons)
-        val recipients = initialState.bulkValidRecipients.map { RecipientOutput(it, amountShannons) }
-        val batches = recipients.chunked(BULK_BATCH_SIZE)
+    private suspend fun proceedWithBulkSend(transfers: List<ReviewedTransfer>, privateKey: ByteArray) {
+        val intent = transfers.first()
+        val capturedAddress = intent.fromAddress
+        val capturedWalletId = intent.walletId
+        val capturedNetwork = intent.network
+        val recipients = transfers.flatMap { it.recipients }
+        val batches = transfers.map { it.recipients }
         _uiState.update {
             it.copy(
                 isLoading = true,
@@ -914,7 +876,7 @@ class SendViewModel @Inject constructor(
                 // Cancellation between successful batches must prevent another signing call.
                 kotlinx.coroutines.yield()
                 kotlinx.coroutines.currentCoroutineContext().ensureActive()
-                if (repository.currentNetwork != capturedNetwork || walletPreferencesActiveId() != capturedWalletId) {
+                if (!isCurrent(intent)) {
                     throw kotlinx.coroutines.CancellationException("Send source changed")
                 }
                 val next = batch.map { it.address }
@@ -929,13 +891,10 @@ class SendViewModel @Inject constructor(
                         bulkCurrentBatch = index + 1,
                     )
                 }
-                val txHash = repository.prepareAndSendBulkOrThrow(
-                    fromAddress = capturedAddress,
-                    recipients = batch,
-                    privateKey = privateKey,
-                    expectedWalletId = capturedWalletId,
-                    expectedNetwork = capturedNetwork,
-                )
+                val reviewedBatch = transfers[index]
+                val txHash = repository.sendReviewed(reviewedBatch, privateKey,
+                    isCurrent = { isCurrent(reviewedBatch) },
+                    onSigned = { if (index == transfers.lastIndex) privateKey.fill(0) })
                 submitted += entered
                 val after = before.copy(submittedRecipients = submitted.toList(),
                     submittedTxHashes = before.submittedTxHashes + txHash, uncertainRecipients = emptyList())
@@ -1184,6 +1143,8 @@ class SendViewModel @Inject constructor(
     }
 
     fun cancelAuth() {
+        invalidateDraft()
+        sendJob?.cancel()
         _uiState.update { it.copy(requiresAuth = false, authMethod = null) }
     }
 

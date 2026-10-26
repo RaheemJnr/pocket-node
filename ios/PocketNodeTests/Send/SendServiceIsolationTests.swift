@@ -90,4 +90,37 @@ final class SendServiceIsolationTests: XCTestCase {
 
         wait(for: [finished], timeout: 20)
     }
+    func testReviewSourceValidatorReadsLiveIdentityOffMainActor() throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        let store = WalletStore(directory: directory)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let suite = "send-review-" + UUID().uuidString
+        let defaults = UserDefaults(suiteName: suite)!
+        defer { defaults.removePersistentDomain(forName: suite) }
+        let preferences = UserDefaultsPreferences(defaults: defaults)
+        preferences.setSelectedNetwork(network: .testnet)
+        func save(_ id: String) throws {
+            try store.save(WalletRecord(id: id, name: "Fixture", type: "raw_key",
+                mainnetAddress: SendFixtures.mainnetAddress, testnetAddress: SendFixtures.testnetAddress, createdAt: 0))
+        }
+        try save("review-wallet")
+        let review = try ReviewedTransfer(walletId: "review-wallet", fromAddress: SendFixtures.testnetAddress,
+            network: .testnet, recipients: [RecipientOutput(address: SendFixtures.testnetAddress, amountShannons: 10_000_000_000)],
+            feeShannons: 1000, generation: 1, isBulk: false)
+        let current = SharedValueBox(true)
+        let check = SendService.reviewValidator(walletURL: store.fileURL,
+            networkReader: preferences.selectedNetworkReader(), review: review, isCurrent: { current.get() })
+        XCTAssertTrue(offMainActor("review current") { check().boolValue })
+        current.set(false)
+        XCTAssertFalse(offMainActor("review edited") { check().boolValue })
+        current.set(true)
+        preferences.setSelectedNetwork(network: .mainnet)
+        XCTAssertFalse(offMainActor("network changed") { check().boolValue })
+        preferences.setSelectedNetwork(network: .testnet)
+        try save("other-wallet")
+        XCTAssertFalse(offMainActor("wallet replaced") { check().boolValue })
+        try FileManager.default.removeItem(at: store.fileURL)
+        XCTAssertFalse(offMainActor("wallet removed") { check().boolValue })
+    }
+
 }

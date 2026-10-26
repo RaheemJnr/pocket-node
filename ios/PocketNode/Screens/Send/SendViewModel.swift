@@ -36,6 +36,7 @@ enum AddressIndicator: Equatable {
 /// amount that is about to be signed, because editing the form is only
 /// reachable after Cancel has cleared it.
 struct SendReview: Equatable {
+    let intent: ReviewedTransfer
     let recipient: String
     let amountShannons: Int64
     let feeShannons: Int64
@@ -139,6 +140,20 @@ final class SendViewModel {
     private(set) var preparingMessage = ""
 
     private(set) var review: SendReview?
+    @ObservationIgnored private let draftGeneration = SharedValueBox<Int64>(0)
+    @ObservationIgnored private var maxRequest: Task<Int64, Never>?
+
+    private func invalidateDraft() {
+        draftGeneration.update { $0 += 1 }
+        maxRequest?.cancel()
+        review = nil
+        sweepAcknowledged = false
+    }
+
+    private func sourceMatches(_ intent: ReviewedTransfer) -> Bool {
+        service.walletId == intent.walletId && service.fromAddress == intent.fromAddress &&
+            service.network == intent.network && draftGeneration.get() == intent.generation
+    }
 
     /// "I understand" on the sweep warning. Reset with every new review, so an
     /// acknowledgement never carries over to a different draft.
@@ -243,6 +258,7 @@ final class SendViewModel {
     // MARK: - Editing
 
     func updateRecipient(_ text: String) {
+        invalidateDraft()
         recipient = text
         alert = nil
     }
@@ -252,6 +268,7 @@ final class SendViewModel {
     /// rejected, so the field never fights the user mid-entry.
     func updateAmount(_ text: String) {
         guard let sanitized = sanitizeAmount(input: text) else { return }
+        invalidateDraft()
         amount = sanitized
         alert = nil
         recomputeFee()
@@ -265,7 +282,14 @@ final class SendViewModel {
 
     /// The MAX pill.
     func setMaxAmount() async {
-        let spendable = await service.maxSendableShannons()
+        invalidateDraft()
+        let generation = draftGeneration.get()
+        let source = service.fromAddress
+        let wallet = service.walletId
+        let network = service.network
+        let request = Task { await service.maxSendableShannons() }
+        maxRequest = request
+        let spendable = await request.value
         // Clamped to the balance ``validate()`` measures against. The two are
         // read from different places on purpose: the pipeline prices MAX over
         // the cells a send would select, which include the change in-flight
@@ -273,6 +297,8 @@ final class SendViewModel {
         // read. The first can therefore be the larger of the two, and MAX
         // filling a number the screen then refuses as "Insufficient balance"
         // is worse than a MAX that is a few shannons conservative.
+        guard !Task.isCancelled, draftGeneration.get() == generation, service.fromAddress == source,
+              service.walletId == wallet, service.network == network else { return }
         let shannons = Swift.min(spendable, availableShannons)
         // Trailing zeros trimmed and a "." decimal point, because the value
         // goes straight back into the field the sanitiser owns.
@@ -294,7 +320,11 @@ final class SendViewModel {
             return
         }
 
-        sweepAcknowledged = false
+        invalidateDraft()
+        let generation = draftGeneration.get()
+        let destination = recipient
+        let network = service.network
+        guard let walletId = service.walletId else { return }
         // Only when there is nothing left being watched. A transaction the
         // user hid stays hidden through the next draft: un-hiding it here
         // would throw its sheet up over the review sheet, and a settled one
@@ -312,13 +342,19 @@ final class SendViewModel {
         do {
             let plan = try await service.preview(
                 from: from,
-                recipients: [RecipientOutput(address: recipient, amountShannons: amountShannons)]
+                recipients: [RecipientOutput(address: destination, amountShannons: amountShannons)]
             )
+            guard !Task.isCancelled, draftGeneration.get() == generation, service.walletId == walletId,
+                  service.fromAddress == from, service.network == network else { return }
+            let intent = try ReviewedTransfer(walletId: walletId, fromAddress: from, network: network,
+                recipients: [RecipientOutput(address: destination, amountShannons: amountShannons)],
+                feeShannons: plan.feeShannons, generation: generation, isBulk: false)
             // The form's fee line was the one-input guess; the plan is what the
             // send will actually pay, so both surfaces now agree.
             estimatedFeeShannons = plan.feeShannons
             review = SendReview(
-                recipient: recipient,
+                intent: intent,
+                recipient: destination,
                 amountShannons: amountShannons,
                 feeShannons: plan.feeShannons,
                 sweep: sweepWarning(
@@ -335,8 +371,7 @@ final class SendViewModel {
     /// Review dismissed without sending. Nothing was built, so there is
     /// nothing to undo.
     func cancelReview() {
-        review = nil
-        sweepAcknowledged = false
+        invalidateDraft()
     }
 
     /// The only path to the key.
@@ -345,8 +380,9 @@ final class SendViewModel {
         // The sheet disables Confirm until the box is ticked; enforced here too
         // so the warning cannot be skipped by a caller that does not (#447).
         guard review.sweep == nil || sweepAcknowledged else { return }
-        guard let from = service.fromAddress else {
-            alert = SendAlert(message: "Wallet not initialized", detail: nil, canRetry: false)
+        guard sourceMatches(review.intent) else {
+            invalidateDraft()
+            alert = SendAlert(message: "Send source changed. Review the payment again.", detail: nil, canRetry: false)
             return
         }
 
@@ -357,12 +393,9 @@ final class SendViewModel {
         // and a carried-over Hide would swallow its whole lifecycle.
         isStatusSheetHidden = false
 
-        let result = await service.send(
-            from: from,
-            to: review.recipient,
-            amount: review.amountShannons,
-            expectedFee: review.feeShannons
-        )
+        let generation = draftGeneration
+        let expectedGeneration = review.intent.generation
+        let result = await service.sendReviewed(review.intent, isCurrent: { generation.get() == expectedGeneration })
         switch result {
         case .success:
             // The form is cleared the moment the broadcast is accepted, so a
