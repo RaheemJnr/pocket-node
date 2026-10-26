@@ -214,6 +214,31 @@ class WalletSettingsViewModelDeleteTest {
         assertRegisteredOnlyAfterDelete()
     }
 
+    @Test fun `vacuum failure with pending cleanup preserves removal acknowledgement and gateway`() = vacuumFailureAfterRemoval(pending = true)
+    @Test fun `vacuum failure after clean removal still completes navigation and gateway`() = vacuumFailureAfterRemoval(pending = false)
+
+    private fun vacuumFailureAfterRemoval(pending: Boolean) {
+        seed("C", entity("A", "aa", false), entity("C", "cc", true))
+        if (pending) coEvery { keyManager.deleteWalletKeys("C", false) } throws IllegalStateException("synthetic obstruction")
+        io.mockk.mockkObject(com.rjnr.pocketnode.data.database.DatabaseMaintenanceUtil)
+        try {
+            every { com.rjnr.pocketnode.data.database.DatabaseMaintenanceUtil.vacuum(db) } throws android.database.sqlite.SQLiteFullException("synthetic full disk")
+            runTest(testDispatcher) {
+                deletedId = "C"
+                val vm = newViewModel("C")
+                advanceUntilIdle(); vm.confirmDelete(); advanceUntilIdle()
+                assertNull(db.walletDao().getById("C"))
+                assertEquals(pending, db.walletPendingCleanupDao().get("C") != null)
+                assertEquals(script("aa"), gateway.walletInfo.value?.script)
+                assertNull(vm.uiState.value.error)
+                assertEquals(pending, vm.uiState.value.cleanupPending)
+                assertEquals(!pending, vm.uiState.value.deleted)
+                if (pending) { vm.acknowledgeCleanupPending(); assertTrue(vm.uiState.value.deleted) }
+            }
+            assertRegisteredOnlyAfterDelete()
+        } finally { io.mockk.unmockkObject(com.rjnr.pocketnode.data.database.DatabaseMaintenanceUtil) }
+    }
+
     @Test
     fun `deleting the active wallet moves the gateway onto the new active wallet`() {
         seed(

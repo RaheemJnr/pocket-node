@@ -76,11 +76,11 @@ class WalletRepositoryTest {
         db.close()
     }
 
-    private fun newRepo(dao: WalletDao = walletDao, km: KeyManager = keyManager, keys: com.rjnr.pocketnode.data.database.dao.KeyMaterialDao = db.keyMaterialDao(), mnemonics: MnemonicManager = mnemonicManager) = WalletRepository(
+    private fun newRepo(dao: WalletDao = walletDao, km: KeyManager = keyManager, keys: com.rjnr.pocketnode.data.database.dao.KeyMaterialDao = db.keyMaterialDao(), mnemonics: MnemonicManager = mnemonicManager, housekeepingPrefs: WalletPreferences = walletPreferences) = WalletRepository(
         dao, km, walletPreferences, walletPreferences, mnemonics, db,
         db.transactionDao(), db.balanceCacheDao(), db.daoCellDao(),
         db.pendingDaoWithdrawDao(), db.pendingDaoUnlockDao(), keys,
-        db.subAccountCandidateDao(), SubAccountDiscovery(mnemonics, km), walletPreferences, NoopLogger
+        db.subAccountCandidateDao(), SubAccountDiscovery(mnemonics, km), housekeepingPrefs, NoopLogger
     )
 
     @Test
@@ -1113,6 +1113,46 @@ class WalletRepositoryTest {
         repo.factoryReset()
         assertTrue(db.walletPendingCleanupDao().all().isEmpty())
         assertTrue(runCatching { repo.retryPendingWalletCleanup() }.isFailure)
+    }
+
+    @Test fun `vacuum failure preserves committed pending cleanup outcome`() = postcommitMaintenanceFailure(pending = true, sweep = false)
+    @Test fun `vacuum failure preserves committed clean outcome`() = postcommitMaintenanceFailure(pending = false, sweep = false)
+    @Test fun `sweep failure preserves committed pending cleanup outcome`() = postcommitMaintenanceFailure(pending = true, sweep = true)
+    @Test fun `sweep failure preserves committed clean outcome`() = postcommitMaintenanceFailure(pending = false, sweep = true)
+
+    @Test fun `vacuum cancellation propagates and retains committed pending intent`() = postcommitMaintenanceFailure(pending = true, sweep = false, cancelled = true)
+    @Test fun `sweep cancellation propagates and retains committed pending intent`() = postcommitMaintenanceFailure(pending = true, sweep = true, cancelled = true)
+
+    private fun postcommitMaintenanceFailure(pending: Boolean, sweep: Boolean, cancelled: Boolean = false) = runTest {
+        val gone = repo.createWallet("Gone", { id, bundle -> fakePersistV2(id, bundle) }).getOrThrow()
+        repo.createWallet("Keep", { id, bundle -> fakePersistV2(id, bundle) }).getOrThrow()
+        val directory = java.nio.file.Files.createTempDirectory("housekeeping-failure").toFile()
+        val backup = com.rjnr.pocketnode.data.crypto.KeyBackupManager(directory, NoopLogger, keyManager.walletStorage)
+        keyManager.setBackupManager(backup)
+        val obstruction = java.io.File(directory, "${gone.walletId}.enc.tmp")
+        val maintenancePrefs = io.mockk.spyk(walletPreferences)
+        if (pending) { obstruction.mkdir(); java.io.File(obstruction, "blocker").writeText("synthetic") }
+        val maintenanceFailure = if (cancelled) kotlinx.coroutines.CancellationException("synthetic cancellation")
+            else android.database.sqlite.SQLiteFullException("private diagnostic sentinel")
+        io.mockk.mockkObject(com.rjnr.pocketnode.data.database.DatabaseMaintenanceUtil)
+        try {
+            if (sweep) {
+                io.mockk.every { maintenancePrefs.clearSweepTxHashes(gone.walletId) } throws maintenanceFailure
+            } else {
+                io.mockk.every { com.rjnr.pocketnode.data.database.DatabaseMaintenanceUtil.vacuum(db) } throws maintenanceFailure
+            }
+            val failure = runCatching { newRepo(housekeepingPrefs = maintenancePrefs).deleteWallet(gone.walletId) }.exceptionOrNull()
+            if (cancelled) assertSame(maintenanceFailure, failure)
+            else if (pending) assertTrue("Must report pending cleanup, not maintenance failure", failure is WalletCleanupPendingException)
+            else assertNull("Committed clean removal must succeed despite housekeeping failure", failure)
+            assertNull(walletDao.getById(gone.walletId))
+            assertNull(db.keyMaterialDao().getByWalletId(gone.walletId))
+            assertEquals(pending, db.walletPendingCleanupDao().get(gone.walletId) != null)
+            assertEquals(pending, obstruction.exists())
+        } finally {
+            io.mockk.unmockkObject(com.rjnr.pocketnode.data.database.DatabaseMaintenanceUtil)
+            directory.deleteRecursively()
+        }
     }
 
 }

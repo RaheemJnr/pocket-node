@@ -544,10 +544,24 @@ class WalletRepository @Inject constructor(
         // #538 review: a deleted wallet's gap-limit sweep markers must not
         // outlive it (they are keyed by walletId, but nothing else ever
         // reads or prunes them otherwise).
-        walletPreferences.clearSweepTxHashes(walletId)
+        // Removal has committed. Housekeeping must not replace its cleanup outcome with
+        // a generic deletion error, which would leave caller gateway/recovery state stale.
+        try {
+            walletPreferences.clearSweepTxHashes(walletId)
+        } catch (cancelled: kotlinx.coroutines.CancellationException) {
+            throw cancelled
+        } catch (failure: Exception) {
+            logger.w(TAG, "Post-removal sweep housekeeping failed (${failure.javaClass.simpleName})")
+        }
         // VACUUM must run outside the transaction above, SQLite rejects VACUUM
         // when a transaction is open on the same connection.
-        DatabaseMaintenanceUtil.vacuum(appDatabase)
+        try {
+            DatabaseMaintenanceUtil.vacuum(appDatabase)
+        } catch (cancelled: kotlinx.coroutines.CancellationException) {
+            throw cancelled
+        } catch (failure: Exception) {
+            logger.w(TAG, "Post-removal database housekeeping failed (${failure.javaClass.simpleName})")
+        }
         if (!cleanupComplete) throw WalletCleanupPendingException()
         logger.d(TAG, "Deleted wallet and caches: $walletId")
     }
