@@ -1085,6 +1085,53 @@ class WalletRepositoryTest {
         } finally { directory.deleteRecursively() }
     }
 
+    @Test fun `replacement removal supersedes stale cleanup with keep backup`() = replacementRemoval(true)
+    @Test fun `replacement removal supersedes stale cleanup with delete backup`() = replacementRemoval(false)
+    @Test fun `replacement removal rollback restores stale cleanup intent`() = replacementRemoval(true, rollback = true)
+
+    private fun replacementRemoval(keepBackup: Boolean, rollback: Boolean = false) = runTest {
+        val replacement = repo.createWallet("Replacement", { id, bundle -> fakePersistV2(id, bundle) }).getOrThrow()
+        repo.createWallet("Keep", { id, bundle -> fakePersistV2(id, bundle) }).getOrThrow()
+        val oldIntent = com.rjnr.pocketnode.data.database.entity.WalletPendingCleanupEntity(replacement.walletId, !keepBackup)
+        db.walletPendingCleanupDao().insert(oldIntent)
+        val directory = java.nio.file.Files.createTempDirectory("replacement-removal").toFile()
+        try {
+            keyManager.setBackupManager(com.rjnr.pocketnode.data.crypto.KeyBackupManager(directory, NoopLogger, keyManager.walletStorage))
+            val copies = listOf("enc", "enc.tmp").map { suffix ->
+                java.io.File(directory, "${replacement.walletId}.$suffix").apply { writeText("synthetic $suffix") }
+            }
+            assertFalse(repo.retryPendingWalletCleanup())
+            assertEquals(oldIntent, db.walletPendingCleanupDao().get(replacement.walletId))
+            assertNotNull(walletDao.getById(replacement.walletId))
+            assertTrue(copies.all { it.exists() })
+            if (rollback) {
+                val failure = IllegalStateException("synthetic removal failure")
+                val failingDao = object : WalletDao by walletDao {
+                    override suspend fun delete(walletId: String) { throw failure }
+                }
+                val observed = runCatching {
+                    newRepo(dao = failingDao).deleteWallet(replacement.walletId, keepBackupFile = keepBackup)
+                }.exceptionOrNull()
+                // Coroutine stack recovery may copy the exception across the Room dispatcher.
+                assertEquals(failure.javaClass, observed?.javaClass)
+                assertEquals(failure.message, observed?.message)
+                assertEquals(oldIntent, db.walletPendingCleanupDao().get(replacement.walletId))
+                assertNotNull(walletDao.getById(replacement.walletId))
+                assertNotNull(db.keyMaterialDao().getByWalletId(replacement.walletId))
+                assertNotNull(db.walletVaultDao().get(replacement.walletId))
+                assertTrue(copies.all { it.exists() })
+            } else {
+                repo.deleteWallet(replacement.walletId, keepBackupFile = keepBackup)
+                assertNull(walletDao.getById(replacement.walletId))
+                assertNull(db.keyMaterialDao().getByWalletId(replacement.walletId))
+                assertNull(db.walletVaultDao().get(replacement.walletId))
+                assertNull(db.walletPendingCleanupDao().get(replacement.walletId))
+                copies.forEach { assertEquals(keepBackup, it.exists()) }
+                if (keepBackup) copies.zip(listOf("enc", "enc.tmp")).forEach { (copy, suffix) -> assertEquals("synthetic $suffix", copy.readText()) }
+            }
+        } finally { directory.deleteRecursively() }
+    }
+
     @Test
     fun `recovery cleanup retry preserves committed and interrupted backups`() = runTest {
         val context = ApplicationProvider.getApplicationContext<Context>()
