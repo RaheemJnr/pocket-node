@@ -212,7 +212,9 @@ class WalletPreferences @Inject constructor(
 
     override fun setSelectedNetwork(network: NetworkType) {
         // commit() instead of apply() — must flush synchronously before Process.killProcess()
-        prefs.edit().putString(KEY_SELECTED_NETWORK, network.name).commit()
+        check(prefs.edit().putString(KEY_SELECTED_NETWORK, network.name).commit()) {
+            "Cannot persist selected network"
+        }
     }
 
     /**
