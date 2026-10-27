@@ -747,7 +747,7 @@ impl LatestBlockFilterHashes {
             .enumerate()
         {
             if old_hash != new_hash {
-                let number = start_number + (start_index_for_old + index) as BlockNumber;
+                let number = start_number + (start_index_for_new + index) as BlockNumber;
                 let errmsg = format!(
                     "old filter hash for block {} is {:#x} but new is {:#}",
                     number, old_hash, new_hash
@@ -2193,6 +2193,28 @@ mod filter_range_regressions {
             .unwrap();
         assert_eq!(repeated, None);
         assert_eq!(hashes.get_hashes(), vec![hash; 3]);
+    }
+
+    #[test]
+    fn maximum_height_conflicting_filter_repeat_is_ignored() {
+        let checkpoint = u64::MAX - 3;
+        let hash = packed::Byte32::default();
+        let original = vec![hash.clone(); 3];
+        let mut hashes = LatestBlockFilterHashes::mock(checkpoint, original.clone());
+        let conflict = packed::Byte32::from_slice(&[1; 32]).unwrap();
+        let error = hashes
+            .update_latest_block_filter_hashes(
+                u64::MAX,
+                checkpoint,
+                &hash,
+                u64::MAX,
+                &hash,
+                &[conflict],
+            )
+            .unwrap_err();
+        assert_eq!(error.code(), StatusCode::Ignore);
+        assert_eq!(hashes.get_hashes(), original);
+        assert_eq!(hashes.get_last_number(), u64::MAX);
     }
 
     #[test]

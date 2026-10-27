@@ -2,7 +2,7 @@
   "upstream_repository": "nervosnetwork/ckb-light-client",
   "upstream_commit": "9ce5fc6507ce1379dd8bd4b947426078bb2062e8",
   "archive_sha256": "24cb4a3043a96b42de717e8db4f60dcc6b5b2056265102960a97a9a3cad85f0f",
-  "mobile_patch_sha256": "3ca1de50519b081938631a583dd413f32e3132095c2c833c2e14f633408e04c3",
+  "mobile_patch_sha256": "a40224c605d103d4cef2aa326a16bf76ee32a8efe060c7ed089a584f6c8aee48",
   "upstream_files": {
     ".github/codecov.yaml": "35efb16290fe39a272f173155117104119f4de0d46725bf21a4fcb201f873abe",
     ".github/workflows/ci.yaml": "28eb6793d401496217141e70079ad646d23766aadd16e8ea63a63f813eef3399",
@@ -176,7 +176,7 @@
     "light-client-lib/src/protocols/light_client/components/tests/send_last_state_proof.rs": "9f5cbc58b66a1bb2e26bba4de30d0960661e373d7a13caf4f37d04e29a2abd13",
     "light-client-lib/src/protocols/light_client/constant.rs": "f46ee46bc7674167ea6bbb639c76a40f6ac7e551bac0f046d6a100a7ff099c23",
     "light-client-lib/src/protocols/light_client/mod.rs": "eb066ea8251f940eb4d6dd9fb94f5307a1de8cd25a52c98cacd629027e65bfde",
-    "light-client-lib/src/protocols/light_client/peers.rs": "4a3f6fc2aa43e2284a2c92a62b943ba3231f2c4c57de2780a83dfd154f9f7c48",
+    "light-client-lib/src/protocols/light_client/peers.rs": "a86bd0cb5a1b6834e5de60d7a4468573fd0cae262e1b6d424db9cca023dcabe7",
     "light-client-lib/src/protocols/light_client/prelude.rs": "b925d9d7e5a630d172e324a40d08c84adf2f11e6b7dccfdccf7aa0db2ddcb366",
     "light-client-lib/src/protocols/light_client/sampling.rs": "d7813265f0c32b2b2286251079e8be92587b547262ee83019b74e23623324533",
     "light-client-lib/src/protocols/light_client/tests/mod.rs": "6efe4bd2dd52d34845cd1050b4982f64a00df5b002001bf2ffa5d8ad05636f26",

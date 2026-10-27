@@ -12218,7 +12218,7 @@ index 9b5f30a907e8e517cac6f5860751e86b5f1a4174..61694ab67135c411d97ca771d195a64b
              .parent_chain_root()
              .total_difficulty()
 diff --git a/light-client-lib/src/protocols/light_client/peers.rs b/light-client-lib/src/protocols/light_client/peers.rs
-index 367ea21195ceee718b3a5954caa4ee5257b58bb3..44f4f55b5dc55d20d617458e73ca7f6cade3c073 100644
+index 367ea21195ceee718b3a5954caa4ee5257b58bb3..31769887b62fa5b8062036bbebab7f4a51301a8f 100644
 --- a/light-client-lib/src/protocols/light_client/peers.rs
 +++ b/light-client-lib/src/protocols/light_client/peers.rs
 @@ -663,12 +663,10 @@ impl LatestBlockFilterHashes {
@@ -12255,6 +12255,15 @@ index 367ea21195ceee718b3a5954caa4ee5257b58bb3..44f4f55b5dc55d20d617458e73ca7f6c
          }
          // Check block filter hashes.
          let (start_index_for_old, start_index_for_new) = if start_number
+@@ -750,7 +747,7 @@ impl LatestBlockFilterHashes {
+             .enumerate()
+         {
+             if old_hash != new_hash {
+-                let number = start_number + (start_index_for_old + index) as BlockNumber;
++                let number = start_number + (start_index_for_new + index) as BlockNumber;
+                 let errmsg = format!(
+                     "old filter hash for block {} is {:#x} but new is {:#}",
+                     number, old_hash, new_hash
 @@ -758,11 +755,16 @@ impl LatestBlockFilterHashes {
                  return Err(StatusCode::Ignore.with_context(errmsg));
              }
@@ -12277,7 +12286,7 @@ index 367ea21195ceee718b3a5954caa4ee5257b58bb3..44f4f55b5dc55d20d617458e73ca7f6c
          } else {
              Ok(None)
          }
-@@ -2055,3 +2057,160 @@ fn if_verifiable_headers_are_same(lhs: &VerifiableHeader, rhs: &VerifiableHeader
+@@ -2055,3 +2057,182 @@ fn if_verifiable_headers_are_same(lhs: &VerifiableHeader, rhs: &VerifiableHeader
                      .as_slice()))
          && lhs.total_difficulty() == rhs.total_difficulty()
  }
@@ -12417,6 +12426,28 @@ index 367ea21195ceee718b3a5954caa4ee5257b58bb3..44f4f55b5dc55d20d617458e73ca7f6c
 +            .unwrap();
 +        assert_eq!(repeated, None);
 +        assert_eq!(hashes.get_hashes(), vec![hash; 3]);
++    }
++
++    #[test]
++    fn maximum_height_conflicting_filter_repeat_is_ignored() {
++        let checkpoint = u64::MAX - 3;
++        let hash = packed::Byte32::default();
++        let original = vec![hash.clone(); 3];
++        let mut hashes = LatestBlockFilterHashes::mock(checkpoint, original.clone());
++        let conflict = packed::Byte32::from_slice(&[1; 32]).unwrap();
++        let error = hashes
++            .update_latest_block_filter_hashes(
++                u64::MAX,
++                checkpoint,
++                &hash,
++                u64::MAX,
++                &hash,
++                &[conflict],
++            )
++            .unwrap_err();
++        assert_eq!(error.code(), StatusCode::Ignore);
++        assert_eq!(hashes.get_hashes(), original);
++        assert_eq!(hashes.get_last_number(), u64::MAX);
 +    }
 +
 +    #[test]
