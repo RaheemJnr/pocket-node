@@ -1,17 +1,17 @@
 diff --git a/.cargo/audit.toml b/.cargo/audit.toml
 new file mode 100644
-index 0000000000000000000000000000000000000000..e87a8fee807f5e8333731358260aeb3ff9491eb2
+index 0000000000000000000000000000000000000000..83849575790e062a7ce0eefa0013a77b81148981
 --- /dev/null
 +++ b/.cargo/audit.toml
-@@ -0,0 +1,25 @@
+@@ -0,0 +1,27 @@
 +# cargo-audit config. Read from .cargo/audit.toml relative to the working
 +# directory (external/ckb-light-client) by the supply-chain CI workflow and by
 +# `cargo audit` run locally from this directory.
 +#
-+# Every ignored advisory below is transitive (pulled in by upstream CKB or
-+# libp2p/tentacle crates), not something this crate calls directly in an
-+# affected way. Review each one again by the date noted and drop it once the
-+# transitive dependency is bumped upstream.
++# Exceptions cover upstream dependencies, binding-generation tooling, and
++# direct runtime/storage serialization. Each reason states its scope; an
++# unmaintained notice is a maintenance exception, not a claim of general safety.
++# Review each by the date noted and remove it after a compatible migration.
 +#
 +# Keep this list consistent with deny.toml's [advisories.ignore]: the same
 +# RUSTSEC IDs, same reasons.
@@ -19,6 +19,8 @@ index 0000000000000000000000000000000000000000..e87a8fee807f5e8333731358260aeb3f
 +[advisories]
 +ignore = [
 +    "RUSTSEC-2024-0437", # protobuf recursion; inspected metrics path encodes only, prometheus 0.13 pins protobuf 2; upstream metrics migration required. Review by 2026-12-28.
++    "RUSTSEC-2026-0374", # basic-toml unmaintained in Askama/UniFFI binding generation; advisory reports maintenance status, no specific vulnerable operation; generator migration required. Review by 2026-12-28.
++    "RUSTSEC-2025-0141", # bincode 1.3.3 unmaintained; direct runtime/storage serialization retained for format compatibility, replacement requires migration; advisory reports maintenance status, no specific vulnerable operation. Review by 2026-12-28.
 +    "RUSTSEC-2025-0057", # fxhash unmaintained, transitive hashing utility, no known vulnerability. Review by 2026-12-28.
 +    "RUSTSEC-2024-0384", # instant unmaintained, transitive via parking_lot/governor. Review by 2026-12-28.
 +    "RUSTSEC-2025-0119", # number_prefix unmaintained, transitive build-time dependency only. Review by 2026-12-28.
@@ -3996,10 +3998,10 @@ index 2d36993b14a429bb16671a86ccdaf23900ff669a..00000000000000000000000000000000
 -# By default RPC only binds to localhost, thus it only allows accessing from the same machine.
 -listen_address = "127.0.0.1:9000"
 diff --git a/deny.toml b/deny.toml
-index 9aaa370eb7a06a8639ef7adc648a5336f8eceb81..5543389a6414be098e003d10274ace3991322eef 100644
+index 9aaa370eb7a06a8639ef7adc648a5336f8eceb81..81d48e9b66a3862afbb7fc21568ef3aa818cc923 100644
 --- a/deny.toml
 +++ b/deny.toml
-@@ -1,13 +1,25 @@
+@@ -1,13 +1,27 @@
 +# cargo-deny config for the vendored CKB light client workspace.
 +# Run from external/ckb-light-client: `cargo deny check`.
 +#
@@ -4021,6 +4023,8 @@ index 9aaa370eb7a06a8639ef7adc648a5336f8eceb81..5543389a6414be098e003d10274ace39
 -    { id = "RUSTSEC-2025-0119", reason = "Pulled in transitively through ckb-db-migration -> indicatif 0.16; no safe upgrade is available in the current ckb 1.x dependency line." },
 -    { id = "RUSTSEC-2025-0141", reason = "bincode 1.3 is used directly and transitively by the current serialization format; no safe drop-in upgrade is available." },
 +    { id = "RUSTSEC-2024-0437", reason = "protobuf recursion; inspected metrics path encodes only, prometheus 0.13 pins protobuf 2; upstream metrics migration required. Review by 2026-12-28." },
++    { id = "RUSTSEC-2026-0374", reason = "basic-toml unmaintained in Askama/UniFFI binding generation; advisory reports maintenance status, no specific vulnerable operation; generator migration required. Review by 2026-12-28." },
++    { id = "RUSTSEC-2025-0141", reason = "bincode 1.3.3 unmaintained; direct runtime/storage serialization retained for format compatibility, replacement requires migration; advisory reports maintenance status, no specific vulnerable operation. Review by 2026-12-28." },
 +    { id = "RUSTSEC-2025-0057", reason = "fxhash unmaintained, transitive hashing utility, no known vulnerability. Review by 2026-12-28." },
 +    { id = "RUSTSEC-2024-0384", reason = "instant unmaintained, transitive via parking_lot/governor. Review by 2026-12-28." },
 +    { id = "RUSTSEC-2025-0119", reason = "number_prefix unmaintained, transitive build-time dependency only. Review by 2026-12-28." },
@@ -4033,7 +4037,7 @@ index 9aaa370eb7a06a8639ef7adc648a5336f8eceb81..5543389a6414be098e003d10274ace39
  ]
  
  [licenses]
-@@ -15,23 +27,49 @@ allow = [
+@@ -15,23 +29,49 @@ allow = [
      "0BSD",
      "Apache-2.0",
      "Apache-2.0 WITH LLVM-exception",
