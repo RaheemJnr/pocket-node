@@ -71,4 +71,51 @@ class WalletLegacyCleanupTest {
         assertTrue(cleanup.clean("a", 0, fixture.material))
         fixture.close()
     }
+
+    @Test fun `retiring one wallet preserves shared wrapper for another row and interrupted archive`() = walletOperationTest {
+        WalletVaultIntegrationFixture().use { f ->
+            f.wallet()
+            f.legacy.migrateWallet("a", f.material.privateKey, null, "raw_key", false)
+            val words = "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about"
+            val key = MnemonicManager().mnemonicToPrivateKey(words.split(" "))
+            val info = WalletDerivation.walletInfo(key)
+            val hex = try { key.joinToString("") { "%02x".format(it) } } finally { key.fill(0) }
+            f.db.walletDao().insert(com.rjnr.pocketnode.data.database.entity.WalletEntity("b", "Seed", "mnemonic", null, null,
+                mainnetAddress = info.mainnetAddress, testnetAddress = info.testnetAddress))
+            f.legacy.migrateWallet("b", hex, words, "mnemonic", true)
+            val sibling = f.db.keyMaterialDao().getByWalletId("b")!!
+            f.phrase()
+            val raw = f.reader.readKeyMaterial(f.activity, "a", "Read", "Read") as WalletKeyReader.MaterialResult.Success
+            try { assertNull(raw.mnemonic) } finally { raw.privateKey.fill(0) }
+            assertNull(f.db.walletVaultDao().legacy("a"))
+            assertEquals(sibling, f.db.keyMaterialDao().getByWalletId("b"))
+            assertEquals(words, f.legacy.legacySourceForVaultCleanup(sibling)!!.mnemonic)
+            assertTrue(f.encryption.hasV1Key())
+
+            f.cleanupOk = false
+            f.phrase()
+            assertTrue(f.reader.readKeyMaterial(f.activity, "b", "Read", "Read") is WalletKeyReader.MaterialResult.NotAvailable)
+            assertEquals(sibling, f.db.walletVaultDao().legacy("b")?.source())
+            assertTrue(f.store.pendingLegacyCleanup().contains("b"))
+            assertTrue(f.v2.finalize().isSuccess)
+            assertTrue(f.encryption.hasV1Key())
+            assertEquals(words, f.legacy.legacySourceForVaultCleanup(f.db.walletVaultDao().legacy("b")!!.source())!!.mnemonic)
+
+            f.cleanupOk = true
+            f.phrase()
+            val recovered = f.coordinator.read(f.activity, "b", "Read", "Read") as VaultAccessResult.Success
+            assertEquals(words, recovered.material.mnemonic)
+            assertNull(f.db.walletVaultDao().legacy("b"))
+            assertTrue(f.store.pendingLegacyCleanup().isEmpty())
+            for (id in listOf("a", "b")) {
+                val marker = f.db.keyMaterialDao().getByWalletId(id)!!
+                assertEquals(3, marker.kdfVersion)
+                assertTrue(marker.encryptedPrivateKey.isEmpty())
+                assertNull(marker.encryptedMnemonic)
+                assertTrue(marker.iv.isEmpty())
+            }
+            // Retaining the unused wrapper does not retain either wallet's old ciphertext.
+            assertTrue(f.encryption.hasV1Key())
+        }
+    }
 }

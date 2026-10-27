@@ -591,4 +591,74 @@ class LegacyBackupRecoveryTest {
         }
     }
 
+    @Test fun `unreadable scoped V1 seed remains durable until authenticated retry preserves it`() = walletOperationTest {
+        val context = androidx.test.core.app.ApplicationProvider.getApplicationContext<android.content.Context>()
+        val name = "retirement-${java.util.UUID.randomUUID()}.db"
+        fun database() = androidx.room.Room.databaseBuilder(context, com.rjnr.pocketnode.data.database.AppDatabase::class.java, name)
+            .allowMainThreadQueries().build()
+        val encryption = spyk(com.rjnr.pocketnode.data.crypto.KeystoreEncryptionManager.createForTest())
+        var readable = true
+        every { encryption.newDecryptCipher(any()) } answers {
+            if (!readable) throw java.security.ProviderException("Synthetic temporary provider failure")
+            callOriginal()
+        }
+        val words = "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about"
+        val key = MnemonicManager().mnemonicToPrivateKey(words.split(" "))
+        val info = WalletDerivation.walletInfo(key)
+        val hex = try { key.joinToString("") { "%02x".format(it) } } finally { key.fill(0) }
+        val raw = com.rjnr.pocketnode.data.crypto.KeyMaterial(hex, null, "raw_key", false)
+        var retained: com.rjnr.pocketnode.data.database.entity.KeyMaterialEntity? = null
+        var captured: ByteArray? = null
+        try {
+            WalletVaultIntegrationFixture(database(), encryption).use { f ->
+                f.db.walletDao().insert(com.rjnr.pocketnode.data.database.entity.WalletEntity("a", "Seed", "mnemonic", null, null,
+                    mainnetAddress = info.mainnetAddress, testnetAddress = info.testnetAddress))
+                f.legacy.migrateWallet("a", hex, words, "mnemonic", true)
+                retained = f.db.keyMaterialDao().getByWalletId("a")!!
+                f.backup.writeBackup("a", raw, "111111".toCharArray())
+                captured = File(context.cacheDir, "integration-backups/a.enc").readBytes()
+                readable = false
+                f.phrase("111111"); f.phrase()
+                assertEquals(VaultAccessResult.CleanupRequired, resolver(f).recover(f.activity, "a"))
+                assertEquals(retained, f.db.walletVaultDao().legacy("a")?.source())
+                assertTrue(f.store.pendingLegacyCleanup().contains("a"))
+                assertArrayEquals(captured, File(context.cacheDir, "integration-backups/a.enc").readBytes())
+            }
+            WalletVaultIntegrationFixture(database(), encryption).use { f ->
+                assertEquals(retained, f.db.walletVaultDao().legacy("a")?.source())
+                assertTrue(f.store.pendingLegacyCleanup().contains("a"))
+                // A new authenticated V3 read cannot discard the still-unreadable archive.
+                f.phrase()
+                assertEquals(VaultAccessResult.CleanupRequired, f.coordinator.read(f.activity, "a", "Read", "Read"))
+                assertArrayEquals(captured, File(context.cacheDir, "integration-backups/a.enc").readBytes())
+                readable = true
+                assertEquals(words, f.legacy.legacySourceForVaultCleanup(retained!!)!!.mnemonic)
+                f.phrase("111111"); f.phrase()
+                val result = resolver(f).resumeCleanup(f.activity, "a") as VaultAccessResult.Success
+                assertEquals(words, result.material.mnemonic)
+                assertNull(f.db.walletVaultDao().legacy("a"))
+                assertFalse(f.backup.hasBackup("a"))
+                assertTrue(f.store.pendingLegacyCleanup().isEmpty())
+                f.phrase()
+                assertEquals(words, (f.coordinator.read(f.activity, "a", "Read", "Read") as VaultAccessResult.Success).material.mnemonic)
+            }
+        } finally { context.deleteDatabase(name) }
+    }
+
+    @Test fun `readable different scoped V1 identity is retained after matching backup recovery`() = walletOperationTest {
+        WalletVaultIntegrationFixture().use { f ->
+            f.wallet()
+            val otherKey = "00".repeat(31) + "03"
+            f.legacy.migrateWallet("a", otherKey, null, "raw_key", false)
+            val source = f.db.keyMaterialDao().getByWalletId("a")!!
+            val backup = fixture(f, "a"); val captured = backup.readBytes()
+            f.phrase("111111"); f.phrase()
+            assertEquals(VaultAccessResult.CleanupRequired, resolver(f).recover(f.activity, "a"))
+            assertEquals(source, f.db.walletVaultDao().legacy("a")?.source())
+            assertEquals(otherKey, f.legacy.legacySourceForVaultCleanup(source)!!.privateKeyHex)
+            assertTrue(f.store.pendingLegacyCleanup().contains("a"))
+            assertArrayEquals(captured, backup.readBytes())
+        }
+    }
+
 }
