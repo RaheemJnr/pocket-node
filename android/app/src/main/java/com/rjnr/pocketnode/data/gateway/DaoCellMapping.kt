@@ -69,9 +69,13 @@ internal fun DaoCellEntity.withoutWithdrawalEvidence(): DaoCellEntity = copy(
  * A joined current height mapping does not independently prove that an old
  * transaction moved to a different block. Contradictions remain unresolved.
  */
-internal fun DaoCellEntity.withWithdrawalEvidence(fresh: DaoCellEntity): DaoCellEntity {
+internal fun DaoCellEntity.withWithdrawalEvidence(
+    fresh: DaoCellEntity,
+    historicalWithdrawalHashes: Set<String> = emptySet(),
+): DaoCellEntity {
     if (!fresh.hasResolvedWithdrawalHeaders() || fresh.withdrawBlockNumber != withdrawBlockNumber ||
         fresh.capacity != capacity ||
+        historicalWithdrawalHashes.any { !it.equals(fresh.withdrawBlockHash, ignoreCase = true) } ||
         (withdrawBlockHash != null && !withdrawBlockHash.equals(fresh.withdrawBlockHash, ignoreCase = true))) {
         return withoutWithdrawalEvidence()
     }

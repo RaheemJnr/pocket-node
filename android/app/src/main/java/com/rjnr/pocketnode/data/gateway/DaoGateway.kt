@@ -365,36 +365,34 @@ class DaoGateway(
         val cachedByKey = cached.groupBy { normalizedOutPointKey(it.txHash, it.index) }
         // Older write-through could store both 0x0 and 0x00. Neither alias
         // may hide a conflicting historical association belonging to the same cell.
-        val conflictingKeys = cachedByKey.filterValues { rows ->
-            rows.mapNotNull { it.withdrawBlockHash?.lowercase() }.distinct().size > 1
-        }.keys
+        val historicalHashesByKey = cachedByKey.mapValues { (_, rows) ->
+            rows.mapNotNull { it.withdrawBlockHash?.lowercase() }.toSet()
+        }
         // A live scan uses the same joined height map as cached revalidation.
         // It must not erase a historical contradiction on the next refresh.
         val checkedLive = live.map { position ->
             val key = normalizedOutPointKey(position.outPoint.txHash, position.outPoint.index)
-            val prior = cachedByKey[key]?.firstOrNull()
+            val priors = cachedByKey[key].orEmpty()
+            val historicalHashes = historicalHashesByKey[key].orEmpty()
             val fresh = position.toDaoCellEntity(network, walletId, nowMs)
-            val checked = when {
-                prior == null -> fresh
-                key in conflictingKeys -> prior.withoutWithdrawalEvidence()
-                prior.withdrawBlockNumber != null -> prior.withWithdrawalEvidence(fresh)
-                else -> fresh
-            }
+            fun checkedFor(row: com.rjnr.pocketnode.data.database.entity.DaoCellEntity) =
+                if (row.withdrawBlockNumber != null) row.withWithdrawalEvidence(fresh, historicalHashes) else fresh
+            // The display base may use either alias, but acceptance always
+            // checks the full group's history, even when this alias has no hash.
+            val checked = checkedFor(priors.firstOrNull() ?: fresh)
             mutations.add {
                 val dao = appDatabase.daoCellDao()
-                val current = dao.getByOutPoint(prior?.txHash ?: fresh.txHash, prior?.index ?: fresh.index)
-                if (current == null) {
-                    dao.upsert(checked)
-                } else if (current.status != DaoCellStatus.COMPLETED.name &&
-                    current.network == network && current.walletId == walletId) {
-                    val updated = when {
-                        key in conflictingKeys -> current.withoutWithdrawalEvidence()
-                        current.withdrawBlockNumber != null -> current.withWithdrawalEvidence(fresh)
-                        else -> fresh
+                for (prior in priors.ifEmpty { listOf(fresh) }) {
+                    val current = dao.getByOutPoint(prior.txHash, prior.index)
+                    if (current == null) {
+                        dao.upsert(checkedFor(prior))
+                    } else if (current.status != DaoCellStatus.COMPLETED.name &&
+                        current.network == network && current.walletId == walletId) {
+                        val updated = checkedFor(current)
+                        dao.upsert(updated.copy(status = if (current.status != prior.status) {
+                            current.status
+                        } else updated.status))
                     }
-                    dao.upsert(updated.copy(status = if (prior != null && current.status != prior.status) {
-                        current.status
-                    } else updated.status))
                 }
             }
             if (checked == fresh) position else {
@@ -464,9 +462,9 @@ class DaoGateway(
                 // or, worse, reappearing as an unlockable outside-window row
                 // for the minutes between broadcast and the tx being scored.
                 CachedDaoCellFate.UNLOCK_IN_FLIGHT ->
-                    confirming += withFreshCompensation(entity, mutations, currentEpoch, normKey in conflictingKeys).toCachedDeposit()
+                    confirming += withFreshCompensation(entity, mutations, currentEpoch, historicalHashesByKey[normKey].orEmpty()).toCachedDeposit()
                 CachedDaoCellFate.OUTSIDE_WINDOW ->
-                    outsideWindow += withFreshCompensation(entity, mutations, currentEpoch, normKey in conflictingKeys).toOutsideWindowDeposit()
+                    outsideWindow += withFreshCompensation(entity, mutations, currentEpoch, historicalHashesByKey[normKey].orEmpty()).toOutsideWindowDeposit()
             }
         }
         if (outsideWindow.isNotEmpty()) {
@@ -489,11 +487,12 @@ class DaoGateway(
         entity: com.rjnr.pocketnode.data.database.entity.DaoCellEntity,
         mutations: DaoMutations,
         currentEpoch: EpochInfo?,
-        conflictingHistory: Boolean,
+        historicalHashes: Set<String>,
     ): com.rjnr.pocketnode.data.database.entity.DaoCellEntity {
-        val checked = if (conflictingHistory) entity.withoutWithdrawalEvidence() else {
-            daoDepositReader.revalidateCachedWithdrawing(entity, currentEpoch, NetworkType.valueOf(entity.network))
-        }
+        val resolved = daoDepositReader.revalidateCachedWithdrawing(entity, currentEpoch, NetworkType.valueOf(entity.network))
+        val checked = if (entity.withdrawBlockNumber != null) {
+            entity.withWithdrawalEvidence(resolved, historicalHashes)
+        } else resolved
         if (checked != entity) {
             mutations.add {
                 val dao = appDatabase.daoCellDao()
@@ -503,7 +502,7 @@ class DaoGateway(
                     // Preserve concurrent retirement/local status transitions;
                     // never replace the entire stale snapshot read above.
                     val metadata = if (current.withdrawBlockNumber != null) {
-                        current.withWithdrawalEvidence(checked)
+                        current.withWithdrawalEvidence(checked, historicalHashes)
                     } else current
                     dao.upsert(metadata.copy(
                         status = if (current.status == entity.status) metadata.status else current.status))

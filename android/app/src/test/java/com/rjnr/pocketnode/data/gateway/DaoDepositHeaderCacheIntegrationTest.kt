@@ -285,6 +285,63 @@ class DaoDepositHeaderCacheIntegrationTest {
         }
     }
 
+    @Test fun `cached null aliases honor conflicting history on every repeated refresh`() = runTest {
+        assertNullAliasHistory(live = false, matches = false)
+    }
+
+    @Test fun `live null aliases honor conflicting history regardless of row order`() = runTest {
+        assertNullAliasHistory(live = true, matches = false)
+    }
+
+    @Test fun `cached null aliases recover when fresh proof matches all history`() = runTest {
+        assertNullAliasHistory(live = false, matches = true)
+    }
+
+    @Test fun `live null aliases recover when fresh proof matches all history`() = runTest {
+        assertNullAliasHistory(live = true, matches = true)
+    }
+
+    private suspend fun assertNullAliasHistory(live: Boolean, matches: Boolean) {
+        val original = reader.list(script, null, network).single().toDaoCellEntity(network.name, "wallet", 7)
+        val oldHash = if (matches) withdraw.hash else hash("cf")
+        for (nullIndex in listOf("0x0", "0x00")) {
+            for (nullFirst in listOf(true, false)) {
+                db.daoCellDao().deleteAll()
+                val nullRow = original.copy(index = nullIndex, withdrawBlockHash = null, withdrawEpochHex = null)
+                val historicRow = original.copy(index = if (nullIndex == "0x0") "0x00" else "0x0",
+                    withdrawBlockHash = oldHash)
+                val ordered = if (nullFirst) listOf(nullRow, historicRow) else listOf(historicRow, nullRow)
+                ordered.forEach { db.daoCellDao().upsert(it) }
+                native.cellsPage = json.encodeToString(JniPagination(if (live) listOf(cell) else emptyList(), null))
+                repeat(3) {
+                    val shown = gateway.getDaoDeposits(ctx()).getOrThrow()
+                    assertEquals(if (live) 1 else 2, shown.size)
+                    shown.forEach { position ->
+                        if (matches) resolved(position) else unresolved(position)
+                        assertEquals(!live, position.outsideSyncWindow)
+                    }
+                    val storedNull = db.daoCellDao().getByOutPoint(phaseHash, nullRow.index)!!
+                    val storedHistoric = db.daoCellDao().getByOutPoint(phaseHash, historicRow.index)!!
+                    assertEquals(oldHash, storedHistoric.withdrawBlockHash)
+                    assertEquals(original.withdrawBlockNumber, storedNull.withdrawBlockNumber)
+                    assertEquals(original.withdrawBlockNumber, storedHistoric.withdrawBlockNumber)
+                    if (!matches) {
+                        assertNull(storedNull.withdrawBlockHash)
+                        assertNull(storedNull.withdrawEpochHex)
+                        assertNull(storedNull.unlockEpochHex)
+                        assertEquals(0L, storedNull.compensation)
+                        assertNull(storedHistoric.withdrawEpochHex)
+                        assertNull(storedHistoric.unlockEpochHex)
+                        assertEquals(0L, storedHistoric.compensation)
+                    } else {
+                        assertEquals(withdraw.hash, storedNull.withdrawBlockHash)
+                        assertEquals(withdraw.epoch, storedNull.withdrawEpochHex)
+                    }
+                }
+            }
+        }
+    }
+
     private fun duringRevalidation(action: suspend () -> Unit) {
         val realReader = reader
         val scheduled = spyk(realReader)
