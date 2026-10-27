@@ -717,7 +717,7 @@ class SendReviewStateMachineTest {
         } finally { androidx.lifecycle.ViewModelStore().apply { put("reconcile", vm); clear() }; runCurrent() }
     }
 
-    // Real transaction assembly at the signing seam: equal fees cannot conceal changed outputs.
+    // Editing the draft during authentication aborts before signing, even with an unchanged fee.
     @Test fun `auth edit cannot substitute same fee recipient output`() = runTest(testDispatcher) {
         val builder = TransactionBuilder(com.rjnr.pocketnode.data.validation.NetworkValidator())
         val from = com.rjnr.pocketnode.data.wallet.AddressUtils.encode(plannedTransfer.selectedCells.first().lock, NetworkType.TESTNET)
@@ -726,8 +726,9 @@ class SendReviewStateMachineTest {
         every { repository.getCurrentAddress() } returns from
         coEvery { repository.previewTransfer(any(), any()) } answers { builder.planTransfer(arg(1), plannedTransfer.selectedCells) }
         val gate = kotlinx.coroutines.CompletableDeferred<Unit>()
+        val returnedKey = ByteArray(32) { 7 }
         coEvery { walletKeyReader.readPrivateKey(any(), any(), any(), any()) } coAnswers {
-            gate.await(); WalletKeyReader.Result.Success(ByteArray(32) { 7 })
+            gate.await(); WalletKeyReader.Result.Success(returnedKey)
         }
         var signed: com.rjnr.pocketnode.data.gateway.models.Transaction? = null
         coEvery { repository.sendReviewed(any(), any(), any(), any()) } coAnswers {
@@ -744,10 +745,9 @@ class SendReviewStateMachineTest {
             assertEquals(1000L, vm.uiState.value.reviewRequest!!.feeShannons)
             vm.confirmSend(foregroundActivity); runCurrent()
             vm.updateRecipient(replacement); vm.updateAmount("150"); gate.complete(Unit); runCurrent()
-            signed?.let {
-                assertEquals("same fee must never authorize another script", "0x" + "bb".repeat(20), it.cellOutputs.first().lock.args)
-                assertEquals(100_00000000L, it.cellOutputs.first().capacity.removePrefix("0x").toLong(16))
-            }
+            assertNull("editing the draft during authentication must abort before signing", signed)
+            coVerify(exactly = 0) { repository.sendReviewed(any(), any(), any(), any()) }
+            assertTrue("the returned signing key must be wiped after the abort", returnedKey.all { it == 0.toByte() })
         } finally { androidx.lifecycle.ViewModelStore().apply { put("race", vm); clear() }; runCurrent() }
     }
 
