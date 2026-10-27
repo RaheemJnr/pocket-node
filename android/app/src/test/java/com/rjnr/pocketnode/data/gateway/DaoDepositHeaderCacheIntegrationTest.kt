@@ -349,13 +349,70 @@ class DaoDepositHeaderCacheIntegrationTest {
         assertTrue(gate.isReady(network.name))
     }
 
-    private fun withHistoryReadHook(beforeRead: suspend () -> Unit) {
+    @Test fun `deposited live aliases retain one durable stored key across refreshes`() = runTest {
+        assertDepositedAliasIdentity()
+    }
+
+    @Test fun `deposited alias restores the prior key when row disappears after history read`() = runTest {
+        assertDepositedAliasIdentity(removeAfterRead = true)
+    }
+
+    @Test fun `deposited alias preserves concurrent status on the existing raw key`() = runTest {
+        assertDepositedAliasIdentity(changeStatusAfterRead = true)
+    }
+
+    private suspend fun assertDepositedAliasIdentity(
+        removeAfterRead: Boolean = false,
+        changeStatusAfterRead: Boolean = false,
+    ) {
+        for ((storedIndex, liveIndex) in listOf("0x0" to "0x00", "0x00" to "0x0")) {
+            db.daoCellDao().deleteAll()
+            native.cellsPage = json.encodeToString(JniPagination(listOf(
+                cell.copy(outputData = "0x0000000000000000",
+                    outPoint = cell.outPoint.copy(index = liveIndex))), null))
+            val fresh = reader.list(script, null, network).single()
+                .toDaoCellEntity(network.name, "wallet", 7)
+            assertNull(fresh.withdrawBlockNumber)
+            val stored = fresh.copy(index = storedIndex, lastUpdatedAt = 1)
+            db.daoCellDao().upsert(stored)
+            var changed = false
+            withHistoryReadHook(afterRead = {
+                if (!changed) {
+                    changed = true
+                    if (removeAfterRead) db.daoCellDao().deleteAll()
+                    if (changeStatusAfterRead) db.daoCellDao().updateStatus(
+                        stored.txHash, stored.index, DaoCellStatus.UNLOCKING.name)
+                }
+            }) {}
+            repeat(if (changeStatusAfterRead) 1 else 2) {
+                val positions = gateway.getDaoDeposits(ctx()).getOrThrow()
+                assertEquals(1, positions.size)
+                val rows = db.daoCellDao().getActiveByWalletAndNetwork("wallet", network.name)
+                assertEquals("$storedIndex -> $liveIndex must not create a second raw key", 1, rows.size)
+                val retained = rows.single()
+                assertEquals(stored.txHash, retained.txHash)
+                assertEquals(storedIndex, retained.index)
+                assertNull(db.daoCellDao().getByOutPoint(stored.txHash, liveIndex))
+                assertEquals(if (changeStatusAfterRead) DaoCellStatus.UNLOCKING.name else fresh.status,
+                    retained.status)
+                assertTrue(retained.lastUpdatedAt > stored.lastUpdatedAt)
+                assertEquals(fresh.depositBlockHash, retained.depositBlockHash)
+            }
+        }
+    }
+
+    private fun withHistoryReadHook(
+        afterRead: suspend () -> Unit = {},
+        beforeRead: suspend () -> Unit,
+    ) {
         val roomDao = db.daoCellDao()
         val faultingDao = object : DaoCellDao by roomDao {
             override suspend fun getActiveByWalletAndNetwork(walletId: String, network: String):
                 List<com.rjnr.pocketnode.data.database.entity.DaoCellEntity> {
                 beforeRead()
-                return roomDao.getActiveByWalletAndNetwork(walletId, network)
+                val rows = roomDao.getActiveByWalletAndNetwork(walletId, network)
+                afterRead()
+                return rows
             }
         }
         // Real manager: the injected failure occurs beneath its exception policy.

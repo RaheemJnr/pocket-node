@@ -385,10 +385,11 @@ class DaoGateway(
                 for (prior in priors.ifEmpty { listOf(fresh) }) {
                     val current = dao.getByOutPoint(prior.txHash, prior.index)
                     if (current == null) {
-                        dao.upsert(checkedFor(prior))
+                        dao.upsert(checkedFor(prior).copy(txHash = prior.txHash, index = prior.index))
                     } else if (current.status != DaoCellStatus.COMPLETED.name &&
                         current.network == network && current.walletId == walletId) {
-                        val updated = checkedFor(current)
+                        // Fresh scans may use a different spelling of the same normalized outpoint.
+                        val updated = checkedFor(current).copy(txHash = current.txHash, index = current.index)
                         dao.upsert(updated.copy(status = if (current.status != prior.status) {
                             current.status
                         } else updated.status))
