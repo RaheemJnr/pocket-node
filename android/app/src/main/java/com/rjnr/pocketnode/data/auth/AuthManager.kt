@@ -25,32 +25,44 @@ class AuthManager @Inject constructor(
     internal var testPrefs: SharedPreferences? = null
 
     private val walletStorage = com.rjnr.pocketnode.data.wallet.WalletStorageBoundary(context)
+    // In-memory revocation must not wait for a PIN KDF or filesystem work. Publication
+    // alone takes both locks, always files -> session; never acquire files under session.
+    private val sessionLock = Any()
     private var sessionPin: CharArray? = null
     private var generation = 0L
 
     fun setSessionPin(pin: CharArray) = walletStorage.readOrWriteFiles {
-        clearSession()
-        sessionPin = pin.copyOf()
+        synchronized(sessionLock) { replaceSessionPinLocked(pin) }
     }
 
-    internal fun sessionGeneration(): Long = walletStorage.files { generation }
+    internal fun sessionGeneration(): Long = synchronized(sessionLock) { generation }
 
     /** Atomically reject an authentication result started before session revocation. */
     internal fun setSessionPinIfCurrent(pin: CharArray, expectedGeneration: Long): Boolean =
         walletStorage.readOrWriteFiles {
-            if (generation != expectedGeneration) false else {
-                setSessionPin(pin)
-                true
+            synchronized(sessionLock) {
+                if (generation != expectedGeneration) false else {
+                    replaceSessionPinLocked(pin)
+                    true
+                }
             }
         }
 
-    fun getSessionPin(): CharArray? = walletStorage.files { sessionPin?.copyOf() }
+    fun getSessionPin(): CharArray? = synchronized(sessionLock) { sessionPin?.copyOf() }
 
-    fun hasSessionPin(): Boolean = walletStorage.files { sessionPin != null }
+    fun hasSessionPin(): Boolean = synchronized(sessionLock) { sessionPin != null }
 
-    fun clearSession() = walletStorage.files {
+    fun clearSession() = synchronized(sessionLock) { clearSessionLocked() }
+
+    /** Caller holds sessionLock, and the installation fence when publishing. */
+    private fun replaceSessionPinLocked(pin: CharArray) {
+        clearSessionLocked()
+        sessionPin = pin.copyOf()
+    }
+
+    private fun clearSessionLocked() {
         generation++
-        sessionPin?.let { java.util.Arrays.fill(it, '\u0000') }
+        sessionPin?.fill('\u0000')
         sessionPin = null
     }
 

@@ -102,18 +102,24 @@ class KeyManager @Inject constructor(
     internal var authManager: AuthManager? = null
 
     // Fallback PIN holder, only used by unit tests that don't wire an AuthManager.
-    // Prefer authManager.getSessionPin() in production.
+    // Like AuthManager, publication takes files -> session; clearing never waits for files.
+    private val sessionLock = Any()
+    private var fallbackSessionPin: CharArray? = null
+
     @VisibleForTesting
-    internal var sessionPin: CharArray? = null
+    internal val sessionPin: CharArray?
+        get() = synchronized(sessionLock) { fallbackSessionPin?.copyOf() }
 
     fun setSessionPin(pin: CharArray) = walletStorage.readOrWriteFiles {
-        sessionPin?.let { java.util.Arrays.fill(it, '\u0000') }
-        sessionPin = pin.copyOf()
+        synchronized(sessionLock) {
+            fallbackSessionPin?.fill('\u0000')
+            fallbackSessionPin = pin.copyOf()
+        }
     }
 
-    fun clearSessionPin() = walletStorage.files {
-        sessionPin?.let { java.util.Arrays.fill(it, '\u0000') }
-        sessionPin = null
+    fun clearSessionPin() = synchronized(sessionLock) {
+        fallbackSessionPin?.fill('\u0000')
+        fallbackSessionPin = null
     }
 
     /**
