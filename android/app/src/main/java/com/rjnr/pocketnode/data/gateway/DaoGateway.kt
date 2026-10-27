@@ -132,7 +132,7 @@ class DaoGateway(
             .getOrDefault(emptyList())
         if (pending.isEmpty()) return deposits
 
-        fun key(txHash: String, index: String) = "$txHash:$index"
+        fun key(txHash: String, index: String) = normalizedOutPointKey(txHash, index)
         val depositedKeys = deposits
             .filter { it.status == DaoCellStatus.DEPOSITED }
             .map { key(it.outPoint.txHash, it.outPoint.index) }

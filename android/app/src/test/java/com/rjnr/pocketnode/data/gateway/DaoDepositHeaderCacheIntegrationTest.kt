@@ -9,6 +9,8 @@ import com.rjnr.pocketnode.data.database.AppDatabase
 import com.rjnr.pocketnode.data.database.dao.DaoCellDao
 import com.rjnr.pocketnode.data.database.entity.HeaderCacheEntity
 import com.rjnr.pocketnode.data.database.entity.PendingDaoUnlockEntity
+import com.rjnr.pocketnode.data.database.entity.PendingDaoWithdrawEntity
+import com.rjnr.pocketnode.data.database.entity.TransactionEntity
 import com.rjnr.pocketnode.data.gateway.models.*
 import com.rjnr.pocketnode.data.wallet.WalletInfo
 import io.mockk.coEvery
@@ -442,6 +444,57 @@ class DaoDepositHeaderCacheIntegrationTest {
         assertEquals("0x00", shown.outPoint.index)
         assertEquals(original.capacity, shown.capacity)
         assertEquals(2, db.daoCellDao().getActiveByWalletAndNetwork("wallet", network.name).size)
+    }
+
+    @Test fun `pending phase one marker overlays the single normalized deposited position`() = runTest {
+        assertPhaseOneAliasMarker("PENDING")
+    }
+
+    @Test fun `unknown phase one marker overlays and survives normalized alias display`() = runTest {
+        assertPhaseOneAliasMarker("UNKNOWN")
+    }
+
+    @Test fun `verified committed phase one marker is retained while normalized deposit remains`() = runTest {
+        assertPhaseOneAliasMarker("CONFIRMED")
+    }
+
+    @Test fun `failed phase one marker is deleted by its exact stored alias key`() = runTest {
+        assertPhaseOneAliasMarker("FAILED")
+    }
+
+    private suspend fun assertPhaseOneAliasMarker(txStatus: String) {
+        native.cellsPage = json.encodeToString(JniPagination(listOf(cell.copy(outputData = "0x0000000000000000")), null))
+        val original = reader.list(script, null, network).single().toDaoCellEntity(network.name, "wallet", 7)
+        val broadcastHash = hash("bc")
+        native.cellsPage = json.encodeToString(JniPagination(emptyList<JniCell>(), null))
+        for (markerIndex in listOf("0x0", "0x00")) {
+            for (reverseOrder in listOf(false, true)) {
+                db.daoCellDao().deleteAll()
+                db.pendingDaoWithdrawDao().deleteByWalletAndNetwork("wallet", network.name)
+                val rows = listOf(original, original.copy(index = "0x00"))
+                (if (reverseOrder) rows.reversed() else rows).forEach { db.daoCellDao().upsert(it) }
+                val marker = PendingDaoWithdrawEntity(phaseHash, markerIndex, broadcastHash, "wallet", network.name, 7)
+                db.pendingDaoWithdrawDao().upsert(marker)
+                if (txStatus != "UNKNOWN") db.transactionDao().insert(TransactionEntity(
+                    txHash = broadcastHash, blockNumber = if (txStatus == "CONFIRMED") "0xd0" else "0x0",
+                    blockHash = if (txStatus == "CONFIRMED") hash("bd") else "", timestamp = 7,
+                    balanceChange = "0x0", direction = "dao_withdraw", fee = "0x0",
+                    confirmations = if (txStatus == "CONFIRMED") 1 else 0, blockTimestampHex = null,
+                    network = network.name, status = txStatus, isLocal = true, cachedAt = 7, walletId = "wallet"))
+                repeat(2) {
+                    val shown = gateway.getDaoDeposits(ctx()).getOrThrow()
+                    assertEquals(1, shown.size)
+                    assertEquals(original.capacity, shown.sumOf { it.capacity })
+                    assertEquals("0x0", shown.single().outPoint.index)
+                    assertEquals(if (txStatus == "FAILED") DaoCellStatus.DEPOSITED else DaoCellStatus.WITHDRAWING,
+                        shown.single().status)
+                    val remaining = db.pendingDaoWithdrawDao().getByWalletAndNetwork("wallet", network.name)
+                    assertEquals(if (txStatus == "FAILED") emptyList<PendingDaoWithdrawEntity>() else listOf(marker), remaining)
+                    assertEquals(setOf("0x0", "0x00"), db.daoCellDao().getActiveByWalletAndNetwork("wallet", network.name)
+                        .map { it.index }.toSet())
+                }
+            }
+        }
     }
 
     private suspend fun assertNullAliasHistory(live: Boolean, matches: Boolean) {
