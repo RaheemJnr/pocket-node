@@ -248,6 +248,7 @@ class MainActivity : FragmentActivity(), com.rjnr.pocketnode.ui.security.WalletS
                                     runBlocking { repository.needsMnemonicBackup() }
                                 },
                                 onAuthUnlocked = { reauthPolicy.onColdStartAuthUnlocked() },
+                                onRequireUnlock = { reauthPolicy.onPinChanged() },
                             )
                         },
                         overlay = {

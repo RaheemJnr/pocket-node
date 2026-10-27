@@ -83,6 +83,7 @@ sealed class Screen(val route: String) {
         }
     }
     object MnemonicImport : Screen("mnemonic_import")
+    object PinChange : Screen("pin_change")
     object Auth : Screen("auth")
     object PinEntry : Screen("pin_entry/{mode}") {
         fun createRoute(mode: String) = "pin_entry/$mode"
@@ -145,6 +146,7 @@ fun CkbNavGraph(
     // Cold-start unlock on the Auth route (#524: lets MainActivity tell a
     // process that has been unlocked from one restored after process death).
     onAuthUnlocked: () -> Unit = {},
+    onRequireUnlock: () -> Unit = {},
 ) {
     // PIN is mandatory: if the user doesn't have one yet, any "go to Main" action
     // must first pass through PIN setup. Once a PIN exists, mnemonic backup is
@@ -231,6 +233,16 @@ fun CkbNavGraph(
                     }
                 },
                 onNavigateBack = { navController.popBackStack() }
+            )
+        }
+
+        composable(Screen.PinChange.route) {
+            com.rjnr.pocketnode.ui.screens.auth.PinChangeScreen(
+                onBack = { navController.popBackStack() },
+                onRequireUnlock = {
+                    navController.popBackStack()
+                    onRequireUnlock()
+                },
             )
         }
 
@@ -410,6 +422,7 @@ fun CkbNavGraph(
                 onNavigateToPinSetup = {
                     navController.navigate(Screen.PinEntry.createRoute("setup"))
                 },
+                onNavigateToPinChange = { navController.navigate(Screen.PinChange.route) },
                 onNavigateToPinVerify = {
                     navController.navigate(Screen.PinEntry.createRoute("verify"))
                 },

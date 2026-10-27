@@ -39,14 +39,34 @@ class AuthManager @Inject constructor(
 
     /** Atomically reject an authentication result started before session revocation. */
     internal fun setSessionPinIfCurrent(pin: CharArray, expectedGeneration: Long): Boolean =
-        walletStorage.readOrWriteFiles {
-            synchronized(sessionLock) {
-                if (generation != expectedGeneration) false else {
-                    replaceSessionPinLocked(pin)
-                    true
-                }
+        setSessionPinAndGetGenerationIfCurrent(pin, expectedGeneration) != null
+
+    /** The credential check runs under the files fence, before taking the short session lock. */
+    internal fun setSessionPinAndGetGenerationIfCurrent(
+        pin: CharArray,
+        expectedGeneration: Long,
+        isCredentialCurrent: () -> Boolean = { true },
+    ): Long? = walletStorage.readOrWriteFiles {
+        if (!isCredentialCurrent()) return@readOrWriteFiles null
+        synchronized(sessionLock) {
+            if (generation != expectedGeneration) null else {
+                replaceSessionPinLocked(pin)
+                generation
             }
         }
+    }
+
+    internal fun isSessionCurrent(expectedGeneration: Long): Boolean = synchronized(sessionLock) {
+        generation == expectedGeneration && sessionPin != null
+    }
+
+    /** Called under the files fence after staging a replacement verifier. Never runs disk/KDF work. */
+    internal fun claimPinChange(expectedGeneration: Long): Boolean = synchronized(sessionLock) {
+        if (generation != expectedGeneration || sessionPin == null) false else {
+            clearSessionLocked()
+            true
+        }
+    }
 
     fun getSessionPin(): CharArray? = synchronized(sessionLock) { sessionPin?.copyOf() }
 
