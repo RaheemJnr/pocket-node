@@ -91,6 +91,8 @@ fun DaoDepositCard(
                     val hours = deposit.lockRemainingHours
                     if (deposit.unlockEpoch == null || hours == null) {
                         stringResource(R.string.dao_waiting_deposit_details)
+                    } else if (hours == 0) {
+                        stringResource(R.string.dao_unlock_less_than_hour)
                     } else {
                         val days = hours / 24
                         val h = hours % 24
