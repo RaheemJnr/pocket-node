@@ -415,9 +415,7 @@ class DaoDepositReader @Inject constructor(
         network: NetworkType,
     ): DaoCellEntity {
         if (entity.withdrawBlockNumber == null) return entity
-        val unresolved = entity.copy(status = DaoCellStatus.LOCKED.name,
-            depositBlockHash = "", depositEpochHex = null, depositTimestamp = 0L,
-            compensation = 0L, unlockEpochHex = null)
+        val unresolved = entity.withoutWithdrawalEvidence()
         return try {
             val phase = LightClientNative.nativeGetTransaction(entity.txHash)
                 ?.let { json.decodeFromString<JniTransactionWithStatus>(it) } ?: return unresolved
@@ -433,12 +431,7 @@ class DaoDepositReader @Inject constructor(
                 "0x${entity.withdrawBlockNumber.toString(16)}", "0x0")
             val fresh = resolveOneDeposit(cell, currentEpoch, network, mutableListOf())
                 .toDaoCellEntity(entity.network, entity.walletId, entity.lastUpdatedAt)
-            // These are the deposit-derived claims being revalidated. Pending
-            // intent and the stored withdrawing position remain independent.
-            entity.copy(status = fresh.status, depositBlockNumber = fresh.depositBlockNumber,
-                depositBlockHash = fresh.depositBlockHash, depositEpochHex = fresh.depositEpochHex,
-                depositTimestamp = fresh.depositTimestamp, compensation = fresh.compensation,
-                unlockEpochHex = fresh.unlockEpochHex)
+            entity.withWithdrawalEvidence(fresh)
         } catch (e: CancellationException) {
             throw e
         } catch (e: Exception) {
@@ -481,7 +474,8 @@ class DaoDepositReader @Inject constructor(
         entity: DaoCellEntity,
         cachedDao: suspend (blockHash: String) -> String?,
     ): Long? {
-        if (entity.depositBlockHash.isEmpty()) return null
+        if (entity.depositBlockHash.isEmpty() ||
+            (entity.withdrawBlockNumber != null && !entity.hasResolvedWithdrawalHeaders())) return null
         val depositDao = cachedDao(entity.depositBlockHash) ?: return null
         val withdrawHash = entity.withdrawBlockHash
         val endDao = when {

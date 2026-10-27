@@ -9,6 +9,7 @@ import com.rjnr.pocketnode.data.database.AppDatabase
 import com.rjnr.pocketnode.data.database.entity.PendingDaoUnlockEntity
 import com.rjnr.pocketnode.data.database.entity.TransactionEntity
 import com.rjnr.pocketnode.data.gateway.models.DaoCellStatus
+import com.rjnr.pocketnode.data.gateway.models.EpochInfo
 import com.rjnr.pocketnode.data.gateway.models.DaoDeposit
 import com.rjnr.pocketnode.data.gateway.models.JniHeaderView
 import com.rjnr.pocketnode.data.gateway.models.JniTransactionWithStatus
@@ -260,6 +261,9 @@ class DaoGatewayUnlockTest {
         // exactly what used to push the row into the outside-window branch.
         depositBlockNumber = 500L,
         depositBlockHash = "0x" + "aa".repeat(32),
+        depositEpoch = EpochInfo(100, 0, 1800),
+        withdrawEpoch = EpochInfo(200, 0, 1800),
+        unlockEpoch = EpochInfo(201, 0, 1800),
         withdrawBlockNumber = 900L,
         withdrawBlockHash = "0x" + "bb".repeat(32),
     )

@@ -6,8 +6,11 @@ import androidx.test.core.app.ApplicationProvider
 import com.rjnr.pocketnode.core.log.NoopLogger
 import com.rjnr.pocketnode.data.database.AppDatabase
 import com.rjnr.pocketnode.data.database.entity.HeaderCacheEntity
+import com.rjnr.pocketnode.data.database.entity.PendingDaoUnlockEntity
 import com.rjnr.pocketnode.data.gateway.models.*
 import com.rjnr.pocketnode.data.wallet.WalletInfo
+import io.mockk.coEvery
+import io.mockk.spyk
 import io.mockk.every
 import io.mockk.mockk
 import kotlinx.coroutines.test.runTest
@@ -35,12 +38,14 @@ class DaoDepositHeaderCacheIntegrationTest {
     private lateinit var reader: DaoDepositReader
     private lateinit var resolver: DaoHeaderResolver
     private lateinit var gateway: DaoGateway
+    private lateinit var sync: DaoSyncManager
+    private lateinit var api: LightClientApi
     private val network = NetworkType.TESTNET
     private val script = Script(Script.SECP256K1_CODE_HASH, "type", "0x" + "11".repeat(20))
     private val phaseHash = hash("aa")
     private val parentHash = hash("bb")
     private val deposit = header(hash("d1"), "0x64", "0x70800000000064", "0x10000000")
-    private val withdraw = header(hash("d2"), "0xc8", "0x708000000000c8", "0x20000000")
+    private val withdraw = header(hash("d2"), "0xc8", "0x708000000000c8", "0x20000000").copy(dao = hash("e2"))
     private val output = CellOutput("0x174876e800", script, DaoConstants.DAO_TYPE_SCRIPT)
     private val cell = JniCell(output, "0x6400000000000000", OutPoint(phaseHash, "0x0"), "0xc8", "0x1")
 
@@ -49,12 +54,12 @@ class DaoDepositHeaderCacheIntegrationTest {
         db = Room.inMemoryDatabaseBuilder(ApplicationProvider.getApplicationContext<Context>(), AppDatabase::class.java)
             .allowMainThreadQueries().build()
         gate = VerificationCacheGate(ApplicationProvider.getApplicationContext(), db)
-        val api = mockk<LightClientApi>(relaxed = true)
+        api = mockk<LightClientApi>(relaxed = true)
         every { api.callRpc("get_verification_epoch") } returns
             """{"result":{"version":1,"generation":"${"e".repeat(32)}"}}"""
         every { api.getTipHeader() } returns json.encodeToString(withdraw)
         gate.reconcile(api, network)
-        val sync = DaoSyncManager(db.headerCacheDao(), db.daoCellDao(), db.pendingDaoWithdrawDao(),
+        sync = DaoSyncManager(db.headerCacheDao(), db.daoCellDao(), db.pendingDaoWithdrawDao(),
             db.pendingDaoUnlockDao(), NoopLogger, gate)
         resolver = DaoHeaderResolver(json, sync, NoopLogger)
         reader = DaoDepositReader(json, resolver, NoopLogger)
@@ -130,6 +135,174 @@ class DaoDepositHeaderCacheIntegrationTest {
             transaction = phase.transaction!!.copy(headerDeps = listOf(fork.hash))))
         val position = reader.list(script, null, network).single()
         assertEquals("", position.depositBlockHash)
+        assertNull(position.unlockEpoch)
+        assertEquals(0L, position.compensation)
+    }
+
+    @Test fun `cached null withdrawal proof rehydrates in reader and durable gateway row`() = runTest {
+        val original = reader.list(script, null, network).single().toDaoCellEntity(network.name, "wallet", 7)
+            .copy(withdrawBlockHash = null, withdrawEpochHex = null)
+        db.daoCellDao().upsert(original)
+        native.cellsPage = json.encodeToString(JniPagination(emptyList<JniCell>(), null))
+        val checked = reader.revalidateCachedWithdrawing(original, null, network)
+        assertEquals(withdraw.hash, checked.withdrawBlockHash)
+        assertEquals(withdraw.epoch, checked.withdrawEpochHex)
+        val result = gateway.getDaoDeposits(ctx()).getOrThrow().single()
+        resolved(result)
+        assertTrue(result.outsideSyncWindow)
+        val stored = db.daoCellDao().getByOutPoint(phaseHash, "0x0")!!
+        assertEquals(withdraw.hash, stored.withdrawBlockHash)
+        assertEquals(withdraw.epoch, stored.withdrawEpochHex)
+        assertEquals(original.withdrawBlockNumber, stored.withdrawBlockNumber)
+    }
+
+    @Test fun `same withdrawal identity corrects stale epoch using canonical header`() = runTest {
+        val original = reader.list(script, null, network).single().toDaoCellEntity(network.name, "wallet", 7)
+            .copy(withdrawEpochHex = deposit.epoch)
+        db.daoCellDao().upsert(original)
+        native.cellsPage = json.encodeToString(JniPagination(emptyList<JniCell>(), null))
+        resolved(gateway.getDaoDeposits(ctx()).getOrThrow().single())
+        assertEquals(withdraw.epoch, db.daoCellDao().getByOutPoint(phaseHash, "0x0")!!.withdrawEpochHex)
+    }
+
+    @Test fun `withdrawal contradiction survives repeated cached and live refreshes`() = runTest {
+        val oldHash = hash("cf")
+        val original = reader.list(script, null, network).single().toDaoCellEntity(network.name, "wallet", 7)
+            .copy(withdrawBlockHash = oldHash)
+        db.daoCellDao().upsert(original)
+        cache(withdraw.copy(hash = oldHash, dao = hash("ef")))
+        native.cellsPage = json.encodeToString(JniPagination(emptyList<JniCell>(), null))
+        repeat(3) {
+            val result = gateway.getDaoDeposits(ctx()).getOrThrow().single()
+            unresolved(result)
+            assertTrue(result.outsideSyncWindow)
+            val stored = db.daoCellDao().getByOutPoint(phaseHash, "0x0")!!
+            assertEquals(oldHash, stored.withdrawBlockHash) // historical locator, never exposed as proof
+            assertNull(stored.withdrawEpochHex)
+            assertEquals(original.withdrawBlockNumber, stored.withdrawBlockNumber)
+        }
+        native.cellsPage = json.encodeToString(JniPagination(listOf(cell), null))
+        repeat(2) {
+            unresolved(gateway.getDaoDeposits(ctx()).getOrThrow().single())
+            assertEquals(oldHash, db.daoCellDao().getByOutPoint(phaseHash, "0x0")!!.withdrawBlockHash)
+        }
+        assertFalse(native.maxWithdrawCalls.any { it.endDao == hash("ef") })
+    }
+
+    @Test fun `missing phase proof masks historical locator and remains retryable`() = runTest {
+        val original = reader.list(script, null, network).single().toDaoCellEntity(network.name, "wallet", 7)
+        db.daoCellDao().upsert(original)
+        val phase = native.transactionsByHash.remove(phaseHash)!!
+        native.cellsPage = json.encodeToString(JniPagination(emptyList<JniCell>(), null))
+        unresolved(gateway.getDaoDeposits(ctx()).getOrThrow().single())
+        val stored = db.daoCellDao().getByOutPoint(phaseHash, "0x0")!!
+        assertEquals(withdraw.hash, stored.withdrawBlockHash)
+        assertNull(stored.withdrawEpochHex)
+        native.transactionsByHash[phaseHash] = phase
+        resolved(gateway.getDaoDeposits(ctx()).getOrThrow().single())
+    }
+
+    @Test fun `missing canonical withdrawal evidence clears claims and later rehydrates`() = runTest {
+        val original = reader.list(script, null, network).single().toDaoCellEntity(network.name, "wallet", 7)
+        db.daoCellDao().upsert(original)
+        native.cellsPage = json.encodeToString(JniPagination(emptyList<JniCell>(), null))
+        native.headersByNumber.remove(withdraw.number)
+        native.maxWithdrawCalls.clear()
+        unresolved(gateway.getDaoDeposits(ctx()).getOrThrow().single())
+        assertTrue(native.maxWithdrawCalls.isEmpty())
+        native.headersByNumber[withdraw.number] = json.encodeToString(withdraw)
+        resolved(gateway.getDaoDeposits(ctx()).getOrThrow().single())
+        assertTrue(native.maxWithdrawCalls.all { it.endDao == withdraw.dao })
+    }
+
+    @Test fun `unresolved pending unlock preserves marker and position without proof`() = runTest {
+        val original = reader.list(script, null, network).single().toDaoCellEntity(network.name, "wallet", 7)
+        db.daoCellDao().upsert(original)
+        db.pendingDaoUnlockDao().upsert(PendingDaoUnlockEntity(phaseHash, "0x0", hash("ab"),
+            "wallet", network.name, System.currentTimeMillis()))
+        native.cellsPage = json.encodeToString(JniPagination(emptyList<JniCell>(), null))
+        native.transactionsByHash.remove(phaseHash)
+        val shown = gateway.getDaoDeposits(ctx()).getOrThrow().single()
+        assertEquals(DaoCellStatus.UNLOCKING, shown.status)
+        assertEquals(original.txHash, shown.outPoint.txHash)
+        assertFalse(shown.outsideSyncWindow)
+        assertNull(shown.withdrawBlockHash)
+        assertNull(shown.unlockEpoch)
+        assertEquals(0L, shown.compensation)
+        assertEquals(1, db.pendingDaoUnlockDao().getByWalletAndNetwork("wallet", network.name).size)
+    }
+
+    @Test fun `current-row proof copy preserves concurrent status and position`() = runTest {
+        val original = reader.list(script, null, network).single().toDaoCellEntity(network.name, "wallet", 7)
+            .copy(withdrawBlockHash = null, withdrawEpochHex = null)
+        db.daoCellDao().upsert(original)
+        native.cellsPage = json.encodeToString(JniPagination(emptyList<JniCell>(), null))
+        duringRevalidation {
+            db.daoCellDao().upsert(original.copy(status = DaoCellStatus.UNLOCKING.name, lastUpdatedAt = 99))
+        }
+        gateway.getDaoDeposits(ctx()).getOrThrow()
+        val stored = db.daoCellDao().getByOutPoint(phaseHash, "0x0")!!
+        assertEquals(DaoCellStatus.UNLOCKING.name, stored.status)
+        assertEquals(99L, stored.lastUpdatedAt)
+        assertEquals(original.withdrawBlockNumber, stored.withdrawBlockNumber)
+        assertEquals(withdraw.hash, stored.withdrawBlockHash)
+        assertEquals(withdraw.epoch, stored.withdrawEpochHex)
+    }
+
+    @Test fun `proof refresh cannot modify a row completed during evidence reads`() = runTest {
+        val original = reader.list(script, null, network).single().toDaoCellEntity(network.name, "wallet", 7)
+            .copy(withdrawBlockHash = null, withdrawEpochHex = null)
+        db.daoCellDao().upsert(original)
+        native.cellsPage = json.encodeToString(JniPagination(emptyList<JniCell>(), null))
+        val retired = original.copy(status = DaoCellStatus.COMPLETED.name, lastUpdatedAt = 99)
+        duringRevalidation { db.daoCellDao().upsert(retired) }
+        gateway.getDaoDeposits(ctx()).getOrThrow()
+        assertEquals(retired, db.daoCellDao().getByOutPoint(phaseHash, "0x0"))
+    }
+
+    @Test fun `failed association lookup cannot publish a fresh live proof`() = runTest {
+        val failingSync = spyk(sync)
+        coEvery { failingSync.getActiveDeposits(network.name, "wallet") } throws IllegalStateException("unreadable associations")
+        gateway = DaoGateway(db, failingSync, reader, resolver, LightClientReadOnly(api, json, NoopLogger),
+            mockk(relaxed = true), mockk(relaxed = true), NoopLogger, gate)
+        assertTrue(gateway.getDaoDeposits(ctx()).isFailure)
+        assertNull(db.daoCellDao().getByOutPoint(phaseHash, "0x0"))
+    }
+
+    @Test fun `normalized duplicate cannot hide a historical withdrawal contradiction`() = runTest {
+        val original = reader.list(script, null, network).single().toDaoCellEntity(network.name, "wallet", 7)
+        db.daoCellDao().upsert(original.copy(withdrawBlockHash = hash("cf")))
+        db.daoCellDao().upsert(original.copy(index = "0x00"))
+        repeat(2) {
+            unresolved(gateway.getDaoDeposits(ctx()).getOrThrow().single())
+            assertEquals(hash("cf"), db.daoCellDao().getByOutPoint(phaseHash, "0x0")!!.withdrawBlockHash)
+        }
+        native.cellsPage = json.encodeToString(JniPagination(emptyList<JniCell>(), null))
+        repeat(2) {
+            val positions = gateway.getDaoDeposits(ctx()).getOrThrow()
+            assertEquals(2, positions.size)
+            positions.forEach(::unresolved)
+        }
+    }
+
+    private fun duringRevalidation(action: suspend () -> Unit) {
+        val realReader = reader
+        val scheduled = spyk(realReader)
+        coEvery { scheduled.revalidateCachedWithdrawing(any(), any(), any()) } coAnswers {
+            val result = realReader.revalidateCachedWithdrawing(firstArg(), secondArg(), thirdArg())
+            action()
+            result
+        }
+        gateway = DaoGateway(db, sync, scheduled, resolver, LightClientReadOnly(api, json, NoopLogger),
+            mockk(relaxed = true), mockk(relaxed = true), NoopLogger, gate)
+    }
+
+    private fun unresolved(position: DaoDeposit) {
+        assertEquals(DaoCellStatus.LOCKED, position.status)
+        assertEquals("", position.depositBlockHash)
+        assertNull(position.depositEpoch)
+        assertNull(position.withdrawBlockHash)
+        assertNull(position.withdrawEpoch)
         assertNull(position.unlockEpoch)
         assertEquals(0L, position.compensation)
     }

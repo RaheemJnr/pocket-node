@@ -211,6 +211,18 @@ class DaoDepositReaderCompensationTest {
         txStatus = JniTxStatus(status = "committed", blockHash = withdrawBlockHash),
     )
 
+    @Test fun `historical withdrawal locator cannot be a compensation endpoint without epoch proof`() = runTest {
+        val row = cachedRow(withdrawBlockNumber = 200L, withdrawBlockHash = withdrawBlockHash)
+            .copy(withdrawEpochHex = null)
+        val requested = mutableListOf<String>()
+        assertNull(reader.recomputeCachedCompensation(row) { hash ->
+            requested += hash
+            headersByHash[hash]?.dao
+        })
+        assertEquals(emptyList<String>(), requested)
+        assertEquals(emptyList<MaxWithdrawCall>(), calls)
+    }
+
     private fun cachedRow(
         withdrawBlockNumber: Long? = null,
         withdrawBlockHash: String? = null,
@@ -222,10 +234,10 @@ class DaoDepositReaderCompensationTest {
         status = if (withdrawBlockNumber != null) "UNLOCKABLE" else "DEPOSITED",
         depositBlockNumber = 100L,
         depositBlockHash = depositBlockHash,
-        depositEpochHex = null,
+        depositEpochHex = "0x70800000000064",
         withdrawBlockNumber = withdrawBlockNumber,
         withdrawBlockHash = withdrawBlockHash,
-        withdrawEpochHex = null,
+        withdrawEpochHex = if (withdrawBlockNumber != null) "0x708000000000c8" else null,
         compensation = compensation,
         unlockEpochHex = null,
         depositTimestamp = 0L,
