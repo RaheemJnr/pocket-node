@@ -219,19 +219,20 @@ class DaoDepositReader @Inject constructor(
             // outside the model's signed Long range remain unparseable rows.
             depositBlockNumber = data.chunked(2).reversed().joinToString("").toLong(16)
             withdrawBlockNumber = cell.blockNumber.removePrefix("0x").toLong(16)
-            val original = resolveWithdrawingDepositHeader(
+            val resolved = resolveWithdrawingHeaders(
                 cell, withdrawTx, cellBlockHeader, depositBlockNumber, ::header,
             )
-            if (original != null && cellBlockHeader != null) {
-                withdrawBlockHash = cellBlockHeader.hash
-                withdrawEpoch = EpochInfo.fromHex(cellBlockHeader.epoch)
+            if (resolved != null) {
+                val (original, canonicalWithdraw) = resolved
+                withdrawBlockHash = canonicalWithdraw.hash
+                withdrawEpoch = EpochInfo.fromHex(canonicalWithdraw.epoch)
                 depositBlockHash = original.hash
                 depositEpoch = EpochInfo.fromHex(original.epoch)
                 depositTimestampMs = original.timestamp.removePrefix("0x").toLong(16)
-                compensationFor(original.dao, cellBlockHeader.dao, capacityShannons)
+                compensationFor(original.dao, canonicalWithdraw.dao, capacityShannons)
                     ?.let { compensation = it }
                 val sinceHex = LightClientNative.nativeCalculateUnlockEpoch(
-                    original.epoch, cellBlockHeader.epoch
+                    original.epoch, canonicalWithdraw.epoch
                 )
                 if (sinceHex != null) {
                     val epochVal = sinceHex.removePrefix("0x").toLong(16) and 0x00FF_FFFF_FFFF_FFFFL
@@ -340,13 +341,13 @@ class DaoDepositReader @Inject constructor(
      * its staged cache writes; a cached or peer-fetched header alone is no proof
      * that its hash is canonical. No negative evidence is cached here.
      */
-    private suspend fun resolveWithdrawingDepositHeader(
+    private suspend fun resolveWithdrawingHeaders(
         cell: Cell,
         phaseOne: JniTransactionWithStatus?,
         withdrawHeader: JniHeaderView?,
         depositHeight: Long,
         header: suspend (String) -> JniHeaderView?,
-    ): JniHeaderView? {
+    ): Pair<JniHeaderView, JniHeaderView>? {
         val tx = phaseOne?.transaction ?: return null
         val index = cell.outPoint.index.removePrefix("0x").toIntOrNull(16) ?: return null
         if (phaseOne.txStatus.status != "committed" || tx.hash != cell.outPoint.txHash ||
@@ -363,10 +364,12 @@ class DaoDepositReader @Inject constructor(
 
         // Require the withdrawing transaction's block association to agree too.
         val withdrawHeight = cell.blockNumber.removePrefix("0x").toLong(16)
-        if (canonical(withdrawHeight) != withdrawHeader || depositHeight >= withdrawHeight) return null
-        val canonicalDeposit = canonical(depositHeight) ?: return null
-        if (canonicalDeposit.hash !in tx.headerDeps) return null
-        val original = header(canonicalDeposit.hash)?.takeIf { it == canonicalDeposit } ?: return null
+        val canonicalWithdraw = canonical(withdrawHeight) ?: return null
+        if (!withdrawHeader.matchesCachedFields(canonicalWithdraw) || depositHeight >= withdrawHeight) return null
+        val original = canonical(depositHeight) ?: return null
+        if (original.hash !in tx.headerDeps) return null
+        val depositEvidence = header(original.hash) ?: return null
+        if (!depositEvidence.matchesCachedFields(original)) return null
 
         // DAO C validates phase-one input/output at the same GLOBAL index,
         // including normal cells. Never infer linkage from capacity or ordering
@@ -388,8 +391,18 @@ class DaoDepositReader @Inject constructor(
                 parentTx.outputsData.getOrNull(parentIndex) != "0x0000000000000000"
             ) return null
         }
-        return original
+        // Use the complete current native headers, never the reduced projection.
+        return original to canonicalWithdraw
     }
+
+    /** HeaderCacheEntity preserves these five chain fields; the remaining
+     * JniHeaderView fields are empty on an ordinary cache hit. Validate every
+     * persisted chain field against current native canonical evidence rather
+     * than comparing the complete header to its intentionally reduced cache.
+     */
+    private fun JniHeaderView.matchesCachedFields(canonical: JniHeaderView): Boolean =
+        hash == canonical.hash && number == canonical.number && epoch == canonical.epoch &&
+            timestamp == canonical.timestamp && dao == canonical.dao
 
     /** Recheck old first-dependency metadata using the actual phase-one output.
      * Cache-only positions may need a local transaction rescan before this can

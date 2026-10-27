@@ -947,6 +947,9 @@ class DaoUnlockShadowLightClientNative {
     @Implementation
     fun nativeGetHeaderByNumber(number: String): String? = headersByNumber[number]
 
+    @Implementation
+    fun nativeGetHeader(hash: String): String? = headersByHash[hash]
+
     data class MaxWithdrawCall(val depositDao: String, val endDao: String, val occupied: Long)
 
     companion object {
@@ -965,6 +968,7 @@ class DaoUnlockShadowLightClientNative {
 
         val transactionsByHash = mutableMapOf<String, String>()
         val headersByNumber = mutableMapOf<String, String>()
+        val headersByHash = mutableMapOf<String, String>()
 
         /** Every max-withdraw calculation asked of the bridge. */
         val maxWithdrawCalls = mutableListOf<MaxWithdrawCall>()

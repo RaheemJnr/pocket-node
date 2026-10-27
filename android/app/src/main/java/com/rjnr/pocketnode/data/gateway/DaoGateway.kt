@@ -433,15 +433,14 @@ class DaoGateway(
     }
 
     /**
-     * #550: a cached-only DAO row with its compensation recomputed from cached
-     * headers, written back when it changed. Live rows are recomputed by every
-     * scan; a row the scan no longer returns would otherwise keep whatever was
-     * stored, including amounts from before the occupied-capacity fix. When the
-     * headers are not cached the stored row is returned unchanged.
+     * Revalidate cached-only withdrawing metadata from phase-one/canonical
+     * evidence before refreshing compensation. Missing proof clears unproven
+     * deposit claims; deposited rows retain the cache-only compensation path.
+     * Native reads finish before mutations run in the revision-bound commit.
      *
-     * The write-back updates the compensation column alone and skips a
-     * COMPLETED row. A whole-row upsert of [entity] (read earlier in the merge)
-     * would race #529's retirement and restore a claimed deposit's old status.
+     * Metadata writes copy the current row, preserve concurrent status changes
+     * and skip COMPLETED rows. The compensation-only update likewise cannot
+     * resurrect a position retired while its evidence was being read.
      */
     private suspend fun withFreshCompensation(
         entity: com.rjnr.pocketnode.data.database.entity.DaoCellEntity,
