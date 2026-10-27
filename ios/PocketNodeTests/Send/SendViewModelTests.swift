@@ -733,6 +733,51 @@ final class SendViewModelTests: XCTestCase {
         XCTAssertTrue(service.sendCalls.isEmpty)
     }
 
+    func testCurrentSuspendedPreviewFailureStillShowsItsError() async {
+        await assertSuspendedPreviewFailure(isStale: false) {}
+    }
+
+    func testEditedDraftDiscardsSuspendedPreviewFailure() async {
+        await assertSuspendedPreviewFailure(isStale: true) { model.updateAmount("150") }
+        await assertSuspendedPreviewFailure(isStale: true) { model.updateRecipient("edited recipient") }
+    }
+
+    func testChangedSourceDiscardsSuspendedPreviewFailure() async {
+        await assertSuspendedPreviewFailure(isStale: true) { service.walletId = "another-wallet" }
+        await assertSuspendedPreviewFailure(isStale: true) { service.fromAddress = SendFixtures.mainnetAddress }
+        await assertSuspendedPreviewFailure(isStale: true) { service.network = .mainnet }
+    }
+
+    func testCancelledPreviewDiscardsItsLateFailure() async {
+        await assertSuspendedPreviewFailure(isStale: true, cancel: true) {}
+    }
+
+    private func assertSuspendedPreviewFailure(
+        isStale: Bool, cancel: Bool = false, change: () -> Void
+    ) async {
+        service = FakeSendService()
+        model = SendViewModel(service: service)
+        model.updateRecipient(SendFixtures.testnetAddress)
+        model.updateAmount("100")
+        let gate = PreviewFailureGate()
+        service.previewError = SendError(message: "Preview unavailable")
+        service.onPreview = { await gate.suspend() }
+        let request = Task { await model.submit() }
+        await gate.waitForEntry()
+        change()
+        if cancel { request.cancel() }
+        gate.release()
+        await request.value
+        if isStale {
+            XCTAssertNil(model.alert)
+        } else {
+            XCTAssertEqual(model.alert?.message, "Preview unavailable")
+        }
+        XCTAssertNil(model.review)
+        XCTAssertFalse(model.isPreparing)
+        XCTAssertTrue(service.sendCalls.isEmpty)
+    }
+
     func testSourceChangedAfterReviewRequiresAnotherReview() async {
         model.updateRecipient(SendFixtures.testnetAddress)
         model.updateAmount("100")
@@ -786,4 +831,32 @@ final class SendViewModelTests: XCTestCase {
         XCTAssertNil(model.alert)
     }
 
+}
+
+/// Explicit rendezvous: edits/source changes occur only after preview suspends,
+/// and the failure cannot return until the test releases it. No timers or sleeps.
+@MainActor
+private final class PreviewFailureGate {
+    private var entered = false
+    private var entryWaiter: CheckedContinuation<Void, Never>?
+    private var suspended: CheckedContinuation<Void, Never>?
+
+    func suspend() async {
+        await withCheckedContinuation { continuation in
+            suspended = continuation
+            entered = true
+            entryWaiter?.resume()
+            entryWaiter = nil
+        }
+    }
+
+    func waitForEntry() async {
+        if entered { return }
+        await withCheckedContinuation { entryWaiter = $0 }
+    }
+
+    func release() {
+        suspended?.resume()
+        suspended = nil
+    }
 }

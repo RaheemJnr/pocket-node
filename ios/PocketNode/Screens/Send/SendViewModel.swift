@@ -383,6 +383,8 @@ final class SendViewModel {
                 ).map(SweepNotice.init)
             )
         } catch {
+            guard !Task.isCancelled, draftGeneration.get() == generation, service.walletId == walletId,
+                  service.fromAddress == from, service.network == network else { return }
             alert = Self.alert(for: error)
         }
     }
