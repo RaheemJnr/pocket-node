@@ -418,6 +418,7 @@ class SendViewModel @Inject constructor(
                 error = null,
             )
         }
+        updateAmount(_uiState.value.amountCkb)
     }
 
     /**

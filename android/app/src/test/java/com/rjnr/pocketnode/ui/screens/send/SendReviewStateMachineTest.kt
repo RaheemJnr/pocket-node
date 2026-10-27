@@ -787,6 +787,64 @@ class SendReviewStateMachineTest {
         } finally { androidx.lifecycle.ViewModelStore().apply { put("plainMax", vm); clear() }; runCurrent() }
     }
 
+    private fun feeContact(address: String) = com.rjnr.pocketnode.data.database.entity.ContactEntity(
+        id = address, walletId = null, name = "Fee fixture", address = address, network = NetworkType.TESTNET.name,
+        notes = null, tags = null, createdAt = 1, updatedAt = 1, lastUsedAt = null, useCount = 0)
+
+    @Test fun `contact selection reprices existing amount and dust warning in both directions`() = runTest(testDispatcher) {
+        transactionBuilder = TransactionBuilder(com.rjnr.pocketnode.data.validation.NetworkValidator())
+        every { repository.balance } returns MutableStateFlow(BalanceResponse(senderAddress,
+            "0x${2000_00000000L.toString(16)}", "2000", "0x1"))
+        val custom = feeContact(com.rjnr.pocketnode.data.wallet.AddressUtils.encode(
+            Script("0x" + "42".repeat(32), "data2", "0x" + "bb".repeat(1024)), NetworkType.TESTNET))
+        val standard = feeContact(recipient)
+        val vm = newViewModel(); runCurrent()
+        try {
+            vm.updateRecipient(recipient); vm.updateAmount("1938.99999")
+            assertEquals(1000L, vm.uiState.value.estimatedFee)
+            assertNull(vm.uiState.value.burnWarning)
+            vm.sendTransaction(); runCurrent()
+            assertNotNull(vm.uiState.value.reviewRequest)
+            vm.selectContact(custom)
+            assertNull(vm.uiState.value.reviewRequest)
+            assertEquals(1670L, vm.uiState.value.estimatedFee)
+            assertTrue(vm.uiState.value.burnWarning!!.contains("60.9999933"))
+            assertEquals(custom, vm.uiState.value.matchedContact)
+            assertTrue(vm.uiState.value.recipientSuggestions.isEmpty())
+            advanceTimeBy(300); runCurrent()
+            assertEquals(custom, vm.uiState.value.matchedContact)
+            assertEquals(1670L, vm.uiState.value.estimatedFee)
+            coVerify(exactly = 0) { contactRepository.search(any()) }
+            vm.selectContact(standard)
+            assertEquals("1938.99999", vm.uiState.value.amountCkb)
+            assertEquals(1000L, vm.uiState.value.estimatedFee)
+            assertNull(vm.uiState.value.burnWarning)
+            assertEquals(standard, vm.uiState.value.matchedContact)
+        } finally { androidx.lifecycle.ViewModelStore().apply { put("contactFee", vm); clear() }; runCurrent() }
+    }
+
+    @Test fun `late MAX cannot restore amount or estimate after selecting contact`() = runTest(testDispatcher) {
+        transactionBuilder = TransactionBuilder(com.rjnr.pocketnode.data.validation.NetworkValidator())
+        val gate = kotlinx.coroutines.CompletableDeferred<Unit>()
+        coEvery { repository.getCells() } coAnswers {
+            kotlinx.coroutines.withContext(kotlinx.coroutines.NonCancellable) { gate.await() }
+            Result.success(com.rjnr.pocketnode.data.gateway.models.CellsResponse(plannedTransfer.selectedCells, null))
+        }
+        val custom = feeContact(com.rjnr.pocketnode.data.wallet.AddressUtils.encode(
+            Script("0x" + "42".repeat(32), "data2", "0x" + "bb".repeat(1024)), NetworkType.TESTNET))
+        val vm = newViewModel(); runCurrent()
+        try {
+            vm.fillForm(); vm.setMaxAmount(); runCurrent()
+            vm.selectContact(custom)
+            gate.complete(Unit); runCurrent()
+            assertEquals("100", vm.uiState.value.amountCkb)
+            assertEquals(custom.address, vm.uiState.value.recipientAddress)
+            assertEquals(custom, vm.uiState.value.matchedContact)
+            assertEquals(1670L, vm.uiState.value.estimatedFee)
+            assertNull(vm.uiState.value.burnWarning)
+        } finally { androidx.lifecycle.ViewModelStore().apply { put("contactMax", vm); clear() }; runCurrent() }
+    }
+
     @Test fun `MAX uses the captured custom destination size`() = runTest(testDispatcher) {
         transactionBuilder = TransactionBuilder(com.rjnr.pocketnode.data.validation.NetworkValidator())
         val base = plannedTransfer.selectedCells.first()
