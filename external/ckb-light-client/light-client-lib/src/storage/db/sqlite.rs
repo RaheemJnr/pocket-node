@@ -242,9 +242,11 @@ impl StorageBackend for Storage {
         let rows: Vec<(Vec<u8>, Vec<u8>)> = {
             let conn = self.conn.lock().unwrap();
 
-            let (order_clause, comparison) = match direction {
-                IteratorDirection::Forward => ("ASC", ">="),
-                IteratorDirection::Reverse => ("DESC", "<="),
+            let (order_clause, comparison) = match (direction, &start) {
+                (IteratorDirection::Forward, IteratorStart::From(_)) => ("ASC", ">="),
+                (IteratorDirection::Reverse, IteratorStart::From(_)) => ("DESC", "<="),
+                (IteratorDirection::Forward, IteratorStart::After(_)) => ("ASC", ">"),
+                (IteratorDirection::Reverse, IteratorStart::After(_)) => ("DESC", "<"),
             };
 
             let query = format!(
@@ -263,10 +265,8 @@ impl StorageBackend for Storage {
 
             // Collect rows that pass the take_while condition.
             // We need to eagerly collect because the lock must be released before filter_map_fn runs.
-            let skip = if start.should_skip_first() { 1 } else { 0 };
             query_rows
                 .filter_map(|r| r.ok())
-                .skip(skip)
                 .take_while(|(key, _)| take_while_fn(key))
                 .collect()
         };
@@ -374,5 +374,69 @@ mod mobile_compatibility_tests {
         let desc = storage.iterator_collect(IteratorMode::From(&[2], Direction::Reverse), |_| true);
         assert_eq!(asc.iter().map(|x| x.0[0]).collect::<Vec<_>>(), vec![2, 3]);
         assert_eq!(desc.iter().map(|x| x.0[0]).collect::<Vec<_>>(), vec![2, 1]);
+    }
+}
+
+#[cfg(test)]
+mod cursor_regressions {
+    use super::*;
+
+    #[test]
+    fn exclusive_cursor_preserves_first_survivor_when_cursor_is_absent() {
+        let directory = tempfile::tempdir().unwrap();
+        let storage = Storage::new(directory.path().join("cursor.db"));
+        for key in [1, 3, 5] {
+            StorageBackend::put(&storage, vec![key], vec![key]).unwrap();
+        }
+        let cases = [
+            (
+                IteratorStart::From(vec![3]),
+                IteratorDirection::Forward,
+                vec![3, 5],
+            ),
+            (
+                IteratorStart::From(vec![3]),
+                IteratorDirection::Reverse,
+                vec![3, 1],
+            ),
+            (
+                IteratorStart::After(vec![3]),
+                IteratorDirection::Forward,
+                vec![5],
+            ),
+            (
+                IteratorStart::After(vec![3]),
+                IteratorDirection::Reverse,
+                vec![1],
+            ),
+            (
+                IteratorStart::After(vec![2]),
+                IteratorDirection::Forward,
+                vec![3, 5],
+            ),
+            (
+                IteratorStart::After(vec![4]),
+                IteratorDirection::Reverse,
+                vec![3, 1],
+            ),
+        ];
+        for (start, direction, expected) in cases {
+            // The mapper reenters storage, as service queries do.
+            let reader = storage.clone();
+            let actual = storage.collect_iterator(
+                start,
+                direction,
+                Box::new(|_| true),
+                Box::new(move |key, _| reader.get(key).unwrap()),
+                10,
+            );
+            assert_eq!(
+                actual
+                    .into_iter()
+                    .map(|pair| pair.key[0])
+                    .collect::<Vec<_>>(),
+                expected
+            );
+        }
     }
 }

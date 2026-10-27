@@ -84,6 +84,11 @@ impl<'a> SendLastStateProofProcess<'a> {
             .iter()
             .map(|header| header.to_entity().into())
             .collect::<Vec<VerifiableHeader>>();
+        // Matching and difficulty logging call total_difficulty(), which uses
+        // unchecked U256 addition. Reject overflow before either can run.
+        for header in &headers {
+            return_if_failed!(LightClientProtocol::check_total_difficulty(header));
+        }
         let last_n_blocks = self.protocol.last_n_blocks() as usize;
 
         trace!(

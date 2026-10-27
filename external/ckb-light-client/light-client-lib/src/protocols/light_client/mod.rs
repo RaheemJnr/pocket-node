@@ -298,7 +298,11 @@ impl LightClientProtocol {
             );
             return Err(StatusCode::InvalidChainRoot.with_context(errmsg));
         }
-        // Check Total Difficulty
+        Self::check_total_difficulty(verifiable_header)
+    }
+
+    fn check_total_difficulty(verifiable_header: &VerifiableHeader) -> Result<(), Status> {
+        let header = verifiable_header.header();
         let parent_total_difficulty: U256 = verifiable_header
             .parent_chain_root()
             .total_difficulty()

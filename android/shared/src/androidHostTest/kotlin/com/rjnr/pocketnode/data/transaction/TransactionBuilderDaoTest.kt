@@ -20,7 +20,8 @@ class TransactionBuilderDaoTest {
         outPoint = OutPoint("0x" + "ab".repeat(32), "0x${index.toString(16)}"),
         capacity = "0x${capacityShannons.toString(16)}",
         blockNumber = "0x100",
-        lock = testScript
+        lock = testScript,
+        data = "0x"
     )
 
     private fun makeDepositCell(): Cell = Cell(
@@ -39,6 +40,27 @@ class TransactionBuilderDaoTest {
         lock = testScript,
         type = DaoConstants.DAO_TYPE_SCRIPT
     )
+
+    @Test fun `DAO funding preserves application data while explicit typed deposit remains spendable`() {
+        val safe = makeCell(300_00000000L, 1)
+        val protected = listOf(
+            makeCell(120_00000000L, 2).copy(data = "0x01"),
+            makeCell(120_00000000L, 3).copy(data = "0x00"),
+            makeCell(120_00000000L, 4).copy(data = ""),
+            makeCell(120_00000000L, 5).copy(type = DaoConstants.DAO_TYPE_SCRIPT),
+            makeCell(120_00000000L, 6).copy(lock = testScript.copy(args = "0x" + "bb".repeat(20))),
+        )
+        val deposit = builder.buildDaoDeposit(DaoConstants.MIN_DEPOSIT_SHANNONS, protected + safe,
+            testScript, testPrivateKey, NetworkType.TESTNET)
+        assertEquals(listOf(safe.outPoint), deposit.cellInputs.map { it.previousOutput })
+        assertEquals("0x0000000000000000", deposit.outputsData.first())
+        val daoCell = makeDepositCell()
+        val withdraw = builder.buildDaoWithdraw(daoCell, 256, "0x" + "ee".repeat(32), testScript,
+            testPrivateKey, NetworkType.TESTNET, protected + safe)
+        assertEquals(listOf(daoCell.outPoint, safe.outPoint), withdraw.cellInputs.map { it.previousOutput })
+        assertEquals(DaoConstants.DAO_TYPE_SCRIPT, withdraw.cellOutputs.first().type)
+        assertEquals("0x0001000000000000", withdraw.outputsData.first())
+    }
 
     // --- buildDaoDeposit ---
 

@@ -148,7 +148,7 @@ final class SendViewModel {
 
     private(set) var review: SendReview?
     @ObservationIgnored private let draftGeneration = SharedValueBox<Int64>(0)
-    @ObservationIgnored private var maxRequest: Task<Int64, Never>?
+    @ObservationIgnored private var maxRequest: Task<Int64, Error>?
 
     private func invalidateDraft() {
         draftGeneration.update { $0 += 1 }
@@ -272,6 +272,7 @@ final class SendViewModel {
         invalidateDraft()
         recipient = text
         alert = nil
+        recomputeFee()
     }
 
     /// Runs the shared sanitiser on every keystroke: non-numeric characters, a
@@ -298,9 +299,18 @@ final class SendViewModel {
         let source = service.fromAddress
         let wallet = service.walletId
         let network = service.network
-        let request = Task { await service.maxSendableShannons() }
+        let destination = recipient
+        let request = Task { try await service.maxSendableShannons(recipientAddress: destination) }
         maxRequest = request
-        let spendable = await request.value
+        let spendable: Int64
+        do {
+            spendable = try await request.value
+        } catch {
+            guard !Task.isCancelled, draftGeneration.get() == generation, service.fromAddress == source,
+                  service.walletId == wallet, service.network == network else { return }
+            alert = Self.alert(for: error)
+            return
+        }
         // Clamped to the balance ``validate()`` measures against. The two are
         // read from different places on purpose: the pipeline prices MAX over
         // the cells a send would select, which include the change in-flight
@@ -375,6 +385,8 @@ final class SendViewModel {
                 ).map(SweepNotice.init)
             )
         } catch {
+            guard !Task.isCancelled, draftGeneration.get() == generation, service.walletId == walletId,
+                  service.fromAddress == from, service.network == network else { return }
             alert = Self.alert(for: error)
         }
     }
@@ -516,7 +528,7 @@ final class SendViewModel {
         let shannons = ckbToShannons(text: amount)?.int64Value ?? 0
         let balance = availableShannons
         let outputCount = (shannons > 0 && balance - shannons < SendCopyKt.MIN_CELL_SHANNONS) ? 1 : 2
-        let fee = service.estimateFee(inputCount: 1, outputCount: outputCount)
+        let fee = service.estimateFee(inputCount: 1, recipientAddresses: [recipient], includeChange: outputCount == 2)
         estimatedFeeShannons = fee
 
         let change = balance - shannons - fee

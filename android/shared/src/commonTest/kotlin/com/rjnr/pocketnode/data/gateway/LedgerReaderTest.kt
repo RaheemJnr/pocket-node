@@ -25,11 +25,9 @@ import kotlin.test.assertTrue
 /**
  * The shared read path over recorded bridge payloads.
  *
- * Every JSON these tests hand the fake client is either a [LightClientFixtures]
- * constant recorded off the chain, or is assembled here from those same
- * recorded values with one field rewritten — the rewrite is always named in the
- * constant's comment. Nothing is invented: the capacities, hashes, outpoints
- * and block numbers all came off testnet.
+ * Recorded payloads come from [LightClientFixtures] or named rewrites of those
+ * fixtures. The #596 eligibility cases below use explicitly synthetic cells
+ * with known data and locks, independent of any wallet or chain state.
  *
  * The bugs this guards are the expensive ones: a balance computed from a single
  * page, a rescue rescan that re-fires forever (#332), a history page that loses
@@ -300,6 +298,59 @@ class LedgerReaderTest {
 
         val message = result.exceptionOrNull()?.message.orEmpty()
         assertTrue(message.contains("light client not ready"), message)
+    }
+
+    // Synthetic coverage for #596; these payloads are intentionally not chain recordings.
+    private fun plainPolicyPage(includeEmpty: Boolean = true): String {
+        val outputs = listOf("0x", "0x01", "0x00", "", null, "typed", "wrong")
+            .filter { includeEmpty || it != "0x" }
+            .mapIndexed { index, data ->
+                val type = if (data == "typed") ",\"type\":{\"code_hash\":\"${script.codeHash}\",\"hash_type\":\"type\",\"args\":\"0x\"}" else ""
+                val lock = if (data == "wrong") script.copy(args = "0x" + "bb".repeat(20)) else script
+                val outputData = if (data == null) "" else ",\"output_data\":\"${if (data in listOf("typed", "wrong")) "0x" else data}\""
+                """{"output":{"capacity":"0x${300_00000001L.toString(16)}","lock":{"code_hash":"${lock.codeHash}","hash_type":"type","args":"${lock.args}"}$type}$outputData,"out_point":{"tx_hash":"0x${(index + 1).toString(16).padStart(64, '0')}","index":"0x0"},"block_number":"0x1","tx_index":"0x0"}"""
+            }
+        return """{"objects":[${outputs.joinToString(",")}],"last_cursor":"0x"}"""
+    }
+    private fun policyApi(page: String?) = FakeLightClientApi()
+        .enqueue("getCellsCapacity", LightClientFixtures.CELLS_CAPACITY)
+        .enqueue("getCells", page)
+        .enqueue("getTransactions", """{"objects":[],"last_cursor":"0x"}""")
+
+    @Test fun spendableCellsAndBothBalancePathsRequireKnownEmptyDataAndSourceLock() = runTest {
+        val page = plainPolicyPage()
+        val active = readerOver(policyApi(page)).readBalance(ADDRESS, script, NetworkType.TESTNET, WALLET,
+            { false }, mutableSetOf(), {}, {}).getOrThrow()
+        val inactive = readerOver(policyApi(page)).readBalanceForWallet(WALLET, com.rjnr.pocketnode.data.wallet.AddressUtils.encode(script, NetworkType.TESTNET), NetworkType.TESTNET).getOrThrow()
+        assertEquals(300_00000001L, active.capacityAsLong())
+        assertEquals(300_00000001L, inactive.capacityAsLong())
+        val cells = readerOver(policyApi(page)).getCells(script).getOrThrow().items
+        assertEquals(1, cells.size)
+        assertEquals("0x" + "1".padStart(64, '0'), cells.single().outPoint.txHash)
+    }
+
+    @Test fun protectedOnlyAndEmptyWalletsReportZeroSpendableCapacity() = runTest {
+        for (page in listOf(plainPolicyPage(false), """{"objects":[],"last_cursor":"0x"}""")) {
+            val active = readerOver(policyApi(page)).readBalance(ADDRESS, script, NetworkType.TESTNET, WALLET,
+                { false }, mutableSetOf(), {}, {}).getOrThrow()
+            val inactive = readerOver(policyApi(page)).readBalanceForWallet(WALLET, com.rjnr.pocketnode.data.wallet.AddressUtils.encode(script, NetworkType.TESTNET), NetworkType.TESTNET).getOrThrow()
+            assertEquals(0L, active.capacityAsLong())
+            assertEquals(0L, inactive.capacityAsLong())
+        }
+    }
+
+    @Test fun dataOnlyWalletWithHistoryDoesNotTriggerAnEmptyWalletRescan() = runTest {
+        val api = policyApi(plainPolicyPage(false)).enqueue("getTransactions", LightClientFixtures.GET_TRANSACTIONS_PAGE)
+        var rescans = 0
+        readerOver(api).readBalance(ADDRESS, script, NetworkType.TESTNET, WALLET,
+            { false }, mutableSetOf(), {}, { rescans++ }).getOrThrow()
+        assertEquals(0, rescans)
+    }
+
+    @Test fun unresolvedCellDataWalkCannotFallbackToRawSpendableCapacity() = runTest {
+        assertTrue(readerOver(policyApi(null)).readBalance(ADDRESS, script, NetworkType.TESTNET, WALLET,
+            { false }, mutableSetOf(), {}, {}).isFailure)
+        assertTrue(readerOver(policyApi(null)).readBalanceForWallet(WALLET, com.rjnr.pocketnode.data.wallet.AddressUtils.encode(script, NetworkType.TESTNET), NetworkType.TESTNET).isFailure)
     }
 
     // ---- history ----

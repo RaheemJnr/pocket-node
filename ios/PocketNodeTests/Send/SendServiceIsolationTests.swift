@@ -123,4 +123,30 @@ final class SendServiceIsolationTests: XCTestCase {
         XCTAssertFalse(offMainActor("wallet removed") { check().boolValue })
     }
 
+    @MainActor
+    func testUnresolvedMaxReadIsAnErrorRatherThanDisplayedCapacity() async throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        let store = WalletStore(directory: directory)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let suite = "plain-capacity-" + UUID().uuidString
+        let defaults = UserDefaults(suiteName: suite)!
+        defer { defaults.removePersistentDomain(forName: suite) }
+        let preferences = UserDefaultsPreferences(defaults: defaults)
+        preferences.setSelectedNetwork(network: .testnet)
+        try store.save(WalletRecord(id: "synthetic", name: "Fixture", type: "raw_key",
+            mainnetAddress: SendFixtures.mainnetAddress, testnetAddress: SendFixtures.testnetAddress, createdAt: 0))
+        // No native node is initialized or started. Every bridge read is unresolved.
+        let lightClient = LightClientService(network: .testnet, autoStart: false)
+        let sync = SyncService(lightClient: lightClient, api: UniffiLightClientApi(), preferences: preferences)
+        let keys = WalletKeyStore(keychain: KeychainStore(service: suite), wrapper: SecureEnclaveKeyWrapper(tag: suite))
+        let service = SendService(sync: sync, walletStore: store, walletKeyStore: keys,
+            auth: StubAuthGate(), preferences: preferences)
+        do {
+            _ = try await service.maxSendableShannons(recipientAddress: nil)
+            XCTFail("Unresolved cells must not produce a spendable MAX quote")
+        } catch {
+            XCTAssertFalse(error.localizedDescription.isEmpty)
+        }
+    }
+
 }

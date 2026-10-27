@@ -65,7 +65,7 @@ class TransactionBuilder(
         const val SECP256K1_CODE_HASH =
             "0x9bd7e06f3ecf4be0f2fcd2188b23f1b9fcc88e5d4b65a8637b17723bbda3cce8"
         const val MIN_CELL_CAPACITY = 61_00000000L
-        const val DEFAULT_FEE = 100_000L // generous upper bound for cell selection
+        const val DEFAULT_FEE = 100_000L // initial selection allowance; large outputs are repriced
         const val FEE_RATE = 1000L       // shannons per KB (standard minimum relay fee)
         const val MIN_FEE = 1_000L       // floor: 0.00001 CKB
         private const val MAX_TX_SIZE = 596 * 1024 // 596KB CKB protocol limit
@@ -86,6 +86,26 @@ class TransactionBuilder(
     fun estimateTransferFee(inputCount: Int, outputCount: Int): Long =
         estimateFeeWithGroups(inputCount, outputCount, groupCount = 1)
 
+    /** Actual empty-data, untyped output sizes; input signing remains one secp group. */
+    fun estimateTransferFeeForScripts(inputCount: Int, outputScripts: List<Script>): Long =
+        estimateFeeWithGroups(inputCount, outputScripts.size, 1,
+            outputScripts.fold(0L) { total, script -> checkedAdd(total, 24L + serializeScript(script).size) })
+
+    /** Preliminary form pricing also works while an address is incomplete. Review validates it. */
+    fun estimateTransferFeeForDraft(
+        inputCount: Int,
+        recipientAddresses: List<String>,
+        changeAddress: String?,
+        includeChange: Boolean,
+    ): Long {
+        val addresses = recipientAddresses + if (includeChange) listOf(changeAddress ?: "") else emptyList()
+        val outputBytes = addresses.fold(0L) { total, address ->
+            val script = AddressUtils.parseAddress(address)
+            checkedAdd(total, if (script == null) 97L else 24L + serializeScript(script).size)
+        }
+        return estimateFeeWithGroups(inputCount, addresses.size, 1, outputBytes)
+    }
+
     /**
      * #382 Tier 3: fee for a sweep spending inputs locked by [groupCount]
      * DIFFERENT secp256k1 scripts. Each lock group's first witness carries a
@@ -96,7 +116,11 @@ class TransactionBuilder(
     fun estimateSweepFee(inputCount: Int, groupCount: Int): Long =
         estimateFeeWithGroups(inputCount, outputCount = 1, groupCount = groupCount)
 
-    private fun estimateFeeWithGroups(inputCount: Int, outputCount: Int, groupCount: Int): Long {
+    private fun estimateFeeWithGroups(
+        inputCount: Int, outputCount: Int, groupCount: Int,
+        outputBytes: Long = outputCount.toLong() * 97L,
+    ): Long {
+        require(inputCount >= 0 && outputCount >= 0 && groupCount >= 0 && outputBytes >= 0)
         // Molecule accounting, sized to never undershoot the node's measured
         // tx_size. The previous formula undercounted the witnesses dynvec
         // (missing the 4-byte offset per item) and per-output script tables;
@@ -108,27 +132,27 @@ class TransactionBuilder(
         //
         // raw = table hdr(28) + version(4) + cell_deps fixvec(4+37) +
         //       header_deps(4) = 77
-        val rawOverhead = 77
+        val rawOverhead = 77L
         // inputs fixvec: 4 + n * (since 8 + outpoint 36)
-        val inputsSize = 4 + inputCount * 44
+        val inputsSize = 4L + inputCount.toLong() * 44
         // outputs dynvec: 4 + n * (offset 4 + CellOutput 97)
         //   CellOutput = table hdr 16 + capacity 8 + secp lock script 73
         //   (script = table hdr 16 + codeHash 32 + hashType 1 + args 4+20)
-        val outputsSize = 4 + outputCount * (4 + 97)
+        val outputsSize = checkedAdd(4L + outputCount.toLong() * 4, outputBytes)
         // outputs_data dynvec: 4 + n * (offset 4 + empty Bytes 4)
-        val outputsDataSize = 4 + outputCount * 8
+        val outputsDataSize = 4L + outputCount.toLong() * 8
         // witnesses dynvec: 4 + n*offset(4) + one full item (len 4 +
         // WitnessArgs 85) PER LOCK GROUP + each remaining "0x" item (len 4)
-        val witnessSize = 4 + inputCount * 4 + groupCount * (4 + 85) +
-            (inputCount - groupCount).coerceAtLeast(0) * 4
+        val witnessSize = 4L + inputCount.toLong() * 4 + groupCount.toLong() * (4 + 85) +
+            (inputCount.toLong() - groupCount).coerceAtLeast(0) * 4
         // Transaction wrapper table hdr (12) + in-block serialization offset (4)
         val wrapperSize = 16
-        // Margin: molecule drift and future script arg growth. Proportional to
+        // Margin: molecule drift. Actual output script growth is priced above. Proportional to
         // input count so big txs keep headroom (2 bytes/input + 200 flat).
-        val margin = 200 + inputCount * 2
+        val margin = 200L + inputCount.toLong() * 2
 
-        val estimatedBytes = rawOverhead + inputsSize + outputsSize +
-            outputsDataSize + witnessSize + wrapperSize + margin
+        val estimatedBytes = listOf(rawOverhead, inputsSize, outputsSize,
+            outputsDataSize, witnessSize, wrapperSize.toLong(), margin).fold(0L, ::checkedAdd)
         return calculateFeeForSize(estimatedBytes)
     }
 
@@ -140,14 +164,17 @@ class TransactionBuilder(
      * and a 1-input fee assumption underestimates the fee on fragmented
      * wallets, making the subsequent Max send fail with insufficient funds.
      *
-     * Cells with malformed capacity hex are skipped from both the sum and the
-     * input count: buildTransfer could not spend them either.
+     * Only observed-empty untyped cells are eligible. Source-aware callers first
+     * restrict the lock. Cells with malformed capacity hex are skipped from
+     * both the sum and the input count: buildTransfer could not spend them either.
      */
-    fun calculateMaxSendable(cells: List<Cell>): Long {
-        val capacities = cells.mapNotNull { it.capacity.removePrefix("0x").toLongOrNull(16) }
+    fun calculateMaxSendable(cells: List<Cell>): Long = calculateMaxSendable(cells, null)
+
+    fun calculateMaxSendable(cells: List<Cell>, recipientAddress: String?): Long {
+        val capacities = cells.filter { it.isPlainCapacity() }.mapNotNull { it.capacity.removePrefix("0x").toLongOrNull(16) }
         if (capacities.isEmpty()) return 0L
-        val total = capacities.sum()
-        val fee = estimateTransferFee(inputCount = capacities.size, outputCount = 1)
+        val total = capacities.fold(0L, ::checkedAdd)
+        val fee = estimateTransferFeeForDraft(capacities.size, listOf(recipientAddress ?: ""), null, false)
         return (total - fee).coerceAtLeast(0L)
     }
 
@@ -256,12 +283,18 @@ class TransactionBuilder(
         tx.copy(witnesses = witnesses)
     }
 
+    private fun checkedAdd(left: Long, right: Long): Long {
+        require(left >= 0 && right >= 0 && left <= Long.MAX_VALUE - right) { "Transaction size overflow" }
+        return left + right
+    }
+
     /**
      * Calculate fee from serialized transaction size using the standard fee rate.
      * fee = ceil(size_bytes * fee_rate / 1000), with a minimum floor.
      */
-    private fun calculateFeeForSize(sizeBytes: Int): Long {
-        val fee = (sizeBytes.toLong() * FEE_RATE + 999) / 1000
+    private fun calculateFeeForSize(sizeBytes: Long): Long {
+        require(sizeBytes in 0..(Long.MAX_VALUE - 999) / FEE_RATE) { "Transaction size overflow" }
+        val fee = (sizeBytes * FEE_RATE + 999) / 1000
         return fee.coerceAtLeast(MIN_FEE)
     }
 
@@ -313,49 +346,61 @@ class TransactionBuilder(
      * `estimateTransferFee(1, n)` suggests (#490).
      *
      * Throws the same selection errors the build throws, so a preview fails
-     * where the send would fail.
+     * where the send would fail. This source-free entry requires callers to
+     * restrict cells to the source lock; prepareMultiTransfer rechecks it.
      */
     fun planTransfer(
         recipients: List<RecipientOutput>,
         availableCells: List<Cell>,
     ): TransferPlan {
         require(recipients.isNotEmpty()) { "At least one recipient is required" }
-        recipients.forEach { DestinationPolicy.requireRecipient(it) }
-        val totalRecipientAmount = recipients.sumOf { it.amountShannons }
+        val recipientScripts = recipients.map { DestinationPolicy.requireRecipient(it) }
+        val totalRecipientAmount = recipients.fold(0L) { sum, output -> checkedAdd(sum, output.amountShannons) }
+        var selectionFee = DEFAULT_FEE
+        while (true) {
+            // Select cells with an initial allowance to ensure we gather enough inputs
+            val (selectedCells, totalInput) = selectCells(availableCells, checkedAdd(totalRecipientAmount, selectionFee))
 
-        // Select cells with generous fee to ensure we gather enough inputs
-        val (selectedCells, totalInput) = selectCells(availableCells, totalRecipientAmount + DEFAULT_FEE)
+            if (selectedCells.isEmpty()) {
+                throw IllegalStateException("No cells available")
+            }
 
-        if (selectedCells.isEmpty()) {
-            throw IllegalStateException("No cells available")
+            if (totalInput < checkedAdd(totalRecipientAmount, MIN_FEE)) {
+                throw IllegalStateException("Insufficient balance: have $totalInput, need at least ${checkedAdd(totalRecipientAmount, MIN_FEE)}")
+            }
+
+            // Compute dynamic fee based on actual tx structure
+            val changeWithDefaultFee = totalInput - totalRecipientAmount - DEFAULT_FEE
+            val initialOutputCount = recipients.size + if (changeWithDefaultFee >= MIN_CELL_CAPACITY) 1 else 0
+            fun feeFor(outputCount: Int): Long = estimateTransferFeeForScripts(selectedCells.size,
+                recipientScripts + if (outputCount > recipients.size) listOf(selectedCells.first().lock) else emptyList())
+            var dynamicFee = feeFor(initialOutputCount)
+
+            // Recompute change with the actual script-aware fee
+            var change = totalInput - totalRecipientAmount - dynamicFee
+            val finalOutputCount = recipients.size + if (change >= MIN_CELL_CAPACITY) 1 else 0
+
+            // Re-estimate if output count changed (edge case: lower fee creates a viable change output)
+            if (finalOutputCount != initialOutputCount) {
+                dynamicFee = feeFor(finalOutputCount)
+                change = totalInput - totalRecipientAmount - dynamicFee
+            }
+
+            // A large accepted output can exceed the old selection allowance. Gather again
+            // only if its real fee makes this selection insufficient or leaves unusable change.
+            if (dynamicFee > selectionFee && change != 0L && change < MIN_CELL_CAPACITY) {
+                selectionFee = dynamicFee
+                continue
+            }
+            require(change >= 0) { "Insufficient balance including transaction fee" }
+            return TransferPlan(
+                selectedCells = selectedCells,
+                totalInput = totalInput,
+                totalRecipientAmount = totalRecipientAmount,
+                feeShannons = dynamicFee,
+                changeShannons = change,
+            )
         }
-
-        if (totalInput < totalRecipientAmount + MIN_FEE) {
-            throw IllegalStateException("Insufficient balance: have $totalInput, need at least ${totalRecipientAmount + MIN_FEE}")
-        }
-
-        // Compute dynamic fee based on actual tx structure
-        val changeWithDefaultFee = totalInput - totalRecipientAmount - DEFAULT_FEE
-        val initialOutputCount = recipients.size + if (changeWithDefaultFee >= MIN_CELL_CAPACITY) 1 else 0
-        var dynamicFee = estimateTransferFee(selectedCells.size, initialOutputCount)
-
-        // Recompute change with the (smaller) dynamic fee
-        var change = totalInput - totalRecipientAmount - dynamicFee
-        val finalOutputCount = recipients.size + if (change >= MIN_CELL_CAPACITY) 1 else 0
-
-        // Re-estimate if output count changed (edge case: lower fee creates a viable change output)
-        if (finalOutputCount != initialOutputCount) {
-            dynamicFee = estimateTransferFee(selectedCells.size, finalOutputCount)
-            change = totalInput - totalRecipientAmount - dynamicFee
-        }
-
-        return TransferPlan(
-            selectedCells = selectedCells,
-            totalInput = totalInput,
-            totalRecipientAmount = totalRecipientAmount,
-            feeShannons = dynamicFee,
-            changeShannons = change,
-        )
     }
 
     /**
@@ -425,7 +470,7 @@ class TransactionBuilder(
         logger.d(TAG, "  Network: ${network.name}")
         logger.d(TAG, "  Using SECP256K1 cell dep: $secp256k1TxHash")
 
-        val plan = planTransfer(recipients, availableCells)
+        val plan = planTransfer(recipients, availableCells.filter { it.isPlainCapacity(senderScript) })
         val selectedCells = plan.selectedCells
         val change = plan.changeShannons
 
@@ -529,7 +574,7 @@ class TransactionBuilder(
         }
 
         logger.d(TAG, "  Signing transaction with ${inputs.size} inputs, ${outputs.size} outputs (est. ${estimatedSize} bytes)")
-        return PreparedTransfer(unsignedTx, selectedCells.toList())
+        return PreparedTransfer(unsignedTx, selectedCells.toList()).also(::validateTransferFee)
     }
 
     // ========================================
@@ -565,7 +610,7 @@ class TransactionBuilder(
             "Minimum DAO deposit is ${DaoConstants.MIN_DEPOSIT_SHANNONS / 100_000_000} CKB"
         }
 
-        val (selectedCells, totalInput) = selectCells(availableCells, amountShannons + DEFAULT_FEE)
+        val (selectedCells, totalInput) = selectCells(availableCells.filter { it.isPlainCapacity(senderScript) }, amountShannons + DEFAULT_FEE)
         if (totalInput < amountShannons + DEFAULT_FEE) {
             throw Exception("Insufficient balance. Need ${amountShannons + DEFAULT_FEE}, have $totalInput")
         }
@@ -657,7 +702,7 @@ class TransactionBuilder(
         // The previous implementation used the deposit cell as the only input,
         // making `inputs == outputs`, so the network rejected the tx and the
         // JNI bridge returned null ("send failed - native returned null", #119).
-        val (feeCells, feeTotal) = selectCells(availableCells, DEFAULT_FEE + MIN_CELL_CAPACITY)
+        val (feeCells, feeTotal) = selectCells(availableCells.filter { it.isPlainCapacity(senderScript) }, DEFAULT_FEE + MIN_CELL_CAPACITY)
 
         // DEFAULT_FEE above is the selection reservation (a generous upper
         // bound), not the fee. Paying it flat charged 100,000 shannons for a
@@ -827,6 +872,25 @@ class TransactionBuilder(
         return rawSize + witnessesSize + 16
     }
 
+    /** Recheck paid capacity against actual output bytes and the signature witness before signing. */
+    internal fun validateTransferFee(prepared: PreparedTransfer) {
+        val tx = prepared.transaction
+        require(tx.cellInputs.isNotEmpty()) { "No inputs" }
+        val signedShape = tx.copy(witnesses = tx.cellInputs.indices.map {
+            if (it == 0) serializeWitnessArgs(ByteArray(65), null, null).toHexString() else "0x"
+        })
+        val inputTotal = prepared.selectedCells.fold(0L) { sum, cell ->
+            checkedAdd(sum, requireNotNull(parseCapacity(cell.capacity)))
+        }
+        val outputTotal = tx.cellOutputs.fold(0L) { sum, output ->
+            checkedAdd(sum, requireNotNull(parseCapacity(output.capacity)))
+        }
+        require(inputTotal >= outputTotal && inputTotal - outputTotal >=
+            calculateFeeForSize(serializedSizeWithWitnesses(signedShape).toLong())) {
+            "Transaction fee does not cover its serialized size. Review the payment again."
+        }
+    }
+
     private fun estimateTransactionSize(tx: Transaction): Int {
         return try {
             val rawSize = serializeRawTransaction(tx).size
@@ -852,7 +916,7 @@ class TransactionBuilder(
         minChange: Long = MIN_CELL_CAPACITY,
     ): Pair<List<Cell>, Long> {
         val sortedCells = cells
-            .filter { it.type == null }
+            .filter { it.isPlainCapacity() }
             // Malformed capacity hex from the node: skip the cell rather than
             // abort the whole selection — same treatment as
             // calculateMaxSendable (#321).

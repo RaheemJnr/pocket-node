@@ -169,12 +169,12 @@ class SendPipeline(
      * between a MAX that sends and one that fails (#321).
      */
     @Throws(Throwable::class)
-    suspend fun maxSendable(ctx: SendContext, fromAddress: String): Long {
+    suspend fun maxSendable(ctx: SendContext, fromAddress: String, recipientAddress: String? = null): Long {
         val senderNetwork = ctx.network
         val walletId = ctx.walletId
         return sendMutex.withLock {
             val cells = resolveSpendableCells(fromAddress, senderNetwork, walletId, senderNetwork.name)
-            transactionBuilder.calculateMaxSendable(cells)
+            transactionBuilder.calculateMaxSendable(cells, recipientAddress)
         }
     }
 
@@ -797,7 +797,8 @@ class SendPipeline(
     ): List<Cell> {
         // getCells(fromAddress) decodes the address to a script — honors the
         // snapshot rather than reading the active wallet live. It already
-        // excludes typed (DAO/token) cells, so this is regular spendable CKB.
+        // requires observed-empty untyped cells at that source lock.
+        val senderScript = requireNotNull(AddressUtils.parseAddress(fromAddress)) { "Invalid sender address" }
         val cellsResult = getCells(fromAddress).getOrThrow()
         val pending = pendingBroadcasts.getActive(walletId, network)
         val reserved: Set<OutPoint> = pending
@@ -843,7 +844,7 @@ class SendPipeline(
                         blockNumber = "0x0", // synthetic — not on chain yet
                         lock = output.lock,
                         type = output.type,
-                        data = "0x"
+                        data = pendingTx.outputsData.getOrNull(idx) ?: ""
                     )
                 }
             }
@@ -854,7 +855,7 @@ class SendPipeline(
         // duplicate input and fail. liveFiltered is first, so distinctBy
         // keeps the real cell.
         val filtered = (liveFiltered + pendingChange)
-            .filterNot { it.outPoint in reserved }
+            .filter { it.outPoint !in reserved && it.isPlainCapacity(senderScript) }
             .distinctBy { "${it.outPoint.txHash}:${it.outPoint.index}" }
         logger.d(
             TAG,

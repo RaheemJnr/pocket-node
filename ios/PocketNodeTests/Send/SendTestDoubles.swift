@@ -23,8 +23,9 @@ final class FakeSendService: SendServicing {
     var previewFee: Int64 = 100_000
     var previewError: Error?
 
-    /// What ``maxSendableShannons()`` answers.
+    /// What the destination-aware MAX request answers.
     var maxSendable: Int64 = 0
+    var maxError: Error?
     var onMax: (@MainActor () async -> Void)?
 
     /// What ``send(from:to:amount:expectedFee:)`` answers.
@@ -43,14 +44,22 @@ final class FakeSendService: SendServicing {
     private(set) var retryCalls: [String] = []
     private(set) var dismissCalls = 0
 
-    func estimateFee(inputCount: Int, outputCount: Int) -> Int64 {
+    var feeEstimator: ((Int, [String], Bool) -> Int64)?
+    func estimateFee(inputCount: Int, recipientAddresses: [String], includeChange: Bool) -> Int64 {
+        if let feeEstimator { return feeEstimator(inputCount, recipientAddresses, includeChange) }
         // A stand-in for the real molecule accounting, shaped like it: one
         // output costs less than two, which is what the dust-warning heuristic
         // turns on.
-        Int64(outputCount) * 50_000
+        return Int64(recipientAddresses.count + (includeChange ? 1 : 0)) * 50_000
     }
 
-    func maxSendableShannons() async -> Int64 { await onMax?(); return maxSendable }
+    private(set) var maxRecipients: [String?] = []
+    func maxSendableShannons(recipientAddress: String?) async throws -> Int64 {
+        maxRecipients.append(recipientAddress)
+        await onMax?()
+        if let maxError { throw maxError }
+        return maxSendable
+    }
 
     func preview(from: String, recipients: [RecipientOutput]) async throws -> TransferPlan {
         previewCalls.append((from, recipients))

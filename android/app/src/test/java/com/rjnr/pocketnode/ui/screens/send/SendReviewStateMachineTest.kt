@@ -85,6 +85,7 @@ class SendReviewStateMachineTest {
                 capacity = "0x${(70_00000000L).toString(16)}",
                 blockNumber = "0x100",
                 lock = Script(Script.SECP256K1_CODE_HASH, "type", "0x" + "aa".repeat(20)),
+                data = "0x",
             )
         },
         totalInput = 280_00000000L,
@@ -121,7 +122,7 @@ class SendReviewStateMachineTest {
 
         keyManager = mockk(relaxed = true)
         transactionBuilder = mockk(relaxed = true)
-        every { transactionBuilder.estimateTransferFee(any(), any()) } returns 1_000L
+        every { transactionBuilder.estimateTransferFeeForDraft(any(), any(), any(), any()) } returns 1_000L
 
         authManager = mockk(relaxed = true)
         pinManager = mockk(relaxed = true)
@@ -716,7 +717,7 @@ class SendReviewStateMachineTest {
         } finally { androidx.lifecycle.ViewModelStore().apply { put("reconcile", vm); clear() }; runCurrent() }
     }
 
-    // Real transaction assembly at the signing seam: equal fees cannot conceal changed outputs.
+    // Editing the draft during authentication aborts before signing, even with an unchanged fee.
     @Test fun `auth edit cannot substitute same fee recipient output`() = runTest(testDispatcher) {
         val builder = TransactionBuilder(com.rjnr.pocketnode.data.validation.NetworkValidator())
         val from = com.rjnr.pocketnode.data.wallet.AddressUtils.encode(plannedTransfer.selectedCells.first().lock, NetworkType.TESTNET)
@@ -725,8 +726,9 @@ class SendReviewStateMachineTest {
         every { repository.getCurrentAddress() } returns from
         coEvery { repository.previewTransfer(any(), any()) } answers { builder.planTransfer(arg(1), plannedTransfer.selectedCells) }
         val gate = kotlinx.coroutines.CompletableDeferred<Unit>()
+        val returnedKey = ByteArray(32) { 7 }
         coEvery { walletKeyReader.readPrivateKey(any(), any(), any(), any()) } coAnswers {
-            gate.await(); WalletKeyReader.Result.Success(ByteArray(32) { 7 })
+            gate.await(); WalletKeyReader.Result.Success(returnedKey)
         }
         var signed: com.rjnr.pocketnode.data.gateway.models.Transaction? = null
         coEvery { repository.sendReviewed(any(), any(), any(), any()) } coAnswers {
@@ -743,10 +745,9 @@ class SendReviewStateMachineTest {
             assertEquals(1000L, vm.uiState.value.reviewRequest!!.feeShannons)
             vm.confirmSend(foregroundActivity); runCurrent()
             vm.updateRecipient(replacement); vm.updateAmount("150"); gate.complete(Unit); runCurrent()
-            signed?.let {
-                assertEquals("same fee must never authorize another script", "0x" + "bb".repeat(20), it.cellOutputs.first().lock.args)
-                assertEquals(100_00000000L, it.cellOutputs.first().capacity.removePrefix("0x").toLong(16))
-            }
+            assertNull("editing the draft during authentication must abort before signing", signed)
+            coVerify(exactly = 0) { repository.sendReviewed(any(), any(), any(), any()) }
+            assertTrue("the returned signing key must be wiped after the abort", returnedKey.all { it == 0.toByte() })
         } finally { androidx.lifecycle.ViewModelStore().apply { put("race", vm); clear() }; runCurrent() }
     }
 
@@ -756,7 +757,7 @@ class SendReviewStateMachineTest {
             kotlinx.coroutines.withContext(kotlinx.coroutines.NonCancellable) { gate.await() }
             Result.success(com.rjnr.pocketnode.data.gateway.models.CellsResponse(plannedTransfer.selectedCells, null))
         }
-        every { transactionBuilder.calculateMaxSendable(any()) } returns 279_99999000L
+        every { transactionBuilder.calculateMaxSendable(any(), any()) } returns 279_99999000L
         val vm = newViewModel(); runCurrent()
         try {
             vm.setMaxAmount(); runCurrent()
@@ -765,6 +766,146 @@ class SendReviewStateMachineTest {
             gate.complete(Unit); runCurrent()
             assertEquals("100", vm.uiState.value.amountCkb)
         } finally { androidx.lifecycle.ViewModelStore().apply { put("max", vm); clear() }; runCurrent() }
+    }
+
+    @Test fun `MAX quotes only observed empty cells at its captured source lock`() = runTest(testDispatcher) {
+        transactionBuilder = TransactionBuilder(com.rjnr.pocketnode.data.validation.NetworkValidator())
+        val base = plannedTransfer.selectedCells.first()
+        val protected = listOf(base.copy(data = "0x01"), base.copy(data = "0x00"), base.copy(data = ""),
+            base.copy(type = base.lock), base.copy(lock = base.lock.copy(args = "0x" + "bb".repeat(20))))
+        coEvery { repository.getCells() } coAnswers {
+            // Force the suspend resume path so MockK does not double-box inline Result.
+            kotlinx.coroutines.yield()
+            Result.success(com.rjnr.pocketnode.data.gateway.models.CellsResponse(plannedTransfer.selectedCells + protected, null))
+        }
+        val vm = newViewModel(); runCurrent()
+        try {
+            vm.setMaxAmount(); runCurrent()
+            assertNull("MAX read must succeed: ${vm.uiState.value.error}", vm.uiState.value.error)
+            // Four empty 70 CKB cells minus the 1000-shannon fee, with exact integer accounting.
+            assertEquals("279.99999", vm.uiState.value.amountCkb)
+        } finally { androidx.lifecycle.ViewModelStore().apply { put("plainMax", vm); clear() }; runCurrent() }
+    }
+
+    private fun feeContact(address: String) = com.rjnr.pocketnode.data.database.entity.ContactEntity(
+        id = address, walletId = null, name = "Fee fixture", address = address, network = NetworkType.TESTNET.name,
+        notes = null, tags = null, createdAt = 1, updatedAt = 1, lastUsedAt = null, useCount = 0)
+
+    @Test fun `contact selection reprices existing amount and dust warning in both directions`() = runTest(testDispatcher) {
+        transactionBuilder = TransactionBuilder(com.rjnr.pocketnode.data.validation.NetworkValidator())
+        every { repository.balance } returns MutableStateFlow(BalanceResponse(senderAddress,
+            "0x${2000_00000000L.toString(16)}", "2000", "0x1"))
+        val custom = feeContact(com.rjnr.pocketnode.data.wallet.AddressUtils.encode(
+            Script("0x" + "42".repeat(32), "data2", "0x" + "bb".repeat(1024)), NetworkType.TESTNET))
+        val standard = feeContact(recipient)
+        val vm = newViewModel(); runCurrent()
+        try {
+            vm.updateRecipient(recipient); vm.updateAmount("1938.99999")
+            assertEquals(1000L, vm.uiState.value.estimatedFee)
+            assertNull(vm.uiState.value.burnWarning)
+            vm.sendTransaction(); runCurrent()
+            assertNotNull(vm.uiState.value.reviewRequest)
+            vm.selectContact(custom)
+            assertNull(vm.uiState.value.reviewRequest)
+            assertEquals(1670L, vm.uiState.value.estimatedFee)
+            assertTrue(vm.uiState.value.burnWarning!!.contains("60.9999933"))
+            assertEquals(custom, vm.uiState.value.matchedContact)
+            assertTrue(vm.uiState.value.recipientSuggestions.isEmpty())
+            advanceTimeBy(300); runCurrent()
+            assertEquals(custom, vm.uiState.value.matchedContact)
+            assertEquals(1670L, vm.uiState.value.estimatedFee)
+            coVerify(exactly = 0) { contactRepository.search(any()) }
+            vm.selectContact(standard)
+            assertEquals("1938.99999", vm.uiState.value.amountCkb)
+            assertEquals(1000L, vm.uiState.value.estimatedFee)
+            assertNull(vm.uiState.value.burnWarning)
+            assertEquals(standard, vm.uiState.value.matchedContact)
+        } finally { androidx.lifecycle.ViewModelStore().apply { put("contactFee", vm); clear() }; runCurrent() }
+    }
+
+    @Test fun `late MAX cannot restore amount or estimate after selecting contact`() = runTest(testDispatcher) {
+        transactionBuilder = TransactionBuilder(com.rjnr.pocketnode.data.validation.NetworkValidator())
+        val gate = kotlinx.coroutines.CompletableDeferred<Unit>()
+        coEvery { repository.getCells() } coAnswers {
+            kotlinx.coroutines.withContext(kotlinx.coroutines.NonCancellable) { gate.await() }
+            Result.success(com.rjnr.pocketnode.data.gateway.models.CellsResponse(plannedTransfer.selectedCells, null))
+        }
+        val custom = feeContact(com.rjnr.pocketnode.data.wallet.AddressUtils.encode(
+            Script("0x" + "42".repeat(32), "data2", "0x" + "bb".repeat(1024)), NetworkType.TESTNET))
+        val vm = newViewModel(); runCurrent()
+        try {
+            vm.fillForm(); vm.setMaxAmount(); runCurrent()
+            vm.selectContact(custom)
+            gate.complete(Unit); runCurrent()
+            assertEquals("100", vm.uiState.value.amountCkb)
+            assertEquals(custom.address, vm.uiState.value.recipientAddress)
+            assertEquals(custom, vm.uiState.value.matchedContact)
+            assertEquals(1670L, vm.uiState.value.estimatedFee)
+            assertNull(vm.uiState.value.burnWarning)
+        } finally { androidx.lifecycle.ViewModelStore().apply { put("contactMax", vm); clear() }; runCurrent() }
+    }
+
+    @Test fun `MAX uses the captured custom destination size`() = runTest(testDispatcher) {
+        transactionBuilder = TransactionBuilder(com.rjnr.pocketnode.data.validation.NetworkValidator())
+        val base = plannedTransfer.selectedCells.first()
+        val custom = base.lock.copy(codeHash = "0x" + "42".repeat(32), args = "0x" + "bb".repeat(1024))
+        val recipient = com.rjnr.pocketnode.data.wallet.AddressUtils.encode(custom, NetworkType.TESTNET)
+        val cells = listOf(base.copy(capacity = "0x${2000_00000000L.toString(16)}"))
+        coEvery { repository.getCells() } coAnswers {
+            kotlinx.coroutines.yield()
+            Result.success(com.rjnr.pocketnode.data.gateway.models.CellsResponse(cells, null))
+        }
+        val vm = newViewModel(); runCurrent()
+        try {
+            vm.updateRecipient(recipient); vm.setMaxAmount(); runCurrent()
+            assertNull(vm.uiState.value.error)
+            assertEquals("1999.99998439", vm.uiState.value.amountCkb)
+            assertEquals(1561L, vm.uiState.value.estimatedFee)
+        } finally { androidx.lifecycle.ViewModelStore().apply { put("customMax", vm); clear() }; runCurrent() }
+    }
+
+    @Test fun `MAX result for edited destination cannot replace current amount`() = runTest(testDispatcher) {
+        val gate = kotlinx.coroutines.CompletableDeferred<Unit>()
+        coEvery { repository.getCells() } coAnswers {
+            kotlinx.coroutines.withContext(kotlinx.coroutines.NonCancellable) { gate.await() }
+            Result.success(com.rjnr.pocketnode.data.gateway.models.CellsResponse(plannedTransfer.selectedCells, null))
+        }
+        every { transactionBuilder.calculateMaxSendable(any(), any()) } returns 279_99999000L
+        val vm = newViewModel(); runCurrent()
+        try {
+            vm.fillForm(); vm.setMaxAmount(); runCurrent()
+            vm.updateRecipient("edited destination"); gate.complete(Unit); runCurrent()
+            assertEquals("100", vm.uiState.value.amountCkb)
+            assertEquals("edited destination", vm.uiState.value.recipientAddress)
+            assertNull(vm.uiState.value.error)
+        } finally { androidx.lifecycle.ViewModelStore().apply { put("destinationMax", vm); clear() }; runCurrent() }
+    }
+
+    @Test fun `failed MAX preserves amount and reports unresolved cells`() = runTest(testDispatcher) {
+        coEvery { repository.getCells() } returns Result.failure(IllegalStateException("Cell data unavailable"))
+        val vm = newViewModel(); runCurrent()
+        try {
+            vm.updateAmount("123")
+            vm.setMaxAmount(); runCurrent()
+            assertEquals("123", vm.uiState.value.amountCkb)
+            assertNotNull(vm.uiState.value.error)
+        } finally { androidx.lifecycle.ViewModelStore().apply { put("maxError", vm); clear() }; runCurrent() }
+    }
+
+    @Test fun `late failed MAX cannot replace new draft or publish error`() = runTest(testDispatcher) {
+        val gate = kotlinx.coroutines.CompletableDeferred<Unit>()
+        coEvery { repository.getCells() } coAnswers {
+            kotlinx.coroutines.withContext(kotlinx.coroutines.NonCancellable) { gate.await() }
+            Result.failure(IllegalStateException("Cell data unavailable"))
+        }
+        val vm = newViewModel(); runCurrent()
+        try {
+            vm.setMaxAmount(); runCurrent()
+            vm.updateAmount("123")
+            gate.complete(Unit); runCurrent()
+            assertEquals("123", vm.uiState.value.amountCkb)
+            assertNull(vm.uiState.value.error)
+        } finally { androidx.lifecycle.ViewModelStore().apply { put("lateMaxError", vm); clear() }; runCurrent() }
     }
 
     /** Only the transport/storage are doubles: real ledger, planner, review validator and signing serializer. */

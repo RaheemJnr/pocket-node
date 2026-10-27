@@ -100,7 +100,7 @@ class SendSweepWarningTest {
 
         keyManager = mockk(relaxed = true)
         transactionBuilder = mockk(relaxed = true)
-        every { transactionBuilder.estimateTransferFee(any(), any()) } returns 1_000L
+        every { transactionBuilder.estimateTransferFeeForDraft(any(), any(), any(), any()) } returns 1_000L
 
         authManager = mockk(relaxed = true)
         every { authManager.isAuthBeforeSendEnabled() } returns false
@@ -162,6 +162,7 @@ class SendSweepWarningTest {
                     capacity = "0x${balanceShannons.toString(16)}",
                     blockNumber = "0x100",
                     lock = Script(Script.SECP256K1_CODE_HASH, "type", "0x" + "aa".repeat(20)),
+                    data = "0x",
                 )
             ),
             totalInput = balanceShannons,

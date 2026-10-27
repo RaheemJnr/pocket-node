@@ -11,6 +11,8 @@
 [advisories]
 ignore = [
     { id = "RUSTSEC-2024-0437", reason = "protobuf recursion; inspected metrics path encodes only, prometheus 0.13 pins protobuf 2; upstream metrics migration required. Review by 2026-12-28." },
+    { id = "RUSTSEC-2026-0374", reason = "basic-toml unmaintained in Askama/UniFFI binding generation; advisory reports maintenance status, no specific vulnerable operation; generator migration required. Review by 2026-12-28." },
+    { id = "RUSTSEC-2025-0141", reason = "bincode 1.3.3 unmaintained; direct runtime/storage serialization retained for format compatibility, replacement requires migration; advisory reports maintenance status, no specific vulnerable operation. Review by 2026-12-28." },
     { id = "RUSTSEC-2025-0057", reason = "fxhash unmaintained, transitive hashing utility, no known vulnerability. Review by 2026-12-28." },
     { id = "RUSTSEC-2024-0384", reason = "instant unmaintained, transitive via parking_lot/governor. Review by 2026-12-28." },
     { id = "RUSTSEC-2025-0119", reason = "number_prefix unmaintained, transitive build-time dependency only. Review by 2026-12-28." },

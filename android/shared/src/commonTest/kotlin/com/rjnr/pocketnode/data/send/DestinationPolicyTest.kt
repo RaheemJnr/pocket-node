@@ -9,7 +9,7 @@ import kotlin.test.*
 class DestinationPolicyTest {
     private val sender = Script(Script.SECP256K1_CODE_HASH, "type", "0x" + "aa".repeat(20))
     private val from = AddressUtils.encode(sender, NetworkType.TESTNET)
-    private val cells = listOf(Cell(OutPoint("0x" + "11".repeat(32), "0x0"), "0x${300_00000000L.toString(16)}", "0x1", sender))
+    private val cells = listOf(Cell(OutPoint("0x" + "11".repeat(32), "0x0"), "0x${300_00000000L.toString(16)}", "0x1", sender, data = "0x"))
     private val builder = TransactionBuilder(NetworkValidator())
     private fun recipients(script: Script) = listOf(RecipientOutput(AddressUtils.encode(script, NetworkType.TESTNET), 100_00000000L))
 

@@ -12,7 +12,7 @@ class ReviewedTransferTest {
     private val other = sender.copy(args = "0x" + "cc".repeat(20))
     private val from = AddressUtils.encode(sender, NetworkType.TESTNET)
     private val to = AddressUtils.encode(destination, NetworkType.TESTNET)
-    private val cells = listOf(Cell(OutPoint("0x" + "11".repeat(32), "0x0"), "0x${300_00000000L.toString(16)}", "0x1", sender))
+    private val cells = listOf(Cell(OutPoint("0x" + "11".repeat(32), "0x0"), "0x${300_00000000L.toString(16)}", "0x1", sender, data = "0x"))
     private val builder = TransactionBuilder(NetworkValidator())
     private val recipients = listOf(RecipientOutput(to, 100_00000000L))
     private fun review(outputs: List<RecipientOutput> = recipients) = ReviewedTransfer("wallet", from, NetworkType.TESTNET, outputs, 1000, 1)

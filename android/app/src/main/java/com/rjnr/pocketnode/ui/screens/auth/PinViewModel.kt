@@ -164,6 +164,10 @@ class PinViewModel @Inject constructor(
             }
 
             PinMode.VERIFY -> {
+                if (pinManager.hasUnconfirmedChange()) {
+                    showError("PIN storage could not be confirmed. Restart the app before trying to unlock.")
+                    return
+                }
                 _uiState.update { it.copy(isVerifying = true) }
                 viewModelScope.launch {
                     val ok = withContext(Dispatchers.Default) { pinManager.verifyPin(pin) }

@@ -512,6 +512,8 @@ class WalletRepository @Inject constructor(
                 "Added wallet identity changed"
             }
             // Retry intent must survive a crash immediately after this transaction commits.
+            // A reused identity may retain an older refused intent; this authorized
+            // removal atomically supersedes it with the caller's latest backup choice.
             appDatabase.walletPendingCleanupDao().insert(
                 com.rjnr.pocketnode.data.database.entity.WalletPendingCleanupEntity(walletId, keepBackupFile)
             )

@@ -112,6 +112,9 @@ class ReauthLockPolicy(
         }
     }
 
+    /** A claimed app-PIN change always requires fresh authentication. */
+    fun onPinChanged() = lock()
+
     /** The cold-start Auth route unlocked. */
     fun onColdStartAuthUnlocked() {
         process.unlocked = true

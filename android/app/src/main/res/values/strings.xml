@@ -472,6 +472,8 @@
     <string name="dao_deposit_cta">Deposit</string>
     <string name="dao_make_first_deposit">Make First Deposit</string>
     <string name="dao_card_withdraw">Withdraw</string>
+    <string name="dao_unlock_less_than_hour">Withdrawal in progress · Unlock in &lt;1h</string>
+    <string name="dao_waiting_deposit_details">Waiting for deposit details</string>
     <string name="dao_card_unlock">Unlock</string>
     <string name="dao_sheet_cancel">Cancel</string>
     <string name="dao_sheet_deposit">Deposit</string>

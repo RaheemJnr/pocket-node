@@ -343,6 +343,7 @@ class SendViewModel @Inject constructor(
     fun updateRecipient(address: String) {
         invalidateDraft()
         _uiState.update { it.copy(recipientAddress = address, error = null) }
+        updateAmount(_uiState.value.amountCkb)
         // Debounced autocomplete + saved-contact lookup. Cancel any in-flight
         // search so each keystroke supersedes the previous one. (#196)
         suggestionsJob?.cancel()
@@ -417,6 +418,7 @@ class SendViewModel @Inject constructor(
                 error = null,
             )
         }
+        updateAmount(_uiState.value.amountCkb)
     }
 
     /**
@@ -467,7 +469,8 @@ class SendViewModel @Inject constructor(
         // Estimate: 1 input, 2 outputs (recipient + change) for typical transfer
         // If sending ~all balance, assume 1 output (no change)
         val outputCount = if (amountShannons > 0 && balance - amountShannons < 61_00000000L) 1 else 2
-        val estimatedFee = transactionBuilder.estimateTransferFee(inputCount = 1, outputCount = outputCount)
+        val estimatedFee = transactionBuilder.estimateTransferFeeForDraft(1, listOf(_uiState.value.recipientAddress),
+            repository.getCurrentAddress(), outputCount == 2)
         val potentialChange = balance - amountShannons - estimatedFee
         val minCapacity = 61_00000000L
 
@@ -494,23 +497,21 @@ class SendViewModel @Inject constructor(
         val walletId = walletPreferencesActiveId()
         val network = repository.currentNetwork
         val address = repository.getCurrentAddress()
+        val recipient = _uiState.value.recipientAddress
         maxJob = viewModelScope.launch {
-            // Sending max consumes EVERY spendable cell, so the fee must be
-            // estimated for all of them as inputs — the old 1-input estimate
-            // undershot on fragmented wallets and the Max send then failed
-            // with insufficient funds (#321). getCells is the same source the
-            // send path uses (spent + typed/DAO cells already filtered), so
-            // Max also can't overshoot a balance that includes unspendable
-            // cells.
-            val maxShannons = repository.getCells()
-                .map { transactionBuilder.calculateMaxSendable(it.items) }
-                .getOrElse {
-                    // Cell fetch failed — fall back to displayed balance with
-                    // the 1-input estimate (previous behavior), integer math.
-                    val balance = _uiState.value.availableBalance
-                    val fee = transactionBuilder.estimateTransferFee(inputCount = 1, outputCount = 1)
-                    (balance - fee).coerceAtLeast(0L)
-                }
+            // MAX uses the same proven-empty cells and source lock as the send.
+            // A displayed/cached balance cannot replace a failed cell-data read.
+            val result = repository.getCells().mapCatching { response ->
+                val source = requireNotNull(address?.let { AddressUtils.parseAddress(it) }) { "Wallet not initialized" }
+                transactionBuilder.calculateMaxSendable(response.items.filter { it.isPlainCapacity(source) }, recipient)
+            }
+            coroutineContext.ensureActive()
+            if (generation != request || walletPreferencesActiveId() != walletId ||
+                repository.currentNetwork != network || repository.getCurrentAddress() != address) return@launch
+            val maxShannons = result.getOrElse { error ->
+                _uiState.update { it.copy(error = com.rjnr.pocketnode.ui.util.UiMessage.Raw(error.message ?: "Could not resolve spendable cells")) }
+                return@launch
+            }
             // BigDecimal, not Double: shannon precision is lost above ~90M CKB.
             // toPlainString always uses '.' regardless of device locale, which
             // sanitizeAmount requires.
@@ -1191,7 +1192,7 @@ class SendViewModel @Inject constructor(
                 } else {
                     batch.size
                 }
-                transactionBuilder.estimateTransferFee(inputCount = inputs, outputCount = batch.size + 1)
+                transactionBuilder.estimateTransferFeeForDraft(inputs, batch, repository.getCurrentAddress(), true)
             }
         }
         return copy(

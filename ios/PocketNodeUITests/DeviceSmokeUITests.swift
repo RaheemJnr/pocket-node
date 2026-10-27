@@ -530,7 +530,7 @@ final class DeviceSmokeUITests: XCTestCase {
         let amountField = app.textFields["send.amount"]
         Self.clear(amountField, in: app)
         amountField.typeText(Self.sendAmount)
-        if M3UITest.label("send.addressState", in: app, timeout: 5) != "Valid CKB testnet address" {
+        if M3UITest.label("send.addressState", in: app, timeout: 5) != "Recognized address format" {
             Self.clear(app.textFields["send.recipient"], in: app)
             app.textFields["send.recipient"].typeText(Self.returnAddress)
         }

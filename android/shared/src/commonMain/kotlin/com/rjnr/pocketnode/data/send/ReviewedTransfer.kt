@@ -56,7 +56,7 @@ class ReviewedTransfer @Throws(Throwable::class) constructor(
         var inputTotal = 0L
         tx.cellInputs.forEach { input ->
             val cell = prepared.selectedCells.singleOrNull { it.outPoint == input.previousOutput }
-            requireReviewed(cell != null && cell.lock == sourceScript && cell.type == null && cell.data == "0x" && input.since == "0x0")
+            requireReviewed(cell != null && cell.isPlainCapacity(sourceScript) && input.since == "0x0")
             val amount = cell!!.capacity.removePrefix("0x").toLongOrNull(16) ?: error("Invalid input capacity")
             requireReviewed(amount > 0 && inputTotal <= Long.MAX_VALUE - amount)
             inputTotal += amount

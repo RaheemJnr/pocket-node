@@ -27,7 +27,7 @@ final class SendUITests: XCTestCase {
 
         Self.clear(recipient, in: app)
         recipient.typeText(M3UITest.testnetAddress)
-        M3UITest.assertLabel("send.addressState", equals: "Valid CKB testnet address", in: app)
+        M3UITest.assertLabel("send.addressState", equals: "Recognized address format", in: app)
     }
 
     /// The shared sanitiser drops a ninth decimal as it is typed, and the field
@@ -133,7 +133,7 @@ final class SendUITests: XCTestCase {
             app.textFields["send.recipient"].waitForExistence(timeout: 15),
             "the scanner did not dismiss"
         )
-        M3UITest.assertLabel("send.addressState", equals: "Valid CKB testnet address", in: app)
+        M3UITest.assertLabel("send.addressState", equals: "Recognized address format", in: app)
     }
 
     // MARK: - Helpers
