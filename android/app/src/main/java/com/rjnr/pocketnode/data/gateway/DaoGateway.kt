@@ -361,7 +361,7 @@ class DaoGateway(
         val nowMs = System.currentTimeMillis()
 
         // An unreadable association is not an empty history.
-        val cached = daoSyncManager.getActiveDeposits(network, walletId)
+        val cached = daoSyncManager.requireActiveDepositHistory(network, walletId)
         val cachedByKey = cached.groupBy { normalizedOutPointKey(it.txHash, it.index) }
         // Older write-through could store both 0x0 and 0x00. Neither alias
         // may hide a conflicting historical association belonging to the same cell.

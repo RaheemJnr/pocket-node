@@ -9,6 +9,8 @@ import com.rjnr.pocketnode.data.database.entity.DaoCellEntity
 import com.rjnr.pocketnode.data.database.entity.HeaderCacheEntity
 import com.rjnr.pocketnode.data.gateway.models.JniHeaderView
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.ensureActive
 import javax.inject.Inject
 import javax.inject.Singleton
 
@@ -46,6 +48,20 @@ class DaoSyncManager @Inject constructor(
     }
 
     // --- DAO cell lifecycle ---
+
+    /**
+     * Proof-sensitive history read: absence is meaningful only after a successful
+     * database read under one ready revision. UI readers below remain tolerant.
+     */
+    suspend fun requireActiveDepositHistory(network: String, walletId: String): List<DaoCellEntity> {
+        require(walletId.isNotBlank()) { "walletId is required" }
+        currentCoroutineContext().ensureActive()
+        val ticket = verificationCacheGate.requireReadyRevision(network)
+        val rows = daoCellDao.getActiveByWalletAndNetwork(walletId, network)
+        currentCoroutineContext().ensureActive()
+        verificationCacheGate.requireCurrent(network, ticket)
+        return rows
+    }
 
     suspend fun getActiveDeposits(network: String, walletId: String): List<DaoCellEntity> {
         val revision = verificationCacheGate.currentRevision()

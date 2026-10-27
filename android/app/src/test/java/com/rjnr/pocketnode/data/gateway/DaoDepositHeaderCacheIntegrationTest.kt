@@ -1,10 +1,12 @@
 package com.rjnr.pocketnode.data.gateway
 
 import android.content.Context
+import android.database.sqlite.SQLiteException
 import androidx.room.Room
 import androidx.test.core.app.ApplicationProvider
 import com.rjnr.pocketnode.core.log.NoopLogger
 import com.rjnr.pocketnode.data.database.AppDatabase
+import com.rjnr.pocketnode.data.database.dao.DaoCellDao
 import com.rjnr.pocketnode.data.database.entity.HeaderCacheEntity
 import com.rjnr.pocketnode.data.database.entity.PendingDaoUnlockEntity
 import com.rjnr.pocketnode.data.gateway.models.*
@@ -13,6 +15,7 @@ import io.mockk.coEvery
 import io.mockk.spyk
 import io.mockk.every
 import io.mockk.mockk
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.test.runTest
 import kotlinx.serialization.encodeToString
 import kotlinx.serialization.json.Json
@@ -260,13 +263,104 @@ class DaoDepositHeaderCacheIntegrationTest {
         assertEquals(retired, db.daoCellDao().getByOutPoint(phaseHash, "0x0"))
     }
 
-    @Test fun `failed association lookup cannot publish a fresh live proof`() = runTest {
-        val failingSync = spyk(sync)
-        coEvery { failingSync.getActiveDeposits(network.name, "wallet") } throws IllegalStateException("unreadable associations")
-        gateway = DaoGateway(db, failingSync, reader, resolver, LightClientReadOnly(api, json, NoopLogger),
-            mockk(relaxed = true), mockk(relaxed = true), NoopLogger, gate)
+    @Test fun `actual database failure cannot authorize a live exact-key position`() = runTest {
+        assertDatabaseFailureDoesNotAuthorize("0x0")
+    }
+
+    @Test fun `actual database failure cannot insert an actionable alternate index`() = runTest {
+        assertDatabaseFailureDoesNotAuthorize("0x00")
+    }
+
+    private suspend fun assertDatabaseFailureDoesNotAuthorize(liveIndex: String) {
+        val original = reader.list(script, null, network).single().toDaoCellEntity(network.name, "wallet", 7)
+            .copy(withdrawBlockHash = hash("cf"))
+        db.daoCellDao().upsert(original)
+        val headers = db.headerCacheDao().getByNetwork(network.name)
+        val marker = PendingDaoUnlockEntity(phaseHash, "0x0", hash("ab"), "wallet", network.name,
+            System.currentTimeMillis())
+        db.pendingDaoUnlockDao().upsert(marker)
+        native.cellsPage = json.encodeToString(JniPagination(listOf(cell.copy(
+            outPoint = cell.outPoint.copy(index = liveIndex))), null))
+        var failOnce = true
+        withHistoryReadHook {
+            if (failOnce) {
+                failOnce = false
+                throw SQLiteException("task-owned association read failure")
+            }
+        }
+        val result = gateway.getDaoDeposits(ctx())
+        assertNull("No alternate spelling may gain a durable association", db.daoCellDao().getByOutPoint(phaseHash, "0x00"))
+        assertTrue(result.isFailure)
+        assertTrue(result.exceptionOrNull() is SQLiteException)
+        assertEquals(listOf(original), db.daoCellDao().getActiveByWalletAndNetwork("wallet", network.name))
+        assertEquals(headers, db.headerCacheDao().getByNetwork(network.name))
+        assertEquals(listOf(marker), db.pendingDaoUnlockDao().getByWalletAndNetwork("wallet", network.name))
+        assertNull(db.daoCellDao().getByOutPoint(phaseHash, "0x00"))
+        // A successful retry still sees the historical contradiction and marker.
+        val retry = gateway.getDaoDeposits(ctx()).getOrThrow().single()
+        assertEquals(DaoCellStatus.UNLOCKING, retry.status)
+        assertNull(retry.withdrawBlockHash)
+        assertNull(retry.unlockEpoch)
+        assertEquals(0L, retry.compensation)
+        assertEquals(hash("cf"), db.daoCellDao().getByOutPoint(phaseHash, "0x0")!!.withdrawBlockHash)
+        assertNull(db.daoCellDao().getByOutPoint(phaseHash, "0x00"))
+        assertEquals(listOf(marker), db.pendingDaoUnlockDao().getByWalletAndNetwork("wallet", network.name))
+    }
+
+    @Test fun `actual history read cancellation cannot publish or stage a position`() = runTest {
+        withHistoryReadHook { throw CancellationException("cancel history read") }
+        val failure = runCatching { gateway.getDaoDeposits(ctx()) }.exceptionOrNull()
+        assertTrue(failure is CancellationException)
+        assertTrue(db.daoCellDao().getActiveByWalletAndNetwork("wallet", network.name).isEmpty())
+        assertTrue(db.headerCacheDao().getByNetwork(network.name).isEmpty())
+    }
+
+    @Test fun `history read readiness loss cannot become successful empty history`() = runTest {
+        withHistoryReadHook { gate.close() }
         assertTrue(gateway.getDaoDeposits(ctx()).isFailure)
-        assertNull(db.daoCellDao().getByOutPoint(phaseHash, "0x0"))
+        assertTrue(db.daoCellDao().getActiveByWalletAndNetwork("wallet", network.name).isEmpty())
+        assertTrue(db.headerCacheDao().getByNetwork(network.name).isEmpty())
+    }
+
+    @Test fun `history read close and reopen invalidates the original revision`() = runTest {
+        withHistoryReadHook { gate.reconcile(api, network) }
+        assertTrue(gateway.getDaoDeposits(ctx()).isFailure)
+        assertTrue(gate.isReady(network.name))
+        assertTrue(db.daoCellDao().getActiveByWalletAndNetwork("wallet", network.name).isEmpty())
+        assertTrue(db.headerCacheDao().getByNetwork(network.name).isEmpty())
+    }
+
+    @Test fun `not-ready refresh fails while tolerant history reads retain empty UI semantics`() = runTest {
+        var reads = 0
+        withHistoryReadHook { reads++ }
+        gate.close()
+        assertTrue(gateway.getDaoDeposits(ctx()).isFailure)
+        assertTrue(sync.getActiveDeposits(network.name, "wallet").isEmpty())
+        assertTrue(runCatching { sync.requireActiveDepositHistory(network.name, "wallet") }.isFailure)
+        assertEquals(0, reads)
+    }
+
+    @Test fun `strict history API rejects a changed revision even if readiness returns`() = runTest {
+        withHistoryReadHook { gate.reconcile(api, network) }
+        val result = runCatching { sync.requireActiveDepositHistory(network.name, "wallet") }
+        assertTrue(result.exceptionOrNull() is IllegalStateException)
+        assertTrue(gate.isReady(network.name))
+    }
+
+    private fun withHistoryReadHook(beforeRead: suspend () -> Unit) {
+        val roomDao = db.daoCellDao()
+        val faultingDao = object : DaoCellDao by roomDao {
+            override suspend fun getActiveByWalletAndNetwork(walletId: String, network: String):
+                List<com.rjnr.pocketnode.data.database.entity.DaoCellEntity> {
+                beforeRead()
+                return roomDao.getActiveByWalletAndNetwork(walletId, network)
+            }
+        }
+        // Real manager: the injected failure occurs beneath its exception policy.
+        sync = DaoSyncManager(db.headerCacheDao(), faultingDao, db.pendingDaoWithdrawDao(),
+            db.pendingDaoUnlockDao(), NoopLogger, gate)
+        gateway = DaoGateway(db, sync, reader, resolver, LightClientReadOnly(api, json, NoopLogger),
+            mockk(relaxed = true), mockk(relaxed = true), NoopLogger, gate)
     }
 
     @Test fun `normalized duplicate cannot hide a historical withdrawal contradiction`() = runTest {
