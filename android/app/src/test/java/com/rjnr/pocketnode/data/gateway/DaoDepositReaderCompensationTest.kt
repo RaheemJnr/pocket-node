@@ -16,6 +16,8 @@ import com.rjnr.pocketnode.data.gateway.models.OutPoint
 import com.rjnr.pocketnode.data.gateway.models.Script
 import io.mockk.coEvery
 import io.mockk.mockk
+import io.mockk.coVerify
+import io.mockk.spyk
 import kotlinx.coroutines.test.runTest
 import kotlinx.serialization.encodeToString
 import kotlinx.serialization.json.Json
@@ -88,7 +90,7 @@ class DaoDepositReaderCompensationTest {
         // the withdraw block; its original deposit header comes via header_deps.
         coEvery { resolver.getBlockHashForCell(depositTx) } returns depositBlockHash
         coEvery { resolver.getBlockHashForCell(withdrawTx) } returns withdrawBlockHash
-        coEvery { resolver.getOrFetchHeader(any(), any()) } answers { headersByHash[firstArg()] }
+        coEvery { resolver.getOrFetchHeader(any(), any(), any()) } answers { headersByHash[firstArg()] }
 
         reader = DaoDepositReader(json, resolver, NoopLogger)
     }
@@ -103,6 +105,18 @@ class DaoDepositReaderCompensationTest {
         DaoUnlockShadowLightClientNative.transactionOverride = null
         DaoUnlockShadowLightClientNative.maxWithdrawCalls.clear()
         DaoUnlockShadowLightClientNative.transactionQueries.clear()
+    }
+
+    @Test fun `staged header lookup does not cache while default send lookup still does`() = runTest {
+        val cache = mockk<DaoSyncManager>(relaxed = true)
+        coEvery { cache.getCachedHeader(any()) } returns null
+        val lookup = spyk(DaoHeaderResolver(json, cache, NoopLogger))
+        val expected = header(depositBlockHash, depositDao)
+        coEvery { lookup.fetchHeaderWithRetry(depositBlockHash) } returns expected
+        assertEquals(expected, lookup.getOrFetchHeader(depositBlockHash, NetworkType.TESTNET, cacheResult = false))
+        coVerify(exactly = 0) { cache.cacheHeader(any(), any()) }
+        assertEquals(expected, lookup.getOrFetchHeader(depositBlockHash, NetworkType.TESTNET))
+        coVerify(exactly = 1) { cache.cacheHeader(expected, "TESTNET") }
     }
 
     @Test

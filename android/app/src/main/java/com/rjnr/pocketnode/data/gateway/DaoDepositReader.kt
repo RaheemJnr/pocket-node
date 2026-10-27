@@ -70,7 +70,13 @@ class DaoDepositReader @Inject constructor(
      *   the tip header was unreadable; this only degrades the status
      *   for withdrawing cells, deposit and APC math are unaffected.
      */
-    suspend fun list(walletScript: Script, currentEpoch: EpochInfo?, network: NetworkType): List<DaoDeposit> {
+    suspend fun list(
+        walletScript: Script,
+        currentEpoch: EpochInfo?,
+        network: NetworkType,
+        // Reconciliation stages these headers with its other revision-bound writes.
+        headersToCache: MutableList<JniHeaderView>? = null,
+    ): List<DaoDeposit> {
         // Query ALL cells by lock script (like Neuron), then filter locally for DAO type
         val searchKey = JniSearchKey(
             script = walletScript,
@@ -134,7 +140,7 @@ class DaoDepositReader @Inject constructor(
         for (jniCell in liveDaoCells) {
             // One malformed cell (bad capacity/epoch/timestamp hex from the
             // node) drops that row instead of failing the whole DAO list (#321).
-            runCatching { resolveOneDeposit(jniCell, currentEpoch, network) }
+            runCatching { resolveOneDeposit(jniCell, currentEpoch, network, headersToCache) }
                 .onSuccess { deposits += it }
                 .onFailure {
                     logger.w(
@@ -156,7 +162,11 @@ class DaoDepositReader @Inject constructor(
         jniCell: JniCell,
         currentEpoch: EpochInfo?,
         network: NetworkType,
+        headersToCache: MutableList<JniHeaderView>?,
     ): DaoDeposit {
+        suspend fun header(hash: String): JniHeaderView? =
+            daoHeaderResolver.getOrFetchHeader(hash, network, cacheResult = headersToCache == null)
+                ?.also { headersToCache?.add(it) }
         val cell = jniCell.toCell()
         val data = cell.data.removePrefix("0x")
         val cellId = "${cell.outPoint.txHash.take(20)}...:${cell.outPoint.index}"
@@ -198,7 +208,7 @@ class DaoDepositReader @Inject constructor(
         // Get block header for compensation & epoch data (cache-first).
         val blockHash = daoHeaderResolver.getBlockHashForCell(cell.outPoint.txHash)
         val cellBlockHeader = if (blockHash != null) {
-            daoHeaderResolver.getOrFetchHeader(blockHash, network)
+            header(blockHash)
         } else null
 
         if (cellBlockHeader != null) {
@@ -233,7 +243,7 @@ class DaoDepositReader @Inject constructor(
                     depositBlockHash = origDepositBlockHash
                 }
                 val origDepositHeader = origDepositBlockHash?.let { h ->
-                    daoHeaderResolver.getOrFetchHeader(h, network)
+                    header(h)
                 }
 
                 if (origDepositHeader != null) {

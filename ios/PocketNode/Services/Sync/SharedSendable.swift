@@ -114,3 +114,6 @@ extension KotlinByteArray: @retroactive @unchecked Sendable {}
 extension RoomKmpSyncProgressStore: @retroactive @unchecked Sendable {}
 extension RoomKmpTransactionStore: @retroactive @unchecked Sendable {}
 extension SyncProgressRecord: @retroactive @unchecked Sendable {}
+
+/// ReviewedTransfer owns defensive recipient copies and otherwise immutable values.
+extension ReviewedTransfer: @retroactive @unchecked Sendable {}

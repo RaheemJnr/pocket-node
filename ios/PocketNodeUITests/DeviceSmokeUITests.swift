@@ -491,11 +491,8 @@ final class DeviceSmokeUITests: XCTestCase {
         let total = M3UITest.label("review.total", in: app)
         NSLog("SMOKE_REVIEW recipient=%@ amount=%@ fee=%@ total=%@", recipientRow, amount, fee, total)
 
-        // The row truncates, so the two ends are what can be compared.
-        XCTAssertTrue(recipientRow.hasPrefix(String(Self.returnAddress.prefix(10))),
-                      "review showed \(recipientRow) for \(Self.returnAddress)")
-        XCTAssertTrue(recipientRow.hasSuffix(String(Self.returnAddress.suffix(6))),
-                      "review showed \(recipientRow) for \(Self.returnAddress)")
+        XCTAssertEqual(recipientRow, Self.returnAddress,
+                       "approval must expose the complete reviewed destination")
         XCTAssertEqual(amount, "\(Self.sendAmount).00 CKB")
         XCTAssertTrue(fee.hasSuffix(" CKB"), "the fee row read \(fee)")
         XCTAssertFalse(fee.isEmpty || fee == "0 CKB", "a built transaction always pays a fee; got \(fee)")

@@ -35,6 +35,8 @@ import com.rjnr.pocketnode.data.wallet.WalletDerivation
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
@@ -144,6 +146,7 @@ class SendPipeline(
         fromAddress: String,
         recipients: List<RecipientOutput>,
     ): TransferPlan {
+        recipients.forEach { DestinationPolicy.requireRecipient(it, ctx.network) }
         val senderNetwork = ctx.network
         val walletId = ctx.walletId
         return sendMutex.withLock {
@@ -195,21 +198,58 @@ class SendPipeline(
         /** Synchronous last-use notification; never retained. Borrowed signers are untouched by default. */
         onSigned: () -> Unit = {},
     ): Result<String> = runCatching {
-        buildReserveAndSend(ctx, fromAddress) { availableCells, net ->
-            verifyExpectedFee(
-                recipients = listOf(RecipientOutput(toAddress, amountShannons)),
-                availableCells = availableCells,
-                expectedFeeShannons = expectedFeeShannons,
-            )
-            transactionBuilder.buildTransfer(
-                fromAddress = fromAddress,
-                toAddress = toAddress,
-                amountShannons = amountShannons,
-                availableCells = availableCells,
-                signer = signer,
-                network = net
-            ).also { onSigned() }
+        val recipients = listOf(RecipientOutput(toAddress, amountShannons))
+        recipients.forEach { DestinationPolicy.requireRecipient(it, ctx.network) }
+        buildReserveAndSend(ctx, fromAddress) { cells, net ->
+            verifyExpectedFee(recipients, cells, expectedFeeShannons)
+            val prepared = transactionBuilder.prepareMultiTransfer(fromAddress, recipients, cells, net)
+            val fee = expectedFeeShannons ?: transactionBuilder.planTransfer(recipients, cells).feeShannons
+            ReviewedTransfer(ctx.walletId, fromAddress, net, recipients, fee, 0).validatePrepared(prepared)
+            transactionBuilder.signTransaction(prepared.transaction, signer, prepared.selectedCells.size).also { onSigned() }
         }
+    }
+
+    /** Exact preview for sequential batches, using normal assembly and every sender-owned output. */
+    @Throws(Throwable::class)
+    suspend fun previewBatches(ctx: SendContext, fromAddress: String, batches: List<List<RecipientOutput>>): List<Long> =
+        sendMutex.withLock {
+            batches.flatten().forEach { DestinationPolicy.requireRecipient(it, ctx.network) }
+            var cells = resolveSpendableCells(fromAddress, ctx.network, ctx.walletId, ctx.network.name)
+            val sender = requireNotNull(AddressUtils.parseAddress(fromAddress))
+            batches.map { recipients ->
+                val prepared = transactionBuilder.prepareMultiTransfer(fromAddress, recipients, cells, ctx.network)
+                val tx = prepared.transaction
+                val fee = prepared.selectedCells.sumOf { it.capacityAsLong() } - tx.cellOutputs.sumOf { it.capacity.removePrefix("0x").toLong(16) }
+                val spent = prepared.selectedCells.map { it.outPoint }.toSet()
+                val txHash = transactionBuilder.computeTxHash(tx)
+                cells = cells.filterNot { it.outPoint in spent } + tx.cellOutputs.mapIndexedNotNull { outputIndex, output ->
+                    if (output.lock != sender) null else Cell(
+                        OutPoint(txHash, "0x${outputIndex.toString(16)}"), output.capacity, "0x0", output.lock, output.type, tx.outputsData[outputIndex])
+                }
+                fee
+            }
+        }
+
+    /** Reviewed Android/iOS path. Source and draft validity are rechecked after all suspending reads. */
+    @Throws(Throwable::class)
+    suspend fun sendReviewed(
+        ctx: SendContext,
+        review: ReviewedTransfer,
+        signer: Signer,
+        isCurrent: () -> Boolean,
+        onSigned: () -> Unit = {},
+    ): String {
+        val hash = buildReserveAndSend(ctx, review.fromAddress) { cells, net ->
+            require(isCurrent() && ctx.walletId == review.walletId && net == review.network && ctx.activeScript == review.sourceScript) {
+                "Send source or review changed. Review the payment again."
+            }
+            val prepared = transactionBuilder.prepareMultiTransfer(review.fromAddress, review.recipients, cells, net)
+            review.validatePrepared(prepared)
+            require(isCurrent()) { "Send source or review changed. Review the payment again." }
+            transactionBuilder.signTransaction(prepared.transaction, signer, prepared.selectedCells.size).also { onSigned() }
+        }
+        if (review.isBulk) uiPreferences.addBulkTxHash(hash)
+        return hash
     }
 
     /**
@@ -249,14 +289,13 @@ class SendPipeline(
         recipients: List<RecipientOutput>,
         signer: Signer,
     ): Result<String> = runCatching {
-        val txHash = buildReserveAndSend(ctx, fromAddress) { availableCells, net ->
-            transactionBuilder.buildMultiTransfer(
-                fromAddress = fromAddress,
-                recipients = recipients,
-                availableCells = availableCells,
-                signer = signer,
-                network = net
-            )
+        val frozenRecipients = recipients.map { it.copy() }
+        frozenRecipients.forEach { DestinationPolicy.requireRecipient(it, ctx.network) }
+        val txHash = buildReserveAndSend(ctx, fromAddress) { cells, net ->
+            val prepared = transactionBuilder.prepareMultiTransfer(fromAddress, frozenRecipients, cells, net)
+            val fee = transactionBuilder.planTransfer(frozenRecipients, cells).feeShannons
+            ReviewedTransfer(ctx.walletId, fromAddress, net, frozenRecipients, fee, 0, true).validatePrepared(prepared)
+            transactionBuilder.signTransaction(prepared.transaction, signer, prepared.selectedCells.size)
         }
         // Remember this batch's hash so the activity list can badge it "Bulk".
         uiPreferences.addBulkTxHash(txHash)
@@ -621,6 +660,7 @@ class SendPipeline(
 
         val signedTx = sendMutex.withLock {
             val filtered = resolveSpendableCells(fromAddress, senderNetwork, walletId, network)
+            currentCoroutineContext().ensureActive()
 
             val signed = build(filtered, senderNetwork)
 
@@ -814,6 +854,7 @@ class SendPipeline(
         // duplicate input and fail. liveFiltered is first, so distinctBy
         // keeps the real cell.
         val filtered = (liveFiltered + pendingChange)
+            .filterNot { it.outPoint in reserved }
             .distinctBy { "${it.outPoint.txHash}:${it.outPoint.index}" }
         logger.d(
             TAG,

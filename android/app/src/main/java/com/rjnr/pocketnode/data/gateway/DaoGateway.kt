@@ -10,6 +10,8 @@ import com.rjnr.pocketnode.data.wallet.WalletInfo
 import com.nervosnetwork.ckblightclient.LightClientNative
 import kotlinx.coroutines.CancellationException
 
+private typealias DaoMutations = MutableList<suspend () -> Unit>
+
 /**
  * The Nervos DAO surface, extracted from [GatewayRepository] (#460).
  *
@@ -38,6 +40,7 @@ class DaoGateway(
     private val transactionBuilder: TransactionBuilder,
     private val sendPipeline: SendPipeline,
     private val logger: Logger,
+    private val verificationCacheGate: VerificationCacheGate,
 ) {
 
     /**
@@ -70,9 +73,25 @@ class DaoGateway(
         daoHeaderResolver.getOrFetchHeader(blockHash, ctx.network())
 
     suspend fun getDaoDeposits(ctx: DaoContext): Result<List<DaoDeposit>> = runCatching {
+        val network = ctx.network()
+        val ticket = verificationCacheGate.requireReadyRevision(network.name)
+        val walletId = ctx.walletId()
         val info = ctx.walletInfo() ?: throw Exception("No wallet")
+        val windowStart = ctx.existingScriptBlock()
+        val snapshot = DaoContext(
+            network = { network }, walletId = { walletId }, walletInfo = { info },
+            currentAddress = ctx.currentAddress, existingScriptBlock = { windowStart },
+            privateKey = ctx.privateKey, sendContext = ctx.sendContext,
+            transactionStatus = ctx.transactionStatus, setScriptsAndRecord = ctx.setScriptsAndRecord,
+        )
+        val mutations: DaoMutations = mutableListOf()
         val currentEpoch = lightClient.getCurrentEpoch().getOrNull()
-        val live = daoDepositReader.list(info.script, currentEpoch, ctx.network())
+        val headers = mutableListOf<JniHeaderView>()
+        val live = daoDepositReader.list(info.script, currentEpoch, network, headers)
+        for (header in headers) {
+            val row = com.rjnr.pocketnode.data.database.entity.HeaderCacheEntity.from(header, network.name)
+            mutations.add { appDatabase.headerCacheDao().upsert(row) }
+        }
         // #357: drop a spent deposit's stale DEPOSITED entry that the light
         // client still lists alongside its new withdrawing cell, before the
         // pending-withdraw overlay would paint it a duplicate "Confirming…".
@@ -82,9 +101,17 @@ class DaoGateway(
         // the overlay deletes the markers it resolves, so the overlay must not
         // run first or the merge would see no marker on the very poll where
         // the unlock resolves.
-        val pendingUnlocks = readPendingUnlocks(ctx, deduped)
-        val merged = mergeWithCachedDaoDeposits(ctx, deduped, pendingUnlocks)
-        applyPendingUnlockOverlay(ctx, applyPendingWithdrawOverlay(ctx, merged), pendingUnlocks)
+        val pendingUnlocks = readPendingUnlocks(snapshot, deduped)
+        val merged = mergeWithCachedDaoDeposits(snapshot, deduped, pendingUnlocks, mutations)
+        val result = applyPendingUnlockOverlay(snapshot,
+            applyPendingWithdrawOverlay(snapshot, merged, mutations), pendingUnlocks, mutations)
+        // All chain-dependent writes are staged. No old read can retire local
+        // intent or repopulate caches after close/epoch cleanup supersedes it.
+        verificationCacheGate.commitIfCurrent(network.name, ticket) {
+            for (mutation in mutations) mutation()
+        }
+        verificationCacheGate.requireCurrent(network.name, ticket)
+        result
     }.onFailure { if (it is CancellationException) throw it }
 
     /**
@@ -96,7 +123,7 @@ class DaoGateway(
      * state across process death; [resolvePendingWithdraw] decides per marker
      * whether to overlay WITHDRAWING, or retire it (committed / failed).
      */
-    private suspend fun applyPendingWithdrawOverlay(ctx: DaoContext, deposits: List<DaoDeposit>): List<DaoDeposit> {
+    private suspend fun applyPendingWithdrawOverlay(ctx: DaoContext, deposits: List<DaoDeposit>, mutations: DaoMutations): List<DaoDeposit> {
         val walletId = ctx.walletId()
         if (walletId.isEmpty()) return deposits
         val network = ctx.network().name
@@ -126,7 +153,7 @@ class DaoGateway(
                 PendingWithdrawResolution.OVERLAY -> if (stillDeposited) overlayKeys.add(k)
                 PendingWithdrawResolution.CLEAR_CONFIRMED,
                 PendingWithdrawResolution.CLEAR_FAILED ->
-                    runCatching { withdrawDao.deleteByDeposit(p.depositTxHash, p.depositIndex) }
+                    mutations.add { withdrawDao.deleteByDeposit(p.depositTxHash, p.depositIndex) }
             }
         }
         if (overlayKeys.isEmpty()) return deposits
@@ -252,6 +279,7 @@ class DaoGateway(
         ctx: DaoContext,
         deposits: List<DaoDeposit>,
         pendingUnlocks: List<PendingUnlock>,
+        mutations: DaoMutations,
     ): List<DaoDeposit> {
         if (pendingUnlocks.isEmpty()) return deposits
         val unlockDao = appDatabase.pendingDaoUnlockDao()
@@ -261,16 +289,14 @@ class DaoGateway(
         // itself was deleted, losing the verdict entirely.
         val cachedKeys = cachedRowKeys(ctx)
 
-        suspend fun retireMarker(p: PendingUnlock, status: DaoCellStatus) {
+        fun retireMarker(p: PendingUnlock, status: DaoCellStatus) {
             val row = cachedKeys[p.cellKey]
-            runCatching {
-                daoSyncManager.updateStatus(
+            mutations.add {
+                appDatabase.daoCellDao().updateStatus(
                     row?.first ?: p.entity.withdrawingTxHash,
                     row?.second ?: p.entity.withdrawingIndex,
                     status.name,
                 )
-            }
-            runCatching {
                 unlockDao.deleteByWithdrawingCell(
                     p.entity.withdrawingTxHash,
                     p.entity.withdrawingIndex,
@@ -326,15 +352,15 @@ class DaoGateway(
         ctx: DaoContext,
         live: List<DaoDeposit>,
         pendingUnlocks: List<PendingUnlock>,
+        mutations: DaoMutations,
     ): List<DaoDeposit> {
         val walletId = ctx.walletId()
         if (walletId.isEmpty()) return live
         val network = ctx.network().name
         val nowMs = System.currentTimeMillis()
 
-        runCatching {
-            daoSyncManager.upsertDaoCells(live.map { it.toDaoCellEntity(network, walletId, nowMs) })
-        }.onFailure { logger.w(TAG, "DAO write-through failed: ${it.message}") }
+        val liveRows = live.map { it.toDaoCellEntity(network, walletId, nowMs) }
+        mutations.add { appDatabase.daoCellDao().upsertAll(liveRows) }
 
         val windowStart = ctx.existingScriptBlock()
         // Normalized, like every other outpoint comparison here: a raw compare
@@ -386,17 +412,17 @@ class DaoGateway(
                 )
             ) {
                 CachedDaoCellFate.IGNORE -> Unit
-                CachedDaoCellFate.RETIRE -> runCatching {
-                    daoSyncManager.updateStatus(entity.txHash, entity.index, DaoCellStatus.COMPLETED.name)
+                CachedDaoCellFate.RETIRE -> mutations.add {
+                    appDatabase.daoCellDao().updateStatus(entity.txHash, entity.index, DaoCellStatus.COMPLETED.name)
                 }
                 // Still confirming: keep the position on screen so it reads
                 // "Confirming…" (the overlay paints it) rather than vanishing
                 // or, worse, reappearing as an unlockable outside-window row
                 // for the minutes between broadcast and the tx being scored.
                 CachedDaoCellFate.UNLOCK_IN_FLIGHT ->
-                    confirming += withFreshCompensation(entity).toCachedDeposit()
+                    confirming += withFreshCompensation(entity, mutations).toCachedDeposit()
                 CachedDaoCellFate.OUTSIDE_WINDOW ->
-                    outsideWindow += withFreshCompensation(entity).toOutsideWindowDeposit()
+                    outsideWindow += withFreshCompensation(entity, mutations).toOutsideWindowDeposit()
             }
         }
         if (outsideWindow.isNotEmpty()) {
@@ -418,6 +444,7 @@ class DaoGateway(
      */
     private suspend fun withFreshCompensation(
         entity: com.rjnr.pocketnode.data.database.entity.DaoCellEntity,
+        mutations: DaoMutations,
     ): com.rjnr.pocketnode.data.database.entity.DaoCellEntity {
         val fresh = try {
             daoDepositReader.recomputeCachedCompensation(entity) { hash ->
@@ -430,8 +457,11 @@ class DaoGateway(
             null
         } ?: return entity
         if (fresh == entity.compensation) return entity
-        // Logs its own failures and rethrows cancellation.
-        daoSyncManager.updateCompensation(entity, fresh)
+        mutations.add {
+            appDatabase.daoCellDao().updateCompensation(
+                entity.txHash, entity.index, entity.network, entity.walletId, fresh,
+            )
+        }
         return entity.copy(compensation = fresh)
     }
 

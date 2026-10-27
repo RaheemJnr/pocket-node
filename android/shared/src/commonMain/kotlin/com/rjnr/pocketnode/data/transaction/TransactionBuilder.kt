@@ -1,5 +1,6 @@
 package com.rjnr.pocketnode.data.transaction
 
+import com.rjnr.pocketnode.data.send.DestinationPolicy
 import com.rjnr.pocketnode.core.crypto.Blake2b
 import com.rjnr.pocketnode.core.crypto.Secp256k1Signer
 import com.rjnr.pocketnode.core.crypto.hexToByteArray
@@ -50,6 +51,9 @@ data class TransferPlan(
     val feeShannons: Long,
     val changeShannons: Long,
 )
+
+/** Unsigned transfer and the exact input cells used to build it. */
+data class PreparedTransfer(val transaction: Transaction, val selectedCells: List<Cell>)
 
 class TransactionBuilder(
     private val networkValidator: NetworkValidator,
@@ -316,6 +320,7 @@ class TransactionBuilder(
         availableCells: List<Cell>,
     ): TransferPlan {
         require(recipients.isNotEmpty()) { "At least one recipient is required" }
+        recipients.forEach { DestinationPolicy.requireRecipient(it) }
         val totalRecipientAmount = recipients.sumOf { it.amountShannons }
 
         // Select cells with generous fee to ensure we gather enough inputs
@@ -378,6 +383,17 @@ class TransactionBuilder(
         signer: Signer,
         network: NetworkType
     ): Transaction {
+        val prepared = prepareMultiTransfer(fromAddress, recipients, availableCells, network)
+        return signTransaction(prepared.transaction, signer, prepared.selectedCells.size)
+    }
+
+    /** Uses the same assembly and dust checks for review and signing. */
+    fun prepareMultiTransfer(
+        fromAddress: String,
+        recipients: List<RecipientOutput>,
+        availableCells: List<Cell>,
+        network: NetworkType,
+    ): PreparedTransfer {
         logger.d(TAG, "🔨 Building transfer transaction")
         // Sender + recipient + amount form a payment record — redact the
         // addresses and drop the amount from debug logcat (#321).
@@ -398,8 +414,7 @@ class TransactionBuilder(
             ?: throw IllegalArgumentException("Invalid sender address")
 
         val recipientScripts = recipients.map { recipient ->
-            val script = AddressUtils.parseAddress(recipient.address)
-                ?: throw IllegalArgumentException("Invalid recipient address")
+            val script = DestinationPolicy.requireRecipient(recipient, network)
             networkValidator.validateTransferAddresses(fromAddress, recipient.address, network)
                 .getOrThrow()
             script
@@ -514,7 +529,7 @@ class TransactionBuilder(
         }
 
         logger.d(TAG, "  Signing transaction with ${inputs.size} inputs, ${outputs.size} outputs (est. ${estimatedSize} bytes)")
-        return signTransaction(unsignedTx, signer, selectedCells.size)
+        return PreparedTransfer(unsignedTx, selectedCells.toList())
     }
 
     // ========================================

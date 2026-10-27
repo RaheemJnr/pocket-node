@@ -4,13 +4,17 @@ import android.content.Context
 import androidx.room.Room
 import androidx.test.core.app.ApplicationProvider
 import com.rjnr.pocketnode.data.database.AppDatabase
-import com.rjnr.pocketnode.data.database.entity.DaoCellEntity
+import com.rjnr.pocketnode.core.log.NoopLogger
 import com.rjnr.pocketnode.data.database.entity.SyncProgressEntity
+import com.rjnr.pocketnode.data.database.entity.PendingBroadcastEntity
 import com.rjnr.pocketnode.data.database.entity.TransactionEntity
 import com.rjnr.pocketnode.data.gateway.models.NetworkType
 import io.mockk.every
 import io.mockk.mockk
 import kotlinx.coroutines.test.runTest
+import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.CoroutineStart
+import kotlinx.coroutines.async
 import org.junit.After
 import org.junit.Assert.*
 import org.junit.Before
@@ -103,14 +107,94 @@ class VerificationCacheGateTest {
     @Test fun `DAO pending preservation requires local provenance on the same network`() = runTest {
         seed()
         db.transactionDao().insert(TransactionEntity("other-network", "0x0", "", 1, "1", "out", "", 0, null, "TESTNET", "PENDING", true, 1, "active"))
-        for (hash in listOf("outgoing", "remote-pending", "other-network")) {
-            db.daoCellDao().upsert(DaoCellEntity(hash, "0x0", 100, "PENDING", 0, "", null,
-                null, null, null, 0, null, 1, "MAINNET", 1, "active"))
+        for ((hash, network) in listOf("broadcast-only" to "MAINNET", "broadcast-other" to "TESTNET")) {
+            db.pendingBroadcastDao().insert(PendingBroadcastEntity(hash, "active", network,
+                "{}", "[]", "BROADCAST", 1, 0, 1, 1))
+        }
+        val writer = DaoSyncManager(db.headerCacheDao(), db.daoCellDao(),
+            db.pendingDaoWithdrawDao(), db.pendingDaoUnlockDao(), NoopLogger, readyVerificationGate())
+        for (hash in listOf("outgoing", "remote-pending", "other-network", "broadcast-only", "broadcast-other")) {
+            writer.insertPendingDeposit(hash, 100, "MAINNET", walletId = "active")
+            assertEquals("DEPOSITING", db.daoCellDao().getByOutPoint(hash, "0x0")!!.status)
         }
         VerificationCacheGate(context, db).reconcile(client(), NetworkType.MAINNET)
         assertNotNull(db.daoCellDao().getByOutPoint("outgoing", "0x0"))
         assertNull(db.daoCellDao().getByOutPoint("remote-pending", "0x0"))
         assertNull(db.daoCellDao().getByOutPoint("other-network", "0x0"))
+        assertNotNull(db.daoCellDao().getByOutPoint("broadcast-only", "0x0"))
+        assertNull(db.daoCellDao().getByOutPoint("broadcast-other", "0x0"))
+    }
+
+    @Test fun `failed marker after memory publication retries until a checked durable write succeeds`() = runTest {
+        val gate = VerificationCacheGate(context, db)
+        val preferences = context.getSharedPreferences("verified_chain_cache", Context.MODE_PRIVATE)
+        var attempts = 0
+        gate.writeGeneration = { network, generation ->
+            // Model SharedPreferences publishing its memory map before reporting disk failure.
+            preferences.edit().putString(network, generation).commit()
+            ++attempts >= 3
+        }
+        repeat(2) {
+            db.syncProgressDao().upsert(SyncProgressEntity("inactive", "MAINNET", 100, 400, 1))
+            try { gate.reconcile(client(), NetworkType.MAINNET); fail("accepted failed commit") }
+            catch (_: IllegalStateException) { }
+            assertFalse(gate.isReady("MAINNET"))
+            assertEquals("a".repeat(32), preferences.getString("MAINNET", null))
+            assertTrue(db.syncProgressDao().getAllForNetwork("MAINNET").isEmpty())
+        }
+        gate.reconcile(client(), NetworkType.MAINNET)
+        assertEquals(3, attempts)
+        assertTrue(gate.isReady("MAINNET"))
+    }
+
+    @Test fun `close serializes with transaction commit and superseded mutations are rejected`() = runTest {
+        val gate = VerificationCacheGate(context, db)
+        gate.reconcile(client(), NetworkType.MAINNET)
+        val ticket = gate.requireReadyRevision("MAINNET")
+        val entered = CompletableDeferred<Unit>()
+        val finish = CompletableDeferred<Unit>()
+        val mutation = async {
+            gate.commitIfCurrent("MAINNET", ticket) {
+                db.syncProgressDao().upsert(SyncProgressEntity("active", "MAINNET", 100, 400, 1))
+                entered.complete(Unit)
+                finish.await()
+            }
+        }
+        entered.await()
+        val cancelled = async(start = CoroutineStart.UNDISPATCHED) {
+            gate.commitIfCurrent("MAINNET", ticket) {
+                db.syncProgressDao().upsert(SyncProgressEntity("cancelled", "MAINNET", 100, 400, 1))
+            }
+        }
+        cancelled.cancel()
+        val closing = async(start = CoroutineStart.UNDISPATCHED) { gate.close() }
+        assertFalse(closing.isCompleted)
+        finish.complete(Unit)
+        mutation.await()
+        closing.await()
+        cancelled.join()
+        assertNull(db.syncProgressDao().get("cancelled", "MAINNET"))
+        assertFalse(gate.isReady("MAINNET"))
+        assertEquals(400L, db.syncProgressDao().get("active", "MAINNET")!!.localSavedBlockNumber)
+        try {
+            gate.commitIfCurrent("MAINNET", ticket) { db.syncProgressDao().upsert(SyncProgressEntity("active", "MAINNET", 100, 900, 1)) }
+            fail("superseded mutation ran")
+        } catch (_: IllegalStateException) { }
+        assertEquals(400L, db.syncProgressDao().get("active", "MAINNET")!!.localSavedBlockNumber)
+    }
+
+    @Test fun `mutation failure rolls back the whole staged transaction`() = runTest {
+        val gate = VerificationCacheGate(context, db)
+        gate.reconcile(client(), NetworkType.MAINNET)
+        val ticket = gate.requireReadyRevision("MAINNET")
+        try {
+            gate.commitIfCurrent("MAINNET", ticket) {
+                db.syncProgressDao().upsert(SyncProgressEntity("active", "MAINNET", 100, 400, 1))
+                error("injected write failure")
+            }
+            fail("accepted write failure")
+        } catch (_: IllegalStateException) { }
+        assertNull(db.syncProgressDao().get("active", "MAINNET"))
     }
 
 }
