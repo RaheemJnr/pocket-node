@@ -100,7 +100,7 @@ class SendSweepWarningTest {
 
         keyManager = mockk(relaxed = true)
         transactionBuilder = mockk(relaxed = true)
-        every { transactionBuilder.estimateTransferFee(any(), any()) } returns 1_000L
+        every { transactionBuilder.estimateTransferFeeForDraft(any(), any(), any(), any()) } returns 1_000L
 
         authManager = mockk(relaxed = true)
         every { authManager.isAuthBeforeSendEnabled() } returns false

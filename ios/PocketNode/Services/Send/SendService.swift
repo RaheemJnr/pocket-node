@@ -114,10 +114,10 @@ protocol SendServicing: AnyObject {
     var availableShannons: Int64 { get }
 
     /// The form's fee line: a guess at 1 input, before a plan exists.
-    func estimateFee(inputCount: Int, outputCount: Int) -> Int64
+    func estimateFee(inputCount: Int, recipientAddresses: [String], includeChange: Bool) -> Int64
 
     /// The MAX pill: the largest amount a single transfer can carry right now.
-    func maxSendableShannons() async throws -> Int64
+    func maxSendableShannons(recipientAddress: String?) async throws -> Int64
 
     /// Price the transfer the review sheet is about to show. Throws whatever
     /// selection throws, which the caller surfaces instead of opening the
@@ -297,15 +297,15 @@ final class SendService: SendServicing {
 
     // MARK: - Pricing
 
-    func estimateFee(inputCount: Int, outputCount: Int) -> Int64 {
-        builder.estimateTransferFee(inputCount: Int32(inputCount), outputCount: Int32(outputCount))
+    func estimateFee(inputCount: Int, recipientAddresses: [String], includeChange: Bool) -> Int64 {
+        builder.estimateTransferFeeForDraft(inputCount: Int32(inputCount), recipientAddresses: recipientAddresses, changeAddress: fromAddress, includeChange: includeChange)
     }
 
-    func maxSendableShannons() async throws -> Int64 {
+    func maxSendableShannons(recipientAddress: String?) async throws -> Int64 {
         guard let from = fromAddress, let context = makeContext() else {
             throw SendError(message: "Wallet not initialized")
         }
-        let largest = try await pipeline.maxSendable(ctx: context, fromAddress: from)
+        let largest = try await pipeline.maxSendable(ctx: context, fromAddress: from, recipientAddress: recipientAddress)
         return largest.int64Value
     }
 

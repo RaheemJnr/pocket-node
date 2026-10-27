@@ -272,6 +272,7 @@ final class SendViewModel {
         invalidateDraft()
         recipient = text
         alert = nil
+        recomputeFee()
     }
 
     /// Runs the shared sanitiser on every keystroke: non-numeric characters, a
@@ -298,7 +299,8 @@ final class SendViewModel {
         let source = service.fromAddress
         let wallet = service.walletId
         let network = service.network
-        let request = Task { try await service.maxSendableShannons() }
+        let destination = recipient
+        let request = Task { try await service.maxSendableShannons(recipientAddress: destination) }
         maxRequest = request
         let spendable: Int64
         do {
@@ -526,7 +528,7 @@ final class SendViewModel {
         let shannons = ckbToShannons(text: amount)?.int64Value ?? 0
         let balance = availableShannons
         let outputCount = (shannons > 0 && balance - shannons < SendCopyKt.MIN_CELL_SHANNONS) ? 1 : 2
-        let fee = service.estimateFee(inputCount: 1, outputCount: outputCount)
+        let fee = service.estimateFee(inputCount: 1, recipientAddresses: [recipient], includeChange: outputCount == 2)
         estimatedFeeShannons = fee
 
         let change = balance - shannons - fee

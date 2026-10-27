@@ -140,6 +140,18 @@ class SendPipelineTest {
     private fun signer() = PrivateKeySigner(TEST_KEY.copyOf())
 
 
+    @Test fun maxQuoteUsesCapturedCustomDestinationAndMatchesPreview() = runTest {
+        val custom = AddressUtils.encode(FROM_SCRIPT.copy(codeHash = "0x" + "42".repeat(32),
+            args = "0x" + "bb".repeat(1024)), NetworkType.TESTNET)
+        val cells = LIVE_CELLS.map { it.copy(capacity = "0x${2000_00000000L.toString(16)}") }
+        val max = pipelineOver(api(cells = cells)).maxSendable(ctx(this), FROM_ADDRESS, custom)
+        val plan = pipelineOver(api(cells = cells)).previewTransfer(ctx(this), FROM_ADDRESS,
+            listOf(RecipientOutput(custom, max)))
+        assertEquals(0L, plan.changeShannons)
+        assertTrue(plan.feeShannons > 1000L)
+        assertEquals(cells.sumOf { it.capacityAsLong() } - plan.feeShannons, max)
+    }
+
     @Test fun contradictoryDestinationIsRejectedBySingleBulkPreviewAndReviewedEntryPoints() = runTest {
         val malformed = AddressUtils.encode(FROM_SCRIPT.copy(hashType = "data"), NetworkType.TESTNET)
         val recipients = listOf(RecipientOutput(malformed, 100_00000000L))

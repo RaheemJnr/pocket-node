@@ -169,12 +169,12 @@ class SendPipeline(
      * between a MAX that sends and one that fails (#321).
      */
     @Throws(Throwable::class)
-    suspend fun maxSendable(ctx: SendContext, fromAddress: String): Long {
+    suspend fun maxSendable(ctx: SendContext, fromAddress: String, recipientAddress: String? = null): Long {
         val senderNetwork = ctx.network
         val walletId = ctx.walletId
         return sendMutex.withLock {
             val cells = resolveSpendableCells(fromAddress, senderNetwork, walletId, senderNetwork.name)
-            transactionBuilder.calculateMaxSendable(cells)
+            transactionBuilder.calculateMaxSendable(cells, recipientAddress)
         }
     }
 

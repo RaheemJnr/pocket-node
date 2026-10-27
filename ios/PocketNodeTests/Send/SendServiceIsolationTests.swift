@@ -142,7 +142,7 @@ final class SendServiceIsolationTests: XCTestCase {
         let service = SendService(sync: sync, walletStore: store, walletKeyStore: keys,
             auth: StubAuthGate(), preferences: preferences)
         do {
-            _ = try await service.maxSendableShannons()
+            _ = try await service.maxSendableShannons(recipientAddress: nil)
             XCTFail("Unresolved cells must not produce a spendable MAX quote")
         } catch {
             XCTAssertFalse(error.localizedDescription.isEmpty)

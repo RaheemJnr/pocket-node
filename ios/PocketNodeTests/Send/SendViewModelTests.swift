@@ -805,6 +805,34 @@ final class SendViewModelTests: XCTestCase {
         XCTAssertEqual(model.review?.amountShannons, 100 * ckb)
     }
 
+    func testChangingRecipientRepricesActualCustomOutputBytes() {
+        let builder = TransactionBuilder(networkValidator: NetworkValidator(), logger: NoopLogger.shared)
+        service.feeEstimator = { inputs, recipients, change in
+            builder.estimateTransferFeeForDraft(inputCount: Int32(inputs), recipientAddresses: recipients,
+                changeAddress: SendFixtures.testnetAddress, includeChange: change)
+        }
+        model.updateAmount("100")
+        XCTAssertEqual(model.estimatedFeeShannons, 1000)
+        let custom = AddressUtils.shared.encode(script: Script(codeHash: "0x" + String(repeating: "42", count: 32),
+            hashType: "data2", args: "0x" + String(repeating: "11", count: 1024)), network: .testnet)
+        model.updateRecipient(custom)
+        XCTAssertEqual(model.estimatedFeeShannons, 1670)
+    }
+
+    func testMaxCapturesDestinationAndDiscardsResultAfterDestinationEdit() async {
+        model.updateRecipient(SendFixtures.testnetAddress)
+        model.updateAmount("100")
+        service.maxSendable = 999 * ckb
+        service.onMax = { [weak self] in
+            await Task { @MainActor in self?.model.updateRecipient("edited destination") }.value
+        }
+        await model.setMaxAmount()
+        XCTAssertEqual(service.maxRecipients, [SendFixtures.testnetAddress])
+        XCTAssertEqual(model.amount, "100")
+        XCTAssertEqual(model.recipient, "edited destination")
+        XCTAssertNil(model.alert)
+    }
+
     func testFailedMaxPreservesAmountAndShowsReadError() async {
         model.updateAmount("123")
         service.maxError = SendError(message: "Cell data unavailable")
