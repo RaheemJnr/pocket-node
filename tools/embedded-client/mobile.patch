@@ -12089,6 +12089,70 @@ index 3e2e940680078ea42523f20e9896be8c766bbfb8..f5c0ac401d960ecb425cd65f9d26591d
 +
 +#[cfg(all(feature = "uniffi-bridge", not(target_arch = "wasm32")))]
 +uniffi::setup_scaffolding!("CkbLightClient");
+diff --git a/light-client-lib/src/protocols/filter/components/block_filter_hashes_process.rs b/light-client-lib/src/protocols/filter/components/block_filter_hashes_process.rs
+index 579e9974414dc920e05366be2429103b2f7fa40d..e6eccd9dc5b6e706a2186df9c61c65e68906418d 100644
+--- a/light-client-lib/src/protocols/filter/components/block_filter_hashes_process.rs
++++ b/light-client-lib/src/protocols/filter/components/block_filter_hashes_process.rs
+@@ -205,22 +205,28 @@ impl<'a> BlockFilterHashesProcess<'a> {
+                 }
+             }
+ 
+-            // Update cached block filter hashes.
++            // A shorter matching response confirms a prefix without replacing
++            // the longer cache. Append only new hashes through the checkpoint.
+             let start_index = cached_hashes[index_offset..].len();
+             let mut new_cached_hashes = cached_hashes;
+-            if end_number > next_cached_check_point_number {
++            let end_index = if end_number > next_cached_check_point_number {
+                 let excess_size = (end_number - next_cached_check_point_number) as usize;
+-                let new_size = block_filter_hashes.len() - excess_size;
+-                new_cached_hashes.extend_from_slice(&block_filter_hashes[start_index..new_size]);
++                block_filter_hashes.len() - excess_size
+             } else {
+-                new_cached_hashes.extend_from_slice(&block_filter_hashes[start_index..]);
++                block_filter_hashes.len()
++            };
++            if start_index < end_index {
++                new_cached_hashes.extend_from_slice(&block_filter_hashes[start_index..end_index]);
+             }
++            let covered_number = (cached_check_point_number
++                + new_cached_hashes.len() as BlockNumber)
++                .min(next_cached_check_point_number);
+             self.protocol
+                 .peers
+                 .update_cached_block_filter_hashes(new_cached_hashes)
+                 .await;
+ 
+-            if end_number < next_cached_check_point_number {
++            if covered_number < next_cached_check_point_number {
+                 let best_peers = self
+                     .protocol
+                     .peers
+@@ -241,7 +247,7 @@ impl<'a> BlockFilterHashesProcess<'a> {
+                     .cloned()
+                     .unwrap_or(self.peer_index);
+                 self.protocol
+-                    .send_get_block_filter_hashes(self.nc, best_peer, end_number + 1);
++                    .send_get_block_filter_hashes(self.nc, best_peer, covered_number + 1);
+             } else {
+                 // if couldn't request more block filter hashes,
+                 // check if could request more block filters.
+diff --git a/light-client-lib/src/protocols/light_client/components/send_last_state_proof.rs b/light-client-lib/src/protocols/light_client/components/send_last_state_proof.rs
+index b706cb0faecef34c2f5371d1f24366eb7fbc1264..50730123bc968064a388b990a93f25d5f92f3c6b 100644
+--- a/light-client-lib/src/protocols/light_client/components/send_last_state_proof.rs
++++ b/light-client-lib/src/protocols/light_client/components/send_last_state_proof.rs
+@@ -84,6 +84,11 @@ impl<'a> SendLastStateProofProcess<'a> {
+             .iter()
+             .map(|header| header.to_entity().into())
+             .collect::<Vec<VerifiableHeader>>();
++        // Matching and difficulty logging call total_difficulty(), which uses
++        // unchecked U256 addition. Reject overflow before either can run.
++        for header in &headers {
++            return_if_failed!(LightClientProtocol::check_total_difficulty(header));
++        }
+         let last_n_blocks = self.protocol.last_n_blocks() as usize;
+ 
+         trace!(
 diff --git a/light-client-lib/src/protocols/light_client/components/tests/send_last_state_proof.rs b/light-client-lib/src/protocols/light_client/components/tests/send_last_state_proof.rs
 index 869358bfc36f2c9f26663c4febbf92d817cb665e..310516ea46a9d852b7eb9ffa6cfeed288939af66 100644
 --- a/light-client-lib/src/protocols/light_client/components/tests/send_last_state_proof.rs
@@ -12136,11 +12200,84 @@ index 869358bfc36f2c9f26663c4febbf92d817cb665e..310516ea46a9d852b7eb9ffa6cfeed28
 +        assert_eq!(error.code(), StatusCode::InvalidParentBlock);
 +    }
 +}
+diff --git a/light-client-lib/src/protocols/light_client/mod.rs b/light-client-lib/src/protocols/light_client/mod.rs
+index 9b5f30a907e8e517cac6f5860751e86b5f1a4174..61694ab67135c411d97ca771d195a64b13c1c7c6 100644
+--- a/light-client-lib/src/protocols/light_client/mod.rs
++++ b/light-client-lib/src/protocols/light_client/mod.rs
+@@ -298,7 +298,11 @@ impl LightClientProtocol {
+             );
+             return Err(StatusCode::InvalidChainRoot.with_context(errmsg));
+         }
+-        // Check Total Difficulty
++        Self::check_total_difficulty(verifiable_header)
++    }
++
++    fn check_total_difficulty(verifiable_header: &VerifiableHeader) -> Result<(), Status> {
++        let header = verifiable_header.header();
+         let parent_total_difficulty: U256 = verifiable_header
+             .parent_chain_root()
+             .total_difficulty()
 diff --git a/light-client-lib/src/protocols/light_client/peers.rs b/light-client-lib/src/protocols/light_client/peers.rs
-index 367ea21195ceee718b3a5954caa4ee5257b58bb3..5c82377538d32f4fbe1bf4648bdf5faf6ac771f7 100644
+index 367ea21195ceee718b3a5954caa4ee5257b58bb3..44f4f55b5dc55d20d617458e73ca7f6cade3c073 100644
 --- a/light-client-lib/src/protocols/light_client/peers.rs
 +++ b/light-client-lib/src/protocols/light_client/peers.rs
-@@ -2055,3 +2055,20 @@ fn if_verifiable_headers_are_same(lhs: &VerifiableHeader, rhs: &VerifiableHeader
+@@ -663,12 +663,10 @@ impl LatestBlockFilterHashes {
+             );
+             return Err(StatusCode::Ignore.with_context(errmsg));
+         }
+-        let mut end_number = match block_filter_hashes
+-            .len()
+-            .checked_add(start_number as usize)
+-            .and_then(|v| v.checked_sub(1))
+-        {
+-            Some(v) => v as BlockNumber,
++        // The slice is nonempty. Subtract before adding so a range ending at
++        // u64::MAX is valid, and never narrow a block number to pointer width.
++        let end_number = match start_number.checked_add(block_filter_hashes.len() as BlockNumber - 1) {
++            Some(v) => v,
+             None => {
+                 let errmsg = format!(
+                     "overflow computing end number: start_number ({}) + len ({}) - 1",
+@@ -686,7 +684,7 @@ impl LatestBlockFilterHashes {
+             return Err(StatusCode::Ignore.with_context(errmsg));
+         }
+         let last_filter_number = self.get_last_number();
+-        if start_number > last_filter_number + 1 {
++        if start_number.saturating_sub(1) > last_filter_number {
+             let errmsg = format!(
+                 "start number ({}) is continuous with last filter block number ({})",
+                 start_number, last_filter_number
+@@ -697,7 +695,6 @@ impl LatestBlockFilterHashes {
+             let diff = end_number - last_proved_number;
+             let new_length = block_filter_hashes.len() - diff as usize;
+             block_filter_hashes = &block_filter_hashes[..new_length];
+-            end_number = last_proved_number;
+         }
+         // Check block filter hashes.
+         let (start_index_for_old, start_index_for_new) = if start_number
+@@ -758,11 +755,16 @@ impl LatestBlockFilterHashes {
+                 return Err(StatusCode::Ignore.with_context(errmsg));
+             }
+         }
+-        // Update block filter hashes.
+-        let index = start_index_for_new + self.inner[start_index_for_old..].len();
+-        self.inner.extend_from_slice(&block_filter_hashes[index..]);
+-        if end_number < last_proved_number {
+-            Ok(Some(end_number + 1))
++        // All supplied overlap has been checked. A shorter matching response
++        // confirms a prefix; only a response extending our coverage adds data.
++        let overlap = self.inner[start_index_for_old..].len();
++        let incoming = &block_filter_hashes[start_index_for_new..];
++        if incoming.len() > overlap {
++            self.inner.extend_from_slice(&incoming[overlap..]);
++        }
++        let covered_number = self.get_last_number().min(last_proved_number);
++        if covered_number < last_proved_number {
++            Ok(Some(covered_number + 1))
+         } else {
+             Ok(None)
+         }
+@@ -2055,3 +2057,160 @@ fn if_verifiable_headers_are_same(lhs: &VerifiableHeader, rhs: &VerifiableHeader
                      .as_slice()))
          && lhs.total_difficulty() == rhs.total_difficulty()
  }
@@ -12150,12 +12287,152 @@ index 367ea21195ceee718b3a5954caa4ee5257b58bb3..5c82377538d32f4fbe1bf4648bdf5faf
 +    use super::*;
 +
 +    #[test]
++    fn shorter_filter_overlap_preserves_cache_and_next_request() {
++        let hash = packed::Byte32::default();
++        // Cover responses including the checkpoint, immediately after it, and
++        // beginning inside the existing cache.
++        for start in [100, 101, 102] {
++            let original = vec![hash.clone(); 10];
++            let mut hashes = LatestBlockFilterHashes::mock(100, original.clone());
++            let next = hashes
++                .update_latest_block_filter_hashes(
++                    120,
++                    100,
++                    &hash,
++                    start,
++                    &hash,
++                    &vec![hash.clone(); 3],
++                )
++                .unwrap();
++            assert_eq!(hashes.get_hashes(), original);
++            assert_eq!(next, Some(111));
++        }
++    }
++
++    #[test]
++    fn conflicting_shorter_filter_overlap_is_rejected_without_mutation() {
++        let hash = packed::Byte32::default();
++        let conflict = packed::Byte32::from_slice(&[1; 32]).unwrap();
++        let original = vec![hash.clone(); 10];
++        let mut hashes = LatestBlockFilterHashes::mock(100, original.clone());
++        let error = hashes
++            .update_latest_block_filter_hashes(
++                120,
++                100,
++                &hash,
++                102,
++                &hash,
++                &[hash.clone(), conflict],
++            )
++            .unwrap_err();
++        assert_eq!(error.code(), StatusCode::Ignore);
++        assert_eq!(hashes.get_hashes(), original);
++    }
++
++    #[test]
++    fn filter_range_above_u32_max_keeps_full_block_numbers() {
++        let checkpoint = u64::from(u32::MAX) + 5;
++        let hash = packed::Byte32::default();
++        let mut hashes = LatestBlockFilterHashes::new(checkpoint);
++        let next = hashes
++            .update_latest_block_filter_hashes(
++                checkpoint + 10,
++                checkpoint,
++                &hash,
++                checkpoint + 1,
++                &hash,
++                &[hash.clone(), hash.clone()],
++            )
++            .unwrap();
++        assert_eq!(next, Some(checkpoint + 3));
++        assert_eq!(hashes.get_last_number(), checkpoint + 2);
++    }
++
++    #[test]
++    fn retained_filter_coverage_stops_at_proved_tip() {
++        let hash = packed::Byte32::default();
++        let mut hashes = LatestBlockFilterHashes::mock(100, vec![hash.clone(); 10]);
++        let next = hashes
++            .update_latest_block_filter_hashes(110, 100, &hash, 102, &hash, &vec![hash.clone(); 3])
++            .unwrap();
++        assert_eq!(next, None);
++        assert_eq!(hashes.get_hashes(), vec![hash; 10]);
++    }
++
++    #[test]
++    fn extending_filter_overlap_is_capped_at_proved_tip() {
++        let hash = packed::Byte32::default();
++        let mut hashes = LatestBlockFilterHashes::mock(100, vec![hash.clone(); 3]);
++        let next = hashes
++            .update_latest_block_filter_hashes(106, 100, &hash, 102, &hash, &vec![hash.clone(); 10])
++            .unwrap();
++        assert_eq!(next, None);
++        assert_eq!(hashes.get_hashes(), vec![hash; 6]);
++    }
++
++    #[test]
++    fn extending_filter_overlap_requests_first_missing_hash() {
++        let hash = packed::Byte32::default();
++        let mut hashes = LatestBlockFilterHashes::mock(100, vec![hash.clone(); 3]);
++        let next = hashes
++            .update_latest_block_filter_hashes(
++                106,
++                100,
++                &hash,
++                103,
++                &hash,
++                &[hash.clone(), hash.clone()],
++            )
++            .unwrap();
++        assert_eq!(next, Some(105));
++        assert_eq!(hashes.get_hashes(), vec![hash; 4]);
++    }
++
++    #[test]
++    fn filter_range_ending_at_u64_max_is_valid() {
++        let checkpoint = u64::MAX - 3;
++        let hash = packed::Byte32::default();
++        let mut hashes = LatestBlockFilterHashes::new(checkpoint);
++        let next = hashes
++            .update_latest_block_filter_hashes(
++                u64::MAX,
++                checkpoint,
++                &hash,
++                checkpoint + 1,
++                &hash,
++                &vec![hash.clone(); 3],
++            )
++            .unwrap();
++        assert_eq!(next, None);
++        assert_eq!(hashes.get_last_number(), u64::MAX);
++        let repeated = hashes
++            .update_latest_block_filter_hashes(
++                u64::MAX,
++                checkpoint,
++                &hash,
++                u64::MAX,
++                &hash,
++                &[hash.clone()],
++            )
++            .unwrap();
++        assert_eq!(repeated, None);
++        assert_eq!(hashes.get_hashes(), vec![hash; 3]);
++    }
++
++    #[test]
 +    fn overflowing_filter_range_is_ignored_without_mutating_cached_hashes() {
 +        let mut hashes = LatestBlockFilterHashes::new(0);
 +        let hash = packed::Byte32::default();
-+        let error = hashes.update_latest_block_filter_hashes(
-+            u64::MAX, 0, &hash, u64::MAX, &hash, &[hash.clone(), hash.clone()],
-+        ).unwrap_err();
++        let error = hashes
++            .update_latest_block_filter_hashes(
++                u64::MAX,
++                0,
++                &hash,
++                u64::MAX,
++                &hash,
++                &[hash.clone(), hash.clone()],
++            )
++            .unwrap_err();
 +        assert_eq!(error.code(), StatusCode::Ignore);
 +        assert!(hashes.get_hashes().is_empty());
 +        assert_eq!(hashes.get_last_number(), 0);
@@ -13387,7 +13664,7 @@ index 38c18a5dd9258f9140dd9018db640dc2d4b88a56..8b477fffae8c905a0db8f10005e542af
  mod browser;
  #[cfg(target_arch = "wasm32")]
 diff --git a/light-client-lib/src/storage/db/sqlite.rs b/light-client-lib/src/storage/db/sqlite.rs
-index 250eca2bac43f6ec6381c6ffe7756d9cf2d8508a..4c80492d85ad979e1233e1680e5654cb279867ee 100644
+index 250eca2bac43f6ec6381c6ffe7756d9cf2d8508a..a5b744af1c066d3facc6f6be036f122826d448ed 100644
 --- a/light-client-lib/src/storage/db/sqlite.rs
 +++ b/light-client-lib/src/storage/db/sqlite.rs
 @@ -16,7 +16,7 @@ use ckb_types::{
@@ -13539,7 +13816,18 @@ index 250eca2bac43f6ec6381c6ffe7756d9cf2d8508a..4c80492d85ad979e1233e1680e5654cb
              .map_err(|e| crate::error::Error::runtime(format!("Failed to delete: {}", e)))?;
          Ok(())
      }
-@@ -207,7 +248,7 @@ impl StorageBackend for Storage {
+@@ -201,13 +242,15 @@ impl StorageBackend for Storage {
+         let rows: Vec<(Vec<u8>, Vec<u8>)> = {
+             let conn = self.conn.lock().unwrap();
+ 
+-            let (order_clause, comparison) = match direction {
+-                IteratorDirection::Forward => ("ASC", ">="),
+-                IteratorDirection::Reverse => ("DESC", "<="),
++            let (order_clause, comparison) = match (direction, &start) {
++                (IteratorDirection::Forward, IteratorStart::From(_)) => ("ASC", ">="),
++                (IteratorDirection::Reverse, IteratorStart::From(_)) => ("DESC", "<="),
++                (IteratorDirection::Forward, IteratorStart::After(_)) => ("ASC", ">"),
++                (IteratorDirection::Reverse, IteratorStart::After(_)) => ("DESC", "<"),
              };
  
              let query = format!(
@@ -13548,7 +13836,18 @@ index 250eca2bac43f6ec6381c6ffe7756d9cf2d8508a..4c80492d85ad979e1233e1680e5654cb
                  comparison, order_clause
              );
  
-@@ -295,3 +336,43 @@ impl CellProvider for Storage {
+@@ -222,10 +265,8 @@ impl StorageBackend for Storage {
+ 
+             // Collect rows that pass the take_while condition.
+             // We need to eagerly collect because the lock must be released before filter_map_fn runs.
+-            let skip = if start.should_skip_first() { 1 } else { 0 };
+             query_rows
+                 .filter_map(|r| r.ok())
+-                .skip(skip)
+                 .take_while(|(key, _)| take_while_fn(key))
+                 .collect()
+         };
+@@ -295,3 +336,107 @@ impl CellProvider for Storage {
          CellStatus::Unknown
      }
  }
@@ -13592,6 +13891,70 @@ index 250eca2bac43f6ec6381c6ffe7756d9cf2d8508a..4c80492d85ad979e1233e1680e5654cb
 +        assert_eq!(desc.iter().map(|x| x.0[0]).collect::<Vec<_>>(), vec![2, 1]);
 +    }
 +}
++
++#[cfg(test)]
++mod cursor_regressions {
++    use super::*;
++
++    #[test]
++    fn exclusive_cursor_preserves_first_survivor_when_cursor_is_absent() {
++        let directory = tempfile::tempdir().unwrap();
++        let storage = Storage::new(directory.path().join("cursor.db"));
++        for key in [1, 3, 5] {
++            StorageBackend::put(&storage, vec![key], vec![key]).unwrap();
++        }
++        let cases = [
++            (
++                IteratorStart::From(vec![3]),
++                IteratorDirection::Forward,
++                vec![3, 5],
++            ),
++            (
++                IteratorStart::From(vec![3]),
++                IteratorDirection::Reverse,
++                vec![3, 1],
++            ),
++            (
++                IteratorStart::After(vec![3]),
++                IteratorDirection::Forward,
++                vec![5],
++            ),
++            (
++                IteratorStart::After(vec![3]),
++                IteratorDirection::Reverse,
++                vec![1],
++            ),
++            (
++                IteratorStart::After(vec![2]),
++                IteratorDirection::Forward,
++                vec![3, 5],
++            ),
++            (
++                IteratorStart::After(vec![4]),
++                IteratorDirection::Reverse,
++                vec![3, 1],
++            ),
++        ];
++        for (start, direction, expected) in cases {
++            // The mapper reenters storage, as service queries do.
++            let reader = storage.clone();
++            let actual = storage.collect_iterator(
++                start,
++                direction,
++                Box::new(|_| true),
++                Box::new(move |key, _| reader.get(key).unwrap()),
++                10,
++            );
++            assert_eq!(
++                actual
++                    .into_iter()
++                    .map(|pair| pair.key[0])
++                    .collect::<Vec<_>>(),
++                expected
++            );
++        }
++    }
++}
 diff --git a/light-client-lib/src/storage/mod.rs b/light-client-lib/src/storage/mod.rs
 index 5ef7fb0d8277467881bd491790401c530b8789b1..8a3d5cdc9d13ac692bf7896279943eb3d4346e74 100644
 --- a/light-client-lib/src/storage/mod.rs
@@ -13615,10 +13978,111 @@ index 5ef7fb0d8277467881bd491790401c530b8789b1..8a3d5cdc9d13ac692bf7896279943eb3
      Lock,
      Type,
 diff --git a/light-client-lib/src/tests/protocols/block_filter.rs b/light-client-lib/src/tests/protocols/block_filter.rs
-index 0cc6e19c259ad35f5be39826ca4b6648e31a1e22..7e418d031ea7616402d5167c08175d822d97a3c9 100644
+index 0cc6e19c259ad35f5be39826ca4b6648e31a1e22..d8379333613ebf60090567334a269fad439d52fa 100644
 --- a/light-client-lib/src/tests/protocols/block_filter.rs
 +++ b/light-client-lib/src/tests/protocols/block_filter.rs
-@@ -894,3 +894,46 @@ async fn test_block_filter_without_enough_hashes() {
+@@ -25,6 +25,100 @@ use crate::{
+     },
+ };
+ 
++#[tokio::test]
++async fn shorter_finalized_filter_reply_preserves_cache_and_next_request() {
++    check_finalized_filter_reply(10, 3, false, 10, Some(11)).await;
++}
++
++#[tokio::test]
++async fn conflicting_shorter_finalized_filter_reply_preserves_cache() {
++    check_finalized_filter_reply(10, 3, true, 10, None).await;
++}
++
++#[tokio::test]
++async fn finalized_filter_requests_stop_at_checkpoint() {
++    let boundary = CHECK_POINT_INTERVAL as usize;
++    check_finalized_filter_reply(
++        boundary - 1,
++        3,
++        false,
++        boundary - 1,
++        Some(CHECK_POINT_INTERVAL),
++    )
++    .await;
++    check_finalized_filter_reply(boundary, 3, false, boundary, None).await;
++    check_finalized_filter_reply(10, boundary + 3, false, boundary, None).await;
++}
++
++async fn check_finalized_filter_reply(
++    cached_len: usize,
++    response_len: usize,
++    conflicting: bool,
++    expected_len: usize,
++    expected_next: Option<u64>,
++) {
++    let chain = MockChain::new_with_dummy_pow("short-filter-reply");
++    let nc = MockNetworkContext::new(SupportProtocols::Filter);
++    let peers = chain.create_peers();
++    let peer = PeerIndex::new(1);
++    peers.add_peer(peer);
++    let tip = VerifiableHeader::new(
++        HeaderBuilder::default()
++            .epoch(EpochNumberWithFraction::new(0, 0, 100).full_value())
++            .number(CHECK_POINT_INTERVAL * 2)
++            .build(),
++        Default::default(),
++        None,
++        Default::default(),
++    );
++    peers.mock_prove_state(peer, tip).unwrap();
++    let storage = chain.client_storage();
++    let (_, checkpoint) = storage.get_last_check_point();
++    storage.update_check_points(1, &[packed::Byte32::default()]);
++    storage.update_max_check_point_index(1);
++    let cached = vec![packed::Byte32::default(); cached_len];
++    peers
++        .update_cached_block_filter_hashes(cached.clone())
++        .await;
++    let mut response = vec![packed::Byte32::default(); response_len];
++    if conflicting {
++        response[1] = packed::Byte32::from_slice(&[1; 32]).unwrap();
++    }
++    let content = packed::BlockFilterHashes::new_builder()
++        .start_number(1u64)
++        .parent_block_filter_hash(checkpoint)
++        .block_filter_hashes(response)
++        .build();
++    let message = packed::BlockFilterMessage::new_builder()
++        .set(content)
++        .build();
++    let mut protocol = chain.create_filter_protocol(Arc::clone(&peers));
++    protocol
++        .received(nc.context(), peer, message.as_bytes())
++        .await;
++    assert_eq!(
++        peers.get_cached_block_filter_hashes().await,
++        (0, vec![packed::Byte32::default(); expected_len])
++    );
++    assert!(nc.not_banned(peer));
++    let sent = nc.sent_messages().borrow();
++    let requests = sent
++        .iter()
++        .filter_map(|(_, _, bytes)| {
++            match packed::BlockFilterMessageReader::from_slice(bytes)
++                .unwrap()
++                .to_enum()
++            {
++                packed::BlockFilterMessageUnionReader::GetBlockFilterHashes(request) => {
++                    Some(request.start_number().unpack())
++                }
++                _ => None,
++            }
++        })
++        .collect::<Vec<u64>>();
++    assert_eq!(requests, expected_next.into_iter().collect::<Vec<_>>());
++}
++
+ #[tokio::test]
+ async fn test_block_filter_malformed_message() {
+     let chain = MockChain::new_with_dummy_pow("test-block-filter");
+@@ -894,3 +988,46 @@ async fn test_block_filter_without_enough_hashes() {
  
      assert!(nc.sent_messages().borrow().is_empty());
  }
@@ -13665,6 +14129,62 @@ index 0cc6e19c259ad35f5be39826ca4b6648e31a1e22..7e418d031ea7616402d5167c08175d82
 +    assert!(chain.client_storage().get_earliest_matched_blocks().is_none());
 +    assert!(nc.sent_messages().borrow().is_empty());
 +}
+diff --git a/light-client-lib/src/tests/protocols/light_client/send_last_state_proof.rs b/light-client-lib/src/tests/protocols/light_client/send_last_state_proof.rs
+index 2101d6ba1d21dbd6b1fb3cf80d1c35e375ee968d..58abbf2ab39081d93e817160f437653915baed3e 100644
+--- a/light-client-lib/src/tests/protocols/light_client/send_last_state_proof.rs
++++ b/light-client-lib/src/tests/protocols/light_client/send_last_state_proof.rs
+@@ -181,6 +181,51 @@ fn header_with_overflowing_total_difficulty(
+         .build()
+ }
+ 
++#[tokio::test(flavor = "multi_thread")]
++async fn reject_response_header_with_overflowing_total_difficulty() {
++    let chain = MockChain::new_with_dummy_pow("overflowing-proof-response").start();
++    chain.mine_to(4);
++    let snapshot = chain.shared().snapshot();
++    // Exercise both the first and a later sampled header through wire dispatch.
++    for bad_index in [0, 1] {
++        let nc = MockNetworkContext::new(SupportProtocols::LightClient);
++        let peer = PeerIndex::new(1);
++        let peers = chain.create_peers();
++        peers.add_peer(peer);
++        let mut protocol = chain.create_light_client_protocol(Arc::clone(&peers));
++        protocol.set_last_n_blocks(1);
++        let tip = snapshot.get_verifiable_header_by_number(3).unwrap();
++        let request = packed::GetLastStateProof::new_builder()
++            .start_number(1u64)
++            .difficulty_boundary(U256::max_value().pack())
++            .build();
++        peers
++            .mock_prove_request(
++                peer,
++                ProveRequest::new(LastState::new(tip.clone().into()), request),
++            )
++            .unwrap();
++        let mut headers = (1..=2)
++            .map(|number| snapshot.get_verifiable_header_by_number(number).unwrap())
++            .collect::<Vec<_>>();
++        headers[bad_index] = header_with_overflowing_total_difficulty(headers[bad_index].clone());
++        let message = packed::LightClientMessage::new_builder()
++            .set(
++                packed::SendLastStateProof::new_builder()
++                    .last_header(tip)
++                    .headers(headers)
++                    .build(),
++            )
++            .build();
++        protocol
++            .received(nc.context(), peer, message.as_bytes())
++            .await;
++        assert!(nc.banned_since(peer, StatusCode::InvalidTotalDifficulty));
++        assert!(peers.get_state(&peer).unwrap().get_prove_state().is_none());
++        assert!(nc.sent_messages().borrow().is_empty());
++    }
++}
++
+ #[tokio::test(flavor = "multi_thread")]
+ async fn reject_last_header_with_overflowing_total_difficulty() {
+     let chain = MockChain::new_with_dummy_pow("test-light-client").start();
 diff --git a/light-client-lib/src/tests/protocols/light_client/send_transactions_proof.rs b/light-client-lib/src/tests/protocols/light_client/send_transactions_proof.rs
 index 03be056b0463e8985a596f3e1e75bc3eac491c80..d390d3aef0ba1ca33cd46f3435934a2b51af0441 100644
 --- a/light-client-lib/src/tests/protocols/light_client/send_transactions_proof.rs

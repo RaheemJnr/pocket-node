@@ -25,6 +25,18 @@ upstream development-only documentation are omitted explicitly in the manifest.
 The shared WASM dependency follows upstream, but WASM is not a supported mobile
 release target. Mobile build scripts and this repository's CI remain authoritative.
 
+Deferred backend work from the native integration review:
+
+* The retained, unsupported browser backend groups batch deletes before puts,
+  so a put followed by a delete of the same key has the wrong result. Its
+  exclusive cursor handling also needs review with the omitted IndexedDB worker.
+  Supporting WASM requires ordered, atomic batch operations and browser tests;
+  the mobile SQLite backend applies batch operations in call order.
+* SQLite pagination uses strict comparisons for exclusive cursors, including
+  deleted cursors, but still collects matching rows before applying the result
+  limit. Bounded scans need a separate design for snapshots and concurrent writes
+  while preserving callbacks that reenter storage.
+
 ## Verify and maintain
 
 Download the pinned archive, then run:

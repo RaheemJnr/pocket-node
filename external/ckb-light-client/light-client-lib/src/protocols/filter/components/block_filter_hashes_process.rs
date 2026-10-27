@@ -205,22 +205,28 @@ impl<'a> BlockFilterHashesProcess<'a> {
                 }
             }
 
-            // Update cached block filter hashes.
+            // A shorter matching response confirms a prefix without replacing
+            // the longer cache. Append only new hashes through the checkpoint.
             let start_index = cached_hashes[index_offset..].len();
             let mut new_cached_hashes = cached_hashes;
-            if end_number > next_cached_check_point_number {
+            let end_index = if end_number > next_cached_check_point_number {
                 let excess_size = (end_number - next_cached_check_point_number) as usize;
-                let new_size = block_filter_hashes.len() - excess_size;
-                new_cached_hashes.extend_from_slice(&block_filter_hashes[start_index..new_size]);
+                block_filter_hashes.len() - excess_size
             } else {
-                new_cached_hashes.extend_from_slice(&block_filter_hashes[start_index..]);
+                block_filter_hashes.len()
+            };
+            if start_index < end_index {
+                new_cached_hashes.extend_from_slice(&block_filter_hashes[start_index..end_index]);
             }
+            let covered_number = (cached_check_point_number
+                + new_cached_hashes.len() as BlockNumber)
+                .min(next_cached_check_point_number);
             self.protocol
                 .peers
                 .update_cached_block_filter_hashes(new_cached_hashes)
                 .await;
 
-            if end_number < next_cached_check_point_number {
+            if covered_number < next_cached_check_point_number {
                 let best_peers = self
                     .protocol
                     .peers
@@ -241,7 +247,7 @@ impl<'a> BlockFilterHashesProcess<'a> {
                     .cloned()
                     .unwrap_or(self.peer_index);
                 self.protocol
-                    .send_get_block_filter_hashes(self.nc, best_peer, end_number + 1);
+                    .send_get_block_filter_hashes(self.nc, best_peer, covered_number + 1);
             } else {
                 // if couldn't request more block filter hashes,
                 // check if could request more block filters.
