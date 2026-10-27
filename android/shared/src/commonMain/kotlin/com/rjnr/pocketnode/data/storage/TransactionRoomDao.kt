@@ -25,12 +25,12 @@ interface TransactionRoomDao {
      */
     @Query(
         "SELECT txHash, fee_shannons AS feeShannons FROM transactions " +
-            "WHERE network = :network AND txHash IN (:hashes) AND fee_shannons IS NOT NULL"
+            "WHERE network = :network AND txHash IN (:hashes) AND fee_shannons IS NOT NULL AND status != 'UNVERIFIED'"
     )
     suspend fun getKnownFees(hashes: List<String>, network: String): List<TxFeeRow>
 
     /** Hex block numbers of every cached tx for a wallet. Anchors the candidate scan depth. */
-    @Query("SELECT blockNumber FROM transactions WHERE walletId = :walletId AND network = :network")
+    @Query("SELECT blockNumber FROM transactions WHERE status != 'UNVERIFIED' AND walletId = :walletId AND network = :network")
     suspend fun getBlockNumbers(walletId: String, network: String): List<String>
 
     @Insert(onConflict = OnConflictStrategy.REPLACE)
@@ -45,14 +45,14 @@ interface TransactionRoomDao {
      */
     @Query(
         "SELECT * FROM transactions " +
-            "WHERE walletId = :walletId AND network = :network AND status IN ('PENDING', 'FAILED')"
+            "WHERE status != 'UNVERIFIED' AND walletId = :walletId AND network = :network AND status IN ('PENDING', 'FAILED')"
     )
     suspend fun getNonConfirmedByWallet(walletId: String, network: String): List<TransactionRow>
 
     /** PENDING rows with no `pending_broadcasts` entry: rows the watchdog cannot see. */
     @Query(
         "SELECT txHash FROM transactions " +
-            "WHERE walletId = :walletId AND network = :network AND status = 'PENDING' " +
+            "WHERE status != 'UNVERIFIED' AND walletId = :walletId AND network = :network AND status = 'PENDING' " +
             "AND txHash NOT IN (SELECT txHash FROM pending_broadcasts)"
     )
     suspend fun getOrphanPendingHashes(walletId: String, network: String): List<String>
@@ -111,7 +111,7 @@ interface TransactionRoomDao {
      * needs SOME total order or page 0 and page 1 can overlap or skip.
      */
     @Query(
-        "SELECT * FROM transactions WHERE walletId = :walletId AND network = :network " +
+        "SELECT * FROM transactions WHERE status != 'UNVERIFIED' AND walletId = :walletId AND network = :network " +
             "ORDER BY CASE WHEN status = 'PENDING' THEN 0 ELSE 1 END, timestamp DESC, " +
             "LENGTH(blockNumber) DESC, blockNumber DESC, rowid ASC " +
             "LIMIT :limit OFFSET :offset"
@@ -125,7 +125,7 @@ interface TransactionRoomDao {
 
     /** One page of the list narrowed to [directions]. Same sort as [pageAll], for the same reasons. */
     @Query(
-        "SELECT * FROM transactions WHERE walletId = :walletId AND network = :network " +
+        "SELECT * FROM transactions WHERE status != 'UNVERIFIED' AND walletId = :walletId AND network = :network " +
             "AND direction IN (:directions) " +
             "ORDER BY CASE WHEN status = 'PENDING' THEN 0 ELSE 1 END, timestamp DESC, " +
             "LENGTH(blockNumber) DESC, blockNumber DESC, rowid ASC " +

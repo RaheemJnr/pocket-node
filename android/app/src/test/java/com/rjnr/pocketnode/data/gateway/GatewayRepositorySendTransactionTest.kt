@@ -67,7 +67,7 @@ class GatewayRepositorySendTransactionTest {
         db = Room.inMemoryDatabaseBuilder(ctx, AppDatabase::class.java)
             .allowMainThreadQueries()
             .build()
-        cacheManager = CacheManager(db.transactionDao(), db.balanceCacheDao(), NoopLogger)
+        cacheManager = CacheManager(db.transactionDao(), db.balanceCacheDao(), NoopLogger, verificationCacheGate = com.rjnr.pocketnode.data.gateway.readyVerificationGate())
     }
 
     @After

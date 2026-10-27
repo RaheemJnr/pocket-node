@@ -250,7 +250,8 @@ object AppModule {
         transactionDao: TransactionDao,
         balanceCacheDao: BalanceCacheDao,
         logger: Logger,
-    ): CacheManager = CacheManager(transactionDao, balanceCacheDao, logger)
+        verificationCacheGate: com.rjnr.pocketnode.data.gateway.VerificationCacheGate,
+    ): CacheManager = CacheManager(transactionDao, balanceCacheDao, logger, verificationCacheGate)
 
     @Provides
     @Singleton
@@ -260,8 +261,9 @@ object AppModule {
         pendingDaoWithdrawDao: com.rjnr.pocketnode.data.database.dao.PendingDaoWithdrawDao,
         pendingDaoUnlockDao: com.rjnr.pocketnode.data.database.dao.PendingDaoUnlockDao,
         logger: Logger,
+        verificationCacheGate: com.rjnr.pocketnode.data.gateway.VerificationCacheGate,
     ): DaoSyncManager = DaoSyncManager(
-        headerCacheDao, daoCellDao, pendingDaoWithdrawDao, pendingDaoUnlockDao, logger,
+        headerCacheDao, daoCellDao, pendingDaoWithdrawDao, pendingDaoUnlockDao, logger, verificationCacheGate,
     )
 
     @Provides

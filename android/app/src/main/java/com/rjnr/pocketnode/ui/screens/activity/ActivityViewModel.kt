@@ -57,6 +57,7 @@ class ActivityViewModel @Inject constructor(
     private val appStatePreferences: AppStatePreferences,
     private val uiPreferences: UiPreferences,
     private val logger: Logger,
+    private val verificationCacheGate: com.rjnr.pocketnode.data.gateway.VerificationCacheGate,
 ) : ViewModel() {
 
     enum class Filter { ALL, RECEIVED, SENT }
@@ -90,10 +91,12 @@ class ActivityViewModel @Inject constructor(
     @OptIn(kotlinx.coroutines.ExperimentalCoroutinesApi::class)
     val transactionPagingFlow: Flow<PagingData<TransactionRecord>> = combine(
         _uiState.map { it.filter }.distinctUntilChanged(),
-        _uiState.map { it.currentNetwork }.distinctUntilChanged()
-    ) { filter, network ->
-        filter to network
-    }.flatMapLatest { (filter, network) ->
+        _uiState.map { it.currentNetwork }.distinctUntilChanged(),
+        verificationCacheGate.readyNetworks,
+    ) { filter, network, ready ->
+        Triple(filter, network, network.name in ready)
+    }.flatMapLatest { (filter, network, ready) ->
+        if (!ready) return@flatMapLatest kotlinx.coroutines.flow.flowOf(PagingData.empty<TransactionRecord>())
         val walletId = appStatePreferences.getActiveWalletId() ?: ""
         Pager(PagingConfig(pageSize = 20, enablePlaceholders = false)) {
             when (filter) {
@@ -201,7 +204,10 @@ class ActivityViewModel @Inject constructor(
             runCatching {
                 val walletId = appStatePreferences.getActiveWalletId() ?: ""
                 val network = _uiState.value.currentNetwork.name
+                val revision = verificationCacheGate.currentRevision()
+                check(verificationCacheGate.isReady(network)) { "Chain cache verification is not ready" }
                 val entities = transactionDao.getAllByWalletAndNetwork(walletId, network)
+                check(verificationCacheGate.isReady(network) && verificationCacheGate.currentRevision() == revision) { "Chain cache verification changed" }
                 TransactionExporter().exportToCsv(entities)
             }.onSuccess { csv ->
                 pendingCsvExport = csv

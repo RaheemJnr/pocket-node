@@ -13,22 +13,20 @@ enum class PendingWithdrawResolution {
 }
 
 /**
- * Decide a pending withdraw marker's fate from two facts:
- *  - [depositStillDeposited]: is the deposit cell still DEPOSITED in the live
- *    light-client scan? (false = consumed by a committed withdraw.)
- *  - [withdrawTxStatus]: the withdraw tx's status in the local cache
- *    ("PENDING"/"CONFIRMED"/"FAILED"/null), maintained by BroadcastWatchdog.
- *
- * The deposit disappearing is the authoritative success signal — it only
- * happens once the spend is on-chain and indexed. A FAILED tx while the
- * deposit is still present is the authoritative failure signal. Everything
- * else means the withdraw is still in flight.
+ * An empty scan can be a revalidation or a shallow horizon, not a spend.
+ * Retain local intent until inclusion is verified or failure is explicit.
+ * A CONFIRMED string alone is insufficient; cache inclusion must carry a
+ * block association populated after the epoch handoff.
  */
 fun resolvePendingWithdraw(
     depositStillDeposited: Boolean,
     withdrawTxStatus: String?,
+    chainVerdict: DaoUnlockChainVerdict = DaoUnlockChainVerdict.UNKNOWN,
+    cacheInclusionVerified: Boolean = false,
 ): PendingWithdrawResolution = when {
-    !depositStillDeposited -> PendingWithdrawResolution.CLEAR_CONFIRMED
-    withdrawTxStatus == "FAILED" -> PendingWithdrawResolution.CLEAR_FAILED
+    chainVerdict == DaoUnlockChainVerdict.REJECTED || withdrawTxStatus == "FAILED" -> PendingWithdrawResolution.CLEAR_FAILED
+    !depositStillDeposited && (chainVerdict == DaoUnlockChainVerdict.COMMITTED ||
+        (withdrawTxStatus == "CONFIRMED" && cacheInclusionVerified)) -> PendingWithdrawResolution.CLEAR_CONFIRMED
+    withdrawTxStatus == "UNVERIFIED" -> PendingWithdrawResolution.OVERLAY
     else -> PendingWithdrawResolution.OVERLAY
 }

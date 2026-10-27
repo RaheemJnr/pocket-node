@@ -12,20 +12,14 @@
 
 [advisories]
 ignore = [
-    "RUSTSEC-2025-0024", # crossbeam-channel double-free on Drop, transitive via ckb-channel/ckb-network. Review by 2026-12-28.
-    "RUSTSEC-2026-0204", # crossbeam-epoch invalid pointer deref in a Debug fmt impl, transitive, not on a reachable path. Review by 2026-12-28.
-    "RUSTSEC-2026-0258", # h2 unbounded empty DATA frames DoS, transitive via the tentacle/hyper stack, not exercised by this light client's RPC surface. Review by 2026-12-28.
-    "RUSTSEC-2025-0004", # openssl use-after-free in select_next_proto, ALPN negotiation is not used here. Review by 2026-12-28.
-    "RUSTSEC-2025-0022", # openssl use-after-free in Md::fetch/Cipher::fetch, transitive via tentacle-secio. Review by 2026-12-28.
-    "RUSTSEC-2024-0437", # protobuf uncontrolled recursion, transitive, not on a network-facing decode path here. Review by 2026-12-28.
+    "RUSTSEC-2024-0437", # protobuf recursion; inspected metrics path encodes only, prometheus 0.13 pins protobuf 2; upstream metrics migration required. Review by 2026-12-28.
     "RUSTSEC-2025-0057", # fxhash unmaintained, transitive hashing utility, no known vulnerability. Review by 2026-12-28.
     "RUSTSEC-2024-0384", # instant unmaintained, transitive via parking_lot/governor. Review by 2026-12-28.
     "RUSTSEC-2025-0119", # number_prefix unmaintained, transitive build-time dependency only. Review by 2026-12-28.
     "RUSTSEC-2024-0436", # paste unmaintained, proc-macro helper, no known vulnerability. Review by 2026-12-28.
     "RUSTSEC-2024-0370", # proc-macro-error unmaintained, build-time proc-macro dependency only. Review by 2026-12-28.
-    "RUSTSEC-2026-0190", # anyhow Error::downcast_mut unsoundness, we do not call downcast_mut on anyhow::Error here. Review by 2026-12-28.
-    "RUSTSEC-2026-0306", # faster-hex AVX2 hex_decode_unchecked read past src, we do not use the unchecked decode API. Review by 2026-12-28.
-    "RUSTSEC-2026-0253", # lru LruCache::pop panic-safety unsoundness, transitive, no panicking Drop/Eq in the cached types we use. Review by 2026-12-28.
-    "RUSTSEC-2026-0186", # memmap2 unchecked pointer offset, transitive via storage backends, no untrusted offsets fed in here. Review by 2026-12-28.
-    "RUSTSEC-2026-0097", # rand unsound with a custom logger using rand::rng(), we do not install a custom log::Log that reenters rand. Review by 2026-12-28.
+    "RUSTSEC-2026-0306", # faster-hex 0.6 AVX2 unchecked decode; shipped ARM excludes AVX2, no direct mobile call found; x86 emulator qualification separate. Review by 2026-12-28.
+    "RUSTSEC-2026-0253", # lru 0.7 pop panic safety; inspected CKB verification cache uses Byte32 keys with no panicking Drop; upstream major update required. Review by 2026-12-28.
+    "RUSTSEC-2026-0186", # memmap2 0.5 via cacache/chain-spec; no affected range advise/flush call found in inspected cache path; upstream major update required. Review by 2026-12-28.
+    "RUSTSEC-2026-0097", # rand 0.7 via ckb-vm/numext: custom RNG-reentrant logger required; 0.8/0.9 fixed. Review by 2026-12-28.
 ]

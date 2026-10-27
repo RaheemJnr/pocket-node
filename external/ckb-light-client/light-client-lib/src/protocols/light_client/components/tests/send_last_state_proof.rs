@@ -622,3 +622,42 @@ fn test_verify_total_difficulty_during_more_than_two_epochs() {
         }
     }
 }
+
+mod malformed_boundaries {
+    use super::super::super::send_last_state_proof::{check_if_response_is_matched, verify_mmr_proof};
+    use crate::protocols::StatusCode;
+    use ckb_types::{core::BlockBuilder, packed, prelude::*, utilities::merkle_mountain_range::VerifiableHeader};
+
+    fn header(number: u64) -> VerifiableHeader {
+        VerifiableHeader::new(BlockBuilder::default().number(number).epoch(ckb_types::core::EpochNumberWithFraction::new(0, 0, 100).full_value()).build().header(),
+            Default::default(), None, Default::default())
+    }
+
+    #[test]
+    fn proof_start_after_tip_is_malformed() {
+        let request = packed::GetLastStateProof::new_builder().start_number(10u64).build();
+        let error = check_if_response_is_matched(100, &request, &[header(8)], &header(9)).unwrap_err();
+        assert_eq!(error.code(), StatusCode::MalformedProtocolMessage);
+    }
+
+    #[test]
+    fn last_header_successor_must_not_wrap() {
+        let request = packed::GetLastStateProof::new_builder().start_number(u64::MAX).build();
+        let error = check_if_response_is_matched(100, &request, &[header(u64::MAX)], &header(u64::MAX)).unwrap_err();
+        assert_eq!(error.code(), StatusCode::MalformedProtocolMessage);
+    }
+
+    #[test]
+    fn inconsistent_reorg_boundary_is_malformed() {
+        let request = packed::GetLastStateProof::new_builder().start_number(1u64).build();
+        let error = check_if_response_is_matched(1, &request, &[header(0), header(1), header(2)], &header(3)).unwrap_err();
+        assert_eq!(error.code(), StatusCode::MalformedProtocolMessage);
+    }
+
+    #[test]
+    fn genesis_cannot_supply_a_parent_chain_proof() {
+        let proof = packed::HeaderDigestVec::default();
+        let error = verify_mmr_proof(10000, &header(0), proof.as_reader(), std::iter::empty()).unwrap_err();
+        assert_eq!(error.code(), StatusCode::InvalidParentBlock);
+    }
+}

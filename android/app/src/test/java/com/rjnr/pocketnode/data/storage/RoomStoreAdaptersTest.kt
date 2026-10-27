@@ -196,7 +196,7 @@ class RoomStoreAdaptersTest {
     @Test
     fun `balance cache round trips through the store`() = runTest {
         val store = RoomBalanceCache(
-            CacheManager(db.transactionDao(), db.balanceCacheDao(), NoopLogger)
+            CacheManager(db.transactionDao(), db.balanceCacheDao(), NoopLogger, verificationCacheGate = com.rjnr.pocketnode.data.gateway.readyVerificationGate())
         )
         val balance = BalanceResponse(
             address = "ckt1qexample",
@@ -294,7 +294,7 @@ class RoomStoreAdaptersTest {
 
     private fun transactionStore() = RoomTransactionStore(
         db.transactionDao(),
-        CacheManager(db.transactionDao(), db.balanceCacheDao(), NoopLogger),
+        CacheManager(db.transactionDao(), db.balanceCacheDao(), NoopLogger, verificationCacheGate = com.rjnr.pocketnode.data.gateway.readyVerificationGate()),
     )
 
     private fun transaction(

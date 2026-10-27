@@ -92,7 +92,13 @@ pub(crate) fn sample_blocks(
     last_difficulty: &U256,
     last_n_blocks: BlockNumber,
 ) -> (U256, Vec<U256>) {
-    let blocks_count = last_number - start_number;
+    let Some(blocks_count) = last_number.checked_sub(start_number) else {
+        warn!(
+            "sampling: start_number ({}) >= last_number ({}), returning empty result",
+            start_number, last_number
+        );
+        return (start_difficulty.clone(), Vec::new());
+    };
     let k = estimate_k(last_n_blocks, blocks_count, C_FRACTION);
     let samples_count = estimate_samples_count(blocks_count, last_n_blocks, k, LAMBDA);
 
@@ -140,6 +146,9 @@ pub(crate) fn sample_blocks(
 //
 // [FlyClient: Super-Light Clients for Cryptocurrencies]: https://eprint.iacr.org/2019/226.pdf
 pub(crate) fn estimate_k(l: BlockNumber, n: BlockNumber, c: f64) -> f64 {
+    if n == 0 {
+        return 0.0;
+    }
     ((l as f64) / (n as f64)).log(c)
 }
 
@@ -185,5 +194,26 @@ pub(crate) fn estimate_samples_count(
         } else {
             m - last_n_blocks
         }
+    }
+}
+
+
+#[cfg(test)]
+mod boundary_regressions {
+    use super::*;
+
+    #[test]
+    fn reversed_range_returns_no_samples_instead_of_underflowing() {
+        let start = U256::from(123u32);
+        let (boundary, samples) = sample_blocks(u64::MAX, &start, 0, &U256::zero(), 100);
+        assert_eq!(boundary, start);
+        assert!(samples.is_empty());
+    }
+
+    #[test]
+    fn empty_range_has_finite_estimate_and_no_samples() {
+        assert_eq!(estimate_k(100, 0, 0.5), 0.0);
+        let (_, samples) = sample_blocks(42, &U256::from(123u32), 42, &U256::from(123u32), 100);
+        assert!(samples.is_empty());
     }
 }
