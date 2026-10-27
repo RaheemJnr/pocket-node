@@ -102,7 +102,7 @@ class DaoGateway(
         // run first or the merge would see no marker on the very poll where
         // the unlock resolves.
         val pendingUnlocks = readPendingUnlocks(snapshot, deduped)
-        val merged = mergeWithCachedDaoDeposits(snapshot, deduped, pendingUnlocks, mutations)
+        val merged = mergeWithCachedDaoDeposits(snapshot, deduped, pendingUnlocks, mutations, currentEpoch)
         val result = applyPendingUnlockOverlay(snapshot,
             applyPendingWithdrawOverlay(snapshot, merged, mutations), pendingUnlocks, mutations)
         // All chain-dependent writes are staged. No old read can retire local
@@ -353,6 +353,7 @@ class DaoGateway(
         live: List<DaoDeposit>,
         pendingUnlocks: List<PendingUnlock>,
         mutations: DaoMutations,
+        currentEpoch: EpochInfo?,
     ): List<DaoDeposit> {
         val walletId = ctx.walletId()
         if (walletId.isEmpty()) return live
@@ -420,9 +421,9 @@ class DaoGateway(
                 // or, worse, reappearing as an unlockable outside-window row
                 // for the minutes between broadcast and the tx being scored.
                 CachedDaoCellFate.UNLOCK_IN_FLIGHT ->
-                    confirming += withFreshCompensation(entity, mutations).toCachedDeposit()
+                    confirming += withFreshCompensation(entity, mutations, currentEpoch).toCachedDeposit()
                 CachedDaoCellFate.OUTSIDE_WINDOW ->
-                    outsideWindow += withFreshCompensation(entity, mutations).toOutsideWindowDeposit()
+                    outsideWindow += withFreshCompensation(entity, mutations, currentEpoch).toOutsideWindowDeposit()
             }
         }
         if (outsideWindow.isNotEmpty()) {
@@ -445,9 +446,28 @@ class DaoGateway(
     private suspend fun withFreshCompensation(
         entity: com.rjnr.pocketnode.data.database.entity.DaoCellEntity,
         mutations: DaoMutations,
+        currentEpoch: EpochInfo?,
     ): com.rjnr.pocketnode.data.database.entity.DaoCellEntity {
+        val checked = daoDepositReader.revalidateCachedWithdrawing(entity, currentEpoch, NetworkType.valueOf(entity.network))
+        if (checked != entity) {
+            mutations.add {
+                val dao = appDatabase.daoCellDao()
+                val current = dao.getByOutPoint(entity.txHash, entity.index)
+                if (current != null && current.status != DaoCellStatus.COMPLETED.name &&
+                    current.network == entity.network && current.walletId == entity.walletId) {
+                    // Preserve concurrent retirement/local status transitions;
+                    // never replace the entire stale snapshot read above.
+                    dao.upsert(current.copy(
+                        status = if (current.status == entity.status) checked.status else current.status,
+                        depositBlockNumber = checked.depositBlockNumber,
+                        depositBlockHash = checked.depositBlockHash, depositEpochHex = checked.depositEpochHex,
+                        depositTimestamp = checked.depositTimestamp, compensation = checked.compensation,
+                        unlockEpochHex = checked.unlockEpochHex))
+                }
+            }
+        }
         val fresh = try {
-            daoDepositReader.recomputeCachedCompensation(entity) { hash ->
+            daoDepositReader.recomputeCachedCompensation(checked) { hash ->
                 daoSyncManager.getCachedHeader(hash)?.dao
             }
         } catch (e: CancellationException) {
@@ -455,14 +475,14 @@ class DaoGateway(
         } catch (e: Exception) {
             logger.w(TAG, "DAO compensation recompute failed: ${e.message}")
             null
-        } ?: return entity
-        if (fresh == entity.compensation) return entity
+        } ?: return checked
+        if (fresh == checked.compensation) return checked
         mutations.add {
             appDatabase.daoCellDao().updateCompensation(
                 entity.txHash, entity.index, entity.network, entity.walletId, fresh,
             )
         }
-        return entity.copy(compensation = fresh)
+        return checked.copy(compensation = fresh)
     }
 
     /**

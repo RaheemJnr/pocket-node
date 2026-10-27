@@ -3,6 +3,8 @@ package com.rjnr.pocketnode.data.gateway
 import com.nervosnetwork.ckblightclient.LightClientNative
 import com.rjnr.pocketnode.data.database.entity.DaoCellEntity
 import com.rjnr.pocketnode.core.log.Logger
+import com.rjnr.pocketnode.data.gateway.models.Cell
+import com.rjnr.pocketnode.data.gateway.models.CellOutput
 import com.rjnr.pocketnode.data.gateway.models.DaoCellStatus
 import com.rjnr.pocketnode.data.gateway.models.DaoConstants
 import com.rjnr.pocketnode.data.gateway.models.DaoDeposit
@@ -17,6 +19,7 @@ import com.rjnr.pocketnode.data.gateway.models.NetworkType
 import com.rjnr.pocketnode.data.gateway.models.Script
 import com.rjnr.pocketnode.data.gateway.models.cyclePhaseFromProgress
 import com.rjnr.pocketnode.data.gateway.models.determineDaoStatus
+import kotlinx.coroutines.CancellationException
 import kotlinx.serialization.encodeToString
 import kotlinx.serialization.json.Json
 import javax.inject.Inject
@@ -155,8 +158,8 @@ class DaoDepositReader @Inject constructor(
 
     /**
      * Resolve compensation + epoch metadata for one DAO cell.
-     * Extracted from the monolithic loop body purely for readability;
-     * behavior is unchanged from the original `GatewayRepository.getDaoDeposits`.
+     * Withdrawing metadata remains unresolved until its per-cell header
+     * identity is established, independent of transaction dependency order.
      */
     private suspend fun resolveOneDeposit(
         jniCell: JniCell,
@@ -211,82 +214,46 @@ class DaoDepositReader @Inject constructor(
             header(blockHash)
         } else null
 
-        if (cellBlockHeader != null) {
-            val cellBlockEpoch = EpochInfo.fromHex(cellBlockHeader.epoch)
-            depositBlockHash = cellBlockHeader.hash
-            depositEpoch = cellBlockEpoch
-            depositTimestampMs = cellBlockHeader.timestamp.removePrefix("0x").toLong(16)
-
-            if (isWithdrawing) {
-                // Cell data contains deposit block number as 8-byte LE
-                val depositBlockNum = data.chunked(2)
-                    .map { it.toInt(16).toByte() }
-                    .toByteArray()
-                    .let { bytes ->
-                        var num = 0L
-                        for (i in bytes.indices) {
-                            num = num or ((bytes[i].toLong() and 0xFF) shl (i * 8))
-                        }
-                        num
-                    }
-
-                withdrawBlockNumber = cell.blockNumber.removePrefix("0x").toLong(16)
+        if (isWithdrawing) {
+            // Withdrawing data is an unsigned 8-byte LE deposit height. Heights
+            // outside the model's signed Long range remain unparseable rows.
+            depositBlockNumber = data.chunked(2).reversed().joinToString("").toLong(16)
+            withdrawBlockNumber = cell.blockNumber.removePrefix("0x").toLong(16)
+            val original = resolveWithdrawingDepositHeader(
+                cell, withdrawTx, cellBlockHeader, depositBlockNumber, ::header,
+            )
+            if (original != null && cellBlockHeader != null) {
                 withdrawBlockHash = cellBlockHeader.hash
-                withdrawEpoch = cellBlockEpoch
-                depositBlockNumber = depositBlockNum
-
-                // Original deposit header for compensation (cache-first). The
-                // phase-1 tx (`withdrawTx`) and its consumed outpoints were read
-                // up front (#434); reuse it here for the header dep.
-                val origDepositBlockHash = withdrawTx?.transaction?.headerDeps?.firstOrNull()
-                if (origDepositBlockHash != null) {
-                    depositBlockHash = origDepositBlockHash
-                }
-                val origDepositHeader = origDepositBlockHash?.let { h ->
-                    header(h)
-                }
-
-                if (origDepositHeader != null) {
-                    depositBlockHash = origDepositHeader.hash
-                    depositEpoch = EpochInfo.fromHex(origDepositHeader.epoch)
-                    depositTimestampMs = origDepositHeader.timestamp.removePrefix("0x").toLong(16)
-                    compensationFor(origDepositHeader.dao, cellBlockHeader.dao, capacityShannons)
-                        ?.let { compensation = it }
-                    val sinceHex = LightClientNative.nativeCalculateUnlockEpoch(
-                        origDepositHeader.epoch, cellBlockHeader.epoch
-                    )
-                    if (sinceHex != null) {
-                        val epochVal = sinceHex.removePrefix("0x").toLong(16) and 0x00FF_FFFF_FFFF_FFFFL
-                        unlockEpoch = EpochInfo.fromHex("0x${epochVal.toString(16)}")
-                        if (currentEpoch != null && unlockEpoch!!.value > currentEpoch.value) {
-                            lockRemainingHours = ((unlockEpoch!!.value - currentEpoch.value) * DaoConstants.HOURS_PER_EPOCH).toInt()
-                        }
+                withdrawEpoch = EpochInfo.fromHex(cellBlockHeader.epoch)
+                depositBlockHash = original.hash
+                depositEpoch = EpochInfo.fromHex(original.epoch)
+                depositTimestampMs = original.timestamp.removePrefix("0x").toLong(16)
+                compensationFor(original.dao, cellBlockHeader.dao, capacityShannons)
+                    ?.let { compensation = it }
+                val sinceHex = LightClientNative.nativeCalculateUnlockEpoch(
+                    original.epoch, cellBlockHeader.epoch
+                )
+                if (sinceHex != null) {
+                    val epochVal = sinceHex.removePrefix("0x").toLong(16) and 0x00FF_FFFF_FFFF_FFFFL
+                    unlockEpoch = EpochInfo.fromHex("0x${epochVal.toString(16)}")
+                    if (currentEpoch != null && unlockEpoch.value > currentEpoch.value) {
+                        lockRemainingHours = ((unlockEpoch.value - currentEpoch.value) * DaoConstants.HOURS_PER_EPOCH).toInt()
                     }
                 }
             } else {
-                // Deposited cell — calculate compensation using current tip header
-                val tipJson = LightClientNative.nativeGetTipHeader()
-                if (tipJson != null) {
-                    val tipHeader = json.decodeFromString<JniHeaderView>(tipJson)
-                    compensationFor(cellBlockHeader.dao, tipHeader.dao, capacityShannons)
-                        ?.let { compensation = it }
-                }
+                // Keep a basic withdrawing row, retrying all evidence next scan.
+                // In particular, the withdraw header is never deposit metadata.
+                logger.d(TAG, "Unresolved deposit header for $cellId")
             }
-        } else {
-            logger.d(TAG, "  No header available for $cellId — showing deposit with basic info")
-            if (isWithdrawing) {
-                val depositBlockNum = data.chunked(2)
-                    .map { it.toInt(16).toByte() }
-                    .toByteArray()
-                    .let { bytes ->
-                        var num = 0L
-                        for (i in bytes.indices) {
-                            num = num or ((bytes[i].toLong() and 0xFF) shl (i * 8))
-                        }
-                        num
-                    }
-                withdrawBlockNumber = cell.blockNumber.removePrefix("0x").toLong(16)
-                depositBlockNumber = depositBlockNum
+        } else if (cellBlockHeader != null) {
+            depositBlockHash = cellBlockHeader.hash
+            depositEpoch = EpochInfo.fromHex(cellBlockHeader.epoch)
+            depositTimestampMs = cellBlockHeader.timestamp.removePrefix("0x").toLong(16)
+            val tipJson = LightClientNative.nativeGetTipHeader()
+            if (tipJson != null) {
+                val tipHeader = json.decodeFromString<JniHeaderView>(tipJson)
+                compensationFor(cellBlockHeader.dao, tipHeader.dao, capacityShannons)
+                    ?.let { compensation = it }
             }
         }
 
@@ -365,6 +332,106 @@ class DaoDepositReader @Inject constructor(
             apc = apc,
             consumedDepositOutPoints = consumedDepositOutPoints,
         )
+    }
+
+    /**
+     * Resolve by the encoded height and current native canonical identity, never
+     * dependency order. DaoGateway's verification revision bounds this read and
+     * its staged cache writes; a cached or peer-fetched header alone is no proof
+     * that its hash is canonical. No negative evidence is cached here.
+     */
+    private suspend fun resolveWithdrawingDepositHeader(
+        cell: Cell,
+        phaseOne: JniTransactionWithStatus?,
+        withdrawHeader: JniHeaderView?,
+        depositHeight: Long,
+        header: suspend (String) -> JniHeaderView?,
+    ): JniHeaderView? {
+        val tx = phaseOne?.transaction ?: return null
+        val index = cell.outPoint.index.removePrefix("0x").toIntOrNull(16) ?: return null
+        if (phaseOne.txStatus.status != "committed" || tx.hash != cell.outPoint.txHash ||
+            withdrawHeader == null || phaseOne.txStatus.blockHash != withdrawHeader.hash ||
+            withdrawHeader.number.removePrefix("0x").toLongOrNull(16) !=
+                cell.blockNumber.removePrefix("0x").toLongOrNull(16) ||
+            tx.outputs.getOrNull(index) != CellOutput(cell.capacity, cell.lock, cell.type) || tx.outputsData.getOrNull(index) != cell.data
+        ) return null
+
+        fun canonical(height: Long): JniHeaderView? =
+            LightClientNative.nativeGetHeaderByNumber("0x${height.toString(16)}")
+                ?.let { json.decodeFromString<JniHeaderView>(it) }
+                ?.takeIf { it.number.removePrefix("0x").toLongOrNull(16) == height }
+
+        // Require the withdrawing transaction's block association to agree too.
+        val withdrawHeight = cell.blockNumber.removePrefix("0x").toLong(16)
+        if (canonical(withdrawHeight) != withdrawHeader || depositHeight >= withdrawHeight) return null
+        val canonicalDeposit = canonical(depositHeight) ?: return null
+        if (canonicalDeposit.hash !in tx.headerDeps) return null
+        val original = header(canonicalDeposit.hash)?.takeIf { it == canonicalDeposit } ?: return null
+
+        // DAO C validates phase-one input/output at the same GLOBAL index,
+        // including normal cells. Never infer linkage from capacity or ordering
+        // within the DAO group. A lock may change in this valid transition.
+        val previous = tx.inputs.getOrNull(index)?.previousOutput ?: return null
+        val parent = LightClientNative.nativeGetTransaction(previous.txHash)
+            ?.let { json.decodeFromString<JniTransactionWithStatus>(it) }
+        // Old parents may be outside the local scan window. Verified committed
+        // phase-one data + canonical identity still resolve the header, but do
+        // not claim independent parent evidence when it is unavailable.
+        if (parent?.transaction != null) {
+            val parentTx = parent.transaction ?: return null
+            val parentIndex = previous.index.removePrefix("0x").toIntOrNull(16) ?: return null
+            val deposited = parentTx.outputs.getOrNull(parentIndex) ?: return null
+            if (parent.txStatus.status != "committed" || parentTx.hash != previous.txHash ||
+                parent.txStatus.blockHash != original.hash || deposited.type != cell.type ||
+                deposited.capacity.removePrefix("0x").toLongOrNull(16) !=
+                    cell.capacity.removePrefix("0x").toLongOrNull(16) ||
+                parentTx.outputsData.getOrNull(parentIndex) != "0x0000000000000000"
+            ) return null
+        }
+        return original
+    }
+
+    /** Recheck old first-dependency metadata using the actual phase-one output.
+     * Cache-only positions may need a local transaction rescan before this can
+     * resolve; their existence and outside-window/pending overlays are retained.
+     * All native reads happen before DaoGateway's revision-bound write phase.
+     */
+    suspend fun revalidateCachedWithdrawing(
+        entity: DaoCellEntity,
+        currentEpoch: EpochInfo?,
+        network: NetworkType,
+    ): DaoCellEntity {
+        if (entity.withdrawBlockNumber == null) return entity
+        val unresolved = entity.copy(status = DaoCellStatus.LOCKED.name,
+            depositBlockHash = "", depositEpochHex = null, depositTimestamp = 0L,
+            compensation = 0L, unlockEpochHex = null)
+        return try {
+            val phase = LightClientNative.nativeGetTransaction(entity.txHash)
+                ?.let { json.decodeFromString<JniTransactionWithStatus>(it) } ?: return unresolved
+            val tx = phase.transaction ?: return unresolved
+            val index = entity.index.removePrefix("0x").toIntOrNull(16) ?: return unresolved
+            val output = tx.outputs.getOrNull(index) ?: return unresolved
+            val data = tx.outputsData.getOrNull(index) ?: return unresolved
+            if (data.length != 18 || data == "0x0000000000000000" ||
+                output.type != DaoConstants.DAO_TYPE_SCRIPT ||
+                output.capacity.removePrefix("0x").toLongOrNull(16) != entity.capacity
+            ) return unresolved
+            val cell = JniCell(output, data, entity.toCachedDeposit().outPoint,
+                "0x${entity.withdrawBlockNumber.toString(16)}", "0x0")
+            val fresh = resolveOneDeposit(cell, currentEpoch, network, mutableListOf())
+                .toDaoCellEntity(entity.network, entity.walletId, entity.lastUpdatedAt)
+            // These are the deposit-derived claims being revalidated. Pending
+            // intent and the stored withdrawing position remain independent.
+            entity.copy(status = fresh.status, depositBlockNumber = fresh.depositBlockNumber,
+                depositBlockHash = fresh.depositBlockHash, depositEpochHex = fresh.depositEpochHex,
+                depositTimestamp = fresh.depositTimestamp, compensation = fresh.compensation,
+                unlockEpochHex = fresh.unlockEpochHex)
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            logger.w(TAG, "Cached DAO deposit evidence unavailable: ${e.message}")
+            unresolved
+        }
     }
 
     /**

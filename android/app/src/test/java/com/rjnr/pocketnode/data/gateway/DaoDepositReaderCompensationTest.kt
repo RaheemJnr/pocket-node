@@ -3,6 +3,7 @@ package com.rjnr.pocketnode.data.gateway
 import com.rjnr.pocketnode.core.log.NoopLogger
 import com.rjnr.pocketnode.data.database.entity.DaoCellEntity
 import com.rjnr.pocketnode.data.gateway.DaoUnlockShadowLightClientNative.MaxWithdrawCall
+import com.rjnr.pocketnode.data.gateway.models.CellInput
 import com.rjnr.pocketnode.data.gateway.models.CellOutput
 import com.rjnr.pocketnode.data.gateway.models.DaoConstants
 import com.rjnr.pocketnode.data.gateway.models.JniCell
@@ -73,7 +74,7 @@ class DaoDepositReaderCompensationTest {
     private val headersByHash by lazy {
         mapOf(
             depositBlockHash to header(depositBlockHash, depositDao),
-            withdrawBlockHash to header(withdrawBlockHash, withdrawDao),
+            withdrawBlockHash to header(withdrawBlockHash, withdrawDao).copy(number = "0xc8"),
             tipBlockHash to header(tipBlockHash, tipDao),
         )
     }
@@ -85,6 +86,8 @@ class DaoDepositReaderCompensationTest {
         resetShadow()
         DaoUnlockShadowLightClientNative.tipHeader = json.encodeToString(header(tipBlockHash, tipDao))
 
+        DaoUnlockShadowLightClientNative.headersByNumber["0x64"] = json.encodeToString(headersByHash.getValue(depositBlockHash))
+        DaoUnlockShadowLightClientNative.headersByNumber["0xc8"] = json.encodeToString(headersByHash.getValue(withdrawBlockHash))
         val resolver = mockk<DaoHeaderResolver>()
         // The deposited cell sits in the deposit block, the withdrawing cell in
         // the withdraw block; its original deposit header comes via header_deps.
@@ -99,6 +102,8 @@ class DaoDepositReaderCompensationTest {
     fun teardown() = resetShadow()
 
     private fun resetShadow() {
+        DaoUnlockShadowLightClientNative.headersByNumber.clear()
+        DaoUnlockShadowLightClientNative.transactionsByHash.clear()
         DaoUnlockShadowLightClientNative.tipHeader = null
         DaoUnlockShadowLightClientNative.chainStatus = null
         DaoUnlockShadowLightClientNative.cellsPage = null
@@ -132,7 +137,7 @@ class DaoDepositReaderCompensationTest {
     @Test
     fun `withdrawing cell compensation uses the deposit cell occupied capacity`() = runTest {
         DaoUnlockShadowLightClientNative.cellsPage = cellsJson(withdrawingCell())
-        DaoUnlockShadowLightClientNative.transactionOverride = json.encodeToString(phaseOneTx())
+        DaoUnlockShadowLightClientNative.transactionsByHash[withdrawTx] = json.encodeToString(phaseOneTx())
 
         val deposit = reader.list(walletScript, currentEpoch = null, network = NetworkType.TESTNET).single()
 
@@ -198,9 +203,9 @@ class DaoDepositReaderCompensationTest {
             version = "0x0",
             cellDeps = emptyList(),
             headerDeps = listOf(depositBlockHash),
-            inputs = emptyList(),
-            outputs = emptyList(),
-            outputsData = emptyList(),
+            inputs = listOf(CellInput(previousOutput = OutPoint(depositTx, "0x0"))),
+            outputs = listOf(withdrawingCell().output),
+            outputsData = listOf(withdrawingCell().outputData!!),
             witnesses = emptyList(),
         ),
         txStatus = JniTxStatus(status = "committed", blockHash = withdrawBlockHash),

@@ -102,6 +102,7 @@ class DaoGatewayUnlockTest {
             db.pendingDaoUnlockDao(),
             NoopLogger, verificationCacheGate = verificationGate)
         depositReader = mockk()
+        coEvery { depositReader.revalidateCachedWithdrawing(any(), any(), any()) } answers { firstArg() }
         // A real LightClientReadOnly over a faked bridge: mocking its
         // Result-returning members directly trips mockk's value-class boxing.
         val json = Json { ignoreUnknownKeys = true }
@@ -674,6 +675,36 @@ class DaoGatewayUnlockTest {
         assertTrue("the retired row must not render: $deposits", deposits.isEmpty())
     }
 
+    @Test fun `fresh unresolved live cell clears stale cached unlock metadata`() = runTest {
+        seedCachedWithdrawingRow()
+        val unresolved = withdrawingDeposit().copy(status = DaoCellStatus.LOCKED,
+            depositBlockHash = "", depositEpoch = null, depositTimestamp = 0L,
+            unlockEpoch = null, compensation = 0L)
+        coEvery { depositReader.list(any(), any(), any(), any()) } returns listOf(unresolved)
+        val shown = gateway.getDaoDeposits(ctx()).getOrThrow().single()
+        val stored = db.daoCellDao().getByOutPoint(withdrawingOutPoint.txHash, withdrawingOutPoint.index)!!
+        assertEquals("", shown.depositBlockHash); assertNull(shown.unlockEpoch)
+        assertEquals("", stored.depositBlockHash); assertNull(stored.unlockEpochHex)
+        assertEquals("LOCKED", stored.status); assertEquals(0L, stored.compensation)
+    }
+
+    @Test fun `cached-only unresolved evidence is cleared durably while preserving position and marker`() = runTest {
+        seedCachedWithdrawingRow()
+        markUnlockInFlight("PENDING")
+        coEvery { depositReader.list(any(), any(), any(), any()) } returns emptyList()
+        coEvery { depositReader.revalidateCachedWithdrawing(any(), any(), any()) } answers {
+            firstArg<com.rjnr.pocketnode.data.database.entity.DaoCellEntity>().copy(
+                status = "LOCKED", depositBlockHash = "", depositEpochHex = null,
+                depositTimestamp = 0L, compensation = 0L, unlockEpochHex = null)
+        }
+        val shown = gateway.getDaoDeposits(ctx()).getOrThrow().single()
+        val stored = db.daoCellDao().getByOutPoint(withdrawingOutPoint.txHash, withdrawingOutPoint.index)!!
+        assertEquals(DaoCellStatus.UNLOCKING, shown.status)
+        assertEquals("", shown.depositBlockHash); assertNull(shown.unlockEpoch)
+        assertEquals("", stored.depositBlockHash); assertNull(stored.unlockEpochHex)
+        assertEquals(1, db.pendingDaoUnlockDao().getByWalletAndNetwork(walletId, network.name).size)
+    }
+
     @Test
     fun `a live cell spelled differently from its cached row is not duplicated`() = runTest {
         seedCachedWithdrawingRow()
@@ -891,7 +922,8 @@ class DaoUnlockShadowLightClientNative {
      * own answer when the node does not know the transaction.
      */
     @Implementation
-    fun nativeGetTransaction(hash: String): String? = transactionOverride?.also { transactionQueries += hash }
+    fun nativeGetTransaction(hash: String): String? = transactionsByHash[hash]?.also { transactionQueries += hash }
+        ?: transactionOverride?.also { transactionQueries += hash }
         ?: chainStatus.also { transactionQueries += hash }?.let {
             Json.encodeToString(
                 JniTransactionWithStatus(
@@ -912,6 +944,9 @@ class DaoUnlockShadowLightClientNative {
         @Suppress("UNUSED_PARAMETER") cursor: String?,
     ): String? = cellsPage
 
+    @Implementation
+    fun nativeGetHeaderByNumber(number: String): String? = headersByNumber[number]
+
     data class MaxWithdrawCall(val depositDao: String, val endDao: String, val occupied: Long)
 
     companion object {
@@ -927,6 +962,9 @@ class DaoUnlockShadowLightClientNative {
          * carrying header_deps). Null elsewhere.
          */
         var transactionOverride: String? = null
+
+        val transactionsByHash = mutableMapOf<String, String>()
+        val headersByNumber = mutableMapOf<String, String>()
 
         /** Every max-withdraw calculation asked of the bridge. */
         val maxWithdrawCalls = mutableListOf<MaxWithdrawCall>()

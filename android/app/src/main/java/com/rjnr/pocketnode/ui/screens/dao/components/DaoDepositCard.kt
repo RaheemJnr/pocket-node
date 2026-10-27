@@ -87,19 +87,20 @@ fun DaoDepositCard(
                     else "Compensation cycle ending soon"
                 }
                 DaoCellStatus.LOCKED -> {
-                    // "Unlockable in Xd Yh" was vague — didn't tell the user
-                    // what was happening or what the next action is. New copy
-                    // matches the verb on the action button ("Unlock") so the
-                    // countdown reads as "when this button becomes tappable".
-                    val hours = deposit.lockRemainingHours ?: 0
-                    val days = hours / 24
-                    val h = hours % 24
-                    val timeStr = when {
-                        days > 0 && h > 0 -> "${days}d ${h}h"
-                        days > 0 -> "${days}d"
-                        else -> "${h}h"
+                    // Missing evidence cannot be presented as a zero-hour wait.
+                    val hours = deposit.lockRemainingHours
+                    if (deposit.unlockEpoch == null || hours == null) {
+                        stringResource(R.string.dao_waiting_deposit_details)
+                    } else {
+                        val days = hours / 24
+                        val h = hours % 24
+                        val timeStr = when {
+                            days > 0 && h > 0 -> "${days}d ${h}h"
+                            days > 0 -> "${days}d"
+                            else -> "${h}h"
+                        }
+                        "Withdrawal in progress · Unlock in $timeStr"
                     }
-                    "Withdrawal in progress · Unlock in $timeStr"
                 }
                 DaoCellStatus.UNLOCKABLE -> "Ready to unlock!"
                 DaoCellStatus.DEPOSITING, DaoCellStatus.WITHDRAWING, DaoCellStatus.UNLOCKING ->
