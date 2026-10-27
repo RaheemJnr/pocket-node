@@ -28,6 +28,7 @@ use crate::{
 pub type BadMessageRateLimiter<T> = RateLimiter<T, DefaultKeyedStateStore<T>, DefaultClock>;
 
 pub struct Peers {
+    recovery: super::recovery::RecoveryRegistry,
     inner: DashMap<PeerIndex, Peer>,
     // The headers are fetching, the value is:
     fetching_headers: DashMap<Byte32, FetchInfo>,
@@ -63,6 +64,8 @@ pub struct Peers {
 
 #[derive(Clone)]
 pub struct Peer {
+    pub(crate) connection: [u8; 16],
+    pub(crate) txs_quarantined: bool,
     // The peer is just discovered when it's `None`.
     state: PeerState,
     blocks_proof_request: Option<BlocksProofRequest>,
@@ -73,6 +76,7 @@ pub struct Peer {
 }
 
 pub struct FetchInfo {
+    generation: [u8; 16],
     // the added timestamp
     added_ts: u64,
     // the first fetch timestamp
@@ -176,6 +180,8 @@ pub(crate) struct BlocksRequest {
 
 #[derive(Clone)]
 pub(crate) struct TransactionsProofRequest {
+    pub(crate) recovery: Option<super::recovery::RecoveryAttempt>,
+    pub(crate) generic_generations: Option<HashMap<Byte32, [u8; 16]>>,
     content: packed::GetTransactionsProof,
     when_sent: u64,
 }
@@ -200,6 +206,7 @@ pub(crate) struct LatestBlockFilterHashes {
 impl FetchInfo {
     pub fn new(added_ts: u64, first_sent: u64, timeout: bool, missing: bool) -> FetchInfo {
         FetchInfo {
+            generation: rand::random(),
             added_ts,
             first_sent,
             timeout,
@@ -216,6 +223,7 @@ impl FetchInfo {
     }
     fn new_add(added_ts: u64) -> FetchInfo {
         FetchInfo {
+            generation: rand::random(),
             added_ts,
             first_sent: 0,
             timeout: false,
@@ -457,7 +465,12 @@ impl BlocksRequest {
 
 impl TransactionsProofRequest {
     fn new(content: packed::GetTransactionsProof, when_sent: u64) -> Self {
-        Self { content, when_sent }
+        Self {
+            content,
+            when_sent,
+            recovery: None,
+            generic_generations: None,
+        }
     }
 
     pub(crate) fn last_hash(&self) -> Byte32 {
@@ -1079,6 +1092,8 @@ impl Peer {
         let check_point_number = check_point_interval * BlockNumber::from(start_check_point.0);
         let latest_block_filter_hashes = LatestBlockFilterHashes::new(check_point_number);
         Self {
+            connection: rand::random(),
+            txs_quarantined: false,
             state: Default::default(),
             blocks_proof_request: None,
             blocks_request: None,
@@ -1114,6 +1129,9 @@ impl Peer {
 }
 
 impl Peers {
+    pub fn recovery(&self) -> &super::recovery::RecoveryRegistry {
+        &self.recovery
+    }
     pub fn new(
         max_outbound_peers: u32,
         check_point_interval: BlockNumber,
@@ -1135,6 +1153,7 @@ impl Peers {
         };
 
         Self {
+            recovery: Default::default(),
             inner: Default::default(),
             fetching_headers: DashMap::new(),
             fetching_txs: DashMap::new(),
@@ -1214,6 +1233,7 @@ impl Peers {
                     // Insert with missing=true to prevent infinite retry loop
                     // This will be cleaned up when the DB range is removed
                     FetchInfo {
+                        generation: rand::random(),
                         added_ts: unix_time_as_millis(),
                         first_sent: 0,
                         timeout: false,
@@ -1268,6 +1288,18 @@ impl Peers {
         }
     }
     pub(crate) fn mark_fetching_txs_timeout(&self, peer_index: PeerIndex) {
+        // Keep the occupied slot quarantined until disconnected drains this session.
+        let attempt = if let Some(mut peer) = self.inner.get_mut(&peer_index) {
+            peer.txs_quarantined = true;
+            peer.txs_proof_request
+                .as_ref()
+                .and_then(|r| r.recovery.clone())
+        } else {
+            None
+        };
+        if let Some(attempt) = attempt {
+            self.recovery.fail_attempt(&attempt);
+        }
         if let Some(peer) = self.get_peer(&peer_index) {
             if let Some(request) = peer.get_txs_proof_request() {
                 for tx_hash in request.tx_hashes() {
@@ -1288,13 +1320,20 @@ impl Peers {
             }
         }
     }
-    pub(crate) fn fetching_idle_txs(&self, tx_hashes: &[Byte32], now: u64) {
-        for tx_hash in tx_hashes {
-            if let Some(mut value) = self.fetching_txs.get_mut(tx_hash) {
-                if value.first_sent == 0 {
-                    value.first_sent = now;
+    pub(crate) fn mark_txs_request_sent(&self, index: PeerIndex, now: u64) {
+        // App enqueue may race the network send. Mark only the frozen generation;
+        // a replacement must remain unsent and eligible for its own attempt.
+        let request = self.get_peer(&index).and_then(|p| p.txs_proof_request);
+        if let Some(generations) = request.and_then(|r| r.generic_generations) {
+            for (hash, expected) in generations {
+                if let Some(mut entry) = self.fetching_txs.get_mut(&hash) {
+                    if entry.generation == expected {
+                        if entry.first_sent == 0 {
+                            entry.first_sent = now;
+                        }
+                        entry.timeout = false;
+                    }
                 }
-                value.timeout = false;
             }
         }
     }
@@ -1611,6 +1650,79 @@ impl Peers {
                 hashes.map(|hashes| BlocksRequest::new(hashes, unix_time_as_millis()));
         }
     }
+    pub(crate) fn install_txs_proof_request(
+        &self,
+        index: PeerIndex,
+        connection: [u8; 16],
+        content: packed::GetTransactionsProof,
+        recovery: Option<super::recovery::RecoveryAttempt>,
+    ) -> bool {
+        let generic_generations = Some(
+            content
+                .tx_hashes()
+                .into_iter()
+                .filter_map(|hash| {
+                    self.fetching_txs
+                        .get(&hash)
+                        .map(|e| (hash.clone(), e.generation))
+                })
+                .collect(),
+        );
+        let mut request = TransactionsProofRequest::new(content, unix_time_as_millis());
+        request.recovery = recovery;
+        request.generic_generations = generic_generations;
+        if let Some(mut peer) = self.inner.get_mut(&index) {
+            if peer.connection == connection
+                && !peer.txs_quarantined
+                && peer.txs_proof_request.is_none()
+            {
+                peer.txs_proof_request = Some(request);
+                return true;
+            }
+        }
+        false
+    }
+    pub(crate) fn mark_requested_txs_missing(
+        &self,
+        hashes: &[Byte32],
+        request: &TransactionsProofRequest,
+    ) {
+        if let Some(generations) = &request.generic_generations {
+            for hash in hashes {
+                if let Some(expected) = generations.get(hash) {
+                    if let Some(mut entry) = self.fetching_txs.get_mut(hash) {
+                        if &entry.generation == expected {
+                            entry.missing = true;
+                        }
+                    }
+                }
+            }
+        } else {
+            self.mark_fetching_txs_missing(hashes);
+        }
+    }
+
+    pub(crate) fn remove_requested_transaction(
+        &self,
+        hash: &Byte32,
+        block: &Byte32,
+        request: &TransactionsProofRequest,
+    ) {
+        if let Some(generations) = &request.generic_generations {
+            if let Some(expected) = generations.get(hash) {
+                if self
+                    .fetching_txs
+                    .remove_if(hash, |_, e| &e.generation == expected)
+                    .is_some()
+                {
+                    self.remove_fetching_header(block);
+                }
+            }
+        } else {
+            self.remove_fetching_transaction(hash, block);
+        }
+    }
+
     pub(crate) fn update_txs_proof_request(
         &self,
         index: PeerIndex,

@@ -29,6 +29,7 @@ mod components;
 pub mod constant;
 mod peers;
 pub(crate) mod prelude;
+pub mod recovery;
 mod sampling;
 
 #[cfg(test)]
@@ -349,6 +350,8 @@ impl LightClientProtocol {
         let (old_total_difficulty, prev_last_header) = self.storage.get_last_state();
         let new_total_difficulty = new_prove_state.get_last_header().total_difficulty();
         if new_total_difficulty > old_total_difficulty {
+            // A failed/unwound update remains unavailable. No lock crosses await.
+            let recovery_update = self.peers.recovery().begin_chain_update().ok();
             let reorg_last_headers = new_prove_state.get_reorg_last_headers();
             if reorg_last_headers.is_empty() {
                 let prev_last_header_number: BlockNumber = prev_last_header.raw().number().unpack();
@@ -411,6 +414,14 @@ impl LightClientProtocol {
                     matched_blocks.clear();
                 } else {
                     warn!("long fork detected");
+                    if let Some(update) = recovery_update {
+                        let _ = self.peers.recovery().finish_chain_update(
+                            update,
+                            recovery::ChainSnapshot {
+                                anchor: prev_last_header,
+                            },
+                        );
+                    }
                     return Ok(false);
                 }
             }
@@ -420,6 +431,14 @@ impl LightClientProtocol {
                 &new_prove_state.get_last_header().header().data(),
                 new_prove_state.get_last_headers(),
             );
+            if let Some(update) = recovery_update {
+                let _ = self.peers.recovery().finish_chain_update(
+                    update,
+                    recovery::ChainSnapshot {
+                        anchor: new_prove_state.get_last_header().header().data(),
+                    },
+                );
+            }
         }
         self.peers()
             .update_prove_state(peer_index, new_prove_state)?;
@@ -720,7 +739,11 @@ impl LightClientProtocol {
     }
 
     async fn fetch_headers_txs(&mut self, nc: &BoxedCKBProtocolContext) {
-        if !self.peers.has_fetching_info() {
+        let recovery_hashes = self
+            .peers
+            .recovery()
+            .queued_hashes(recovery::Instant::now());
+        if !self.peers.has_fetching_info() && recovery_hashes.is_empty() {
             trace!("no fetching headers/transactions needed");
             return;
         }
@@ -775,15 +798,15 @@ impl LightClientProtocol {
             }
         }
 
-        for tx_hashes in self
-            .peers
-            .get_txs_to_fetch()
-            .chunks(GET_TRANSACTIONS_PROOF_LIMIT)
-        {
+        let mut txs_to_fetch = self.peers.get_txs_to_fetch();
+        txs_to_fetch.extend(recovery_hashes);
+        let mut seen = std::collections::HashSet::new();
+        txs_to_fetch.retain(|hash| seen.insert(hash.clone()));
+        for tx_hashes in txs_to_fetch.chunks(GET_TRANSACTIONS_PROOF_LIMIT) {
             if let Some(peer_index) = best_peers.iter().find(|peer_index| {
                 self.peers
                     .get_peer(peer_index)
-                    .map(|peer| peer.get_txs_proof_request().is_none())
+                    .map(|peer| !peer.txs_quarantined && peer.get_txs_proof_request().is_none())
                     .unwrap_or(false)
             }) {
                 debug!("send transaction proof request to peer: {}", peer_index);
@@ -803,8 +826,31 @@ impl LightClientProtocol {
                     .set(content.clone())
                     .build();
 
-                self.peers
-                    .update_txs_proof_request(*peer_index, Some(content));
+                let Some(peer) = self.peers.get_peer(peer_index) else {
+                    continue;
+                };
+                let attempt = self
+                    .peers
+                    .recovery()
+                    .freeze(
+                        &dedup_hashes,
+                        peer.connection,
+                        &tip_header,
+                        recovery::Instant::now(),
+                    )
+                    .ok()
+                    .flatten();
+                if !self.peers.install_txs_proof_request(
+                    *peer_index,
+                    peer.connection,
+                    content,
+                    attempt.clone(),
+                ) {
+                    if let Some(attempt) = attempt {
+                        self.peers.recovery().fail_attempt(&attempt);
+                    }
+                    continue;
+                }
                 if let Err(err) = nc.send_message(
                     SupportProtocols::LightClient.protocol_id(),
                     *peer_index,
@@ -813,8 +859,11 @@ impl LightClientProtocol {
                     let error_message =
                         format!("nc.send_message LightClientMessage, error: {:?}", err);
                     info!("{}", error_message);
+                    self.peers.mark_fetching_txs_timeout(*peer_index);
+                    let _ = nc.disconnect(*peer_index, "transaction proof send failed");
+                    continue;
                 }
-                self.peers.fetching_idle_txs(&dedup_hashes, now);
+                self.peers.mark_txs_request_sent(*peer_index, now);
             } else {
                 debug!("all valid peers are busy for fetching transactions");
                 break;

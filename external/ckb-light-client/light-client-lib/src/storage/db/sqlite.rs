@@ -163,7 +163,9 @@ impl BatchWriter for Batch {
     }
 
     fn commit(self) -> Result<()> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.conn.lock().map_err(|_| {
+            crate::error::Error::runtime("storage batch lock poisoned")
+        })?;
         let tx = conn.unchecked_transaction().map_err(|e| {
             crate::error::Error::runtime(format!("Failed to begin transaction: {}", e))
         })?;

@@ -477,22 +477,36 @@ pub trait LightClientStorage: StorageBackend {
         batch.commit().expect("batch commit should be ok");
     }
 
-    /// Add fetched transaction
+    /// Add fetched transaction with the existing unknown-ordinal sentinel.
     fn add_fetched_tx(&self, tx: &Transaction, hwe: &HeaderWithExtension) {
+        self.try_add_fetched_txs(&[(tx, hwe)])
+            .expect("batch commit should be ok");
+    }
+
+    /// Persist verified associations atomically without swallowing backend failure.
+    /// This does not change script indexes or claim output liveness/index completeness.
+    /// Membership proofs do not provide the transaction's block-order ordinal.
+    fn try_add_fetched_txs(
+        &self,
+        transactions: &[(&Transaction, &HeaderWithExtension)],
+    ) -> crate::error::Result<()> {
+        if transactions.is_empty() {
+            return Ok(());
+        }
         let mut batch = self.batch();
-        let block_hash = hwe.header.calc_header_hash();
-        let block_number: u64 = hwe.header.raw().number().unpack();
-        batch.put(&Key::BlockHash(&block_hash).into_vec(), &hwe.to_vec());
-        batch.put(
-            &Key::BlockNumber(block_number).into_vec(),
-            block_hash.as_slice(),
-        );
-        let tx_hash = tx.calc_tx_hash();
-        let tx_index = u32::MAX;
-        let key = Key::TxHash(&tx_hash).into_vec();
-        let value: Vec<u8> = Value::Transaction(block_number, tx_index as TxIndex, tx).into();
-        batch.put(&key, &value);
-        batch.commit().expect("batch commit should be ok");
+        for (tx, hwe) in transactions {
+            let block_hash = hwe.header.calc_header_hash();
+            let block_number: u64 = hwe.header.raw().number().unpack();
+            batch.put(&Key::BlockHash(&block_hash).into_vec(), &hwe.to_vec());
+            batch.put(
+                &Key::BlockNumber(block_number).into_vec(),
+                block_hash.as_slice(),
+            );
+            let tx_hash = tx.calc_tx_hash();
+            let value: Vec<u8> = Value::Transaction(block_number, u32::MAX as TxIndex, tx).into();
+            batch.put(&Key::TxHash(&tx_hash).into_vec(), &value);
+        }
+        batch.commit()
     }
 
     /// Filter and store block data
