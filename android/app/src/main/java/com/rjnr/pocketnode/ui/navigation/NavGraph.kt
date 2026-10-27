@@ -140,6 +140,7 @@ fun CkbNavGraph(
     navController: NavHostController,
     startDestination: String = Screen.Onboarding.route,
     pinManager: PinManager,
+    sessionUnlocked: Boolean = false,
     needsMnemonicBackup: () -> Boolean = { false },
     // Cold-start unlock on the Auth route (#524: lets MainActivity tell a
     // process that has been unlocked from one restored after process death).
@@ -234,7 +235,14 @@ fun CkbNavGraph(
         }
 
         composable(Screen.Auth.route) { backStackEntry ->
-            AuthScreen(
+            if (sessionUnlocked) {
+                // The activity overlay already performed authentication and migration.
+                LaunchedEffect(Unit) {
+                    navController.navigate(destinationAfterWalletReady()) {
+                        popUpTo(Screen.Auth.route) { inclusive = true }
+                    }
+                }
+            } else AuthScreen(
                 onAuthSuccess = {
                     onAuthUnlocked()
                     navController.navigate(destinationAfterWalletReady()) {
@@ -627,7 +635,9 @@ fun CkbNavGraph(
 
         composable(Screen.InitialPinSetup.route) {
             InitialPinSetupScreen(
+                onForgotPin = { navController.navigate(Screen.ForgotPin.route) },
                 onPinCreated = {
+                    onAuthUnlocked()
                     // #286: surface background sync at the point of choice,
                     // right after the mandatory PIN step. The opt-in screen
                     // self-skips when the preference is already set.

@@ -62,6 +62,7 @@ class SecuritySettingsViewModelTest {
         keyManager = mockk(relaxed = true)
         walletDao = mockk(relaxed = true)
 
+        every { authManager.hasSessionPin() } returns true
         every { authManager.isBiometricAvailable() } returns AuthManager.BiometricStatus.AVAILABLE
         every { authManager.isBiometricEnabled() } returns false
         every { authManager.isAuthBeforeSendEnabled() } returns false
@@ -178,6 +179,45 @@ class SecuritySettingsViewModelTest {
         org.junit.Assert.assertTrue(vm.uiState.value.vaultMessage!!.contains("Cancelled"))
         coVerify(exactly = 0) { operations.change(any()) }
         coVerify(exactly = 0) { operations.enroll(any(), any(), any()) }
+    }
+
+    @Test fun `restored pending security action cannot change settings without a live PIN session`() = runTest {
+        every { authManager.hasSessionPin() } returns false
+        val vm = newViewModel()
+        advanceUntilIdle()
+        vm.setPendingAction(PendingSecurityAction.ENABLE_AUTH_BEFORE_SEND)
+        vm.executePendingAction()
+        advanceUntilIdle()
+        assertEquals(false, vm.uiState.value.isAuthBeforeSendEnabled)
+        verify(exactly = 0) { authManager.setAuthBeforeSendEnabled(any()) }
+    }
+
+    @Test fun `biometric warning cannot apply after the credential session is cleared`() = runTest {
+        coEvery { walletDao.count() } returns 1
+        val vm = newViewModel()
+        advanceUntilIdle()
+        vm.setPendingAction(PendingSecurityAction.ENABLE_BIOMETRIC)
+        vm.executePendingAction()
+        advanceUntilIdle()
+        assertNotNull(vm.uiState.value.biometricEnrollmentWarning)
+        every { authManager.hasSessionPin() } returns false
+        vm.confirmBiometricEnrollmentWarning()
+        assertEquals(false, vm.uiState.value.isBiometricEnabled)
+        verify(exactly = 0) { authManager.setBiometricEnabled(any()) }
+    }
+
+    @Test fun `all restored sensitive actions fail closed without a live PIN session`() = runTest {
+        every { authManager.hasSessionPin() } returns false
+        for (action in PendingSecurityAction.entries) {
+            val vm = newViewModel()
+            advanceUntilIdle()
+            vm.setPendingAction(action)
+            vm.executePendingAction()
+            advanceUntilIdle()
+        }
+        verify(exactly = 0) { pinManager.removePin(any()) }
+        verify(exactly = 0) { authManager.setBiometricEnabled(any()) }
+        verify(exactly = 0) { authManager.setAuthBeforeSendEnabled(any()) }
     }
 
 }

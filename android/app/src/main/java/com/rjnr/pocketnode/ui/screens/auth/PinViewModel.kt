@@ -65,6 +65,12 @@ class PinViewModel @Inject constructor(
         }
     }
 
+    internal fun hasPersistedPin(): Boolean = pinManager.hasPin()
+
+    /** A restored setup destination may consume fresh overlay auth, never PIN existence alone. */
+    internal fun canCompleteInitialSetup(): Boolean =
+        pinManager.hasPin() && authManager.hasSessionPin()
+
     fun setMode(mode: PinMode) {
         val (title, subtitle) = when (mode) {
             PinMode.SETUP -> "Create PIN" to "Choose a 6-digit PIN"
@@ -119,6 +125,8 @@ class PinViewModel @Inject constructor(
 
     private fun handlePinSubmit(pin: String) {
         val mode = _uiState.value.mode
+        val lockSession = ReauthLockEvents.locks.value
+        val authGeneration = authManager.sessionGeneration()
         when (mode) {
             PinMode.SETUP -> {
                 _uiState.update { it.copy(pinComplete = true) }
@@ -133,11 +141,24 @@ class PinViewModel @Inject constructor(
                 viewModelScope.launch {
                     // Argon2id KDF takes ~300-600 ms on a real device. Run off
                     // the main thread so the keypad doesn't freeze.
-                    withContext(Dispatchers.Default) { pinManager.setPin(pin) }
-                    // Seed the session PIN so KeyManager.writeBackupIfPinAvailable can
-                    // immediately encrypt KeyBackupManager material for any future
-                    // wallet create/import / mnemonic-backed-up writes.
-                    authManager.setSessionPin(pin.toCharArray())
+                    try {
+                        withContext(Dispatchers.Default) { pinManager.setPin(pin) }
+                    } catch (cancelled: kotlinx.coroutines.CancellationException) {
+                        throw cancelled
+                    } catch (_: IllegalStateException) {
+                        setupPin = null
+                        _uiState.update { it.copy(isVerifying = false, pinComplete = false) }
+                        showError("PIN setup is unavailable. Unlock your wallet or finish resetting it first.")
+                        return@launch
+                    }
+                    if (lockSession != ReauthLockEvents.locks.value || !publishSession(pin, authGeneration)) {
+                        // Setup may have persisted while stopped. Require entry of that PIN,
+                        // including when the user returned before the KDF finished.
+                        setupPin = null
+                        setMode(PinMode.VERIFY)
+                        _uiState.update { it.copy(isVerifying = false) }
+                        return@launch
+                    }
                     _uiState.update { it.copy(isVerifying = false, pinComplete = true) }
                 }
             }
@@ -146,8 +167,17 @@ class PinViewModel @Inject constructor(
                 _uiState.update { it.copy(isVerifying = true) }
                 viewModelScope.launch {
                     val ok = withContext(Dispatchers.Default) { pinManager.verifyPin(pin) }
+                    if (lockSession != ReauthLockEvents.locks.value ||
+                        authGeneration != authManager.sessionGeneration()
+                    ) {
+                        _uiState.update { it.copy(isVerifying = false, pinComplete = false, enteredDigits = "") }
+                        return@launch
+                    }
                     if (ok) {
-                        authManager.setSessionPin(pin.toCharArray())
+                        if (!publishSession(pin, authGeneration)) {
+                            _uiState.update { it.copy(isVerifying = false, pinComplete = false, enteredDigits = "") }
+                            return@launch
+                        }
                         // Correct PIN restores full attempts (PinManager reset)
                         // — mirror that here and drop any recovery dialog so it
                         // can't reappear after a successful unlock.
@@ -189,6 +219,12 @@ class PinViewModel @Inject constructor(
                 }
             }
         }
+    }
+
+    private fun publishSession(pin: String, generation: Long): Boolean {
+        val chars = pin.toCharArray()
+        return try { authManager.setSessionPinIfCurrent(chars, generation) }
+        finally { chars.fill('\u0000') }
     }
 
     private fun showError(message: String) {

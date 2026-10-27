@@ -232,9 +232,14 @@ class WalletSettingsViewModel @Inject constructor(
                 // gateway must follow even if the user leaves the screen
                 // (viewModelScope cancelled) mid-way, or it stays on the
                 // deleted wallet. Hence NonCancellable for the whole sequence.
+                var cleanupPending = false
                 withContext(NonCancellable) {
                     nextActiveId?.let { walletRepository.switchActiveWallet(it) }
-                    walletRepository.deleteWallet(walletId)
+                    try {
+                        walletRepository.deleteWallet(walletId)
+                    } catch (_: com.rjnr.pocketnode.data.wallet.WalletCleanupPendingException) {
+                        cleanupPending = true
+                    }
                     // #563: the switch only changed Room. Move the gateway
                     // (Home, Settings, sync registration) onto the active
                     // wallet now, after the delete, so no set includes the
@@ -247,7 +252,7 @@ class WalletSettingsViewModel @Inject constructor(
                         logger.w(TAG, "Re-registration after deleting $walletId failed", e)
                     }
                 }
-                _uiState.update { it.copy(showDeleteConfirm = false, deleted = true) }
+                _uiState.update { it.copy(showDeleteConfirm = false, deleted = !cleanupPending, cleanupPending = cleanupPending) }
             } catch (e: Exception) {
                 logger.e(TAG, "Failed to delete wallet", e)
                 _uiState.update {
@@ -255,6 +260,10 @@ class WalletSettingsViewModel @Inject constructor(
                 }
             }
         }
+    }
+
+    fun acknowledgeCleanupPending() {
+        _uiState.update { if (it.cleanupPending) it.copy(cleanupPending = false, deleted = true) else it }
     }
 
     // -- Wallet type helpers --
@@ -373,6 +382,7 @@ data class WalletSettingsUiState(
     val daoDepositAmount: String = "",
     val pendingTxCount: Int = 0,
     val deleted: Boolean = false,
+    val cleanupPending: Boolean = false,
     val error: com.rjnr.pocketnode.ui.util.UiMessage? = null,
     val hasMnemonic: Boolean? = null,
 )
