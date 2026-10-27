@@ -2921,6 +2921,21 @@
             <sha256 value="313367a8992f76164bf8e5207ea330b5749927f19fe7657a4d3dcec373ed442a" origin="Fresh repository download; no publisher SHA256: https://repo.maven.apache.org/maven2/com/google/guava/guava-parent/32.1.1-android/guava-parent-32.1.1-android.pom" />
          </artifact>
       </component>
+      <component group="com.google.guava" name="guava-parent" version="32.1.1-jre">
+         <artifact name="guava-parent-32.1.1-jre.pom">
+            <sha256 value="06aa5d1ac068f2f809530f3ff53fb5c8c940152a253623d0b53c4f53f5a13a3d" origin="Fresh repository download; no publisher SHA256: https://repo.maven.apache.org/maven2/com/google/guava/guava-parent/32.1.1-jre/guava-parent-32.1.1-jre.pom" />
+         </artifact>
+      </component>
+      <component group="com.google.guava" name="guava-parent" version="33.0.0-jre">
+         <artifact name="guava-parent-33.0.0-jre.pom">
+            <sha256 value="040cc88c680b413d70ba9fc8371b36093021b10996aa3598621de767d418229a" origin="Fresh repository download; no publisher SHA256: https://repo.maven.apache.org/maven2/com/google/guava/guava-parent/33.0.0-jre/guava-parent-33.0.0-jre.pom" />
+         </artifact>
+      </component>
+      <component group="com.google.guava" name="guava-parent" version="33.2.1-jre">
+         <artifact name="guava-parent-33.2.1-jre.pom">
+            <sha256 value="9095f6d8ee3765950207510785830cc2280e781067915fa99cfe1740d4865c14" origin="Fresh repository download; no publisher SHA256: https://repo.maven.apache.org/maven2/com/google/guava/guava-parent/33.2.1-jre/guava-parent-33.2.1-jre.pom" />
+         </artifact>
+      </component>
       <component group="com.google.guava" name="guava-parent" version="33.3.1-jre">
          <artifact name="guava-parent-33.3.1-jre.pom">
             <sha256 value="55441db27e8869dfefe053059bdf478bdc7e95585642bf391f0023345fd56287" origin="Fresh repository download; no publisher SHA256: https://repo.maven.apache.org/maven2/com/google/guava/guava-parent/33.3.1-jre/guava-parent-33.3.1-jre.pom" />
@@ -5298,6 +5313,11 @@
             <sha256 value="1239e9dbe1397cd5971342956b2511bc3ace7b641842e4372a088dcfa8b9ad55" origin="Repository SHA256: https://repo.maven.apache.org/maven2/org/jetbrains/kotlinx/kotlinx-coroutines-bom/1.8.0/kotlinx-coroutines-bom-1.8.0.pom.sha256" />
          </artifact>
       </component>
+      <component group="org.jetbrains.kotlinx" name="kotlinx-coroutines-bom" version="1.8.1">
+         <artifact name="kotlinx-coroutines-bom-1.8.1.pom">
+            <sha256 value="563e4aa29fa8fe09a6e1746d0a5b51308f7c7dedc468dc5a0ca810a485877030" origin="Repository SHA256: https://repo.maven.apache.org/maven2/org/jetbrains/kotlinx/kotlinx-coroutines-bom/1.8.1/kotlinx-coroutines-bom-1.8.1.pom.sha256" />
+         </artifact>
+      </component>
       <component group="org.jetbrains.kotlinx" name="kotlinx-coroutines-bom" version="1.9.0">
          <artifact name="kotlinx-coroutines-bom-1.9.0.pom">
             <sha256 value="bea5511e9001f2c593ab5080df131b219ab5e2085cc5979ce583eacd4946fd78" origin="Repository SHA256: https://repo.maven.apache.org/maven2/org/jetbrains/kotlinx/kotlinx-coroutines-bom/1.9.0/kotlinx-coroutines-bom-1.9.0.pom.sha256" />
@@ -5717,6 +5737,9 @@
       <component group="org.junit" name="junit-bom" version="5.8.2">
          <artifact name="junit-bom-5.8.2.module">
             <sha256 value="40cfad993fa70ecdf2af74d0c56da1484ee220964be8f932cfe632be9a2733fa" origin="Repository SHA256: https://repo.maven.apache.org/maven2/org/junit/junit-bom/5.8.2/junit-bom-5.8.2.module.sha256" />
+         </artifact>
+         <artifact name="junit-bom-5.8.2.pom">
+            <sha256 value="836069ca9e8ee3c56e48376222da291263f137bd3fd16d84fdd47efcc3f286e2" origin="Repository SHA256: https://repo.maven.apache.org/maven2/org/junit/junit-bom/5.8.2/junit-bom-5.8.2.pom.sha256" />
          </artifact>
       </component>
       <component group="org.junit" name="junit-bom" version="5.9.2">
