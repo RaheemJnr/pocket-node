@@ -280,7 +280,8 @@ class DaoDepositHeaderCacheIntegrationTest {
         native.cellsPage = json.encodeToString(JniPagination(emptyList<JniCell>(), null))
         repeat(2) {
             val positions = gateway.getDaoDeposits(ctx()).getOrThrow()
-            assertEquals(2, positions.size)
+            assertEquals(1, positions.size)
+            assertEquals(original.capacity, positions.sumOf { it.capacity })
             positions.forEach(::unresolved)
         }
     }
@@ -301,6 +302,54 @@ class DaoDepositHeaderCacheIntegrationTest {
         assertNullAliasHistory(live = true, matches = true)
     }
 
+    @Test fun `cached aliases display one capacity while both rows refresh canonical metadata`() = runTest {
+        val original = reader.list(script, null, network).single().toDaoCellEntity(network.name, "wallet", 7)
+            .copy(withdrawEpochHex = deposit.epoch)
+        db.daoCellDao().upsert(original.copy(index = "0x00"))
+        db.daoCellDao().upsert(original)
+        native.cellsPage = json.encodeToString(JniPagination(emptyList<JniCell>(), null))
+        repeat(3) {
+            val shown = gateway.getDaoDeposits(ctx()).getOrThrow()
+            assertEquals(1, shown.size)
+            assertEquals(original.capacity, shown.sumOf { it.capacity })
+            resolved(shown.single())
+            assertEquals("0x0", shown.single().outPoint.index)
+            assertTrue(shown.single().outsideSyncWindow)
+            val stored = db.daoCellDao().getActiveByWalletAndNetwork("wallet", network.name)
+            assertEquals(2, stored.size)
+            assertEquals(setOf("0x0", "0x00"), stored.map { it.index }.toSet())
+            stored.forEach {
+                assertEquals(withdraw.hash, it.withdrawBlockHash)
+                assertEquals(withdraw.epoch, it.withdrawEpochHex)
+                assertEquals(original.withdrawBlockNumber, it.withdrawBlockNumber)
+            }
+        }
+    }
+
+    @Test fun `cached display prefers unresolved evidence over an actionable alias`() = runTest {
+        val original = reader.list(script, null, network).single().toDaoCellEntity(network.name, "wallet", 7)
+        db.daoCellDao().upsert(original)
+        // This alias no longer matches the native output, so its proof must clear.
+        db.daoCellDao().upsert(original.copy(index = "0x00", capacity = original.capacity + 1))
+        native.cellsPage = json.encodeToString(JniPagination(emptyList<JniCell>(), null))
+        val shown = gateway.getDaoDeposits(ctx()).getOrThrow().single()
+        unresolved(shown)
+        assertEquals("0x00", shown.outPoint.index)
+        assertEquals(2, db.daoCellDao().getActiveByWalletAndNetwork("wallet", network.name).size)
+    }
+
+    @Test fun `cached display preserves a pending alias over a resolved actionable alias`() = runTest {
+        val original = reader.list(script, null, network).single().toDaoCellEntity(network.name, "wallet", 7)
+        db.daoCellDao().upsert(original)
+        db.daoCellDao().upsert(original.copy(index = "0x00", status = DaoCellStatus.UNLOCKING.name))
+        native.cellsPage = json.encodeToString(JniPagination(emptyList<JniCell>(), null))
+        val shown = gateway.getDaoDeposits(ctx()).getOrThrow().single()
+        assertEquals(DaoCellStatus.UNLOCKING, shown.status)
+        assertEquals("0x00", shown.outPoint.index)
+        assertEquals(original.capacity, shown.capacity)
+        assertEquals(2, db.daoCellDao().getActiveByWalletAndNetwork("wallet", network.name).size)
+    }
+
     private suspend fun assertNullAliasHistory(live: Boolean, matches: Boolean) {
         val original = reader.list(script, null, network).single().toDaoCellEntity(network.name, "wallet", 7)
         val oldHash = if (matches) withdraw.hash else hash("cf")
@@ -315,7 +364,8 @@ class DaoDepositHeaderCacheIntegrationTest {
                 native.cellsPage = json.encodeToString(JniPagination(if (live) listOf(cell) else emptyList(), null))
                 repeat(3) {
                     val shown = gateway.getDaoDeposits(ctx()).getOrThrow()
-                    assertEquals(if (live) 1 else 2, shown.size)
+                    assertEquals(1, shown.size)
+                    assertEquals(original.capacity, shown.sumOf { it.capacity })
                     shown.forEach { position ->
                         if (matches) resolved(position) else unresolved(position)
                         assertEquals(!live, position.outsideSyncWindow)

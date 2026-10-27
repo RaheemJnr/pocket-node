@@ -470,7 +470,25 @@ class DaoGateway(
         if (outsideWindow.isNotEmpty()) {
             logger.i(TAG, "DAO merge: ${outsideWindow.size} cached deposit(s) predate sync window (start=$windowStart)")
         }
-        return checkedLive + confirming + outsideWindow
+        // Every alias above has been validated and staged. Deduplicate only
+        // presentation, so aliases cannot double the position's displayed capacity.
+        // Unknown evidence wins over an actionable alias; pending markers are
+        // applied after this merge and still paint the single position confirming.
+        return (checkedLive + confirming + outsideWindow)
+            .groupBy { normalizedOutPointKey(it.outPoint.txHash, it.outPoint.index) }
+            .values.map { aliases ->
+                aliases.minWith(compareBy<DaoDeposit> { position ->
+                    when {
+                        position.withdrawBlockNumber != null &&
+                            (position.depositBlockHash.isEmpty() || position.depositEpoch == null ||
+                                position.withdrawBlockHash == null || position.withdrawEpoch == null ||
+                                position.unlockEpoch == null) -> 0
+                        position.status in setOf(DaoCellStatus.DEPOSITING, DaoCellStatus.WITHDRAWING,
+                            DaoCellStatus.UNLOCKING) -> 1
+                        else -> 2
+                    }
+                }.thenBy { it.outPoint.index })
+            }
     }
 
     /**
