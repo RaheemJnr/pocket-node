@@ -162,6 +162,20 @@ pub fn cancel_dao_recovery(request_id: &str) -> Result<String, BridgeError> {
     call("cancel", request_id, "")
 }
 
+/// Test seam for real protocol fixtures; uses the production envelope adapter.
+#[cfg(test)]
+pub(crate) fn protocol_fixture_call(
+    registry: &RecoveryRegistry, operation: &str, first: &str, second: &str,
+) -> Value {
+    serde_json::from_str(&Adapter { state: STATE_RUNNING, registry }
+        .call(operation, first, second).unwrap()).unwrap()
+}
+
+#[cfg(test)]
+pub(crate) fn protocol_fixture_request_id(envelope: &Value) -> RequestId {
+    decode("q", envelope["result"]["request_id"].as_str().unwrap()).unwrap()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

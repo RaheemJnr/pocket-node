@@ -1507,6 +1507,32 @@ async fn recovery_changed_tip_case(with_recovery: bool) {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn recovery_real_fork_reinclusion_and_commit_invalidation() {
+    recovery_fork_fixture(false).await;
+}
+
+/// Synthetic DAO-shaped membership only: producer skips full-node consensus
+/// checks, while the unchanged light-client handler verifies all proof fields.
+#[tokio::test(flavor = "multi_thread")]
+async fn recovery_dao_protocol_bridge_fixture() {
+    recovery_fork_fixture(true).await;
+}
+
+fn fixture_all_switches<T: FromIterator<T> + std::ops::Not<Output = T>>() -> T {
+    !std::iter::empty::<T>().collect::<T>()
+}
+
+fn mine_membership_fixture(chain: &impl RunningChainExt, block: ckb_types::core::BlockView) {
+    let number = block.number();
+    // Switch::DISABLE_ALL, inferred to avoid adding a direct transitive dependency.
+    // Only this synthetic producer bypasses consensus; no protocol switch exists.
+    assert!(chain.controller().blocking_process_block_with_switch(
+        Arc::new(block), fixture_all_switches()).unwrap());
+    while chain.tx_pool().get_tx_pool_info().unwrap().tip_number != number {}
+}
+
+async fn recovery_fork_fixture(dao_fixture: bool) {
+    use crate::bridge_core::dao_recovery::{protocol_fixture_call as bridge, protocol_fixture_request_id};
+    use serde_json::json;
     use crate::protocols::light_client::recovery::{
         ChainSnapshot, RecoveryIdentity, RecoveryStatus,
     };
@@ -1514,7 +1540,16 @@ async fn recovery_real_fork_reinclusion_and_commit_invalidation() {
     use std::{collections::HashSet, time::Instant};
     let chain = MockChain::new_with_dummy_pow("recovery-real-fork").start();
     chain.mine_to(20);
-    let tx = chain.get_cellbase_as_input(13);
+    let base_tx = chain.get_cellbase_as_input(13);
+    let tx = if dao_fixture {
+        let dao_type = packed::Script::new_builder()
+            .code_hash(h256!("0x82d76d1b75fe2fd9a27dfbaa65a039221a380d76c926f378d3f81cf3e7e13f2e").pack())
+            .hash_type(ckb_types::core::ScriptHashType::Type).build();
+        base_tx.as_advanced_builder()
+            .set_outputs(vec![base_tx.outputs().get(0).unwrap().as_builder().type_(Some(dao_type).pack()).build()])
+            .set_outputs_data(vec![ckb_types::bytes::Bytes::from(13u64.to_le_bytes().to_vec()).pack()])
+            .build()
+    } else { base_tx };
     chain.mine_block(|block| {
         block
             .as_advanced_builder()
@@ -1522,7 +1557,12 @@ async fn recovery_real_fork_reinclusion_and_commit_invalidation() {
             .build()
     });
     chain.mine_blocks(1);
-    chain.mine_block(|block| block.as_advanced_builder().transaction(tx.clone()).build());
+    if dao_fixture {
+        let block: packed::Block = chain.shared().get_block_template(None, None, None).unwrap().unwrap().into();
+        mine_membership_fixture(&chain, block.as_advanced_builder().transaction(tx.clone()).build());
+    } else {
+        chain.mine_block(|block| block.as_advanced_builder().transaction(tx.clone()).build());
+    }
     chain.mine_to(25);
     let old = chain.shared().snapshot().get_block_by_number(23).unwrap();
     let last: VerifiableHeader = chain
@@ -1555,7 +1595,7 @@ async fn recovery_real_fork_reinclusion_and_commit_invalidation() {
         .initialize(
             RecoveryIdentity {
                 genesis_hash: chain.consensus().genesis_block().hash(),
-                store_generation: "isolated-fork-store".into(),
+                store_generation: "e".repeat(32),
                 run_nonce: [5; 16],
             },
             ChainSnapshot {
@@ -1590,13 +1630,14 @@ async fn recovery_real_fork_reinclusion_and_commit_invalidation() {
                 .build()
         });
     }
-    chain.mine_block(|block| {
+    let include = |block: packed::Block| {
         let cellbase = block.transactions().get(0).unwrap().into_view();
-        block
-            .as_advanced_builder()
-            .set_transactions(vec![cellbase, tx.clone()])
-            .build()
-    });
+        block.as_advanced_builder().set_transactions(vec![cellbase, tx.clone()]).build()
+    };
+    if dao_fixture {
+        let block: packed::Block = chain.shared().get_block_template(None, None, None).unwrap().unwrap().into();
+        mine_membership_fixture(&chain, include(block));
+    } else { chain.mine_block(include); }
     chain.mine_to(28);
     let fresh = chain.shared().snapshot().get_block_by_number(25).unwrap();
     assert_ne!(fresh.hash(), old.hash());
@@ -1645,7 +1686,8 @@ async fn recovery_real_fork_reinclusion_and_commit_invalidation() {
         .recovery()
         .validate(id, old_receipt.id, Instant::now())
         .is_err());
-    let recovered = peers.recovery().request(tx.hash(), Instant::now()).unwrap();
+    let request_envelope = bridge(peers.recovery(), "request", &format!("{:#x}", tx.hash()), "");
+    let recovered = protocol_fixture_request_id(&request_envelope);
     protocol.notify(nc.context(), FETCH_HEADER_TX_TOKEN).await;
     protocol
         .received(
@@ -1674,6 +1716,36 @@ async fn recovery_real_fork_reinclusion_and_commit_invalidation() {
         .recovery()
         .validate(recovered, receipt.id, Instant::now())
         .is_ok());
+
+    if dao_fixture {
+        let request_token = request_envelope["result"]["request_id"].as_str().unwrap();
+        let poll = bridge(peers.recovery(), "poll", request_token, "");
+        let receipt_token = poll["result"]["receipt"]["receipt_id"].as_str().unwrap();
+        let validate = bridge(peers.recovery(), "validate", request_token, receipt_token);
+        assert_eq!(validate["result"]["valid"], true);
+        assert_eq!(poll["result"]["receipt"]["header"]["number"], "0x19");
+        // Expiry advances the actual registry clock observation, not a JSON edit.
+        peers.recovery().poll(recovered, Instant::now() + std::time::Duration::from_secs(31)).unwrap();
+        let expired_poll = bridge(peers.recovery(), "poll", request_token, "");
+        let expired_validate = bridge(peers.recovery(), "validate", request_token, receipt_token);
+        assert_eq!(expired_poll["result"]["status"], "expired");
+        assert!(expired_validate.get("error").is_some());
+        let restarted = crate::protocols::light_client::recovery::RecoveryRegistry::new(
+            RecoveryIdentity { genesis_hash: chain.consensus().genesis_block().hash(),
+                store_generation: "e".repeat(32), run_nonce: [6;16] },
+            ChainSnapshot { anchor: new_last.header().data() });
+        let restart_validate = bridge(&restarted, "validate", request_token, receipt_token);
+        assert!(restart_validate.get("error").is_some());
+        if let Ok(path) = std::env::var("POCKET_DAO_PROTOCOL_FIXTURE_PATH") {
+            std::fs::write(path, serde_json::to_string_pretty(&json!({
+                "producer": "recovery_dao_protocol_bridge_fixture; dummy PoW; synthetic producer DISABLE_ALL; real light-client handler",
+                "old_header": ckb_jsonrpc_types::HeaderView::from(old.header()),
+                "request": request_envelope, "poll": poll, "validate": validate,
+                "expired_poll": expired_poll, "expired_validate": expired_validate,
+                "restart_validate": restart_validate
+            })).unwrap()).unwrap();
+        }
+    }
 }
 
 #[tokio::test]
