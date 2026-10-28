@@ -276,3 +276,23 @@ pub fn calculate_unlock_epoch(
 pub fn call_rpc(method: String) -> Result<String, LightClientError> {
     rpc::call_rpc(&method).map_err(Into::into)
 }
+
+#[uniffi::export]
+pub fn request_dao_recovery(tx_hash: String) -> Result<String, LightClientError> {
+    crate::bridge_core::dao_recovery::request_dao_recovery(&tx_hash).map_err(Into::into)
+}
+
+#[uniffi::export]
+pub fn poll_dao_recovery(request_id: String) -> Result<String, LightClientError> {
+    crate::bridge_core::dao_recovery::poll_dao_recovery(&request_id).map_err(Into::into)
+}
+
+#[uniffi::export]
+pub fn validate_dao_recovery(request_id: String, receipt_id: String) -> Result<String, LightClientError> {
+    crate::bridge_core::dao_recovery::validate_dao_recovery(&request_id, &receipt_id).map_err(Into::into)
+}
+
+#[uniffi::export]
+pub fn cancel_dao_recovery(request_id: String) -> Result<String, LightClientError> {
+    crate::bridge_core::dao_recovery::cancel_dao_recovery(&request_id).map_err(Into::into)
+}

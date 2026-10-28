@@ -181,6 +181,14 @@ impl RecoveryRegistry {
         state.running = true;
         Ok(())
     }
+    /// A binding snapshot for bridge registration, never authorization by itself.
+    pub fn identity(&self) -> Result<RecoveryIdentity, RecoveryError> {
+        let state = self.lock()?;
+        if !state.available() {
+            return Err(RecoveryError::Unavailable);
+        }
+        state.identity.clone().ok_or(RecoveryError::Unavailable)
+    }
     pub fn new(identity: RecoveryIdentity, snapshot: ChainSnapshot) -> Self {
         let registry = Self::default();
         // A rejected identity leaves the registry unavailable.

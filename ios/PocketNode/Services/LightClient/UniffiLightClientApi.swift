@@ -34,6 +34,9 @@ import os
 /// `SEND_ERROR_PREFIX` in `bridge_core/query.rs`). `nil` is kept for the case
 /// it was always meant for: the bridge genuinely answering nothing.
 ///
+/// Dedicated recovery calls forward versioned JSON envelopes unchanged. Registry
+/// errors remain in-band for `DaoRecoveryClient`; lifecycle errors become nil.
+///
 /// ## Threading
 ///
 /// Every call blocks, some of them for seconds (`doInit` opens the store and
@@ -210,6 +213,22 @@ final class UniffiLightClientApi: NSObject, LightClientApi, @unchecked Sendable 
 
     func estimateCycles(txJson: String) -> String? {
         query("estimateCycles") { try CkbLightClient.estimateCycles(txJson: txJson) }
+    }
+
+    func requestDaoRecovery(txHash: String) -> String? {
+        query("requestDaoRecovery") { try CkbLightClient.requestDaoRecovery(txHash: txHash) }
+    }
+
+    func pollDaoRecovery(requestId: String) -> String? {
+        query("pollDaoRecovery") { try CkbLightClient.pollDaoRecovery(requestId: requestId) }
+    }
+
+    func validateDaoRecovery(requestId: String, receiptId: String) -> String? {
+        query("validateDaoRecovery") { try CkbLightClient.validateDaoRecovery(requestId: requestId, receiptId: receiptId) }
+    }
+
+    func cancelDaoRecovery(requestId: String) -> String? {
+        query("cancelDaoRecovery") { try CkbLightClient.cancelDaoRecovery(requestId: requestId) }
     }
 
     // MARK: - Node info

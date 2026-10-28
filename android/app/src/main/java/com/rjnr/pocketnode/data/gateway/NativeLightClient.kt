@@ -57,6 +57,10 @@ interface NativeLightClient {
         occupiedCapacity: Long
     ): Long
     fun nativeCalculateUnlockEpoch(depositEpochHex: String, withdrawEpochHex: String): String?
+    fun nativeRequestDaoRecovery(txHash: String): String?
+    fun nativePollDaoRecovery(requestId: String): String?
+    fun nativeValidateDaoRecovery(requestId: String, receiptId: String): String?
+    fun nativeCancelDaoRecovery(requestId: String): String?
 }
 
 /** Production surface: every function delegates straight to the JNI object. */
@@ -145,4 +149,8 @@ class JniLightClient @Inject constructor() : NativeLightClient {
         depositEpochHex: String,
         withdrawEpochHex: String
     ): String? = LightClientNative.nativeCalculateUnlockEpoch(depositEpochHex, withdrawEpochHex)
+    override fun nativeRequestDaoRecovery(txHash: String): String? = LightClientNative.nativeRequestDaoRecovery(txHash)
+    override fun nativePollDaoRecovery(requestId: String): String? = LightClientNative.nativePollDaoRecovery(requestId)
+    override fun nativeValidateDaoRecovery(requestId: String, receiptId: String): String? = LightClientNative.nativeValidateDaoRecovery(requestId, receiptId)
+    override fun nativeCancelDaoRecovery(requestId: String): String? = LightClientNative.nativeCancelDaoRecovery(requestId)
 }

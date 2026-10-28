@@ -21,6 +21,7 @@
 //! - 2 (STOPPED): Stopped
 
 pub mod dao;
+pub mod dao_recovery;
 pub mod error;
 pub mod lifecycle;
 pub mod query;

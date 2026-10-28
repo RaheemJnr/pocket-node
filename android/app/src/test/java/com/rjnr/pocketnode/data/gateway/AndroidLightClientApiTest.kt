@@ -45,6 +45,30 @@ class AndroidLightClientApiTest {
 
     private val stringCases: List<StringCase> = listOf(
         StringCase(
+            "requestDaoRecovery",
+            { n, v -> every { n.nativeRequestDaoRecovery(any()) } returns v },
+            { it.requestDaoRecovery("0xhash") },
+            { verify(exactly = 1) { it.nativeRequestDaoRecovery("0xhash") } },
+        ),
+        StringCase(
+            "pollDaoRecovery",
+            { n, v -> every { n.nativePollDaoRecovery(any()) } returns v },
+            { it.pollDaoRecovery("request-token") },
+            { verify(exactly = 1) { it.nativePollDaoRecovery("request-token") } },
+        ),
+        StringCase(
+            "validateDaoRecovery",
+            { n, v -> every { n.nativeValidateDaoRecovery(any(), any()) } returns v },
+            { it.validateDaoRecovery("request-token", "receipt-token") },
+            { verify(exactly = 1) { it.nativeValidateDaoRecovery("request-token", "receipt-token") } },
+        ),
+        StringCase(
+            "cancelDaoRecovery",
+            { n, v -> every { n.nativeCancelDaoRecovery(any()) } returns v },
+            { it.cancelDaoRecovery("request-token") },
+            { verify(exactly = 1) { it.nativeCancelDaoRecovery("request-token") } },
+        ),
+        StringCase(
             "getTipHeader",
             { n, v -> every { n.nativeGetTipHeader() } returns v },
             { it.getTipHeader() },

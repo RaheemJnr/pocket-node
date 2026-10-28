@@ -234,6 +234,12 @@ object LightClientNative {
         withdrawEpochHex: String
     ): String?
 
+    /** Dedicated v1 membership bridge; returned tokens are ephemeral. */
+    external fun nativeRequestDaoRecovery(txHash: String): String?
+    external fun nativePollDaoRecovery(requestId: String): String?
+    external fun nativeValidateDaoRecovery(requestId: String, receiptId: String): String?
+    external fun nativeCancelDaoRecovery(requestId: String): String?
+
     // ========================================
     // Callback Interfaces
     // ========================================

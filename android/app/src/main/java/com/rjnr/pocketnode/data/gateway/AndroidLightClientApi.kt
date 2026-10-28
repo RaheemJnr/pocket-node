@@ -145,4 +145,8 @@ class AndroidLightClientApi @Inject constructor(
         depositEpochHex: String,
         withdrawEpochHex: String
     ): String? = native.nativeCalculateUnlockEpoch(depositEpochHex, withdrawEpochHex)
+    override fun requestDaoRecovery(txHash: String): String? = native.nativeRequestDaoRecovery(txHash)
+    override fun pollDaoRecovery(requestId: String): String? = native.nativePollDaoRecovery(requestId)
+    override fun validateDaoRecovery(requestId: String, receiptId: String): String? = native.nativeValidateDaoRecovery(requestId, receiptId)
+    override fun cancelDaoRecovery(requestId: String): String? = native.nativeCancelDaoRecovery(requestId)
 }
