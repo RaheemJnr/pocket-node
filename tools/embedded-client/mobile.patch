@@ -12182,7 +12182,7 @@ index b706cb0faecef34c2f5371d1f24366eb7fbc1264..50730123bc968064a388b990a93f25d5
  
          trace!(
 diff --git a/light-client-lib/src/protocols/light_client/components/send_transactions_proof.rs b/light-client-lib/src/protocols/light_client/components/send_transactions_proof.rs
-index e70b69277175ef8207cb427748aac5ef402d58b7..03c9a5d5ebf61792b577006b101c613d2ca992f5 100644
+index e70b69277175ef8207cb427748aac5ef402d58b7..fb4dcecbb5d1c400026c2802f5fd0bb7914ef081 100644
 --- a/light-client-lib/src/protocols/light_client/components/send_transactions_proof.rs
 +++ b/light-client-lib/src/protocols/light_client/components/send_transactions_proof.rs
 @@ -1,3 +1,4 @@
@@ -12245,7 +12245,19 @@ index e70b69277175ef8207cb427748aac5ef402d58b7..03c9a5d5ebf61792b577006b101c613d
          let last_header: VerifiableHeader = self.message.last_header().to_entity().into();
          let filtered_blocks_len = self.message.filtered_blocks().len();
          // Parse the V1 extra fields with a verifying reader up front, before any
-@@ -216,28 +252,79 @@ impl<'a> SendTransactionsProofProcess<'a> {
+@@ -101,6 +137,11 @@ impl<'a> SendTransactionsProofProcess<'a> {
+                 self.protocol
+                     .peers()
+                     .mark_fetching_txs_timeout(self.peer_index);
++                // This valid response closes the attempt, but its quarantined slot
++                // still needs a drain before another request can use the session.
++                let _ = self
++                    ._nc
++                    .disconnect(self.peer_index, "transaction proof tip changed");
+                 return Status::ok();
+             } else {
+                 // Since the last state is different, then no data should be contained.
+@@ -216,28 +257,79 @@ impl<'a> SendTransactionsProofProcess<'a> {
              }
              debug!("verify SendTransactionsProof ok");
  
@@ -15631,10 +15643,10 @@ index 2101d6ba1d21dbd6b1fb3cf80d1c35e375ee968d..58abbf2ab39081d93e817160f4376539
  async fn reject_last_header_with_overflowing_total_difficulty() {
      let chain = MockChain::new_with_dummy_pow("test-light-client").start();
 diff --git a/light-client-lib/src/tests/protocols/light_client/send_transactions_proof.rs b/light-client-lib/src/tests/protocols/light_client/send_transactions_proof.rs
-index 03be056b0463e8985a596f3e1e75bc3eac491c80..8267fae82a3b1a965a026952f7a4f7ade0bab890 100644
+index 03be056b0463e8985a596f3e1e75bc3eac491c80..f6d19eaf5c115f502a765a8935ecf8e7bf44b6b3 100644
 --- a/light-client-lib/src/tests/protocols/light_client/send_transactions_proof.rs
 +++ b/light-client-lib/src/tests/protocols/light_client/send_transactions_proof.rs
-@@ -811,3 +811,785 @@ async fn test_send_headers_txs_request() {
+@@ -811,3 +811,917 @@ async fn test_send_headers_txs_request() {
      assert_eq!(peers.get_txs_to_fetch().len(), 1);
      assert_eq!(peers.get_headers_to_fetch().len(), 1);
  }
@@ -16201,6 +16213,138 @@ index 03be056b0463e8985a596f3e1e75bc3eac491c80..8267fae82a3b1a965a026952f7a4f7ad
 +}
 +
 +#[tokio::test(flavor = "multi_thread")]
++async fn recovery_changed_tip_drains_generic_request() {
++    recovery_changed_tip_case(false).await;
++}
++
++#[tokio::test(flavor = "multi_thread")]
++async fn recovery_changed_tip_drains_recovery_request() {
++    recovery_changed_tip_case(true).await;
++}
++
++async fn recovery_changed_tip_case(with_recovery: bool) {
++    use crate::protocols::light_client::recovery::{
++        ChainSnapshot, RecoveryIdentity, RecoveryStatus,
++    };
++    use std::time::Instant;
++    let chain = MockChain::new_with_dummy_pow("recovery-old-flight").start();
++    chain.mine_to(20);
++    let block = chain.shared().snapshot().get_block_by_number(5).unwrap();
++    let hash = block.transactions()[0].hash();
++    let last: VerifiableHeader = chain
++        .shared()
++        .snapshot()
++        .get_verifiable_header_by_number(20)
++        .unwrap()
++        .into();
++    chain
++        .client_storage()
++        .update_last_state(&last.total_difficulty(), &last.header().data(), &[]);
++    let peers = chain.create_peers();
++    let peer = PeerIndex::new(3);
++    peers.add_peer(peer);
++    peers.mock_prove_state(peer, last.clone()).unwrap();
++    peers
++        .recovery()
++        .initialize(
++            RecoveryIdentity {
++                genesis_hash: chain.consensus().genesis_block().hash(),
++                store_generation: "isolated-test-store".into(),
++                run_nonce: [6; 16],
++            },
++            ChainSnapshot {
++                anchor: last.header().data(),
++            },
++        )
++        .unwrap();
++    let mut protocol = chain.create_light_client_protocol(peers.clone());
++    let nc = MockNetworkContext::new(SupportProtocols::LightClient);
++    peers.add_fetch_tx(hash.clone(), 111);
++    let old_id = with_recovery.then(|| {
++        peers
++            .recovery()
++            .request(hash.clone(), Instant::now())
++            .unwrap()
++    });
++    protocol.notify(nc.context(), FETCH_HEADER_TX_TOKEN).await;
++    assert!(!peers.get_txs_to_fetch().contains(&hash));
++    let connection = peers.get_peer(&peer).unwrap().connection;
++    chain.mine_to(21);
++    let changed_tip = chain
++        .shared()
++        .snapshot()
++        .get_verifiable_header_by_number(21)
++        .unwrap();
++    let empty = packed::SendTransactionsProofV1::new_builder()
++        .last_header(changed_tip)
++        .build();
++    let changed = packed::LightClientMessage::new_builder().set(empty).build();
++    protocol
++        .received(nc.context(), peer, changed.as_bytes())
++        .await;
++    assert!(
++        nc.not_banned(peer),
++        "valid changed-tip response must be accepted"
++    );
++    assert!(
++        nc.disconnect_requested(peer),
++        "quarantine must promptly request drain"
++    );
++    assert!(peers.get_peer(&peer).unwrap().txs_quarantined);
++    assert!(peers
++        .get_peer(&peer)
++        .unwrap()
++        .get_txs_proof_request()
++        .is_some());
++    assert!(
++        peers.get_txs_to_fetch().contains(&hash),
++        "generic waiter must remain retryable"
++    );
++    if let Some(id) = old_id {
++        assert_eq!(
++            peers.recovery().poll(id, Instant::now()).unwrap(),
++            RecoveryStatus::Unavailable
++        );
++    }
++    let fresh_id = peers
++        .recovery()
++        .request(hash.clone(), Instant::now())
++        .unwrap();
++    let old_response = recovery_proof_message(&chain, 20, 5, &hash);
++    protocol
++        .received(nc.context(), peer, old_response.as_bytes())
++        .await;
++    assert_eq!(
++        peers.recovery().poll(fresh_id, Instant::now()).unwrap(),
++        RecoveryStatus::Queued
++    );
++    assert!(peers.get_txs_to_fetch().contains(&hash));
++    let sent = nc.sent_messages().borrow().len();
++    protocol.notify(nc.context(), FETCH_HEADER_TX_TOKEN).await;
++    assert_eq!(nc.sent_messages().borrow().len(), sent);
++    protocol.disconnected(nc.context(), peer).await;
++    assert!(peers.get_peer(&peer).is_none());
++    peers.add_peer(peer);
++    // The peer hint did not advance our proven local tip. The replacement proves
++    // that current local anchor before it is eligible for a fresh attempt.
++    peers.mock_prove_state(peer, last).unwrap();
++    assert_ne!(peers.get_peer(&peer).unwrap().connection, connection);
++    protocol.notify(nc.context(), FETCH_HEADER_TX_TOKEN).await;
++    assert_eq!(
++        peers.recovery().poll(fresh_id, Instant::now()).unwrap(),
++        RecoveryStatus::Fetching
++    );
++    protocol
++        .received(nc.context(), peer, old_response.as_bytes())
++        .await;
++    assert!(matches!(
++        peers.recovery().poll(fresh_id, Instant::now()).unwrap(),
++        RecoveryStatus::Verified(_)
++    ));
++    assert!(peers.get_tx_fetch_info(&hash).is_none());
++}
++
++#[tokio::test(flavor = "multi_thread")]
 +async fn recovery_real_fork_reinclusion_and_commit_invalidation() {
 +    use crate::protocols::light_client::recovery::{
 +        ChainSnapshot, RecoveryIdentity, RecoveryStatus,
@@ -16446,10 +16590,10 @@ index 776a88f024a0ba18a11848e8adf9fb45c1806ea8..096d611e2f2bcf1e98cbcca7fd4eeca1
      (storage, tmp_dir)
  }
 diff --git a/light-client-lib/src/tests/utils/network_context.rs b/light-client-lib/src/tests/utils/network_context.rs
-index 7ef8ed245d6ebc007df9e6c52f94355302879a91..6a3a690f4db9935312d75c0c227e9ca7d916ab6a 100644
+index 7ef8ed245d6ebc007df9e6c52f94355302879a91..22399c539f9581f10511dd944df0caa811188137 100644
 --- a/light-client-lib/src/tests/utils/network_context.rs
 +++ b/light-client-lib/src/tests/utils/network_context.rs
-@@ -14,6 +14,7 @@ use crate::protocols::{Status, StatusCode};
+@@ -14,9 +14,11 @@ use crate::protocols::{Status, StatusCode};
  
  struct MockProtocolContext {
      protocol: SupportProtocols,
@@ -16457,7 +16601,11 @@ index 7ef8ed245d6ebc007df9e6c52f94355302879a91..6a3a690f4db9935312d75c0c227e9ca7
      sent_messages: RefCell<Vec<(ProtocolId, PeerIndex, P2pBytes)>>,
      banned_peers: RefCell<Vec<(PeerIndex, Duration, String)>>,
      connected_peers: RefCell<HashSet<PeerIndex>>,
-@@ -31,6 +32,7 @@ impl MockProtocolContext {
++    disconnect_requests: RefCell<Vec<PeerIndex>>,
+ }
+ 
+ pub(crate) struct MockNetworkContext {
+@@ -31,9 +33,11 @@ impl MockProtocolContext {
      fn new(protocol: SupportProtocols) -> Self {
          Self {
              protocol,
@@ -16465,10 +16613,18 @@ index 7ef8ed245d6ebc007df9e6c52f94355302879a91..6a3a690f4db9935312d75c0c227e9ca7
              sent_messages: Default::default(),
              banned_peers: Default::default(),
              connected_peers: Default::default(),
-@@ -45,6 +47,10 @@ impl MockNetworkContext {
++            disconnect_requests: Default::default(),
+         }
+     }
+ }
+@@ -45,6 +49,14 @@ impl MockNetworkContext {
          Self { inner }
      }
  
++    pub(crate) fn disconnect_requested(&self, peer: PeerIndex) -> bool {
++        self.inner.disconnect_requests.borrow().contains(&peer)
++    }
++
 +    pub(crate) fn on_next_send(&self, callback: impl FnOnce() + 'static) {
 +        *self.inner.on_send.borrow_mut() = Some(Box::new(callback));
 +    }
@@ -16476,7 +16632,7 @@ index 7ef8ed245d6ebc007df9e6c52f94355302879a91..6a3a690f4db9935312d75c0c227e9ca7
      pub(crate) fn sent_messages(&self) -> &RefCell<Vec<(ProtocolId, PeerIndex, P2pBytes)>> {
          &self.inner.sent_messages
      }
-@@ -186,6 +192,9 @@ impl CKBProtocolContext for MockProtocolContext {
+@@ -186,6 +198,9 @@ impl CKBProtocolContext for MockProtocolContext {
          peer_index: PeerIndex,
          data: P2pBytes,
      ) -> Result<(), Error> {
@@ -16486,6 +16642,14 @@ index 7ef8ed245d6ebc007df9e6c52f94355302879a91..6a3a690f4db9935312d75c0c227e9ca7
          self.sent_messages
              .borrow_mut()
              .push((proto_id, peer_index, data));
+@@ -200,6 +215,7 @@ impl CKBProtocolContext for MockProtocolContext {
+         unimplemented!();
+     }
+     fn disconnect(&self, peer_index: PeerIndex, _message: &str) -> Result<(), Error> {
++        self.disconnect_requests.borrow_mut().push(peer_index);
+         self.connected_peers.borrow_mut().remove(&peer_index);
+         Ok(())
+     }
 diff --git a/light-client-lib/tests/cursor_roundtrip.rs b/light-client-lib/tests/cursor_roundtrip.rs
 new file mode 100644
 index 0000000000000000000000000000000000000000..0ae69b53e604b4a62f1f2fe7ead58547ceb102e2

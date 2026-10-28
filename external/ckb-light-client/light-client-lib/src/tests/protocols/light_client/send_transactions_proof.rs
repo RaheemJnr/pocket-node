@@ -1374,6 +1374,138 @@ async fn recovery_old_generic_case(timeout: bool) {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn recovery_changed_tip_drains_generic_request() {
+    recovery_changed_tip_case(false).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn recovery_changed_tip_drains_recovery_request() {
+    recovery_changed_tip_case(true).await;
+}
+
+async fn recovery_changed_tip_case(with_recovery: bool) {
+    use crate::protocols::light_client::recovery::{
+        ChainSnapshot, RecoveryIdentity, RecoveryStatus,
+    };
+    use std::time::Instant;
+    let chain = MockChain::new_with_dummy_pow("recovery-old-flight").start();
+    chain.mine_to(20);
+    let block = chain.shared().snapshot().get_block_by_number(5).unwrap();
+    let hash = block.transactions()[0].hash();
+    let last: VerifiableHeader = chain
+        .shared()
+        .snapshot()
+        .get_verifiable_header_by_number(20)
+        .unwrap()
+        .into();
+    chain
+        .client_storage()
+        .update_last_state(&last.total_difficulty(), &last.header().data(), &[]);
+    let peers = chain.create_peers();
+    let peer = PeerIndex::new(3);
+    peers.add_peer(peer);
+    peers.mock_prove_state(peer, last.clone()).unwrap();
+    peers
+        .recovery()
+        .initialize(
+            RecoveryIdentity {
+                genesis_hash: chain.consensus().genesis_block().hash(),
+                store_generation: "isolated-test-store".into(),
+                run_nonce: [6; 16],
+            },
+            ChainSnapshot {
+                anchor: last.header().data(),
+            },
+        )
+        .unwrap();
+    let mut protocol = chain.create_light_client_protocol(peers.clone());
+    let nc = MockNetworkContext::new(SupportProtocols::LightClient);
+    peers.add_fetch_tx(hash.clone(), 111);
+    let old_id = with_recovery.then(|| {
+        peers
+            .recovery()
+            .request(hash.clone(), Instant::now())
+            .unwrap()
+    });
+    protocol.notify(nc.context(), FETCH_HEADER_TX_TOKEN).await;
+    assert!(!peers.get_txs_to_fetch().contains(&hash));
+    let connection = peers.get_peer(&peer).unwrap().connection;
+    chain.mine_to(21);
+    let changed_tip = chain
+        .shared()
+        .snapshot()
+        .get_verifiable_header_by_number(21)
+        .unwrap();
+    let empty = packed::SendTransactionsProofV1::new_builder()
+        .last_header(changed_tip)
+        .build();
+    let changed = packed::LightClientMessage::new_builder().set(empty).build();
+    protocol
+        .received(nc.context(), peer, changed.as_bytes())
+        .await;
+    assert!(
+        nc.not_banned(peer),
+        "valid changed-tip response must be accepted"
+    );
+    assert!(
+        nc.disconnect_requested(peer),
+        "quarantine must promptly request drain"
+    );
+    assert!(peers.get_peer(&peer).unwrap().txs_quarantined);
+    assert!(peers
+        .get_peer(&peer)
+        .unwrap()
+        .get_txs_proof_request()
+        .is_some());
+    assert!(
+        peers.get_txs_to_fetch().contains(&hash),
+        "generic waiter must remain retryable"
+    );
+    if let Some(id) = old_id {
+        assert_eq!(
+            peers.recovery().poll(id, Instant::now()).unwrap(),
+            RecoveryStatus::Unavailable
+        );
+    }
+    let fresh_id = peers
+        .recovery()
+        .request(hash.clone(), Instant::now())
+        .unwrap();
+    let old_response = recovery_proof_message(&chain, 20, 5, &hash);
+    protocol
+        .received(nc.context(), peer, old_response.as_bytes())
+        .await;
+    assert_eq!(
+        peers.recovery().poll(fresh_id, Instant::now()).unwrap(),
+        RecoveryStatus::Queued
+    );
+    assert!(peers.get_txs_to_fetch().contains(&hash));
+    let sent = nc.sent_messages().borrow().len();
+    protocol.notify(nc.context(), FETCH_HEADER_TX_TOKEN).await;
+    assert_eq!(nc.sent_messages().borrow().len(), sent);
+    protocol.disconnected(nc.context(), peer).await;
+    assert!(peers.get_peer(&peer).is_none());
+    peers.add_peer(peer);
+    // The peer hint did not advance our proven local tip. The replacement proves
+    // that current local anchor before it is eligible for a fresh attempt.
+    peers.mock_prove_state(peer, last).unwrap();
+    assert_ne!(peers.get_peer(&peer).unwrap().connection, connection);
+    protocol.notify(nc.context(), FETCH_HEADER_TX_TOKEN).await;
+    assert_eq!(
+        peers.recovery().poll(fresh_id, Instant::now()).unwrap(),
+        RecoveryStatus::Fetching
+    );
+    protocol
+        .received(nc.context(), peer, old_response.as_bytes())
+        .await;
+    assert!(matches!(
+        peers.recovery().poll(fresh_id, Instant::now()).unwrap(),
+        RecoveryStatus::Verified(_)
+    ));
+    assert!(peers.get_tx_fetch_info(&hash).is_none());
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn recovery_real_fork_reinclusion_and_commit_invalidation() {
     use crate::protocols::light_client::recovery::{
         ChainSnapshot, RecoveryIdentity, RecoveryStatus,

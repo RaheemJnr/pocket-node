@@ -137,6 +137,11 @@ impl<'a> SendTransactionsProofProcess<'a> {
                 self.protocol
                     .peers()
                     .mark_fetching_txs_timeout(self.peer_index);
+                // This valid response closes the attempt, but its quarantined slot
+                // still needs a drain before another request can use the session.
+                let _ = self
+                    ._nc
+                    .disconnect(self.peer_index, "transaction proof tip changed");
                 return Status::ok();
             } else {
                 // Since the last state is different, then no data should be contained.
