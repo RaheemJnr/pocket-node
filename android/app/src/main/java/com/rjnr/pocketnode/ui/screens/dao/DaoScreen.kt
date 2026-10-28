@@ -10,6 +10,9 @@ import androidx.compose.material.icons.filled.Lock
 import androidx.compose.material3.*
 import androidx.compose.material3.pulltorefresh.PullToRefreshBox
 import androidx.compose.runtime.*
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.compose.LocalLifecycleOwner
+import androidx.lifecycle.repeatOnLifecycle
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -44,6 +47,12 @@ fun DaoScreen(
     onNavigateToPinVerify: () -> Unit = {},
     daoPinVerified: Boolean = false
 ) {
+    val lifecycleOwner = LocalLifecycleOwner.current
+    LaunchedEffect(viewModel, lifecycleOwner) {
+        lifecycleOwner.lifecycle.repeatOnLifecycle(Lifecycle.State.RESUMED) {
+            viewModel.runForegroundRecovery()
+        }
+    }
     val uiState by viewModel.uiState.collectAsState()
     val availableBalance by viewModel.availableBalance.collectAsState()
     val networkType by viewModel.networkType.collectAsState()
@@ -240,7 +249,8 @@ fun DaoScreen(
                             deposit = deposit,
                             onWithdraw = { withdrawTargetKey = deposit.daoTargetKey() },
                             onUnlock = { unlockTargetKey = deposit.daoTargetKey() },
-                            actionEnabled = daoActionEnabled(deposit, uiState.pendingAction),
+                            actionEnabled = daoActionEnabled(deposit, uiState.pendingAction, uiState.checkingWithdrawal),
+                            checkingWithdrawal = daoRecoveryTargets(uiState.checkingWithdrawal, deposit.outPoint),
                         )
                     }
                 }

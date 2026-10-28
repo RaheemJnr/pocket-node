@@ -31,6 +31,28 @@ class DaoDepositCardCountdownTest {
     private val position = DaoDeposit(OutPoint("0xabc", "0x0"), 100_000_000_000,
         DaoCellStatus.LOCKED, 100, unlockEpoch = EpochInfo(200, 0, 1800), lockRemainingHours = 0)
 
+    @Test fun `active recovery shows checking while pending completed and outside window retain identity`() {
+        val current = mutableStateOf(position.copy(unlockEpoch = null, outsideSyncWindow = true))
+        compose.setContent { DaoDepositCard(current.value, {}, {}, checkingWithdrawal = true) }
+        compose.onNodeWithText("dao_checking_withdrawal_details").assertExists()
+        compose.onNodeWithText("dao_card_unlock").assertDoesNotExist()
+        compose.runOnIdle { current.value = current.value.copy(status = DaoCellStatus.UNLOCKING) }
+        compose.onNodeWithText("Confirming...").assertExists()
+        compose.onNodeWithText("dao_checking_withdrawal_details").assertDoesNotExist()
+        compose.runOnIdle { current.value = current.value.copy(status = DaoCellStatus.COMPLETED) }
+        compose.onNodeWithText("Completed").assertExists()
+        compose.onNodeWithText("dao_checking_withdrawal_details").assertDoesNotExist()
+    }
+
+    @Test fun `unavailable withdrawal details stay blocked after checking ends`() {
+        val checking = mutableStateOf(true)
+        compose.setContent { DaoDepositCard(position.copy(withdrawBlockNumber = 200, unlockEpoch = null), {}, {}, checkingWithdrawal = checking.value) }
+        compose.onNodeWithText("dao_checking_withdrawal_details").assertExists()
+        compose.runOnIdle { checking.value = false }
+        compose.onNodeWithText("dao_withdrawal_details_unavailable").assertExists()
+        compose.onNodeWithText("dao_card_unlock").assertDoesNotExist()
+    }
+
     @Test fun `known zero hour locked wait uses localized sub-hour copy`() {
         compose.setContent { DaoDepositCard(position, {}, {}) }
         compose.onNodeWithText("dao_unlock_less_than_hour").assertExists()

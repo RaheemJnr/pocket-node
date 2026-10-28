@@ -10,6 +10,7 @@ import com.rjnr.pocketnode.data.send.SendContext
 import io.mockk.*
 import kotlinx.coroutines.test.runTest
 import kotlinx.coroutines.async
+import kotlinx.coroutines.launch
 import kotlinx.serialization.encodeToString
 import kotlinx.serialization.json.Json
 import org.junit.*
@@ -69,6 +70,103 @@ class DaoRecoveryCoordinatorTest {
         100_000_000_000L, status, 100, hash("dd"), "0x70800000000064", 200, hash("ee"),
         "0x708000000000c8", 123, "0x70800000000258", 999, network.name, 8, "wallet")
     private suspend fun begin() = recovery.begin("wallet", network, script, genesis, point)
+
+    private fun suitableNative() {
+        every { api.status() } returns 1
+        every { api.callRpc("get_peers") } returns """{"result":[{"protocols":[{"id":"0x78","version":"3"}],"sync_state":{"proved_best_known_header":{"hash":"${hash("cc")}","number":"0x12c"}}}]}"""
+    }
+    @Test fun `automatic selector keeps ordinary missing headers ordinary and excludes terminal and pending aliases`() = runTest {
+        suitableNative()
+        val scheduler = DaoRecoveryScheduler(db, recovery, api, gate, json)
+        val session = RecoverySession("wallet", network, genesis, script, gate.lifecycleRevision())
+        val positions = listOf(row().toUnverifiedCacheProjection())
+        every { api.getHeaderByNumber(any()) } returns null
+        assertTrue(scheduler.candidates(session, positions).isEmpty())
+        val header = JniHeaderView(hash("cc"), "0xc8", "0x70800000000001", "0x1", hash("00"), hash("00"), hash("00"), hash("00"), hash("00"), "0x0")
+        every { api.getHeaderByNumber(any()) } returns json.encodeToString(header)
+        assertEquals(listOf(RecoveryOutPoint.from(point)), scheduler.candidates(session, positions))
+        db.daoCellDao().upsert(row("00010"))
+        assertEquals(1, scheduler.candidates(session, positions).size)
+        for (status in listOf("UNLOCKING", "WITHDRAWING", "COMPLETED")) {
+            db.daoCellDao().upsert(row("00010", status))
+            assertTrue(scheduler.candidates(session, positions).isEmpty())
+        }
+    }
+    @Test fun `guard without current receipt qualifies even with retained matching canonical maps`() = runTest {
+        suitableNative()
+        val context = begin()
+        assertEquals(RecoveryOutcome.Adopted, recovery.recover(context))
+        val scheduler = DaoRecoveryScheduler(db, recovery, api, gate, json)
+        val session = RecoverySession("wallet", network, genesis, script, gate.lifecycleRevision())
+        val positions = db.daoCellDao().allRows().map { it.toUnverifiedCacheProjection() }
+        assertTrue(scheduler.candidates(session, positions).isEmpty())
+        valid = false
+        assertEquals(listOf(RecoveryOutPoint.from(point)), scheduler.candidates(session, positions))
+        every { api.callRpc("get_peers") } returns "{}"
+        assertTrue(scheduler.candidates(session, positions).isEmpty())
+    }
+
+    @Test fun `foreground scheduler adopts then tip adapter revokes and leaving screen cancels authority`() = kotlinx.coroutines.runBlocking {
+        suitableNative()
+        every { api.getGenesisBlock() } returns """{"header":{"hash":"$genesis"}}"""
+        val canonical = JniHeaderView(hash("cc"), "0xc8", "0x70800000000001", "0x1", hash("00"), hash("00"), hash("00"), hash("00"), hash("00"), "0x0")
+        every { api.getHeaderByNumber(any()) } returns json.encodeToString(canonical)
+        val wallet = kotlinx.coroutines.flow.MutableStateFlow<com.rjnr.pocketnode.data.wallet.WalletInfo?>(
+            com.rjnr.pocketnode.data.wallet.WalletInfo("public", script, "test", "main"))
+        val net = kotlinx.coroutines.flow.MutableStateFlow(network)
+        val tip = kotlinx.coroutines.flow.MutableStateFlow(300L)
+        val repository = mockk<GatewayRepository> {
+            every { walletInfo } returns wallet
+            every { this@mockk.network } returns net
+            every { tipFlow } returns tip
+            every { activeWalletAndNetworkOrNull() } returns ("wallet" to this@DaoRecoveryCoordinatorTest.network.name)
+        }
+        val positions = kotlinx.coroutines.flow.MutableStateFlow(listOf(row().toUnverifiedCacheProjection()))
+        val refreshed = kotlinx.coroutines.channels.Channel<Unit>(kotlinx.coroutines.channels.Channel.UNLIMITED)
+        val scheduler = DaoRecoveryScheduler(db, recovery, api, gate, json)
+        val job = launch { scheduler.foreground(repository, positions) { refreshed.send(Unit) } }
+        try {
+            kotlinx.coroutines.withTimeout(5_000) { refreshed.receive() }
+            assertNotNull(recovery.validateGuard(network, point, "wallet"))
+            verify(exactly = 1) { api.requestDaoRecovery(txHash) }
+            valid = false
+            tip.value = 301
+            kotlinx.coroutines.withTimeout(5_000) { refreshed.receive() }
+            assertNull(recovery.validateGuard(network, point, "wallet"))
+            verify(exactly = 1) { api.requestDaoRecovery(txHash) }
+        } finally { job.cancel(); job.join() }
+        assertNull(scheduler.checking.value)
+    }
+
+    @Test fun `automatic adapter keeps native request stable through pending polls then requires exact receipt`() = runTest {
+        var polls = 0
+        every { api.pollDaoRecovery(any()) } answers {
+            polls++
+            if (polls <= 2) """{"schema_version":1,"operation":"poll","result":{"request_id":"$request","status":"fetching","receipt":null}}"""
+            else """{"schema_version":1,"operation":"poll","result":{"request_id":"$request","status":"verified","receipt":${json.encodeToString(receipt)}}}"""
+        }
+        val runner = DaoRecoveryAttemptRunner(recovery)
+        val session = RecoverySession("wallet", network, genesis, script, gate.lifecycleRevision())
+        assertTrue(runner.run(session, RecoveryOutPoint.from(point)) { true })
+        verify(exactly = 1) { api.requestDaoRecovery(txHash) }
+        verify(exactly = 3) { api.pollDaoRecovery(request) }
+        assertNotNull(recovery.validateGuard(network, point, "wallet"))
+        runner.cancelAll()
+        assertNull(recovery.validateGuard(network, point, "wallet"))
+    }
+    @Test fun `automatic adapter never treats adopted locator as current authority`() = runTest {
+        var validations = 0
+        every { api.validateDaoRecovery(any(), any()) } answers {
+            validations++
+            if (validations == 1) """{"schema_version":1,"operation":"validate","result":{"request_id":"$request","valid":true,"receipt":${json.encodeToString(receipt)}}}"""
+            else """{"schema_version":1,"operation":"validate","error":{"code":"invalid_receipt"}}"""
+        }
+        val runner = DaoRecoveryAttemptRunner(recovery)
+        assertFalse(runner.run(RecoverySession("wallet", network, genesis, script, gate.lifecycleRevision()), RecoveryOutPoint.from(point)) { true })
+        assertEquals(300L, db.daoCellDao().allRows().single().withdrawBlockNumber)
+        assertNull(recovery.validateGuard(network, point, "wallet"))
+        runner.cancelAll()
+    }
 
     @Test fun `adoption repairs every alias including added pending and completed rows preserving identities`() = runTest {
         val before = gate.requireReadyRevision(network.name)

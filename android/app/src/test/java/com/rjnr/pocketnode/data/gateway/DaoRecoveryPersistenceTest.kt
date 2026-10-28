@@ -58,6 +58,40 @@ class DaoRecoveryPersistenceTest {
         } finally { context.deleteDatabase(name) }
     }
 
+    @Test fun `scheduler debits survive actual Room reopen and restart ignores elapsed wall clock`() = kotlinx.coroutines.test.runTest {
+        val context = ApplicationProvider.getApplicationContext<Context>()
+        val name = "dao-recovery-scheduler-restart.db"
+        context.deleteDatabase(name)
+        fun open() = Room.databaseBuilder(context, AppDatabase::class.java, name)
+            .allowMainThreadQueries().setQueryExecutor { it.run() }.setTransactionExecutor { it.run() }.build()
+        var elapsed = 0L
+        var wall = 1_000_000L
+        val clock = object : RecoveryClock { override fun elapsed() = elapsed; override fun wall() = wall }
+        val session = RecoverySession("wallet", com.rjnr.pocketnode.data.gateway.models.NetworkType.TESTNET, "genesis",
+            com.rjnr.pocketnode.data.gateway.models.Script("code", "type", "args"), 1)
+        val key = RecoveryBudgetKey(session, RecoveryOutPoint("hash", 0))
+        var database = open()
+        try {
+            database.walletDao().insert(com.rjnr.pocketnode.data.database.entity.WalletEntity("wallet", "Synthetic", "raw_key", null, null, isActive = true))
+            val budget = DaoRecoveryBudget(database, clock)
+            val first = budget.debit(key)!!; budget.finish(first)
+            elapsed = 10_000; wall += 10_000
+            val second = budget.debit(key)!!; budget.finish(second)
+            elapsed = 40_000; wall += 30_000
+            val third = budget.debit(key)!!; budget.finish(third)
+            database.close()
+            database = open()
+            wall += 86_400_000 // Cannot jump over cooldown by changing device time.
+            val restarted = DaoRecoveryBudget(database, clock)
+            assertNull(restarted.debit(key))
+            elapsed += 599_999
+            wall = 1 // Nor can rollback produce an immediate retry loop.
+            assertNull(restarted.debit(key))
+            elapsed++
+            assertEquals(1, restarted.debit(key)!!.record.attempts)
+        } finally { database.close(); context.deleteDatabase(name) }
+    }
+
     @Test fun `fresh database can retain recovery obligations and retry budgets separately from disposable cells`() {
         val db = Room.inMemoryDatabaseBuilder(ApplicationProvider.getApplicationContext<Context>(), AppDatabase::class.java)
             .allowMainThreadQueries().build()

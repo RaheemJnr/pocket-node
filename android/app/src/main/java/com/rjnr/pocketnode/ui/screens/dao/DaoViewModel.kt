@@ -33,8 +33,10 @@ class DaoViewModel @Inject constructor(
     private val pinManager: PinManager,
     private val walletKeyReader: WalletKeyReader,
     private val walletRepository: WalletRepository,
+    private val recoveryScheduler: com.rjnr.pocketnode.data.gateway.DaoRecoveryScheduler,
 ) : ViewModel() {
 
+    private val _recoveryPositions = MutableStateFlow<List<DaoDeposit>>(emptyList())
     private val _uiState = MutableStateFlow(DaoUiState())
     val uiState: StateFlow<DaoUiState> = _uiState.asStateFlow()
 
@@ -47,6 +49,13 @@ class DaoViewModel @Inject constructor(
     private var pendingDepositAmount: Long = 0L
 
     init {
+        viewModelScope.launch {
+            recoveryScheduler.checking.collect { point ->
+                _uiState.update { it.copy(checkingWithdrawal = point?.let {
+                    OutPoint(it.transactionHash, "0x${it.outputIndex.toString(16)}")
+                }) }
+            }
+        }
         // #347: rehydrate the "Withdrawing from DAO…" banner from the persisted
         // marker so it survives process death (it was previously in-memory
         // only). The per-deposit card overlay shows independently via the
@@ -113,6 +122,7 @@ class DaoViewModel @Inject constructor(
     private suspend fun refreshDaoData() {
         repository.getDaoDeposits()
             .onSuccess { deposits ->
+                _recoveryPositions.value = deposits
                 val active = deposits
                     .filter { it.status != DaoCellStatus.COMPLETED }
                     .sortedByDescending { it.depositBlockNumber }
@@ -229,7 +239,7 @@ class DaoViewModel @Inject constructor(
     }
 
     fun withdraw(deposit: DaoDeposit) {
-        if (!daoActionEnabled(deposit, _uiState.value.pendingAction)) return
+        if (!daoActionEnabled(deposit, _uiState.value.pendingAction, _uiState.value.checkingWithdrawal)) return
         _uiState.update { it.copy(pendingAction = DaoAction.Withdrawing(deposit.outPoint)) }
         viewModelScope.launch {
             repository.withdrawFromDao(deposit.outPoint)
@@ -239,7 +249,7 @@ class DaoViewModel @Inject constructor(
 
     /** V2-aware withdraw entry point. See [depositWithActivity]. */
     fun withdrawWithActivity(activity: FragmentActivity, deposit: DaoDeposit) {
-        if (!daoActionEnabled(deposit, _uiState.value.pendingAction)) return
+        if (!daoActionEnabled(deposit, _uiState.value.pendingAction, _uiState.value.checkingWithdrawal)) return
         // Claim the position before launching (#529): the guard above reads
         // pendingAction, so a second tap in the same frame must already see it.
         _uiState.update { it.copy(pendingAction = DaoAction.Withdrawing(deposit.outPoint)) }
@@ -256,7 +266,7 @@ class DaoViewModel @Inject constructor(
     }
 
     fun unlock(deposit: DaoDeposit) {
-        if (!daoActionEnabled(deposit, _uiState.value.pendingAction)) return
+        if (!daoActionEnabled(deposit, _uiState.value.pendingAction, _uiState.value.checkingWithdrawal)) return
         _uiState.update { it.copy(pendingAction = DaoAction.Unlocking(deposit.outPoint)) }
         viewModelScope.launch {
             repository.unlockDao(withdrawingOutPoint = deposit.outPoint, selected = deposit)
@@ -287,7 +297,7 @@ class DaoViewModel @Inject constructor(
 
     /** V2-aware unlock entry point. See [depositWithActivity]. */
     fun unlockWithActivity(activity: FragmentActivity, deposit: DaoDeposit) {
-        if (!daoActionEnabled(deposit, _uiState.value.pendingAction)) return
+        if (!daoActionEnabled(deposit, _uiState.value.pendingAction, _uiState.value.checkingWithdrawal)) return
         // Claim the position before launching (#529): the guard above reads
         // pendingAction, so a second tap in the same frame must already see it
         // and never reach a second preflight or auth prompt.
@@ -392,6 +402,11 @@ class DaoViewModel @Inject constructor(
         }
     }
 
+    /** Called only by the screen's RESUMED lifecycle block; cancellation owns native cleanup. */
+    suspend fun runForegroundRecovery() {
+        recoveryScheduler.foreground(repository, _recoveryPositions) { refreshDaoData() }
+    }
+
     fun clearError() {
         _uiState.update { it.copy(error = null) }
     }
@@ -463,7 +478,11 @@ fun daoActionTargets(pendingAction: DaoAction?, outPoint: OutPoint): Boolean = w
  * the confirming status the persisted markers overlay for it. A second tap
  * can only build a transaction against an outpoint that is already spent.
  */
-fun daoActionEnabled(deposit: DaoDeposit, pendingAction: DaoAction?): Boolean =
-    !daoActionTargets(pendingAction, deposit.outPoint) &&
+fun daoRecoveryTargets(checking: OutPoint?, outPoint: OutPoint): Boolean = checking != null &&
+    runCatching { com.rjnr.pocketnode.data.gateway.RecoveryOutPoint.from(checking) ==
+        com.rjnr.pocketnode.data.gateway.RecoveryOutPoint.from(outPoint) }.getOrDefault(checking == outPoint)
+
+fun daoActionEnabled(deposit: DaoDeposit, pendingAction: DaoAction?, checking: OutPoint? = null): Boolean =
+    !daoRecoveryTargets(checking, deposit.outPoint) && !daoActionTargets(pendingAction, deposit.outPoint) &&
         deposit.status != DaoCellStatus.WITHDRAWING &&
         deposit.status != DaoCellStatus.UNLOCKING
