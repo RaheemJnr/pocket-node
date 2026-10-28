@@ -46,6 +46,7 @@ class WalletRepository @Inject constructor(
     private val subAccountDiscovery: SubAccountDiscovery,
     private val walletPreferences: WalletPreferences,
     private val logger: Logger,
+    private val recoveryLifetime: com.rjnr.pocketnode.data.gateway.DaoRecoveryLifetime = com.rjnr.pocketnode.data.gateway.DaoRecoveryLifetime(),
 ) {
     /** Operation-owned proposed metadata; only new UUID creation paths issue this context. */
     class Creation internal constructor(internal val wallet: WalletEntity, internal val expectedParent: WalletEntity? = null) {
@@ -463,6 +464,7 @@ class WalletRepository @Inject constructor(
      * Switch active wallet. Updates Room, preferences, and last-active timestamp.
      */
     suspend fun switchActiveWallet(walletId: String) {
+        recoveryLifetime.invalidate()
         val wallet = walletDao.getById(walletId)
             ?: throw IllegalArgumentException("Wallet not found: $walletId")
         // One transaction (#563 review F3): a failure part-way must leave
@@ -653,6 +655,7 @@ class WalletRepository @Inject constructor(
 
     /** Explicit installation reset. The marker survives failure, cancellation and process death. */
     suspend fun factoryReset() {
+        recoveryLifetime.invalidate()
         appDatabase.withTransaction { keyManager.walletStorage.beginReset() }
         com.rjnr.pocketnode.ui.screens.auth.ReauthLockEvents.onLocked()
         keyManager.deleteInstallationFiles()

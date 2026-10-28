@@ -120,7 +120,7 @@ class DaoGatewayUnlockTest {
             sendPipeline = mockk<SendPipeline>(relaxed = true),
             logger = NoopLogger,
             verificationCacheGate = verificationGate,
-            recovery = DaoRecoveryCoordinator(db, verificationGate, epochClient("a"), Json { encodeDefaults = true }),
+            recovery = DaoRecoveryCoordinator(db, verificationGate, epochClient("a"), Json { encodeDefaults = true }, DaoRecoveryLifetime().apply { onStarted() }),
         )
     }
 
@@ -177,7 +177,7 @@ class DaoGatewayUnlockTest {
         val readsThrough = spyk(db)
         every { readsThrough.transactionDao() } returns paused
         val suspendedGateway = DaoGateway(readsThrough, daoSyncManager, depositReader,
-            mockk(relaxed = true), lightClient, mockk(relaxed = true), mockk(relaxed = true), NoopLogger, verificationGate, DaoRecoveryCoordinator(db, verificationGate, epochClient("a"), Json { encodeDefaults = true }))
+            mockk(relaxed = true), lightClient, mockk(relaxed = true), mockk(relaxed = true), NoopLogger, verificationGate, DaoRecoveryCoordinator(db, verificationGate, epochClient("a"), Json { encodeDefaults = true }, DaoRecoveryLifetime().apply { onStarted() }))
         val refresh = async { suspendedGateway.getDaoDeposits(ctx()) }
         captured.await()
         assertTrue("read/stage phase must not write headers", db.headerCacheDao().getByNetwork(network.name).isEmpty())
@@ -849,7 +849,9 @@ class DaoGatewayUnlockTest {
             lightClient = api,
             transactionBuilder = builder,
             ledger = mockk(relaxed = true),
-            pendingBroadcasts = mockk(relaxed = true),
+            pendingBroadcasts = mockk(relaxed = true) {
+                coEvery { insertFresh(any()) } returns true
+            },
             transactions = mockk(relaxed = true),
             syncEngine = mockk(relaxed = true),
             syncCoordinator = mockk(relaxed = true),
@@ -868,7 +870,7 @@ class DaoGatewayUnlockTest {
             sendPipeline = pipeline,
             logger = NoopLogger,
             verificationCacheGate = verificationGate,
-            recovery = DaoRecoveryCoordinator(db, verificationGate, epochClient("a"), Json { encodeDefaults = true }),
+            recovery = DaoRecoveryCoordinator(db, verificationGate, epochClient("a"), Json { encodeDefaults = true }, DaoRecoveryLifetime().apply { onStarted() }),
         )
 
         val result = switching.unlockDao(ctx(walletIdOf = { active }), withdrawingOutPoint, privateKey = ByteArray(32))

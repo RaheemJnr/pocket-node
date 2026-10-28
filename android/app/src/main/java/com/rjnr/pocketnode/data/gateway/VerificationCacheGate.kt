@@ -20,6 +20,7 @@ import javax.inject.Singleton
 class VerificationCacheGate @Inject constructor(
     @ApplicationContext context: Context,
     private val database: AppDatabase,
+    private val recoveryLifetime: DaoRecoveryLifetime = DaoRecoveryLifetime(),
 ) {
     private val applied = context.getSharedPreferences("verified_chain_cache", Context.MODE_PRIVATE)
     internal var writeGeneration: suspend (String, String) -> Boolean = { network, generation ->
@@ -47,6 +48,7 @@ class VerificationCacheGate @Inject constructor(
     fun currentRevision(): Long = revision
 
     suspend fun close() = state.withLock {
+        recoveryLifetime.invalidate()
         synchronized(this) {
             revision += 1
             lifecycle += 1
@@ -79,8 +81,12 @@ class VerificationCacheGate @Inject constructor(
     suspend fun commitRecoveryIfCurrent(network: String, ticket: Long, mutations: suspend () -> Unit): Long = state.withLock {
         currentCoroutineContext().ensureActive()
         requireCurrent(network, ticket)
-        database.withTransaction { mutations() }
-        synchronized(this) { revision += 1; revision }
+        // A committed Room transaction must publish its fence even if cancellation
+        // races the dispatcher return. This section contains SQL only, no native IO.
+        kotlinx.coroutines.withContext(kotlinx.coroutines.NonCancellable) {
+            database.withTransaction { mutations() }
+            synchronized(this@VerificationCacheGate) { revision += 1; revision }
+        }
     }
 
     suspend fun reconcile(client: LightClientApi, network: NetworkType) = reconciliation.withLock {

@@ -37,6 +37,7 @@ data class DaoRecoveryContext internal constructor(
     val walletId: String, val network: NetworkType, val script: Script,
     val ticket: DaoRecoveryTicket, val lifecycle: Long,
     val outPoint: RecoveryOutPoint,
+    val foregroundRevision: Long,
 )
 sealed class RecoveryOutcome {
     data object Pending : RecoveryOutcome()
@@ -55,6 +56,7 @@ class DaoRecoveryCoordinator @Inject constructor(
     private val gate: VerificationCacheGate,
     private val api: LightClientApi,
     private val json: Json,
+    private val lifetime: DaoRecoveryLifetime,
 ) : InputSubmissionAuthorizer {
     private data class Active(val context: DaoRecoveryContext, val snapshot: ValidatedRecoverySnapshot)
     private val active = mutableMapOf<DaoRecoveryEntity, Active>()
@@ -62,9 +64,19 @@ class DaoRecoveryCoordinator @Inject constructor(
     private val _invalidation = MutableStateFlow(0L)
     val invalidation = _invalidation.asStateFlow()
 
+    init {
+        lifetime.observeInvalidation {
+            synchronized(active) {
+                active.clear()
+                _invalidation.value += 1
+            }
+        }
+    }
+
     suspend fun begin(walletId: String, network: NetworkType, script: Script, genesisHash: String,
                       outPoint: OutPoint): DaoRecoveryContext {
         database.walletStorage.requireOpen()
+        val foregroundRevision = lifetime.capture()
         val point = RecoveryOutPoint.from(outPoint)
         val revision = gate.requireReadyRevision(network.name)
         val lifecycle = gate.lifecycleRevision()
@@ -81,7 +93,8 @@ class DaoRecoveryCoordinator @Inject constructor(
             gate.requireCurrent(network.name, revision)
             check(ticket.identity.storeGeneration == gate.generation(network.name))
             check(database.walletDao().getActive()?.walletId == walletId) { "Wallet changed" }
-            return DaoRecoveryContext(walletId, network, script, ticket, lifecycle, point)
+            lifetime.requireCurrent(foregroundRevision)
+            return DaoRecoveryContext(walletId, network, script, ticket, lifecycle, point, foregroundRevision)
         } catch (failure: Throwable) {
             allocated?.let { ticket ->
                 withContext(kotlinx.coroutines.NonCancellable + Dispatchers.IO) { client.cancel(ticket) }
@@ -146,6 +159,7 @@ class DaoRecoveryCoordinator @Inject constructor(
     }
 
     private suspend fun requireContext(context: DaoRecoveryContext) {
+        lifetime.requireCurrent(context.foregroundRevision)
         currentCoroutineContext().ensureActive()
         database.walletStorage.requireOpen()
         check(synchronized(active) { context.ticket !in cancelled }) { "Recovery cancelled" }
@@ -188,6 +202,7 @@ class DaoRecoveryCoordinator @Inject constructor(
             currentCoroutineContext().ensureActive()
             database.walletStorage.requireOpen()
             check(gate.isReady(network.name) && gate.lifecycleRevision() == candidate.context.lifecycle)
+            lifetime.requireCurrent(candidate.context.foregroundRevision)
             check(synchronized(active) { active[guard] == candidate && candidate.context.ticket !in cancelled })
             candidate.snapshot
         } catch (e: CancellationException) { invalidate(candidate); throw e }

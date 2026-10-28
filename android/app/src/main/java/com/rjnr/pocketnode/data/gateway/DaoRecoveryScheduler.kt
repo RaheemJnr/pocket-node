@@ -179,6 +179,9 @@ internal class DaoRecoveryAttemptRunner(private val coordinator: DaoRecoveryCoor
                     RecoveryOutcome.Unavailable -> return false
                     RecoveryOutcome.Adopted -> {
                         current = coordinator.validateGuard(context, point.toOutPoint()) != null && eligible()
+                        // Completed authority belongs to the coordinator until native/context expiry.
+                        // Route cleanup owns only requests that have not completed.
+                        if (current) contexts.remove(point)
                         return current
                     }
                 }
@@ -213,6 +216,7 @@ class DaoRecoveryScheduler @Inject constructor(
     })
     private val queue = DaoRecoveryQueue(budget)
     val checking = queue.checking
+    val invalidation = coordinator.invalidation
     // Multiple composition instances cannot create overlapping native operations.
     private val foregroundOwner = Mutex()
 

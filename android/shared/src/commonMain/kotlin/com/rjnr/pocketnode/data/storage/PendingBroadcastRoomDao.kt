@@ -18,6 +18,32 @@ interface PendingBroadcastRoomDao {
     @Insert(onConflict = OnConflictStrategy.REPLACE)
     suspend fun insert(row: PendingBroadcastRow)
 
+    @Insert(onConflict = OnConflictStrategy.IGNORE)
+    suspend fun insertFresh(row: PendingBroadcastRow): Long
+
+    @Query("SELECT * FROM pending_broadcasts WHERE txHash = :hash")
+    suspend fun getByHash(hash: String): PendingBroadcastRow?
+
+    @Query("SELECT EXISTS(SELECT 1 FROM transactions WHERE txHash = :hash AND network = :network " +
+        "AND (walletId != :wallet OR status != 'PENDING' OR isLocal != 1))")
+    suspend fun hasAdvancedActivity(hash: String, network: String, wallet: String): Boolean
+
+    @Query("UPDATE transactions SET status = 'FAILED', cachedAt = :now WHERE txHash = :hash " +
+        "AND network = :network AND walletId = :wallet AND status = 'PENDING' AND isLocal = 1")
+    suspend fun failLocalActivity(hash: String, network: String, wallet: String, now: Long)
+
+    @androidx.room.Transaction
+    suspend fun failKnownUnsent(expected: PendingBroadcastRow, now: Long): Boolean {
+        val current = getByHash(expected.txHash) ?: return false
+        // Watchdog observations do not transfer ownership; submission/confirmation do.
+        if (expected.state != "BROADCASTING" ||
+            current.copy(nullCount = expected.nullCount, lastCheckedAt = expected.lastCheckedAt) != expected ||
+            hasAdvancedActivity(expected.txHash, expected.network, expected.walletId)) return false
+        if (compareAndUpdateState(expected.txHash, "BROADCASTING", "FAILED", now) != 1) return false
+        failLocalActivity(expected.txHash, expected.network, expected.walletId, now)
+        return true
+    }
+
     /**
      * CAS update: only writes if the current state matches [expected]. Returns
      * rows affected. Callers must check `== 1` before treating the transition

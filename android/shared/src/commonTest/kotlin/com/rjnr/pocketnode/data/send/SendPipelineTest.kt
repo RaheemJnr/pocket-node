@@ -510,9 +510,10 @@ class SendPipelineTest {
     fun invalidationDuringPendingPersistenceAbortsBeforeBridgeSubmission() = runTest {
         var valid = true
         val store = object : PendingBroadcastStore by broadcasts {
-            override suspend fun insert(record: PendingBroadcastRecord) {
-                broadcasts.insert(record)
+            override suspend fun insertFresh(record: PendingBroadcastRecord): Boolean {
+                val inserted = broadcasts.insertFresh(record)
                 valid = false
+                return inserted
             }
         }
         val bridge = api(sendAnswer = "\"$PENDING_HASH\"")
@@ -523,6 +524,32 @@ class SendPipelineTest {
         assertTrue(result.isFailure)
         assertTrue(bridge.callsTo("sendTransaction").isEmpty())
         assertEquals(json.encodeToString(signed), broadcasts.byHash.values.single().signedTxJson)
+        assertEquals("FAILED", broadcasts.byHash.values.single().state)
+        assertTrue(broadcasts.getActive(WALLET, NetworkType.TESTNET.name).isEmpty())
+    }
+
+    @Test
+    fun cancellationAfterInsertCommitBeforeReturnReleasesKnownUnsentReservation() = runTest {
+        val inserted = CompletableDeferred<Unit>()
+        val release = CompletableDeferred<Unit>()
+        val store = object : PendingBroadcastStore by broadcasts {
+            override suspend fun insertFresh(record: PendingBroadcastRecord): Boolean {
+                val result = broadcasts.insertFresh(record)
+                inserted.complete(Unit)
+                release.await()
+                return result
+            }
+        }
+        val bridge = api(sendAnswer = "\"$PENDING_HASH\"")
+        val signed = json.decodeFromString<Transaction>(pendingChangeTx())
+        val sending = async { pipelineOver(bridge, store).sendTransaction(ctx(this), signed) }
+        inserted.await()
+        sending.cancel()
+        release.complete(Unit)
+        sending.join()
+        assertEquals("FAILED", broadcasts.byHash.values.single().state)
+        assertEquals(json.encodeToString(signed), broadcasts.byHash.values.single().signedTxJson)
+        assertTrue(bridge.callsTo("sendTransaction").isEmpty())
     }
 
     @Test

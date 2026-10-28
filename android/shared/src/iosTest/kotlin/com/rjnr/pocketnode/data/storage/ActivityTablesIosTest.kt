@@ -78,6 +78,31 @@ class ActivityTablesIosTest {
         lastCheckedAt = NOW,
     )
 
+    @Test fun `known unsent failure releases reservations and preserves bytes and activity atomically`() = runTest {
+        val row = broadcastRow("0xaa")
+        assertTrue(broadcasts.insertFresh(row))
+        transactions.insertPendingTransaction("0xaa", NETWORK, WALLET, "0x1", "dao_unlock", "0x0", 7L)
+        assertTrue(broadcasts.failKnownUnsent(row, NOW + 1))
+        assertTrue(broadcasts.getActive(WALLET, NETWORK).isEmpty())
+        assertEquals(row.copy(state = "FAILED", lastCheckedAt = NOW + 1), broadcasts.getFailedRow("0xaa"))
+        assertEquals("FAILED", transactions.getByHash("0xaa", NETWORK)?.status)
+        assertEquals(7L, transactions.getByHash("0xaa", NETWORK)?.feeShannons)
+    }
+
+    @Test fun `known unsent CAS cannot overwrite independently advanced pending or activity`() = runTest {
+        for (advance in listOf("BROADCAST", "CONFIRMED", "ACTIVITY_CONFIRMED")) {
+            val hash = "0x$advance"
+            val row = broadcastRow(hash)
+            broadcasts.insert(row)
+            transactions.insertPendingTransaction(hash, NETWORK, WALLET, "0x1", "out", "0x0", 7L)
+            if (advance == "ACTIVITY_CONFIRMED") transactions.updateTransactionStatus(hash, "CONFIRMED")
+            else broadcasts.compareAndUpdateState(hash, "BROADCASTING", advance, NOW + 1)
+            assertTrue(!broadcasts.failKnownUnsent(row, NOW + 2))
+            assertNull(broadcasts.getFailedRow(hash))
+            assertEquals(if (advance == "ACTIVITY_CONFIRMED") "CONFIRMED" else "PENDING", transactions.getByHash(hash, NETWORK)?.status)
+        }
+    }
+
     // ---- transactions ----
 
     @Test

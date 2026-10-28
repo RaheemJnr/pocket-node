@@ -9,6 +9,8 @@ import com.rjnr.pocketnode.data.gateway.models.*
 import com.rjnr.pocketnode.data.send.SendContext
 import io.mockk.*
 import kotlinx.coroutines.test.runTest
+import kotlinx.coroutines.test.setMain
+import kotlinx.coroutines.test.resetMain
 import kotlinx.coroutines.async
 import kotlinx.coroutines.launch
 import kotlinx.serialization.encodeToString
@@ -20,10 +22,12 @@ import org.robolectric.RobolectricTestRunner
 
 /** Real Room and typed bridge decoder. Only native authority responses are scripted. */
 @RunWith(RobolectricTestRunner::class)
+@OptIn(kotlinx.coroutines.ExperimentalCoroutinesApi::class)
 class DaoRecoveryCoordinatorTest {
     private val json = Json { encodeDefaults = true }
     private lateinit var db: AppDatabase
     private lateinit var gate: VerificationCacheGate
+    private lateinit var lifetime: DaoRecoveryLifetime
     private lateinit var recovery: DaoRecoveryCoordinator
     private lateinit var api: LightClientApi
     private val network = NetworkType.TESTNET
@@ -39,7 +43,8 @@ class DaoRecoveryCoordinatorTest {
     @Before fun setup() = runTest {
         db = Room.inMemoryDatabaseBuilder(ApplicationProvider.getApplicationContext<Context>(), AppDatabase::class.java)
             .allowMainThreadQueries().build()
-        gate = spyk(VerificationCacheGate(ApplicationProvider.getApplicationContext(), db))
+        lifetime = DaoRecoveryLifetime().apply { onStarted() }
+        gate = spyk(VerificationCacheGate(ApplicationProvider.getApplicationContext(), db, lifetime))
         api = mockk(relaxed = true)
         every { api.callRpc("get_verification_epoch") } returns """{"result":{"version":1,"generation":"${identity.storeGeneration}"}}"""
         gate.reconcile(api, network)
@@ -61,7 +66,7 @@ class DaoRecoveryCoordinatorTest {
             if (valid) """{"schema_version":1,"operation":"validate","result":{"request_id":"$request","valid":true,"receipt":${json.encodeToString(receipt)}}}"""
             else """{"schema_version":1,"operation":"validate","error":{"code":"invalid_receipt"}}"""
         }
-        recovery = DaoRecoveryCoordinator(db, gate, api, json)
+        recovery = DaoRecoveryCoordinator(db, gate, api, json, lifetime)
         db.daoCellDao().upsert(row())
     }
     @After fun close() { db.close() }
@@ -252,8 +257,109 @@ class DaoRecoveryCoordinatorTest {
         verify(exactly = 3) { api.pollDaoRecovery(request) }
         assertNotNull(recovery.validateGuard(network, point, "wallet"))
         runner.cancelAll()
-        assertNull(recovery.validateGuard(network, point, "wallet"))
+        assertNotNull("completed receipt survives leaving DAO", recovery.validateGuard(network, point, "wallet"))
     }
+    @Test fun `leaving DAO reaches actual Activity Retry with original bytes and refuses real invalidation`() = kotlinx.coroutines.runBlocking {
+        kotlinx.coroutines.Dispatchers.setMain(kotlinx.coroutines.Dispatchers.Unconfined)
+        val store = androidx.lifecycle.ViewModelStore()
+        try {
+            suitableNative()
+            every { api.getGenesisBlock() } returns """{"header":{"hash":"$genesis"}}"""
+            val canonical = JniHeaderView(hash("cc"), "0xc8", "0x70800000000001", "0x1", hash("00"), hash("00"), hash("00"), hash("00"), hash("00"), "0x0")
+            every { api.getHeaderByNumber(any()) } returns json.encodeToString(canonical)
+            val repository = mockk<GatewayRepository>(relaxed = true) {
+                every { walletInfo } returns kotlinx.coroutines.flow.MutableStateFlow<com.rjnr.pocketnode.data.wallet.WalletInfo?>(
+                    com.rjnr.pocketnode.data.wallet.WalletInfo("public", script, "test", "main"))
+                every { this@mockk.network } returns kotlinx.coroutines.flow.MutableStateFlow(this@DaoRecoveryCoordinatorTest.network)
+                every { tipFlow } returns kotlinx.coroutines.flow.MutableStateFlow(300L)
+                every { activeWalletAndNetworkOrNull() } returns ("wallet" to this@DaoRecoveryCoordinatorTest.network.name)
+            }
+            val tx = Transaction(cellDeps = emptyList(), headerDeps = listOf(hash("dd"), hash("cc")),
+                cellInputs = listOf(CellInput(previousOutput = point)),
+                cellOutputs = listOf(CellOutput("0x174876e800", script)), outputsData = listOf("0x"), witnesses = listOf("0x1234"))
+            val builder = com.rjnr.pocketnode.data.transaction.TransactionBuilder(com.rjnr.pocketnode.data.validation.NetworkValidator())
+            val hash = builder.computeTxHash(tx)
+            val bytes = "  " + json.encodeToString(tx) + "  " // preserve literal stored formatting too
+            val failed = PendingBroadcastEntity(hash, "wallet", network.name, bytes, json.encodeToString(listOf(point)), "FAILED", 300, 3, 7, 8)
+            db.pendingBroadcastDao().insert(failed)
+            val transactions = com.rjnr.pocketnode.data.storage.RoomTransactionStore(db.transactionDao(),
+                CacheManager(db.transactionDao(), db.balanceCacheDao(), com.rjnr.pocketnode.core.log.NoopLogger, gate))
+            transactions.insertPendingTransaction(hash, network.name, "wallet", "0x1", "dao_unlock", "0x0", 1)
+            transactions.updateTransactionStatus(hash, "FAILED")
+            val pipeline = com.rjnr.pocketnode.data.send.SendPipeline(api, builder, mockk(relaxed = true),
+                com.rjnr.pocketnode.data.storage.RoomPendingBroadcastStore(db.pendingBroadcastDao()), transactions,
+                mockk(relaxed = true), mockk(relaxed = true), mockk(relaxed = true), json,
+                com.rjnr.pocketnode.core.log.NoopLogger, recovery)
+            every { api.getTipHeader() } returns null
+            every { api.sendTransaction(any()) } returns hash
+            val retried = kotlinx.coroutines.channels.Channel<Result<String>>(kotlinx.coroutines.channels.Channel.UNLIMITED)
+            coEvery { repository.retryBroadcast(hash) } coAnswers {
+                pipeline.retryBroadcast(SendContext(network, "wallet", script, { true }, this@runBlocking), hash).also { retried.send(it) }
+            }
+            val scheduler = DaoRecoveryScheduler(db, recovery, api, gate, json)
+            val adopted = kotlinx.coroutines.CompletableDeferred<Unit>()
+            val daoRoute = launch {
+                scheduler.foreground(repository, kotlinx.coroutines.flow.MutableStateFlow(listOf(row().toUnverifiedCacheProjection()))) { adopted.complete(Unit) }
+            }
+            kotlinx.coroutines.withTimeout(5_000) { adopted.await() }
+            daoRoute.cancel(); daoRoute.join() // same cancellation boundary as leaving RESUMED DaoScreen
+            assertNotNull(recovery.validateGuard(network, point, "wallet"))
+            coEvery { repository.getTransactions(any()) } coAnswers { kotlinx.coroutines.awaitCancellation() }
+            val activity = com.rjnr.pocketnode.ui.screens.activity.ActivityViewModel(repository, db.transactionDao(), db.pendingBroadcastDao(),
+                mockk(relaxed = true), mockk(relaxed = true), com.rjnr.pocketnode.core.log.NoopLogger, gate)
+            store.put("activity", activity)
+            activity.retryFailedTransaction(hash)
+            assertTrue(retried.receive().isSuccess)
+            verify(exactly = 1) { api.sendTransaction(bytes) }
+            assertEquals(bytes, db.pendingBroadcastDao().getActive("wallet", network.name).single().signedTxJson)
+            db.pendingBroadcastDao().insert(failed)
+            valid = false
+            recovery.refreshNativeValidity()
+            activity.retryFailedTransaction(hash)
+            assertTrue(retried.receive().isFailure)
+            assertEquals(failed, db.pendingBroadcastDao().getFailedRow(hash))
+            verify(exactly = 1) { api.sendTransaction(any()) }
+        } finally { store.clear(); kotlinx.coroutines.Dispatchers.resetMain() }
+    }
+
+    @Test fun `configuration recreation retains receipt but real background and foreground cannot revive it`() = runTest {
+        val context = begin()
+        assertEquals(RecoveryOutcome.Adopted, recovery.recover(context))
+        lifetime.onStopped(true)
+        lifetime.onStarted()
+        assertNotNull(recovery.validateGuard(context, point))
+        lifetime.onStopped(false)
+        assertTrue(runCatching { begin() }.isFailure)
+        lifetime.onStarted()
+        assertNull(recovery.validateGuard(context, point))
+    }
+
+    @Test fun `actual wallet switch away and back cannot revive completed receipt`() = runTest {
+        val context = begin()
+        assertEquals(RecoveryOutcome.Adopted, recovery.recover(context))
+        db.walletDao().insert(WalletEntity("other", "Other synthetic", "raw_key", null, null, isActive = false))
+        val keys = mockk<com.rjnr.pocketnode.data.wallet.KeyManager>(relaxed = true) {
+            every { walletStorage } returns db.walletStorage
+        }
+        val wallets = com.rjnr.pocketnode.data.wallet.WalletRepository(db.walletDao(), keys,
+            mockk(relaxed = true), mockk(relaxed = true), mockk(relaxed = true), db, db.transactionDao(), db.balanceCacheDao(),
+            db.daoCellDao(), db.pendingDaoWithdrawDao(), db.pendingDaoUnlockDao(), db.keyMaterialDao(), db.subAccountCandidateDao(),
+            mockk(relaxed = true), mockk(relaxed = true), com.rjnr.pocketnode.core.log.NoopLogger, lifetime)
+        wallets.switchActiveWallet("other")
+        wallets.switchActiveWallet("wallet")
+        assertEquals("wallet", db.walletDao().getActive()?.walletId)
+        assertNull(recovery.validateGuard(context, point))
+        assertTrue(gate.isReady(network.name))
+    }
+
+    @Test fun `network close and reopen cannot revive completed receipt`() = runTest {
+        val context = begin()
+        assertEquals(RecoveryOutcome.Adopted, recovery.recover(context))
+        gate.reconcile(api, NetworkType.MAINNET)
+        gate.reconcile(api, network)
+        assertNull(recovery.validateGuard(context, point))
+    }
+
     @Test fun `automatic adapter never treats adopted locator as current authority`() = runTest {
         var validations = 0
         every { api.validateDaoRecovery(any(), any()) } answers {
@@ -342,7 +448,7 @@ class DaoRecoveryCoordinatorTest {
         assertEquals(RecoveryOutcome.Adopted, recovery.recover(context))
         db.daoCellDao().deleteAll()
         db.daoCellDao().upsert(row())
-        val restarted = DaoRecoveryCoordinator(db, gate, api, json)
+        val restarted = DaoRecoveryCoordinator(db, gate, api, json, lifetime)
         assertNull(restarted.validateGuard(network, point, "wallet"))
         every { api.callRpc("get_verification_epoch") } returns """{"result":{"version":1,"generation":"${"f".repeat(32)}"}}"""
         gate.reconcile(api, network)
@@ -465,7 +571,7 @@ class DaoRecoveryCoordinatorTest {
         assertEquals(RecoveryOutcome.Adopted, recovery.recover(context))
         // Even a preexisting derived row is not authorization after a new coordinator starts.
         db.daoCellDao().upsert(row().copy(withdrawBlockNumber = 300, withdrawBlockHash = hash("cc")))
-        val restarted = DaoRecoveryCoordinator(db, gate, api, json)
+        val restarted = DaoRecoveryCoordinator(db, gate, api, json, lifetime)
         val projected = db.daoCellDao().allRows().single().toOutsideWindowDeposit(restarted)
         assertNull(projected.unlockEpoch)
         assertNull(projected.withdrawBlockHash)

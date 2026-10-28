@@ -244,6 +244,17 @@ class FakePendingBroadcastStore : PendingBroadcastStore {
         byHash[record.txHash] = record
     }
 
+    override suspend fun insertFresh(record: PendingBroadcastRecord): Boolean {
+        if (record.txHash in byHash) return false
+        insert(record)
+        return true
+    }
+    override suspend fun failKnownUnsent(expected: PendingBroadcastRecord, now: Long): Boolean {
+        val current = byHash[expected.txHash] ?: return false
+        if (current.copy(nullCount = expected.nullCount, lastCheckedAt = expected.lastCheckedAt) != expected) return false
+        return compareAndUpdateState(expected.txHash, "BROADCASTING", "FAILED", now) == 1
+    }
+
     override suspend fun compareAndUpdateState(
         hash: String,
         expected: String,

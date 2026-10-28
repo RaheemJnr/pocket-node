@@ -134,6 +134,15 @@ class FakePendingBroadcastRoomDao : PendingBroadcastRoomDao {
         state.value = state.value.filterNot { it.txHash == row.txHash } + row
     }
 
+    override suspend fun insertFresh(row: PendingBroadcastRow): Long {
+        if (rows.any { it.txHash == row.txHash }) return -1L
+        insert(row)
+        return 1L
+    }
+    override suspend fun getByHash(hash: String) = rows.firstOrNull { it.txHash == hash }
+    override suspend fun hasAdvancedActivity(hash: String, network: String, wallet: String) = false
+    override suspend fun failLocalActivity(hash: String, network: String, wallet: String, now: Long) = Unit
+
     override suspend fun compareAndUpdateState(
         hash: String,
         expected: String,

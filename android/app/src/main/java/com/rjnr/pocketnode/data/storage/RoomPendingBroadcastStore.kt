@@ -25,6 +25,11 @@ class RoomPendingBroadcastStore @Inject constructor(
     override suspend fun insert(record: PendingBroadcastRecord) =
         dao.insert(record.toEntity())
 
+    override suspend fun insertFresh(record: PendingBroadcastRecord): Boolean = dao.insertFresh(record.toEntity()) != -1L
+
+    override suspend fun failKnownUnsent(expected: PendingBroadcastRecord, now: Long): Boolean =
+        dao.failKnownUnsent(expected.toEntity(), now)
+
     override suspend fun compareAndUpdateState(
         hash: String,
         expected: String,

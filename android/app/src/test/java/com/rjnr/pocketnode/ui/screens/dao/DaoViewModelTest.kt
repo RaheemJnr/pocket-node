@@ -35,8 +35,10 @@ class DaoViewModelTest {
     private lateinit var walletKeyReader: WalletKeyReader
     private lateinit var walletRepository: WalletRepository
     private val checking = MutableStateFlow<com.rjnr.pocketnode.data.gateway.RecoveryOutPoint?>(null)
+    private val invalidation = MutableStateFlow(0L)
     private val recoveryScheduler = mockk<com.rjnr.pocketnode.data.gateway.DaoRecoveryScheduler>(relaxed = true) {
         every { checking } returns this@DaoViewModelTest.checking
+        every { invalidation } returns this@DaoViewModelTest.invalidation
     }
 
     private val testOutPoint = OutPoint("0x" + "ab".repeat(32), "0x0")
@@ -93,6 +95,54 @@ class DaoViewModelTest {
         checking.value = null
         testDispatcher.scheduler.runCurrent()
         assertNull(vm.uiState.value.checkingWithdrawal)
+    }
+
+    @Test fun `newer refresh wins when older actionable result resumes last`() = kotlinx.coroutines.test.runTest(testDispatcher) {
+        val old = makeDaoDeposit(status = DaoCellStatus.UNLOCKABLE).copy(compensation = 99, recoveryReceiptId = "old")
+        val fresh = makeDaoDeposit(status = DaoCellStatus.LOCKED)
+        val continuations = mutableListOf<kotlin.coroutines.Continuation<Any?>>()
+        captureDaoLoads(continuations)
+        val vm = DaoViewModel(repository, authManager, pinManager, walletKeyReader, walletRepository, recoveryScheduler)
+        val store = androidx.lifecycle.ViewModelStore().apply { put("dao", vm) }
+        try {
+            testDispatcher.scheduler.runCurrent()
+            assertEquals(1, continuations.size)
+            invalidation.value++
+            vm.refresh()
+            testDispatcher.scheduler.runCurrent()
+            assertEquals(2, continuations.size)
+            continuations[1].resumeWith(Result.success(Result.success(listOf(fresh))))
+            testDispatcher.scheduler.runCurrent()
+            assertEquals(listOf(fresh), vm.uiState.value.activeDeposits)
+            continuations[0].resumeWith(Result.success(Result.success(listOf(old))))
+            testDispatcher.scheduler.runCurrent()
+            assertEquals(listOf(fresh), vm.uiState.value.activeDeposits)
+            assertEquals(0L, vm.uiState.value.overview.totalCompensation)
+        } finally { store.clear() }
+    }
+
+    @Test fun `observed invalidation suppresses result before a successor refresh even starts`() = kotlinx.coroutines.test.runTest(testDispatcher) {
+        val continuations = mutableListOf<kotlin.coroutines.Continuation<Any?>>()
+        captureDaoLoads(continuations)
+        val vm = DaoViewModel(repository, authManager, pinManager, walletKeyReader, walletRepository, recoveryScheduler)
+        val store = androidx.lifecycle.ViewModelStore().apply { put("dao", vm) }
+        try {
+            testDispatcher.scheduler.runCurrent()
+            assertEquals(1, continuations.size)
+            invalidation.value++
+            continuations.single().resumeWith(Result.success(Result.success(listOf(makeDaoDeposit(status = DaoCellStatus.UNLOCKABLE).copy(recoveryReceiptId = "old")))))
+            testDispatcher.scheduler.runCurrent()
+            assertTrue(vm.uiState.value.activeDeposits.isEmpty())
+        } finally { store.clear() }
+    }
+
+    /** Resume the suspend Result method's JVM ABI directly: MockK otherwise double-boxes Result. */
+    @Suppress("UNCHECKED_CAST")
+    private fun captureDaoLoads(continuations: MutableList<kotlin.coroutines.Continuation<Any?>>) {
+        (coEvery { repository.getDaoDeposits() } as io.mockk.MockKStubScope<Any?, Any?>).answers {
+            continuations += invocation.args.last() as kotlin.coroutines.Continuation<Any?>
+            kotlin.coroutines.intrinsics.COROUTINE_SUSPENDED
+        }
     }
 
     // --- Synchronous ViewModel operations ---

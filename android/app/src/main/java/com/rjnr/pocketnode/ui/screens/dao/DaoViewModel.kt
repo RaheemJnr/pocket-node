@@ -47,6 +47,7 @@ class DaoViewModel @Inject constructor(
     val networkType: StateFlow<NetworkType> = repository.network
 
     private var pendingDepositAmount: Long = 0L
+    private var refreshSequence = 0L
 
     init {
         viewModelScope.launch {
@@ -120,8 +121,12 @@ class DaoViewModel @Inject constructor(
     }
 
     private suspend fun refreshDaoData() {
+        val sequence = ++refreshSequence
+        val invalidation = recoveryScheduler.invalidation.value
+        fun current() = sequence == refreshSequence && recoveryScheduler.invalidation.value == invalidation
         repository.getDaoDeposits()
             .onSuccess { deposits ->
+                if (!current()) return@onSuccess
                 _recoveryPositions.value = deposits
                 val active = deposits
                     .filter { it.status != DaoCellStatus.COMPLETED }
@@ -159,6 +164,7 @@ class DaoViewModel @Inject constructor(
                 resolvePendingAction(deposits)
             }
             .onFailure { e ->
+                if (!current()) return@onFailure
                 _uiState.update {
                     it.copy(error = e.message?.let(com.rjnr.pocketnode.ui.util.UiMessage::Raw), isLoading = false)
                 }

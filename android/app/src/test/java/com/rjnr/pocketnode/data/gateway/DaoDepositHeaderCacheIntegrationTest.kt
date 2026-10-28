@@ -68,7 +68,7 @@ class DaoDepositHeaderCacheIntegrationTest {
         gate.reconcile(api, network)
         sync = DaoSyncManager(db.headerCacheDao(), db.daoCellDao(), db.pendingDaoWithdrawDao(),
             db.pendingDaoUnlockDao(), NoopLogger, gate)
-        recovery = DaoRecoveryCoordinator(db, gate, api, json)
+        recovery = DaoRecoveryCoordinator(db, gate, api, json, DaoRecoveryLifetime().apply { onStarted() })
         resolver = DaoHeaderResolver(json, sync, NoopLogger)
         reader = DaoDepositReader(json, resolver, NoopLogger, recovery)
         gateway = DaoGateway(db, sync, reader, resolver, LightClientReadOnly(api, json, NoopLogger),
@@ -105,6 +105,45 @@ class DaoDepositHeaderCacheIntegrationTest {
             mockk(relaxed = true), mockk(relaxed = true), NoopLogger, gate, finalProjection)
         assertTrue(finalGateway.getDaoDeposits(ctx()).isFailure)
         assertTrue(db.daoCellDao().allRows().isNotEmpty())
+    }
+
+    @Test fun `adapter invalidation while final second position suspends rejects earlier actionable position`() = runTest {
+        gateway.getDaoDeposits(ctx()).getOrThrow()
+        adoptLocator()
+        val secondCell = cell.copy(outPoint = OutPoint(hash("a2"), "0x0"), outputData = "0x0000000000000000", blockNumber = "0x64")
+        native.cellsPage = json.encodeToString(JniPagination(listOf(cell, secondCell), null))
+        val projectedA = kotlinx.coroutines.CompletableDeferred<DaoDeposit>()
+        val releaseB = kotlinx.coroutines.CompletableDeferred<Unit>()
+        val parkedB = kotlinx.coroutines.CompletableDeferred<Unit>()
+        val finalProjection = spyk(recovery)
+        every { finalProjection.invalidation } returns recovery.invalidation
+        var committed = false
+        val publicationGate = spyk(gate)
+        coEvery { publicationGate.commitIfCurrent(any(), any(), any()) } coAnswers {
+            gate.commitIfCurrent(firstArg(), secondArg(), thirdArg())
+            committed = true
+        }
+        coEvery { finalProjection.project(any(), any(), any()) } coAnswers {
+            val position = thirdArg<DaoDeposit>()
+            if (position.outPoint == secondCell.outPoint && committed) { parkedB.complete(Unit); releaseB.await() }
+            val projected = recovery.project(firstArg(), secondArg(), position)
+            if (position.outPoint == cell.outPoint && committed) projectedA.complete(projected)
+            projected
+        }
+        val finalGateway = DaoGateway(db, sync, reader, resolver, LightClientReadOnly(api, json, NoopLogger),
+            mockk(relaxed = true), mockk(relaxed = true), NoopLogger, publicationGate, finalProjection)
+        val revision = gate.currentRevision()
+        val pending = async { finalGateway.getDaoDeposits(ctx()) }
+        assertNotNull(projectedA.await().recoveryReceiptId)
+        parkedB.await()
+        recoveryValid = false
+        recovery.refreshNativeValidity()
+        assertTrue(recovery.invalidation.value > 0)
+        assertEquals(recovery.invalidation.value, finalProjection.invalidation.value)
+        assertTrue(gate.isReady(network.name))
+        assertEquals(revision, gate.currentRevision())
+        releaseB.complete(Unit)
+        assertTrue("old multi-position publication must be rejected", pending.await().isFailure)
     }
 
     @Test fun `persisted recovery obligation blocks retained matching mappings after restart`() = runTest {

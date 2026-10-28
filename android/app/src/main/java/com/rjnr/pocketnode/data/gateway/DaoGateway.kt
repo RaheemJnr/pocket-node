@@ -114,7 +114,9 @@ class DaoGateway(
         }
         verificationCacheGate.requireCurrent(network.name, ticket)
         check(ctx.network() == network && ctx.walletId() == walletId) { "Wallet changed" }
+        val invalidation = recovery.invalidation.value
         val published = result.map { recovery.project(network, walletId, it) }
+        check(recovery.invalidation.value == invalidation) { "Withdrawal verification changed" }
         verificationCacheGate.requireCurrent(network.name, ticket)
         check(ctx.network() == network && ctx.walletId() == walletId) { "Wallet changed" }
         published

@@ -65,6 +65,12 @@ interface PendingBroadcastStore {
      */
     suspend fun insert(record: PendingBroadcastRecord)
 
+    /** Claim a new attempt without replacing any prior history. */
+    suspend fun insertFresh(record: PendingBroadcastRecord): Boolean
+
+    /** Atomically fail an owned, still-unsent attempt and its local activity. Advanced state wins. */
+    suspend fun failKnownUnsent(expected: PendingBroadcastRecord, now: Long): Boolean
+
     /**
      * Move [hash] from [expected] to [next], stamping `lastCheckedAt` with
      * [now]. Answers the number of rows changed: 1 on success, 0 when the row

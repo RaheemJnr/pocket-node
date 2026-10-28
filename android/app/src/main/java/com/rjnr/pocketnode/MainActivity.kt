@@ -275,8 +275,12 @@ class MainActivity : FragmentActivity(), com.rjnr.pocketnode.ui.security.WalletS
         setIntent(safeIntent)
     }
 
+    @Inject
+    lateinit var daoRecoveryLifetime: com.rjnr.pocketnode.data.gateway.DaoRecoveryLifetime
+
     override fun onStart() {
         super.onStart()
+        daoRecoveryLifetime.onStarted()
         reauthPolicy.onStart(pinManager.hasPin())
         // Re-arm background sync on every foreground (#286). The FGS dies
         // silently in three ways the preference can't see — Android 15's 6h
@@ -290,6 +294,7 @@ class MainActivity : FragmentActivity(), com.rjnr.pocketnode.ui.security.WalletS
     }
 
     override fun onStop() {
+        daoRecoveryLifetime.onStopped(isChangingConfigurations)
         super.onStop()
         // Play build only (self-gated): enqueue a one-time catch-up so the light
         // client keeps syncing for a few minutes after the app is backgrounded,

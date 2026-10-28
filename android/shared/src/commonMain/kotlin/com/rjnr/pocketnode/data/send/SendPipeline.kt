@@ -386,8 +386,12 @@ class SendPipeline(
         ctx: SendContext, transaction: Transaction, expectedWalletId: String? = null,
         pendingFeeShannons: Long? = null, pendingDirection: String = "out",
         retryRecord: PendingBroadcastRecord? = null,
+        freshRecord: PendingBroadcastRecord? = null,
         requireCurrentSelection: suspend () -> Unit = {},
-    ): Result<String> = runCatching {
+    ): Result<String> {
+        var owned = freshRecord
+        var bridgeEntered = false
+        return runCatching {
         val authorization = inputAuthorizer.authorize(ctx, transaction)
         authorization.requireCurrent()
         requireCurrentSelection()
@@ -461,8 +465,7 @@ class SendPipeline(
             val existing = pendingBroadcasts.getActive(walletId, network)
                 .firstOrNull { it.txHash == txHash }
             if (existing == null) {
-                pendingBroadcasts.insert(
-                    PendingBroadcastRecord(
+                val record = PendingBroadcastRecord(
                         txHash = txHash,
                         walletId = walletId,
                         network = network,
@@ -474,7 +477,11 @@ class SendPipeline(
                         createdAt = now,
                         lastCheckedAt = now
                     )
-                )
+                // Capture ownership even if cancellation races the committed insert's return.
+                withContext(kotlinx.coroutines.NonCancellable) {
+                    check(pendingBroadcasts.insertFresh(record)) { "Submission state changed" }
+                    owned = record
+                }
                 transactions.insertPendingTransaction(
                     txHash = txHash,
                     network = network,
@@ -496,6 +503,7 @@ class SendPipeline(
         currentCoroutineContext().ensureActive()
         // Bridge broadcast — outside the mutex (long-running, no need to serialize).
         val rawResult = try {
+            bridgeEntered = true
             lightClient.sendTransaction(txJson)
         } catch (e: CancellationException) {
             // The bridge may already have accepted the signed transaction. Preserve its exact
@@ -639,6 +647,15 @@ class SendPipeline(
         }
 
         returnedHash
+        }.onFailure { failure ->
+            if (!bridgeEntered) owned?.let { record ->
+                try {
+                    withContext(kotlinx.coroutines.NonCancellable) {
+                        pendingBroadcasts.failKnownUnsent(record, clock.nowMs())
+                    }
+                } catch (cleanup: Exception) { failure.addSuppressed(cleanup) }
+            }
+        }
     }
 
     /**
@@ -683,7 +700,8 @@ class SendPipeline(
         val tipNumber = currentTipNumberOrZero()
         publishTip(tipNumber)
 
-        val signedTx = sendMutex.withLock {
+        var owned: PendingBroadcastRecord? = null
+        val signedTx = try { sendMutex.withLock {
             val filtered = resolveSpendableCells(fromAddress, senderNetwork, walletId, network)
             currentCoroutineContext().ensureActive()
 
@@ -764,8 +782,7 @@ class SendPipeline(
                 null
             }
 
-            pendingBroadcasts.insert(
-                PendingBroadcastRecord(
+            val record = PendingBroadcastRecord(
                     txHash = txHash,
                     walletId = walletId,
                     network = network,
@@ -777,7 +794,10 @@ class SendPipeline(
                     createdAt = now,
                     lastCheckedAt = now
                 )
-            )
+            withContext(kotlinx.coroutines.NonCancellable) {
+                check(pendingBroadcasts.insertFresh(record)) { "Submission state changed" }
+                owned = record
+            }
             transactions.insertPendingTransaction(
                 txHash = txHash,
                 network = network,
@@ -792,12 +812,18 @@ class SendPipeline(
                 feeShannons = plannedFeeShannons
             )
             signed
+        } } catch (failure: Throwable) {
+            owned?.let { record ->
+                try { withContext(kotlinx.coroutines.NonCancellable) { pendingBroadcasts.failKnownUnsent(record, clock.nowMs()) } }
+                catch (cleanup: Exception) { failure.addSuppressed(cleanup) }
+            }
+            throw failure
         }
 
         // sendTransaction owns the broadcast + post-broadcast CAS.
         // Its insert path is idempotent: it sees the row we just inserted
         // and skips re-insertion, then performs broadcast + state CAS.
-        return sendTransaction(ctx, signedTx).getOrThrow()
+        return submit(ctx, signedTx, freshRecord = owned).getOrThrow()
     }
 
     // ========================================
