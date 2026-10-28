@@ -70,15 +70,22 @@ class DaoRecoveryCoordinator @Inject constructor(
         val lifecycle = gate.lifecycleRevision()
         check(database.walletDao().getActive()?.walletId == walletId) { "Wallet changed" }
         val client = DaoRecoveryClient(api, genesisHash)
-        val ticket = withContext(Dispatchers.IO) { client.request(point.transactionHash) }.valueOrNull()
-            ?: error("Recovery unavailable")
+        // Own a successful allocation inside IO, before prompt cancellation can
+        // discard withContext's result on return to the foreground dispatcher.
+        var allocated: DaoRecoveryTicket? = null
         try {
+            val ticket = withContext(Dispatchers.IO) {
+                client.request(point.transactionHash).valueOrNull().also { allocated = it }
+            } ?: error("Recovery unavailable")
+            currentCoroutineContext().ensureActive()
             gate.requireCurrent(network.name, revision)
             check(ticket.identity.storeGeneration == gate.generation(network.name))
             check(database.walletDao().getActive()?.walletId == walletId) { "Wallet changed" }
             return DaoRecoveryContext(walletId, network, script, ticket, lifecycle, point)
         } catch (failure: Throwable) {
-            client.cancel(ticket)
+            allocated?.let { ticket ->
+                withContext(kotlinx.coroutines.NonCancellable + Dispatchers.IO) { client.cancel(ticket) }
+            }
             throw failure
         }
     }

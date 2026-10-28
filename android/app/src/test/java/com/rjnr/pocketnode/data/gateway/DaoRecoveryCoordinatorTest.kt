@@ -138,6 +138,106 @@ class DaoRecoveryCoordinatorTest {
         assertNull(scheduler.checking.value)
     }
 
+    @Test fun `foreground cancellation owns allocated request until exact noncancellable cleanup before successor begins`() = kotlinx.coroutines.runBlocking {
+        suitableNative()
+        every { api.getGenesisBlock() } returns """{"header":{"hash":"$genesis"}}"""
+        val canonical = JniHeaderView(hash("cc"), "0xc8", "0x70800000000001", "0x1", hash("00"), hash("00"), hash("00"), hash("00"), hash("00"), "0x0")
+        every { api.getHeaderByNumber(any()) } returns json.encodeToString(canonical)
+        db.daoCellDao().upsert(row("0x0"))
+        val repository = mockk<GatewayRepository> {
+            every { walletInfo } returns kotlinx.coroutines.flow.MutableStateFlow<com.rjnr.pocketnode.data.wallet.WalletInfo?>(
+                com.rjnr.pocketnode.data.wallet.WalletInfo("public", script, "test", "main"))
+            every { this@mockk.network } returns kotlinx.coroutines.flow.MutableStateFlow(this@DaoRecoveryCoordinatorTest.network)
+            every { tipFlow } returns kotlinx.coroutines.flow.MutableStateFlow(300L)
+            every { activeWalletAndNetworkOrNull() } returns ("wallet" to this@DaoRecoveryCoordinatorTest.network.name)
+        }
+        val firstAllocated = kotlinx.coroutines.CompletableDeferred<Unit>()
+        val cleanupEntered = kotlinx.coroutines.CompletableDeferred<Unit>()
+        val successorAllocated = kotlinx.coroutines.CompletableDeferred<Unit>()
+        val releaseRequest = java.util.concurrent.CountDownLatch(1)
+        val releaseCleanup = java.util.concurrent.CountDownLatch(1)
+        val count = java.util.concurrent.atomic.AtomicInteger()
+        val events = java.util.concurrent.CopyOnWriteArrayList<String>()
+        val live = java.util.concurrent.ConcurrentHashMap.newKeySet<String>()
+        val firstRequest = "dr1.q.11"
+        val nextRequest = "dr1.q.22"
+        every { api.requestDaoRecovery(txHash) } answers {
+            val id = if (count.incrementAndGet() == 1) firstRequest else nextRequest
+            events += "allocated:$id"
+            live += id
+            if (id == firstRequest) {
+                firstAllocated.complete(Unit)
+                check(releaseRequest.await(5, java.util.concurrent.TimeUnit.SECONDS))
+            } else successorAllocated.complete(Unit)
+            """{"schema_version":1,"operation":"request","result":{"request_id":"$id","transaction_hash":"$txHash","identity":${json.encodeToString(identity)}}}"""
+        }
+        every { api.cancelDaoRecovery(any()) } answers {
+            val id = firstArg<String>()
+            if (id == firstRequest) {
+                cleanupEntered.complete(Unit)
+                check(releaseCleanup.await(5, java.util.concurrent.TimeUnit.SECONDS))
+            }
+            live -= id
+            events += "cancelled:$id"
+            """{"schema_version":1,"operation":"cancel","result":{"request_id":"$id","status":"cancelled"}}"""
+        }
+        every { api.pollDaoRecovery(any()) } answers {
+            """{"schema_version":1,"operation":"poll","result":{"request_id":"${firstArg<String>()}","status":"fetching","receipt":null}}"""
+        }
+        val scheduler = DaoRecoveryScheduler(db, recovery, api, gate, json)
+        val firstPositions = kotlinx.coroutines.flow.MutableStateFlow(listOf(row().toUnverifiedCacheProjection()))
+        val nextPositions = kotlinx.coroutines.flow.MutableStateFlow(listOf(row("0x0").toUnverifiedCacheProjection()))
+        val owner = launch { scheduler.foreground(repository, firstPositions) {} }
+        var successor: kotlinx.coroutines.Job? = null
+        try {
+            kotlinx.coroutines.withTimeout(5_000) { firstAllocated.await() }
+            owner.cancel() // Native already allocated, but the IO result has not returned.
+            successor = launch { scheduler.foreground(repository, nextPositions) {} }
+            kotlinx.coroutines.yield()
+            assertFalse(successorAllocated.isCompleted)
+            releaseRequest.countDown()
+            val ownsCleanup = kotlinx.coroutines.withTimeout(5_000) {
+                kotlinx.coroutines.selects.select<Boolean> {
+                    cleanupEntered.onAwait { true }
+                    owner.onJoin { false }
+                }
+            }
+            assertTrue("allocated ticket must be cancelled before foreground owner completes", ownsCleanup)
+            assertFalse("cancellation must await exact native cleanup", owner.isCompleted)
+            assertFalse("successor must wait until cleanup completes", successorAllocated.isCompleted)
+            releaseCleanup.countDown()
+            kotlinx.coroutines.withTimeout(5_000) { owner.join(); successorAllocated.await() }
+            assertTrue(owner.isCancelled)
+            assertEquals(listOf("allocated:$firstRequest", "cancelled:$firstRequest", "allocated:$nextRequest"), events.toList())
+            assertEquals(setOf(nextRequest), live.toSet())
+            assertTrue(recovery.guards(network, point).isEmpty())
+        } finally {
+            releaseRequest.countDown(); releaseCleanup.countDown()
+            owner.cancel(); owner.join()
+            successor?.cancel(); successor?.join()
+        }
+        assertTrue(live.isEmpty())
+        verify(exactly = 1) { api.cancelDaoRecovery(firstRequest) }
+        verify(exactly = 1) { api.cancelDaoRecovery(nextRequest) }
+    }
+
+    @Test fun `begin request null and error have no ticket to cancel while normal context remains usable`() = runTest {
+        every { api.requestDaoRecovery(txHash) } returnsMany listOf(null,
+            """{"schema_version":1,"operation":"request","error":{"code":"unavailable"}}""")
+        repeat(2) {
+            assertTrue(runCatching { begin() }.exceptionOrNull() is IllegalStateException)
+        }
+        verify(exactly = 0) { api.cancelDaoRecovery(any()) }
+        every { api.requestDaoRecovery(txHash) } returns
+            """{"schema_version":1,"operation":"request","result":{"request_id":"$request","transaction_hash":"$txHash","identity":${json.encodeToString(identity)}}}"""
+        val context = begin()
+        assertEquals(request, context.ticket.requestId)
+        assertEquals(RecoveryOutcome.Adopted, recovery.recover(context))
+        assertNotNull(recovery.validateGuard(context, point))
+        recovery.cancel(context)
+        verify(exactly = 1) { api.cancelDaoRecovery(request) }
+    }
+
     @Test fun `automatic adapter keeps native request stable through pending polls then requires exact receipt`() = runTest {
         var polls = 0
         every { api.pollDaoRecovery(any()) } answers {
