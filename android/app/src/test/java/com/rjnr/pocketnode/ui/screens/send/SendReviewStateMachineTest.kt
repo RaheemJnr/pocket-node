@@ -937,6 +937,7 @@ class SendReviewStateMachineTest {
         }
         val pending = mockk<com.rjnr.pocketnode.data.storage.PendingBroadcastStore>(relaxed = true)
         coEvery { pending.getActive(any(), any()) } returns emptyList()
+        coEvery { pending.insertFresh(any()) } returns true // The empty test store grants the initial claim.
         val pipeline = com.rjnr.pocketnode.data.send.SendPipeline(api,
             TransactionBuilder(com.rjnr.pocketnode.data.validation.NetworkValidator()), ledger, pending,
             mockk(relaxed = true), mockk(relaxed = true), mockk(relaxed = true), uiPreferences, json, NoopLogger, inputAuthorizer = com.rjnr.pocketnode.data.send.NoDaoRecoveryAdoption, queryContext = testDispatcher)

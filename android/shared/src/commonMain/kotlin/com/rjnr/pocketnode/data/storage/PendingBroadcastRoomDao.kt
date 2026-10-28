@@ -64,7 +64,22 @@ interface PendingBroadcastRoomDao {
     @Query("UPDATE pending_broadcasts SET state = 'BROADCAST', submittedAtTipBlock = :submittedAt, " +
         "nullCount = 0, lastCheckedAt = :now WHERE txHash = :hash AND state = 'FAILED' " +
         "AND lastCheckedAt = :expectedLastCheckedAt")
-    suspend fun rearmAcceptedRetry(hash: String, expectedLastCheckedAt: Long, submittedAt: Long, now: Long): Int
+    suspend fun rearmPendingRetry(hash: String, expectedLastCheckedAt: Long, submittedAt: Long, now: Long): Int
+
+    @Query("UPDATE transactions SET status = 'PENDING', cachedAt = :now WHERE txHash = :hash " +
+        "AND network = :network AND walletId = :wallet AND status = 'FAILED' AND isLocal = 1")
+    suspend fun rearmLocalFailedActivity(hash: String, network: String, wallet: String, now: Long)
+
+    @androidx.room.Transaction
+    suspend fun rearmAcceptedRetry(hash: String, expectedLastCheckedAt: Long, submittedAt: Long, now: Long): Int {
+        val current = getByHash(hash) ?: return 0
+        val changed = rearmPendingRetry(hash, expectedLastCheckedAt, submittedAt, now)
+        if (changed == 1) {
+            // The two rows publish together; chain-derived or advanced activity always wins.
+            rearmLocalFailedActivity(hash, current.network, current.walletId, now)
+        }
+        return changed
+    }
 
     @Query(
         "UPDATE pending_broadcasts SET nullCount = :count, lastCheckedAt = :now WHERE txHash = :hash"

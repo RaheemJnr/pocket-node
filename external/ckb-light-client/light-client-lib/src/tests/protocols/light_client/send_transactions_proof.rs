@@ -1029,7 +1029,12 @@ async fn recovery_dispatch_case(case: &str) {
     }
     let content = builder.build();
     if case == "storage" {
-        chain.client_storage().conn.lock().unwrap().execute_batch("CREATE TRIGGER recovery_fail BEFORE INSERT ON kv WHEN hex(substr(NEW.key, 1, 1)) = '00' BEGIN SELECT RAISE(ABORT, 'injected recovery failure'); END;").unwrap();
+        // Fetched records may be inserted or conditionally updated. Inject a real
+        // TxHash write failure in either case, after the header writes are staged.
+        chain.client_storage().conn.lock().unwrap().execute_batch(
+            "CREATE TRIGGER recovery_fail_insert BEFORE INSERT ON kv WHEN hex(substr(NEW.key, 1, 1)) = '00' BEGIN SELECT RAISE(ABORT, 'injected recovery failure'); END;
+             CREATE TRIGGER recovery_fail_update BEFORE UPDATE ON kv WHEN hex(substr(NEW.key, 1, 1)) = '00' BEGIN SELECT RAISE(ABORT, 'injected recovery failure'); END;"
+        ).unwrap();
     }
     if case == "timeout" {
         peers.mark_fetching_txs_timeout(peer);

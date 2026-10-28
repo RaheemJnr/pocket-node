@@ -22,6 +22,13 @@ pub trait BatchWriter {
     /// Add a key-value pair to the batch
     fn put(&mut self, key: &[u8], value: &[u8]);
 
+    /// Stage a write conditional on the value at commit time, including absence.
+    /// A mismatch is a successful no-op; other batch writes still commit atomically.
+    /// Backends must not emulate this with a read followed by an unconditional write.
+    fn compare_and_put(&mut self, _key: &[u8], _expected: Option<&[u8]>, _value: &[u8]) -> Result<()> {
+        Err(crate::error::Error::runtime("backend lacks atomic conditional batch writes"))
+    }
+
     /// Add a delete operation to the batch
     fn delete(&mut self, key: &[u8]);
 

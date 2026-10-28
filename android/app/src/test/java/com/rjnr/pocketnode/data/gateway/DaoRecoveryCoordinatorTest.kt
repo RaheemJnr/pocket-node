@@ -312,12 +312,15 @@ class DaoRecoveryCoordinatorTest {
             assertTrue(retried.receive().isSuccess)
             verify(exactly = 1) { api.sendTransaction(bytes) }
             assertEquals(bytes, db.pendingBroadcastDao().getActive("wallet", network.name).single().signedTxJson)
+            assertEquals("PENDING", db.transactionDao().getByTxHash(hash)?.status)
             db.pendingBroadcastDao().insert(failed)
+            transactions.updateTransactionStatus(hash, "FAILED")
             valid = false
             recovery.refreshNativeValidity()
             activity.retryFailedTransaction(hash)
             assertTrue(retried.receive().isFailure)
             assertEquals(failed, db.pendingBroadcastDao().getFailedRow(hash))
+            assertEquals("FAILED", db.transactionDao().getByTxHash(hash)?.status)
             verify(exactly = 1) { api.sendTransaction(any()) }
         } finally { store.clear(); kotlinx.coroutines.Dispatchers.resetMain() }
     }

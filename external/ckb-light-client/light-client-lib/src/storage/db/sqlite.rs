@@ -149,6 +149,7 @@ pub struct Batch {
 enum BatchOp {
     Put(Vec<u8>, Vec<u8>),
     Delete(Vec<u8>),
+    CompareAndPut(Vec<u8>, Option<Vec<u8>>, Vec<u8>),
 }
 
 // Implement BatchWriter trait for Batch
@@ -156,6 +157,13 @@ impl BatchWriter for Batch {
     fn put(&mut self, key: &[u8], value: &[u8]) {
         self.operations
             .push(BatchOp::Put(key.to_vec(), value.to_vec()));
+    }
+
+    fn compare_and_put(&mut self, key: &[u8], expected: Option<&[u8]>, value: &[u8]) -> Result<()> {
+        self.operations.push(BatchOp::CompareAndPut(
+            key.to_vec(), expected.map(<[u8]>::to_vec), value.to_vec(),
+        ));
+        Ok(())
     }
 
     fn delete(&mut self, key: &[u8]) {
@@ -180,6 +188,20 @@ impl BatchWriter for Batch {
                     .map_err(|e| {
                         crate::error::Error::runtime(format!("Failed to put in batch: {}", e))
                     })?;
+                }
+                BatchOp::CompareAndPut(key, expected, value) => {
+                    // Evaluate under the same SQL transaction as the rest of the batch.
+                    // A filter batch that committed since the snapshot must win.
+                    match expected {
+                        Some(expected) => tx.execute(
+                            "UPDATE kv SET value = ?2 WHERE key = ?1 AND value = ?3",
+                            rusqlite::params![&key, &value, &expected],
+                        ),
+                        None => tx.execute(
+                            "INSERT INTO kv (key, value) VALUES (?1, ?2) ON CONFLICT(key) DO NOTHING",
+                            rusqlite::params![&key, &value],
+                        ),
+                    }.map_err(|e| crate::error::Error::runtime(format!("Failed conditional batch put: {}", e)))?;
                 }
                 BatchOp::Delete(key) => {
                     tx.execute(

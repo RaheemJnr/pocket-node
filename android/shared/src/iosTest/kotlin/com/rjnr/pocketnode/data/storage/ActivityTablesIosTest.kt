@@ -103,6 +103,30 @@ class ActivityTablesIosTest {
         }
     }
 
+    @Test fun `accepted retry atomically restores local failed activity and preserves history`() = runTest {
+        val row = broadcastRow("0xretry", state = "FAILED", nullCount = 3)
+        broadcasts.insert(row)
+        transactions.insertPendingTransaction(row.txHash, NETWORK, WALLET, "0x1", "dao_unlock", "0x0", 7L)
+        transactions.updateTransactionStatus(row.txHash, "FAILED")
+        val activity = transactions.getByHash(row.txHash, NETWORK)!!
+        assertEquals(0, broadcasts.rearmAcceptedRetry(row.txHash, NOW - 1, 1100, NOW + 1))
+        assertEquals(activity, transactions.getByHash(row.txHash, NETWORK))
+        assertEquals(1, broadcasts.rearmAcceptedRetry(row.txHash, NOW, 1100, NOW + 1))
+        assertEquals(activity.copy(status = "PENDING"), transactions.getByHash(row.txHash, NETWORK))
+        assertEquals(row.copy(state = "BROADCAST", submittedAtTipBlock = 1100, nullCount = 0, lastCheckedAt = NOW + 1),
+            broadcasts.getActive(WALLET, NETWORK).single())
+    }
+
+    @Test fun `accepted retry preserves activity confirmed independently of pending state`() = runTest {
+        val row = broadcastRow("0xconfirmed", state = "FAILED")
+        broadcasts.insert(row)
+        transactions.insertPendingTransaction(row.txHash, NETWORK, WALLET, "0x1", "out", "0x0", 7L)
+        transactions.updateTransactionStatus(row.txHash, "CONFIRMED")
+        val confirmed = transactions.getByHash(row.txHash, NETWORK)
+        broadcasts.rearmAcceptedRetry(row.txHash, NOW, 1100, NOW + 1)
+        assertEquals(confirmed, transactions.getByHash(row.txHash, NETWORK))
+    }
+
     // ---- transactions ----
 
     @Test

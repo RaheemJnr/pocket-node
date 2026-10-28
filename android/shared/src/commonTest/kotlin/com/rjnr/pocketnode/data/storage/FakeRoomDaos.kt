@@ -157,13 +157,15 @@ class FakePendingBroadcastRoomDao : PendingBroadcastRoomDao {
         return 1
     }
 
-    override suspend fun rearmAcceptedRetry(hash: String, expectedLastCheckedAt: Long, submittedAt: Long, now: Long): Int {
+    override suspend fun rearmPendingRetry(hash: String, expectedLastCheckedAt: Long, submittedAt: Long, now: Long): Int {
         val target = state.value.firstOrNull { it.txHash == hash && it.state == "FAILED" && it.lastCheckedAt == expectedLastCheckedAt } ?: return 0
         state.value = state.value.map {
             if (it.txHash == hash) target.copy(state = "BROADCAST", submittedAtTipBlock = submittedAt, nullCount = 0, lastCheckedAt = now) else it
         }
         return 1
     }
+
+    override suspend fun rearmLocalFailedActivity(hash: String, network: String, wallet: String, now: Long) = Unit
 
     override suspend fun updateNullCount(hash: String, count: Int, now: Long) {
         state.value = state.value.map {

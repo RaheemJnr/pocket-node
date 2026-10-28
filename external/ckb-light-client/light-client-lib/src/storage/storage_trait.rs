@@ -486,6 +486,9 @@ pub trait LightClientStorage: StorageBackend {
     /// Persist verified associations atomically without swallowing backend failure.
     /// This does not change script indexes or claim output liveness/index completeness.
     /// Membership proofs do not provide the transaction's block-order ordinal.
+    /// Indexed coordinates are retained; absent/unknown records change only if their
+    /// snapshot still matches at commit. A concurrent index write wins without error.
+    /// Receipts carry the proven header independently of these indexing coordinates.
     fn try_add_fetched_txs(
         &self,
         transactions: &[(&Transaction, &HeaderWithExtension)],
@@ -503,8 +506,21 @@ pub trait LightClientStorage: StorageBackend {
                 block_hash.as_slice(),
             );
             let tx_hash = tx.calc_tx_hash();
+            let key = Key::TxHash(&tx_hash).into_vec();
+            let previous = StorageBackend::get(self, key.clone())?;
+            if let Some(stored) = &previous {
+                let ordinal = stored.get(8..12).ok_or_else(||
+                    crate::error::Error::runtime("invalid stored transaction coordinates"))?;
+                // Real coordinates belong to the script indexes, even across fork heights.
+                // Membership recovery may add headers but cannot relocate indexed cells.
+                if ordinal != u32::MAX.to_be_bytes() {
+                    continue;
+                }
+            }
             let value: Vec<u8> = Value::Transaction(block_number, u32::MAX as TxIndex, tx).into();
-            batch.put(&Key::TxHash(&tx_hash).into_vec(), &value);
+            // Filtering may index this transaction after our read. Check the snapshot
+            // inside the atomic commit so it cannot be replaced by an unknown ordinal.
+            batch.compare_and_put(&key, previous.as_deref(), &value)?;
         }
         batch.commit()
     }

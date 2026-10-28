@@ -15521,6 +15521,24 @@ index 4f9fbd4e8af82bd00b76a38413f0aaecfa72d0ff..4695df0ea70c71d8a79c8e42b909e998
  #[serde(rename_all = "snake_case")]
  pub enum CellType {
      Input,
+diff --git a/light-client-lib/src/storage/backend.rs b/light-client-lib/src/storage/backend.rs
+index 02581c3f396ed63bd7b34f07e6b9ecd5ff58dbdb..15b6fb3018b9d934f9d7c79e4e422bf063321238 100644
+--- a/light-client-lib/src/storage/backend.rs
++++ b/light-client-lib/src/storage/backend.rs
+@@ -22,6 +22,13 @@ pub trait BatchWriter {
+     /// Add a key-value pair to the batch
+     fn put(&mut self, key: &[u8], value: &[u8]);
+ 
++    /// Stage a write conditional on the value at commit time, including absence.
++    /// A mismatch is a successful no-op; other batch writes still commit atomically.
++    /// Backends must not emulate this with a read followed by an unconditional write.
++    fn compare_and_put(&mut self, _key: &[u8], _expected: Option<&[u8]>, _value: &[u8]) -> Result<()> {
++        Err(crate::error::Error::runtime("backend lacks atomic conditional batch writes"))
++    }
++
+     /// Add a delete operation to the batch
+     fn delete(&mut self, key: &[u8]);
+ 
 diff --git a/light-client-lib/src/storage/db/mod.rs b/light-client-lib/src/storage/db/mod.rs
 index 38c18a5dd9258f9140dd9018db640dc2d4b88a56..8b477fffae8c905a0db8f10005e542af5189b811 100644
 --- a/light-client-lib/src/storage/db/mod.rs
@@ -15548,7 +15566,7 @@ index 38c18a5dd9258f9140dd9018db640dc2d4b88a56..8b477fffae8c905a0db8f10005e542af
  mod browser;
  #[cfg(target_arch = "wasm32")]
 diff --git a/light-client-lib/src/storage/db/sqlite.rs b/light-client-lib/src/storage/db/sqlite.rs
-index 250eca2bac43f6ec6381c6ffe7756d9cf2d8508a..84e701d158f04e084c6c0b8dbc2265eaf95cf330 100644
+index 250eca2bac43f6ec6381c6ffe7756d9cf2d8508a..8c2844002851013971a70499dba28173d62ca5f0 100644
 --- a/light-client-lib/src/storage/db/sqlite.rs
 +++ b/light-client-lib/src/storage/db/sqlite.rs
 @@ -16,7 +16,7 @@ use ckb_types::{
@@ -15664,7 +15682,27 @@ index 250eca2bac43f6ec6381c6ffe7756d9cf2d8508a..84e701d158f04e084c6c0b8dbc2265ea
              .map_err(|e| crate::error::Error::runtime(format!("Failed to prepare get: {}", e)))?;
  
          let result = stmt.query_row(rusqlite::params![key.as_ref()], |row| {
-@@ -122,7 +163,9 @@ impl BatchWriter for Batch {
+@@ -108,6 +149,7 @@ pub struct Batch {
+ enum BatchOp {
+     Put(Vec<u8>, Vec<u8>),
+     Delete(Vec<u8>),
++    CompareAndPut(Vec<u8>, Option<Vec<u8>>, Vec<u8>),
+ }
+ 
+ // Implement BatchWriter trait for Batch
+@@ -117,12 +159,21 @@ impl BatchWriter for Batch {
+             .push(BatchOp::Put(key.to_vec(), value.to_vec()));
+     }
+ 
++    fn compare_and_put(&mut self, key: &[u8], expected: Option<&[u8]>, value: &[u8]) -> Result<()> {
++        self.operations.push(BatchOp::CompareAndPut(
++            key.to_vec(), expected.map(<[u8]>::to_vec), value.to_vec(),
++        ));
++        Ok(())
++    }
++
+     fn delete(&mut self, key: &[u8]) {
+         self.operations.push(BatchOp::Delete(key.to_vec()));
      }
  
      fn commit(self) -> Result<()> {
@@ -15675,7 +15713,7 @@ index 250eca2bac43f6ec6381c6ffe7756d9cf2d8508a..84e701d158f04e084c6c0b8dbc2265ea
          let tx = conn.unchecked_transaction().map_err(|e| {
              crate::error::Error::runtime(format!("Failed to begin transaction: {}", e))
          })?;
-@@ -131,7 +174,7 @@ impl BatchWriter for Batch {
+@@ -131,16 +182,30 @@ impl BatchWriter for Batch {
              match op {
                  BatchOp::Put(key, value) => {
                      tx.execute(
@@ -15684,8 +15722,23 @@ index 250eca2bac43f6ec6381c6ffe7756d9cf2d8508a..84e701d158f04e084c6c0b8dbc2265ea
                          rusqlite::params![&key, &value],
                      )
                      .map_err(|e| {
-@@ -140,7 +183,7 @@ impl BatchWriter for Batch {
+                         crate::error::Error::runtime(format!("Failed to put in batch: {}", e))
+                     })?;
                  }
++                BatchOp::CompareAndPut(key, expected, value) => {
++                    // Evaluate under the same SQL transaction as the rest of the batch.
++                    // A filter batch that committed since the snapshot must win.
++                    match expected {
++                        Some(expected) => tx.execute(
++                            "UPDATE kv SET value = ?2 WHERE key = ?1 AND value = ?3",
++                            rusqlite::params![&key, &value, &expected],
++                        ),
++                        None => tx.execute(
++                            "INSERT INTO kv (key, value) VALUES (?1, ?2) ON CONFLICT(key) DO NOTHING",
++                            rusqlite::params![&key, &value],
++                        ),
++                    }.map_err(|e| crate::error::Error::runtime(format!("Failed conditional batch put: {}", e)))?;
++                }
                  BatchOp::Delete(key) => {
                      tx.execute(
 -                        "DELETE FROM kv_store WHERE key = ?",
@@ -15693,7 +15746,7 @@ index 250eca2bac43f6ec6381c6ffe7756d9cf2d8508a..84e701d158f04e084c6c0b8dbc2265ea
                          rusqlite::params![&key],
                      )
                      .map_err(|e| {
-@@ -168,7 +211,7 @@ impl StorageBackend for Storage {
+@@ -168,7 +233,7 @@ impl StorageBackend for Storage {
      fn put(&self, key: Vec<u8>, value: Vec<u8>) -> Result<()> {
          let conn = self.conn.lock().unwrap();
          conn.execute(
@@ -15702,7 +15755,7 @@ index 250eca2bac43f6ec6381c6ffe7756d9cf2d8508a..84e701d158f04e084c6c0b8dbc2265ea
              rusqlite::params![key.as_slice(), value.as_slice()],
          )
          .map_err(|e| crate::error::Error::runtime(format!("Failed to put: {}", e)))?;
-@@ -177,7 +220,7 @@ impl StorageBackend for Storage {
+@@ -177,7 +242,7 @@ impl StorageBackend for Storage {
  
      fn delete(&self, key: &[u8]) -> Result<()> {
          let conn = self.conn.lock().unwrap();
@@ -15711,7 +15764,7 @@ index 250eca2bac43f6ec6381c6ffe7756d9cf2d8508a..84e701d158f04e084c6c0b8dbc2265ea
              .map_err(|e| crate::error::Error::runtime(format!("Failed to delete: {}", e)))?;
          Ok(())
      }
-@@ -201,13 +244,15 @@ impl StorageBackend for Storage {
+@@ -201,13 +266,15 @@ impl StorageBackend for Storage {
          let rows: Vec<(Vec<u8>, Vec<u8>)> = {
              let conn = self.conn.lock().unwrap();
  
@@ -15731,7 +15784,7 @@ index 250eca2bac43f6ec6381c6ffe7756d9cf2d8508a..84e701d158f04e084c6c0b8dbc2265ea
                  comparison, order_clause
              );
  
-@@ -222,10 +267,8 @@ impl StorageBackend for Storage {
+@@ -222,10 +289,8 @@ impl StorageBackend for Storage {
  
              // Collect rows that pass the take_while condition.
              // We need to eagerly collect because the lock must be released before filter_map_fn runs.
@@ -15742,7 +15795,7 @@ index 250eca2bac43f6ec6381c6ffe7756d9cf2d8508a..84e701d158f04e084c6c0b8dbc2265ea
                  .take_while(|(key, _)| take_while_fn(key))
                  .collect()
          };
-@@ -295,3 +338,107 @@ impl CellProvider for Storage {
+@@ -295,3 +360,107 @@ impl CellProvider for Storage {
          CellStatus::Unknown
      }
  }
@@ -15884,10 +15937,10 @@ index 5ef7fb0d8277467881bd491790401c530b8789b1..0a5b967ee8733eb7198b8868eb4e9d92
          &self.pending_txs
      }
 diff --git a/light-client-lib/src/storage/storage_trait.rs b/light-client-lib/src/storage/storage_trait.rs
-index d562a63d40b31644b084e68d46e71213f5be5625..e38645898cce09e95582778a4a10c51afd104cb0 100644
+index d562a63d40b31644b084e68d46e71213f5be5625..0ab87de90d3506147f3ada9ba349a461f64d4d22 100644
 --- a/light-client-lib/src/storage/storage_trait.rs
 +++ b/light-client-lib/src/storage/storage_trait.rs
-@@ -477,22 +477,36 @@ pub trait LightClientStorage: StorageBackend {
+@@ -477,22 +477,52 @@ pub trait LightClientStorage: StorageBackend {
          batch.commit().expect("batch commit should be ok");
      }
  
@@ -15901,6 +15954,9 @@ index d562a63d40b31644b084e68d46e71213f5be5625..e38645898cce09e95582778a4a10c51a
 +    /// Persist verified associations atomically without swallowing backend failure.
 +    /// This does not change script indexes or claim output liveness/index completeness.
 +    /// Membership proofs do not provide the transaction's block-order ordinal.
++    /// Indexed coordinates are retained; absent/unknown records change only if their
++    /// snapshot still matches at commit. A concurrent index write wins without error.
++    /// Receipts carry the proven header independently of these indexing coordinates.
 +    fn try_add_fetched_txs(
 +        &self,
 +        transactions: &[(&Transaction, &HeaderWithExtension)],
@@ -15931,8 +15987,21 @@ index d562a63d40b31644b084e68d46e71213f5be5625..e38645898cce09e95582778a4a10c51a
 +                block_hash.as_slice(),
 +            );
 +            let tx_hash = tx.calc_tx_hash();
++            let key = Key::TxHash(&tx_hash).into_vec();
++            let previous = StorageBackend::get(self, key.clone())?;
++            if let Some(stored) = &previous {
++                let ordinal = stored.get(8..12).ok_or_else(||
++                    crate::error::Error::runtime("invalid stored transaction coordinates"))?;
++                // Real coordinates belong to the script indexes, even across fork heights.
++                // Membership recovery may add headers but cannot relocate indexed cells.
++                if ordinal != u32::MAX.to_be_bytes() {
++                    continue;
++                }
++            }
 +            let value: Vec<u8> = Value::Transaction(block_number, u32::MAX as TxIndex, tx).into();
-+            batch.put(&Key::TxHash(&tx_hash).into_vec(), &value);
++            // Filtering may index this transaction after our read. Check the snapshot
++            // inside the atomic commit so it cannot be replaced by an unknown ordinal.
++            batch.compare_and_put(&key, previous.as_deref(), &value)?;
 +        }
 +        batch.commit()
      }
@@ -16147,10 +16216,10 @@ index 2101d6ba1d21dbd6b1fb3cf80d1c35e375ee968d..58abbf2ab39081d93e817160f4376539
  async fn reject_last_header_with_overflowing_total_difficulty() {
      let chain = MockChain::new_with_dummy_pow("test-light-client").start();
 diff --git a/light-client-lib/src/tests/protocols/light_client/send_transactions_proof.rs b/light-client-lib/src/tests/protocols/light_client/send_transactions_proof.rs
-index 03be056b0463e8985a596f3e1e75bc3eac491c80..cb1944e2ce952af54b51dcf8b8b2667db567b98d 100644
+index 03be056b0463e8985a596f3e1e75bc3eac491c80..c6ff5026a53ebc7cae44bf5441c0856b3cdd4815 100644
 --- a/light-client-lib/src/tests/protocols/light_client/send_transactions_proof.rs
 +++ b/light-client-lib/src/tests/protocols/light_client/send_transactions_proof.rs
-@@ -811,3 +811,989 @@ async fn test_send_headers_txs_request() {
+@@ -811,3 +811,994 @@ async fn test_send_headers_txs_request() {
      assert_eq!(peers.get_txs_to_fetch().len(), 1);
      assert_eq!(peers.get_headers_to_fetch().len(), 1);
  }
@@ -16372,7 +16441,12 @@ index 03be056b0463e8985a596f3e1e75bc3eac491c80..cb1944e2ce952af54b51dcf8b8b2667d
 +    }
 +    let content = builder.build();
 +    if case == "storage" {
-+        chain.client_storage().conn.lock().unwrap().execute_batch("CREATE TRIGGER recovery_fail BEFORE INSERT ON kv WHEN hex(substr(NEW.key, 1, 1)) = '00' BEGIN SELECT RAISE(ABORT, 'injected recovery failure'); END;").unwrap();
++        // Fetched records may be inserted or conditionally updated. Inject a real
++        // TxHash write failure in either case, after the header writes are staged.
++        chain.client_storage().conn.lock().unwrap().execute_batch(
++            "CREATE TRIGGER recovery_fail_insert BEFORE INSERT ON kv WHEN hex(substr(NEW.key, 1, 1)) = '00' BEGIN SELECT RAISE(ABORT, 'injected recovery failure'); END;
++             CREATE TRIGGER recovery_fail_update BEFORE UPDATE ON kv WHEN hex(substr(NEW.key, 1, 1)) = '00' BEGIN SELECT RAISE(ABORT, 'injected recovery failure'); END;"
++        ).unwrap();
 +    }
 +    if case == "timeout" {
 +        peers.mark_fetching_txs_timeout(peer);
@@ -17140,6 +17214,116 @@ index 03be056b0463e8985a596f3e1e75bc3eac491c80..cb1944e2ce952af54b51dcf8b8b2667d
 +async fn recovery_generic_enqueue_during_send_keeps_retry_eligibility() {
 +    recovery_dispatch_case("generic_during_send").await;
 +}
+diff --git a/light-client-lib/src/tests/storage.rs b/light-client-lib/src/tests/storage.rs
+index db9e610e8efe9f2330c4ce4a475e002b24399f2d..bf48c5a728aa5f44d390040f1bba80c801ad208f 100644
+--- a/light-client-lib/src/tests/storage.rs
++++ b/light-client-lib/src/tests/storage.rs
+@@ -24,3 +24,105 @@ fn test_forget_update_min_filtred_number() {
+     );
+     assert_eq!(storage.get_min_filtered_block_number(), 33);
+ }
++
++fn indexed_recovery_fixture(proven_height: u64, rollback_spend: bool) {
++    use ckb_types::{core::{BlockBuilder, TransactionBuilder}, packed::{CellInput, CellOutput, OutPoint}, prelude::*};
++    use crate::storage::{HeaderWithExtension, Key, StorageBackend, ScriptStatus, ScriptType};
++    let (storage, _dir) = new_storage("indexed_recovery");
++    let lock = Script::new_builder().args(vec![1u8].pack()).build();
++    let type_script = Script::new_builder().args(vec![2u8].pack()).build();
++    storage.update_filter_scripts(vec![
++        ScriptStatus { script: lock.clone(), script_type: ScriptType::Lock, block_number: 1 },
++        ScriptStatus { script: type_script.clone(), script_type: ScriptType::Type, block_number: 1 },
++    ], Default::default());
++    let tx = TransactionBuilder::default()
++        .output(CellOutput::new_builder().capacity(100u64).lock(lock.clone()).type_(Some(type_script.clone()).pack()).build())
++        .output_data(vec![0u8; 8].pack()).build();
++    let block = BlockBuilder::default().epoch(ckb_types::core::EpochNumberWithFraction::new(0, 0, 100).full_value()).number(10u64)
++        .transaction(TransactionBuilder::default().build()).transaction(tx.clone()).build();
++    storage.filter_block(block.data());
++    let fetched = BlockBuilder::default().epoch(ckb_types::core::EpochNumberWithFraction::new(0, 0, 100).full_value()).number(proven_height).transaction(tx.clone()).build();
++    storage.try_add_fetched_txs(&[(&tx.data(), &HeaderWithExtension { header: fetched.data().header(), extension: None })]).unwrap();
++    assert!(storage.get_header(&fetched.hash()).is_some());
++    let spend = TransactionBuilder::default()
++        .input(CellInput::new_builder().previous_output(OutPoint::new(tx.hash(), 0)).build()).build();
++    storage.filter_block(BlockBuilder::default().epoch(ckb_types::core::EpochNumberWithFraction::new(0, 0, 100).full_value()).number(30u64).transaction(spend).build().data());
++    if rollback_spend {
++        storage.update_filter_scripts(vec![
++            ScriptStatus { script: lock.clone(), script_type: ScriptType::Lock, block_number: 30 },
++            ScriptStatus { script: type_script.clone(), script_type: ScriptType::Type, block_number: 30 },
++        ], Default::default());
++        storage.rollback_to_block(30);
++    }
++    for (script, is_type) in [(&lock, false), (&type_script, true)] {
++        let key = |height, ordinal| if is_type { Key::CellTypeScript(script, height, ordinal, 0).into_vec() }
++            else { Key::CellLockScript(script, height, ordinal, 0).into_vec() };
++        assert_eq!(StorageBackend::get(&storage, key(10, 1)).unwrap(),
++            if rollback_spend { Some(tx.hash().as_slice().to_vec()) } else { None }, "real indexed cell after spend/rollback");
++        assert_eq!(StorageBackend::get(&storage, key(proven_height, u32::MAX)).unwrap(), None, "no synthetic ordinal cell");
++    }
++    let (height, ordinal, stored) = storage.get_transaction(&tx.hash()).unwrap();
++    assert_eq!((height, ordinal), (10, 1));
++    assert_eq!(stored.as_slice(), tx.data().as_slice());
++}
++
++#[test] fn recovery_same_height_preserves_indexed_spend() { indexed_recovery_fixture(10, false); }
++#[test] fn recovery_other_height_preserves_indexed_spend() { indexed_recovery_fixture(20, false); }
++#[test] fn recovery_same_height_preserves_indexed_rollback() { indexed_recovery_fixture(10, true); }
++#[test] fn recovery_other_height_preserves_indexed_rollback() { indexed_recovery_fixture(20, true); }
++
++// Park a proof batch after it has observed storage, then commit a real indexed block
++// before its writes land. This deterministic ordering reproduces the concurrent race.
++struct IndexBeforeCommit {
++    storage: storage::Storage,
++    block: ckb_types::packed::Block,
++}
++struct IndexBeforeCommitBatch {
++    inner: storage::Batch,
++    storage: storage::Storage,
++    block: ckb_types::packed::Block,
++}
++impl storage::BatchWriter for IndexBeforeCommitBatch {
++    fn put(&mut self, key: &[u8], value: &[u8]) { self.inner.put(key, value); }
++    fn compare_and_put(&mut self, key: &[u8], expected: Option<&[u8]>, value: &[u8]) -> crate::error::Result<()> {
++        self.inner.compare_and_put(key, expected, value)
++    }
++    fn delete(&mut self, key: &[u8]) { self.inner.delete(key); }
++    fn commit(self) -> crate::error::Result<()> {
++        self.storage.filter_block(self.block);
++        self.inner.commit()
++    }
++}
++impl storage::StorageBackend for IndexBeforeCommit {
++    type Batch = IndexBeforeCommitBatch;
++    fn get(&self, key: Vec<u8>) -> crate::error::Result<Option<Vec<u8>>> { self.storage.get(key) }
++    fn put(&self, key: Vec<u8>, value: Vec<u8>) -> crate::error::Result<()> { storage::StorageBackend::put(&self.storage, key, value) }
++    fn delete(&self, key: &[u8]) -> crate::error::Result<()> { storage::StorageBackend::delete(&self.storage, key) }
++    fn batch(&self) -> Self::Batch {
++        IndexBeforeCommitBatch { inner: storage::StorageBackend::batch(&self.storage), storage: self.storage.clone(), block: self.block.clone() }
++    }
++    fn collect_iterator(&self, start: storage::IteratorStart, direction: storage::IteratorDirection,
++        take: storage::TakeWhileFn, map: storage::FilterMapFn, limit: usize) -> Vec<storage::KVPair> {
++        storage::StorageBackend::collect_iterator(&self.storage, start, direction, take, map, limit)
++    }
++}
++impl LightClientStorage for IndexBeforeCommit {}
++
++fn recovery_races_filter(existing_unknown: bool) {
++    use ckb_types::{core::{BlockBuilder, TransactionBuilder}, packed::CellOutput, prelude::*};
++    use crate::storage::{HeaderWithExtension, ScriptStatus, ScriptType};
++    let (storage, _dir) = new_storage("recovery_races_filter");
++    let script = Script::default();
++    storage.update_filter_scripts(vec![ScriptStatus { script: script.clone(), script_type: ScriptType::Lock, block_number: 1 }], Default::default());
++    let tx = TransactionBuilder::default().output(CellOutput::new_builder().lock(script).build()).output_data(vec![1u8].pack()).build();
++    let indexed = BlockBuilder::default().epoch(ckb_types::core::EpochNumberWithFraction::new(0, 0, 100).full_value()).number(10u64).transaction(TransactionBuilder::default().build()).transaction(tx.clone()).build();
++    let fetched = BlockBuilder::default().epoch(ckb_types::core::EpochNumberWithFraction::new(0, 0, 100).full_value()).number(20u64).transaction(tx.clone()).build();
++    let hwe = HeaderWithExtension { header: fetched.data().header(), extension: None };
++    if existing_unknown { storage.add_fetched_tx(&tx.data(), &hwe); }
++    let interleaved = IndexBeforeCommit { storage: storage.clone(), block: indexed.data() };
++    interleaved.try_add_fetched_txs(&[(&tx.data(), &hwe)]).unwrap();
++    let (height, ordinal, _) = storage.get_transaction(&tx.hash()).unwrap();
++    assert_eq!((height, ordinal), (10, 1), "indexed commit wins over stale fetched snapshot");
++}
++#[test] fn recovery_absent_snapshot_cannot_overwrite_concurrent_index() { recovery_races_filter(false); }
++#[test] fn recovery_unknown_snapshot_cannot_overwrite_concurrent_index() { recovery_races_filter(true); }
 diff --git a/light-client-lib/src/tests/utils/chain.rs b/light-client-lib/src/tests/utils/chain.rs
 index fd4a593481bf888d5d2c3a63f721914a1ac5af84..5f0740b2d8f007faca06db36c3aaacb534e1351c 100644
 --- a/light-client-lib/src/tests/utils/chain.rs

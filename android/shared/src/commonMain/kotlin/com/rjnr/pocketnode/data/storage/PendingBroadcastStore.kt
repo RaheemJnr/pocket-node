@@ -80,7 +80,7 @@ interface PendingBroadcastStore {
      */
     suspend fun compareAndUpdateState(hash: String, expected: String, next: String, now: Long): Int
 
-    /** Rearm only the captured FAILED observation after native acceptance; terminal progress wins. */
+    /** Atomically rearm the captured FAILED observation and local FAILED activity after native acceptance; advanced activity wins. */
     suspend fun rearmAcceptedRetry(hash: String, expectedLastCheckedAt: Long, submittedAt: Long, now: Long): Int
 
     /** Record [count] consecutive unknown-transaction answers for [hash]. */
