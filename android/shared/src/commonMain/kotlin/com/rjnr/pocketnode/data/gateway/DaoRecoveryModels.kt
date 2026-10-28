@@ -118,7 +118,17 @@ class DaoRecoveryClient(private val api: LightClientApi, genesisHash: String) {
             val known = setOf("unavailable", "capacity", "unknown_request", "expired", "sequence_exhausted", "storage", "invalid_receipt", "invalid_hash", "invalid_token")
             throw RecoveryProtocolFailure(if (error.code in known) error.code else "invalid_response")
         }
-        return envelope.getValue("result").jsonObject
+        val result = envelope.getValue("result").jsonObject
+        // Tree decoding can coerce quoted Boolean/Int values. Check authority
+        // scalars against exact JSON primitives before decoding typed models.
+        if (operation == "validate") requireProtocol(result["valid"] == JsonPrimitive(true))
+        if (operation == "poll" || operation == "validate") {
+            val receipt = result["receipt"]
+            if (receipt != null && receipt != JsonNull) {
+                requireProtocol(receipt.jsonObject["schema_version"] == JsonPrimitive(1))
+            }
+        }
+        return result
     }
     // Json's object decoder overwrites duplicate keys. Reject them, including
     // escaped spellings of the same key, before any authority fields are read.

@@ -103,4 +103,91 @@ class DaoRecoveryContractTest {
         assertIs<DaoRecoveryResult.Failure>(client.validate(ticket,"dr1.r.00"))
         assertTrue(api.calls.none { it.function == "callRpc" })
     }
+
+    @Test fun validationRequiresExactBooleanScalar() {
+        val context = nativeContext()
+        val envelope = Json.parseToJsonElement(DaoRecoveryFixtures.VALIDATE).jsonObject
+        val result = envelope.getValue("result").jsonObject
+        assertIs<DaoRecoveryResult.Success<DaoRecoveryValidation>>(
+            context.client.validate(context.ticket, context.receiptId))
+        val invalidValues = listOf(JsonPrimitive("true"), JsonPrimitive("false"), JsonPrimitive(false),
+            JsonPrimitive(1), JsonPrimitive(0), JsonNull, JsonObject(emptyMap()), JsonArray(emptyList()))
+        invalidValues.forEach { value ->
+            val invalid = JsonObject(envelope + ("result" to JsonObject(result + ("valid" to value)))).toString()
+            context.api.reset(); context.api.enqueue("validateDaoRecovery", invalid)
+            assertIs<DaoRecoveryResult.Failure>(
+                context.client.validate(context.ticket, context.receiptId), "valid must be JSON true: $value")
+        }
+    }
+
+    @Test fun pollReceiptRequiresExactVersionScalar() {
+        val context = nativeContext()
+        assertIs<DaoRecoveryResult.Success<DaoRecoveryPoll>>(context.client.poll(context.ticket))
+        invalidVersions().forEach { version ->
+            context.api.reset()
+            context.api.enqueue("pollDaoRecovery", withReceiptVersion(DaoRecoveryFixtures.POLL, version))
+            assertIs<DaoRecoveryResult.Failure>(context.client.poll(context.ticket), "receipt version must be JSON 1: $version")
+        }
+    }
+
+    @Test fun validationReceiptRequiresExactVersionScalar() {
+        val context = nativeContext()
+        assertIs<DaoRecoveryResult.Success<DaoRecoveryValidation>>(
+            context.client.validate(context.ticket, context.receiptId))
+        invalidVersions().forEach { version ->
+            context.api.reset()
+            context.api.enqueue("validateDaoRecovery", withReceiptVersion(DaoRecoveryFixtures.VALIDATE, version))
+            assertIs<DaoRecoveryResult.Failure>(
+                context.client.validate(context.ticket, context.receiptId), "receipt version must be JSON 1: $version")
+        }
+    }
+
+    @Test fun envelopeVersionsRequireExactNumberForEveryOperation() {
+        val context = nativeContext()
+        val cancelled = """{"schema_version":1,"operation":"cancel","result":{"request_id":"${context.ticket.requestId}","status":"cancelled"}}"""
+        val operations = listOf(
+            Triple("requestDaoRecovery", DaoRecoveryFixtures.REQUEST) { context.client.request(context.ticket.transactionHash) },
+            Triple("pollDaoRecovery", DaoRecoveryFixtures.POLL) { context.client.poll(context.ticket) },
+            Triple("validateDaoRecovery", DaoRecoveryFixtures.VALIDATE) { context.client.validate(context.ticket, context.receiptId) },
+            Triple("cancelDaoRecovery", cancelled) { context.client.cancel(context.ticket) },
+        )
+        operations.forEach { (operation, fixture, call) ->
+            context.api.reset(); context.api.enqueue(operation, fixture)
+            assertIs<DaoRecoveryResult.Success<*>>(call())
+            val envelope = Json.parseToJsonElement(fixture).jsonObject
+            invalidVersions().forEach { version ->
+                context.api.reset()
+                context.api.enqueue(operation, JsonObject(envelope + ("schema_version" to version)).toString())
+                assertIs<DaoRecoveryResult.Failure>(call(), "$operation envelope version must be JSON 1: $version")
+            }
+        }
+    }
+
+    private data class NativeContext(val api: FakeLightClientApi, val client: DaoRecoveryClient,
+        val ticket: DaoRecoveryTicket, val receiptId: String)
+
+    private fun nativeContext(): NativeContext {
+        val request = Json.parseToJsonElement(DaoRecoveryFixtures.REQUEST).jsonObject.getValue("result").jsonObject
+        val nativeGenesis = request.getValue("identity").jsonObject.getValue("genesis_hash").jsonPrimitive.content
+        val nativeHash = request.getValue("transaction_hash").jsonPrimitive.content
+        val api = FakeLightClientApi().enqueue("requestDaoRecovery", DaoRecoveryFixtures.REQUEST)
+            .enqueue("pollDaoRecovery", DaoRecoveryFixtures.POLL).enqueue("validateDaoRecovery", DaoRecoveryFixtures.VALIDATE)
+        val client = DaoRecoveryClient(api, nativeGenesis)
+        val ticket = assertIs<DaoRecoveryResult.Success<DaoRecoveryTicket>>(client.request(nativeHash)).value
+        val receiptId = Json.parseToJsonElement(DaoRecoveryFixtures.VALIDATE).jsonObject.getValue("result")
+            .jsonObject.getValue("receipt").jsonObject.getValue("receipt_id").jsonPrimitive.content
+        return NativeContext(api, client, ticket, receiptId)
+    }
+
+    private fun invalidVersions(): List<JsonElement> = listOf(JsonPrimitive("1"), JsonPrimitive(1.0),
+        Json.parseToJsonElement("1e0"), JsonPrimitive(0), JsonPrimitive(2), JsonPrimitive(true),
+        JsonNull, JsonObject(emptyMap()), JsonArray(emptyList()))
+
+    private fun withReceiptVersion(fixture: String, version: JsonElement): String {
+        val envelope = Json.parseToJsonElement(fixture).jsonObject
+        val result = envelope.getValue("result").jsonObject
+        val receipt = result.getValue("receipt").jsonObject
+        return JsonObject(envelope + ("result" to JsonObject(result +
+            ("receipt" to JsonObject(receipt + ("schema_version" to version)))))).toString()
+    }
 }
