@@ -2,7 +2,7 @@ name: supply-chain
 
 on:
   pull_request:
-    branches: [main]
+    branches: [main, codex/security-maintenance-batch-1]
   push:
     branches: [main]
   schedule:
