@@ -152,8 +152,17 @@ class DaoRecoveryCoordinator @Inject constructor(
         return database.daoRecoveryDao().guards(network.name, point.transactionHash, point.outputIndex)
     }
 
-    suspend fun validateGuard(context: DaoRecoveryContext, outPoint: OutPoint): ValidatedRecoverySnapshot? =
-        validateGuard(context.network, outPoint, context.walletId)
+    suspend fun validateGuard(context: DaoRecoveryContext, outPoint: OutPoint): ValidatedRecoverySnapshot? {
+        return try {
+            check(RecoveryOutPoint.from(outPoint) == context.outPoint)
+            requireContext(context)
+            val snapshot = validateGuard(context.network, outPoint, context.walletId) ?: return null
+            // The general lookup may have validated a successor while suspended.
+            check(synchronized(active) { active[snapshot.guard]?.context == context && context.ticket !in cancelled })
+            snapshot
+        } catch (e: CancellationException) { throw e }
+        catch (_: Exception) { null }
+    }
 
     suspend fun validateGuard(network: NetworkType, outPoint: OutPoint, walletId: String? = null): ValidatedRecoverySnapshot? {
         val guards = guards(network, outPoint)

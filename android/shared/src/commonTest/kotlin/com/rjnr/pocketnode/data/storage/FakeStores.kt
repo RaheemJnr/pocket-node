@@ -256,6 +256,13 @@ class FakePendingBroadcastStore : PendingBroadcastStore {
         return 1
     }
 
+    override suspend fun rearmAcceptedRetry(hash: String, expectedLastCheckedAt: Long, submittedAt: Long, now: Long): Int {
+        val existing = byHash[hash] ?: return 0
+        if (existing.state != "FAILED" || existing.lastCheckedAt != expectedLastCheckedAt) return 0
+        byHash[hash] = existing.copy(state = "BROADCAST", submittedAtTipBlock = submittedAt, nullCount = 0, lastCheckedAt = now)
+        return 1
+    }
+
     override suspend fun updateNullCount(hash: String, count: Int, now: Long) {
         val existing = byHash[hash] ?: return
         byHash[hash] = existing.copy(nullCount = count, lastCheckedAt = now)

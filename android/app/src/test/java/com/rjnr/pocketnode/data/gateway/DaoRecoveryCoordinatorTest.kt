@@ -178,6 +178,40 @@ class DaoRecoveryCoordinatorTest {
         assertNotNull(recovery.validateGuard(second, OutPoint(txHash, "0x0")))
     }
 
+    @Test fun `cancelled attempt cannot authorize replacement attempt for same output`() = runTest {
+        val first = begin()
+        assertEquals(RecoveryOutcome.Adopted, recovery.recover(first))
+        recovery.cancel(first)
+        request = "dr1.q.02"
+        receipt = receipt.copy(requestId = request, receiptId = "dr1.r.02")
+        val replacement = begin()
+        assertEquals(RecoveryOutcome.Adopted, recovery.recover(replacement))
+        assertNotNull(recovery.validateGuard(replacement, point))
+        assertNull(recovery.validateGuard(first, point))
+    }
+
+    @Test fun `superseded uncancelled attempt cannot borrow successor receipt`() = runTest {
+        val first = begin()
+        assertEquals(RecoveryOutcome.Adopted, recovery.recover(first))
+        request = "dr1.q.02"
+        receipt = receipt.copy(requestId = request, receiptId = "dr1.r.02")
+        val replacement = begin()
+        assertEquals(RecoveryOutcome.Adopted, recovery.recover(replacement))
+        assertNull(recovery.validateGuard(first, point))
+        assertNotNull(recovery.validateGuard(replacement, point))
+    }
+
+    @Test fun `context cannot validate another adopted output`() = runTest {
+        val first = begin()
+        assertEquals(RecoveryOutcome.Adopted, recovery.recover(first))
+        val otherPoint = OutPoint(txHash, "0x0")
+        db.daoCellDao().upsert(row("0x0"))
+        val second = recovery.begin("wallet", network, script, genesis, otherPoint)
+        assertEquals(RecoveryOutcome.Adopted, recovery.recover(second))
+        assertNotNull(recovery.validateGuard(second, otherPoint))
+        assertNull(recovery.validateGuard(first, otherPoint))
+    }
+
     @Test fun `guarded submission pins locator and fails after native invalidation`() = runTest {
         val context = begin()
         assertEquals(RecoveryOutcome.Adopted, recovery.recover(context))

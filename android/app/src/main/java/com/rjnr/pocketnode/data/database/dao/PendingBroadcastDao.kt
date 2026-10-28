@@ -30,6 +30,11 @@ interface PendingBroadcastDao {
         now: Long
     ): Int
 
+    @Query("UPDATE pending_broadcasts SET state = 'BROADCAST', submittedAtTipBlock = :submittedAt, " +
+        "nullCount = 0, lastCheckedAt = :now WHERE txHash = :hash AND state = 'FAILED' " +
+        "AND lastCheckedAt = :expectedLastCheckedAt")
+    suspend fun rearmAcceptedRetry(hash: String, expectedLastCheckedAt: Long, submittedAt: Long, now: Long): Int
+
     @Query(
         "UPDATE pending_broadcasts SET nullCount = :count, lastCheckedAt = :now WHERE txHash = :hash"
     )

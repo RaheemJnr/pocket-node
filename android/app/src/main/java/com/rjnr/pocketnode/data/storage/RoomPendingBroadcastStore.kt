@@ -32,6 +32,9 @@ class RoomPendingBroadcastStore @Inject constructor(
         now: Long,
     ): Int = dao.compareAndUpdateState(hash = hash, expected = expected, next = next, now = now)
 
+    override suspend fun rearmAcceptedRetry(hash: String, expectedLastCheckedAt: Long, submittedAt: Long, now: Long): Int =
+        dao.rearmAcceptedRetry(hash, expectedLastCheckedAt, submittedAt, now)
+
     override suspend fun updateNullCount(hash: String, count: Int, now: Long) =
         dao.updateNullCount(hash, count, now)
 

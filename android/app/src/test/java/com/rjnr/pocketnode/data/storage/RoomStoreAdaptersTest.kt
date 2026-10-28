@@ -258,6 +258,22 @@ class RoomStoreAdaptersTest {
         assertEquals("{}", active.single().signedTxJson)
     }
 
+    @Test
+    fun `accepted retry atomically rearms only captured failed observation`() = runTest {
+        val store = RoomPendingBroadcastStore(db.pendingBroadcastDao())
+        val original = PendingBroadcastRecord(txHash = "tx-retry", walletId = "w1", network = "TESTNET", signedTxJson = "signed bytes",
+            reservedInputs = "[]", state = "FAILED", submittedAtTipBlock = 100, nullCount = 3, createdAt = 10, lastCheckedAt = 20)
+        store.insert(original)
+        assertEquals(0, store.rearmAcceptedRetry(original.txHash, 19, 130, 30))
+        assertEquals(original, store.getFailedRow(original.txHash))
+        assertEquals(1, store.rearmAcceptedRetry(original.txHash, 20, 130, 30))
+        assertEquals(original.copy(state = "BROADCAST", submittedAtTipBlock = 130, nullCount = 0, lastCheckedAt = 30),
+            store.getActive("w1", "TESTNET").single())
+        assertEquals(0, store.rearmAcceptedRetry(original.txHash, 20, 140, 40))
+        store.compareAndUpdateState(original.txHash, "BROADCAST", "CONFIRMED", 50)
+        assertEquals(0, store.rearmAcceptedRetry(original.txHash, 50, 150, 60))
+    }
+
     private fun record(
         hash: String,
         direction: String,

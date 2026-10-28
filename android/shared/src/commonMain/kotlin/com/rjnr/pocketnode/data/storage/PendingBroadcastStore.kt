@@ -61,7 +61,7 @@ interface PendingBroadcastStore {
      * Upsert one row, replacing any row with the same `txHash`. The DAO
      * declares `OnConflictStrategy.REPLACE`, and the send path depends on it:
      * the hash-mismatch re-key path deletes and re-inserts under the returned
-     * hash, and a retry re-inserts the same hash after dropping its FAILED row.
+     * hash. Accepted retries use a conditional rearm instead of replacement.
      */
     suspend fun insert(record: PendingBroadcastRecord)
 
@@ -73,6 +73,9 @@ interface PendingBroadcastStore {
      * from a loss.
      */
     suspend fun compareAndUpdateState(hash: String, expected: String, next: String, now: Long): Int
+
+    /** Rearm only the captured FAILED observation after native acceptance; terminal progress wins. */
+    suspend fun rearmAcceptedRetry(hash: String, expectedLastCheckedAt: Long, submittedAt: Long, now: Long): Int
 
     /** Record [count] consecutive unknown-transaction answers for [hash]. */
     suspend fun updateNullCount(hash: String, count: Int, now: Long)

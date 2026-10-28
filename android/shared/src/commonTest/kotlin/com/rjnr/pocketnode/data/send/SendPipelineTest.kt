@@ -550,8 +550,50 @@ class SendPipelineTest {
             json.decodeFromString<Transaction>(broadcastJson),
         )
         assertEquals("BROADCAST", broadcasts.byHash.getValue(PENDING_HASH).state)
-        // Retrying preserves prior counters; reconciliation owns their next update.
-        assertEquals(3, broadcasts.byHash.getValue(PENDING_HASH).nullCount)
+        // Acceptance rearms observation; refusals retain the captured counters.
+        assertEquals(0, broadcasts.byHash.getValue(PENDING_HASH).nullCount)
+    }
+
+    @Test
+    fun acceptedRetryDoesNotOverwriteProgressDuringNativeSubmission() = runTest {
+        val original = pendingRow(PENDING_HASH, "FAILED", listOf(LIVE_CELLS[0].outPoint), pendingChangeTx(), 3)
+        for (state in listOf("CONFIRMED", "BROADCAST")) {
+            broadcasts.insert(original)
+            val advanced = original.copy(state = state, lastCheckedAt = 999)
+            val bridge = object : FakeLightClientApi() {
+                override fun sendTransaction(txJson: String): String? {
+                    assertEquals(original.signedTxJson, txJson)
+                    broadcasts.byHash[PENDING_HASH] = advanced
+                    return "\"$PENDING_HASH\""
+                }
+            }.enqueue("getTipHeader", LightClientFixtures.TIP_HEADER)
+                .enqueue("getTransactions", LightClientFixtures.GET_TRANSACTIONS_PAGE)
+                .enqueue("getCells", cellsPage(LIVE_CELLS))
+            pipelineOver(bridge).retryBroadcast(ctx(this), PENDING_HASH).getOrThrow()
+            assertEquals(advanced, broadcasts.byHash[PENDING_HASH])
+        }
+    }
+
+    @Test
+    fun acceptedRetryGetsFreshWatchdogWindowForInPoolAndNotFound() = runTest {
+        val original = pendingRow(PENDING_HASH, "FAILED", listOf(LIVE_CELLS[0].outPoint), pendingChangeTx(), 3)
+        val currentTip = LightClientFixtures.TIP_HEADER_NUMBER
+        for (status in listOf(com.rjnr.pocketnode.data.sync.TxFetchResult.InPool, com.rjnr.pocketnode.data.sync.TxFetchResult.NotFound)) {
+            broadcasts.insert(original)
+            pipelineOver(api(sendAnswer = "\"$PENDING_HASH\"")).retryBroadcast(ctx(this), PENDING_HASH).getOrThrow()
+            val wd = com.rjnr.pocketnode.data.sync.BroadcastWatchdog(broadcasts,
+                com.rjnr.pocketnode.data.sync.TransactionStatusGateway { status }, transactions,
+                object : com.rjnr.pocketnode.data.gateway.TipSource {
+                    override val tipFlow = kotlinx.coroutines.flow.MutableStateFlow(currentTip)
+                    override suspend fun fetchAndPublishTip() = currentTip
+                    override fun activeWalletAndNetworkOrNull() = WALLET to "TESTNET"
+                }, { true }, kotlinx.coroutines.test.StandardTestDispatcher(testScheduler), NoopLogger, clock)
+            repeat(3) { wd.checkAll(currentTip, WALLET, "TESTNET") }
+            assertEquals("BROADCAST", broadcasts.byHash.getValue(PENDING_HASH).state)
+            assertEquals(currentTip, broadcasts.byHash.getValue(PENDING_HASH).submittedAtTipBlock)
+            wd.checkAll(currentTip + 25, WALLET, "TESTNET")
+            assertEquals("FAILED", broadcasts.byHash.getValue(PENDING_HASH).state)
+        }
     }
 
     @Test

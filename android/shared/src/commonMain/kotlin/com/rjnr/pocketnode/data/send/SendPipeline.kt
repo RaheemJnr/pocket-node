@@ -571,14 +571,16 @@ class SendPipeline(
                 feeShannons = pendingFeeShannons
             )
         } else {
-            val ok = pendingBroadcasts.compareAndUpdateState(
+            val ok = if (retryRecord != null) pendingBroadcasts.rearmAcceptedRetry(
+                txHash, retryRecord.lastCheckedAt, currentTipNumberOrZero().takeIf { it > 0 } ?: tipNumber, clock.nowMs()
+            ) else pendingBroadcasts.compareAndUpdateState(
                 hash = txHash,
-                expected = retryRecord?.state ?: "BROADCASTING",
+                expected = "BROADCASTING",
                 next = "BROADCAST",
                 now = clock.nowMs()
             )
             if (ok != 1) {
-                logger.w(TAG, "compareAndUpdateState saw row not in BROADCASTING (race?); proceeding")
+                logger.w(TAG, "Accepted broadcast did not replace concurrently advanced pending state")
             }
         }
 
