@@ -95,10 +95,16 @@ internal fun DaoCellEntity.withWithdrawalEvidence(
  * predates the window. Flagging it would raise the deep-rescan banner for a
  * position that is mid-claim.
  */
-internal fun DaoCellEntity.toCachedDeposit(): DaoDeposit =
-    toOutsideWindowDeposit().copy(outsideSyncWindow = false)
+internal suspend fun DaoCellEntity.toCachedDeposit(recovery: DaoRecoveryCoordinator): DaoDeposit =
+    recovery.project(com.rjnr.pocketnode.data.gateway.models.NetworkType.valueOf(network), walletId,
+        toUnverifiedCacheProjection().copy(outsideSyncWindow = false))
 
-internal fun DaoCellEntity.toOutsideWindowDeposit(): DaoDeposit {
+internal suspend fun DaoCellEntity.toOutsideWindowDeposit(recovery: DaoRecoveryCoordinator): DaoDeposit =
+    recovery.project(com.rjnr.pocketnode.data.gateway.models.NetworkType.valueOf(network), walletId,
+        toUnverifiedCacheProjection())
+
+/** Shape conversion only. Production display/action consumers use the guarded suspend projections above. */
+internal fun DaoCellEntity.toUnverifiedCacheProjection(): DaoDeposit {
     val projected = if (withdrawBlockNumber != null && !hasResolvedWithdrawalHeaders()) {
         withoutWithdrawalEvidence().copy(withdrawBlockHash = null)
     } else this

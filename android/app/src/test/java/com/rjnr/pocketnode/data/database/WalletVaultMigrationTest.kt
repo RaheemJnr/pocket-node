@@ -42,7 +42,7 @@ class WalletVaultMigrationTest {
         helper.writableDatabase
         helper.close()
         try {
-            val upgraded = Room.databaseBuilder(ctx, AppDatabase::class.java, name).addMigrations(MIGRATION_17_18, MIGRATION_18_19).build()
+            val upgraded = Room.databaseBuilder(ctx, AppDatabase::class.java, name).addMigrations(MIGRATION_17_18, MIGRATION_18_19, MIGRATION_19_20).build()
             try {
                 upgraded.openHelper.writableDatabase
                 for (version in 1..2) {

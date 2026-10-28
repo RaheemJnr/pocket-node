@@ -40,6 +40,8 @@ import com.rjnr.pocketnode.data.database.entity.WalletEntity
         BalanceCacheEntity::class,
         HeaderCacheEntity::class,
         DaoCellEntity::class,
+        com.rjnr.pocketnode.data.database.entity.DaoRecoveryEntity::class,
+        com.rjnr.pocketnode.data.database.entity.DaoRecoveryRetryEntity::class,
         WalletEntity::class,
         KeyMaterialEntity::class,
         SyncProgressEntity::class,
@@ -97,7 +99,7 @@ import com.rjnr.pocketnode.data.database.entity.WalletEntity
     // Version 18 adds verified wallet envelopes, the installation passphrase profile,
     // and retained legacy ciphertext. No existing row is converted by the SQL migration.
     // Version 19 records retryable file cleanup atomically with ordinary wallet deletion.
-    version = 19,
+    version = 20,
     // Schema export re-enabled (#149). It was OFF because Room 2.8.4's
     // bundled kotlinx-serialization-core crashed KSP with an AbstractMethodError
     // against the project's kotlinx-serialization-json:1.8.0. Verified clean
@@ -123,6 +125,7 @@ abstract class AppDatabase : RoomDatabase() {
     abstract fun transactionDao(): TransactionDao
     abstract fun balanceCacheDao(): BalanceCacheDao
     abstract fun headerCacheDao(): HeaderCacheDao
+    abstract fun daoRecoveryDao(): com.rjnr.pocketnode.data.database.dao.DaoRecoveryDao
     abstract fun daoCellDao(): DaoCellDao
     abstract fun walletDao(): WalletDao
     abstract fun keyMaterialDao(): KeyMaterialDao

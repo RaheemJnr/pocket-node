@@ -320,6 +320,43 @@ class DaoViewModelTest {
         assertEquals(DaoAction.Withdrawing(testOutPoint), vm.uiState.value.pendingAction)
     }
 
+    @Test fun `legacy unlock carries immutable selected proof into repository authentication`() {
+        coEvery { repository.getDaoDeposits() } coAnswers { awaitCancellation() }
+        var received: DaoDeposit? = null
+        coEvery { repository.unlockDao(any(), any<DaoDeposit>()) } coAnswers {
+            received = secondArg(); awaitCancellation()
+        }
+        val selected = makeDaoDeposit(status = DaoCellStatus.UNLOCKABLE).copy(recoveryReceiptId = "dr1.r.01")
+        val vm = DaoViewModel(repository, authManager, pinManager, walletKeyReader, walletRepository)
+        vm.unlock(selected); testDispatcher.scheduler.runCurrent()
+        try { assertEquals(selected, received) }
+        finally { androidx.lifecycle.ViewModelStore().apply { put("test", vm); clear() }; testDispatcher.scheduler.runCurrent() }
+    }
+
+    @Test fun `activity unlock retains selected proof across suspended authentication`() {
+        coEvery { repository.getDaoDeposits() } coAnswers { awaitCancellation() }
+        coEvery { repository.unlockPreflight(any()) } returns Result.success(Unit)
+        every { walletRepository.activeWalletIdSnapshot() } returns "wallet-1"
+        val authenticated = kotlinx.coroutines.CompletableDeferred<Unit>()
+        val key = ByteArray(32) { 7 }
+        coEvery { walletKeyReader.readPrivateKey(any(), any(), any(), any()) } coAnswers {
+            authenticated.await(); WalletKeyReader.Result.Success(key)
+        }
+        var received: DaoDeposit? = null
+        coEvery { repository.unlockDao(any(), any<ByteArray>(), any<DaoDeposit>()) } coAnswers {
+            received = thirdArg(); awaitCancellation()
+        }
+        val selected = makeDaoDeposit(status = DaoCellStatus.UNLOCKABLE).copy(recoveryReceiptId = "dr1.r.01")
+        val vm = DaoViewModel(repository, authManager, pinManager, walletKeyReader, walletRepository)
+        val host = com.rjnr.pocketnode.data.wallet.ForegroundTestHost()
+        vm.unlockWithActivity(host.activity, selected); testDispatcher.scheduler.runCurrent()
+        assertNull(received)
+        authenticated.complete(Unit); testDispatcher.scheduler.runCurrent()
+        try { assertEquals(selected, received) }
+        finally { androidx.lifecycle.ViewModelStore().apply { put("test", vm); clear() }; testDispatcher.scheduler.runCurrent() }
+        assertTrue(key.all { it == 0.toByte() })
+    }
+
     // --- outsideWindowPromptCount (pure function) ---
 
     @Test

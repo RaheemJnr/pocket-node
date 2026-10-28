@@ -56,7 +56,9 @@ class DaoDepositHeaderResolutionTest {
         val resolver = mockk<DaoHeaderResolver>()
         coEvery { resolver.getBlockHashForCell(phaseHash) } returns withdrawHeader.hash
         coEvery { resolver.getOrFetchHeader(any(), any(), any()) } answers { headers[firstArg()] }
-        reader = DaoDepositReader(json, resolver, NoopLogger)
+        val noRecovery = mockk<DaoRecoveryCoordinator>(relaxed = true)
+        coEvery { noRecovery.project(any(), any(), any()) } answers { thirdArg() }
+        reader = DaoDepositReader(json, resolver, NoopLogger, noRecovery)
     }
 
     @After fun reset() {

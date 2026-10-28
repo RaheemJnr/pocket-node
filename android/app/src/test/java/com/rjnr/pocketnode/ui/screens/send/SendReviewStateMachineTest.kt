@@ -939,7 +939,7 @@ class SendReviewStateMachineTest {
         coEvery { pending.getActive(any(), any()) } returns emptyList()
         val pipeline = com.rjnr.pocketnode.data.send.SendPipeline(api,
             TransactionBuilder(com.rjnr.pocketnode.data.validation.NetworkValidator()), ledger, pending,
-            mockk(relaxed = true), mockk(relaxed = true), mockk(relaxed = true), uiPreferences, json, NoopLogger, queryContext = testDispatcher)
+            mockk(relaxed = true), mockk(relaxed = true), mockk(relaxed = true), uiPreferences, json, NoopLogger, inputAuthorizer = com.rjnr.pocketnode.data.send.NoDaoRecoveryAdoption, queryContext = testDispatcher)
         coEvery { repository.previewTransfer(any(), any()) } coAnswers {
             pipeline.previewTransfer(com.rjnr.pocketnode.data.send.SendContext(NetworkType.TESTNET, "w1", plannedTransfer.selectedCells.first().lock, { false }, scope), arg(0), arg(1))
         }

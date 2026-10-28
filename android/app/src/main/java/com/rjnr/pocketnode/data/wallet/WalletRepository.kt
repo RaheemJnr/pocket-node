@@ -537,6 +537,8 @@ class WalletRepository @Inject constructor(
             // import are this wallet's rows too. Left behind, a wallet
             // removed right after import (Cancel on the sync sheet) would
             // leave them orphaned.
+            appDatabase.daoRecoveryDao().deleteGuardsForWallet(walletId)
+            appDatabase.daoRecoveryDao().deleteBudgetsForWallet(walletId)
             appDatabase.syncProgressDao().deleteForWallet(walletId)
             subAccountCandidateDao.deleteForParent(walletId)
             // Its send records (pending, broadcast and failed) go with it.
@@ -678,7 +680,7 @@ class WalletRepository @Inject constructor(
     private companion object {
         val SECRET_TABLES = listOf("wallets", "key_material", "wallet_vault", "wallet_vault_legacy", "wallet_passphrase_profile")
         val RESET_TABLES = SECRET_TABLES + listOf("wallet_pending_cleanup", "transactions", "balance_cache", "dao_cells", "pending_dao_withdraws",
-            "pending_dao_unlocks", "sync_progress", "sub_account_candidates", "pending_broadcasts")
+            "pending_dao_unlocks", "dao_recovery_guards", "dao_recovery_retry_budget", "sync_progress", "sub_account_candidates", "pending_broadcasts")
     }
 
 }

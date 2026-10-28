@@ -41,6 +41,7 @@ class DaoGateway(
     private val sendPipeline: SendPipeline,
     private val logger: Logger,
     private val verificationCacheGate: VerificationCacheGate,
+    private val recovery: DaoRecoveryCoordinator,
 ) {
 
     /**
@@ -103,15 +104,20 @@ class DaoGateway(
         // the unlock resolves.
         val pendingUnlocks = readPendingUnlocks(snapshot, deduped)
         val merged = mergeWithCachedDaoDeposits(snapshot, deduped, pendingUnlocks, mutations, currentEpoch)
-        val result = applyPendingUnlockOverlay(snapshot,
+        val mergedResult = applyPendingUnlockOverlay(snapshot,
             applyPendingWithdrawOverlay(snapshot, merged, mutations), pendingUnlocks, mutations)
+        val result = mergedResult.map { recovery.project(network, walletId, it) }
         // All chain-dependent writes are staged. No old read can retire local
         // intent or repopulate caches after close/epoch cleanup supersedes it.
         verificationCacheGate.commitIfCurrent(network.name, ticket) {
             for (mutation in mutations) mutation()
         }
         verificationCacheGate.requireCurrent(network.name, ticket)
-        result
+        check(ctx.network() == network && ctx.walletId() == walletId) { "Wallet changed" }
+        val published = result.map { recovery.project(network, walletId, it) }
+        verificationCacheGate.requireCurrent(network.name, ticket)
+        check(ctx.network() == network && ctx.walletId() == walletId) { "Wallet changed" }
+        published
     }.onFailure { if (it is CancellationException) throw it }
 
     /**
@@ -375,8 +381,11 @@ class DaoGateway(
             val priors = cachedByKey[key].orEmpty()
             val historicalHashes = historicalHashesByKey[key].orEmpty()
             val fresh = position.toDaoCellEntity(network, walletId, nowMs)
+            val hasGuard = recovery.guards(ctx.network(), position.outPoint).isNotEmpty()
+            val guardValid = !hasGuard || recovery.validateGuard(ctx.network(), position.outPoint, walletId) != null
             fun checkedFor(row: com.rjnr.pocketnode.data.database.entity.DaoCellEntity) =
-                if (row.withdrawBlockNumber != null) row.withWithdrawalEvidence(fresh, historicalHashes) else fresh
+                if (!guardValid) row.withoutWithdrawalEvidence()
+                else if (row.withdrawBlockNumber != null) row.withWithdrawalEvidence(fresh, historicalHashes) else fresh
             // The display base may use either alias, but acceptance always
             // checks the full group's history, even when this alias has no hash.
             val checked = checkedFor(priors.firstOrNull() ?: fresh)
@@ -397,7 +406,7 @@ class DaoGateway(
                 }
             }
             if (checked == fresh) position else {
-                val proof = checked.toCachedDeposit()
+                val proof = checked.toCachedDeposit(recovery)
                 position.copy(status = proof.status, depositBlockNumber = proof.depositBlockNumber,
                     depositBlockHash = proof.depositBlockHash, depositEpoch = proof.depositEpoch,
                     depositTimestamp = proof.depositTimestamp, withdrawBlockHash = proof.withdrawBlockHash,
@@ -463,9 +472,9 @@ class DaoGateway(
                 // or, worse, reappearing as an unlockable outside-window row
                 // for the minutes between broadcast and the tx being scored.
                 CachedDaoCellFate.UNLOCK_IN_FLIGHT ->
-                    confirming += withFreshCompensation(entity, mutations, currentEpoch, historicalHashesByKey[normKey].orEmpty()).toCachedDeposit()
+                    confirming += withFreshCompensation(entity, mutations, currentEpoch, historicalHashesByKey[normKey].orEmpty()).toCachedDeposit(recovery)
                 CachedDaoCellFate.OUTSIDE_WINDOW ->
-                    outsideWindow += withFreshCompensation(entity, mutations, currentEpoch, historicalHashesByKey[normKey].orEmpty()).toOutsideWindowDeposit()
+                    outsideWindow += withFreshCompensation(entity, mutations, currentEpoch, historicalHashesByKey[normKey].orEmpty()).toOutsideWindowDeposit(recovery)
             }
         }
         if (outsideWindow.isNotEmpty()) {
@@ -737,10 +746,10 @@ class DaoGateway(
         txHash
     }
 
-    suspend fun unlockDao(ctx: DaoContext, withdrawingOutPoint: OutPoint): Result<String> =
+    suspend fun unlockDao(ctx: DaoContext, withdrawingOutPoint: OutPoint, selected: DaoDeposit? = null): Result<String> =
         ctx.privateKey().let { key ->
             try {
-                unlockDao(ctx, withdrawingOutPoint, privateKey = key)
+                unlockDao(ctx, withdrawingOutPoint, privateKey = key, selected = selected)
             } finally {
                 key.fill(0) // transient signing key — zero after use (#321)
             }
@@ -751,6 +760,7 @@ class DaoGateway(
         ctx: DaoContext,
         withdrawingOutPoint: OutPoint,
         privateKey: ByteArray,
+        selected: DaoDeposit? = null,
     ): Result<String> = runCatching {
         val info = ctx.walletInfo() ?: throw Exception("No wallet")
         val net = ctx.network()
@@ -776,6 +786,30 @@ class DaoGateway(
         require(deposit.status == DaoCellStatus.UNLOCKABLE) {
             "Cell is not unlockable yet (status: ${deposit.status})"
         }
+
+        val lifecycle = verificationCacheGate.lifecycleRevision()
+        val originalGuards = recovery.guards(net, withdrawingOutPoint)
+        val originalProof = if (originalGuards.isEmpty()) null else
+            requireNotNull(recovery.validateGuard(net, withdrawingOutPoint, walletId)) { "Withdrawal details need fresh verification" }
+        suspend fun requireSelectionCurrent() {
+            check(ctx.walletId() == walletId && ctx.network() == net && ctx.walletInfo()?.script == info.script &&
+                verificationCacheGate.lifecycleRevision() == lifecycle && verificationCacheGate.isReady(net.name)) {
+                "Wallet or network changed before broadcast"
+            }
+            check(recovery.guards(net, withdrawingOutPoint) == originalGuards) { "Withdrawal details changed; review this position again" }
+            if (originalProof != null) {
+                check(selected != null && !selected.outsideSyncWindow && !deposit.outsideSyncWindow &&
+                    selected.recoveryReceiptId == originalProof.receipt.receiptId &&
+                    recovery.validateGuard(net, withdrawingOutPoint, walletId) == originalProof) {
+                    "Withdrawal details changed; review this position again"
+                }
+            }
+            if (selected != null) check(selected.sameWithdrawalAssociation(deposit)) {
+                "Withdrawal details changed; review this position again"
+            }
+            unlockPreflight(ctx, withdrawingOutPoint).getOrThrow()
+        }
+        requireSelectionCurrent()
 
         // Use the deposit object's hashes — it is the single source of truth
         val depositBlockHash = deposit.depositBlockHash
@@ -813,6 +847,7 @@ class DaoGateway(
             type = DaoConstants.DAO_TYPE_SCRIPT
         )
 
+        requireSelectionCurrent()
         val tx = transactionBuilder.buildDaoUnlock(
             withdrawingCell = withdrawingCell,
             maxWithdraw = maxWithdraw,
@@ -854,6 +889,8 @@ class DaoGateway(
             ctx = ctx.sendContext(),
             transaction = tx,
             pendingFeeShannons = plannedFeeShannons,
+            expectedWalletId = walletId,
+            requireCurrentSelection = ::requireSelectionCurrent,
         ).getOrThrow()
         logger.d(TAG, "DAO unlock (phase 2) sent: $txHash")
 
@@ -968,7 +1005,7 @@ class DaoGateway(
             if (txHash.length <= 22) txHash else "${txHash.take(10)}...${txHash.takeLast(8)}"
 
         /**
-         * Outpoint key with the index normalized (hex vs decimal) so a match
+         * Outpoint key with the optional-0x hexadecimal index normalized so a match
          * across the live scan, the dao_cells cache and the pending markers is
          * reliable whatever spelling each recorded.
          */
@@ -983,3 +1020,11 @@ private fun com.rjnr.pocketnode.data.database.entity.TransactionEntity?.hasVerif
     this != null && this.network == network && status == "CONFIRMED" && confirmations > 0 &&
         blockHash.isNotBlank() && blockHash != "0x" &&
         (blockNumber.removePrefix("0x").toLongOrNull(16) ?: 0L) > 0L
+
+/** Only immutable reviewed association fields participate; changing proof is a new review. */
+private fun DaoDeposit.sameWithdrawalAssociation(other: DaoDeposit): Boolean =
+    outPoint == other.outPoint && capacity == other.capacity &&
+        depositBlockNumber == other.depositBlockNumber && depositBlockHash == other.depositBlockHash &&
+        depositEpoch == other.depositEpoch && withdrawBlockNumber == other.withdrawBlockNumber &&
+        withdrawBlockHash == other.withdrawBlockHash && withdrawEpoch == other.withdrawEpoch &&
+        unlockEpoch == other.unlockEpoch && recoveryReceiptId == other.recoveryReceiptId

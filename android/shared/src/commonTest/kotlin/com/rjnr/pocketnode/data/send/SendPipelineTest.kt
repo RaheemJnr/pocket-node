@@ -76,6 +76,7 @@ class SendPipelineTest {
     private fun pipelineOver(
         api: FakeLightClientApi,
         pendingBroadcasts: PendingBroadcastStore = broadcasts,
+        authorizer: InputSubmissionAuthorizer = NoDaoRecoveryAdoption,
     ): SendPipeline {
         val syncPreferences = FakeSyncPreferences()
         val ledger = LedgerReader(
@@ -111,6 +112,7 @@ class SendPipelineTest {
             uiPreferences = uiPreferences,
             json = json,
             logger = NoopLogger,
+            inputAuthorizer = authorizer,
             clock = clock,
             // Keep every hop on the test dispatcher so the post-broadcast
             // re-register is observable from the test body: with a real
@@ -470,6 +472,60 @@ class SendPipelineTest {
     // ---- retry ----
 
     @Test
+    fun rejectedGuardedRetryPreservesOriginalSignedBytesAndFailedRecord() = runTest {
+        val original = pendingRow(txHash = PENDING_HASH, state = "FAILED",
+            reserved = listOf(LIVE_CELLS[0].outPoint), signedTx = pendingChangeTx(), nullCount = 3)
+        broadcasts.insert(original)
+        val bridge = api(sendAnswer = "\"$PENDING_HASH\"")
+        val result = pipelineOver(bridge, authorizer = InputSubmissionAuthorizer { _, _ ->
+            error("Recovery unavailable")
+        }).retryBroadcast(ctx(this), PENDING_HASH)
+        assertTrue(result.isFailure)
+        assertEquals(original, broadcasts.byHash[PENDING_HASH])
+        assertTrue(bridge.callsTo("sendTransaction").isEmpty())
+    }
+
+    @Test
+    fun lateGuardRefusalPreservesRetryBytesAndConcurrentConfirmation() = runTest {
+        val original = pendingRow(txHash = PENDING_HASH, state = "FAILED",
+            reserved = listOf(LIVE_CELLS[0].outPoint), signedTx = pendingChangeTx(), nullCount = 3)
+        broadcasts.insert(original)
+        val bridge = api(sendAnswer = "\"$PENDING_HASH\"")
+        var checks = 0
+        val result = pipelineOver(bridge, authorizer = InputSubmissionAuthorizer { _, _ ->
+            SubmissionAuthorization {
+                checks++
+                if (checks == 3) {
+                    broadcasts.compareAndUpdateState(PENDING_HASH, "FAILED", "CONFIRMED", 999)
+                    error("Recovery invalidated after preparation")
+                }
+            }
+        }).retryBroadcast(ctx(this), PENDING_HASH)
+        assertTrue(result.isFailure)
+        assertEquals(original.copy(state = "CONFIRMED", lastCheckedAt = 999), broadcasts.byHash[PENDING_HASH])
+        assertTrue(bridge.callsTo("sendTransaction").isEmpty())
+    }
+
+    @Test
+    fun invalidationDuringPendingPersistenceAbortsBeforeBridgeSubmission() = runTest {
+        var valid = true
+        val store = object : PendingBroadcastStore by broadcasts {
+            override suspend fun insert(record: PendingBroadcastRecord) {
+                broadcasts.insert(record)
+                valid = false
+            }
+        }
+        val bridge = api(sendAnswer = "\"$PENDING_HASH\"")
+        val signed = json.decodeFromString<Transaction>(pendingChangeTx())
+        val result = pipelineOver(bridge, store, InputSubmissionAuthorizer { _, _ ->
+            SubmissionAuthorization { check(valid) { "Recovery expired" } }
+        }).sendTransaction(ctx(this), signed)
+        assertTrue(result.isFailure)
+        assertTrue(bridge.callsTo("sendTransaction").isEmpty())
+        assertEquals(json.encodeToString(signed), broadcasts.byHash.values.single().signedTxJson)
+    }
+
+    @Test
     fun retryReBroadcastsTheStoredBytesRatherThanRebuilding() = runTest {
         val stored = pendingChangeTx()
         broadcasts.insert(
@@ -494,8 +550,8 @@ class SendPipelineTest {
             json.decodeFromString<Transaction>(broadcastJson),
         )
         assertEquals("BROADCAST", broadcasts.byHash.getValue(PENDING_HASH).state)
-        // The FAILED row's nullCount is not carried into the retry.
-        assertEquals(0, broadcasts.byHash.getValue(PENDING_HASH).nullCount)
+        // Retrying preserves prior counters; reconciliation owns their next update.
+        assertEquals(3, broadcasts.byHash.getValue(PENDING_HASH).nullCount)
     }
 
     @Test

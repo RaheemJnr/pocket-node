@@ -120,6 +120,7 @@ class DaoGatewayUnlockTest {
             sendPipeline = mockk<SendPipeline>(relaxed = true),
             logger = NoopLogger,
             verificationCacheGate = verificationGate,
+            recovery = DaoRecoveryCoordinator(db, verificationGate, epochClient("a"), Json { encodeDefaults = true }),
         )
     }
 
@@ -176,7 +177,7 @@ class DaoGatewayUnlockTest {
         val readsThrough = spyk(db)
         every { readsThrough.transactionDao() } returns paused
         val suspendedGateway = DaoGateway(readsThrough, daoSyncManager, depositReader,
-            mockk(relaxed = true), lightClient, mockk(relaxed = true), mockk(relaxed = true), NoopLogger, verificationGate)
+            mockk(relaxed = true), lightClient, mockk(relaxed = true), mockk(relaxed = true), NoopLogger, verificationGate, DaoRecoveryCoordinator(db, verificationGate, epochClient("a"), Json { encodeDefaults = true }))
         val refresh = async { suspendedGateway.getDaoDeposits(ctx()) }
         captured.await()
         assertTrue("read/stage phase must not write headers", db.headerCacheDao().getByNetwork(network.name).isEmpty())
@@ -221,13 +222,13 @@ class DaoGatewayUnlockTest {
     /** Every transaction the gateway asked the chain about. */
     private val chainQueries = mutableListOf<String>()
 
-    private fun ctx(walletIdOf: () -> String = { walletId }) = DaoGateway.DaoContext(
+    private fun ctx(walletIdOf: () -> String = { walletId }, readKey: suspend () -> ByteArray = { ByteArray(32) }) = DaoGateway.DaoContext(
         network = { network },
         walletId = walletIdOf,
         walletInfo = { WalletInfo("0xpub", script, "ckt1...", "ckb1...") },
         currentAddress = { "ckt1..." },
         existingScriptBlock = { syncHead },
-        privateKey = { ByteArray(32) },
+        privateKey = readKey,
         sendContext = {
             SendContext(
                 network = network,
@@ -791,6 +792,30 @@ class DaoGatewayUnlockTest {
     fun `an aged marker still proposed in the pool keeps the position confirming`() =
         agedPendingOnChainHoldsTheCardConfirming("proposed")
 
+    @Test
+    fun `selected withdrawal locator changed during authentication is refused before preparation`() = runTest {
+        val current = withdrawingDeposit()
+        coEvery { depositReader.list(any(), any(), any(), any()) } returns listOf(current)
+        val selected = current.copy(withdrawBlockHash = "0x" + "fa".repeat(32))
+        val result = gateway.unlockDao(ctx(), withdrawingOutPoint, ByteArray(32), selected)
+        assertTrue(result.isFailure)
+        assertEquals("Withdrawal details changed; review this position again", result.exceptionOrNull()?.message)
+    }
+
+    @Test fun `legacy authentication cannot silently replace selected locator on resume`() = runTest {
+        val selected = withdrawingDeposit()
+        coEvery { depositReader.list(any(), any(), any(), any()) } returns listOf(selected)
+        val entered = kotlinx.coroutines.CompletableDeferred<Unit>()
+        val resume = kotlinx.coroutines.CompletableDeferred<Unit>()
+        val key = ByteArray(32) { 7 }
+        val job = async { gateway.unlockDao(ctx(readKey = { entered.complete(Unit); resume.await(); key }), withdrawingOutPoint, selected) }
+        entered.await()
+        coEvery { depositReader.list(any(), any(), any(), any()) } returns listOf(selected.copy(withdrawBlockHash = "0x" + "fa".repeat(32)))
+        resume.complete(Unit)
+        assertEquals("Withdrawal details changed; review this position again", job.await().exceptionOrNull()?.message)
+        assertTrue(key.all { it == 0.toByte() })
+    }
+
     /**
      * Public #529 review S1: the marker is filed under the wallet the unlock
      * was signed for, read before the broadcast, not whichever wallet is
@@ -829,6 +854,7 @@ class DaoGatewayUnlockTest {
             syncEngine = mockk(relaxed = true),
             syncCoordinator = mockk(relaxed = true),
             uiPreferences = mockk(relaxed = true),
+            inputAuthorizer = com.rjnr.pocketnode.data.send.NoDaoRecoveryAdoption,
             json = Json { ignoreUnknownKeys = true; encodeDefaults = true },
             logger = NoopLogger,
         )
@@ -842,6 +868,7 @@ class DaoGatewayUnlockTest {
             sendPipeline = pipeline,
             logger = NoopLogger,
             verificationCacheGate = verificationGate,
+            recovery = DaoRecoveryCoordinator(db, verificationGate, epochClient("a"), Json { encodeDefaults = true }),
         )
 
         val result = switching.unlockDao(ctx(walletIdOf = { active }), withdrawingOutPoint, privateKey = ByteArray(32))

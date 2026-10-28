@@ -638,3 +638,22 @@ val MIGRATION_18_19 = object : Migration(18, 19) {
         db.execSQL("CREATE TABLE IF NOT EXISTS `wallet_pending_cleanup` (`walletId` TEXT NOT NULL, `keepBackup` INTEGER NOT NULL, PRIMARY KEY(`walletId`))")
     }
 }
+
+/** Recovery obligations and scheduler budgets survive ordinary chain-cache cleanup. */
+val MIGRATION_19_20 = object : Migration(19, 20) {
+    override fun migrate(db: SupportSQLiteDatabase) {
+        db.execSQL("""CREATE TABLE IF NOT EXISTS dao_recovery_guards (
+            walletId TEXT NOT NULL, network TEXT NOT NULL, genesisHash TEXT NOT NULL,
+            transactionHash TEXT NOT NULL, outputIndex INTEGER NOT NULL,
+            capacity INTEGER NOT NULL, depositBlockNumber INTEGER NOT NULL, scriptJson TEXT NOT NULL,
+            withdrawBlockNumber INTEGER NOT NULL, withdrawBlockHash TEXT NOT NULL,
+            storeGeneration TEXT NOT NULL, runNonce TEXT NOT NULL, proofVersion INTEGER NOT NULL,
+            PRIMARY KEY(walletId, network, genesisHash, transactionHash, outputIndex))""")
+        db.execSQL("""CREATE TABLE IF NOT EXISTS dao_recovery_retry_budget (
+            walletId TEXT NOT NULL, network TEXT NOT NULL, genesisHash TEXT NOT NULL,
+            transactionHash TEXT NOT NULL, outputIndex INTEGER NOT NULL,
+            attempts INTEGER NOT NULL, cycleStartedAt INTEGER NOT NULL, lastAttemptAt INTEGER NOT NULL,
+            nextEligibleAt INTEGER NOT NULL,
+            PRIMARY KEY(walletId, network, genesisHash, transactionHash, outputIndex))""")
+    }
+}

@@ -42,7 +42,7 @@ class WalletPendingCleanupMigrationTest {
                 override fun onUpgrade(db: SupportSQLiteDatabase, oldVersion: Int, newVersion: Int) = Unit
             }).build())
         helper.writableDatabase; helper.close()
-        fun open() = Room.databaseBuilder(context, AppDatabase::class.java, name).addMigrations(MIGRATION_18_19).build()
+        fun open() = Room.databaseBuilder(context, AppDatabase::class.java, name).addMigrations(MIGRATION_18_19, MIGRATION_19_20).build()
         try {
             val upgraded = open()
             try {

@@ -1250,12 +1250,12 @@ class GatewayRepository @Inject constructor(
         daoGateway.unlockPreflight(daoContext(), withdrawingOutPoint)
 
     /** @see DaoGateway.unlockDao */
-    suspend fun unlockDao(withdrawingOutPoint: OutPoint): Result<String> =
-        daoGateway.unlockDao(daoContext(), withdrawingOutPoint)
+    suspend fun unlockDao(withdrawingOutPoint: OutPoint, selected: DaoDeposit? = null): Result<String> =
+        daoGateway.unlockDao(daoContext(), withdrawingOutPoint, selected)
 
     /** @see DaoGateway.unlockDao */
-    suspend fun unlockDao(withdrawingOutPoint: OutPoint, privateKey: ByteArray): Result<String> =
-        daoGateway.unlockDao(daoContext(), withdrawingOutPoint, privateKey)
+    suspend fun unlockDao(withdrawingOutPoint: OutPoint, privateKey: ByteArray, selected: DaoDeposit? = null): Result<String> =
+        daoGateway.unlockDao(daoContext(), withdrawingOutPoint, privateKey, selected)
 
 
     // Sync registration + BALANCED filter delegated to [SyncCoordinator] (#106).

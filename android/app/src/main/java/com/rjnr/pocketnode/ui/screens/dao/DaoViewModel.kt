@@ -259,7 +259,7 @@ class DaoViewModel @Inject constructor(
         if (!daoActionEnabled(deposit, _uiState.value.pendingAction)) return
         _uiState.update { it.copy(pendingAction = DaoAction.Unlocking(deposit.outPoint)) }
         viewModelScope.launch {
-            repository.unlockDao(withdrawingOutPoint = deposit.outPoint)
+            repository.unlockDao(withdrawingOutPoint = deposit.outPoint, selected = deposit)
                 .onFailure { e -> failAction(deposit.outPoint, e.message) }
         }
     }
@@ -309,7 +309,7 @@ class DaoViewModel @Inject constructor(
                 promptTitle = "Authenticate to unlock",
                 promptSubtitle = "Verify your identity to claim your CKB and DAO compensation",
             ) { privateKey ->
-                repository.unlockDao(deposit.outPoint, privateKey)
+                repository.unlockDao(deposit.outPoint, privateKey, selected = deposit)
             }
         }
     }

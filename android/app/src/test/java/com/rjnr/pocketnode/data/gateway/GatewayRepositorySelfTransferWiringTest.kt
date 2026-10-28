@@ -138,6 +138,7 @@ class GatewayRepositorySelfTransferWiringTest {
             walletPreferences,
             json,
             NoopLogger,
+            inputAuthorizer = com.rjnr.pocketnode.data.send.NoDaoRecoveryAdoption,
         )
 
         repository = GatewayRepository(

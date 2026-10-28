@@ -95,7 +95,9 @@ class DaoDepositReaderCompensationTest {
         coEvery { resolver.getBlockHashForCell(withdrawTx) } returns withdrawBlockHash
         coEvery { resolver.getOrFetchHeader(any(), any(), any()) } answers { headersByHash[firstArg()] }
 
-        reader = DaoDepositReader(json, resolver, NoopLogger)
+        val noRecovery = mockk<DaoRecoveryCoordinator>(relaxed = true)
+        coEvery { noRecovery.project(any(), any(), any()) } answers { thirdArg() }
+        reader = DaoDepositReader(json, resolver, NoopLogger, noRecovery)
     }
 
     @After

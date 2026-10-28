@@ -77,6 +77,7 @@ data class DaoDeposit(
     // still lists for a short window after the withdraw commits (get_cells
     // surfaces the new withdrawing cell before the spent-outpoint filter catches
     // up). Transient — never persisted to dao_cells.
+    val recoveryReceiptId: String? = null, // Process-local selection stamp; never stored as authorization.
     val consumedDepositOutPoints: List<OutPoint> = emptyList()
 )
 

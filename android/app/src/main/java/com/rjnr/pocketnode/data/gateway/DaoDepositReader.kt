@@ -62,6 +62,7 @@ class DaoDepositReader @Inject constructor(
     private val json: Json,
     private val daoHeaderResolver: DaoHeaderResolver,
     private val logger: Logger,
+    private val recovery: DaoRecoveryCoordinator,
 ) {
 
     /**
@@ -153,7 +154,7 @@ class DaoDepositReader @Inject constructor(
                     )
                 }
         }
-        return deposits
+        return deposits.map { recovery.project(network, null, it) }
     }
 
     /**
@@ -170,7 +171,18 @@ class DaoDepositReader @Inject constructor(
         suspend fun header(hash: String): JniHeaderView? =
             daoHeaderResolver.getOrFetchHeader(hash, network, cacheResult = headersToCache == null)
                 ?.also { headersToCache?.add(it) }
-        val cell = jniCell.toCell()
+        val guards = recovery.guards(network, jniCell.outPoint)
+        val proof = if (guards.isEmpty()) null else recovery.validateGuard(network, jniCell.outPoint)
+        val authenticatedOutput = proof?.receipt?.rawTransaction?.outputs?.getOrNull(
+            RecoveryOutPoint.from(jniCell.outPoint).outputIndex.toInt())
+        val matchesOutput = proof != null && authenticatedOutput?.let {
+            it.lock == jniCell.output.lock && it.type == jniCell.output.type &&
+                it.capacity.removePrefix("0x").toLongOrNull(16) == jniCell.output.capacity.removePrefix("0x").toLongOrNull(16)
+        } == true && proof.receipt.rawTransaction.outputsData.getOrNull(
+            RecoveryOutPoint.from(jniCell.outPoint).outputIndex.toInt()) == jniCell.outputData
+        // Native script indexes can retain the old height. Only a current receipt
+        // for this exact raw output may supply the replacement historical locator.
+        val cell = if (matchesOutput) jniCell.copy(blockNumber = proof!!.receipt.header.number).toCell() else jniCell.toCell()
         val data = cell.data.removePrefix("0x")
         val cellId = "${cell.outPoint.txHash.take(20)}...:${cell.outPoint.index}"
         val capacityShannons = cell.capacity.removePrefix("0x").toLong(16)
@@ -201,7 +213,15 @@ class DaoDepositReader @Inject constructor(
         // withdraw confirms — before the new withdrawing cell's header is
         // fetched — it stayed empty, dedup couldn't fire, and the pending
         // overlay painted the stale deposit a duplicate "Confirming…" card.
-        val withdrawTx = if (isWithdrawing) {
+        val withdrawTx = if (isWithdrawing && matchesOutput) {
+            val receipt = proof!!.receipt
+            val raw = receipt.rawTransaction
+            JniTransactionWithStatus(
+                com.rjnr.pocketnode.data.gateway.models.JniTransactionView(receipt.transactionHash, raw.version,
+                    raw.cellDeps, raw.headerDeps, raw.inputs.map { com.rjnr.pocketnode.data.gateway.models.CellInput(it.since, it.previousOutput) },
+                    raw.outputs.map { CellOutput(it.capacity, it.lock, it.type) }, raw.outputsData, emptyList()),
+                txStatus = com.rjnr.pocketnode.data.gateway.models.JniTxStatus("committed", receipt.header.hash))
+        } else if (isWithdrawing) {
             LightClientNative.nativeGetTransaction(cell.outPoint.txHash)
                 ?.let { json.decodeFromString<JniTransactionWithStatus>(it) }
         } else null
@@ -209,7 +229,7 @@ class DaoDepositReader @Inject constructor(
             ?.map { it.previousOutput } ?: emptyList()
 
         // Get block header for compensation & epoch data (cache-first).
-        val blockHash = daoHeaderResolver.getBlockHashForCell(cell.outPoint.txHash)
+        val blockHash = if (matchesOutput) proof!!.receipt.header.hash else daoHeaderResolver.getBlockHashForCell(cell.outPoint.txHash)
         val cellBlockHeader = if (blockHash != null) {
             header(blockHash)
         } else null
@@ -219,7 +239,7 @@ class DaoDepositReader @Inject constructor(
             // outside the model's signed Long range remain unparseable rows.
             depositBlockNumber = data.chunked(2).reversed().joinToString("").toLong(16)
             withdrawBlockNumber = cell.blockNumber.removePrefix("0x").toLong(16)
-            val resolved = resolveWithdrawingHeaders(
+            val resolved = if (guards.isNotEmpty() && !matchesOutput) null else resolveWithdrawingHeaders(
                 cell, withdrawTx, cellBlockHeader, depositBlockNumber, ::header,
             )
             if (resolved != null) {
@@ -314,7 +334,7 @@ class DaoDepositReader @Inject constructor(
         )
 
         logger.d(TAG, "✅ DAO deposit added: $cellId, status=$status, capacity=$capacityShannons")
-        return DaoDeposit(
+        val position = DaoDeposit(
             outPoint = cell.outPoint,
             capacity = capacityShannons,
             status = status,
@@ -331,8 +351,10 @@ class DaoDepositReader @Inject constructor(
             cyclePhase = cyclePhaseFromProgress(cycleProgress),
             depositTimestamp = depositTimestampMs,
             apc = apc,
+            recoveryReceiptId = proof?.receipt?.receiptId,
             consumedDepositOutPoints = consumedDepositOutPoints,
         )
+        return recovery.project(network, null, position)
     }
 
     /**
@@ -414,6 +436,9 @@ class DaoDepositReader @Inject constructor(
         currentEpoch: EpochInfo?,
         network: NetworkType,
     ): DaoCellEntity {
+        val point = com.rjnr.pocketnode.data.gateway.models.OutPoint(entity.txHash, entity.index)
+        if (recovery.guards(network, point).isNotEmpty() && recovery.validateGuard(network, point, entity.walletId) == null)
+            return entity.withoutWithdrawalEvidence()
         if (entity.withdrawBlockNumber == null) return entity
         val unresolved = entity.withoutWithdrawalEvidence()
         return try {
@@ -427,7 +452,7 @@ class DaoDepositReader @Inject constructor(
                 output.type != DaoConstants.DAO_TYPE_SCRIPT ||
                 output.capacity.removePrefix("0x").toLongOrNull(16) != entity.capacity
             ) return unresolved
-            val cell = JniCell(output, data, entity.toCachedDeposit().outPoint,
+            val cell = JniCell(output, data, com.rjnr.pocketnode.data.gateway.models.OutPoint(entity.txHash, entity.index),
                 "0x${entity.withdrawBlockNumber.toString(16)}", "0x0")
             val fresh = resolveOneDeposit(cell, currentEpoch, network, mutableListOf())
                 .toDaoCellEntity(entity.network, entity.walletId, entity.lastUpdatedAt)
@@ -474,6 +499,13 @@ class DaoDepositReader @Inject constructor(
         entity: DaoCellEntity,
         cachedDao: suspend (blockHash: String) -> String?,
     ): Long? {
+        val point = com.rjnr.pocketnode.data.gateway.models.OutPoint(entity.txHash, entity.index)
+        val network = NetworkType.valueOf(entity.network)
+        val guards = recovery.guards(network, point)
+        val proof = if (guards.isEmpty()) null else recovery.validateGuard(network, point, entity.walletId)
+        if (guards.isNotEmpty() && (proof == null || proof.guard.withdrawBlockNumber != entity.withdrawBlockNumber ||
+            proof.guard.withdrawBlockHash != entity.withdrawBlockHash || proof.guard.capacity != entity.capacity ||
+            proof.guard.depositBlockNumber != entity.depositBlockNumber)) return null
         if (entity.depositBlockHash.isEmpty() ||
             (entity.withdrawBlockNumber != null && !entity.hasResolvedWithdrawalHeaders())) return null
         val depositDao = cachedDao(entity.depositBlockHash) ?: return null
@@ -487,7 +519,10 @@ class DaoDepositReader @Inject constructor(
                 ?.let { json.decodeFromString<JniHeaderView>(it).dao }
                 ?: return null
         }
-        return compensationFor(depositDao, endDao, entity.capacity)?.coerceAtLeast(0L)
+        val compensation = compensationFor(depositDao, endDao, entity.capacity)?.coerceAtLeast(0L)
+        if (recovery.guards(network, point) != guards ||
+            (proof != null && recovery.validateGuard(network, point, entity.walletId) != proof)) return null
+        return compensation
     }
 
     companion object {

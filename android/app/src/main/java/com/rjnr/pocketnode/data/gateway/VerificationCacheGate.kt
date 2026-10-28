@@ -30,6 +30,11 @@ class VerificationCacheGate @Inject constructor(
     fun isReady(network: String): Boolean = network in _readyNetworks.value
 
     private var revision = 0L
+    private var lifecycle = 0L
+    private var generations = emptyMap<String, String>()
+
+    @Synchronized fun lifecycleRevision(): Long = lifecycle
+    @Synchronized fun generation(network: String): String? = generations[network]
     // Lock order is gate state, then Room transaction. Never acquire state from
     // inside an existing Room transaction. Native/read work holds neither lock.
     private val state = Mutex()
@@ -44,6 +49,8 @@ class VerificationCacheGate @Inject constructor(
     suspend fun close() = state.withLock {
         synchronized(this) {
             revision += 1
+            lifecycle += 1
+            generations = emptyMap()
             _readyNetworks.value = emptySet()
             revision
         }
@@ -66,6 +73,14 @@ class VerificationCacheGate @Inject constructor(
         currentCoroutineContext().ensureActive()
         requireCurrent(network, ticket)
         database.withTransaction { mutations() }
+    }
+
+    /** SQL commits first. Staged refresh tickets become stale before state is unlocked. */
+    suspend fun commitRecoveryIfCurrent(network: String, ticket: Long, mutations: suspend () -> Unit): Long = state.withLock {
+        currentCoroutineContext().ensureActive()
+        requireCurrent(network, ticket)
+        database.withTransaction { mutations() }
+        synchronized(this) { revision += 1; revision }
     }
 
     suspend fun reconcile(client: LightClientApi, network: NetworkType) = reconciliation.withLock {
@@ -101,6 +116,7 @@ class VerificationCacheGate @Inject constructor(
         state.withLock {
             synchronized(this) {
                 check(ticket == revision) { "Verification superseded by a network change" }
+                generations = mapOf(network.name to generation)
                 _readyNetworks.value = setOf(network.name)
             }
         }
