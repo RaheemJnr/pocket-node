@@ -4,7 +4,7 @@ on:
   push:
     branches: [main]
   pull_request:
-    branches: [main, codex/security-maintenance-batch-1]
+    branches: [main, codex/security-maintenance-batch-1, codex/dao-association-recovery]
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
