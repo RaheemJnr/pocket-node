@@ -144,6 +144,8 @@ open class FakeLightClientApi : LightClientApi {
         cursor: String?
     ): String? = next("getCells", searchKeyJson, order, limit, cursor)
 
+    override fun getHistorySnapshot(scriptJson: String): String? = next("getHistorySnapshot", scriptJson)
+
     override fun getTransactions(
         searchKeyJson: String,
         order: String,

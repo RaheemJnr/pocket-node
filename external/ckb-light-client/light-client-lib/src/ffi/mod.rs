@@ -296,3 +296,9 @@ pub fn validate_dao_recovery(request_id: String, receipt_id: String) -> Result<S
 pub fn cancel_dao_recovery(request_id: String) -> Result<String, LightClientError> {
     crate::bridge_core::dao_recovery::cancel_dao_recovery(&request_id).map_err(Into::into)
 }
+
+/// Complete history membership, or unavailable; never a partial page.
+#[uniffi::export]
+pub fn get_history_snapshot(script_json: String) -> Result<String, LightClientError> {
+    crate::bridge_core::history::get_history_snapshot(&script_json).map_err(Into::into)
+}

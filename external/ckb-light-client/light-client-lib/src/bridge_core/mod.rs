@@ -23,6 +23,7 @@
 pub mod dao;
 pub mod dao_recovery;
 pub mod error;
+pub mod history;
 pub mod lifecycle;
 pub mod query;
 pub mod rpc;

@@ -3,6 +3,7 @@ package com.rjnr.pocketnode.data.storage
 import androidx.room.Dao
 import androidx.room.Insert
 import androidx.room.OnConflictStrategy
+import androidx.room.Transaction
 import androidx.room.Query
 
 /**
@@ -16,6 +17,27 @@ import androidx.room.Query
  */
 @Dao
 interface TransactionRoomDao {
+    @Query("SELECT * FROM transactions WHERE walletId = :walletId AND network = :network AND status = 'CONFIRMED'")
+    suspend fun canonicalCandidates(walletId: String, network: String): List<TransactionRow>
+
+    @Query("DELETE FROM transactions WHERE txHash = :hash AND walletId = :walletId AND network = :network " +
+        "AND status = 'CONFIRMED' AND blockNumber = :blockNumber AND blockHash = :blockHash AND cachedAt = :cachedAt " +
+        "AND txHash NOT IN (SELECT txHash FROM pending_broadcasts)")
+    suspend fun deleteCanonicalOrphan(hash: String, walletId: String, network: String, blockNumber: String, blockHash: String, cachedAt: Long)
+
+    /** One atomic scoped pass. Pending ownership and a concurrently advanced receipt win. */
+    @Transaction
+    suspend fun reconcileCanonicalHistory(snapshot: com.rjnr.pocketnode.data.gateway.CanonicalHistorySnapshot, walletId: String, network: String, isCurrent: () -> Boolean = { true }) {
+        if (!snapshot.validFor(snapshot.script, network) || walletId.isBlank()) return
+        val candidates = canonicalCandidates(walletId, network)
+        if (candidates.isEmpty() || !isCurrent()) return
+        for (row in candidates) {
+            if (snapshot.provesAbsent(row.txHash, row.blockNumber)) {
+                deleteCanonicalOrphan(row.txHash, walletId, network, row.blockNumber, row.blockHash, row.cachedAt)
+            }
+        }
+    }
+
 
     /**
      * Fees already known for the given hashes. [RoomKmpTransactionStore]

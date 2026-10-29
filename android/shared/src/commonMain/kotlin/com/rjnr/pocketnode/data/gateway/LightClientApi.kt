@@ -53,6 +53,9 @@ package com.rjnr.pocketnode.data.gateway
  * Swift, so a Swift implementation would silently fail to satisfy the protocol.
  */
 interface LightClientApi {
+    /** Complete canonical membership with immutable restore provenance, or null (never absence). */
+    fun getHistorySnapshot(scriptJson: String): String? = null
+
 
     // ---- Lifecycle ----
 

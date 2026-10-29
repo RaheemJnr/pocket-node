@@ -454,4 +454,50 @@ class RoomStoreAdaptersTest {
         cachedAt = 0L,
         walletId = walletId,
     )
+
+    private fun historyProof() = com.rjnr.pocketnode.data.gateway.CanonicalHistorySnapshot(
+        1, true, "TESTNET", "0x" + "1".repeat(64), "store",
+        com.rjnr.pocketnode.data.gateway.models.Script("0x" + "1".repeat(64), "type", "0x01"),
+        "a".repeat(32), "0", "20", "0x" + "2".repeat(64), "20", emptySet())
+
+    @Test fun `canonical cleanup retains incomplete wrong scope horizon and broadcast owned rows`() = runTest {
+        val hash = "0x" + "a".repeat(64)
+        val original = transaction(hash, "w1", "TESTNET", "0xa").copy(cachedAt = 10)
+        db.transactionDao().insert(original)
+        val proof = historyProof()
+        for (bad in listOf(proof.copy(complete = false), proof.copy(processedThrough = "19"), proof.copy(network = "MAINNET"), proof.copy(startHeight = "10"), proof.copy(tipHash = "bad"))) {
+            transactionStore().reconcileCanonicalHistory(bad, "w1", "TESTNET")
+            assertEquals(original, db.transactionDao().getByTxHash(hash))
+        }
+        transactionStore().reconcileCanonicalHistory(proof, "w2", "TESTNET")
+        assertEquals(original, db.transactionDao().getByTxHash(hash))
+        db.pendingBroadcastDao().insert(broadcast(hash, "w1", "TESTNET", "BROADCAST"))
+        transactionStore().reconcileCanonicalHistory(proof, "w1", "TESTNET")
+        assertEquals(original, db.transactionDao().getByTxHash(hash))
+        db.pendingBroadcastDao().delete(hash)
+        transactionStore().reconcileCanonicalHistory(proof, "w1", "TESTNET")
+        assertNull(db.transactionDao().getByTxHash(hash))
+    }
+
+    @Test fun `canonical conditional deletion cannot erase late reinclusion or pending transition`() = runTest {
+        val hash = "0x" + "a".repeat(64)
+        val original = transaction(hash, "w1", "TESTNET", "0xa").copy(cachedAt = 10)
+        for (advanced in listOf(original.copy(blockNumber = "0xb", blockHash = "new", cachedAt = 11), original.copy(status = "PENDING"))) {
+            db.transactionDao().insert(advanced)
+            db.transactionDao().deleteCanonicalOrphan(hash, "w1", "TESTNET", original.blockNumber, original.blockHash, original.cachedAt)
+            assertEquals(advanced, db.transactionDao().getByTxHash(hash))
+        }
+    }
+
+    @Test fun `canonical cleanup failure rolls back earlier deletions`() = runTest {
+        val hash = "0x" + "a".repeat(64)
+        val original = transaction(hash, "w1", "TESTNET", "0xa").copy(cachedAt = 10)
+        db.transactionDao().insert(original)
+        db.transactionDao().insert(original.copy(txHash = "0x" + "b".repeat(64)))
+        db.openHelper.writableDatabase.execSQL("CREATE TRIGGER reject_history BEFORE DELETE ON transactions WHEN OLD.txHash = '0x${"b".repeat(64)}' BEGIN SELECT RAISE(ABORT, 'fixture'); END")
+        val failure = runCatching { transactionStore().reconcileCanonicalHistory(historyProof(), "w1", "TESTNET") }.exceptionOrNull()
+        org.junit.Assert.assertNotNull(failure)
+        assertEquals(original, db.transactionDao().getByTxHash(hash))
+        assertEquals(2, db.transactionDao().canonicalCandidates("w1", "TESTNET").size)
+    }
 }

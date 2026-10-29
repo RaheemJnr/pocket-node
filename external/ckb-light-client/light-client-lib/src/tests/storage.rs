@@ -126,3 +126,68 @@ fn recovery_races_filter(existing_unknown: bool) {
 }
 #[test] fn recovery_absent_snapshot_cannot_overwrite_concurrent_index() { recovery_races_filter(false); }
 #[test] fn recovery_unknown_snapshot_cannot_overwrite_concurrent_index() { recovery_races_filter(true); }
+
+#[test]
+fn history_registration_preserves_original_horizon() {
+    use crate::storage::{Key, StorageBackend, ScriptStatus, ScriptType};
+    use ckb_types::prelude::*;
+    let (storage, _dir) = new_storage("history_horizon");
+    let script = Script::default();
+    storage.update_filter_scripts(vec![ScriptStatus { script: script.clone(), script_type: ScriptType::Lock, block_number: 12 }], Default::default());
+    storage.update_block_number(90);
+    let mut key = Key::Meta("HISTORY_REGISTRATION_V1").into_vec();
+    key.extend_from_slice(script.as_slice()); key.push(0);
+    let metadata = StorageBackend::get(&storage, key).unwrap();
+    assert!(metadata.is_some(), "registration must retain original horizon independently of scan progress");
+    assert_eq!(&metadata.unwrap()[..8], &12u64.to_be_bytes());
+}
+
+#[test]
+fn history_registration_rebuilds_known_bodies_without_touching_other_scripts() {
+    use crate::storage::{Key, StorageBackend, ScriptStatus, ScriptType, CellType, SetScriptsCommand};
+    use ckb_types::{core::{BlockBuilder, TransactionBuilder}, packed::CellOutput, prelude::*};
+    let (storage, _dir) = new_storage("history_rebuild");
+    let script = Script::default();
+    let status = |script_type, block_number| ScriptStatus { script: script.clone(), script_type, block_number };
+    storage.update_filter_scripts(vec![status(ScriptType::Lock, 1), status(ScriptType::Type, 1)], SetScriptsCommand::All);
+    let tx = TransactionBuilder::default().output(CellOutput::new_builder().lock(script.clone()).type_(Some(script.clone()).pack()).build()).output_data(Vec::<u8>::new().pack()).build();
+    let block = BlockBuilder::default().epoch(ckb_types::core::EpochNumberWithFraction::new(0,0,100).full_value()).number(10u64).transaction(tx.clone()).build().data();
+    storage.filter_block(block.clone());
+    storage.update_block_number(20);
+    let lock_key = Key::TxLockScript(&script, 10, 0, 0, CellType::Output).into_vec();
+    let type_key = Key::TxTypeScript(&script, 10, 0, 0, CellType::Output).into_vec();
+    storage.update_filter_scripts(vec![status(ScriptType::Lock, 1)], SetScriptsCommand::Delete);
+    storage.rollback_to_block(10);
+    storage.update_filter_scripts(vec![status(ScriptType::Lock, 1)], SetScriptsCommand::Partial);
+    assert!(StorageBackend::get(&storage, lock_key.clone()).unwrap().is_none(), "unregistered orphan history must be rebuilt on re-registration");
+    assert!(storage.get_transaction(&tx.hash()).is_some(), "known body remains available for input resolution");
+    storage.filter_block(block.clone());
+    assert!(StorageBackend::get(&storage, lock_key.clone()).unwrap().is_some(), "known transaction body must still be reindexed");
+    assert!(StorageBackend::get(&storage, type_key.clone()).unwrap().is_some());
+    storage.update_filter_scripts(vec![status(ScriptType::Lock, 1)], SetScriptsCommand::Partial);
+    assert!(StorageBackend::get(&storage, type_key.clone()).unwrap().is_some(), "other script history survives registration");
+    storage.filter_block(block);
+    // A rescan may lower progress while later history is still present (for example,
+    // a higher-start registration preserves the covered boundary itself).
+    storage.update_filter_scripts(vec![status(ScriptType::Lock, 10), status(ScriptType::Type, 10)], SetScriptsCommand::Partial);
+    storage.rollback_to_block(10);
+    assert!(StorageBackend::get(&storage, lock_key).unwrap().is_none());
+    assert!(StorageBackend::get(&storage, type_key).unwrap().is_none());
+}
+
+#[test]
+fn history_rollback_cleans_indexes_even_when_scan_progress_was_lowered() {
+    use crate::storage::{Key, StorageBackend, ScriptStatus, ScriptType, CellType, SetScriptsCommand};
+    use ckb_types::{core::{BlockBuilder, TransactionBuilder}, packed::CellOutput, prelude::*};
+    let (storage, _dir) = new_storage("history_lowered_progress");
+    let script = Script::default();
+    storage.update_filter_scripts(vec![ScriptStatus { script: script.clone(), script_type: ScriptType::Lock, block_number: 1 }], SetScriptsCommand::All);
+    let tx = TransactionBuilder::default().output(CellOutput::new_builder().lock(script.clone()).build()).output_data(Vec::<u8>::new().pack()).build();
+    storage.filter_block(BlockBuilder::default().epoch(ckb_types::core::EpochNumberWithFraction::new(0,0,100).full_value()).number(10u64).transaction(tx).build().data());
+    // Simulate persisted lowered progress with later indexes from an earlier scan.
+    let key = [Key::Meta("FILTER_SCRIPTS").into_vec(), script.as_slice().to_vec(), vec![0]].concat();
+    StorageBackend::put(&storage, key, 1u64.to_be_bytes().to_vec()).unwrap();
+    storage.rollback_to_block(10);
+    assert!(StorageBackend::get(&storage, Key::TxLockScript(&script, 10, 0, 0, CellType::Output).into_vec()).unwrap().is_none());
+    assert_eq!(storage.get_filter_scripts()[0].block_number, 1, "rollback must not advance lowered progress");
+}

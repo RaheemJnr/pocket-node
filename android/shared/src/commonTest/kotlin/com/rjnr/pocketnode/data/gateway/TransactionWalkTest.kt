@@ -84,6 +84,25 @@ class TransactionWalkTest {
         assertTrue(result.items.isEmpty())
     }
 
+    @Test
+    fun `short final page at the budget is complete not capped`() = runTest {
+        val result = walkAllPages<JniTxWithCell>(100, 1) { page(emptyList(), null) }
+        assertFalse(result.hitCap)
+    }
+
+    @Test
+    fun `middle failure and full page missing cursor never prove completion`() = runTest {
+        var calls = 0
+        val middleFailure = walkAllPages(1, 5) { if (calls++ == 0) page(listOf(interaction("h", "output", 1)), "cursor") else null }
+        assertFalse(middleFailure.complete)
+        assertFalse(middleFailure.hitCap)
+        val missingCursor = walkAllPages(1, 5) { page(listOf(interaction("h", "output", 1)), null) }
+        assertFalse(missingCursor.complete)
+        val capped = walkAllPages(1, 1) { page(listOf(interaction("h", "output", 1)), "cursor") }
+        assertFalse(capped.complete)
+        assertTrue(capped.hitCap)
+    }
+
     // --- netShannonsByTx: correct over the COMPLETE set ---
 
     @Test

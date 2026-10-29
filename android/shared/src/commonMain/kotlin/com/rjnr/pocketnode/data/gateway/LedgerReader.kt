@@ -795,6 +795,26 @@ class LedgerReader(
         // "All" list actually mean all. ---
         transactionStore.cacheTransactions(items, network.name, walletId = activeWalletId)
 
+        // This independent native snapshot is the authority, not absence in display pages.
+        // A partial/capped display walk cannot itself remove a receipt. Native failure,
+        // legacy registration or an unfinished restore retains all cached rows.
+        try {
+            val snapshot = lightClient.getHistorySnapshot(json.encodeToString(myScript))
+                ?.let { json.decodeFromString<CanonicalHistorySnapshot>(it) }
+            if (snapshot != null && snapshot.validFor(myScript, network.name)) {
+                transactionStore.reconcileCanonicalHistory(snapshot, activeWalletId, network.name) {
+                    // Revalidate after the suspendable candidate read, inside the cache transaction.
+                    // A changed tip/restore generation or unavailable second read retains the cache.
+                    lightClient.getHistorySnapshot(json.encodeToString(myScript))
+                        ?.let { json.decodeFromString<CanonicalHistorySnapshot>(it) } == snapshot
+                }
+            }
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            logger.w(TAG, "Canonical history unavailable; retaining cached receipts", e)
+        }
+
         // Sticky: once armed, only the Tier 2 deep scan clears it. Detection
         // is not re-evaluated downward — a later partial walk (runaway cap)
         // must not un-detect.

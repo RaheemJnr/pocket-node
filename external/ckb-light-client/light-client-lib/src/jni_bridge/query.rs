@@ -469,3 +469,17 @@ pub extern "C" fn Java_com_nervosnetwork_ckblightclient_LightClientNative_native
         }
     })
 }
+
+#[no_mangle]
+pub extern "C" fn Java_com_nervosnetwork_ckblightclient_LightClientNative_nativeGetHistorySnapshot(
+    mut env: JNIEnv, _class: JClass, script_json: JString,
+) -> jstring {
+    guard_jni(std::ptr::null_mut(), move || {
+        let script = match jstring_to_string(&mut env, &script_json, "nativeGetHistorySnapshot") {
+            Some(s) => s, None => return ptr::null_mut(),
+        };
+        match crate::bridge_core::history::get_history_snapshot(&script) {
+            Ok(json) => json_to_jstring(&mut env, &json), Err(_) => ptr::null_mut(),
+        }
+    })
+}

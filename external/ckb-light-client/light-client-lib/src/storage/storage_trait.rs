@@ -85,6 +85,8 @@ pub trait LightClientStorage: StorageBackend {
         let mut batch = self.batch();
         let key_prefix = Key::Meta(FILTER_SCRIPTS_KEY).into_vec();
 
+        let registration_nonce: [u8; 16] = rand::random();
+        let registration_prefix = Key::Meta("HISTORY_REGISTRATION_V1").into_vec();
         match command {
             SetScriptsCommand::All => {
                 should_filter_genesis_block = scripts.iter().any(|ss| ss.block_number == 0);
@@ -101,10 +103,14 @@ pub trait LightClientStorage: StorageBackend {
 
                 for kv in existing_keys {
                     batch.delete(&kv.key);
+                    let mut registration_key = registration_prefix.clone();
+                    registration_key.extend_from_slice(&kv.key[key_prefix.len()..]);
+                    batch.delete(&registration_key);
                 }
 
                 // Insert new scripts
                 for ss in scripts {
+                    self.clear_history_after_registration(&ss, &mut batch);
                     let key = [
                         key_prefix.as_ref(),
                         ss.script.as_slice(),
@@ -115,6 +121,11 @@ pub trait LightClientStorage: StorageBackend {
                     ]
                     .concat();
                     batch.put(&key, &ss.block_number.to_be_bytes());
+                    let mut registration_key = registration_prefix.clone();
+                    registration_key.extend_from_slice(&key[key_prefix.len()..]);
+                    let mut registration = ss.block_number.to_be_bytes().to_vec();
+                    registration.extend_from_slice(&registration_nonce);
+                    batch.put(&registration_key, &registration);
                 }
             }
             SetScriptsCommand::Partial => {
@@ -125,6 +136,7 @@ pub trait LightClientStorage: StorageBackend {
                 should_filter_genesis_block = min_script_block_number == Some(0);
 
                 for ss in scripts {
+                    self.clear_history_after_registration(&ss, &mut batch);
                     let key = [
                         key_prefix.as_ref(),
                         ss.script.as_slice(),
@@ -135,6 +147,11 @@ pub trait LightClientStorage: StorageBackend {
                     ]
                     .concat();
                     batch.put(&key, &ss.block_number.to_be_bytes());
+                    let mut registration_key = registration_prefix.clone();
+                    registration_key.extend_from_slice(&key[key_prefix.len()..]);
+                    let mut registration = ss.block_number.to_be_bytes().to_vec();
+                    registration.extend_from_slice(&registration_nonce);
+                    batch.put(&registration_key, &registration);
                 }
             }
             SetScriptsCommand::Delete => {
@@ -153,6 +170,9 @@ pub trait LightClientStorage: StorageBackend {
                     ]
                     .concat();
                     batch.delete(&key);
+                    let mut registration_key = registration_prefix.clone();
+                    registration_key.extend_from_slice(&key[key_prefix.len()..]);
+                    batch.delete(&registration_key);
                 }
             }
         }
@@ -166,6 +186,25 @@ pub trait LightClientStorage: StorageBackend {
             let block = self.get_genesis_block();
             self.filter_block(block);
         }
+    }
+
+    /// A fresh registration rebuilds only history above its exclusive start.
+    /// Bodies and cells remain available for resolving inputs during the rescan.
+    fn clear_history_after_registration(&self, status: &ScriptStatus, batch: &mut Self::Batch) {
+        let Some(first) = status.block_number.checked_add(1) else { return; };
+        let prefix = [vec![match status.script_type {
+            ScriptType::Lock => KeyPrefix::TxLockScript as u8,
+            ScriptType::Type => KeyPrefix::TxTypeScript as u8,
+        }], super::extract_raw_data(&status.script)].concat();
+        let start = [prefix.clone(), first.to_be_bytes().to_vec()].concat();
+        let exact_len = prefix.len() + 17;
+        let rows = self.collect_iterator(
+            IteratorStart::From(start), IteratorDirection::Forward,
+            Box::new(move |key| key.starts_with(&prefix)),
+            Box::new(move |key, value| if key.len() == exact_len { Some(value.to_vec()) } else { None }),
+            usize::MAX,
+        );
+        for row in rows { batch.delete(&row.key); }
     }
 
     /// Get scripts hash by block number
@@ -717,7 +756,9 @@ pub trait LightClientStorage: StorageBackend {
         let mut batch = self.batch();
 
         for ss in scripts {
-            if ss.block_number >= to_number {
+            // A rescan can lower progress while later indexes still exist.
+            // Rollback invalidates those indexes regardless of scan progress.
+            {
                 let script = ss.script;
                 let mut key_prefix = vec![match ss.script_type {
                     ScriptType::Lock => KeyPrefix::TxLockScript as u8,
@@ -848,8 +889,8 @@ pub trait LightClientStorage: StorageBackend {
                     };
                 }
 
-                // update script filter block number
-                {
+                // Never advance a rescan that already starts below the fork.
+                if ss.block_number >= to_number {
                     let mut key = Key::Meta(FILTER_SCRIPTS_KEY).into_vec();
                     key.extend_from_slice(script.as_slice());
                     key.extend_from_slice(match ss.script_type {

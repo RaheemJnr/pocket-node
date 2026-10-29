@@ -373,20 +373,12 @@ fn set_scripts_ordered(
 ) -> Result<(), BridgeError> {
     let peers = get_peers()?;
 
+    // Match the service/RPC lock order: exclude old filter/index work BEFORE
+    // landing new registration progress. Clear the old matched set after the write.
+    // Peers lookup still precedes every mutation (#555).
+    let mut matched_blocks = peers.matched_blocks().blocking_write();
     update_storage();
 
-    // Clear matched blocks when scripts change.
-    // Lock matched_blocks and clear them.
-    // `blocking_write` panics inside a tokio runtime context, so this must only
-    // ever be called from a plain platform thread (the JNI and UniFFI callers).
-    //
-    // This step runs after the storage write and cannot move ahead of it
-    // (clearing matched blocks for the *new* script set only makes sense once
-    // that set has landed). It cannot itself return an error: `blocking_write`
-    // only panics (a programmer error, not a runtime condition) and
-    // `clear_matched_blocks` is infallible, so it cannot turn a landed write
-    // back into a reported failure.
-    let mut matched_blocks = peers.matched_blocks().blocking_write();
     peers.clear_matched_blocks(&mut matched_blocks);
 
     Ok(())
@@ -1132,6 +1124,14 @@ mod tests {
             !storage_written.get(),
             "storage must not be written when the peers lookup fails"
         );
+    }
+
+    #[test]
+    fn registration_storage_write_excludes_old_filter_work() {
+        let peers = test_peers();
+        set_scripts_ordered(|| Ok(Arc::clone(&peers)), || {
+            assert!(peers.matched_blocks().try_write().is_err(), "registration must exclude in-flight old filter work");
+        }).unwrap();
     }
 
     /// Happy path: once the peers lookup succeeds, storage is written and the

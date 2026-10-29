@@ -7712,6 +7712,319 @@ index 0000000000000000000000000000000000000000..02fbd4011c922bbdfd7fbc8888949ab3
 +    #[error("internal error: {0}")]
 +    Internal(String),
 +}
+diff --git a/light-client-lib/src/bridge_core/history.rs b/light-client-lib/src/bridge_core/history.rs
+new file mode 100644
+index 0000000000000000000000000000000000000000..59f7b6c224d4db934c8b689ab8e22052773ba432
+--- /dev/null
++++ b/light-client-lib/src/bridge_core/history.rs
+@@ -0,0 +1,307 @@
++//! Bounded authoritative history from a consistent SQLite read under the chain guard.
++use super::{types::*, BridgeError};
++use crate::{
++    protocols::light_client::recovery::{ChainSnapshot, RecoveryIdentity},
++    storage::{extract_raw_data, Key, KeyPrefix, Storage},
++};
++use ckb_types::{packed, prelude::*};
++use rusqlite::{Connection, OptionalExtension};
++use serde_json::{json, Value};
++use std::collections::BTreeSet;
++const MAX_INTERACTIONS: usize = 20_000;
++fn unavailable() -> BridgeError {
++    BridgeError::Storage("authoritative history unavailable".into())
++}
++fn read(conn: &Connection, key: Vec<u8>) -> Result<Vec<u8>, BridgeError> {
++    conn.query_row("SELECT value FROM kv WHERE key = ?1", [key], |r| r.get(0))
++        .optional()
++        .map_err(|_| unavailable())?
++        .ok_or_else(unavailable)
++}
++fn prefixed(
++    conn: &Connection,
++    prefix: &[u8],
++    cap: usize,
++) -> Result<Vec<(Vec<u8>, Vec<u8>)>, BridgeError> {
++    let mut upper = prefix.to_vec();
++    while upper.last() == Some(&255) {
++        upper.pop();
++    }
++    *upper.last_mut().ok_or_else(unavailable)? += 1;
++    let mut stmt = conn
++        .prepare("SELECT key,value FROM kv WHERE key >= ?1 AND key < ?2 ORDER BY key LIMIT ?3")
++        .map_err(|_| unavailable())?;
++    let rows = stmt
++        .query_map(rusqlite::params![prefix, upper, (cap + 1) as i64], |r| {
++            Ok((r.get(0)?, r.get(1)?))
++        })
++        .map_err(|_| unavailable())?;
++    let result = rows
++        .collect::<Result<Vec<_>, _>>()
++        .map_err(|_| unavailable())?;
++    if result.len() > cap {
++        return Err(unavailable());
++    }
++    Ok(result)
++}
++pub(crate) fn snapshot(
++    storage: &Storage,
++    script: &packed::Script,
++    identity: &RecoveryIdentity,
++    chain: &ChainSnapshot,
++    network: &str,
++) -> Result<Value, BridgeError> {
++    // Excludes registrations and every DB write; caller excludes partial rollback/tip updates.
++    let conn = storage.conn.lock().map_err(|_| unavailable())?;
++    let state = read(&conn, Key::Meta("LAST_STATE").into_vec())?;
++    if state.get(32..) != Some(chain.anchor.as_slice()) {
++        return Err(unavailable());
++    }
++    let tip: u64 = chain.anchor.raw().number().unpack();
++    let suffix = [script.as_slice(), &[0]].concat();
++    let progress = read(
++        &conn,
++        [Key::Meta("FILTER_SCRIPTS").into_vec(), suffix.clone()].concat(),
++    )?;
++    let through = u64::from_be_bytes(progress.as_slice().try_into().map_err(|_| unavailable())?);
++    let registration = read(
++        &conn,
++        [Key::Meta("HISTORY_REGISTRATION_V1").into_vec(), suffix].concat(),
++    )?;
++    if registration.len() != 24 || through < tip {
++        return Err(unavailable());
++    }
++    let start = u64::from_be_bytes(registration[..8].try_into().map_err(|_| unavailable())?);
++    if tip == 0 || start > tip {
++        return Err(unavailable());
++    }
++    if !prefixed(&conn, &Key::Meta("MATCHED_BLOCKS").into_vec(), 0)?.is_empty() {
++        return Err(unavailable());
++    }
++    let prefix = [
++        vec![KeyPrefix::TxLockScript as u8],
++        extract_raw_data(script),
++    ]
++    .concat();
++    let mut hashes = BTreeSet::new();
++    for (key, value) in prefixed(&conn, &prefix, MAX_INTERACTIONS)? {
++        if key.len() != prefix.len() + 17 {
++            return Err(unavailable());
++        }
++        let tail = &key[prefix.len()..];
++        let height = u64::from_be_bytes(tail[..8].try_into().map_err(|_| unavailable())?);
++        if height > tip || tail[16] > 1 {
++            return Err(unavailable());
++        }
++        let hash = packed::Byte32::from_slice(&value).map_err(|_| unavailable())?;
++        let stored = read(&conn, Key::TxHash(&hash).into_vec())?;
++        if stored.get(..12) != Some(&tail[..12]) {
++            return Err(unavailable());
++        }
++        let tx = packed::Transaction::from_slice(stored.get(12..).ok_or_else(unavailable)?)
++            .map_err(|_| unavailable())?;
++        if tx.calc_tx_hash() != hash {
++            return Err(unavailable());
++        }
++        let index =
++            u32::from_be_bytes(tail[12..16].try_into().map_err(|_| unavailable())?) as usize;
++        if (tail[16] == 0 && index >= tx.raw().inputs().len())
++            || (tail[16] == 1 && index >= tx.raw().outputs().len())
++        {
++            return Err(unavailable());
++        }
++        hashes.insert(format!("{hash:#x}"));
++    }
++    let hex = |bytes: &[u8]| bytes.iter().map(|b| format!("{b:02x}")).collect::<String>();
++    Ok(json!({"version":1,"complete":true,"network":network,
++        "genesisHash":format!("{:#x}",identity.genesis_hash),"storeGeneration":identity.store_generation,
++        "script":ckb_jsonrpc_types::Script::from(script.clone()),
++        "registration":hex(&registration[8..]),"startHeight":start.to_string(),
++        "tipHeight":tip.to_string(),"tipHash":format!("{:#x}",chain.anchor.calc_header_hash()),
++        "processedThrough":through.to_string(),"hashes":hashes}))
++}
++pub fn get_history_snapshot(script_json: &str) -> Result<String, BridgeError> {
++    if !is_running() {
++        return Err(BridgeError::NotInitialized);
++    }
++    let script: ckb_jsonrpc_types::Script =
++        serde_json::from_str(script_json).map_err(|_| unavailable())?;
++    let storage = STORAGE_WITH_DATA.get().ok_or_else(unavailable)?;
++    let peers = PEERS.get().ok_or_else(unavailable)?;
++    // Filter/index batches and registrations hold this write lock. Try-read keeps
++    // the synchronous bridge fail-closed and avoids waiting while acquiring authority.
++    let _matched = peers
++        .matched_blocks()
++        .try_read()
++        .map_err(|_| unavailable())?;
++    let consensus = CONSENSUS.get().ok_or_else(unavailable)?;
++    let network = match consensus.id.as_str() {
++        "ckb" => "MAINNET",
++        "ckb_testnet" => "TESTNET",
++        _ => return Err(unavailable()),
++    };
++    let value = peers
++        .recovery()
++        .with_chain_snapshot(|identity, chain| {
++            snapshot(storage.storage(), &script.into(), identity, chain, network)
++        })
++        .map_err(|_| unavailable())??;
++    serde_json::to_string(&value).map_err(|_| unavailable())
++}
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++    use crate::protocols::light_client::recovery::RecoveryRegistry;
++    use crate::storage::{
++        LightClientStorage, ScriptStatus, ScriptType, SetScriptsCommand, StorageBackend,
++    };
++    use ckb_types::{
++        core::{BlockBuilder, TransactionBuilder},
++        U256,
++    };
++    #[test]
++    fn authoritative_history_rollback_reinclusion_and_horizon() {
++        let (storage, _dir) = crate::tests::utils::new_storage("history_snapshot");
++        let script = packed::Script::default();
++        let tip = BlockBuilder::default()
++            .epoch(ckb_types::core::EpochNumberWithFraction::new(0, 0, 100).full_value())
++            .number(20u64)
++            .build()
++            .data()
++            .header();
++        let mut chain = ChainSnapshot {
++            anchor: tip.clone(),
++        };
++        let identity = RecoveryIdentity {
++            genesis_hash: packed::Byte32::default(),
++            store_generation: "store".into(),
++            run_nonce: [1; 16],
++        };
++        storage.update_last_state(&U256::zero(), &tip, &[]);
++        // Legacy DBs have no invented horizon, and registered but unscanned ranges fail closed.
++        assert!(snapshot(&storage, &script, &identity, &chain, "TESTNET").is_err());
++        storage.update_filter_scripts(
++            vec![ScriptStatus {
++                script: script.clone(),
++                script_type: ScriptType::Lock,
++                block_number: 1,
++            }],
++            SetScriptsCommand::All,
++        );
++        assert!(snapshot(&storage, &script, &identity, &chain, "TESTNET").is_err());
++        let tx = TransactionBuilder::default()
++            .output(
++                packed::CellOutput::new_builder()
++                    .lock(script.clone())
++                    .build(),
++            )
++            .output_data(Vec::<u8>::new().pack())
++            .build();
++        storage.filter_block(
++            BlockBuilder::default()
++                .epoch(ckb_types::core::EpochNumberWithFraction::new(0, 0, 100).full_value())
++                .number(10u64)
++                .transaction(tx.clone())
++                .build()
++                .data(),
++        );
++        storage.update_block_number(20);
++        let before = snapshot(&storage, &script, &identity, &chain, "TESTNET").unwrap();
++        assert_eq!(before["hashes"], json!([format!("{:#x}", tx.hash())]));
++        assert_eq!(before["startHeight"], "1");
++        storage.rollback_to_block(10);
++        let replacement_tip = tip.clone().as_builder().nonce(1u128).build();
++        storage.update_last_state(&U256::zero(), &replacement_tip, &[]);
++        assert!(snapshot(&storage, &script, &identity, &chain, "TESTNET").is_err());
++        chain = ChainSnapshot {
++            anchor: replacement_tip,
++        };
++        assert!(snapshot(&storage, &script, &identity, &chain, "TESTNET").is_err());
++        storage.update_block_number(20);
++        assert_eq!(
++            snapshot(&storage, &script, &identity, &chain, "TESTNET").unwrap()["hashes"],
++            json!([])
++        );
++        storage.filter_block(
++            BlockBuilder::default()
++                .epoch(ckb_types::core::EpochNumberWithFraction::new(0, 0, 100).full_value())
++                .number(11u64)
++                .transaction(tx.clone())
++                .build()
++                .data(),
++        );
++        assert_eq!(
++            snapshot(&storage, &script, &identity, &chain, "TESTNET").unwrap()["hashes"],
++            before["hashes"]
++        );
++        storage.update_filter_scripts(
++            vec![ScriptStatus {
++                script: script.clone(),
++                script_type: ScriptType::Lock,
++                block_number: 15,
++            }],
++            SetScriptsCommand::Partial,
++        );
++        assert!(snapshot(&storage, &script, &identity, &chain, "TESTNET").is_err());
++        storage.update_block_number(20);
++        let after = snapshot(&storage, &script, &identity, &chain, "TESTNET").unwrap();
++        assert_eq!(after["startHeight"], "15");
++        assert_ne!(before["registration"], after["registration"]);
++        storage.add_matched_blocks(20, 1, vec![(packed::Byte32::default(), false)]);
++        assert!(snapshot(&storage, &script, &identity, &chain, "TESTNET").is_err());
++        storage.remove_matched_blocks(20);
++        let key = Key::TxHash(&tx.hash()).into_vec();
++        let original_body = StorageBackend::get(&storage, key.clone()).unwrap().unwrap();
++        StorageBackend::put(&storage, key.clone(), vec![0u8; 12]).unwrap();
++        assert!(snapshot(&storage, &script, &identity, &chain, "TESTNET").is_err());
++        StorageBackend::put(&storage, key, original_body).unwrap();
++        // A missing body is not silently skipped into a false absence proof.
++        StorageBackend::delete(&storage, &Key::TxHash(&tx.hash()).into_vec()).unwrap();
++        assert!(snapshot(&storage, &script, &identity, &chain, "TESTNET").is_err());
++    }
++    #[test]
++    fn bounded_read_exact_budget_is_complete_but_extra_row_and_corruption_fail() {
++        let conn = Connection::open_in_memory().unwrap();
++        conn.execute_batch("CREATE TABLE kv(key BLOB PRIMARY KEY,value BLOB)")
++            .unwrap();
++        for key in [vec![1u8, 0], vec![1u8, 1]] {
++            conn.execute(
++                "INSERT INTO kv VALUES (?1, ?2)",
++                rusqlite::params![key, vec![0u8]],
++            )
++            .unwrap();
++        }
++        assert_eq!(prefixed(&conn, &[1], 2).unwrap().len(), 2);
++        assert!(prefixed(&conn, &[1], 1).is_err());
++        conn.execute("INSERT INTO kv VALUES (?1, NULL)", [vec![1u8, 2]])
++            .unwrap();
++        assert!(prefixed(&conn, &[1], 4).is_err());
++    }
++    #[test]
++    fn chain_guard_refuses_snapshot_during_rollback_and_after_shutdown() {
++        let identity = RecoveryIdentity {
++            genesis_hash: packed::Byte32::new([1; 32]),
++            store_generation: "store".into(),
++            run_nonce: [1; 16],
++        };
++        let chain = ChainSnapshot {
++            anchor: packed::Header::default(),
++        };
++        let registry = RecoveryRegistry::new(identity, chain.clone());
++        assert!(registry.with_chain_snapshot(|_, _| ()).is_ok());
++        // Contended authority fails closed immediately, including reentrant reads.
++        assert!(registry
++            .with_chain_snapshot(|_, _| registry.with_chain_snapshot(|_, _| ()))
++            .unwrap()
++            .is_err());
++        let update = registry.begin_chain_update().unwrap();
++        assert!(registry
++            .with_chain_snapshot(|_, _| panic!("must not read mid rollback"))
++            .is_err());
++        registry.finish_chain_update(update, chain).unwrap();
++        assert!(registry.with_chain_snapshot(|_, _| ()).is_ok());
++        registry.revoke_run();
++        assert!(registry.with_chain_snapshot(|_, _| ()).is_err());
++    }
++}
 diff --git a/light-client-lib/src/bridge_core/lifecycle.rs b/light-client-lib/src/bridge_core/lifecycle.rs
 new file mode 100644
 index 0000000000000000000000000000000000000000..e3137eacf38993ee25aba62480364aa40c5b8fe6
@@ -8661,10 +8974,10 @@ index 0000000000000000000000000000000000000000..e3137eacf38993ee25aba62480364aa4
 +}
 diff --git a/light-client-lib/src/bridge_core/mod.rs b/light-client-lib/src/bridge_core/mod.rs
 new file mode 100644
-index 0000000000000000000000000000000000000000..6755f78b40cf07ef6ade270fe4cad66b584ec533
+index 0000000000000000000000000000000000000000..14a6ada2821cf9502595f9491a1da027aef3c446
 --- /dev/null
 +++ b/light-client-lib/src/bridge_core/mod.rs
-@@ -0,0 +1,33 @@
+@@ -0,0 +1,34 @@
 +//! Platform-neutral core of the mobile bridges.
 +//!
 +//! `jni_bridge` (Android) and `ffi` (iOS/UniFFI) are thin marshalling layers on
@@ -8690,6 +9003,7 @@ index 0000000000000000000000000000000000000000..6755f78b40cf07ef6ade270fe4cad66b
 +pub mod dao;
 +pub mod dao_recovery;
 +pub mod error;
++pub mod history;
 +pub mod lifecycle;
 +pub mod query;
 +pub mod rpc;
@@ -8700,7 +9014,7 @@ index 0000000000000000000000000000000000000000..6755f78b40cf07ef6ade270fe4cad66b
 +pub use error::BridgeError;
 diff --git a/light-client-lib/src/bridge_core/query.rs b/light-client-lib/src/bridge_core/query.rs
 new file mode 100644
-index 0000000000000000000000000000000000000000..32c2bafb9c29066925061b34a792e01b113017ce
+index 0000000000000000000000000000000000000000..996d2344b4d143ca7c09f741a2bd159ae98f3fee
 --- /dev/null
 +++ b/light-client-lib/src/bridge_core/query.rs
 @@ -0,0 +1,1163 @@
@@ -9079,20 +9393,12 @@ index 0000000000000000000000000000000000000000..32c2bafb9c29066925061b34a792e01b
 +) -> Result<(), BridgeError> {
 +    let peers = get_peers()?;
 +
++    // Match the service/RPC lock order: exclude old filter/index work BEFORE
++    // landing new registration progress. Clear the old matched set after the write.
++    // Peers lookup still precedes every mutation (#555).
++    let mut matched_blocks = peers.matched_blocks().blocking_write();
 +    update_storage();
 +
-+    // Clear matched blocks when scripts change.
-+    // Lock matched_blocks and clear them.
-+    // `blocking_write` panics inside a tokio runtime context, so this must only
-+    // ever be called from a plain platform thread (the JNI and UniFFI callers).
-+    //
-+    // This step runs after the storage write and cannot move ahead of it
-+    // (clearing matched blocks for the *new* script set only makes sense once
-+    // that set has landed). It cannot itself return an error: `blocking_write`
-+    // only panics (a programmer error, not a runtime condition) and
-+    // `clear_matched_blocks` is infallible, so it cannot turn a landed write
-+    // back into a reported failure.
-+    let mut matched_blocks = peers.matched_blocks().blocking_write();
 +    peers.clear_matched_blocks(&mut matched_blocks);
 +
 +    Ok(())
@@ -9838,6 +10144,14 @@ index 0000000000000000000000000000000000000000..32c2bafb9c29066925061b34a792e01b
 +            !storage_written.get(),
 +            "storage must not be written when the peers lookup fails"
 +        );
++    }
++
++    #[test]
++    fn registration_storage_write_excludes_old_filter_work() {
++        let peers = test_peers();
++        set_scripts_ordered(|| Ok(Arc::clone(&peers)), || {
++            assert!(peers.matched_blocks().try_write().is_err(), "registration must exclude in-flight old filter work");
++        }).unwrap();
 +    }
 +
 +    /// Happy path: once the peers lookup succeeds, storage is written and the
@@ -11362,10 +11676,10 @@ index 7a7d39c1365c94fd87eba099e1accdd35749f126..6db510572cc437bcbfc98ced7b109a44
      #[error("db error: {0}")]
 diff --git a/light-client-lib/src/ffi/mod.rs b/light-client-lib/src/ffi/mod.rs
 new file mode 100644
-index 0000000000000000000000000000000000000000..c3d6aae99e59a35b01a4cc29d42456f03ccc4244
+index 0000000000000000000000000000000000000000..cca9b14ee5cd9e0e24ecbc15b61ddcb38c02bd74
 --- /dev/null
 +++ b/light-client-lib/src/ffi/mod.rs
-@@ -0,0 +1,298 @@
+@@ -0,0 +1,304 @@
 +//! UniFFI bridge for iOS
 +//!
 +//! Thin marshalling layer over [`crate::bridge_core`], mirroring what
@@ -11663,6 +11977,12 @@ index 0000000000000000000000000000000000000000..c3d6aae99e59a35b01a4cc29d42456f0
 +#[uniffi::export]
 +pub fn cancel_dao_recovery(request_id: String) -> Result<String, LightClientError> {
 +    crate::bridge_core::dao_recovery::cancel_dao_recovery(&request_id).map_err(Into::into)
++}
++
++/// Complete history membership, or unavailable; never a partial page.
++#[uniffi::export]
++pub fn get_history_snapshot(script_json: String) -> Result<String, LightClientError> {
++    crate::bridge_core::history::get_history_snapshot(&script_json).map_err(Into::into)
 +}
 diff --git a/light-client-lib/src/jni_bridge/callbacks.rs b/light-client-lib/src/jni_bridge/callbacks.rs
 new file mode 100644
@@ -12100,10 +12420,10 @@ index 0000000000000000000000000000000000000000..33b03eaeb8026bbec386e63904c23f2d
 +}
 diff --git a/light-client-lib/src/jni_bridge/query.rs b/light-client-lib/src/jni_bridge/query.rs
 new file mode 100644
-index 0000000000000000000000000000000000000000..30c5a9c5ae5c716f4bfb08005cc22fc01f39a893
+index 0000000000000000000000000000000000000000..1e01616e6ec960ca87dc97acb85d846bb6b9d0d9
 --- /dev/null
 +++ b/light-client-lib/src/jni_bridge/query.rs
-@@ -0,0 +1,471 @@
+@@ -0,0 +1,485 @@
 +//! Query APIs for JNI bridge
 +//!
 +//! Marshalling only: every export reads its arguments off the JVM, calls the
@@ -12572,6 +12892,20 @@ index 0000000000000000000000000000000000000000..30c5a9c5ae5c716f4bfb08005cc22fc0
 +        match crate::bridge_core::dao_recovery::cancel_dao_recovery(&request_id) {
 +            Ok(json) => json_to_jstring(&mut env, &json),
 +            Err(_) => ptr::null_mut(),
++        }
++    })
++}
++
++#[no_mangle]
++pub extern "C" fn Java_com_nervosnetwork_ckblightclient_LightClientNative_nativeGetHistorySnapshot(
++    mut env: JNIEnv, _class: JClass, script_json: JString,
++) -> jstring {
++    guard_jni(std::ptr::null_mut(), move || {
++        let script = match jstring_to_string(&mut env, &script_json, "nativeGetHistorySnapshot") {
++            Some(s) => s, None => return ptr::null_mut(),
++        };
++        match crate::bridge_core::history::get_history_snapshot(&script) {
++            Ok(json) => json_to_jstring(&mut env, &json), Err(_) => ptr::null_mut(),
 +        }
 +    })
 +}
@@ -13597,10 +13931,10 @@ index 367ea21195ceee718b3a5954caa4ee5257b58bb3..5abafe28b0dfa1a1dd769c523eeccb94
 +}
 diff --git a/light-client-lib/src/protocols/light_client/recovery.rs b/light-client-lib/src/protocols/light_client/recovery.rs
 new file mode 100644
-index 0000000000000000000000000000000000000000..ce3de7ec35aaf6f0bd1638dc9d468abfc1e9e27e
+index 0000000000000000000000000000000000000000..644bfb2bc26f42c5c29d38d4ac5ed2cc5d3ec5ed
 --- /dev/null
 +++ b/light-client-lib/src/protocols/light_client/recovery.rs
-@@ -0,0 +1,796 @@
+@@ -0,0 +1,805 @@
 +//! Ephemeral v1 authority for locally registered, independently verified membership.
 +//!
 +//! Lock order: owned peer/request snapshots -> registry -> synchronous storage batch.
@@ -13784,6 +14118,15 @@ index 0000000000000000000000000000000000000000..ce3de7ec35aaf6f0bd1638dc9d468abf
 +        state.running = true;
 +        Ok(())
 +    }
++    /// Freeze canonical chain identity while a bounded synchronous storage read runs.
++    /// Lock order is registry then storage, identical to recovery persistence.
++    pub(crate) fn with_chain_snapshot<T>(&self, read: impl FnOnce(&RecoveryIdentity, &ChainSnapshot) -> T) -> Result<T, RecoveryError> {
++        let state = self.state.try_lock().map_err(|_| RecoveryError::Unavailable)?;
++        if !state.available() { return Err(RecoveryError::Unavailable); }
++        Ok(read(state.identity.as_ref().ok_or(RecoveryError::Unavailable)?,
++            state.snapshot.as_ref().ok_or(RecoveryError::Unavailable)?))
++    }
++
 +    /// A binding snapshot for bridge registration, never authorization by itself.
 +    pub fn identity(&self) -> Result<RecoveryIdentity, RecoveryError> {
 +        let state = self.lock()?;
@@ -16012,10 +16355,102 @@ index 5ef7fb0d8277467881bd491790401c530b8789b1..0a5b967ee8733eb7198b8868eb4e9d92
          &self.pending_txs
      }
 diff --git a/light-client-lib/src/storage/storage_trait.rs b/light-client-lib/src/storage/storage_trait.rs
-index d562a63d40b31644b084e68d46e71213f5be5625..0ab87de90d3506147f3ada9ba349a461f64d4d22 100644
+index d562a63d40b31644b084e68d46e71213f5be5625..9eb1c521bf26a0f2447ed8f143734420be20cfe0 100644
 --- a/light-client-lib/src/storage/storage_trait.rs
 +++ b/light-client-lib/src/storage/storage_trait.rs
-@@ -477,22 +477,52 @@ pub trait LightClientStorage: StorageBackend {
+@@ -85,6 +85,8 @@ pub trait LightClientStorage: StorageBackend {
+         let mut batch = self.batch();
+         let key_prefix = Key::Meta(FILTER_SCRIPTS_KEY).into_vec();
+ 
++        let registration_nonce: [u8; 16] = rand::random();
++        let registration_prefix = Key::Meta("HISTORY_REGISTRATION_V1").into_vec();
+         match command {
+             SetScriptsCommand::All => {
+                 should_filter_genesis_block = scripts.iter().any(|ss| ss.block_number == 0);
+@@ -101,10 +103,14 @@ pub trait LightClientStorage: StorageBackend {
+ 
+                 for kv in existing_keys {
+                     batch.delete(&kv.key);
++                    let mut registration_key = registration_prefix.clone();
++                    registration_key.extend_from_slice(&kv.key[key_prefix.len()..]);
++                    batch.delete(&registration_key);
+                 }
+ 
+                 // Insert new scripts
+                 for ss in scripts {
++                    self.clear_history_after_registration(&ss, &mut batch);
+                     let key = [
+                         key_prefix.as_ref(),
+                         ss.script.as_slice(),
+@@ -115,6 +121,11 @@ pub trait LightClientStorage: StorageBackend {
+                     ]
+                     .concat();
+                     batch.put(&key, &ss.block_number.to_be_bytes());
++                    let mut registration_key = registration_prefix.clone();
++                    registration_key.extend_from_slice(&key[key_prefix.len()..]);
++                    let mut registration = ss.block_number.to_be_bytes().to_vec();
++                    registration.extend_from_slice(&registration_nonce);
++                    batch.put(&registration_key, &registration);
+                 }
+             }
+             SetScriptsCommand::Partial => {
+@@ -125,6 +136,7 @@ pub trait LightClientStorage: StorageBackend {
+                 should_filter_genesis_block = min_script_block_number == Some(0);
+ 
+                 for ss in scripts {
++                    self.clear_history_after_registration(&ss, &mut batch);
+                     let key = [
+                         key_prefix.as_ref(),
+                         ss.script.as_slice(),
+@@ -135,6 +147,11 @@ pub trait LightClientStorage: StorageBackend {
+                     ]
+                     .concat();
+                     batch.put(&key, &ss.block_number.to_be_bytes());
++                    let mut registration_key = registration_prefix.clone();
++                    registration_key.extend_from_slice(&key[key_prefix.len()..]);
++                    let mut registration = ss.block_number.to_be_bytes().to_vec();
++                    registration.extend_from_slice(&registration_nonce);
++                    batch.put(&registration_key, &registration);
+                 }
+             }
+             SetScriptsCommand::Delete => {
+@@ -153,6 +170,9 @@ pub trait LightClientStorage: StorageBackend {
+                     ]
+                     .concat();
+                     batch.delete(&key);
++                    let mut registration_key = registration_prefix.clone();
++                    registration_key.extend_from_slice(&key[key_prefix.len()..]);
++                    batch.delete(&registration_key);
+                 }
+             }
+         }
+@@ -168,6 +188,25 @@ pub trait LightClientStorage: StorageBackend {
+         }
+     }
+ 
++    /// A fresh registration rebuilds only history above its exclusive start.
++    /// Bodies and cells remain available for resolving inputs during the rescan.
++    fn clear_history_after_registration(&self, status: &ScriptStatus, batch: &mut Self::Batch) {
++        let Some(first) = status.block_number.checked_add(1) else { return; };
++        let prefix = [vec![match status.script_type {
++            ScriptType::Lock => KeyPrefix::TxLockScript as u8,
++            ScriptType::Type => KeyPrefix::TxTypeScript as u8,
++        }], super::extract_raw_data(&status.script)].concat();
++        let start = [prefix.clone(), first.to_be_bytes().to_vec()].concat();
++        let exact_len = prefix.len() + 17;
++        let rows = self.collect_iterator(
++            IteratorStart::From(start), IteratorDirection::Forward,
++            Box::new(move |key| key.starts_with(&prefix)),
++            Box::new(move |key, value| if key.len() == exact_len { Some(value.to_vec()) } else { None }),
++            usize::MAX,
++        );
++        for row in rows { batch.delete(&row.key); }
++    }
++
+     /// Get scripts hash by block number
+     fn get_scripts_hash(&self, block_number: BlockNumber) -> Vec<Byte32> {
+         let key_prefix = Key::Meta(FILTER_SCRIPTS_KEY).into_vec();
+@@ -477,22 +516,52 @@ pub trait LightClientStorage: StorageBackend {
          batch.commit().expect("batch commit should be ok");
      }
  
@@ -16082,6 +16517,28 @@ index d562a63d40b31644b084e68d46e71213f5be5625..0ab87de90d3506147f3ada9ba349a461
      }
  
      /// Filter and store block data
+@@ -687,7 +756,9 @@ pub trait LightClientStorage: StorageBackend {
+         let mut batch = self.batch();
+ 
+         for ss in scripts {
+-            if ss.block_number >= to_number {
++            // A rescan can lower progress while later indexes still exist.
++            // Rollback invalidates those indexes regardless of scan progress.
++            {
+                 let script = ss.script;
+                 let mut key_prefix = vec![match ss.script_type {
+                     ScriptType::Lock => KeyPrefix::TxLockScript as u8,
+@@ -818,8 +889,8 @@ pub trait LightClientStorage: StorageBackend {
+                     };
+                 }
+ 
+-                // update script filter block number
+-                {
++                // Never advance a rescan that already starts below the fork.
++                if ss.block_number >= to_number {
+                     let mut key = Key::Meta(FILTER_SCRIPTS_KEY).into_vec();
+                     key.extend_from_slice(script.as_slice());
+                     key.extend_from_slice(match ss.script_type {
 diff --git a/light-client-lib/src/tests/protocols/block_filter.rs b/light-client-lib/src/tests/protocols/block_filter.rs
 index 0cc6e19c259ad35f5be39826ca4b6648e31a1e22..d8379333613ebf60090567334a269fad439d52fa 100644
 --- a/light-client-lib/src/tests/protocols/block_filter.rs
@@ -17290,10 +17747,10 @@ index 03be056b0463e8985a596f3e1e75bc3eac491c80..c6ff5026a53ebc7cae44bf5441c0856b
 +    recovery_dispatch_case("generic_during_send").await;
 +}
 diff --git a/light-client-lib/src/tests/storage.rs b/light-client-lib/src/tests/storage.rs
-index db9e610e8efe9f2330c4ce4a475e002b24399f2d..bf48c5a728aa5f44d390040f1bba80c801ad208f 100644
+index db9e610e8efe9f2330c4ce4a475e002b24399f2d..29c9be0d0bc771f74c27f0c86db690d3f948ade0 100644
 --- a/light-client-lib/src/tests/storage.rs
 +++ b/light-client-lib/src/tests/storage.rs
-@@ -24,3 +24,105 @@ fn test_forget_update_min_filtred_number() {
+@@ -24,3 +24,170 @@ fn test_forget_update_min_filtred_number() {
      );
      assert_eq!(storage.get_min_filtered_block_number(), 33);
  }
@@ -17399,6 +17856,71 @@ index db9e610e8efe9f2330c4ce4a475e002b24399f2d..bf48c5a728aa5f44d390040f1bba80c8
 +}
 +#[test] fn recovery_absent_snapshot_cannot_overwrite_concurrent_index() { recovery_races_filter(false); }
 +#[test] fn recovery_unknown_snapshot_cannot_overwrite_concurrent_index() { recovery_races_filter(true); }
++
++#[test]
++fn history_registration_preserves_original_horizon() {
++    use crate::storage::{Key, StorageBackend, ScriptStatus, ScriptType};
++    use ckb_types::prelude::*;
++    let (storage, _dir) = new_storage("history_horizon");
++    let script = Script::default();
++    storage.update_filter_scripts(vec![ScriptStatus { script: script.clone(), script_type: ScriptType::Lock, block_number: 12 }], Default::default());
++    storage.update_block_number(90);
++    let mut key = Key::Meta("HISTORY_REGISTRATION_V1").into_vec();
++    key.extend_from_slice(script.as_slice()); key.push(0);
++    let metadata = StorageBackend::get(&storage, key).unwrap();
++    assert!(metadata.is_some(), "registration must retain original horizon independently of scan progress");
++    assert_eq!(&metadata.unwrap()[..8], &12u64.to_be_bytes());
++}
++
++#[test]
++fn history_registration_rebuilds_known_bodies_without_touching_other_scripts() {
++    use crate::storage::{Key, StorageBackend, ScriptStatus, ScriptType, CellType, SetScriptsCommand};
++    use ckb_types::{core::{BlockBuilder, TransactionBuilder}, packed::CellOutput, prelude::*};
++    let (storage, _dir) = new_storage("history_rebuild");
++    let script = Script::default();
++    let status = |script_type, block_number| ScriptStatus { script: script.clone(), script_type, block_number };
++    storage.update_filter_scripts(vec![status(ScriptType::Lock, 1), status(ScriptType::Type, 1)], SetScriptsCommand::All);
++    let tx = TransactionBuilder::default().output(CellOutput::new_builder().lock(script.clone()).type_(Some(script.clone()).pack()).build()).output_data(Vec::<u8>::new().pack()).build();
++    let block = BlockBuilder::default().epoch(ckb_types::core::EpochNumberWithFraction::new(0,0,100).full_value()).number(10u64).transaction(tx.clone()).build().data();
++    storage.filter_block(block.clone());
++    storage.update_block_number(20);
++    let lock_key = Key::TxLockScript(&script, 10, 0, 0, CellType::Output).into_vec();
++    let type_key = Key::TxTypeScript(&script, 10, 0, 0, CellType::Output).into_vec();
++    storage.update_filter_scripts(vec![status(ScriptType::Lock, 1)], SetScriptsCommand::Delete);
++    storage.rollback_to_block(10);
++    storage.update_filter_scripts(vec![status(ScriptType::Lock, 1)], SetScriptsCommand::Partial);
++    assert!(StorageBackend::get(&storage, lock_key.clone()).unwrap().is_none(), "unregistered orphan history must be rebuilt on re-registration");
++    assert!(storage.get_transaction(&tx.hash()).is_some(), "known body remains available for input resolution");
++    storage.filter_block(block.clone());
++    assert!(StorageBackend::get(&storage, lock_key.clone()).unwrap().is_some(), "known transaction body must still be reindexed");
++    assert!(StorageBackend::get(&storage, type_key.clone()).unwrap().is_some());
++    storage.update_filter_scripts(vec![status(ScriptType::Lock, 1)], SetScriptsCommand::Partial);
++    assert!(StorageBackend::get(&storage, type_key.clone()).unwrap().is_some(), "other script history survives registration");
++    storage.filter_block(block);
++    // A rescan may lower progress while later history is still present (for example,
++    // a higher-start registration preserves the covered boundary itself).
++    storage.update_filter_scripts(vec![status(ScriptType::Lock, 10), status(ScriptType::Type, 10)], SetScriptsCommand::Partial);
++    storage.rollback_to_block(10);
++    assert!(StorageBackend::get(&storage, lock_key).unwrap().is_none());
++    assert!(StorageBackend::get(&storage, type_key).unwrap().is_none());
++}
++
++#[test]
++fn history_rollback_cleans_indexes_even_when_scan_progress_was_lowered() {
++    use crate::storage::{Key, StorageBackend, ScriptStatus, ScriptType, CellType, SetScriptsCommand};
++    use ckb_types::{core::{BlockBuilder, TransactionBuilder}, packed::CellOutput, prelude::*};
++    let (storage, _dir) = new_storage("history_lowered_progress");
++    let script = Script::default();
++    storage.update_filter_scripts(vec![ScriptStatus { script: script.clone(), script_type: ScriptType::Lock, block_number: 1 }], SetScriptsCommand::All);
++    let tx = TransactionBuilder::default().output(CellOutput::new_builder().lock(script.clone()).build()).output_data(Vec::<u8>::new().pack()).build();
++    storage.filter_block(BlockBuilder::default().epoch(ckb_types::core::EpochNumberWithFraction::new(0,0,100).full_value()).number(10u64).transaction(tx).build().data());
++    // Simulate persisted lowered progress with later indexes from an earlier scan.
++    let key = [Key::Meta("FILTER_SCRIPTS").into_vec(), script.as_slice().to_vec(), vec![0]].concat();
++    StorageBackend::put(&storage, key, 1u64.to_be_bytes().to_vec()).unwrap();
++    storage.rollback_to_block(10);
++    assert!(StorageBackend::get(&storage, Key::TxLockScript(&script, 10, 0, 0, CellType::Output).into_vec()).unwrap().is_none());
++    assert_eq!(storage.get_filter_scripts()[0].block_number, 1, "rollback must not advance lowered progress");
++}
 diff --git a/light-client-lib/src/tests/utils/chain.rs b/light-client-lib/src/tests/utils/chain.rs
 index fd4a593481bf888d5d2c3a63f721914a1ac5af84..5f0740b2d8f007faca06db36c3aaacb534e1351c 100644
 --- a/light-client-lib/src/tests/utils/chain.rs

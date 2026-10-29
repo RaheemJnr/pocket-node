@@ -19,6 +19,15 @@ import com.rjnr.pocketnode.data.gateway.models.TransactionRecord
  *    atomically through [PendingBroadcastStore.reconcileObservation].
  */
 interface TransactionStore {
+    /**
+     * Remove confirmed receipts only within the snapshot's proven horizon and scope.
+     * Implementations recheck [isCurrent] after their candidate read, inside the same
+     * transaction as conditional deletions. Exceptions/cancellation roll back the pass.
+     * A store without this capability retains receipts. [snapshot] is trusted only
+     * after validation against the requested script/network at the read boundary.
+     */
+    suspend fun reconcileCanonicalHistory(snapshot: com.rjnr.pocketnode.data.gateway.CanonicalHistorySnapshot, walletId: String, network: String, isCurrent: () -> Boolean = { true }) = Unit
+
 
     /**
      * Block numbers of every cached transaction for a wallet, as the
