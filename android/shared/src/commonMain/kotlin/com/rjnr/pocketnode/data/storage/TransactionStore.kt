@@ -14,9 +14,9 @@ import com.rjnr.pocketnode.data.gateway.models.TransactionRecord
  *    failing the read that called them;
  *  - [getBlockNumbers] and [getOrphanPendingHashes] propagate, because they
  *    are plain queries with no fallback answer that would be honest;
- *  - [updateTransactionStatus] propagates on purpose. The broadcast watchdog
- *    calls it before the terminal CAS precisely so a database failure leaves
- *    the pending row recoverable; swallowing here would silently break that.
+ *  - [updateTransactionStatus] propagates store failures. Reconciliation uses
+ *    scoped conditional writes instead; pending-broadcast observations are committed
+ *    atomically through [PendingBroadcastStore.reconcileObservation].
  */
 interface TransactionStore {
 
@@ -57,9 +57,12 @@ interface TransactionStore {
 
     /**
      * Move one row to [status]. Propagates a store failure rather than
-     * swallowing it: see the class KDoc for why the watchdog depends on that.
+     * swallowing it. Reconciliation must use the conditional APIs instead.
      */
     suspend fun updateTransactionStatus(hash: String, status: String)
+
+    /** Settle only a still-PENDING orphan on this wallet/network; advanced rows win. */
+    suspend fun reconcileOrphan(hash: String, walletId: String, network: String, status: String)
 
     /**
      * Write the optimistic activity row for a broadcast that has just been

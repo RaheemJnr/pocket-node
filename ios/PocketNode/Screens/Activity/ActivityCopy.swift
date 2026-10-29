@@ -49,11 +49,11 @@ enum ActivityCopy {
     static func failureReason(_ reason: TxFailureReason?) -> String {
         switch reason {
         case TxFailureReason.dropped:
-            return "The network stopped reporting this transaction, so it never made it into a block. Nothing was sent and your balance is unchanged."
+            return "This transaction was marked failed after it could not be found. Absence alone does not establish whether it was included. Check its current status before sending a new transaction."
         case TxFailureReason.rejected:
-            return "The network kept it waiting for about 6 minutes and then dropped it. That usually means one of the coins it spends had already been used by another transaction."
+            return "The wallet recorded a submission failure or rejection. Older records may have been marked failed after a long wait. Check the current status before sending a new transaction."
         default:
-            return "The wallet could not find this transaction on chain. Nothing was sent and your balance is unchanged."
+            return "The wallet marked this transaction failed, but its current chain status is not known here. Check the current status before sending a new transaction."
         }
     }
 
@@ -64,7 +64,7 @@ enum ActivityCopy {
         case TxDisplayState.broadcasting: return "Sending to the network"
         case TxDisplayState.pending: return "Waiting to be confirmed"
         case TxDisplayState.confirmed: return "Confirmed on chain"
-        case TxDisplayState.failed: return "This did not go through"
+        case TxDisplayState.failed: return "Marked failed"
         default: return "Waiting to be confirmed"
         }
     }
@@ -73,7 +73,7 @@ enum ActivityCopy {
     static func explainerBody(_ state: TxDisplayState, reason: TxFailureReason?) -> [String] {
         switch state {
         case TxDisplayState.broadcasting:
-            return ["Your phone is handing the signed transaction to the CKB network. This normally takes a few seconds. Nothing has moved on chain yet, and your balance has not changed."]
+            return ["The wallet recorded this transaction for submission. Network acceptance or inclusion has not yet been confirmed."]
         case TxDisplayState.confirmed:
             return ["This transaction is in a block and counted in your balance. Every block added after it makes it harder to reverse."]
         case TxDisplayState.failed:
@@ -83,8 +83,8 @@ enum ActivityCopy {
             ]
         default:
             return [
-                "The network has your transaction and is waiting to include it in a block. This usually takes under a minute. It turns Confirmed as soon as it lands in a block.",
-                "There is nothing to do while it is Pending, and you do not need to send it again. If the network still has not picked it up after about 6 minutes, the wallet marks it Failed and offers a retry.",
+                "The wallet has not yet verified that this transaction is in a block. It may still be waiting, or the local node may need time to catch up.",
+                "You do not need to send it again. The wallet keeps checking while the app is open. A long wait or an unavailable status does not mean the transaction failed.",
             ]
         }
     }

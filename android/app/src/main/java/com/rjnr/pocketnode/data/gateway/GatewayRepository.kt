@@ -373,6 +373,7 @@ class GatewayRepository @Inject constructor(
             walletId = activeWalletId,
             networkName = currentNetwork.name,
             scope = scope,
+            currentContext = { activeWalletId to currentNetwork.name },
             statusSource = { hash -> getTransactionStatus(hash) },
         )
 

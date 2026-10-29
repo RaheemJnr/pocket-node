@@ -32,6 +32,9 @@ class RoomKmpPendingBroadcastStore(
     override suspend fun failKnownUnsent(expected: PendingBroadcastRecord, now: Long): Boolean =
         dao.failKnownUnsent(PendingBroadcastRow.from(expected), now)
 
+    override suspend fun reconcileObservation(expected: PendingBroadcastRecord, next: String, nullCount: Int, now: Long): Boolean =
+        dao.reconcileObservation(PendingBroadcastRow.from(expected), next, nullCount, now)
+
     override suspend fun compareAndUpdateState(
         hash: String,
         expected: String,

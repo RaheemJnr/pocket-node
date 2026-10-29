@@ -77,21 +77,21 @@
     <string name="tx_elapsed_days">%1$d d</string>
 
     <string name="tx_explain_broadcasting_title">Sending to the network</string>
-    <string name="tx_explain_broadcasting_body">Your phone is handing the signed transaction to the CKB network. This normally takes a few seconds. Nothing has moved on chain yet, and your balance has not changed.</string>
+    <string name="tx_explain_broadcasting_body">The wallet recorded this transaction for submission. Network acceptance or inclusion has not yet been confirmed.</string>
 
     <string name="tx_explain_pending_title">Waiting to be confirmed</string>
-    <string name="tx_explain_pending_body">The network has your transaction and is waiting to include it in a block. This usually takes under a minute. It turns Confirmed as soon as it lands in a block.</string>
-    <string name="tx_explain_pending_next">There is nothing to do while it is Pending, and you do not need to send it again. If the network still has not picked it up after about 6 minutes, the wallet marks it Failed and offers a retry.</string>
+    <string name="tx_explain_pending_body">The wallet has not yet verified that this transaction is in a block. It may still be waiting, or the local node may need time to catch up.</string>
+    <string name="tx_explain_pending_next">You do not need to send it again. The wallet keeps checking while the app is open. A long wait or an unavailable status does not mean the transaction failed.</string>
 
     <string name="tx_explain_confirmed_title">Confirmed on chain</string>
     <string name="tx_explain_confirmed_body">This transaction is in a block and counted in your balance. Every block added after it makes it harder to reverse.</string>
 
-    <string name="tx_explain_failed_title">This did not go through</string>
+    <string name="tx_explain_failed_title">Marked failed</string>
     <string name="tx_explain_failed_next">Retry re-sends the exact same signed transaction, reusing the same coins, so it can never pay twice.</string>
 
-    <string name="tx_failed_reason_rejected">The network kept it waiting for about 6 minutes and then dropped it. That usually means one of the coins it spends had already been used by another transaction.</string>
-    <string name="tx_failed_reason_dropped">The network stopped reporting this transaction, so it never made it into a block. Nothing was sent and your balance is unchanged.</string>
-    <string name="tx_failed_reason_unknown">The wallet could not find this transaction on chain. Nothing was sent and your balance is unchanged.</string>
+    <string name="tx_failed_reason_rejected">The wallet recorded a submission failure or rejection. Older records may have been marked failed after a long wait. Check the current status before sending a new transaction.</string>
+    <string name="tx_failed_reason_dropped">This transaction was marked failed after it could not be found. Absence alone does not establish whether it was included. Check its current status before sending a new transaction.</string>
+    <string name="tx_failed_reason_unknown">The wallet marked this transaction failed, but its current chain status is not known here. Check the current status before sending a new transaction.</string>
 
     <string name="tx_detail_not_in_block">Not in a block yet</string>
     <string name="tx_detail_submitted">Submitted</string>

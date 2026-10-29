@@ -57,6 +57,12 @@ interface TransactionRoomDao {
     )
     suspend fun getOrphanPendingHashes(walletId: String, network: String): List<String>
 
+    /** Settle only a still-pending orphan for this wallet/network. */
+    @Query("UPDATE transactions SET status = :status, cachedAt = :now WHERE txHash = :hash " +
+        "AND walletId = :walletId AND network = :network AND status = 'PENDING' " +
+        "AND txHash NOT IN (SELECT txHash FROM pending_broadcasts)")
+    suspend fun reconcileOrphan(hash: String, walletId: String, network: String, status: String, now: Long)
+
     /**
      * Status-only update. Bumps `cachedAt` so any staleness logic treats the
      * transition as fresh, matching the Android statement exactly.

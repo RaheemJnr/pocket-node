@@ -44,6 +44,12 @@ interface TransactionDao {
     @Query("UPDATE transactions SET status = :status, confirmations = :confirmations, blockNumber = :blockNumber, blockHash = :blockHash, isLocal = 0, cachedAt = :cachedAt WHERE txHash = :txHash")
     suspend fun updateStatus(txHash: String, status: String, confirmations: Int, blockNumber: String, blockHash: String, cachedAt: Long = System.currentTimeMillis())
 
+    /** Settle only a still-pending orphan for this wallet/network. */
+    @Query("UPDATE transactions SET status = :status, cachedAt = :now WHERE txHash = :hash " +
+        "AND walletId = :walletId AND network = :network AND status = 'PENDING' " +
+        "AND txHash NOT IN (SELECT txHash FROM pending_broadcasts)")
+    suspend fun reconcileOrphan(hash: String, walletId: String, network: String, status: String, now: Long)
+
     /**
      * Status-only update used by BroadcastWatchdog (no on-chain fields known yet).
      * Bumps `cachedAt` so any TTL/staleness logic treats the transition as fresh —

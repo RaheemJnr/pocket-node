@@ -103,9 +103,11 @@ class RoomKmpTransactionStore(
     override suspend fun getOrphanPendingHashes(walletId: String, network: String): List<String> =
         dao.getOrphanPendingHashes(walletId, network)
 
+    override suspend fun reconcileOrphan(hash: String, walletId: String, network: String, status: String) =
+        dao.reconcileOrphan(hash, walletId, network, status, clock.nowMs())
+
     override suspend fun updateTransactionStatus(hash: String, status: String) {
-        // Propagates on purpose: the watchdog calls this BEFORE the terminal
-        // CAS so a database hiccup leaves the pending row recoverable.
+        // Propagate store failures; reconciliation uses its separate conditional APIs.
         dao.updateStatusOnly(hash, status, clock.nowMs())
     }
 

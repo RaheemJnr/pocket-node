@@ -602,7 +602,7 @@ class SendPipelineTest {
     }
 
     @Test
-    fun acceptedRetryGetsFreshWatchdogWindowForInPoolAndNotFound() = runTest {
+    fun acceptedRetryRemainsUnresolvedForInPoolAndNotFound() = runTest {
         val original = pendingRow(PENDING_HASH, "FAILED", listOf(LIVE_CELLS[0].outPoint), pendingChangeTx(), 3)
         val currentTip = LightClientFixtures.TIP_HEADER_NUMBER
         for (status in listOf(com.rjnr.pocketnode.data.sync.TxFetchResult.InPool, com.rjnr.pocketnode.data.sync.TxFetchResult.NotFound)) {
@@ -619,7 +619,7 @@ class SendPipelineTest {
             assertEquals("BROADCAST", broadcasts.byHash.getValue(PENDING_HASH).state)
             assertEquals(currentTip, broadcasts.byHash.getValue(PENDING_HASH).submittedAtTipBlock)
             wd.checkAll(currentTip + 25, WALLET, "TESTNET")
-            assertEquals("FAILED", broadcasts.byHash.getValue(PENDING_HASH).state)
+            assertEquals("BROADCAST", broadcasts.byHash.getValue(PENDING_HASH).state)
         }
     }
 

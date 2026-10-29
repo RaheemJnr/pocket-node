@@ -39,6 +39,9 @@ class RoomTransactionStore @Inject constructor(
     override suspend fun getOrphanPendingHashes(walletId: String, network: String): List<String> =
         cacheManager.getOrphanPendingHashes(walletId, network)
 
+    override suspend fun reconcileOrphan(hash: String, walletId: String, network: String, status: String) =
+        dao.reconcileOrphan(hash, walletId, network, status, com.rjnr.pocketnode.core.time.SystemClock.nowMs())
+
     override suspend fun updateTransactionStatus(hash: String, status: String) =
         cacheManager.updateTransactionStatus(hash, status)
 

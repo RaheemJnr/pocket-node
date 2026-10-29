@@ -44,6 +44,29 @@ interface PendingBroadcastRoomDao {
         return true
     }
 
+    @Query("UPDATE transactions SET status = :status, cachedAt = :now WHERE txHash = :hash " +
+        "AND network = :network AND walletId = :wallet AND status = 'PENDING' AND isLocal = 1")
+    suspend fun reconcileLocalActivity(hash: String, network: String, wallet: String, status: String, now: Long)
+
+    /** Commit an observation only while this exact attempt is still active. */
+    @androidx.room.Transaction
+    suspend fun reconcileObservation(expected: PendingBroadcastRow, next: String, nullCount: Int, now: Long): Boolean {
+        require(next in setOf("BROADCASTING", "BROADCAST", "CONFIRMED", "FAILED"))
+        if (expected.state !in setOf("BROADCASTING", "BROADCAST") || getByHash(expected.txHash) != expected) return false
+        // Never turn already advanced activity into a retryable failure.
+        if (next == "FAILED" && hasAdvancedActivity(expected.txHash, expected.network, expected.walletId)) return false
+        if (next == "CONFIRMED" || next == "FAILED") {
+            reconcileLocalActivity(expected.txHash, expected.network, expected.walletId, next, now)
+        }
+        if (next == "CONFIRMED") {
+            delete(expected.txHash)
+        } else {
+            compareAndUpdateState(expected.txHash, expected.state, next, now)
+            updateNullCount(expected.txHash, nullCount, now)
+        }
+        return true
+    }
+
     /**
      * CAS update: only writes if the current state matches [expected]. Returns
      * rows affected. Callers must check `== 1` before treating the transition

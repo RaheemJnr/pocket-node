@@ -23,13 +23,13 @@ enum class TxDisplayState {
     /** Signed bytes handed to the node; no acknowledgement yet. */
     BROADCASTING,
 
-    /** Accepted by the network, sitting in the pool, waiting to be committed. */
+    /** Inclusion has not yet been verified. */
     PENDING,
 
     /** Committed in a block. */
     CONFIRMED,
 
-    /** Terminal: rejected, dropped, or never seen on chain. */
+    /** A recorded submission failure/rejection, possibly inferred by an older version. */
     FAILED,
 }
 
@@ -125,17 +125,7 @@ object TransactionStatusUi {
         }
     }
 
-    /**
-     * Why a transaction is FAILED, inferred from the broadcast row the watchdog
-     * left behind.
-     *
-     * `BroadcastWatchdog` has exactly two routes to FAILED and they are
-     * distinguishable by `nullCount`: the not-found route increments it past
-     * [NULL_THRESHOLD] before giving up, while the still-in-pool route resets it
-     * to 0 on every healthy check. Rows whose broadcast record has already been
-     * cleared (a retry, or a FAILED row from before this shipped) fall back to
-     * the generic reason.
-     */
+    /** Legacy reason category only; nullCount cannot establish global rejection. */
     @StringRes
     fun failureReasonRes(broadcast: BroadcastInfo?): Int = when {
         broadcast == null -> R.string.tx_failed_reason_unknown

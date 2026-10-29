@@ -59,6 +59,11 @@ class FakeTransactionRoomDao : TransactionRoomDao {
         rows.filter { it.walletId == walletId && it.network == network && it.status == "PENDING" }
             .map { it.txHash }
 
+    override suspend fun reconcileOrphan(hash: String, walletId: String, network: String, status: String, now: Long) {
+        val index = rows.indexOfFirst { it.txHash == hash && it.walletId == walletId && it.network == network && it.status == "PENDING" }
+        if (index >= 0) rows[index] = rows[index].copy(status = status, cachedAt = now)
+    }
+
     override suspend fun updateStatusOnly(hash: String, status: String, cachedAt: Long) {
         val index = rows.indexOfFirst { it.txHash == hash }
         if (index >= 0) rows[index] = rows[index].copy(status = status, cachedAt = cachedAt)
@@ -141,6 +146,7 @@ class FakePendingBroadcastRoomDao : PendingBroadcastRoomDao {
     }
     override suspend fun getByHash(hash: String) = rows.firstOrNull { it.txHash == hash }
     override suspend fun hasAdvancedActivity(hash: String, network: String, wallet: String) = false
+    override suspend fun reconcileLocalActivity(hash: String, network: String, wallet: String, status: String, now: Long) = Unit
     override suspend fun failLocalActivity(hash: String, network: String, wallet: String, now: Long) = Unit
 
     override suspend fun compareAndUpdateState(

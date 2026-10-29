@@ -274,6 +274,70 @@ class RoomStoreAdaptersTest {
         assertEquals(0, store.rearmAcceptedRetry(original.txHash, 50, 150, 60))
     }
 
+    @Test
+    fun `observation atomically confirms owned snapshot and cannot overwrite advanced activity`() = runTest {
+        val store = RoomPendingBroadcastStore(db.pendingBroadcastDao())
+        db.pendingBroadcastDao().insert(broadcast("observed", "w1", "TESTNET", "BROADCAST"))
+        val original = store.getActive("w1", "TESTNET").single()
+        val activity = retryActivity(original.txHash, "PENDING")
+        db.transactionDao().insert(activity)
+        assertEquals(true, store.reconcileObservation(original, "CONFIRMED", 0, 50))
+        assertNull(db.pendingBroadcastDao().getByHash(original.txHash))
+        assertEquals(activity.copy(status = "CONFIRMED", cachedAt = 50), db.transactionDao().getByTxHash(original.txHash))
+        assertEquals(false, store.reconcileObservation(original, "FAILED", 0, 60))
+        assertEquals("CONFIRMED", db.transactionDao().getByTxHash(original.txHash)?.status)
+    }
+
+    @Test
+    fun `rejection cannot downgrade advanced activity or a changed attempt`() = runTest {
+        val store = RoomPendingBroadcastStore(db.pendingBroadcastDao())
+        for (mode in listOf("CONFIRMED", "UNVERIFIED", "NEW_ATTEMPT", "OTHER_WALLET", "NONLOCAL")) {
+            db.pendingBroadcastDao().insert(broadcast(mode, "w1", "TESTNET", "BROADCAST"))
+            val original = store.getActive("w1", "TESTNET").first { it.txHash == mode }
+            val activity = retryActivity(mode, if (mode in listOf("CONFIRMED", "UNVERIFIED")) mode else "PENDING")
+                .let { when (mode) {
+                    "OTHER_WALLET" -> it.copy(walletId = "w2")
+                    "NONLOCAL" -> it.copy(isLocal = false)
+                    else -> it
+                } }
+            db.transactionDao().insert(activity)
+            if (mode == "NEW_ATTEMPT") store.insert(original.copy(lastCheckedAt = 999))
+            assertEquals(mode, false, store.reconcileObservation(original, "FAILED", 0, 60))
+            assertEquals(activity, db.transactionDao().getByTxHash(mode))
+            assertEquals("BROADCAST", db.pendingBroadcastDao().getByHash(mode)?.state)
+        }
+    }
+
+    @Test
+    fun `observation rollback preserves both rows when pending deletion fails`() = runTest {
+        val store = RoomPendingBroadcastStore(db.pendingBroadcastDao())
+        db.pendingBroadcastDao().insert(broadcast("rollback-observation", "w1", "TESTNET", "BROADCAST"))
+        val original = store.getActive("w1", "TESTNET").single()
+        val activity = retryActivity(original.txHash, "PENDING")
+        db.transactionDao().insert(activity)
+        db.openHelper.writableDatabase.execSQL("CREATE TRIGGER reject_observation BEFORE DELETE ON pending_broadcasts BEGIN SELECT RAISE(ABORT, 'fixture'); END")
+        org.junit.Assert.assertNotNull(runCatching { store.reconcileObservation(original, "CONFIRMED", 0, 50) }.exceptionOrNull())
+        assertEquals(original, store.getActive("w1", "TESTNET").single())
+        assertEquals(activity, db.transactionDao().getByTxHash(original.txHash))
+    }
+
+    @Test
+    fun `orphan update is scoped and cannot regress terminal or newly claimed rows`() = runTest {
+        val dao = db.transactionDao()
+        val pending = retryActivity("orphan", "PENDING")
+        dao.insert(pending)
+        dao.reconcileOrphan(pending.txHash, "w2", "TESTNET", "FAILED", 50)
+        dao.reconcileOrphan(pending.txHash, "w1", "MAINNET", "FAILED", 50)
+        assertEquals(pending, dao.getByTxHash(pending.txHash))
+        db.pendingBroadcastDao().insert(broadcast(pending.txHash, "w1", "TESTNET", "BROADCAST"))
+        dao.reconcileOrphan(pending.txHash, "w1", "TESTNET", "FAILED", 50)
+        assertEquals(pending, dao.getByTxHash(pending.txHash))
+        db.pendingBroadcastDao().delete(pending.txHash)
+        dao.reconcileOrphan(pending.txHash, "w1", "TESTNET", "CONFIRMED", 50)
+        dao.reconcileOrphan(pending.txHash, "w1", "TESTNET", "FAILED", 60)
+        assertEquals(pending.copy(status = "CONFIRMED", cachedAt = 50), dao.getByTxHash(pending.txHash))
+    }
+
     private fun retryActivity(hash: String, status: String = "FAILED") = TransactionEntity(
         txHash = hash, blockNumber = "0x0", blockHash = "", timestamp = 10,
         balanceChange = "0x1", direction = "dao_unlock", fee = "0x0", confirmations = 0,
