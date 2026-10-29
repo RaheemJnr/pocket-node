@@ -68,7 +68,18 @@ class InstallationResetTest {
             app.keys.testPrefs = null // exercise production raw-cache invalidation, not the existing test seam
             app.keys.setSessionPin("123456".toCharArray()); app.auth.setSessionPin("123456".toCharArray())
             app.pin.setPin("123456")
+            var now = 1_000_000L
+            app.pin.timeProvider = { now }
+            repeat(10) {
+                now += app.pin.getLockoutRemainingMs() + 1
+                assertFalse(app.pin.verifyPin("000000"))
+            }
+            assertTrue(app.pin.isPermanentlyLocked())
             app.reset.removeAllWalletsAndPin()
+            assertEquals(5, app.pin.getRemainingAttempts())
+            assertFalse(app.pin.isLockedOut()); assertFalse(app.pin.isPermanentlyLocked())
+            assertFalse(app.pin.testPrefs!!.contains("failed_attempts"))
+            assertFalse(app.pin.testPrefs!!.contains("lockout_until"))
             assertFalse(app.legacyPrefs.contains("private_key"))
             assertFalse(File(context.applicationInfo.dataDir, "shared_prefs/ckb_wallet_keys.xml").exists())
             assertNull(app.keys.sessionPin); assertFalse(app.auth.hasSessionPin())
@@ -78,6 +89,8 @@ class InstallationResetTest {
         }
         Installation(restartedContext()).use { fresh ->
             assertEquals(LocalWalletReset.Startup.READY, fresh.reset.prepareStartup())
+            assertFalse(fresh.pin.hasPin()); assertFalse(fresh.pin.isPermanentlyLocked())
+            assertEquals(5, fresh.pin.getRemainingAttempts())
             fresh.migrator().migrateIfNeeded()
             fresh.keys.migrateEspToRoomIfNeeded(fresh.db)
             assertFalse(fresh.keys.hasWallet()); assertEquals(0, fresh.db.walletDao().count())
@@ -91,11 +104,21 @@ class InstallationResetTest {
             stuck.mkdirs(); File(stuck, "child").writeText("disposable")
             app.legacyPrefs.edit().putString("private_key", "00".repeat(31) + "02").commit()
             app.pin.setPin("123456")
+            app.pin.timeProvider = { 1_000_000L }
+            repeat(5) { app.pin.verifyPin("000000") }
+            assertTrue(app.pin.isLockedOut())
             assertTrue(runCatching { app.reset.removeAllWalletsAndPin() }.isFailure)
-            assertTrue(app.pin.hasPin())
+            assertTrue(app.pin.hasPin()); assertTrue(app.pin.isLockedOut())
+            assertEquals(30_000L, app.pin.getLockoutRemainingMs())
             assertEquals(WalletStorageBoundary.Status.PENDING, app.boundary.status())
         }
         Installation(restartedContext()).use { fresh ->
+            fresh.pin.timeProvider = { 1_000_000L }
+            fresh.preferences.setLastSeenVersionCode(19)
+            com.rjnr.pocketnode.recordStartupVersion(fresh.preferences, 20)
+            assertTrue(fresh.pin.isLockedOut())
+            assertEquals(30_000L, fresh.pin.getLockoutRemainingMs())
+            assertEquals(0, fresh.pin.getRemainingAttempts())
             // Reintroduce a fixture source to prove that the pending marker, not just deletion,
             // suppresses reads and migration after process death.
             fresh.legacyPrefs.edit().putString("private_key", "00".repeat(31) + "02").commit()

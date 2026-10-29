@@ -126,22 +126,7 @@ class MainActivity : FragmentActivity(), com.rjnr.pocketnode.ui.security.WalletS
 
         // Interrupted legacy backups remain intact until authenticated migration or explicit deletion.
 
-        // #370: reset the PIN failed-attempt counter once after an overwrite
-        // install / version upgrade, BEFORE the startup gate below reads the
-        // lockout state. A fresh install (last-seen 0) just records the version;
-        // an ordinary same-version relaunch is a no-op. Note: this is a
-        // deliberate product choice (see #370) that trades a little brute-force
-        // hardening — a sideloaded higher-versionCode build would also clear the
-        // count — for not stranding a user who fumbled their PIN before updating.
-        run {
-            val lastSeen = walletPreferences.getLastSeenVersionCode()
-            val current = BuildConfig.VERSION_CODE
-            if (PinManager.shouldResetAttemptsForUpgrade(lastSeen, current)) {
-                pinManager.resetFailedAttempts()
-                logger.i("MainActivity", "PIN attempt counter reset after upgrade $lastSeen -> $current (#370)")
-            }
-            if (lastSeen != current) walletPreferences.setLastSeenVersionCode(current)
-        }
+        recordStartupVersion(walletPreferences, BuildConfig.VERSION_CODE)
 
         // Startup gate: must resolve synchronously to determine start destination.
         // This is the ONE acceptable runBlocking site — it runs once during cold start
