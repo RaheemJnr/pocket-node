@@ -224,6 +224,16 @@ class SendViewModel @Inject constructor(
     private var generation = 0L
     private var maxJob: Job? = null
     private var reviewJob: Job? = null
+    private var bulkCellCountJob: Job? = null
+    private var bulkCellCountGeneration = 0L
+
+    // Count requests belong to the source, not to amount/recipient edits.
+    private fun invalidateBulkCellCount() {
+        bulkCellCountGeneration++
+        bulkCellCountJob?.cancel()
+        bulkCellCountJob = null
+        _uiState.update { it.copy(spendableCellCount = 0).refreshBulkPreview() }
+    }
 
     private fun invalidateDraft() {
         generation++
@@ -312,6 +322,7 @@ class SendViewModel @Inject constructor(
             walletRepository.walletsFlow.collect { wallets ->
                 val currentWalletId = walletPreferencesActiveId()
                 if (previousWalletId != currentWalletId) {
+                    invalidateBulkCellCount()
                     invalidateDraft()
                     sendJob?.cancel(kotlinx.coroutines.CancellationException("Wallet changed"))
                     previousWalletId = currentWalletId
@@ -326,6 +337,7 @@ class SendViewModel @Inject constructor(
         viewModelScope.launch {
             repository.network.collect { network ->
                 if (network != _uiState.value.networkType) {
+                    invalidateBulkCellCount()
                     invalidateDraft()
                     sendJob?.cancel(kotlinx.coroutines.CancellationException("Network changed"))
                     pollingJob?.cancel()
@@ -366,6 +378,7 @@ class SendViewModel @Inject constructor(
     }
 
     fun updateSendMode(mode: SendMode) {
+        invalidateBulkCellCount()
         invalidateDraft()
         _uiState.update {
             it.copy(
@@ -384,8 +397,21 @@ class SendViewModel @Inject constructor(
             // higher fee). The actual per-tx fee is still computed dynamically
             // at build time; this only stops the PREVIEW from assuming 1 input
             // per batch and under-gating.
-            viewModelScope.launch {
-                val count = repository.getCells().map { it.items.size }.getOrNull() ?: 0
+            val request = bulkCellCountGeneration
+            val walletId = walletPreferencesActiveId()
+            val network = repository.currentNetwork
+            val address = repository.getCurrentAddress() ?: return
+            fun isCurrentSource() = bulkCellCountGeneration == request &&
+                walletPreferencesActiveId() == walletId && repository.currentNetwork == network &&
+                repository.getCurrentAddress() == address && _uiState.value.sendMode == SendMode.BULK
+            bulkCellCountJob = viewModelScope.launch {
+                if (!isCurrentSource()) return@launch
+                val result = repository.getCells(address = address)
+                // Result can contain cancellation; neither a late success nor its
+                // fallback zero may overwrite a replacement request's preview.
+                coroutineContext.ensureActive()
+                if (!isCurrentSource()) return@launch
+                val count = result.map { it.items.size }.getOrNull() ?: 0
                 _uiState.update { it.copy(spendableCellCount = count).refreshBulkPreview() }
             }
         }
