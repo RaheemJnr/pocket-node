@@ -167,6 +167,8 @@ jobs:
             exit "$status"
           fi
 
+      # Cold builds can leave less than ten minutes of the job budget. Bound
+      # each test to two minutes and retain its structured diagnostics on failure.
       - name: Test PocketNode (iOS Simulator)
         working-directory: ios
         env:
@@ -182,14 +184,16 @@ jobs:
               -destination "platform=iOS Simulator,id=$SIMULATOR_UDID" -configuration Debug \
               CODE_SIGN_IDENTITY=- CODE_SIGNING_REQUIRED=NO CODE_SIGN_STYLE=Manual DEVELOPMENT_TEAM= PROVISIONING_PROFILE_SPECIFIER= \
               -test-timeouts-enabled YES -default-test-execution-time-allowance 120 \
-              -maximum-test-execution-time-allowance 600 test 2>&1 | tee "$log" | xcbeautify
+              -maximum-test-execution-time-allowance 120 \
+              -resultBundlePath build/logs/PocketNodeTests.xcresult test 2>&1 | tee "$log" | xcbeautify
             status=${PIPESTATUS[0]}
           else
             xcodebuild -project PocketNode.xcodeproj -scheme PocketNode \
               -destination "platform=iOS Simulator,id=$SIMULATOR_UDID" -configuration Debug \
               CODE_SIGN_IDENTITY=- CODE_SIGNING_REQUIRED=NO CODE_SIGN_STYLE=Manual DEVELOPMENT_TEAM= PROVISIONING_PROFILE_SPECIFIER= \
               -test-timeouts-enabled YES -default-test-execution-time-allowance 120 \
-              -maximum-test-execution-time-allowance 600 test > "$log" 2>&1
+              -maximum-test-execution-time-allowance 120 \
+              -resultBundlePath build/logs/PocketNodeTests.xcresult test > "$log" 2>&1
             status=$?
           fi
           if [ "$status" -ne 0 ]; then

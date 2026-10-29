@@ -54,8 +54,16 @@ class TransactionBuilderSizeTest {
             assertTooLarge { builder.prepareMultiTransfer(from, recipients(count, cap / count), cells(), network) }
         }
         val address = recipients(1, cap).single().address
-        val amount = builder.calculateMaxSendable(cells(), address)
-        assertTooLarge { builder.prepareMultiTransfer(from, listOf(RecipientOutput(address, amount)), cells(), network) }
+        assertTooLarge { builder.calculateMaxSendable(cells(), address) }
+    }
+    @Test fun `fragmented max refuses an amount that cannot fit its signed transaction`() {
+        val many = List(12000) { cells().single().copy(outPoint = OutPoint("0x" + "11".repeat(32), "0x${it.toString(16)}"), capacity = "0x${(100 * ckb).toString(16)}") }
+        assertTooLarge { builder.calculateMaxSendable(many, from) }
+        assertTooLarge { builder.calculateMaxSendable(many, null) }
+        val affordable = many.take(100)
+        val max = builder.calculateMaxSendable(affordable, from)
+        val prepared = builder.prepareMultiTransfer(from, listOf(RecipientOutput(from, max)), affordable, network)
+        assertTrue(builder.serializedSizeWithWitnesses(signed(prepared.transaction)) <= cap)
     }
     @Test fun `ordinary normal bulk and max remain signable`() {
         for (outputs in listOf(recipients(1, 20), recipients(2, 20),
@@ -76,10 +84,10 @@ class TransactionBuilderSizeTest {
             val base = builder.prepareMultiTransfer(from, outputs(20), cells(), network)
             val baseSize = builder.serializedSizeWithWitnesses(signed(base.transaction))
             for (target in listOf(cap - 1, cap, cap + 1)) {
-                val requested = outputs(20 + target - baseSize)
                 if (target > cap) {
-                    assertTooLarge { builder.prepareMultiTransfer(from, requested, cells(), network) }
+                    assertTooLarge { builder.prepareMultiTransfer(from, outputs(20 + target - baseSize), cells(), network) }
                 } else {
+                    val requested = outputs(20 + target - baseSize)
                     val tx = builder.buildMultiTransfer(from, requested, cells(), key, network)
                     assertEquals("$mode signed in-block bytes", target, builder.serializedSizeWithWitnesses(tx))
                 }

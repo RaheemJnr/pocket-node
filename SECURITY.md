@@ -6,7 +6,7 @@ Please report suspected vulnerabilities through [GitHub private security advisor
 
 Include the affected version/platform, impact, and a minimal reproduction using synthetic wallet material. Never send a real recovery phrase, private key, PIN, wallet passphrase, signing credential, or unredacted wallet database. We aim to acknowledge reports within 48 hours; investigation and release timelines depend on the finding. Keep reports private while we agree on remediation and disclosure.
 
-Key/mnemonic exposure, authentication bypass, transaction manipulation, unsafe storage/backups/logging, update verification, and embedded native bridge issues are in scope. Report CKB protocol issues to [Nervos](https://github.com/nervosnetwork); application misuse of the protocol is still in scope here. A compromised OS, root/jailbreak, coercion, and social engineering are outside the protection guarantees below, but reports identifying an application defect remain welcome.
+Key/mnemonic exposure, authentication bypass, transaction manipulation, unsafe storage/backups/logging, update verification, and embedded native bridge issues are in scope. Report CKB protocol issues privately to the Nervos Security Team at [security@nervos.org](mailto:security@nervos.org); application misuse of the protocol is still in scope here. A compromised OS, root/jailbreak, coercion, and social engineering are outside the protection guarantees below, but reports identifying an application defect remain welcome.
 
 ## Versions and release status
 

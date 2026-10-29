@@ -66,7 +66,11 @@ class ProvenanceTest(unittest.TestCase):
         manifest = json.loads((self.root / 'release-input/build-provenance.json').read_text())
         self.assertEqual(manifest['source_commit'], self.commit)
         self.assertEqual(manifest['unsigned_apk_sha256'], hashlib.sha256(apk.read_bytes()).hexdigest())
-        self.assertEqual(len(manifest['native_build_outputs']), 2)
+        self.assertEqual(set(manifest['native_build_outputs']), set(ABIS))
+        for abi in ABIS:
+            digest = hashlib.sha256(abi.encode()).hexdigest()
+            self.assertEqual(manifest['native_build_outputs'][abi]['cargo_sha256'], digest)
+            self.assertEqual(manifest['native_build_outputs'][abi]['staged_sha256'], digest)
         self.assertEqual(len(manifest['packaged_native_sha256']), 2)
 
     def test_changed_source_rejected(self):
@@ -115,6 +119,24 @@ class ProvenanceTest(unittest.TestCase):
         step = next(s for s in workflow['jobs']['sign']['steps'] if s.get('name') == 'Generate release verification artifacts')
         # Execute the exact inline trusted generator, never a copied implementation.
         return subprocess.run(['bash', '-e', '-c', step['run']], cwd=self.root, env={**os.environ, **env}, capture_output=True, text=True)
+
+    def test_required_workflow_signs_and_verifies_before_certificate_acceptance(self):
+        workflow = yaml.safe_load((ROOT / '.github/workflows/release.yml').read_text())
+        step = next(s for s in workflow['jobs']['sign']['steps'] if s.get('name') == 'Zipalign, sign, and verify')
+        sdk = self.root / 'sdk/build-tools/fixture'
+        sdk.mkdir(parents=True)
+        (self.root / 'unsigned').mkdir()
+        (self.root / 'unsigned/unsigned.apk').write_bytes(b'unsigned fixture')
+        (self.root / 'release.jks').write_bytes(b'disposable fixture')
+        (sdk / 'zipalign').write_text('#!/bin/sh\ncp "$4" "$5"\n')
+        (sdk / 'apksigner').write_text("#!/usr/bin/env python3\nimport pathlib,sys\nwith open('calls.txt','a') as f: f.write(sys.argv[1]+'\\n')\nif sys.argv[1]=='sign':\n    pathlib.Path(sys.argv[sys.argv.index('--out')+1]).write_bytes(b'signed fixture')\nelif sys.argv[1]=='verify':\n    assert pathlib.Path(sys.argv[-1]).read_bytes()==b'signed fixture'\n    print('Signer #1 certificate SHA-256 digest: '+'b'*64)\nelse: raise AssertionError(sys.argv)\n")
+        for tool in ('zipalign', 'apksigner'): (sdk / tool).chmod(0o755)
+        env = {**os.environ, 'ANDROID_HOME':str(self.root / 'sdk'), 'RELEASE_TAG':'fixture',
+            'KEYSTORE_PASSWORD':'fixture', 'KEY_PASSWORD':'fixture', 'KEY_ALIAS':'fixture', 'RELEASE_CERT_SHA256':'b'*64}
+        result = subprocess.run(['bash','-e','-c',step['run']], cwd=self.root, env=env, capture_output=True, text=True)
+        self.assertEqual(result.returncode,0,result.stderr)
+        self.assertEqual((self.root / 'calls.txt').read_text().splitlines(), ['sign','verify'])
+        self.assertEqual((self.root / 'PocketNode-fixture.apk').read_bytes(), b'signed fixture')
 
     def test_signed_artifact_and_certificate_outputs(self):
         env = self.verification_fixture()

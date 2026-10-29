@@ -793,7 +793,10 @@ pub trait LightClientStorage: StorageBackend {
         let results = self.collect_iterator(
             IteratorStart::From(start_key),
             IteratorDirection::Reverse,
-            Box::new(move |key| key.starts_with(&key_prefix_clone)),
+            Box::new(move |key| {
+                key.starts_with(&key_prefix_clone) && (key.len() != key_prefix_len + 17 ||
+                    u64::from_be_bytes(key[key_prefix_len..key_prefix_len + 8].try_into().expect("stored height")) >= to_number)
+            }),
             // Raw script arguments are a prefix: longer neighboring scripts may
             // interleave. Skip their rows without terminating the selected scan.
             Box::new(move |key, value| {

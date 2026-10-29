@@ -362,7 +362,7 @@ fn history_rewind_cells_unavailable_until_actual_rebuild() {
     use ckb_types::{core::{BlockBuilder, TransactionBuilder, EpochNumberWithFraction}, packed::{CellInput, CellOutput, OutPoint}, prelude::*, U256};
     for selected in &[ScriptType::Lock, ScriptType::Type] {
     let (storage, dir) = new_storage("history_rewind_availability");
-    let script = Script::default();
+    let script = Script::default().as_builder().args(vec![1u8, 2].pack()).build();
     let status = |n| ScriptStatus { script: script.clone(), script_type: match selected { ScriptType::Lock => ScriptType::Lock, ScriptType::Type => ScriptType::Type }, block_number: n };
     let block = |n| BlockBuilder::default().epoch(EpochNumberWithFraction::new(0,0,100).full_value()).number(n);
     let chain = ChainSnapshot { anchor: block(20u64).build().data().header() };
@@ -381,6 +381,11 @@ fn history_rewind_cells_unavailable_until_actual_rebuild() {
     storage.update_filter_scripts(vec![status(5)], SetScriptsCommand::Partial);
     assert!(StorageBackend::get(&storage, match selected { ScriptType::Lock => Key::CellLockScript(&script,5,0,0).into_vec(), ScriptType::Type => Key::CellTypeScript(&script,5,0,0).into_vec() }).unwrap().is_some());
     assert!(cells_ready(&storage, &prefix, &chain).is_err(), "restored spent input must be unavailable to cell/capacity queries");
+    // Both public query paths enumerate starts_with(prefix), so a shorter-args
+    // query would return this script's restored cells even without its own marker.
+    let shorter_prefix = &prefix[..prefix.len() - 1];
+    assert!(StorageBackend::get(&storage, [Key::Meta("CELL_REWIND_V1").into_vec(), shorter_prefix.to_vec()].concat()).unwrap().is_none());
+    assert!(cells_ready(&storage, shorter_prefix, &chain).is_err(), "prefix query must guard the longer script it returns");
     assert!(cells_ready(&storage, &type_prefix, &chain).is_ok());
     let marker_key = [Key::Meta("CELL_REWIND_V1").into_vec(), prefix.clone()].concat();
     let marker = StorageBackend::get(&storage, marker_key.clone()).unwrap().unwrap();

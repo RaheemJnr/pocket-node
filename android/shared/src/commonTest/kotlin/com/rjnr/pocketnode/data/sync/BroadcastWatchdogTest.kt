@@ -237,12 +237,15 @@ class BroadcastWatchdogTest {
     @Test
     fun stalledLookupTimesOutWithoutFailingOrBlockingSibling() = runTest {
         val broadcasts = store(row(), row().copy(txHash = "0xbb"))
+        val fetched = mutableListOf<String>()
         val wd = watchdog(broadcasts, TransactionStatusGateway {
+            fetched += it
             if (it == "0xaa") kotlinx.coroutines.delay(100_000)
             TxFetchResult.InPool
         }, FakeTransactionStore(), testScheduler)
         wd.checkAll(130L, "w1", "TESTNET")
         assertEquals(10_000L, testScheduler.currentTime)
+        assertEquals(setOf("0xaa", "0xbb"), fetched.toSet())
         assertEquals(2, broadcasts.getActive("w1", "TESTNET").size)
     }
 

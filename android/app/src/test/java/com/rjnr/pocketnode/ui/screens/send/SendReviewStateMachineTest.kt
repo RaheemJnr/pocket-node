@@ -795,6 +795,23 @@ class SendReviewStateMachineTest {
         } finally { androidx.lifecycle.ViewModelStore().apply { put("max", vm); clear() }; runCurrent() }
     }
 
+    @Test fun `oversized MAX shows refusal and preserves entered amount`() = runTest(testDispatcher) {
+        transactionBuilder = TransactionBuilder(com.rjnr.pocketnode.data.validation.NetworkValidator())
+        val base = plannedTransfer.selectedCells.first()
+        val many = List(12000) { base.copy(outPoint = base.outPoint.copy(index = "0x${it.toString(16)}"), capacity = "0x2540be400") }
+        coEvery { repository.getCells() } coAnswers {
+            kotlinx.coroutines.yield()
+            Result.success(com.rjnr.pocketnode.data.gateway.models.CellsResponse(many, null))
+        }
+        val vm = newViewModel(); runCurrent()
+        try {
+            vm.fillForm()
+            vm.setMaxAmount(); runCurrent()
+            assertEquals("100", vm.uiState.value.amountCkb)
+            assertTrue(vm.uiState.value.error.toString().contains("too large"))
+        } finally { androidx.lifecycle.ViewModelStore().apply { put("max-size", vm); clear() }; runCurrent() }
+    }
+
     @Test fun `MAX quotes only observed empty cells at its captured source lock`() = runTest(testDispatcher) {
         transactionBuilder = TransactionBuilder(com.rjnr.pocketnode.data.validation.NetworkValidator())
         val base = plannedTransfer.selectedCells.first()

@@ -180,6 +180,20 @@ class TransactionBuilder(
         val capacities = cells.filter { it.isPlainCapacity() }.mapNotNull { it.capacity.removePrefix("0x").toLongOrNull(16) }
         if (capacities.isEmpty()) return 0L
         val total = capacities.fold(0L, ::checkedAdd)
+        // MAX means every eligible input, never an undisclosed subset. Refuse an
+        // unbuildable amount using the same serialized signed shape as preparation.
+        val outputLock = AddressUtils.parseAddress(recipientAddress ?: "")
+            ?: Script(Script.SECP256K1_CODE_HASH, "type", "0x" + "00".repeat(20))
+        val shape = Transaction(
+            version = "0x0",
+            cellDeps = listOf(CellDep(OutPoint(TESTNET_SECP256K1_TX_HASH, "0x0"), "dep_group")),
+            headerDeps = emptyList(),
+            cellInputs = List(capacities.size) { CellInput(previousOutput = OutPoint("0x" + "00".repeat(32), "0x0"), since = "0x0") },
+            cellOutputs = listOf(CellOutput("0x${total.toString(16)}", outputLock, null)),
+            outputsData = listOf("0x"),
+            witnesses = listOf(serializeWitnessArgs(ByteArray(65), null, null).toHexString()) + List(capacities.size - 1) { "0x" },
+        )
+        validateTransactionSize(shape)
         val fee = estimateTransferFeeForDraft(capacities.size, listOf(recipientAddress ?: ""), null, false)
         return (total - fee).coerceAtLeast(0L)
     }

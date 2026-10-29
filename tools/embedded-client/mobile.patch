@@ -16418,7 +16418,7 @@ index 5ef7fb0d8277467881bd491790401c530b8789b1..0a5b967ee8733eb7198b8868eb4e9d92
          &self.pending_txs
      }
 diff --git a/light-client-lib/src/storage/storage_trait.rs b/light-client-lib/src/storage/storage_trait.rs
-index d562a63d40b31644b084e68d46e71213f5be5625..b37f532619a27e8b28ea258d6fdabbf46a088c79 100644
+index d562a63d40b31644b084e68d46e71213f5be5625..2513bd7e0a15f1f012eb19b7c8bebffc869289c4 100644
 --- a/light-client-lib/src/storage/storage_trait.rs
 +++ b/light-client-lib/src/storage/storage_trait.rs
 @@ -85,6 +85,8 @@ pub trait LightClientStorage: StorageBackend {
@@ -16612,7 +16612,7 @@ index d562a63d40b31644b084e68d46e71213f5be5625..b37f532619a27e8b28ea258d6fdabbf4
      }
  
      /// Filter and store block data
-@@ -677,149 +775,159 @@ pub trait LightClientStorage: StorageBackend {
+@@ -677,149 +775,162 @@ pub trait LightClientStorage: StorageBackend {
          batch.commit().expect("batch commit should be ok");
      }
  
@@ -16634,7 +16634,10 @@ index d562a63d40b31644b084e68d46e71213f5be5625..b37f532619a27e8b28ea258d6fdabbf4
 +        let results = self.collect_iterator(
 +            IteratorStart::From(start_key),
 +            IteratorDirection::Reverse,
-+            Box::new(move |key| key.starts_with(&key_prefix_clone)),
++            Box::new(move |key| {
++                key.starts_with(&key_prefix_clone) && (key.len() != key_prefix_len + 17 ||
++                    u64::from_be_bytes(key[key_prefix_len..key_prefix_len + 8].try_into().expect("stored height")) >= to_number)
++            }),
 +            // Raw script arguments are a prefix: longer neighboring scripts may
 +            // interleave. Skip their rows without terminating the selected scan.
 +            Box::new(move |key, value| {
@@ -18113,10 +18116,10 @@ index 03be056b0463e8985a596f3e1e75bc3eac491c80..c6ff5026a53ebc7cae44bf5441c0856b
 +    recovery_dispatch_case("generic_during_send").await;
 +}
 diff --git a/light-client-lib/src/tests/storage.rs b/light-client-lib/src/tests/storage.rs
-index db9e610e8efe9f2330c4ce4a475e002b24399f2d..38110d7e85beab03152282717b18b336d3c2a08b 100644
+index db9e610e8efe9f2330c4ce4a475e002b24399f2d..60bcf2c29335d4f32b75b8aec132405ef4e931d9 100644
 --- a/light-client-lib/src/tests/storage.rs
 +++ b/light-client-lib/src/tests/storage.rs
-@@ -24,3 +24,422 @@ fn test_forget_update_min_filtred_number() {
+@@ -24,3 +24,427 @@ fn test_forget_update_min_filtred_number() {
      );
      assert_eq!(storage.get_min_filtered_block_number(), 33);
  }
@@ -18458,7 +18461,7 @@ index db9e610e8efe9f2330c4ce4a475e002b24399f2d..38110d7e85beab03152282717b18b336
 +    use ckb_types::{core::{BlockBuilder, TransactionBuilder, EpochNumberWithFraction}, packed::{CellInput, CellOutput, OutPoint}, prelude::*, U256};
 +    for selected in &[ScriptType::Lock, ScriptType::Type] {
 +    let (storage, dir) = new_storage("history_rewind_availability");
-+    let script = Script::default();
++    let script = Script::default().as_builder().args(vec![1u8, 2].pack()).build();
 +    let status = |n| ScriptStatus { script: script.clone(), script_type: match selected { ScriptType::Lock => ScriptType::Lock, ScriptType::Type => ScriptType::Type }, block_number: n };
 +    let block = |n| BlockBuilder::default().epoch(EpochNumberWithFraction::new(0,0,100).full_value()).number(n);
 +    let chain = ChainSnapshot { anchor: block(20u64).build().data().header() };
@@ -18477,6 +18480,11 @@ index db9e610e8efe9f2330c4ce4a475e002b24399f2d..38110d7e85beab03152282717b18b336
 +    storage.update_filter_scripts(vec![status(5)], SetScriptsCommand::Partial);
 +    assert!(StorageBackend::get(&storage, match selected { ScriptType::Lock => Key::CellLockScript(&script,5,0,0).into_vec(), ScriptType::Type => Key::CellTypeScript(&script,5,0,0).into_vec() }).unwrap().is_some());
 +    assert!(cells_ready(&storage, &prefix, &chain).is_err(), "restored spent input must be unavailable to cell/capacity queries");
++    // Both public query paths enumerate starts_with(prefix), so a shorter-args
++    // query would return this script's restored cells even without its own marker.
++    let shorter_prefix = &prefix[..prefix.len() - 1];
++    assert!(StorageBackend::get(&storage, [Key::Meta("CELL_REWIND_V1").into_vec(), shorter_prefix.to_vec()].concat()).unwrap().is_none());
++    assert!(cells_ready(&storage, shorter_prefix, &chain).is_err(), "prefix query must guard the longer script it returns");
 +    assert!(cells_ready(&storage, &type_prefix, &chain).is_ok());
 +    let marker_key = [Key::Meta("CELL_REWIND_V1").into_vec(), prefix.clone()].concat();
 +    let marker = StorageBackend::get(&storage, marker_key.clone()).unwrap().unwrap();

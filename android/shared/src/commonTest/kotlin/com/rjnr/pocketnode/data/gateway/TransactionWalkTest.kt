@@ -88,6 +88,7 @@ class TransactionWalkTest {
     fun `short final page at the budget is complete not capped`() = runTest {
         val result = walkAllPages<JniTxWithCell>(100, 1) { page(emptyList(), null) }
         assertFalse(result.hitCap)
+        assertTrue(result.complete)
     }
 
     @Test
