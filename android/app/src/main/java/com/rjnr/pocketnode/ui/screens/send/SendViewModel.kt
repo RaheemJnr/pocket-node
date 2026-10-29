@@ -25,6 +25,7 @@ import com.rjnr.pocketnode.data.wallet.AddressUtils
 import com.rjnr.pocketnode.data.wallet.KeyManager
 import com.rjnr.pocketnode.data.wallet.WalletKeyReader
 import com.rjnr.pocketnode.data.wallet.WalletRepository
+import com.rjnr.pocketnode.core.format.ckbToShannons
 import com.rjnr.pocketnode.util.sanitizeAmount
 import dagger.hilt.android.lifecycle.HiltViewModel
 import kotlinx.coroutines.Job
@@ -33,7 +34,6 @@ import kotlinx.coroutines.flow.*
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.ensureActive
 import java.math.BigDecimal
-import java.math.RoundingMode
 import com.rjnr.pocketnode.data.auth.AuthMethod
 import javax.inject.Inject
 
@@ -444,15 +444,9 @@ class SendViewModel @Inject constructor(
         if (query.isBlank()) recentContacts() else contactRepository.search(query)
 
     fun updateAmount(amount: String) {
-        val sanitized = sanitizeAmount(amount) ?: return  // silently reject invalid chars
+        val sanitized = sanitizeAmount(amount) ?: return // Reject the whole edit.
         invalidateDraft()
-        val amountShannons = try {
-            if (sanitized.isEmpty()) 0L
-            else BigDecimal(sanitized).setScale(8, RoundingMode.DOWN)
-                .multiply(BigDecimal(100_000_000)).longValueExact()
-        } catch (e: Exception) {
-            0L
-        }
+        val amountShannons = ckbToShannons(sanitized) ?: 0L
 
         if (_uiState.value.sendMode == SendMode.BULK) {
             _uiState.update {
@@ -701,10 +695,7 @@ class SendViewModel @Inject constructor(
             _uiState.update { it.copy(error = com.rjnr.pocketnode.ui.util.UiMessage.Resource(com.rjnr.pocketnode.R.string.vm_error_enter_amount)) }
             return false
         }
-        val amountShannons = try {
-            BigDecimal(state.amountCkb).setScale(8, RoundingMode.DOWN)
-                .multiply(BigDecimal(100_000_000)).longValueExact()
-        } catch (e: Exception) {
+        val amountShannons = ckbToShannons(state.amountCkb) ?: run {
             _uiState.update { it.copy(error = com.rjnr.pocketnode.ui.util.UiMessage.Resource(com.rjnr.pocketnode.R.string.vm_error_invalid_amount)) }
             return false
         }
@@ -1227,12 +1218,7 @@ class SendViewModel @Inject constructor(
         )
     }
 
-    private fun parseAmountShannons(amount: String): Long? = try {
-        BigDecimal(amount).setScale(8, RoundingMode.DOWN)
-            .multiply(BigDecimal(100_000_000)).longValueExact()
-    } catch (e: Exception) {
-        null
-    }
+    private fun parseAmountShannons(amount: String): Long? = ckbToShannons(amount)
 }
 
 /**

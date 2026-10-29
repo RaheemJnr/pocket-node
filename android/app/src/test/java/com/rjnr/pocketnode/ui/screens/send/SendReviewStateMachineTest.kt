@@ -176,6 +176,33 @@ class SendReviewStateMachineTest {
         updateAmount(amount)
     }
 
+    @Test fun `amount edits reject whole invalid pastes and preserve exact review shannons`() = runTest(testDispatcher) {
+        // The unrelated cell-count preview uses Result, which relaxed MockK cannot unbox.
+        coEvery { repository.getCells() } throws kotlinx.coroutines.CancellationException("fixture skips cell-count preview")
+        val vm = newViewModel(); advanceUntilIdle()
+        vm.updateRecipient(recipient)
+        listOf("٦١", "６１", "6١", "-61", "+61", "6e1", "1,000", "61,5", " 61 ",
+            "61.000000009", "92233720368.54775808").forEach { invalid ->
+            vm.updateAmount("")
+            vm.updateAmount(invalid)
+            assertEquals(invalid, "", vm.uiState.value.amountCkb)
+        }
+        listOf("", ".", "0", ".5", "60.99999999").forEach { incompleteOrSmall ->
+            vm.updateAmount(incompleteOrSmall); vm.sendTransaction(); advanceUntilIdle()
+            assertNull(incompleteOrSmall, vm.uiState.value.reviewRequest)
+            assertNotNull(vm.uiState.value.error)
+        }
+        vm.updateAmount("61.00000001"); vm.sendTransaction(); advanceUntilIdle()
+        assertNotNull(vm.uiState.value.reviewRequest)
+        coVerify { repository.previewTransfer(senderAddress, listOf(com.rjnr.pocketnode.data.transaction.RecipientOutput(recipient, 6_100_000_001L))) }
+        assertEquals(6_100_000_001L, vm.uiState.value.reviewRequest!!.transfers.single().amountShannons)
+        vm.updateSendMode(SendMode.BULK); vm.updateBulkRecipients(recipient)
+        vm.updateAmount("61."); vm.updateAmount("６１")
+        assertEquals("61.", vm.uiState.value.amountCkb)
+        vm.sendTransaction(); advanceUntilIdle()
+        assertEquals(6_100_000_000L, vm.uiState.value.reviewRequest!!.transfers.single().amountShannons)
+    }
+
     @Test fun `single and bulk reject contradictory locks while custom review preserves guidance`() = runTest(testDispatcher) {
         val bad = com.rjnr.pocketnode.data.wallet.AddressUtils.encode(
             Script(Script.SECP256K1_CODE_HASH, "data", "0x" + "bb".repeat(20)), NetworkType.TESTNET)
