@@ -967,7 +967,9 @@ class SendReviewStateMachineTest {
             throw kotlinx.coroutines.CancellationException("fixture stops after observing exact signed broadcast bytes")
         }
         val ledger = com.rjnr.pocketnode.data.gateway.LedgerReader(api, mockk(relaxed = true), mockk(relaxed = true), mockk(relaxed = true),
-            mockk(relaxed = true), mockk(relaxed = true), mockk(relaxed = true), uiPreferences, json, NoopLogger)
+            mockk(relaxed = true), mockk(relaxed = true), mockk(relaxed = true), uiPreferences, json, NoopLogger,
+            // Keep the synchronous MockK originalCall seam on the caller's test scheduler.
+            queryContext = kotlin.coroutines.EmptyCoroutineContext)
         // Exercise the real repository getCells body without starting its node-owning constructor.
         GatewayRepository::class.java.getDeclaredField("ledgerReader").apply { isAccessible = true }.set(repository, ledger)
         GatewayRepository::class.java.getDeclaredField("_walletInfo").apply { isAccessible = true }.set(repository,
@@ -1002,9 +1004,12 @@ class SendReviewStateMachineTest {
         transactionBuilder = TransactionBuilder(com.rjnr.pocketnode.data.validation.NetworkValidator())
         val signed = mutableListOf<com.rjnr.pocketnode.data.gateway.models.Transaction>()
         recordingPipeline(backgroundScope, signed)
+        // Capture through the real repository while active, then emulate late delivery.
+        // MockK originalCall retains its original continuation and cannot re-enter a cancelled read.
+        val lateCells = repository.getCells().getOrThrow()
         coEvery { repository.getCells() } coAnswers {
             kotlinx.coroutines.withContext(kotlinx.coroutines.NonCancellable) { gate.await() }
-            Result.success(invocation.originalCall() as com.rjnr.pocketnode.data.gateway.models.CellsResponse)
+            Result.success(lateCells)
         }
         val vm = newViewModel(); runCurrent()
         try {

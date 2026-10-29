@@ -61,11 +61,11 @@ import kotlin.coroutines.CoroutineContext
  *
  * ## Threading
  *
- * The bridge calls are blocking and are deliberately NOT wrapped in
- * `withContext` here, because the repository code this replaces did not wrap
- * them either: they run on whichever dispatcher the caller is already on.
- * [queryContext] exists only for [lightClientReadyForRead], which used to go
- * through `LightClientReadOnly` and therefore did hop to IO.
+ * Cell and capacity bridge calls can block during native lock contention.
+ * Every page uses [queryContext] (IO on Android, Default on iOS), including
+ * reads initiated by a UI caller. Cache callbacks and wallet state remain on
+ * the caller's context. Other bridge reads keep their existing dispatching;
+ * [lightClientReadyForRead] also uses [queryContext].
  */
 class LedgerReader(
     private val lightClient: LightClientApi,
@@ -125,7 +125,7 @@ class LedgerReader(
         val searchKey = JniSearchKey(script = myScript)
         logger.d(TAG, "🔍 Fetching balance for script args ${searchKey.script.args.redactAddress()}")
 
-        val responseJson = lightClient.getCellsCapacity(json.encodeToString(searchKey))
+        val responseJson = queryCellsCapacity(json.encodeToString(searchKey))
             ?: throw Exception(readPathNullMessage("get balance", lightClientReadyForRead()))
 
         logger.d(TAG, "📊 Raw capacity response: $responseJson")
@@ -153,7 +153,7 @@ class LedgerReader(
                 var c: String? = null
                 var pages = 0
                 while (pages < MAX_CELL_PAGES) {
-                    val pageJson = lightClient.getCells(
+                    val pageJson = queryCells(
                         json.encodeToString(searchKey), "desc", 100, c
                     ) ?: throw Exception("Cell data unavailable for spendable balance")
                     val page = json.decodeFromString<JniPagination<JniCell>>(pageJson)
@@ -303,7 +303,7 @@ class LedgerReader(
         val searchKey = JniSearchKey(script = script)
         val searchKeyJson = json.encodeToString(searchKey)
 
-        val responseJson = lightClient.getCellsCapacity(searchKeyJson)
+        val responseJson = queryCellsCapacity(searchKeyJson)
             ?: throw Exception(readPathNullMessage("get balance", lightClientReadyForRead()))
         val cap = json.decodeFromString<JniCellsCapacity>(responseJson)
         var capacityVal = 0L
@@ -315,7 +315,7 @@ class LedgerReader(
             var c: String? = null
             var pages = 0
             while (pages < MAX_CELL_PAGES) {
-                val pageJson = lightClient.getCells(searchKeyJson, "desc", 100, c)
+                val pageJson = queryCells(searchKeyJson, "desc", 100, c)
                     ?: throw Exception("Cell data unavailable for spendable balance")
                 val page = json.decodeFromString<JniPagination<JniCell>>(pageJson)
                 allBalanceCells.addAll(page.objects)
@@ -376,7 +376,7 @@ class LedgerReader(
         var lastCursorOut: String? = null
         var cellPages = 0
         while (cellPages < MAX_CELL_PAGES) {
-            val pageJson = lightClient.getCells(
+            val pageJson = queryCells(
                 json.encodeToString(searchKey), "desc", limit, cellCursor
             ) ?: if (cellPages == 0) {
                 throw Exception(readPathNullMessage("get cells", lightClientReadyForRead()))
@@ -431,6 +431,12 @@ class LedgerReader(
         return spentOutpointsOf(walk.items).toMutableSet()
     }
 
+    private suspend fun queryCells(searchKeyJson: String, order: String, limit: Int, cursor: String?): String? =
+        withContext(queryContext) { lightClient.getCells(searchKeyJson, order, limit, cursor) }
+
+    private suspend fun queryCellsCapacity(searchKeyJson: String): String? =
+        withContext(queryContext) { lightClient.getCellsCapacity(searchKeyJson) }
+
     /**
      * Readiness probe for the read-path null classifier ([readPathNullMessage]).
      * A tip header means the light client is up and reporting chain state; its
@@ -439,8 +445,7 @@ class LedgerReader(
      * exception here is treated as "not ready" so we never upgrade a real
      * outage into a misleading transient message.
      *
-     * The one read here that hops to [queryContext]: it used to go through
-     * `LightClientReadOnly`, which forces `Dispatchers.IO`.
+     * Like cell queries, the readiness probe runs on [queryContext].
      */
     private suspend fun lightClientReadyForRead(): Boolean =
         runCatching { withContext(queryContext) { lightClient.getTipHeader() } != null }

@@ -90,6 +90,8 @@ class SendPipelineTest {
             uiPreferences = uiPreferences,
             json = json,
             logger = NoopLogger,
+            // Keep fake bridge calls on runTest's scheduler for advanceUntilIdle assertions.
+            queryContext = EmptyCoroutineContext,
         )
         return SendPipeline(
             lightClient = api,
