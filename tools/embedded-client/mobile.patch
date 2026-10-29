@@ -6977,6 +6977,161 @@ index 0000000000000000000000000000000000000000..84c1ad1e4e00b6d4c549dc8eea20d0bb
 +fn main() {
 +    uniffi::uniffi_bindgen_main()
 +}
+diff --git a/light-client-lib/src/bridge_core/cell_read.rs b/light-client-lib/src/bridge_core/cell_read.rs
+new file mode 100644
+index 0000000000000000000000000000000000000000..ac53450905e56162e35df2c3300de8341c71054a
+--- /dev/null
++++ b/light-client-lib/src/bridge_core/cell_read.rs
+@@ -0,0 +1,149 @@
++//! Bounded cell-read admission. Never wait while holding matched or registry locks.
++use super::error::BridgeError;
++use crate::protocols::light_client::recovery::{ChainSnapshot, RecoveryRegistry};
++use tokio::sync::{RwLock, RwLockReadGuard};
++
++fn unavailable() -> BridgeError {
++    BridgeError::Storage("cells unavailable".into())
++}
++
++pub(super) fn acquire<'a, T>(
++    matched: &'a RwLock<T>,
++    registry: &RecoveryRegistry,
++    mut ready: impl FnMut(&ChainSnapshot) -> Result<(), BridgeError>,
++) -> Result<RwLockReadGuard<'a, T>, BridgeError> {
++    #[cfg(not(target_arch = "wasm32"))]
++    let deadline = std::time::Instant::now() + std::time::Duration::from_millis(500);
++    loop {
++        if let Ok(guard) = matched.try_read() {
++            match registry
++                .try_with_chain_snapshot(|_, chain| ready(chain))
++                .map_err(|_| unavailable())?
++            {
++                Some(result) => {
++                    result?;
++                    return Ok(guard);
++                }
++                None => {} // Registry contention: drop matched before waiting.
++            }
++        }
++        // Both acquisition guards are gone. Semantic errors never reach this retry.
++        #[cfg(target_arch = "wasm32")]
++        return Err(unavailable()); // No blocking sleep on the browser thread.
++        #[cfg(not(target_arch = "wasm32"))]
++        {
++            let remaining = deadline.saturating_duration_since(std::time::Instant::now());
++            if remaining.is_zero() {
++                return Err(unavailable());
++            }
++            std::thread::sleep(remaining.min(std::time::Duration::from_millis(5)));
++            if std::time::Instant::now() >= deadline {
++                return Err(unavailable());
++            }
++        }
++    }
++}
++
++#[cfg(all(test, not(target_arch = "wasm32")))]
++mod tests {
++    use super::*;
++    use crate::protocols::light_client::recovery::RecoveryIdentity;
++    use ckb_types::packed;
++    use std::{
++        sync::mpsc,
++        time::{Duration, Instant},
++    };
++    fn registry() -> RecoveryRegistry {
++        RecoveryRegistry::new(
++            RecoveryIdentity {
++                genesis_hash: packed::Byte32::new([1; 32]),
++                store_generation: "test".into(),
++                run_nonce: [1; 16],
++            },
++            ChainSnapshot {
++                anchor: packed::Header::default(),
++            },
++        )
++    }
++    #[test]
++    fn brief_matched_contention_recovers_and_keeps_query_guard() {
++        let matched = RwLock::new(());
++        let registry = registry();
++        std::thread::scope(|scope| {
++            let (entered, wait) = mpsc::channel();
++            let matched = &matched;
++            scope.spawn(move || {
++                let _writer = matched.blocking_write();
++                entered.send(()).unwrap();
++                std::thread::sleep(Duration::from_millis(30));
++            });
++            wait.recv().unwrap();
++            let guard = acquire(&matched, &registry, |_| Ok(())).unwrap();
++            assert!(matched.try_write().is_err());
++            drop(guard);
++        });
++    }
++    #[test]
++    fn registry_contention_releases_matched_for_writer_before_retry() {
++        let matched = RwLock::new(());
++        let registry = registry();
++        std::thread::scope(|scope| {
++            let (entered, wait) = mpsc::channel();
++            let registry = &registry;
++            let matched = &matched;
++            scope.spawn(move || {
++                registry
++                    .with_chain_snapshot(|_, _| {
++                        entered.send(()).unwrap();
++                        std::thread::sleep(Duration::from_millis(30));
++                        // Would deadlock if the read attempt retained matched while waiting.
++                        let _writer = matched.blocking_write();
++                    })
++                    .unwrap()
++            });
++            wait.recv().unwrap();
++            assert!(acquire(&matched, &registry, |_| Ok(())).is_ok());
++        });
++    }
++    #[test]
++    fn persistent_contention_is_bounded_and_semantic_errors_are_not_retried() {
++        let matched = RwLock::new(());
++        let registry = registry();
++        let writer = matched.blocking_write();
++        let start = Instant::now();
++        assert!(acquire(&matched, &registry, |_| panic!("locked")).is_err());
++        assert!(start.elapsed() >= Duration::from_millis(400));
++        assert!(start.elapsed() < Duration::from_secs(2));
++        drop(writer);
++        let mut calls = 0;
++        assert!(acquire(&matched, &registry, |_| {
++            calls += 1;
++            Err(unavailable())
++        })
++        .is_err());
++        assert_eq!(calls, 1);
++        registry.revoke_run();
++        assert!(acquire(&matched, &registry, |_| panic!("revoked")).is_err());
++    }
++    #[test]
++    fn registry_busy_is_distinct_from_poison_and_unavailable_authority() {
++        let matched = RwLock::new(());
++        let registry = registry();
++        registry
++            .with_chain_snapshot(|_, _| {
++                assert!(registry
++                    .try_with_chain_snapshot(|_, _| ())
++                    .unwrap()
++                    .is_none());
++                let start = Instant::now();
++                assert!(acquire(&matched, &registry, |_| panic!("busy")).is_err());
++                assert!(start.elapsed() >= Duration::from_millis(400));
++                assert!(start.elapsed() < Duration::from_secs(2));
++                assert!(matched.try_write().is_ok());
++            })
++            .unwrap();
++        let _ = std::panic::catch_unwind(|| registry.with_chain_snapshot(|_, _| panic!("poison")));
++        assert!(registry.try_with_chain_snapshot(|_, _| ()).is_err());
++        assert!(acquire(&matched, &registry, |_| panic!("poisoned")).is_err());
++    }
++}
 diff --git a/light-client-lib/src/bridge_core/dao.rs b/light-client-lib/src/bridge_core/dao.rs
 new file mode 100644
 index 0000000000000000000000000000000000000000..7527852fa5d2b6f626925cb5189f489dc7189ae7
@@ -9023,10 +9178,10 @@ index 0000000000000000000000000000000000000000..e3137eacf38993ee25aba62480364aa4
 +}
 diff --git a/light-client-lib/src/bridge_core/mod.rs b/light-client-lib/src/bridge_core/mod.rs
 new file mode 100644
-index 0000000000000000000000000000000000000000..14a6ada2821cf9502595f9491a1da027aef3c446
+index 0000000000000000000000000000000000000000..81ef9d917aad0bfc68cc508a300968d14c4316f8
 --- /dev/null
 +++ b/light-client-lib/src/bridge_core/mod.rs
-@@ -0,0 +1,34 @@
+@@ -0,0 +1,35 @@
 +//! Platform-neutral core of the mobile bridges.
 +//!
 +//! `jni_bridge` (Android) and `ffi` (iOS/UniFFI) are thin marshalling layers on
@@ -9052,6 +9207,7 @@ index 0000000000000000000000000000000000000000..14a6ada2821cf9502595f9491a1da027
 +pub mod dao;
 +pub mod dao_recovery;
 +pub mod error;
++mod cell_read;
 +pub mod history;
 +pub mod lifecycle;
 +pub mod query;
@@ -9063,10 +9219,10 @@ index 0000000000000000000000000000000000000000..14a6ada2821cf9502595f9491a1da027
 +pub use error::BridgeError;
 diff --git a/light-client-lib/src/bridge_core/query.rs b/light-client-lib/src/bridge_core/query.rs
 new file mode 100644
-index 0000000000000000000000000000000000000000..542f4cd3abeaf606bbc65ad7f8370616f0055c8b
+index 0000000000000000000000000000000000000000..e415156c74ca544adf790efcdc2755ce9a2bbef9
 --- /dev/null
 +++ b/light-client-lib/src/bridge_core/query.rs
-@@ -0,0 +1,1177 @@
+@@ -0,0 +1,1171 @@
 +//! Platform-neutral query APIs
 +//!
 +//! Each function returns the exact JSON string the corresponding JNI export
@@ -9612,8 +9768,6 @@ index 0000000000000000000000000000000000000000..542f4cd3abeaf606bbc65ad7f8370616
 +    })?;
 +
 +    let peers = PEERS.get().ok_or_else(|| BridgeError::Storage("cells unavailable".into()))?;
-+    let _matched = peers.matched_blocks().try_read()
-+        .map_err(|_| BridgeError::Storage("cells unavailable".into()))?;
 +
 +    // Build prefix based on script type (use Cell prefix, not Tx prefix)
 +    let prefix = search_prefix(
@@ -9621,9 +9775,8 @@ index 0000000000000000000000000000000000000000..542f4cd3abeaf606bbc65ad7f8370616
 +        KeyPrefix::CellLockScript,
 +        KeyPrefix::CellTypeScript,
 +    );
-+    peers.recovery().with_chain_snapshot(|_, chain|
-+        super::history::cells_ready(swc.storage(), &prefix, chain))
-+        .map_err(|_| BridgeError::Storage("cells unavailable".into()))??;
++    let _matched = super::cell_read::acquire(peers.matched_blocks(), peers.recovery(), |chain|
++        super::history::cells_ready(swc.storage(), &prefix, chain))?;
 +
 +    // Determine from_key based on cursor
 +    let (from_key, skip) = from_key_for(&prefix, direction, cursor_str);
@@ -9883,8 +10036,6 @@ index 0000000000000000000000000000000000000000..542f4cd3abeaf606bbc65ad7f8370616
 +    })?;
 +
 +    let peers = PEERS.get().ok_or_else(|| BridgeError::Storage("cells unavailable".into()))?;
-+    let _matched = peers.matched_blocks().try_read()
-+        .map_err(|_| BridgeError::Storage("cells unavailable".into()))?;
 +
 +    // Build prefix based on script type
 +    let prefix = search_prefix(
@@ -9892,9 +10043,8 @@ index 0000000000000000000000000000000000000000..542f4cd3abeaf606bbc65ad7f8370616
 +        KeyPrefix::CellLockScript,
 +        KeyPrefix::CellTypeScript,
 +    );
-+    peers.recovery().with_chain_snapshot(|_, chain|
-+        super::history::cells_ready(swc.storage(), &prefix, chain))
-+        .map_err(|_| BridgeError::Storage("cells unavailable".into()))??;
++    let _matched = super::cell_read::acquire(peers.matched_blocks(), peers.recovery(), |chain|
++        super::history::cells_ready(swc.storage(), &prefix, chain))?;
 +
 +    // Iterate over cells and sum capacity
 +    let mode = IteratorMode::From(prefix.as_ref(), Direction::Forward);
@@ -13994,10 +14144,10 @@ index 367ea21195ceee718b3a5954caa4ee5257b58bb3..5abafe28b0dfa1a1dd769c523eeccb94
 +}
 diff --git a/light-client-lib/src/protocols/light_client/recovery.rs b/light-client-lib/src/protocols/light_client/recovery.rs
 new file mode 100644
-index 0000000000000000000000000000000000000000..644bfb2bc26f42c5c29d38d4ac5ed2cc5d3ec5ed
+index 0000000000000000000000000000000000000000..baf0982f8766fd2df4984094a895c2d4a0b543d5
 --- /dev/null
 +++ b/light-client-lib/src/protocols/light_client/recovery.rs
-@@ -0,0 +1,805 @@
+@@ -0,0 +1,814 @@
 +//! Ephemeral v1 authority for locally registered, independently verified membership.
 +//!
 +//! Lock order: owned peer/request snapshots -> registry -> synchronous storage batch.
@@ -14184,10 +14334,19 @@ index 0000000000000000000000000000000000000000..644bfb2bc26f42c5c29d38d4ac5ed2cc
 +    /// Freeze canonical chain identity while a bounded synchronous storage read runs.
 +    /// Lock order is registry then storage, identical to recovery persistence.
 +    pub(crate) fn with_chain_snapshot<T>(&self, read: impl FnOnce(&RecoveryIdentity, &ChainSnapshot) -> T) -> Result<T, RecoveryError> {
-+        let state = self.state.try_lock().map_err(|_| RecoveryError::Unavailable)?;
++        self.try_with_chain_snapshot(read)?.ok_or(RecoveryError::Unavailable)
++    }
++
++    /// None means contention only; unavailable authority and poisoned state fail immediately.
++    pub(crate) fn try_with_chain_snapshot<T>(&self, read: impl FnOnce(&RecoveryIdentity, &ChainSnapshot) -> T) -> Result<Option<T>, RecoveryError> {
++        let state = match self.state.try_lock() {
++            Ok(state) => state,
++            Err(std::sync::TryLockError::WouldBlock) => return Ok(None),
++            Err(std::sync::TryLockError::Poisoned(_)) => return Err(RecoveryError::Unavailable),
++        };
 +        if !state.available() { return Err(RecoveryError::Unavailable); }
-+        Ok(read(state.identity.as_ref().ok_or(RecoveryError::Unavailable)?,
-+            state.snapshot.as_ref().ok_or(RecoveryError::Unavailable)?))
++        Ok(Some(read(state.identity.as_ref().ok_or(RecoveryError::Unavailable)?,
++            state.snapshot.as_ref().ok_or(RecoveryError::Unavailable)?)))
 +    }
 +
 +    /// A binding snapshot for bridge registration, never authorization by itself.

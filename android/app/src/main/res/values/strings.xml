@@ -56,7 +56,7 @@
     <string name="edu_block_height_body">A block is one batch of transactions on the blockchain. The block height is just the count of how many blocks exist so far. Higher numbers are more recent.</string>
 
     <string name="edu_activity_title">About transactions</string>
-    <string name="edu_activity_body">Sent and received transactions appear here. A transaction shows as Pending until the network confirms it — usually under a minute. Tap a row to see details.</string>
+    <string name="edu_activity_body">Sent and received transactions appear here. A transaction shows as Pending while its network outcome is unresolved. Confirmation time varies. Tap a row to see details.</string>
 
     <string name="edu_open_faq">Open FAQ</string>
     <string name="edu_got_it">Got it</string>
@@ -113,7 +113,7 @@
     <string name="faq_activity_body">Your phone has to hear about a transaction from the network before showing it. New transactions usually appear within seconds. If your balance looks wrong, pull down to refresh; if the app is still syncing, wait for the sync to finish first.</string>
 
     <string name="faq_pending_title">What does \"Pending\" mean on a transaction?</string>
-    <string name="faq_pending_body">Pending means your transaction has been sent to the network but not yet included in a block. The network usually picks it up within a minute. If a transaction stays Pending for several minutes, you can retry it from the transaction details.</string>
+    <string name="faq_pending_body">Pending means the transaction outcome is unresolved. Confirmation time varies, and a transaction may remain pending if the network cannot confirm its status. Keep syncing and check its details. Do not resend while it is pending; elapsed time alone does not mean it failed.</string>
 
     <string name="faq_confirmations_title">What are confirmations?</string>
     <string name="faq_confirmations_body">Once your transaction is in a block, more blocks are added on top of it over time. Each new block is one confirmation. More confirmations means it is increasingly impossible to reverse. For most everyday amounts, one or two confirmations is enough.</string>

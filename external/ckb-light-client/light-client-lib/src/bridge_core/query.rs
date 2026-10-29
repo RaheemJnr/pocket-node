@@ -543,8 +543,6 @@ pub fn get_cells(
     })?;
 
     let peers = PEERS.get().ok_or_else(|| BridgeError::Storage("cells unavailable".into()))?;
-    let _matched = peers.matched_blocks().try_read()
-        .map_err(|_| BridgeError::Storage("cells unavailable".into()))?;
 
     // Build prefix based on script type (use Cell prefix, not Tx prefix)
     let prefix = search_prefix(
@@ -552,9 +550,8 @@ pub fn get_cells(
         KeyPrefix::CellLockScript,
         KeyPrefix::CellTypeScript,
     );
-    peers.recovery().with_chain_snapshot(|_, chain|
-        super::history::cells_ready(swc.storage(), &prefix, chain))
-        .map_err(|_| BridgeError::Storage("cells unavailable".into()))??;
+    let _matched = super::cell_read::acquire(peers.matched_blocks(), peers.recovery(), |chain|
+        super::history::cells_ready(swc.storage(), &prefix, chain))?;
 
     // Determine from_key based on cursor
     let (from_key, skip) = from_key_for(&prefix, direction, cursor_str);
@@ -814,8 +811,6 @@ pub fn get_cells_capacity(search_key_str: &str) -> Result<String, BridgeError> {
     })?;
 
     let peers = PEERS.get().ok_or_else(|| BridgeError::Storage("cells unavailable".into()))?;
-    let _matched = peers.matched_blocks().try_read()
-        .map_err(|_| BridgeError::Storage("cells unavailable".into()))?;
 
     // Build prefix based on script type
     let prefix = search_prefix(
@@ -823,9 +818,8 @@ pub fn get_cells_capacity(search_key_str: &str) -> Result<String, BridgeError> {
         KeyPrefix::CellLockScript,
         KeyPrefix::CellTypeScript,
     );
-    peers.recovery().with_chain_snapshot(|_, chain|
-        super::history::cells_ready(swc.storage(), &prefix, chain))
-        .map_err(|_| BridgeError::Storage("cells unavailable".into()))??;
+    let _matched = super::cell_read::acquire(peers.matched_blocks(), peers.recovery(), |chain|
+        super::history::cells_ready(swc.storage(), &prefix, chain))?;
 
     // Iterate over cells and sum capacity
     let mode = IteratorMode::From(prefix.as_ref(), Direction::Forward);
