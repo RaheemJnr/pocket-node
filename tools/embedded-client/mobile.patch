@@ -7714,10 +7714,10 @@ index 0000000000000000000000000000000000000000..02fbd4011c922bbdfd7fbc8888949ab3
 +}
 diff --git a/light-client-lib/src/bridge_core/history.rs b/light-client-lib/src/bridge_core/history.rs
 new file mode 100644
-index 0000000000000000000000000000000000000000..ea61e2d046d637b0a0b33837137fc63646ff2f21
+index 0000000000000000000000000000000000000000..15e7902dafc9e42fce0708b8c4ccf9d7406b6ee7
 --- /dev/null
 +++ b/light-client-lib/src/bridge_core/history.rs
-@@ -0,0 +1,318 @@
+@@ -0,0 +1,356 @@
 +//! Bounded authoritative history from a consistent SQLite read under the chain guard.
 +use super::{types::*, BridgeError};
 +use crate::{
@@ -7764,6 +7764,44 @@ index 0000000000000000000000000000000000000000..ea61e2d046d637b0a0b33837137fc636
 +    }
 +    Ok(result)
 +}
++/// Availability only: rewound cells must not enter coin selection before rebuilding.
++/// Caller retains the matched read lock through the subsequent cells/capacity query.
++pub(crate) fn cells_ready(storage: &Storage, cell_prefix: &[u8], chain: &ChainSnapshot) -> Result<(), BridgeError> {
++    let conn = storage.conn.lock().map_err(|_| unavailable())?;
++    let marker_prefix = [Key::Meta("CELL_REWIND_V1").into_vec(), cell_prefix.to_vec()].concat();
++    let markers = prefixed(&conn, &marker_prefix, MAX_INTERACTIONS)?;
++    if markers.is_empty() { return Ok(()); }
++    let state = read(&conn, Key::Meta("LAST_STATE").into_vec())?;
++    if state.get(32..) != Some(chain.anchor.as_slice()) { return Err(unavailable()); }
++    let tip: u64 = chain.anchor.raw().number().unpack();
++    if tip == 0 { return Err(unavailable()); }
++    let filtered = read(&conn, Key::Meta("MIN_FILTERED_NUMBER").into_vec())?;
++    let filtered = u64::from_le_bytes(filtered.as_slice().try_into().map_err(|_| unavailable())?);
++    if !prefixed(&conn, &Key::Meta("MATCHED_BLOCKS").into_vec(), 0)?.is_empty() {
++        return Err(unavailable());
++    }
++    for (key, value) in markers {
++        let frontier = u64::from_be_bytes(value.get(..8).ok_or_else(unavailable)?.try_into().map_err(|_| unavailable())?);
++        let start = u64::from_be_bytes(value.get(8..16).ok_or_else(unavailable)?.try_into().map_err(|_| unavailable())?);
++        let script = packed::Script::from_slice(value.get(16..).ok_or_else(unavailable)?).map_err(|_| unavailable())?;
++        let kind = match cell_prefix.first() {
++            Some(p) if *p == KeyPrefix::CellLockScript as u8 => 0,
++            Some(p) if *p == KeyPrefix::CellTypeScript as u8 => 1,
++            _ => return Err(unavailable()),
++        };
++        let expected_key = [Key::Meta("CELL_REWIND_V1").into_vec(), vec![cell_prefix[0]], extract_raw_data(&script)].concat();
++        if key != expected_key || start > frontier { return Err(unavailable()); }
++        let cursor = read(&conn, [Key::Meta("FILTER_SCRIPTS").into_vec(), script.as_slice().to_vec(), vec![kind]].concat())?;
++        let cursor = u64::from_be_bytes(cursor.as_slice().try_into().map_err(|_| unavailable())?);
++        let required = frontier.min(tip);
++        if cursor < required || filtered < required { return Err(unavailable()); }
++        // Completion is durable: later reorgs again have a coherent undo index.
++        // Clear here to avoid forcing another rewind after normal wallet switching.
++        conn.execute("DELETE FROM kv WHERE key = ?1", [key]).map_err(|_| unavailable())?;
++    }
++    Ok(())
++}
++
 +pub(crate) fn snapshot(
 +    storage: &Storage,
 +    script: &packed::Script,
@@ -9025,10 +9063,10 @@ index 0000000000000000000000000000000000000000..14a6ada2821cf9502595f9491a1da027
 +pub use error::BridgeError;
 diff --git a/light-client-lib/src/bridge_core/query.rs b/light-client-lib/src/bridge_core/query.rs
 new file mode 100644
-index 0000000000000000000000000000000000000000..996d2344b4d143ca7c09f741a2bd159ae98f3fee
+index 0000000000000000000000000000000000000000..542f4cd3abeaf606bbc65ad7f8370616f0055c8b
 --- /dev/null
 +++ b/light-client-lib/src/bridge_core/query.rs
-@@ -0,0 +1,1163 @@
+@@ -0,0 +1,1177 @@
 +//! Platform-neutral query APIs
 +//!
 +//! Each function returns the exact JSON string the corresponding JNI export
@@ -9573,12 +9611,19 @@ index 0000000000000000000000000000000000000000..996d2344b4d143ca7c09f741a2bd159a
 +        BridgeError::Storage("storage not initialized".to_owned())
 +    })?;
 +
++    let peers = PEERS.get().ok_or_else(|| BridgeError::Storage("cells unavailable".into()))?;
++    let _matched = peers.matched_blocks().try_read()
++        .map_err(|_| BridgeError::Storage("cells unavailable".into()))?;
++
 +    // Build prefix based on script type (use Cell prefix, not Tx prefix)
 +    let prefix = search_prefix(
 +        &search_key,
 +        KeyPrefix::CellLockScript,
 +        KeyPrefix::CellTypeScript,
 +    );
++    peers.recovery().with_chain_snapshot(|_, chain|
++        super::history::cells_ready(swc.storage(), &prefix, chain))
++        .map_err(|_| BridgeError::Storage("cells unavailable".into()))??;
 +
 +    // Determine from_key based on cursor
 +    let (from_key, skip) = from_key_for(&prefix, direction, cursor_str);
@@ -9837,12 +9882,19 @@ index 0000000000000000000000000000000000000000..996d2344b4d143ca7c09f741a2bd159a
 +        BridgeError::Storage("storage not initialized".to_owned())
 +    })?;
 +
++    let peers = PEERS.get().ok_or_else(|| BridgeError::Storage("cells unavailable".into()))?;
++    let _matched = peers.matched_blocks().try_read()
++        .map_err(|_| BridgeError::Storage("cells unavailable".into()))?;
++
 +    // Build prefix based on script type
 +    let prefix = search_prefix(
 +        &search_key,
 +        KeyPrefix::CellLockScript,
 +        KeyPrefix::CellTypeScript,
 +    );
++    peers.recovery().with_chain_snapshot(|_, chain|
++        super::history::cells_ready(swc.storage(), &prefix, chain))
++        .map_err(|_| BridgeError::Storage("cells unavailable".into()))??;
 +
 +    // Iterate over cells and sum capacity
 +    let mode = IteratorMode::From(prefix.as_ref(), Direction::Forward);
@@ -16366,7 +16418,7 @@ index 5ef7fb0d8277467881bd491790401c530b8789b1..0a5b967ee8733eb7198b8868eb4e9d92
          &self.pending_txs
      }
 diff --git a/light-client-lib/src/storage/storage_trait.rs b/light-client-lib/src/storage/storage_trait.rs
-index d562a63d40b31644b084e68d46e71213f5be5625..9eb1c521bf26a0f2447ed8f143734420be20cfe0 100644
+index d562a63d40b31644b084e68d46e71213f5be5625..b37f532619a27e8b28ea258d6fdabbf46a088c79 100644
 --- a/light-client-lib/src/storage/storage_trait.rs
 +++ b/light-client-lib/src/storage/storage_trait.rs
 @@ -85,6 +85,8 @@ pub trait LightClientStorage: StorageBackend {
@@ -16378,7 +16430,7 @@ index d562a63d40b31644b084e68d46e71213f5be5625..9eb1c521bf26a0f2447ed8f143734420
          match command {
              SetScriptsCommand::All => {
                  should_filter_genesis_block = scripts.iter().any(|ss| ss.block_number == 0);
-@@ -101,10 +103,14 @@ pub trait LightClientStorage: StorageBackend {
+@@ -101,10 +103,15 @@ pub trait LightClientStorage: StorageBackend {
  
                  for kv in existing_keys {
                      batch.delete(&kv.key);
@@ -16388,12 +16440,14 @@ index d562a63d40b31644b084e68d46e71213f5be5625..9eb1c521bf26a0f2447ed8f143734420
                  }
  
                  // Insert new scripts
-                 for ss in scripts {
-+                    self.clear_history_after_registration(&ss, &mut batch);
+-                for ss in scripts {
++                for mut ss in scripts {
++                    self.rewind_after_registration(&mut ss, &mut batch);
++                    should_filter_genesis_block |= ss.block_number == 0;
                      let key = [
                          key_prefix.as_ref(),
                          ss.script.as_slice(),
-@@ -115,6 +121,11 @@ pub trait LightClientStorage: StorageBackend {
+@@ -115,6 +122,11 @@ pub trait LightClientStorage: StorageBackend {
                      ]
                      .concat();
                      batch.put(&key, &ss.block_number.to_be_bytes());
@@ -16405,15 +16459,18 @@ index d562a63d40b31644b084e68d46e71213f5be5625..9eb1c521bf26a0f2447ed8f143734420
                  }
              }
              SetScriptsCommand::Partial => {
-@@ -125,6 +136,7 @@ pub trait LightClientStorage: StorageBackend {
+@@ -124,7 +136,9 @@ pub trait LightClientStorage: StorageBackend {
+                 let min_script_block_number = scripts.iter().map(|ss| ss.block_number).min();
                  should_filter_genesis_block = min_script_block_number == Some(0);
  
-                 for ss in scripts {
-+                    self.clear_history_after_registration(&ss, &mut batch);
+-                for ss in scripts {
++                for mut ss in scripts {
++                    self.rewind_after_registration(&mut ss, &mut batch);
++                    should_filter_genesis_block |= ss.block_number == 0;
                      let key = [
                          key_prefix.as_ref(),
                          ss.script.as_slice(),
-@@ -135,6 +147,11 @@ pub trait LightClientStorage: StorageBackend {
+@@ -135,6 +149,11 @@ pub trait LightClientStorage: StorageBackend {
                      ]
                      .concat();
                      batch.put(&key, &ss.block_number.to_be_bytes());
@@ -16425,7 +16482,7 @@ index d562a63d40b31644b084e68d46e71213f5be5625..9eb1c521bf26a0f2447ed8f143734420
                  }
              }
              SetScriptsCommand::Delete => {
-@@ -153,6 +170,9 @@ pub trait LightClientStorage: StorageBackend {
+@@ -153,6 +172,9 @@ pub trait LightClientStorage: StorageBackend {
                      ]
                      .concat();
                      batch.delete(&key);
@@ -16435,33 +16492,60 @@ index d562a63d40b31644b084e68d46e71213f5be5625..9eb1c521bf26a0f2447ed8f143734420
                  }
              }
          }
-@@ -168,6 +188,25 @@ pub trait LightClientStorage: StorageBackend {
+@@ -168,6 +190,52 @@ pub trait LightClientStorage: StorageBackend {
          }
      }
  
-+    /// A fresh registration rebuilds only history above its exclusive start.
-+    /// Bodies and cells remain available for resolving inputs during the rescan.
-+    fn clear_history_after_registration(&self, status: &ScriptStatus, batch: &mut Self::Batch) {
-+        let Some(first) = status.block_number.checked_add(1) else { return; };
-+        let prefix = [vec![match status.script_type {
-+            ScriptType::Lock => KeyPrefix::TxLockScript as u8,
-+            ScriptType::Type => KeyPrefix::TxTypeScript as u8,
-+        }], super::extract_raw_data(&status.script)].concat();
-+        let start = [prefix.clone(), first.to_be_bytes().to_vec()].concat();
-+        let exact_len = prefix.len() + 17;
-+        let rows = self.collect_iterator(
-+            IteratorStart::From(start), IteratorDirection::Forward,
-+            Box::new(move |key| key.starts_with(&prefix)),
-+            Box::new(move |key, value| if key.len() == exact_len { Some(value.to_vec()) } else { None }),
-+            usize::MAX,
-+        );
-+        for row in rows { batch.delete(&row.key); }
++    /// Rewind cells and their undo history together to the exclusive scan start.
++    /// Until rescan completes, cells represent this prefix, not latest spendability.
++    fn rewind_after_registration(&self, status: &mut ScriptStatus, batch: &mut Self::Batch) {
++        let cell_prefix = match status.script_type {
++            ScriptType::Lock => KeyPrefix::CellLockScript,
++            ScriptType::Type => KeyPrefix::CellTypeScript,
++        };
++        let marker_key = [Key::Meta("CELL_REWIND_V1").into_vec(), vec![cell_prefix as u8],
++            super::extract_raw_data(&status.script)].concat();
++        let previous_cursor = self.get_filter_scripts().into_iter()
++            .find(|s| s.script == status.script && s.script_type == status.script_type)
++            .map(|s| s.block_number);
++        let previous = StorageBackend::get(self, marker_key.clone()).expect("read rewind marker");
++        let parsed = previous.as_ref().and_then(|v| {
++            if v.get(16..) != Some(status.script.as_slice()) { return None; }
++            let frontier = u64::from_be_bytes(v.get(..8)?.try_into().ok()?);
++            let start = u64::from_be_bytes(v.get(8..16)?.try_into().ok()?);
++            if start > frontier { return None; }
++            Some((frontier, start))
++        });
++        let mut pending = parsed;
++        if let Some((frontier, safe_start)) = parsed {
++            let covered = previous_cursor.unwrap_or(0).min(self.get_min_filtered_block_number());
++            if previous_cursor.is_some() && covered >= frontier && self.get_earliest_matched_blocks().is_none() {
++                batch.delete(&marker_key);
++                pending = None;
++            } else {
++                // A new registration cannot manufacture coverage of an unfinished rewind.
++                status.block_number = status.block_number.min(previous_cursor
++                    .map(|_| covered).unwrap_or(safe_start));
++            }
++        }
++        if let Some(first) = status.block_number.checked_add(1) {
++            if let Some(highest) = self.rollback_script_to_block(status, first, batch) {
++                // Preserve corrupt metadata so availability stays fail-closed.
++                if previous.is_some() && parsed.is_none() { return; }
++                let frontier = highest.max(previous_cursor.unwrap_or(highest))
++                    .max(pending.map(|p| p.0).unwrap_or(0));
++                let safe_start = status.block_number.min(pending.map(|p| p.1).unwrap_or(status.block_number));
++                let value = [frontier.to_be_bytes().to_vec(), safe_start.to_be_bytes().to_vec(),
++                    status.script.as_slice().to_vec()].concat();
++                batch.put(&marker_key, &value);
++            }
++        }
 +    }
 +
      /// Get scripts hash by block number
      fn get_scripts_hash(&self, block_number: BlockNumber) -> Vec<Byte32> {
          let key_prefix = Key::Meta(FILTER_SCRIPTS_KEY).into_vec();
-@@ -477,22 +516,52 @@ pub trait LightClientStorage: StorageBackend {
+@@ -477,22 +545,52 @@ pub trait LightClientStorage: StorageBackend {
          batch.commit().expect("batch commit should be ok");
      }
  
@@ -16528,7 +16612,154 @@ index d562a63d40b31644b084e68d46e71213f5be5625..9eb1c521bf26a0f2447ed8f143734420
      }
  
      /// Filter and store block data
-@@ -687,7 +756,9 @@ pub trait LightClientStorage: StorageBackend {
+@@ -677,149 +775,159 @@ pub trait LightClientStorage: StorageBackend {
+         batch.commit().expect("batch commit should be ok");
+     }
+ 
++    /// Undo one script in reverse transaction/cell order in the caller's atomic batch.
++    /// Shared transaction bodies remain available to other scripts and input resolution.
++    fn rollback_script_to_block(&self, ss: &ScriptStatus, to_number: BlockNumber, batch: &mut Self::Batch) -> Option<BlockNumber> {
++        use super::extract_raw_data;
++        let script = ss.script.clone();
++        let mut key_prefix = vec![match ss.script_type {
++            ScriptType::Lock => KeyPrefix::TxLockScript as u8,
++            ScriptType::Type => KeyPrefix::TxTypeScript as u8,
++        }];
++        key_prefix.extend_from_slice(&extract_raw_data(&script));
++        let mut start_key = key_prefix.clone();
++        start_key.extend_from_slice(BlockNumber::MAX.to_be_bytes().as_ref());
++        let key_prefix_len = key_prefix.len();
++
++        let key_prefix_clone = key_prefix.clone();
++        let results = self.collect_iterator(
++            IteratorStart::From(start_key),
++            IteratorDirection::Reverse,
++            Box::new(move |key| key.starts_with(&key_prefix_clone)),
++            // Raw script arguments are a prefix: longer neighboring scripts may
++            // interleave. Skip their rows without terminating the selected scan.
++            Box::new(move |key, value| {
++                if key.len() != key_prefix_len + 17 { return None; }
++                let height = u64::from_be_bytes(key[key_prefix_len..key_prefix_len + 8].try_into().ok()?);
++                (height >= to_number).then(|| value.to_vec())
++            }),
++            usize::MAX,
++        );
++
++        let highest = results.first().map(|kv| u64::from_be_bytes(
++            kv.key[key_prefix_len..key_prefix_len + 8].try_into().expect("stored height")));
++        for kv in results {
++            let key = &kv.key;
++            let value = &kv.value;
++            let block_number = BlockNumber::from_be_bytes(
++                key[key_prefix_len..key_prefix_len + 8]
++                    .try_into()
++                    .expect("stored BlockNumber"),
++            );
++            log::debug!("rollback {}", block_number);
++            let tx_index = TxIndex::from_be_bytes(
++                key[key_prefix_len + 8..key_prefix_len + 12]
++                    .try_into()
++                    .expect("stored TxIndex"),
++            );
++            let cell_index = CellIndex::from_be_bytes(
++                key[key_prefix_len + 12..key_prefix_len + 16]
++                    .try_into()
++                    .expect("stored CellIndex"),
++            );
++            let tx_hash = packed::Byte32Reader::from_slice_should_be_ok(value).to_entity();
++            if key[key_prefix_len + 16] == 0 {
++                let (_, _, tx) = self
++                    .get_transaction(&tx_hash)
++                    .expect("stored transaction history");
++                let input = tx.raw().inputs().get(cell_index as usize).unwrap();
++                if let Some((
++                    generated_by_block_number,
++                    generated_by_tx_index,
++                    _previous_tx,
++                )) = self.get_transaction(&input.previous_output().tx_hash())
++                {
++                    let key = match ss.script_type {
++                        ScriptType::Lock => Key::CellLockScript(
++                            &script,
++                            generated_by_block_number,
++                            generated_by_tx_index,
++                            input.previous_output().index().unpack(),
++                        ),
++                        ScriptType::Type => Key::CellTypeScript(
++                            &script,
++                            generated_by_block_number,
++                            generated_by_tx_index,
++                            input.previous_output().index().unpack(),
++                        ),
++                    };
++                    batch.put(
++                        &key.into_vec(),
++                        input.previous_output().tx_hash().as_slice(),
++                    );
++                };
++                // delete tx history
++                let key = match ss.script_type {
++                    ScriptType::Lock => Key::TxLockScript(
++                        &script,
++                        block_number,
++                        tx_index,
++                        cell_index,
++                        CellType::Input,
++                    ),
++                    ScriptType::Type => Key::TxTypeScript(
++                        &script,
++                        block_number,
++                        tx_index,
++                        cell_index,
++                        CellType::Input,
++                    ),
++                }
++                .into_vec();
++                batch.delete(&key);
++            } else {
++                // delete utxo
++                let key = match ss.script_type {
++                    ScriptType::Lock => {
++                        Key::CellLockScript(&script, block_number, tx_index, cell_index)
++                    }
++                    ScriptType::Type => {
++                        Key::CellTypeScript(&script, block_number, tx_index, cell_index)
++                    }
++                }
++                .into_vec();
++                batch.delete(&key);
++
++                // delete tx history
++                let key = match ss.script_type {
++                    ScriptType::Lock => Key::TxLockScript(
++                        &script,
++                        block_number,
++                        tx_index,
++                        cell_index,
++                        CellType::Output,
++                    ),
++                    ScriptType::Type => Key::TxTypeScript(
++                        &script,
++                        block_number,
++                        tx_index,
++                        cell_index,
++                        CellType::Output,
++                    ),
++                }
++                .into_vec();
++                batch.delete(&key);
++            };
++        }
++        highest
++    }
++
+     /// Rollback to specified block number
+     ///
+     /// N.B. The specified block will be removed.
+     fn rollback_to_block(&self, to_number: BlockNumber) {
+-        use super::extract_raw_data;
+-
+         let scripts = self.get_filter_scripts();
          let mut batch = self.batch();
  
          for ss in scripts {
@@ -16536,13 +16767,137 @@ index d562a63d40b31644b084e68d46e71213f5be5625..9eb1c521bf26a0f2447ed8f143734420
 +            // A rescan can lower progress while later indexes still exist.
 +            // Rollback invalidates those indexes regardless of scan progress.
 +            {
++                self.rollback_script_to_block(&ss, to_number, &mut batch);
                  let script = ss.script;
-                 let mut key_prefix = vec![match ss.script_type {
-                     ScriptType::Lock => KeyPrefix::TxLockScript as u8,
-@@ -818,8 +889,8 @@ pub trait LightClientStorage: StorageBackend {
-                     };
-                 }
+-                let mut key_prefix = vec![match ss.script_type {
+-                    ScriptType::Lock => KeyPrefix::TxLockScript as u8,
+-                    ScriptType::Type => KeyPrefix::TxTypeScript as u8,
+-                }];
+-                key_prefix.extend_from_slice(&extract_raw_data(&script));
+-                let mut start_key = key_prefix.clone();
+-                start_key.extend_from_slice(BlockNumber::MAX.to_be_bytes().as_ref());
+-                let key_prefix_len = key_prefix.len();
  
+-                let key_prefix_clone = key_prefix.clone();
+-                let results = self.collect_iterator(
+-                    IteratorStart::From(start_key),
+-                    IteratorDirection::Reverse,
+-                    Box::new(move |key| {
+-                        key.starts_with(&key_prefix_clone)
+-                            && BlockNumber::from_be_bytes(
+-                                key[key_prefix_len..key_prefix_len + 8]
+-                                    .try_into()
+-                                    .expect("stored BlockNumber"),
+-                            ) >= to_number
+-                    }),
+-                    Box::new(|_key, value| Some(value.to_vec())),
+-                    usize::MAX,
+-                );
+-
+-                for kv in results {
+-                    let key = &kv.key;
+-                    let value = &kv.value;
+-                    let block_number = BlockNumber::from_be_bytes(
+-                        key[key_prefix_len..key_prefix_len + 8]
+-                            .try_into()
+-                            .expect("stored BlockNumber"),
+-                    );
+-                    log::debug!("rollback {}", block_number);
+-                    let tx_index = TxIndex::from_be_bytes(
+-                        key[key_prefix_len + 8..key_prefix_len + 12]
+-                            .try_into()
+-                            .expect("stored TxIndex"),
+-                    );
+-                    let cell_index = CellIndex::from_be_bytes(
+-                        key[key_prefix_len + 12..key_prefix_len + 16]
+-                            .try_into()
+-                            .expect("stored CellIndex"),
+-                    );
+-                    let tx_hash = packed::Byte32Reader::from_slice_should_be_ok(value).to_entity();
+-                    if key[key_prefix_len + 16] == 0 {
+-                        let (_, _, tx) = self
+-                            .get_transaction(&tx_hash)
+-                            .expect("stored transaction history");
+-                        let input = tx.raw().inputs().get(cell_index as usize).unwrap();
+-                        if let Some((
+-                            generated_by_block_number,
+-                            generated_by_tx_index,
+-                            _previous_tx,
+-                        )) = self.get_transaction(&input.previous_output().tx_hash())
+-                        {
+-                            let key = match ss.script_type {
+-                                ScriptType::Lock => Key::CellLockScript(
+-                                    &script,
+-                                    generated_by_block_number,
+-                                    generated_by_tx_index,
+-                                    input.previous_output().index().unpack(),
+-                                ),
+-                                ScriptType::Type => Key::CellTypeScript(
+-                                    &script,
+-                                    generated_by_block_number,
+-                                    generated_by_tx_index,
+-                                    input.previous_output().index().unpack(),
+-                                ),
+-                            };
+-                            batch.put(
+-                                &key.into_vec(),
+-                                input.previous_output().tx_hash().as_slice(),
+-                            );
+-                        };
+-                        // delete tx history
+-                        let key = match ss.script_type {
+-                            ScriptType::Lock => Key::TxLockScript(
+-                                &script,
+-                                block_number,
+-                                tx_index,
+-                                cell_index,
+-                                CellType::Input,
+-                            ),
+-                            ScriptType::Type => Key::TxTypeScript(
+-                                &script,
+-                                block_number,
+-                                tx_index,
+-                                cell_index,
+-                                CellType::Input,
+-                            ),
+-                        }
+-                        .into_vec();
+-                        batch.delete(&key);
+-                    } else {
+-                        // delete utxo
+-                        let key = match ss.script_type {
+-                            ScriptType::Lock => {
+-                                Key::CellLockScript(&script, block_number, tx_index, cell_index)
+-                            }
+-                            ScriptType::Type => {
+-                                Key::CellTypeScript(&script, block_number, tx_index, cell_index)
+-                            }
+-                        }
+-                        .into_vec();
+-                        batch.delete(&key);
+-
+-                        // delete tx history
+-                        let key = match ss.script_type {
+-                            ScriptType::Lock => Key::TxLockScript(
+-                                &script,
+-                                block_number,
+-                                tx_index,
+-                                cell_index,
+-                                CellType::Output,
+-                            ),
+-                            ScriptType::Type => Key::TxTypeScript(
+-                                &script,
+-                                block_number,
+-                                tx_index,
+-                                cell_index,
+-                                CellType::Output,
+-                            ),
+-                        }
+-                        .into_vec();
+-                        batch.delete(&key);
+-                    };
+-                }
+-
 -                // update script filter block number
 -                {
 +                // Never advance a rescan that already starts below the fork.
@@ -17758,10 +18113,10 @@ index 03be056b0463e8985a596f3e1e75bc3eac491c80..c6ff5026a53ebc7cae44bf5441c0856b
 +    recovery_dispatch_case("generic_during_send").await;
 +}
 diff --git a/light-client-lib/src/tests/storage.rs b/light-client-lib/src/tests/storage.rs
-index db9e610e8efe9f2330c4ce4a475e002b24399f2d..64b7a5a911c774ff8e60a682cc88ec60a2acb448 100644
+index db9e610e8efe9f2330c4ce4a475e002b24399f2d..38110d7e85beab03152282717b18b336d3c2a08b 100644
 --- a/light-client-lib/src/tests/storage.rs
 +++ b/light-client-lib/src/tests/storage.rs
-@@ -24,3 +24,232 @@ fn test_forget_update_min_filtred_number() {
+@@ -24,3 +24,422 @@ fn test_forget_update_min_filtred_number() {
      );
      assert_eq!(storage.get_min_filtered_block_number(), 33);
  }
@@ -17993,6 +18348,196 @@ index db9e610e8efe9f2330c4ce4a475e002b24399f2d..64b7a5a911c774ff8e60a682cc88ec60
 +#[test]
 +fn history_rollback_at_tip_allows_absence_only_after_empty_replacement_scan() {
 +    history_rollback_at_replacement_tip(false);
++}
++
++#[test]
++fn whole_review_rescan_must_preserve_cell_rollback_undo() {
++    use crate::storage::{Key, StorageBackend, ScriptStatus, ScriptType, SetScriptsCommand};
++    use ckb_types::{core::{BlockBuilder, TransactionBuilder, EpochNumberWithFraction}, packed::CellOutput, prelude::*};
++    let (storage, _dir) = new_storage("whole_review_rescan_cells");
++    let script = Script::default();
++    let register = || storage.update_filter_scripts(vec![ScriptStatus { script: script.clone(), script_type: ScriptType::Lock, block_number: 1 }], SetScriptsCommand::Partial);
++    register();
++    let tx = TransactionBuilder::default().output(CellOutput::new_builder().lock(script.clone()).build()).output_data(Vec::<u8>::new().pack()).build();
++    storage.filter_block(BlockBuilder::default().epoch(EpochNumberWithFraction::new(0,0,100).full_value()).number(10u64).transaction(tx.clone()).build().data());
++    storage.update_block_number(20);
++    storage.update_min_filtered_block_number(20);
++    let key = Key::CellLockScript(&script, 10, 0, 0).into_vec();
++    assert!(StorageBackend::get(&storage, key.clone()).unwrap().is_some());
++    register(); // coherent rewind removes the orphan cell and its history together
++    storage.rollback_to_block(10);
++    assert!(StorageBackend::get(&storage, key).unwrap().is_none(), "orphan output must be removed even if rescan registration happened before reorg");
++}
++
++#[test]
++fn whole_review_rescan_must_restore_orphan_spent_cell() {
++    use crate::storage::{Key, StorageBackend, ScriptStatus, ScriptType, SetScriptsCommand};
++    use ckb_types::{core::{BlockBuilder, TransactionBuilder, EpochNumberWithFraction}, packed::{CellInput, CellOutput, OutPoint}, prelude::*};
++    for rescan in [false, true] {
++        let (storage, _dir) = new_storage("whole_review_spent_cells");
++        let script = Script::default();
++        let register = || storage.update_filter_scripts(vec![ScriptStatus { script: script.clone(), script_type: ScriptType::Lock, block_number: 1 }], SetScriptsCommand::Partial);
++        let block = |n| BlockBuilder::default().epoch(EpochNumberWithFraction::new(0,0,100).full_value()).number(n);
++        register();
++        let tx = TransactionBuilder::default().output(CellOutput::new_builder().lock(script.clone()).build()).output_data(Vec::<u8>::new().pack()).build();
++        storage.filter_block(block(5u64).transaction(tx.clone()).build().data());
++        let spend = TransactionBuilder::default().input(CellInput::new_builder().previous_output(OutPoint::new(tx.hash(),0)).build()).build();
++        storage.filter_block(block(10u64).transaction(spend).build().data());
++        storage.update_block_number(20);storage.update_min_filtered_block_number(20);
++        let key = Key::CellLockScript(&script,5,0,0).into_vec();
++        assert!(StorageBackend::get(&storage,key.clone()).unwrap().is_none());
++        if rescan { register(); }
++        storage.rollback_to_block(10);
++        if rescan {
++            // Registration at 1 rewinds creation at 5 too. Restore it by actual scanning.
++            assert!(StorageBackend::get(&storage,key.clone()).unwrap().is_none());
++            storage.filter_block(block(5u64).transaction(tx.clone()).build().data());
++        }
++        assert!(StorageBackend::get(&storage,key).unwrap().is_some(), "canonical creation must be available; rescan={rescan}");
++    }
++}
++
++#[test]
++fn history_registration_rewinds_lock_and_type_cells_in_dependency_order() {
++    use crate::storage::{Key, StorageBackend, ScriptStatus, ScriptType, SetScriptsCommand};
++    use ckb_types::{core::{BlockBuilder, TransactionBuilder, EpochNumberWithFraction}, packed::{CellInput, CellOutput, OutPoint}, prelude::*};
++    for selected in &[ScriptType::Lock, ScriptType::Type] {
++        let (storage, _dir) = new_storage("history_cell_prefix");
++        let script = Script::default();
++        let status = |script_type: &ScriptType, block_number| ScriptStatus { script: script.clone(), script_type: match script_type { ScriptType::Lock => ScriptType::Lock, ScriptType::Type => ScriptType::Type }, block_number };
++        let block = |n| BlockBuilder::default().epoch(EpochNumberWithFraction::new(0,0,100).full_value()).number(n);
++        let output = || CellOutput::new_builder().lock(script.clone()).type_(Some(script.clone()).pack()).build();
++        let cell = |kind: &ScriptType, n| match kind {
++            ScriptType::Lock => Key::CellLockScript(&script, n, 0, 0).into_vec(),
++            ScriptType::Type => Key::CellTypeScript(&script, n, 0, 0).into_vec(),
++        };
++        let other = if *selected == ScriptType::Lock { &ScriptType::Type } else { &ScriptType::Lock };
++        storage.update_filter_scripts(vec![status(&ScriptType::Lock, 1), status(&ScriptType::Type, 1)], SetScriptsCommand::All);
++        let creation = TransactionBuilder::default().output(output()).output_data(Vec::<u8>::new().pack()).build();
++        let spend = TransactionBuilder::default().input(CellInput::new_builder().previous_output(OutPoint::new(creation.hash(),0)).build())
++            .output(output()).output_data(Vec::<u8>::new().pack()).build();
++        let spend_again = TransactionBuilder::default().input(CellInput::new_builder().previous_output(OutPoint::new(spend.hash(),0)).build())
++            .output(output()).output_data(Vec::<u8>::new().pack()).build();
++        storage.filter_block(block(5u64).transaction(creation.clone()).build().data());
++        storage.filter_block(block(10u64).transaction(spend.clone()).build().data());
++        storage.filter_block(block(15u64).transaction(spend_again.clone()).build().data());
++        storage.update_block_number(20);
++        // A registration at the current cursor and the maximum start do not undo cells.
++        for height in [20, u64::MAX] {
++            storage.update_filter_scripts(vec![status(selected, height)], SetScriptsCommand::Partial);
++            assert!(StorageBackend::get(&storage, cell(selected,15)).unwrap().is_some());
++        }
++        storage.update_filter_scripts(vec![status(selected, 5)], SetScriptsCommand::Partial);
++        assert!(StorageBackend::get(&storage, cell(selected,5)).unwrap().is_some(), "exclusive boundary creation must be restored");
++        assert!(StorageBackend::get(&storage, cell(selected,10)).unwrap().is_none(), "intermediate output must not survive reverse undo");
++        assert!(StorageBackend::get(&storage, cell(selected,15)).unwrap().is_none());
++        assert!(StorageBackend::get(&storage, cell(other,5)).unwrap().is_none());
++        assert!(StorageBackend::get(&storage, cell(other,15)).unwrap().is_some(), "other script type remains untouched");
++        assert!(storage.get_transaction(&spend.hash()).is_some());
++        storage.rollback_to_block(10);
++        assert!(StorageBackend::get(&storage, cell(selected,5)).unwrap().is_some());
++        assert!(StorageBackend::get(&storage, cell(other,5)).unwrap().is_some());
++        // Replacement omits old output15 and reincludes spend at11.
++        storage.filter_block(block(11u64).transaction(spend.clone()).build().data());
++        storage.filter_block(block(15u64).build().data());
++        storage.update_block_number(20);
++        for kind in &[ScriptType::Lock, ScriptType::Type] {
++            assert!(StorageBackend::get(&storage, cell(kind,5)).unwrap().is_none());
++            assert!(StorageBackend::get(&storage, cell(kind,10)).unwrap().is_none());
++            assert!(StorageBackend::get(&storage, cell(kind,11)).unwrap().is_some());
++            assert!(StorageBackend::get(&storage, cell(kind,15)).unwrap().is_none());
++        }
++    }
++}
++
++#[test]
++fn history_rewind_cells_unavailable_until_actual_rebuild() {
++    use crate::storage::{Key, KeyPrefix, StorageBackend, ScriptStatus, ScriptType, SetScriptsCommand, Storage};
++    use crate::protocols::light_client::recovery::ChainSnapshot;
++    use crate::bridge_core::history::cells_ready;
++    use ckb_types::{core::{BlockBuilder, TransactionBuilder, EpochNumberWithFraction}, packed::{CellInput, CellOutput, OutPoint}, prelude::*, U256};
++    for selected in &[ScriptType::Lock, ScriptType::Type] {
++    let (storage, dir) = new_storage("history_rewind_availability");
++    let script = Script::default();
++    let status = |n| ScriptStatus { script: script.clone(), script_type: match selected { ScriptType::Lock => ScriptType::Lock, ScriptType::Type => ScriptType::Type }, block_number: n };
++    let block = |n| BlockBuilder::default().epoch(EpochNumberWithFraction::new(0,0,100).full_value()).number(n);
++    let chain = ChainSnapshot { anchor: block(20u64).build().data().header() };
++    storage.update_last_state(&U256::zero(), &chain.anchor, &[]);
++    let prefix = [vec![match selected { ScriptType::Lock => KeyPrefix::CellLockScript as u8, ScriptType::Type => KeyPrefix::CellTypeScript as u8 }], crate::storage::extract_raw_data(&script)].concat();
++    let type_prefix = [vec![match selected { ScriptType::Lock => KeyPrefix::CellTypeScript as u8, ScriptType::Type => KeyPrefix::CellLockScript as u8 }], crate::storage::extract_raw_data(&script)].concat();
++    storage.update_filter_scripts(vec![status(1)], SetScriptsCommand::Partial);
++    assert!(cells_ready(&storage, &prefix, &chain).is_ok(), "new registration is not a global sync gate");
++    let tx = TransactionBuilder::default().output(CellOutput::new_builder().lock(script.clone()).type_(Some(script.clone()).pack()).build()).output_data(Vec::<u8>::new().pack()).build();
++    let spend = TransactionBuilder::default().input(CellInput::new_builder().previous_output(OutPoint::new(tx.hash(),0)).build()).build();
++    storage.filter_block(block(5u64).transaction(tx.clone()).build().data());
++    storage.filter_block(block(10u64).transaction(spend.clone()).build().data());
++    storage.update_block_number(20); storage.update_min_filtered_block_number(20);
++    storage.update_filter_scripts(vec![status(20)], SetScriptsCommand::Partial);
++    assert!(cells_ready(&storage, &prefix, &chain).is_ok(), "current-cursor registration is unchanged");
++    storage.update_filter_scripts(vec![status(5)], SetScriptsCommand::Partial);
++    assert!(StorageBackend::get(&storage, match selected { ScriptType::Lock => Key::CellLockScript(&script,5,0,0).into_vec(), ScriptType::Type => Key::CellTypeScript(&script,5,0,0).into_vec() }).unwrap().is_some());
++    assert!(cells_ready(&storage, &prefix, &chain).is_err(), "restored spent input must be unavailable to cell/capacity queries");
++    assert!(cells_ready(&storage, &type_prefix, &chain).is_ok());
++    let marker_key = [Key::Meta("CELL_REWIND_V1").into_vec(), prefix.clone()].concat();
++    let marker = StorageBackend::get(&storage, marker_key.clone()).unwrap().unwrap();
++    StorageBackend::put(&storage, marker_key.clone(), vec![0u8; 4]).unwrap();
++    assert!(cells_ready(&storage, &prefix, &chain).is_err(), "malformed marker fails closed");
++    StorageBackend::put(&storage, marker_key.clone(), marker).unwrap();
++    drop(storage);
++    let storage = Storage::new(dir.path().join("store.db"));
++    assert!(cells_ready(&storage, &prefix, &chain).is_err(), "guard survives reopen");
++    storage.update_filter_scripts(vec![status(20)], SetScriptsCommand::Partial);
++    assert_eq!(storage.get_filter_scripts()[0].block_number, 5, "forward jump cannot skip repair");
++    storage.update_filter_scripts(vec![status(20)], SetScriptsCommand::Delete);
++    storage.update_filter_scripts(vec![status(20)], SetScriptsCommand::Partial);
++    assert_eq!(storage.get_filter_scripts()[0].block_number, 5);
++    assert!(cells_ready(&storage, &prefix, &chain).is_err());
++    // A shorter canonical tip needs only its actual replacement coverage.
++    let shorter = ChainSnapshot { anchor: block(8u64).build().data().header() };
++    storage.rollback_to_block(8);
++    storage.update_last_state(&U256::zero(), &shorter.anchor, &[]);
++    assert!(cells_ready(&storage, &prefix, &shorter).is_err());
++    storage.filter_block(block(8u64).build().data());
++    storage.update_block_number(8);
++    assert!(cells_ready(&storage, &prefix, &shorter).is_err(), "global coverage is independent");
++    storage.update_min_filtered_block_number(8);
++    storage.add_matched_blocks(8,1,vec![(ckb_types::packed::Byte32::default(),false)]);
++    assert!(cells_ready(&storage, &prefix, &shorter).is_err());
++    storage.remove_matched_blocks(8);
++    assert!(cells_ready(&storage, &prefix, &shorter).is_ok());
++    assert!(StorageBackend::get(&storage, marker_key).unwrap().is_none(), "completed guard retires durably");
++    storage.update_filter_scripts(vec![status(8)], SetScriptsCommand::Partial);
++    assert_eq!(storage.get_filter_scripts()[0].block_number, 8);
++    // Rebuilding to the original frontier removes the restored spent cell.
++    storage.update_last_state(&U256::zero(), &chain.anchor, &[]);
++    storage.filter_block(block(10u64).transaction(spend).build().data());
++    storage.update_block_number(20); storage.update_min_filtered_block_number(20);
++    assert!(cells_ready(&storage, &prefix, &chain).is_ok());
++    assert!(StorageBackend::get(&storage, match selected { ScriptType::Lock => Key::CellLockScript(&script,5,0,0).into_vec(), ScriptType::Type => Key::CellTypeScript(&script,5,0,0).into_vec() }).unwrap().is_none());
++    }
++}
++
++#[test]
++fn history_registration_does_not_rewind_scripts_with_longer_argument_prefix() {
++    use crate::storage::{Key, StorageBackend, ScriptStatus, ScriptType, SetScriptsCommand, CellType};
++    use ckb_types::{core::{BlockBuilder, TransactionBuilder, EpochNumberWithFraction}, packed::{CellInput, CellOutput, OutPoint}, prelude::*};
++    let (storage, _dir) = new_storage("history_neighbor_script");
++    let script = Script::default();
++    let neighbor = script.clone().as_builder().args(vec![1u8].pack()).build();
++    let status = |s: Script, n| ScriptStatus { script: s, script_type: ScriptType::Lock, block_number: n };
++    storage.update_filter_scripts(vec![status(script.clone(),1),status(neighbor.clone(),1)], SetScriptsCommand::All);
++    let tx = TransactionBuilder::default()
++        .output(CellOutput::new_builder().lock(script.clone()).build()).output_data(Vec::<u8>::new().pack())
++        .output(CellOutput::new_builder().lock(neighbor.clone()).build()).output_data(Vec::<u8>::new().pack()).build();
++    storage.filter_block(BlockBuilder::default().epoch(EpochNumberWithFraction::new(0,0,100).full_value()).number(10u64).transaction(tx.clone()).build().data());
++    let spend = TransactionBuilder::default().input(CellInput::new_builder().previous_output(OutPoint::new(tx.hash(),1)).build()).build();
++    storage.filter_block(BlockBuilder::default().epoch(EpochNumberWithFraction::new(0,0,100).full_value()).number(15u64).transaction(spend).build().data());
++    storage.update_block_number(20);storage.update_min_filtered_block_number(20);
++    storage.update_filter_scripts(vec![status(script.clone(),1)], SetScriptsCommand::Partial);
++    assert!(StorageBackend::get(&storage,Key::CellLockScript(&script,10,0,0).into_vec()).unwrap().is_none());
++    assert!(StorageBackend::get(&storage,Key::CellLockScript(&script,10,0,1).into_vec()).unwrap().is_none(), "neighbor undo must not manufacture a cell under the selected script");
++    assert!(StorageBackend::get(&storage,Key::CellLockScript(&neighbor,10,0,1).into_vec()).unwrap().is_none());
++    assert!(StorageBackend::get(&storage,Key::TxLockScript(&neighbor,10,0,1,CellType::Output).into_vec()).unwrap().is_some());
 +}
 diff --git a/light-client-lib/src/tests/utils/chain.rs b/light-client-lib/src/tests/utils/chain.rs
 index fd4a593481bf888d5d2c3a63f721914a1ac5af84..5f0740b2d8f007faca06db36c3aaacb534e1351c 100644

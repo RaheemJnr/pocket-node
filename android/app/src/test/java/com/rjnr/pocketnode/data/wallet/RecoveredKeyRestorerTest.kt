@@ -236,12 +236,25 @@ class RecoveredKeyRestorerTest {
     }
 
     @Test
-    fun `present unusable mismatched key can be repaired by matching external seed`() = walletOperationTest {
+    fun `matching external seed repairs protection while unrelated V1 archive keeps cleanup pending`() = walletOperationTest {
         insertWallet("w1", phraseKeyHex)
         v1Helper.migrateWallet("w1", otherKeyHex, null, KeyManager.WALLET_TYPE_RAW_KEY, false)
-        assertEquals(RecoveredKeyRestorer.Outcome.Restored, restorer.restore(activity, "w1", material(), true))
-        val read = fixture.coordinator.read(activity, "w1", "Read", "Read") as com.rjnr.pocketnode.data.vault.VaultAccessResult.Success
-        assertEquals(phrase, read.material.mnemonic)
+        val original = keyMaterialDao.getByWalletId("w1")!!
+        assertEquals(RecoveredKeyRestorer.Outcome.CleanupRequired, restorer.restore(activity, "w1", material(), true))
+        assertEquals(original, db.walletVaultDao().legacy("w1")?.source())
+        assertTrue(db.walletVaultDao().get("w1")!!.cleanupPending)
+        assertEquals(3, keyMaterialDao.getKdfVersion("w1"))
+        val passphrase = fixture.pass.toCharArray()
+        val plaintext = fixture.crypto.decrypt(fixture.store.get("w1")!!, "w1", passphrase)
+        try {
+            val saved = kotlinx.serialization.json.Json.decodeFromString<KeyMaterial>(plaintext.toString(Charsets.UTF_8))
+            assertEquals(phraseKeyHex, saved.privateKey)
+            assertEquals(phrase, saved.mnemonic)
+        } finally { plaintext.fill(0); passphrase.fill('\u0000') }
+        assertEquals(com.rjnr.pocketnode.data.vault.VaultAccessResult.CleanupRequired,
+            fixture.coordinator.read(activity, "w1", "Read", "Read"))
+        assertEquals(original, db.walletVaultDao().legacy("w1")?.source())
+        assertFalse(restorer.completeIfDone())
     }
 
     @Test

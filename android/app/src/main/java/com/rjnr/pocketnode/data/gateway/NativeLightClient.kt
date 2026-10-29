@@ -28,6 +28,7 @@ interface NativeLightClient {
     fun nativeFetchHeader(hash: String): String?
     fun nativeGetHeaderByNumber(blockNumber: String): String?
     fun nativeSetScripts(scriptsJson: String, command: Int): Boolean
+    fun nativeGetHistorySnapshot(scriptJson: String): String?
     fun nativeGetScripts(): String?
     fun nativeGetCells(
         searchKeyJson: String,
@@ -92,6 +93,9 @@ class JniLightClient @Inject constructor() : NativeLightClient {
 
     override fun nativeSetScripts(scriptsJson: String, command: Int): Boolean =
         LightClientNative.nativeSetScripts(scriptsJson, command)
+
+    override fun nativeGetHistorySnapshot(scriptJson: String): String? =
+        LightClientNative.nativeGetHistorySnapshot(scriptJson)
 
     override fun nativeGetScripts(): String? = LightClientNative.nativeGetScripts()
 

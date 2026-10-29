@@ -44,6 +44,44 @@ fn prefixed(
     }
     Ok(result)
 }
+/// Availability only: rewound cells must not enter coin selection before rebuilding.
+/// Caller retains the matched read lock through the subsequent cells/capacity query.
+pub(crate) fn cells_ready(storage: &Storage, cell_prefix: &[u8], chain: &ChainSnapshot) -> Result<(), BridgeError> {
+    let conn = storage.conn.lock().map_err(|_| unavailable())?;
+    let marker_prefix = [Key::Meta("CELL_REWIND_V1").into_vec(), cell_prefix.to_vec()].concat();
+    let markers = prefixed(&conn, &marker_prefix, MAX_INTERACTIONS)?;
+    if markers.is_empty() { return Ok(()); }
+    let state = read(&conn, Key::Meta("LAST_STATE").into_vec())?;
+    if state.get(32..) != Some(chain.anchor.as_slice()) { return Err(unavailable()); }
+    let tip: u64 = chain.anchor.raw().number().unpack();
+    if tip == 0 { return Err(unavailable()); }
+    let filtered = read(&conn, Key::Meta("MIN_FILTERED_NUMBER").into_vec())?;
+    let filtered = u64::from_le_bytes(filtered.as_slice().try_into().map_err(|_| unavailable())?);
+    if !prefixed(&conn, &Key::Meta("MATCHED_BLOCKS").into_vec(), 0)?.is_empty() {
+        return Err(unavailable());
+    }
+    for (key, value) in markers {
+        let frontier = u64::from_be_bytes(value.get(..8).ok_or_else(unavailable)?.try_into().map_err(|_| unavailable())?);
+        let start = u64::from_be_bytes(value.get(8..16).ok_or_else(unavailable)?.try_into().map_err(|_| unavailable())?);
+        let script = packed::Script::from_slice(value.get(16..).ok_or_else(unavailable)?).map_err(|_| unavailable())?;
+        let kind = match cell_prefix.first() {
+            Some(p) if *p == KeyPrefix::CellLockScript as u8 => 0,
+            Some(p) if *p == KeyPrefix::CellTypeScript as u8 => 1,
+            _ => return Err(unavailable()),
+        };
+        let expected_key = [Key::Meta("CELL_REWIND_V1").into_vec(), vec![cell_prefix[0]], extract_raw_data(&script)].concat();
+        if key != expected_key || start > frontier { return Err(unavailable()); }
+        let cursor = read(&conn, [Key::Meta("FILTER_SCRIPTS").into_vec(), script.as_slice().to_vec(), vec![kind]].concat())?;
+        let cursor = u64::from_be_bytes(cursor.as_slice().try_into().map_err(|_| unavailable())?);
+        let required = frontier.min(tip);
+        if cursor < required || filtered < required { return Err(unavailable()); }
+        // Completion is durable: later reorgs again have a coherent undo index.
+        // Clear here to avoid forcing another rewind after normal wallet switching.
+        conn.execute("DELETE FROM kv WHERE key = ?1", [key]).map_err(|_| unavailable())?;
+    }
+    Ok(())
+}
+
 pub(crate) fn snapshot(
     storage: &Storage,
     script: &packed::Script,

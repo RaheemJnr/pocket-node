@@ -84,7 +84,7 @@ enum ActivityCopy {
         default:
             return [
                 "The wallet has not yet verified that this transaction is in a block. It may still be waiting, or the local node may need time to catch up.",
-                "You do not need to send it again. The wallet keeps checking while the app is open. A long wait or an unavailable status does not mean the transaction failed.",
+                "You do not need to send it again. The wallet checks for updates while the app is open, but checks may stop before a final status is available. A long wait or an unavailable status does not mean the transaction failed.",
             ]
         }
     }

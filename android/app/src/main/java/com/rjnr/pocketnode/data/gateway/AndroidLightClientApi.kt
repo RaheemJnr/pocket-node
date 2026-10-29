@@ -98,7 +98,7 @@ class AndroidLightClientApi @Inject constructor(
     ): String? = native.nativeGetCells(searchKeyJson, order, limit, cursor)
 
     override fun getHistorySnapshot(scriptJson: String): String? =
-        LightClientNative.nativeGetHistorySnapshot(scriptJson)
+        native.nativeGetHistorySnapshot(scriptJson)
 
     override fun getTransactions(
         searchKeyJson: String,

@@ -542,12 +542,19 @@ pub fn get_cells(
         BridgeError::Storage("storage not initialized".to_owned())
     })?;
 
+    let peers = PEERS.get().ok_or_else(|| BridgeError::Storage("cells unavailable".into()))?;
+    let _matched = peers.matched_blocks().try_read()
+        .map_err(|_| BridgeError::Storage("cells unavailable".into()))?;
+
     // Build prefix based on script type (use Cell prefix, not Tx prefix)
     let prefix = search_prefix(
         &search_key,
         KeyPrefix::CellLockScript,
         KeyPrefix::CellTypeScript,
     );
+    peers.recovery().with_chain_snapshot(|_, chain|
+        super::history::cells_ready(swc.storage(), &prefix, chain))
+        .map_err(|_| BridgeError::Storage("cells unavailable".into()))??;
 
     // Determine from_key based on cursor
     let (from_key, skip) = from_key_for(&prefix, direction, cursor_str);
@@ -806,12 +813,19 @@ pub fn get_cells_capacity(search_key_str: &str) -> Result<String, BridgeError> {
         BridgeError::Storage("storage not initialized".to_owned())
     })?;
 
+    let peers = PEERS.get().ok_or_else(|| BridgeError::Storage("cells unavailable".into()))?;
+    let _matched = peers.matched_blocks().try_read()
+        .map_err(|_| BridgeError::Storage("cells unavailable".into()))?;
+
     // Build prefix based on script type
     let prefix = search_prefix(
         &search_key,
         KeyPrefix::CellLockScript,
         KeyPrefix::CellTypeScript,
     );
+    peers.recovery().with_chain_snapshot(|_, chain|
+        super::history::cells_ready(swc.storage(), &prefix, chain))
+        .map_err(|_| BridgeError::Storage("cells unavailable".into()))??;
 
     // Iterate over cells and sum capacity
     let mode = IteratorMode::From(prefix.as_ref(), Direction::Forward);

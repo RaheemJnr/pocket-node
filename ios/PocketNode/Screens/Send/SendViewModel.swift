@@ -275,9 +275,8 @@ final class SendViewModel {
         recomputeFee()
     }
 
-    /// Runs the shared sanitiser on every keystroke: non-numeric characters, a
-    /// second decimal point and a ninth decimal are dropped rather than
-    /// rejected, so the field never fights the user mid-entry.
+    /// Runs the shared sanitiser on every keystroke. An invalid character, second
+    /// decimal point, or ninth decimal rejects the entire edit and retains the prior text.
     func updateAmount(_ text: String) {
         guard let sanitized = sanitizeAmount(input: text) else { return }
         invalidateDraft()

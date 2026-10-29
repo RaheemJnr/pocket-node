@@ -19,6 +19,7 @@ import kotlin.test.assertTrue
  * FAILED. The light client answers null for a tx it simply has not indexed
  * yet, and an old ghost row wrongly retired to FAILED can never come back.
  */
+@OptIn(kotlinx.coroutines.ExperimentalCoroutinesApi::class)
 class StartupReconcilerTest {
 
     private val broadcasts = FakePendingBroadcastStore()
