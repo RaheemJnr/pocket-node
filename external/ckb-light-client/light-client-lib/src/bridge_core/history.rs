@@ -64,6 +64,14 @@ pub(crate) fn snapshot(
         [Key::Meta("FILTER_SCRIPTS").into_vec(), suffix.clone()].concat(),
     )?;
     let through = u64::from_be_bytes(progress.as_slice().try_into().map_err(|_| unavailable())?);
+    // Inclusive rollback removes R but leaves the script cursor at R. The global
+    // filter cursor rewinds to R-1, so both cursors must cover the canonical tip.
+    let filtered = read(&conn, Key::Meta("MIN_FILTERED_NUMBER").into_vec())?;
+    let filtered_through =
+        u64::from_le_bytes(filtered.as_slice().try_into().map_err(|_| unavailable())?);
+    if filtered_through < tip {
+        return Err(unavailable());
+    }
     let registration = read(
         &conn,
         [Key::Meta("HISTORY_REGISTRATION_V1").into_vec(), suffix].concat(),
@@ -207,6 +215,7 @@ mod tests {
                 .data(),
         );
         storage.update_block_number(20);
+        storage.update_min_filtered_block_number(20);
         let before = snapshot(&storage, &script, &identity, &chain, "TESTNET").unwrap();
         assert_eq!(before["hashes"], json!([format!("{:#x}", tx.hash())]));
         assert_eq!(before["startHeight"], "1");
@@ -219,6 +228,7 @@ mod tests {
         };
         assert!(snapshot(&storage, &script, &identity, &chain, "TESTNET").is_err());
         storage.update_block_number(20);
+        storage.update_min_filtered_block_number(20);
         assert_eq!(
             snapshot(&storage, &script, &identity, &chain, "TESTNET").unwrap()["hashes"],
             json!([])
@@ -245,6 +255,7 @@ mod tests {
         );
         assert!(snapshot(&storage, &script, &identity, &chain, "TESTNET").is_err());
         storage.update_block_number(20);
+        storage.update_min_filtered_block_number(20);
         let after = snapshot(&storage, &script, &identity, &chain, "TESTNET").unwrap();
         assert_eq!(after["startHeight"], "15");
         assert_ne!(before["registration"], after["registration"]);

@@ -191,3 +191,65 @@ fn history_rollback_cleans_indexes_even_when_scan_progress_was_lowered() {
     assert!(StorageBackend::get(&storage, Key::TxLockScript(&script, 10, 0, 0, CellType::Output).into_vec()).unwrap().is_none());
     assert_eq!(storage.get_filter_scripts()[0].block_number, 1, "rollback must not advance lowered progress");
 }
+
+fn history_rollback_at_replacement_tip(reinclude: bool) {
+    use crate::storage::{ScriptStatus, ScriptType, SetScriptsCommand};
+    use crate::protocols::light_client::recovery::{RecoveryRegistry, RecoveryIdentity, ChainSnapshot};
+    use ckb_types::{core::{BlockBuilder, TransactionBuilder, EpochNumberWithFraction}, packed::CellOutput, prelude::*, U256};
+    let (storage, _dir) = new_storage("history_rollback_at_tip");
+    let script = Script::default();
+    let tx = TransactionBuilder::default()
+        .output(CellOutput::new_builder().lock(script.clone()).build())
+        .output_data(Vec::<u8>::new().pack()).build();
+    let block = |nonce| BlockBuilder::default()
+        .epoch(EpochNumberWithFraction::new(0, 0, 100).full_value()).number(20u64).nonce(nonce);
+    let original = block(0u128).transaction(tx.clone()).build();
+    let replacement = if reinclude { block(1u128).transaction(tx.clone()).build() } else { block(1u128).build() };
+    storage.update_filter_scripts(vec![ScriptStatus { script: script.clone(), script_type: ScriptType::Lock, block_number: 1 }], SetScriptsCommand::All);
+    storage.filter_block(original.data());
+    storage.update_block_number(20);
+    storage.update_min_filtered_block_number(20);
+    storage.update_last_state(&U256::from(1u64), &original.data().header(), &[]);
+    let registry = RecoveryRegistry::new(
+        RecoveryIdentity { genesis_hash: ckb_types::packed::Byte32::new([1;32]), store_generation: "fixture".into(), run_nonce: [1;16] },
+        ChainSnapshot { anchor: original.data().header() });
+    let snapshot = || registry.with_chain_snapshot(|identity, chain|
+        crate::bridge_core::history::snapshot(&storage, &script, identity, chain, "TESTNET")).unwrap();
+    let hash = format!("{:#x}", tx.hash());
+    assert_eq!(snapshot().unwrap()["hashes"], serde_json::json!([hash.clone()]));
+
+    let update = registry.begin_chain_update().unwrap();
+    storage.rollback_to_block(20);
+    storage.update_last_state(&U256::from(2u64), &replacement.data().header(), &[]);
+    registry.finish_chain_update(update, ChainSnapshot { anchor: replacement.data().header() }).unwrap();
+    assert_eq!(storage.get_min_filtered_block_number(), 19);
+    assert!(snapshot().is_err(), "removed replacement tip is not scanned: no absence authority may reach the cache");
+
+    // The single-block [20,21) filter batch must select this script, even
+    // though the existing per-script rollback cursor is 20.
+    assert!(storage.get_scripts_hash(21).contains(&script.calc_script_hash()));
+    if reinclude {
+        storage.add_matched_blocks(20, 1, vec![(replacement.hash(), true)]);
+        storage.update_min_filtered_block_number(20);
+        assert!(snapshot().is_err(), "filter cursor alone does not prove matched block processing");
+    }
+    storage.filter_block(replacement.data());
+    storage.update_block_number(20);
+    storage.update_min_filtered_block_number(20);
+    if reinclude { storage.remove_matched_blocks(20); }
+    let complete = snapshot().unwrap();
+    assert_eq!(complete["tipHeight"], "20");
+    assert_eq!(complete["tipHash"], format!("{:#x}", replacement.hash()));
+    assert_eq!(complete["hashes"], if reinclude { serde_json::json!([hash]) } else { serde_json::json!([]) },
+        "only scanned replacement membership can preserve reinclusion or authorize orphan cleanup");
+}
+
+#[test]
+fn history_rollback_at_tip_withholds_absence_until_reincluded_transaction_is_indexed() {
+    history_rollback_at_replacement_tip(true);
+}
+
+#[test]
+fn history_rollback_at_tip_allows_absence_only_after_empty_replacement_scan() {
+    history_rollback_at_replacement_tip(false);
+}
