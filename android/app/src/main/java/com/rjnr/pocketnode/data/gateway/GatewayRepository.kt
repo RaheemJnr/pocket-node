@@ -119,6 +119,9 @@ class GatewayRepository @Inject constructor(
     private val _balance = MutableStateFlow<BalanceResponse?>(null)
     val balance: StateFlow<BalanceResponse?> = _balance.asStateFlow()
 
+    private val cellCountReadinessTracker = CellCountReadinessTracker()
+    val cellCountReadiness = cellCountReadinessTracker.readiness
+
     private val _isRegistered = MutableStateFlow(false)
     val isRegistered: StateFlow<Boolean> = _isRegistered.asStateFlow()
 
@@ -250,6 +253,7 @@ class GatewayRepository @Inject constructor(
         // on every wallet switch. Lock script + addresses round-trip from
         // the cached WalletEntity, no key material needed (#213 sub-PR 5).
         val info = keyManager.deriveWalletInfoFromEntity(wallet)
+        cellCountReadinessTracker.activate(wallet.walletId, currentNetwork, info)
         _walletInfo.value = info
         _balance.value = null  // Clear old wallet's balance immediately
         _isRegistered.value = false
@@ -404,6 +408,7 @@ class GatewayRepository @Inject constructor(
             } else {
                 keyManager.getWalletInfo() // fallback for legacy single-wallet (V1 only)
             }
+            cellCountReadinessTracker.activate(activeWalletId, currentNetwork, info)
             _walletInfo.value = info
             info
         } else {
@@ -550,6 +555,8 @@ class GatewayRepository @Inject constructor(
         // No-op when the last landed set was already computed for the
         // active wallet (#539 "make sure the active wallet is registered").
         skipIfActiveRegistered: Boolean = false,
+        // Explicit resync acquisition only; invoked before post-set bookkeeping.
+        onSetLanded: () -> Unit = {},
     ): Result<Unit> = runCatching {
         // Force IO dispatcher — see registerAllWalletScripts above for the same
         // reasoning. ACTIVE_ONLY callers also block Main without this. (#109)
@@ -577,6 +584,7 @@ class GatewayRepository @Inject constructor(
         // switch mid-registration cannot mix two wallets' state.
         val walletId = activeWalletId
         val info = _walletInfo.value ?: throw Exception("Wallet not initialized")
+        val countActivation = cellCountReadiness.value
         if (expectedWalletId != null && walletId != expectedWalletId) {
             throw ActiveWalletChangedException()
         }
@@ -674,6 +682,8 @@ class GatewayRepository @Inject constructor(
                 onLanded = {
                     landed = true
                     _isRegistered.value = true
+                    onSetLanded()
+                    markCellCountRegistered(countActivation)
                     if (savePreference) {
                         val wId = walletId.ifEmpty { null }
                         walletPreferences.setSyncMode(syncMode, walletId = wId)
@@ -706,6 +716,21 @@ class GatewayRepository @Inject constructor(
         // Reading activeWalletId again later would reset, register or roll
         // back whichever wallet happens to be active by then.
         val walletId = activeWalletId
+        val countSource = cellCountReadiness.value?.takeIf { it.walletId == walletId && it.network == currentNetwork }
+        var countResync: CellCountReadiness? = null
+        // Bind after suspending pre-set work, under the registration lock. Two
+        // queued intents in the same activation each bind the epoch their own set
+        // replaces; a wallet A -> B -> A activation cannot adopt an old intent.
+        fun bindCountResync() {
+            val current = cellCountReadiness.value
+            countResync = current.takeIf {
+                countSource != null && it?.activationEpoch == countSource.activationEpoch &&
+                    isCurrentCellCountSource(countSource) && isCurrentCellCountSource(it)
+            }
+        }
+        fun countResyncLanded() {
+            if (isCurrentCellCountSource(countResync)) cellCountReadinessTracker.resyncLanded(countResync)
+        }
         _isRegistered.value = false
         // Snapshot for the rollbacks below, taken under the registration
         // lock right before the progress is zeroed (#539).
@@ -734,9 +759,16 @@ class GatewayRepository @Inject constructor(
                 // for this wallet only reads its progress as 0; other
                 // wallets resume.
                 var persisted = false
+                val context = makeSyncContext()
                 runCatching {
                     syncCoordinator.registerAllWalletScripts(
-                        ctx = makeSyncContext().copy(
+                        ctx = context.copy(
+                            onScriptsRegistered = {
+                                // Supersede the old epoch before its normal registration
+                                // callback can emit an intermediate readiness stage.
+                                countResyncLanded()
+                                context.onScriptsRegistered()
+                            },
                             getWalletSyncBlock = { id ->
                                 if (id == walletId) 0L else getWalletSyncBlock(id)
                             },
@@ -761,6 +793,7 @@ class GatewayRepository @Inject constructor(
                                     walletPreferences.setCustomBlockHeight(customBlockHeight, walletId = wId)
                                 }
                                 walletPreferences.setInitialSyncCompleted(true, walletId = wId)
+                                bindCountResync()
                             },
                             // Still under the mutex, and only when the set
                             // did not land: undo the writes above before any
@@ -796,7 +829,9 @@ class GatewayRepository @Inject constructor(
                         previousSyncBlock = getWalletSyncBlock(walletId)
                         zeroed = true
                         setWalletSyncBlock(walletId, 0L)
+                        bindCountResync()
                     },
+                    onSetLanded = ::countResyncLanded,
                     onNotLanded = {
                         if (zeroed) setWalletSyncBlock(walletId, previousSyncBlock)
                     },
@@ -955,7 +990,22 @@ class GatewayRepository @Inject constructor(
         // poll only tries the lock; while a registration holds it this tick
         // saves nothing (the next one will) and never queues behind it.
         val persisted = syncCoordinator.tryWithRegistrationLock {
+            val countActivation = cellCountReadiness.value
             val lockedState = syncEngine.readChainSyncState()
+            // Bind this fresh, post-registration observation before any later
+            // reconcile can re-register. Never consume the unkeyed SyncProgress.
+            if (countActivation != null && isCurrentCellCountSource(countActivation)) {
+                // ALL registration can land before walletInfo is adopted. A
+                // fresh exact-script observation of the current wallet's landed
+                // set can establish registration without replaying an old Boolean.
+                val observation = if (countActivation.stage == CellCountStage.WAITING &&
+                    syncCoordinator.registeredActiveWalletId == countActivation.walletId &&
+                    lockedState.scripts.any { it.script == countActivation.script && it.scriptType == "lock" }) {
+                    cellCountReadinessTracker.registered(countActivation)
+                    countActivation.copy(stage = CellCountStage.REGISTERED)
+                } else countActivation
+                cellCountReadinessTracker.observe(observation, lockedState)
+            }
             var updated = false
             lockedState.scripts.forEach { script ->
                 val walletId = syncCoordinator.getWalletIdForScript(script.script.args) ?: return@forEach
@@ -1261,14 +1311,28 @@ class GatewayRepository @Inject constructor(
 
 
     // Sync registration + BALANCED filter delegated to [SyncCoordinator] (#106).
-    private fun makeSyncContext(): SyncCoordinator.SyncContext = SyncCoordinator.SyncContext(
-        network = currentNetwork,
-        activeWalletId = activeWalletId,
-        awaitNodeReady = ::awaitNodeReady,
-        getWalletSyncBlock = { walletId -> getWalletSyncBlock(walletId) },
-        onScriptsRegistered = { _isRegistered.value = true },
-        liveActiveWalletId = { activeWalletId },
-    )
+    private fun isCurrentCellCountSource(source: CellCountReadiness?): Boolean =
+        source != null && source.walletId == activeWalletId && source.network == currentNetwork &&
+            source.address == getCurrentAddress() && source.script == _walletInfo.value?.script
+
+    private fun markCellCountRegistered(source: CellCountReadiness?) {
+        if (isCurrentCellCountSource(source)) cellCountReadinessTracker.registered(source)
+    }
+
+    private fun makeSyncContext(): SyncCoordinator.SyncContext {
+        val countActivation = cellCountReadiness.value
+        return SyncCoordinator.SyncContext(
+            network = currentNetwork,
+            activeWalletId = activeWalletId,
+            awaitNodeReady = ::awaitNodeReady,
+            getWalletSyncBlock = { walletId -> getWalletSyncBlock(walletId) },
+            onScriptsRegistered = {
+                _isRegistered.value = true
+                markCellCountRegistered(countActivation)
+            },
+            liveActiveWalletId = { activeWalletId },
+        )
+    }
 
     private suspend fun setScriptsAndRecord(
         statuses: List<JniScriptStatus>,

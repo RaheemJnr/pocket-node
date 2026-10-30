@@ -3,6 +3,11 @@ package com.rjnr.pocketnode.data.storage
 import androidx.room.Room
 import androidx.test.core.app.ApplicationProvider
 import kotlinx.coroutines.test.runTest
+import kotlinx.coroutines.*
+import java.util.concurrent.CountDownLatch
+import java.util.concurrent.Executors
+import java.util.concurrent.TimeUnit
+import kotlin.coroutines.ContinuationInterceptor
 import org.junit.After
 import org.junit.Before
 import org.junit.Test
@@ -131,5 +136,62 @@ class KmpReconciliationSqlTest {
         org.junit.Assert.assertNotNull(failure)
         assertEquals(original, db.transactions().getByHash(hash, "TESTNET"))
         assertEquals(2, db.transactions().canonicalCandidates("w1", "TESTNET").size)
+    }
+
+    @Test fun `canonical revalidation can suspend off transaction dispatcher and resume before deletion`() = runBlocking {
+        val hash = "0x" + "a".repeat(64)
+        val original = TransactionRow(hash, "0xa", "old", 0, "0x1", "in", "0x0", 2, null, "TESTNET", "CONFIRMED", false, 10, "w1")
+        Executors.newSingleThreadExecutor().asCoroutineDispatcher().use { query ->
+            for (current in listOf(false, true)) {
+                db.transactions().insert(original)
+                var checked = false
+                transactions.reconcileCanonicalHistory(historyProof(), "w1", "TESTNET") {
+                    val transactionContext = currentCoroutineContext()[ContinuationInterceptor]
+                    withContext(query) {
+                        org.junit.Assert.assertNotEquals(transactionContext, currentCoroutineContext()[ContinuationInterceptor])
+                        checked = true
+                    }
+                    assertEquals(transactionContext, currentCoroutineContext()[ContinuationInterceptor])
+                    // SQL must still be usable in the original transaction after the native-only hop.
+                    assertEquals(original, db.transactions().getByHash(hash, "TESTNET"))
+                    current
+                }
+                org.junit.Assert.assertTrue(checked)
+                assertEquals(if (current) null else original, db.transactions().getByHash(hash, "TESTNET"))
+            }
+        }
+    }
+
+    @Test fun `cancelled suspended canonical revalidation retains receipt and releases transaction`() = runBlocking {
+        val hash = "0x" + "a".repeat(64)
+        val original = TransactionRow(hash, "0xa", "old", 0, "0x1", "in", "0x0", 2, null, "TESTNET", "CONFIRMED", false, 10, "w1")
+        db.transactions().insert(original)
+        val entered = CompletableDeferred<Unit>()
+        val release = CountDownLatch(1)
+        Executors.newSingleThreadExecutor().asCoroutineDispatcher().use { query ->
+            val operation = async {
+                transactions.reconcileCanonicalHistory(historyProof(), "w1", "TESTNET") {
+                    withContext(query) {
+                        entered.complete(Unit)
+                        check(release.await(5, TimeUnit.SECONDS)) { "caller could not release revalidation" }
+                        true
+                    }
+                }
+            }
+            try {
+                withTimeout(5_000) { entered.await() }
+                operation.cancel()
+                release.countDown()
+                operation.join()
+                org.junit.Assert.assertTrue(operation.isCancelled)
+                assertEquals(original, db.transactions().getByHash(hash, "TESTNET"))
+                // A fresh transaction remains usable after the cancelled pass.
+                transactions.reconcileCanonicalHistory(historyProof(), "w1", "TESTNET") { true }
+                assertNull(db.transactions().getByHash(hash, "TESTNET"))
+            } finally {
+                release.countDown()
+                operation.cancelAndJoin()
+            }
+        }
     }
 }

@@ -22,11 +22,13 @@ interface TransactionStore {
     /**
      * Remove confirmed receipts only within the snapshot's proven horizon and scope.
      * Implementations recheck [isCurrent] after their candidate read, inside the same
-     * transaction as conditional deletions. Exceptions/cancellation roll back the pass.
+     * transaction as conditional deletions. The suspendable check may dispatch native
+     * reads, but must not access this transaction from another dispatcher; database
+     * work resumes in the transaction context. Exceptions/cancellation roll back the pass.
      * A store without this capability retains receipts. [snapshot] is trusted only
      * after validation against the requested script/network at the read boundary.
      */
-    suspend fun reconcileCanonicalHistory(snapshot: com.rjnr.pocketnode.data.gateway.CanonicalHistorySnapshot, walletId: String, network: String, isCurrent: () -> Boolean = { true }) = Unit
+    suspend fun reconcileCanonicalHistory(snapshot: com.rjnr.pocketnode.data.gateway.CanonicalHistorySnapshot, walletId: String, network: String, isCurrent: suspend () -> Boolean = { true }) = Unit
 
 
     /**

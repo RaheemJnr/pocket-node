@@ -65,7 +65,8 @@ import kotlin.coroutines.CoroutineContext
  * Every page uses [queryContext] (IO on Android, Default on iOS), including
  * reads initiated by a UI caller. Cache callbacks and wallet state remain on
  * the caller's context. Other bridge reads keep their existing dispatching;
- * [lightClientReadyForRead] also uses [queryContext].
+ * [lightClientReadyForRead] and both canonical-history snapshot reads also use
+ * [queryContext]. Revalidation returns to the store transaction before cache SQL.
  */
 class LedgerReader(
     private val lightClient: LightClientApi,
@@ -437,6 +438,12 @@ class LedgerReader(
     private suspend fun queryCellsCapacity(searchKeyJson: String): String? =
         withContext(queryContext) { lightClient.getCellsCapacity(searchKeyJson) }
 
+    private suspend fun queryHistorySnapshot(scriptJson: String): CanonicalHistorySnapshot? =
+        withContext(queryContext) {
+            lightClient.getHistorySnapshot(scriptJson)
+                ?.let { json.decodeFromString<CanonicalHistorySnapshot>(it) }
+        }
+
     /**
      * Readiness probe for the read-path null classifier ([readPathNullMessage]).
      * A tip header means the light client is up and reporting chain state; its
@@ -804,14 +811,15 @@ class LedgerReader(
         // A partial/capped display walk cannot itself remove a receipt. Native failure,
         // legacy registration or an unfinished restore retains all cached rows.
         try {
-            val snapshot = lightClient.getHistorySnapshot(json.encodeToString(myScript))
-                ?.let { json.decodeFromString<CanonicalHistorySnapshot>(it) }
+            val scriptJson = json.encodeToString(myScript)
+            val snapshot = queryHistorySnapshot(scriptJson)
             if (snapshot != null && snapshot.validFor(myScript, network.name)) {
                 transactionStore.reconcileCanonicalHistory(snapshot, activeWalletId, network.name) {
                     // Revalidate after the suspendable candidate read, inside the cache transaction.
                     // A changed tip/restore generation or unavailable second read retains the cache.
-                    lightClient.getHistorySnapshot(json.encodeToString(myScript))
-                        ?.let { json.decodeFromString<CanonicalHistorySnapshot>(it) } == snapshot
+                    // Only the native read leaves the transaction dispatcher; withContext
+                    // returns here (or throws cancellation) before any conditional deletion.
+                    queryHistorySnapshot(scriptJson) == snapshot
                 }
             }
         } catch (e: CancellationException) {

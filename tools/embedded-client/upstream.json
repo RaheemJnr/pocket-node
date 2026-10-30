@@ -2,7 +2,7 @@
   "upstream_repository": "nervosnetwork/ckb-light-client",
   "upstream_commit": "9ce5fc6507ce1379dd8bd4b947426078bb2062e8",
   "archive_sha256": "24cb4a3043a96b42de717e8db4f60dcc6b5b2056265102960a97a9a3cad85f0f",
-  "mobile_patch_sha256": "ffa79392dc51c7ef5cd8f585f709886002ea3b02def30fa390e36e336c8fb24f",
+  "mobile_patch_sha256": "5d98e920ed5354bb07d09519d6d273b658446c9265f9734394f9bd4f673221dc",
   "upstream_files": {
     ".github/codecov.yaml": "35efb16290fe39a272f173155117104119f4de0d46725bf21a4fcb201f873abe",
     ".github/workflows/ci.yaml": "28eb6793d401496217141e70079ad646d23766aadd16e8ea63a63f813eef3399",
@@ -144,7 +144,7 @@
     "light-client-lib/src/bridge_core/dao.rs": "110609955c069608280f52f1f79de8c6efbd7840f2895d228f4c300c8e162aee",
     "light-client-lib/src/bridge_core/dao_recovery.rs": "07bba6a37d28b2e7f4eb4a753b46f85258bd89cd47d1f33bcc6180172dc75c9e",
     "light-client-lib/src/bridge_core/error.rs": "deaa7fd5ef026e73f3071f54ab134edad190a249604e1b7917bae60946d3982d",
-    "light-client-lib/src/bridge_core/history.rs": "76fa43884bc355d6cc9de49d63852d7e74926ba328b7c9b18c018b965eaa71b4",
+    "light-client-lib/src/bridge_core/history.rs": "e6bbfb6dcb846c2acc93ce6182a4e06e27d6e8dfbd5fb4206455f9035adc10aa",
     "light-client-lib/src/bridge_core/lifecycle.rs": "4883e95c611013100b4d671c13b938f6fdce88ffb2dcb23c171bd4708a785b83",
     "light-client-lib/src/bridge_core/mod.rs": "091a10dceabe2543f5fb81603a985a6416f814b1b072586048fed10c7e028602",
     "light-client-lib/src/bridge_core/query.rs": "4e3043166d2ec0b77f8f7a639e75ef7400cbdac6311d6cda37bafd5bb172966e",

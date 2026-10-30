@@ -9,6 +9,10 @@ use rusqlite::{Connection, OptionalExtension};
 use serde_json::{json, Value};
 use std::collections::BTreeSet;
 const MAX_INTERACTIONS: usize = 20_000;
+// Separate work budget: neighbor scripts do not consume exact interactions,
+// but dense prefix ranges still fail closed after 100k raw rows (+1 lookahead).
+const MAX_HISTORY_SCAN_ROWS: usize = 100_000;
+const HISTORY_SCAN_CHUNK: usize = 512;
 fn unavailable() -> BridgeError {
     BridgeError::Storage("authoritative history unavailable".into())
 }
@@ -43,6 +47,52 @@ fn prefixed(
         return Err(unavailable());
     }
     Ok(result)
+}
+/// Exact-history selection only; cell queries intentionally retain prefix semantics.
+/// The connection/chain guards held by snapshot keep this keyset walk consistent.
+fn exact_history_rows(
+    conn: &Connection,
+    prefix: &[u8],
+    exact_cap: usize,
+    raw_cap: usize,
+) -> Result<Vec<(Vec<u8>, Vec<u8>)>, BridgeError> {
+    let exact_len = prefix.len() + 17;
+    let mut upper = prefix.to_vec();
+    while upper.last() == Some(&255) { upper.pop(); }
+    *upper.last_mut().ok_or_else(unavailable)? += 1;
+    let mut lower = prefix.to_vec();
+    let mut exclusive = false;
+    let mut scanned = 0;
+    let mut selected = Vec::new();
+    loop {
+        // One lookahead distinguishes a complete exact-budget walk from a
+        // truncated range. Each query seeks after the prior key, never OFFSETs.
+        let limit = (raw_cap - scanned).min(HISTORY_SCAN_CHUNK - 1) + 1;
+        let sql = if exclusive {
+            "SELECT key,CASE WHEN length(key)<=?3 THEN value END FROM kv WHERE key>?1 AND key<?2 ORDER BY key LIMIT ?4"
+        } else {
+            "SELECT key,CASE WHEN length(key)<=?3 THEN value END FROM kv WHERE key>=?1 AND key<?2 ORDER BY key LIMIT ?4"
+        };
+        let mut stmt = conn.prepare(sql).map_err(|_| unavailable())?;
+        let rows = stmt.query_map(rusqlite::params![lower, upper, exact_len as i64, limit as i64], |r| {
+            let key: Vec<u8> = r.get(0)?;
+            // Do not deserialize irrelevant neighbor values (which may be NULL/corrupt).
+            let value: Option<Vec<u8>> = if key.len() <= exact_len { Some(r.get(1)?) } else { None };
+            Ok((key, value))
+        }).map_err(|_| unavailable())?.collect::<Result<Vec<_>, _>>().map_err(|_| unavailable())?;
+        let count = rows.len();
+        for (key, value) in rows {
+            if scanned == raw_cap || key.len() < exact_len { return Err(unavailable()); }
+            scanned += 1;
+            lower = key.clone();
+            if key.len() == exact_len {
+                if selected.len() == exact_cap { return Err(unavailable()); }
+                selected.push((key, value.ok_or_else(unavailable)?));
+            }
+        }
+        if count < limit { return Ok(selected); }
+        exclusive = true;
+    }
 }
 /// Availability only: rewound cells must not enter coin selection before rebuilding.
 /// Caller retains the matched read lock through the subsequent cells/capacity query.
@@ -130,7 +180,7 @@ pub(crate) fn snapshot(
     ]
     .concat();
     let mut hashes = BTreeSet::new();
-    for (key, value) in prefixed(&conn, &prefix, MAX_INTERACTIONS)? {
+    for (key, value) in exact_history_rows(&conn, &prefix, MAX_INTERACTIONS, MAX_HISTORY_SCAN_ROWS)? {
         if key.len() != prefix.len() + 17 {
             return Err(unavailable());
         }
@@ -327,6 +377,120 @@ mod tests {
             .unwrap();
         assert!(prefixed(&conn, &[1], 4).is_err());
     }
+    fn ready_exact_history(scripts: &[packed::Script]) -> (Storage, tempfile::TempDir, RecoveryIdentity, ChainSnapshot) {
+        let (storage, dir) = crate::tests::utils::new_storage("exact_history");
+        let tip = BlockBuilder::default().epoch(ckb_types::core::EpochNumberWithFraction::new(0, 0, 100).full_value()).number(100u64).build().data().header();
+        storage.update_last_state(&U256::zero(), &tip, &[]);
+        storage.update_filter_scripts(scripts.iter().map(|script| ScriptStatus {
+            script: script.clone(), script_type: ScriptType::Lock, block_number: 1,
+        }).collect(), SetScriptsCommand::All);
+        let identity = RecoveryIdentity { genesis_hash: packed::Byte32::default(), store_generation: "exact".into(), run_nonce: [1; 16] };
+        (storage, dir, identity, ChainSnapshot { anchor: tip })
+    }
+    fn finish_exact_history(storage: &Storage) {
+        storage.update_block_number(100);
+        storage.update_min_filtered_block_number(100);
+    }
+    #[test]
+    fn exact_history_skips_interleaved_longer_args_and_keeps_shared_transactions() {
+        let script = packed::Script::default();
+        let neighbors: Vec<_> = [5u64, 15, 30].iter().map(|n|
+            script.clone().as_builder().args(n.to_be_bytes().to_vec().pack()).build()).collect();
+        let other_code = script.clone().as_builder().code_hash(packed::Byte32::new([1;32])).build();
+        let other_type = script.clone().as_builder().hash_type(1u8).build();
+        let mut scripts = vec![script.clone(), other_code.clone(), other_type.clone()]; scripts.extend(neighbors.iter().cloned());
+        let (storage, _dir, identity, chain) = ready_exact_history(&scripts);
+        let mut expected = BTreeSet::new();
+        for (height, locks) in [(10, vec![script.clone()]), (20, vec![script.clone(), neighbors[1].clone()]),
+            (25, vec![neighbors[0].clone(), neighbors[2].clone(), other_code, other_type])] {
+            let mut builder = TransactionBuilder::default();
+            for lock in locks { builder = builder.output(packed::CellOutput::new_builder().lock(lock).build())
+                .output_data(Vec::<u8>::new().pack()); }
+            let tx = builder.build();
+            if height != 25 { expected.insert(format!("{:#x}", tx.hash())); }
+            storage.filter_block(BlockBuilder::default().epoch(ckb_types::core::EpochNumberWithFraction::new(0, 0, 100).full_value()).number(height as u64).transaction(tx).build().data());
+        }
+        finish_exact_history(&storage);
+        let actual = snapshot(&storage, &script, &identity, &chain, "TESTNET").unwrap();
+        assert_eq!(actual["hashes"], json!(expected));
+        assert_eq!(actual["complete"], true);
+    }
+    #[test]
+    fn exact_history_empty_with_more_than_twenty_thousand_neighbor_rows_is_complete() {
+        let script = packed::Script::default();
+        let neighbor = script.clone().as_builder().args(5u64.to_be_bytes().to_vec().pack()).build();
+        let (storage, _dir, identity, chain) = ready_exact_history(&[script.clone()]);
+        {
+            let mut conn = storage.conn.lock().unwrap();
+            let transaction = conn.transaction().unwrap();
+            for index in 0..20_001u32 {
+                let key = Key::TxLockScript(&neighbor, 5, index, 0, crate::storage::CellType::Output).into_vec();
+                // Even unreadable values outside this exact script must not be decoded.
+                transaction.execute("INSERT INTO kv VALUES (?1,NULL)", [key]).unwrap();
+            }
+            transaction.commit().unwrap();
+        }
+        finish_exact_history(&storage);
+        let result = snapshot(&storage, &script, &identity, &chain, "TESTNET").unwrap();
+        assert_eq!(result["hashes"], json!([]));
+        assert_eq!(result["complete"], true);
+        // An exact interaction after the dense neighboring range must still be read.
+        let tx = TransactionBuilder::default().output(packed::CellOutput::new_builder().lock(script.clone()).build())
+            .output_data(Vec::<u8>::new().pack()).build();
+        storage.filter_block(BlockBuilder::default().epoch(ckb_types::core::EpochNumberWithFraction::new(0, 0, 100).full_value()).number(10u64).transaction(tx.clone()).build().data());
+        assert_eq!(snapshot(&storage, &script, &identity, &chain, "TESTNET").unwrap()["hashes"], json!([format!("{:#x}",tx.hash())]));
+    }
+    #[test]
+    fn exact_history_selected_cap_raw_work_cap_and_corruption_are_independent() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch("CREATE TABLE kv(key BLOB PRIMARY KEY,value BLOB)").unwrap();
+        let key = |index: u32, long: bool| {
+            let mut key = vec![1u8]; key.extend_from_slice(&[0u8; 13]); key.extend_from_slice(&index.to_be_bytes());
+            if long { key.push(0); } key
+        };
+        let transaction = conn.transaction().unwrap();
+        for index in 0..20_000u32 {
+            transaction.execute("INSERT INTO kv VALUES (?1,?2)",rusqlite::params![key(index,false),vec![0u8;32]]).unwrap();
+        }
+        transaction.commit().unwrap();
+        assert_eq!(exact_history_rows(&conn,&[1],20_000,100_000).unwrap().len(),20_000);
+        conn.execute("INSERT INTO kv VALUES (?1,?2)",rusqlite::params![key(20_000,false),vec![0u8;32]]).unwrap();
+        assert!(exact_history_rows(&conn,&[1],20_000,100_000).is_err());
+        conn.execute("DELETE FROM kv WHERE key=?1",[key(20_000,false)]).unwrap();
+        // Raw work at the exact budget is complete; one additional neighbor is not.
+        assert_eq!(exact_history_rows(&conn,&[1],20_000,20_000).unwrap().len(),20_000);
+        conn.execute("INSERT INTO kv VALUES (?1,NULL)",[key(20_000,true)]).unwrap();
+        assert!(exact_history_rows(&conn,&[1],20_000,20_000).is_err());
+        assert_eq!(exact_history_rows(&conn,&[1],20_000,20_001).unwrap().len(),20_000);
+        conn.execute("DELETE FROM kv",[]).unwrap();
+        // Empty exact history is not proof of an empty prefix when work ran out.
+        for index in 0..3 { conn.execute("INSERT INTO kv VALUES (?1,NULL)",[key(index,true)]).unwrap(); }
+        assert!(exact_history_rows(&conn,&[1],0,2).is_err());
+        assert!(exact_history_rows(&conn,&[1],0,3).unwrap().is_empty());
+        conn.execute("INSERT INTO kv VALUES (?1,?2)",rusqlite::params![vec![1u8,0],vec![0u8;32]]).unwrap();
+        assert!(exact_history_rows(&conn,&[1],20_000,100_000).is_err(),"short keys cannot be skipped as neighbors");
+        conn.execute("DELETE FROM kv",[]).unwrap();
+        conn.execute("INSERT INTO kv VALUES (?1,NULL)",[key(0,false)]).unwrap();
+        assert!(exact_history_rows(&conn,&[1],20_000,100_000).is_err(),"exact values remain fail-closed");
+    }
+    #[test]
+    fn exact_history_keeps_a_spend_after_its_funding_output_is_consumed() {
+        let script = packed::Script::default();
+        let (storage,_dir,identity,chain) = ready_exact_history(&[script.clone()]);
+        let funding = TransactionBuilder::default().output(packed::CellOutput::new_builder().lock(script.clone()).build())
+            .output_data(Vec::<u8>::new().pack()).build();
+        let spend = TransactionBuilder::default().input(packed::CellInput::new_builder()
+            .previous_output(packed::OutPoint::new_builder().tx_hash(funding.hash()).index(0u32).build()).build()).build();
+        for (height,tx) in [(10u64,funding.clone()),(20u64,spend.clone())] {
+            storage.filter_block(BlockBuilder::default().epoch(ckb_types::core::EpochNumberWithFraction::new(0,0,100).full_value())
+                .number(height).transaction(tx).build().data());
+        }
+        finish_exact_history(&storage);
+        let hashes:BTreeSet<_> = [funding.hash(),spend.hash()].iter().map(|hash|format!("{hash:#x}")).collect();
+        assert_eq!(snapshot(&storage,&script,&identity,&chain,"TESTNET").unwrap()["hashes"],json!(hashes));
+        assert!(StorageBackend::get(&storage,Key::CellLockScript(&script,10,0,0).into_vec()).unwrap().is_none());
+    }
+
     #[test]
     fn chain_guard_refuses_snapshot_during_rollback_and_after_shutdown() {
         let identity = RecoveryIdentity {

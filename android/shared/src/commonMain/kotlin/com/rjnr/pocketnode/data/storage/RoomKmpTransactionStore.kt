@@ -26,7 +26,7 @@ class RoomKmpTransactionStore(
     private val clock: Clock = SystemClock,
 ) : TransactionStore {
 
-    override suspend fun reconcileCanonicalHistory(snapshot: com.rjnr.pocketnode.data.gateway.CanonicalHistorySnapshot, walletId: String, network: String, isCurrent: () -> Boolean) =
+    override suspend fun reconcileCanonicalHistory(snapshot: com.rjnr.pocketnode.data.gateway.CanonicalHistorySnapshot, walletId: String, network: String, isCurrent: suspend () -> Boolean) =
         dao.reconcileCanonicalHistory(snapshot, walletId, network, isCurrent)
 
     override suspend fun getBlockNumbers(walletId: String, network: String): List<String> =
