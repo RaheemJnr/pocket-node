@@ -7,6 +7,7 @@ import com.rjnr.pocketnode.core.time.Clock
 import com.rjnr.pocketnode.core.time.SystemClock
 import com.rjnr.pocketnode.data.gateway.models.JniHeaderView
 import com.rjnr.pocketnode.data.gateway.models.JniScriptStatus
+import com.rjnr.pocketnode.data.gateway.models.Script
 import com.rjnr.pocketnode.data.gateway.models.NetworkType
 import com.rjnr.pocketnode.data.gateway.models.SyncMode
 import com.rjnr.pocketnode.data.gateway.models.getCheckpoint
@@ -28,6 +29,8 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
+import kotlinx.serialization.Serializable
+import kotlinx.serialization.SerialName
 import kotlinx.serialization.encodeToString
 import kotlinx.serialization.json.Json
 import kotlin.concurrent.Volatile
@@ -321,6 +324,13 @@ class SyncCoordinator(
         /** @see SyncCoordinator.registeredActiveWalletId */
         val registeredActiveWalletId: String? get() = this@SyncCoordinator.registeredActiveWalletId
 
+        /** Candidate assembly and its native cursor snapshot share this registration lock. */
+        suspend fun pendingCandidateStatuses(
+            walletId: String,
+            lockScript: Script,
+            blockNumberHex: String,
+        ): List<CandidateRegistration> = pendingCandidateStatusesLocked(walletId, lockScript, blockNumberHex)
+
         /**
          * [setScriptsAndRecord] without taking the lock. [onLanded] runs the
          * moment the light client accepted the set, before the bookkeeping
@@ -516,40 +526,64 @@ class SyncCoordinator(
     }
 
     /**
-     * PENDING sub-account discovery candidates for [walletId] as registrable
-     * script statuses (#82 phase 2). Registered with walletId="" by callers —
-     * [setScriptsAndRecord] skips empty ids for the args→wallet mapping and
-     * sync_progress rows, so candidates never pollute per-wallet progress.
-     * Same fromBlock as the parent so candidates scan the parent's window.
-     * Capped to bound per-script filter cost; remaining PENDING slots
-     * register on later cycles as earlier ones resolve FOUND/EMPTY.
-     *
-     * MUST be included by EVERY path that issues CMD_SET_SCRIPTS_ALL for a
-     * wallet: ALL replaces the whole registered set, so a single-wallet
-     * re-registration that omits candidates silently unregisters them —
-     * the import flow's immediate resync did exactly that and killed
-     * discovery before the filter ever scanned (device-test, 2026-07).
-     * Non-parents have no candidate rows, so this is a cheap no-op for them.
+     * ALL must retain chain-axis FOUND scripts to keep indexing later spends.
+     * Preserve their current native cursor; only absent FOUND and PENDING
+     * discovery candidates use the historical scan start. Called under the
+     * registration lock by both multi-wallet and Android active-only assembly.
+     * Snapshot/store failures abort the registration rather than drop retained
+     * candidates or mistake an unreadable snapshot for an empty registered set.
      */
-    suspend fun pendingCandidateStatuses(
+    private suspend fun pendingCandidateStatusesLocked(
         walletId: String,
-        lockScript: com.rjnr.pocketnode.data.gateway.models.Script,
+        lockScript: Script,
         blockNumberHex: String,
-    ): List<CandidateRegistration> = runCatching {
-        selectCandidatesForRegistration(
+    ): List<CandidateRegistration> {
+        val candidates = selectCandidatesForRegistration(
             subAccountCandidateStore.getForParent(walletId),
             accountAxisCap = MAX_CANDIDATE_SCRIPTS_PER_PARENT,
-        ).map { candidate ->
-            CandidateRegistration(
-                candidate = candidate,
-                status = JniScriptStatus(
-                    script = lockScript.copy(args = candidate.scriptArgs),
-                    scriptType = "lock",
-                    blockNumber = blockNumberHex,
-                ),
-            )
+        )
+        val current = if (candidates.any { it.state == SubAccountCandidateRecord.STATE_FOUND }) {
+            registeredCandidateCursors()
+        } else emptyMap()
+        return candidates.map { candidate ->
+            val script = lockScript.copy(args = candidate.scriptArgs)
+            val from = if (candidate.state == SubAccountCandidateRecord.STATE_FOUND) {
+                current[script to "lock"] ?: blockNumberHex
+            } else blockNumberHex
+            CandidateRegistration(candidate, JniScriptStatus(script, "lock", from))
         }
-    }.getOrDefault(emptyList())
+    }
+
+    // Required script_type avoids JniScriptStatus's default silently treating
+    // an incomplete native snapshot row as a lock-script registration.
+    @Serializable
+    private data class RegisteredCandidateCursor(
+        val script: Script,
+        @SerialName("script_type") val scriptType: String,
+        @SerialName("block_number") val blockNumber: String,
+    )
+
+    private suspend fun registeredCandidateCursors(): Map<Pair<Script, String>, String> {
+        val raw = requireNotNull(getScriptsRaw()) { "Registered candidate cursors unavailable" }
+        val statuses = json.decodeFromString<List<RegisteredCandidateCursor>>(raw)
+        val cursors = mutableMapOf<Pair<Script, String>, String>()
+        for (status in statuses) {
+            require(status.scriptType in setOf("lock", "type") &&
+                status.script.codeHash.matches(Regex("0x[0-9a-fA-F]{64}")) &&
+                status.script.hashType in setOf("data", "type", "data1", "data2") &&
+                status.script.args.matches(Regex("0x([0-9a-fA-F]{2})*")) &&
+                status.blockNumber.matches(Regex("0x[0-9a-fA-F]+")) &&
+                status.blockNumber.removePrefix("0x").toLongOrNull(16) != null
+            ) { "Invalid registered candidate cursor" }
+            val identity = status.script to status.scriptType
+            require(identity !in cursors) { "Duplicate registered candidate cursor" }
+            cursors[identity] = status.blockNumber
+        }
+        // The mutex excludes other application registrations, not native scan
+        // progress. A later set can still rewind blocks scanned after this read;
+        // native coherent rollback/availability guards remain authoritative.
+        return cursors
+    }
 
     /**
      * Earliest cached transaction block for a wallet, or null when the cache

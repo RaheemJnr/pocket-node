@@ -610,17 +610,29 @@ class SendPipelineTest {
         for (status in listOf(com.rjnr.pocketnode.data.sync.TxFetchResult.InPool, com.rjnr.pocketnode.data.sync.TxFetchResult.NotFound)) {
             broadcasts.insert(original)
             pipelineOver(api(sendAnswer = "\"$PENDING_HASH\"")).retryBroadcast(ctx(this), PENDING_HASH).getOrThrow()
+            var statusLookups = 0
             val wd = com.rjnr.pocketnode.data.sync.BroadcastWatchdog(broadcasts,
-                com.rjnr.pocketnode.data.sync.TransactionStatusGateway { status }, transactions,
+                com.rjnr.pocketnode.data.sync.TransactionStatusGateway { statusLookups++; status }, transactions,
                 object : com.rjnr.pocketnode.data.gateway.TipSource {
                     override val tipFlow = kotlinx.coroutines.flow.MutableStateFlow(currentTip)
                     override suspend fun fetchAndPublishTip() = currentTip
                     override fun activeWalletAndNetworkOrNull() = WALLET to "TESTNET"
                 }, { true }, kotlinx.coroutines.test.StandardTestDispatcher(testScheduler), NoopLogger, clock)
-            repeat(3) { wd.checkAll(currentTip, WALLET, "TESTNET") }
+            // The stored retry row predates the slow-poll age threshold.
+            repeat(3) {
+                clock.advance(60_000L)
+                wd.checkAll(currentTip, WALLET, "TESTNET")
+            }
+            assertEquals(3, statusLookups)
+            assertEquals(if (status == com.rjnr.pocketnode.data.sync.TxFetchResult.NotFound) 3 else 0,
+                broadcasts.byHash.getValue(PENDING_HASH).nullCount)
             assertEquals("BROADCAST", broadcasts.byHash.getValue(PENDING_HASH).state)
             assertEquals(currentTip, broadcasts.byHash.getValue(PENDING_HASH).submittedAtTipBlock)
+            clock.advance(60_000L)
             wd.checkAll(currentTip + 25, WALLET, "TESTNET")
+            assertEquals(4, statusLookups)
+            assertEquals(if (status == com.rjnr.pocketnode.data.sync.TxFetchResult.NotFound) 4 else 0,
+                broadcasts.byHash.getValue(PENDING_HASH).nullCount)
             assertEquals("BROADCAST", broadcasts.byHash.getValue(PENDING_HASH).state)
         }
     }

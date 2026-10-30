@@ -112,7 +112,11 @@ class RegistrationLockTest {
             return tipJson
         }
 
-        override fun getScripts(): String? = scripts()
+        @Volatile var onScriptsRead: () -> Unit = {}
+        override fun getScripts(): String? {
+            onScriptsRead()
+            return scripts()
+        }
     }
 
     private class SignalLogger : Logger {
@@ -806,6 +810,95 @@ class RegistrationLockTest {
 
         assertEquals(null, db.syncProgressDao().get(OTHER, network.name))
         assertEquals(ACTIVE_PROGRESS, repository.getWalletSyncBlock(ACTIVE))
+    }
+
+    private suspend fun seedChainCandidate(byte: String, state: String, registeredFrom: Long = 0L) {
+        db.subAccountCandidateDao().insertAll(listOf(
+            com.rjnr.pocketnode.data.database.entity.SubAccountCandidateEntity(
+                parentWalletId = ACTIVE, derivationPath = "m/44'/309'/0'/1/$byte", accountIndex = 0,
+                scriptArgs = script(byte).args, state = state, createdAt = 1L, registeredFromBlock = registeredFrom,
+            )
+        ))
+    }
+
+    @Test
+    fun `FOUND candidate cursor survives both ALL registration callers while discovery keeps history`() = runBlocking {
+        build()
+        seedChainCandidate("dd", "FOUND", registeredFrom = 1_234L)
+        seedChainCandidate("ee", "FOUND")
+        seedChainCandidate("ff", "PENDING")
+        reportedScripts = statusesJson(script("dd") to 19_950_000L, script("ff") to 19_960_000L)
+        var cursorReads = 0
+        bridge.onScriptsRead = {
+            assertTrue("candidate cursor snapshot must be inside the registration lock", coordinator.isRegistrationLocked)
+            cursorReads++
+        }
+        for (strategy in listOf(SyncStrategy.ACTIVE_ONLY, SyncStrategy.ALL_WALLETS)) {
+            walletPreferences.setSyncStrategy(strategy)
+            bridge.setScriptsCalls.clear()
+            repository.registerAccountWithStrategy(savePreference = false).getOrThrow()
+            val (payload, command) = bridge.setScriptsCalls.single()
+            assertEquals(SyncCoordinator.CMD_SET_SCRIPTS_ALL, command)
+            val statuses = json.decodeFromString<List<JniScriptStatus>>(payload)
+            fun start(byte: String) = statuses.single { it.script == script(byte) && it.scriptType == "lock" }
+                .blockNumber.removePrefix("0x").toLong(16)
+            assertEquals("$strategy preserves FOUND", 19_950_000L, start("dd"))
+            assertEquals("$strategy starts absent FOUND historically", 19_800_000L, start("ee"))
+            assertEquals("$strategy does not clamp PENDING discovery", 19_800_000L, start("ff"))
+            assertEquals(1_234L, db.subAccountCandidateDao().getForParent(ACTIVE).single { it.scriptArgs == script("dd").args }.registeredFromBlock)
+        }
+        assertEquals(2, cursorReads)
+    }
+
+    @Test
+    fun `FOUND candidate does not borrow cursor from another full script or script type`() = runBlocking {
+        build()
+        seedChainCandidate("dd", "FOUND")
+        val expected = script("dd")
+        val collisions = listOf(
+            JniScriptStatus(expected.copy(codeHash = "0x" + "11".repeat(32)), "lock", "0x1306950"),
+            JniScriptStatus(expected.copy(hashType = "data"), "lock", "0x1306950"),
+            JniScriptStatus(expected, "type", "0x1306950"),
+        )
+        for (strategy in listOf(SyncStrategy.ACTIVE_ONLY, SyncStrategy.ALL_WALLETS)) {
+            walletPreferences.setSyncStrategy(strategy)
+            for (collision in collisions) {
+                reportedScripts = json.encodeToString(listOf(collision))
+                bridge.setScriptsCalls.clear()
+                repository.registerAccountWithStrategy(savePreference = false).getOrThrow()
+                val sent = json.decodeFromString<List<JniScriptStatus>>(bridge.setScriptsCalls.single().first)
+                val found = sent.single { it.script == expected && it.scriptType == "lock" }
+                assertEquals("$strategy $collision", 19_800_000L, found.blockNumber.removePrefix("0x").toLong(16))
+            }
+        }
+    }
+
+    @Test
+    fun `FOUND candidate unreadable snapshot aborts both ALL callers without recording registration`() = runBlocking {
+        build()
+        seedChainCandidate("dd", "FOUND", registeredFrom = 1_234L)
+        val valid = JniScriptStatus(script("dd"), "lock", "0x1306950")
+        val unreadable = listOf(
+            null, "not json", "{}",
+            json.encodeToString(listOf(valid)).replace("\"script_type\":\"lock\",", ""),
+            json.encodeToString(listOf(valid.copy(scriptType = "unknown"))),
+            json.encodeToString(listOf(valid.copy(script = script("dd").copy(codeHash = "bad")))),
+            json.encodeToString(listOf(valid.copy(blockNumber = "not-hex"))),
+            json.encodeToString(listOf(valid.copy(blockNumber = "0x-1"))),
+            json.encodeToString(listOf(valid.copy(blockNumber = "0xffffffffffffffff"))),
+            json.encodeToString(listOf(valid, valid.copy(blockNumber = "0x100"))),
+        )
+        for (strategy in listOf(SyncStrategy.ACTIVE_ONLY, SyncStrategy.ALL_WALLETS)) {
+            walletPreferences.setSyncStrategy(strategy)
+            for (snapshot in unreadable) {
+                reportedScripts = snapshot
+                bridge.setScriptsCalls.clear()
+                val result = repository.registerAccountWithStrategy(savePreference = false)
+                assertTrue("$strategy must refuse unreadable cursor snapshot: $snapshot", result.isFailure)
+                assertTrue("no ALL set may land on snapshot failure", bridge.setScriptsCalls.isEmpty())
+                assertEquals(1_234L, db.subAccountCandidateDao().getForParent(ACTIVE).single().registeredFromBlock)
+            }
+        }
     }
 
     private fun assertNotNullJob(): kotlinx.coroutines.Job {
