@@ -279,11 +279,13 @@ class SendViewModel @Inject constructor(
             try {
                 if (!isCurrentSource()) return@launch
                 val result = repository.getCells(address = source.address)
-                // Result can contain cancellation; neither a late success nor its
-                // fallback zero may overwrite a replacement request's preview.
+                // Result can contain cancellation; obsolete requests must not
+                // change a replacement request's preview.
                 coroutineContext.ensureActive()
                 if (!isCurrentSource()) return@launch
-                val count = result.map { it.items.size }.getOrNull() ?: 0
+                // Failure is not an empty wallet: retain this source's last
+                // successful snapshot without rearming the bounded read budget.
+                val count = result.getOrNull()?.items?.size ?: return@launch
                 _uiState.update { it.copy(spendableCellCount = count).refreshBulkPreview() }
             } finally {
                 if (isCurrentSource()) {

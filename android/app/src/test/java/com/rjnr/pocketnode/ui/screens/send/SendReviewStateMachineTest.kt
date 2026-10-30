@@ -993,6 +993,54 @@ class SendReviewStateMachineTest {
         } finally { gate.complete(Unit); androidx.lifecycle.ViewModelStore().apply { put("readiness", vm); clear() }; runCurrent() }
     }
 
+    @Test fun `bulk final count failure retains the successful same-source count without retrying`() = runTest(testDispatcher) {
+        assertFinalBulkCountResult(failure = true)
+    }
+
+    @Test fun `bulk final successful empty count clears the previous count without retrying`() = runTest(testDispatcher) {
+        assertFinalBulkCountResult(failure = false)
+    }
+
+    private suspend fun kotlinx.coroutines.test.TestScope.assertFinalBulkCountResult(failure: Boolean) {
+        val stages = MutableStateFlow<com.rjnr.pocketnode.data.gateway.CellCountReadiness?>(readiness())
+        every { repository.cellCountReadiness } returns stages
+        val gate = kotlinx.coroutines.CompletableDeferred<Unit>()
+        var calls = 0
+        coEvery { repository.getCells(any()) } coAnswers {
+            val call = ++calls; kotlinx.coroutines.yield()
+            if (call == 1) {
+                Result.success(com.rjnr.pocketnode.data.gateway.models.CellsResponse(plannedTransfer.selectedCells, null))
+            } else {
+                gate.await()
+                if (failure) Result.failure(IllegalStateException("cell read unavailable"))
+                else Result.success(com.rjnr.pocketnode.data.gateway.models.CellsResponse(emptyList(), null))
+            }
+        }
+        every { transactionBuilder.estimateTransferFeeForDraft(any(), any(), any(), any()) } answers { firstArg<Int>().toLong() * 1000L }
+        val vm = newViewModel(); runCurrent()
+        try {
+            vm.updateSendMode(SendMode.BULK); vm.updateBulkRecipients(recipient); vm.updateAmount("600"); runCurrent()
+            assertEquals(4, vm.uiState.value.spendableCellCount)
+            assertEquals(3000L, vm.uiState.value.estimatedFee)
+            stages.value = readiness(stage = com.rjnr.pocketnode.data.gateway.CellCountStage.CAUGHT_UP); runCurrent()
+            assertEquals(2, calls)
+            assertEquals(4, vm.uiState.value.spendableCellCount)
+            gate.complete(Unit); runCurrent()
+            assertEquals(if (failure) 4 else 0, vm.uiState.value.spendableCellCount)
+            assertEquals(if (failure) 3000L else 1000L, vm.uiState.value.estimatedFee)
+            val finalPreview = vm.uiState.value
+            repeat(3) {
+                stages.value = readiness(); runCurrent()
+                stages.value = readiness(stage = com.rjnr.pocketnode.data.gateway.CellCountStage.CAUGHT_UP); runCurrent()
+            }
+            assertEquals(2, calls)
+            assertEquals(finalPreview, vm.uiState.value)
+            stages.value = readiness(epoch = 2, stage = com.rjnr.pocketnode.data.gateway.CellCountStage.WAITING); runCurrent()
+            assertEquals(0, vm.uiState.value.spendableCellCount)
+            assertEquals(2, calls)
+        } finally { gate.complete(Unit); androidx.lifecycle.ViewModelStore().apply { put("finalCountResult", vm); clear() }; runCurrent() }
+    }
+
     @Test fun `bulk readiness already caught up coalesces stages and never rearms failed final read`() = runTest(testDispatcher) {
         val stages = MutableStateFlow<com.rjnr.pocketnode.data.gateway.CellCountReadiness?>(readiness(stage = com.rjnr.pocketnode.data.gateway.CellCountStage.CAUGHT_UP))
         every { repository.cellCountReadiness } returns stages
