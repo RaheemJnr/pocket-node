@@ -7,6 +7,7 @@ import com.rjnr.pocketnode.core.log.NoopLogger
 import com.rjnr.pocketnode.data.database.AppDatabase
 import com.rjnr.pocketnode.data.gateway.models.BalanceResponse
 import com.rjnr.pocketnode.data.gateway.models.TransactionRecord
+import io.mockk.every
 import io.mockk.coEvery
 import io.mockk.spyk
 import kotlinx.coroutines.test.runTest
@@ -29,7 +30,7 @@ class CacheManagerTest {
         db = Room.inMemoryDatabaseBuilder(context, AppDatabase::class.java)
             .allowMainThreadQueries()
             .build()
-        cacheManager = CacheManager(db.transactionDao(), db.balanceCacheDao(), NoopLogger)
+        cacheManager = CacheManager(db.transactionDao(), db.balanceCacheDao(), NoopLogger, verificationCacheGate = com.rjnr.pocketnode.data.gateway.readyVerificationGate())
     }
 
     @After
@@ -130,7 +131,7 @@ class CacheManagerTest {
             batchSizes.add(hashes.size)
             realDao.getKnownFees(hashes)
         }
-        val manager = CacheManager(spyDao, db.balanceCacheDao(), NoopLogger)
+        val manager = CacheManager(spyDao, db.balanceCacheDao(), NoopLogger, verificationCacheGate = com.rjnr.pocketnode.data.gateway.readyVerificationGate())
 
         val records = (0 until 1_500).map { i ->
             record(txHash = "0x" + i.toString().padStart(64, '0'), feeShannons = null)
@@ -215,4 +216,13 @@ class CacheManagerTest {
         confirmations = 12,
         feeShannons = feeShannons,
     )
+    @Test
+    fun `cached snapshot cannot publish after gate closes and reopens`() = runTest {
+        val gate = readyVerificationGate()
+        every { gate.currentRevision() } returnsMany listOf(0L, 1L)
+        val manager = CacheManager(db.transactionDao(), db.balanceCacheDao(), NoopLogger, gate)
+        manager.cacheBalance(BalanceResponse("address", "0x64", "1", "0x1"), "MAINNET")
+        assertNull(manager.getCachedBalance("MAINNET"))
+    }
+
 }

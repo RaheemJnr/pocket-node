@@ -26,6 +26,7 @@ import com.rjnr.pocketnode.data.database.MIGRATION_14_15
 import com.rjnr.pocketnode.data.database.MIGRATION_15_16
 import com.rjnr.pocketnode.data.database.MIGRATION_16_17
 import com.rjnr.pocketnode.data.database.MIGRATION_17_18
+import com.rjnr.pocketnode.data.database.MIGRATION_18_19
 import com.rjnr.pocketnode.data.database.dao.BalanceCacheDao
 import com.rjnr.pocketnode.data.database.dao.ContactDao
 import com.rjnr.pocketnode.data.database.dao.DaoCellDao
@@ -119,7 +120,7 @@ object AppModule {
     fun provideKeyBackupManager(
         @ApplicationContext context: Context,
         logger: Logger,
-    ): KeyBackupManager = KeyBackupManager(File(context.filesDir, "key_backups"), logger)
+    ): KeyBackupManager = KeyBackupManager(File(context.filesDir, "key_backups"), logger, com.rjnr.pocketnode.data.wallet.WalletStorageBoundary(context))
 
     @Provides
     @Singleton
@@ -163,7 +164,7 @@ object AppModule {
     fun provideAppDatabase(@ApplicationContext context: Context): AppDatabase =
         Room.databaseBuilder(context, AppDatabase::class.java, "pocket_node.db")
             .setJournalMode(RoomDatabase.JournalMode.WRITE_AHEAD_LOGGING)
-            .addMigrations(MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4, MIGRATION_4_5, MIGRATION_5_6, MIGRATION_6_7, MIGRATION_7_8, MIGRATION_8_9, MIGRATION_9_10, MIGRATION_10_11, MIGRATION_11_12, MIGRATION_12_13, MIGRATION_13_14, MIGRATION_14_15, MIGRATION_15_16, MIGRATION_16_17, MIGRATION_17_18)
+            .addMigrations(MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4, MIGRATION_4_5, MIGRATION_5_6, MIGRATION_6_7, MIGRATION_7_8, MIGRATION_8_9, MIGRATION_9_10, MIGRATION_10_11, MIGRATION_11_12, MIGRATION_12_13, MIGRATION_13_14, MIGRATION_14_15, MIGRATION_15_16, MIGRATION_16_17, MIGRATION_17_18, MIGRATION_18_19)
             .build()
 
     @Provides
@@ -224,22 +225,24 @@ object AppModule {
     @Provides
     @Singleton
     fun provideKeyStoreMigrationHelper(
+        database: AppDatabase,
         keyMaterialDao: KeyMaterialDao,
         encryptionManager: KeystoreEncryptionManager,
         @Named("migrationPrefs") migrationPrefs: SharedPreferences,
         logger: Logger,
-    ): KeyStoreMigrationHelper = KeyStoreMigrationHelper(keyMaterialDao, encryptionManager, migrationPrefs, logger)
+    ): KeyStoreMigrationHelper = KeyStoreMigrationHelper(keyMaterialDao, encryptionManager, migrationPrefs, logger, database)
 
     @Provides
     @Singleton
     fun provideKeystoreV2MigrationHelper(
+        database: AppDatabase,
         keyMaterialDao: KeyMaterialDao,
         encryptionManager: KeystoreEncryptionManager,
         @Named("migrationPrefs") migrationPrefs: SharedPreferences,
         logger: Logger,
     ): com.rjnr.pocketnode.data.crypto.KeystoreV2MigrationHelper =
         com.rjnr.pocketnode.data.crypto.KeystoreV2MigrationHelper(
-            keyMaterialDao, encryptionManager, migrationPrefs, logger = logger
+            keyMaterialDao, encryptionManager, migrationPrefs, logger = logger, database = database
         )
 
     @Provides
@@ -248,7 +251,8 @@ object AppModule {
         transactionDao: TransactionDao,
         balanceCacheDao: BalanceCacheDao,
         logger: Logger,
-    ): CacheManager = CacheManager(transactionDao, balanceCacheDao, logger)
+        verificationCacheGate: com.rjnr.pocketnode.data.gateway.VerificationCacheGate,
+    ): CacheManager = CacheManager(transactionDao, balanceCacheDao, logger, verificationCacheGate)
 
     @Provides
     @Singleton
@@ -258,8 +262,9 @@ object AppModule {
         pendingDaoWithdrawDao: com.rjnr.pocketnode.data.database.dao.PendingDaoWithdrawDao,
         pendingDaoUnlockDao: com.rjnr.pocketnode.data.database.dao.PendingDaoUnlockDao,
         logger: Logger,
+        verificationCacheGate: com.rjnr.pocketnode.data.gateway.VerificationCacheGate,
     ): DaoSyncManager = DaoSyncManager(
-        headerCacheDao, daoCellDao, pendingDaoWithdrawDao, pendingDaoUnlockDao, logger,
+        headerCacheDao, daoCellDao, pendingDaoWithdrawDao, pendingDaoUnlockDao, logger, verificationCacheGate,
     )
 
     @Provides
@@ -287,9 +292,10 @@ object AppModule {
         transactionBuilder: TransactionBuilder,
         sendPipeline: com.rjnr.pocketnode.data.send.SendPipeline,
         logger: Logger,
+        verificationCacheGate: com.rjnr.pocketnode.data.gateway.VerificationCacheGate,
     ): com.rjnr.pocketnode.data.gateway.DaoGateway = com.rjnr.pocketnode.data.gateway.DaoGateway(
         appDatabase, daoSyncManager, daoDepositReader, daoHeaderResolver,
-        lightClient, transactionBuilder, sendPipeline, logger,
+        lightClient, transactionBuilder, sendPipeline, logger, verificationCacheGate,
     )
 
     @Provides

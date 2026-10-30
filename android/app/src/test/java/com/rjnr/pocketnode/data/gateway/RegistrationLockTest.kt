@@ -220,7 +220,7 @@ class RegistrationLockTest {
         RoomSubAccountCandidateStore(db.subAccountCandidateDao()),
         RoomTransactionStore(
             db.transactionDao(),
-            CacheManager(db.transactionDao(), db.balanceCacheDao(), NoopLogger),
+            CacheManager(db.transactionDao(), db.balanceCacheDao(), NoopLogger, verificationCacheGate = com.rjnr.pocketnode.data.gateway.readyVerificationGate()),
         ),
         bridge,
         walletPreferences,

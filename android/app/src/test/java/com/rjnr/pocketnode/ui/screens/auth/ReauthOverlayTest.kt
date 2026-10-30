@@ -98,6 +98,7 @@ class ReauthOverlayTest {
     private val authManager = mockk<AuthManager>(relaxed = true).apply {
         every { isBiometricEnrolled() } returns false
         every { isBiometricEnabled() } returns false
+        every { setSessionPinIfCurrent(any(), any()) } returns true
     }
     private val migrationHelper = mockk<KeystoreV2MigrationHelper>(relaxed = true).apply {
         coEvery { pendingWalletIds() } returns emptyList()
@@ -115,8 +116,7 @@ class ReauthOverlayTest {
             )
             PinViewModel::class.java -> PinViewModel(pinManager, authManager)
             ForgotPinViewModel::class.java -> ForgotPinViewModel(
-                mockk(relaxed = true), mockk(relaxed = true), pinManager, mockk(relaxed = true),
-                mockk(relaxed = true), NoopLogger,
+                mockk(relaxed = true), mockk(relaxed = true), NoopLogger,
             )
             else -> error("unexpected $modelClass")
         }.also { created += it } as T
@@ -317,7 +317,7 @@ class ReauthOverlayTest {
         Thread.sleep(200)
         idle()
 
-        verify(exactly = 0) { authManager.setSessionPin(any()) }
+        verify(exactly = 0) { authManager.setSessionPinIfCurrent(any(), any()) }
         assertLockedOnBiometricLevel()
     }
 

@@ -18,7 +18,7 @@ use ckb_types::{
     core::{BlockNumber, EpochNumber, HeaderView},
     packed,
     prelude::*,
-    utilities::merkle_mountain_range::VerifiableHeader,
+    utilities::{compact_to_difficulty, merkle_mountain_range::VerifiableHeader},
     U256,
 };
 
@@ -46,7 +46,7 @@ use super::{
 };
 
 use crate::protocols::{GET_BLOCKS_PROOF_LIMIT, GET_TRANSACTIONS_PROOF_LIMIT, LAST_N_BLOCKS};
-use crate::storage::Storage;
+use crate::storage::{LightClientStorage, Storage};
 use crate::utils::network::prove_or_download_matched_blocks;
 
 pub struct LightClientProtocol {
@@ -298,6 +298,30 @@ impl LightClientProtocol {
             );
             return Err(StatusCode::InvalidChainRoot.with_context(errmsg));
         }
+        Self::check_total_difficulty(verifiable_header)
+    }
+
+    fn check_total_difficulty(verifiable_header: &VerifiableHeader) -> Result<(), Status> {
+        let header = verifiable_header.header();
+        let parent_total_difficulty: U256 = verifiable_header
+            .parent_chain_root()
+            .total_difficulty()
+            .into();
+        let block_difficulty = compact_to_difficulty(header.compact_target());
+        if parent_total_difficulty
+            .checked_add(&block_difficulty)
+            .is_none()
+        {
+            let errmsg = format!(
+                "failed to verify total difficulty for block#{}, hash: {:#x}, \
+                 parent total difficulty: {:#x}, block difficulty: {:#x}",
+                header.number(),
+                header.hash(),
+                parent_total_difficulty,
+                block_difficulty,
+            );
+            return Err(StatusCode::InvalidTotalDifficulty.with_context(errmsg));
+        }
         Ok(())
     }
 
@@ -312,26 +336,6 @@ impl LightClientProtocol {
         trace!("peer {}: update last state", peer_index);
         self.peers().update_last_state(peer_index, last_state)?;
         Ok(())
-    }
-
-    /// Update the prove state to the child block.
-    /// - Update the peer's cache.
-    /// - Try to update the storage without caring about fork.
-    async fn update_prove_state_to_child(
-        &self,
-        peer_index: PeerIndex,
-        new_prove_state: ProveState,
-    ) -> Result<(), Status> {
-        let (old_total_difficulty, _) = self.storage.get_last_state();
-        let new_total_difficulty = new_prove_state.get_last_header().total_difficulty();
-        if new_total_difficulty > old_total_difficulty {
-            self.storage.update_last_state(
-                &new_total_difficulty,
-                &new_prove_state.get_last_header().header().data(),
-                new_prove_state.get_last_headers(),
-            );
-        }
-        self.peers().update_prove_state(peer_index, new_prove_state)
     }
 
     /// Update the prove state base on the previous request.
@@ -556,27 +560,15 @@ impl LightClientProtocol {
             }
         }
 
-        if peers_with_data.len() < required_peers_count {
-            debug!(
-                "no enough peers for finalizing check points, \
-                requires {} but got {}",
-                required_peers_count,
-                peers_with_data.len()
-            );
-            return;
-        }
-        trace!(
-            "requires {} peers for finalizing check points and got {}",
-            required_peers_count,
-            peers_with_data.len()
-        );
         let (last_cpindex, last_check_point) = self.storage.get_last_check_point();
         trace!(
             "finalized check point is {}, {:#x}",
             last_cpindex,
             last_check_point
         );
-        // Clean finalized check points for new proved peers.
+        // Normalizing peers against an already finalized local check point does not require a
+        // quorum. Do it before checking the peer count so a quorum loss cannot leave stale start
+        // indexes that prevent block filter hash requests.
         {
             let mut peers_should_be_skipped = Vec::new();
             for (peer_index, (start_cpindex, check_points)) in peers_with_data.iter_mut() {
@@ -630,7 +622,7 @@ impl LightClientProtocol {
             }
         }
         if peers_with_data.len() < required_peers_count {
-            trace!(
+            debug!(
                 "no enough peers for finalizing check points after cleaning, \
                 requires {} but got {}",
                 required_peers_count,
@@ -638,6 +630,11 @@ impl LightClientProtocol {
             );
             return;
         }
+        trace!(
+            "requires {} peers for finalizing check points and got {}",
+            required_peers_count,
+            peers_with_data.len()
+        );
         // Find a new check point to finalized.
         let check_point_opt =
             {
@@ -790,8 +787,16 @@ impl LightClientProtocol {
                     .unwrap_or(false)
             }) {
                 debug!("send transaction proof request to peer: {}", peer_index);
+                let dedup_hashes: Vec<_> = {
+                    let mut seen = std::collections::HashSet::new();
+                    tx_hashes
+                        .iter()
+                        .filter(|h| seen.insert(*h))
+                        .cloned()
+                        .collect()
+                };
                 let content = packed::GetTransactionsProof::new_builder()
-                    .tx_hashes(tx_hashes.to_vec().pack())
+                    .tx_hashes(dedup_hashes.clone().pack())
                     .last_hash(last_hash.clone())
                     .build();
                 let message = packed::LightClientMessage::new_builder()
@@ -809,7 +814,7 @@ impl LightClientProtocol {
                         format!("nc.send_message LightClientMessage, error: {:?}", err);
                     info!("{}", error_message);
                 }
-                self.peers.fetching_idle_txs(tx_hashes, now);
+                self.peers.fetching_idle_txs(&dedup_hashes, now);
             } else {
                 debug!("all valid peers are busy for fetching transactions");
                 break;

@@ -9,6 +9,7 @@ import com.rjnr.pocketnode.data.database.AppDatabase
 import com.rjnr.pocketnode.data.database.entity.PendingDaoUnlockEntity
 import com.rjnr.pocketnode.data.database.entity.TransactionEntity
 import com.rjnr.pocketnode.data.gateway.models.DaoCellStatus
+import com.rjnr.pocketnode.data.gateway.models.EpochInfo
 import com.rjnr.pocketnode.data.gateway.models.DaoDeposit
 import com.rjnr.pocketnode.data.gateway.models.JniHeaderView
 import com.rjnr.pocketnode.data.gateway.models.JniTransactionWithStatus
@@ -28,6 +29,10 @@ import com.rjnr.pocketnode.data.wallet.WalletInfo
 import io.mockk.coEvery
 import io.mockk.every
 import io.mockk.mockk
+import io.mockk.spyk
+import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.async
+import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.test.runTest
@@ -72,6 +77,7 @@ class DaoGatewayUnlockTest {
     private lateinit var depositReader: DaoDepositReader
     private lateinit var lightClient: LightClientReadOnly
     private lateinit var gateway: DaoGateway
+    private lateinit var verificationGate: VerificationCacheGate
 
     private val walletId = "wallet-1"
     private val network = NetworkType.TESTNET
@@ -88,14 +94,16 @@ class DaoGatewayUnlockTest {
         db = Room.inMemoryDatabaseBuilder(context, AppDatabase::class.java)
             .allowMainThreadQueries()
             .build()
+        verificationGate = VerificationCacheGate(context, db)
+        runBlocking { verificationGate.reconcile(epochClient("a"), network) }
         daoSyncManager = DaoSyncManager(
             db.headerCacheDao(),
             db.daoCellDao(),
             db.pendingDaoWithdrawDao(),
             db.pendingDaoUnlockDao(),
-            NoopLogger,
-        )
+            NoopLogger, verificationCacheGate = verificationGate)
         depositReader = mockk()
+        coEvery { depositReader.revalidateCachedWithdrawing(any(), any(), any()) } answers { firstArg() }
         // A real LightClientReadOnly over a faked bridge: mocking its
         // Result-returning members directly trips mockk's value-class boxing.
         val json = Json { ignoreUnknownKeys = true }
@@ -111,7 +119,78 @@ class DaoGatewayUnlockTest {
             transactionBuilder = mockk<TransactionBuilder>(relaxed = true),
             sendPipeline = mockk<SendPipeline>(relaxed = true),
             logger = NoopLogger,
+            verificationCacheGate = verificationGate,
         )
+    }
+
+    private fun epochClient(letter: String): LightClientApi = mockk {
+        every { callRpc("get_verification_epoch") } returns
+            """{"result":{"version":1,"generation":"${letter.repeat(32)}"}}"""
+    }
+
+    private suspend fun markWithdrawInFlight() {
+        db.pendingDaoWithdrawDao().upsert(com.rjnr.pocketnode.data.database.entity.PendingDaoWithdrawEntity(
+            withdrawingOutPoint.txHash, withdrawingOutPoint.index, unlockTxHash, walletId, network.name, 1))
+    }
+
+    private suspend fun assertBothMarkersRemain() {
+        assertEquals(1, db.pendingDaoUnlockDao().getByWalletAndNetwork(walletId, network.name).size)
+        assertEquals(1, db.pendingDaoWithdrawDao().getByWalletAndNetwork(walletId, network.name).size)
+    }
+
+    @Test fun `closed gate cannot retire markers from pre-handoff block association`() = runTest {
+        markUnlockInFlight("CONFIRMED")
+        markWithdrawInFlight()
+        coEvery { depositReader.list(any(), any(), any(), any()) } returns emptyList()
+        verificationGate.close()
+        val result = gateway.getDaoDeposits(ctx())
+        assertBothMarkersRemain()
+        assertTrue(result.isFailure)
+        verificationGate.reconcile(epochClient("b"), network)
+        gateway.getDaoDeposits(ctx()).getOrThrow()
+        assertBothMarkersRemain()
+        chainStatus = committedOnChain()
+        gateway.getDaoDeposits(ctx()).getOrThrow()
+        assertTrue(db.pendingDaoUnlockDao().getByWalletAndNetwork(walletId, network.name).isEmpty())
+        assertTrue(db.pendingDaoWithdrawDao().getByWalletAndNetwork(walletId, network.name).isEmpty())
+    }
+
+    @Test fun `suspended pre-epoch reconciliation cannot mutate markers after cleanup`() = runTest {
+        markUnlockInFlight("CONFIRMED")
+        markWithdrawInFlight()
+        coEvery { depositReader.list(any(), any(), any(), any()) } answers {
+            arg<MutableList<JniHeaderView>>(3).add(tipHeader())
+            emptyList()
+        }
+        val captured = CompletableDeferred<Unit>()
+        val resume = CompletableDeferred<Unit>()
+        val original = db.transactionDao()
+        val paused = spyk(original)
+        var reads = 0
+        coEvery { paused.getByTxHash(unlockTxHash) } coAnswers {
+            val row = original.getByTxHash(unlockTxHash)
+            // Unlock evidence was already captured; now suspend the withdraw evidence read.
+            if (++reads == 2) { captured.complete(Unit); resume.await() }
+            row
+        }
+        val readsThrough = spyk(db)
+        every { readsThrough.transactionDao() } returns paused
+        val suspendedGateway = DaoGateway(readsThrough, daoSyncManager, depositReader,
+            mockk(relaxed = true), lightClient, mockk(relaxed = true), mockk(relaxed = true), NoopLogger, verificationGate)
+        val refresh = async { suspendedGateway.getDaoDeposits(ctx()) }
+        captured.await()
+        assertTrue("read/stage phase must not write headers", db.headerCacheDao().getByNetwork(network.name).isEmpty())
+        verificationGate.reconcile(epochClient("b"), network)
+        resume.complete(Unit)
+        val result = refresh.await()
+        assertBothMarkersRemain()
+        assertTrue(db.headerCacheDao().getByNetwork(network.name).isEmpty())
+        assertTrue(result.isFailure)
+        chainStatus = committedOnChain()
+        gateway.getDaoDeposits(ctx()).getOrThrow()
+        assertEquals(1, db.headerCacheDao().getByNetwork(network.name).size)
+        assertTrue(db.pendingDaoUnlockDao().getByWalletAndNetwork(walletId, network.name).isEmpty())
+        assertTrue(db.pendingDaoWithdrawDao().getByWalletAndNetwork(walletId, network.name).isEmpty())
     }
 
     private fun tipHeader() = JniHeaderView(
@@ -182,13 +261,16 @@ class DaoGatewayUnlockTest {
         // exactly what used to push the row into the outside-window branch.
         depositBlockNumber = 500L,
         depositBlockHash = "0x" + "aa".repeat(32),
+        depositEpoch = EpochInfo(100, 0, 1800),
+        withdrawEpoch = EpochInfo(200, 0, 1800),
+        unlockEpoch = EpochInfo(201, 0, 1800),
         withdrawBlockNumber = 900L,
         withdrawBlockHash = "0x" + "bb".repeat(32),
     )
 
     /** Seed dao_cells with the withdrawing row, the way a live scan would. */
     private suspend fun seedCachedWithdrawingRow(status: DaoCellStatus = DaoCellStatus.UNLOCKABLE) {
-        coEvery { depositReader.list(any(), any(), any()) } returns listOf(withdrawingDeposit(status))
+        coEvery { depositReader.list(any(), any(), any(), any()) } returns listOf(withdrawingDeposit(status))
         gateway.getDaoDeposits(ctx()).getOrThrow()
     }
 
@@ -211,13 +293,13 @@ class DaoGatewayUnlockTest {
 
     private fun unlockTxRow(txStatus: String) = TransactionEntity(
         txHash = unlockTxHash,
-        blockNumber = "0x0",
-        blockHash = "",
+        blockNumber = if (txStatus == "CONFIRMED") "0x3e8" else "0x0",
+        blockHash = if (txStatus == "CONFIRMED") "0x" + "ff".repeat(32) else "",
         timestamp = System.currentTimeMillis(),
         balanceChange = "0x0",
         direction = "dao_unlock",
         fee = "0x0",
-        confirmations = 0,
+        confirmations = if (txStatus == "CONFIRMED") 1 else 0,
         blockTimestampHex = null,
         network = network.name,
         status = txStatus,
@@ -232,7 +314,7 @@ class DaoGatewayUnlockTest {
         markUnlockInFlight(txStatus = "CONFIRMED")
 
         // The unlock committed: the light client no longer returns the cell.
-        coEvery { depositReader.list(any(), any(), any()) } returns emptyList()
+        coEvery { depositReader.list(any(), any(), any(), any()) } returns emptyList()
         val deposits = gateway.getDaoDeposits(ctx()).getOrThrow()
 
         assertTrue("retired deposit must not be in the list: $deposits", deposits.isEmpty())
@@ -256,7 +338,7 @@ class DaoGatewayUnlockTest {
         seedCachedWithdrawingRow()
         markUnlockInFlight(txStatus = "PENDING")
 
-        coEvery { depositReader.list(any(), any(), any()) } returns emptyList()
+        coEvery { depositReader.list(any(), any(), any(), any()) } returns emptyList()
         val deposits = gateway.getDaoDeposits(ctx()).getOrThrow()
 
         assertEquals(DaoCellStatus.UNLOCKING, deposits.single().status)
@@ -282,7 +364,7 @@ class DaoGatewayUnlockTest {
         // in between, the write-back must not restore the old status.
         seedCachedWithdrawingRow()
         markUnlockInFlight(txStatus = "PENDING")
-        coEvery { depositReader.list(any(), any(), any()) } returns emptyList()
+        coEvery { depositReader.list(any(), any(), any(), any()) } returns emptyList()
         coEvery { depositReader.recomputeCachedCompensation(any(), any()) } coAnswers {
             daoSyncManager.updateStatus(
                 withdrawingOutPoint.txHash, withdrawingOutPoint.index, DaoCellStatus.COMPLETED.name,
@@ -302,7 +384,7 @@ class DaoGatewayUnlockTest {
         // Outside the sync window, no unlock in flight: the stored amount
         // (computed before #550 with 61 CKB occupied) is replaced.
         seedCachedWithdrawingRow()
-        coEvery { depositReader.list(any(), any(), any()) } returns emptyList()
+        coEvery { depositReader.list(any(), any(), any(), any()) } returns emptyList()
         coEvery { depositReader.recomputeCachedCompensation(any(), any()) } returns 7_000L
 
         val deposits = gateway.getDaoDeposits(ctx()).getOrThrow()
@@ -316,7 +398,7 @@ class DaoGatewayUnlockTest {
     @Test
     fun `a cancelled compensation recompute is not swallowed`() = runTest {
         seedCachedWithdrawingRow()
-        coEvery { depositReader.list(any(), any(), any()) } returns emptyList()
+        coEvery { depositReader.list(any(), any(), any(), any()) } returns emptyList()
         coEvery { depositReader.recomputeCachedCompensation(any(), any()) } throws
             kotlinx.coroutines.CancellationException("cancelled")
 
@@ -332,7 +414,7 @@ class DaoGatewayUnlockTest {
     fun `a failed compensation recompute keeps the stored row`() = runTest {
         seedCachedWithdrawingRow()
         val stored = daoSyncManager.getByOutPoint(withdrawingOutPoint.txHash, withdrawingOutPoint.index)!!.compensation
-        coEvery { depositReader.list(any(), any(), any()) } returns emptyList()
+        coEvery { depositReader.list(any(), any(), any(), any()) } returns emptyList()
         coEvery { depositReader.recomputeCachedCompensation(any(), any()) } throws IllegalStateException("bridge")
 
         val deposits = gateway.getDaoDeposits(ctx()).getOrThrow()
@@ -345,7 +427,7 @@ class DaoGatewayUnlockTest {
         // The dangerous case: out-of-window cell, so absence proves nothing.
         seedCachedWithdrawingRow()
         markUnlockInFlight(txStatus = "PENDING")
-        coEvery { depositReader.list(any(), any(), any()) } returns emptyList()
+        coEvery { depositReader.list(any(), any(), any(), any()) } returns emptyList()
         gateway.getDaoDeposits(ctx()).getOrThrow()
 
         // The watchdog finally scores the transaction FAILED.
@@ -370,7 +452,7 @@ class DaoGatewayUnlockTest {
         )
         chainStatus = committedOnChain()
 
-        coEvery { depositReader.list(any(), any(), any()) } returns emptyList()
+        coEvery { depositReader.list(any(), any(), any(), any()) } returns emptyList()
         val deposits = gateway.getDaoDeposits(ctx()).getOrThrow()
 
         assertTrue("a chain-confirmed unlock retires the row: $deposits", deposits.isEmpty())
@@ -382,7 +464,7 @@ class DaoGatewayUnlockTest {
     }
 
     @Test
-    fun `an aged marker the node cannot resolve hands the position back, never retires it`() = runTest {
+    fun `an aged unresolved marker retains local intent without retiring the position`() = runTest {
         // The hazard: an out-of-window cell is ALWAYS absent from the scan, and
         // its transaction can stay unscored locally for longer than the grace
         // period (a swallowed pending-row insert, or the app simply not running
@@ -395,7 +477,7 @@ class DaoGatewayUnlockTest {
         )
         chainStatus = null // node unavailable
 
-        coEvery { depositReader.list(any(), any(), any()) } returns emptyList()
+        coEvery { depositReader.list(any(), any(), any(), any()) } returns emptyList()
         val deposits = gateway.getDaoDeposits(ctx()).getOrThrow()
 
         assertEquals(
@@ -404,7 +486,8 @@ class DaoGatewayUnlockTest {
             daoSyncManager.getByOutPoint(withdrawingOutPoint.txHash, withdrawingOutPoint.index)?.status,
         )
         assertEquals(1, deposits.size)
-        assertTrue(db.pendingDaoUnlockDao().getByWalletAndNetwork(walletId, network.name).isEmpty())
+        assertEquals(1, db.pendingDaoUnlockDao().getByWalletAndNetwork(walletId, network.name).size)
+        assertEquals(DaoCellStatus.UNLOCKING, deposits.single().status)
     }
 
     @Test
@@ -431,7 +514,7 @@ class DaoGatewayUnlockTest {
         markUnlockInFlight(txStatus = "PENDING")
         chainStatus = committedOnChain() // would retire it if consulted
 
-        coEvery { depositReader.list(any(), any(), any()) } returns emptyList()
+        coEvery { depositReader.list(any(), any(), any(), any()) } returns emptyList()
         val deposits = gateway.getDaoDeposits(ctx()).getOrThrow()
 
         assertEquals(DaoCellStatus.UNLOCKING, deposits.single().status)
@@ -442,7 +525,7 @@ class DaoGatewayUnlockTest {
     fun `a retired row stays retired across a relaunch`() = runTest {
         seedCachedWithdrawingRow()
         markUnlockInFlight(txStatus = "CONFIRMED")
-        coEvery { depositReader.list(any(), any(), any()) } returns emptyList()
+        coEvery { depositReader.list(any(), any(), any(), any()) } returns emptyList()
         gateway.getDaoDeposits(ctx()).getOrThrow()
 
         // Second cold load: no marker left, and the row must not resurface.
@@ -456,7 +539,7 @@ class DaoGatewayUnlockTest {
         // is invisible to the light client but is NOT spent.
         seedCachedWithdrawingRow(status = DaoCellStatus.DEPOSITED)
 
-        coEvery { depositReader.list(any(), any(), any()) } returns emptyList()
+        coEvery { depositReader.list(any(), any(), any(), any()) } returns emptyList()
         val deposits = gateway.getDaoDeposits(ctx()).getOrThrow()
 
         assertEquals(1, deposits.size)
@@ -504,7 +587,7 @@ class DaoGatewayUnlockTest {
     fun `unlocking an already-claimed position fails with a terminal message`() = runTest {
         seedCachedWithdrawingRow()
         markUnlockInFlight(txStatus = "CONFIRMED")
-        coEvery { depositReader.list(any(), any(), any()) } returns emptyList()
+        coEvery { depositReader.list(any(), any(), any(), any()) } returns emptyList()
         gateway.getDaoDeposits(ctx()).getOrThrow()
 
         val result = gateway.unlockDao(ctx(), withdrawingOutPoint, privateKey = ByteArray(32))
@@ -517,7 +600,7 @@ class DaoGatewayUnlockTest {
     fun `an already-claimed position is refused before the auth prompt`() = runTest {
         seedCachedWithdrawingRow()
         markUnlockInFlight(txStatus = "CONFIRMED")
-        coEvery { depositReader.list(any(), any(), any()) } returns emptyList()
+        coEvery { depositReader.list(any(), any(), any(), any()) } returns emptyList()
         gateway.getDaoDeposits(ctx()).getOrThrow()
 
         val result = gateway.unlockPreflight(ctx(), withdrawingOutPoint)
@@ -554,7 +637,7 @@ class DaoGatewayUnlockTest {
         // claimed" and let the user build a doomed transaction.
         seedCachedWithdrawingRow()
         markUnlockInFlight(txStatus = "CONFIRMED")
-        coEvery { depositReader.list(any(), any(), any()) } returns emptyList()
+        coEvery { depositReader.list(any(), any(), any(), any()) } returns emptyList()
         gateway.getDaoDeposits(ctx()).getOrThrow()
 
         val paddedIndex = OutPoint(withdrawingOutPoint.txHash, "0x00")
@@ -586,7 +669,7 @@ class DaoGatewayUnlockTest {
         )
         db.transactionDao().insert(unlockTxRow("CONFIRMED"))
 
-        coEvery { depositReader.list(any(), any(), any()) } returns emptyList()
+        coEvery { depositReader.list(any(), any(), any(), any()) } returns emptyList()
         val deposits = gateway.getDaoDeposits(ctx()).getOrThrow()
 
         assertEquals(
@@ -596,13 +679,43 @@ class DaoGatewayUnlockTest {
         assertTrue("the retired row must not render: $deposits", deposits.isEmpty())
     }
 
+    @Test fun `fresh unresolved live cell clears stale cached unlock metadata`() = runTest {
+        seedCachedWithdrawingRow()
+        val unresolved = withdrawingDeposit().copy(status = DaoCellStatus.LOCKED,
+            depositBlockHash = "", depositEpoch = null, depositTimestamp = 0L,
+            unlockEpoch = null, compensation = 0L)
+        coEvery { depositReader.list(any(), any(), any(), any()) } returns listOf(unresolved)
+        val shown = gateway.getDaoDeposits(ctx()).getOrThrow().single()
+        val stored = db.daoCellDao().getByOutPoint(withdrawingOutPoint.txHash, withdrawingOutPoint.index)!!
+        assertEquals("", shown.depositBlockHash); assertNull(shown.unlockEpoch)
+        assertEquals("", stored.depositBlockHash); assertNull(stored.unlockEpochHex)
+        assertEquals("LOCKED", stored.status); assertEquals(0L, stored.compensation)
+    }
+
+    @Test fun `cached-only unresolved evidence is cleared durably while preserving position and marker`() = runTest {
+        seedCachedWithdrawingRow()
+        markUnlockInFlight("PENDING")
+        coEvery { depositReader.list(any(), any(), any(), any()) } returns emptyList()
+        coEvery { depositReader.revalidateCachedWithdrawing(any(), any(), any()) } answers {
+            firstArg<com.rjnr.pocketnode.data.database.entity.DaoCellEntity>().copy(
+                status = "LOCKED", depositBlockHash = "", depositEpochHex = null,
+                depositTimestamp = 0L, compensation = 0L, unlockEpochHex = null)
+        }
+        val shown = gateway.getDaoDeposits(ctx()).getOrThrow().single()
+        val stored = db.daoCellDao().getByOutPoint(withdrawingOutPoint.txHash, withdrawingOutPoint.index)!!
+        assertEquals(DaoCellStatus.UNLOCKING, shown.status)
+        assertEquals("", shown.depositBlockHash); assertNull(shown.unlockEpoch)
+        assertEquals("", stored.depositBlockHash); assertNull(stored.unlockEpochHex)
+        assertEquals(1, db.pendingDaoUnlockDao().getByWalletAndNetwork(walletId, network.name).size)
+    }
+
     @Test
     fun `a live cell spelled differently from its cached row is not duplicated`() = runTest {
         seedCachedWithdrawingRow()
 
         // Same cell, padded index this time: a raw key compare would call it
         // absent, append the cached row and render two cards for one position.
-        coEvery { depositReader.list(any(), any(), any()) } returns listOf(
+        coEvery { depositReader.list(any(), any(), any(), any()) } returns listOf(
             withdrawingDeposit().copy(outPoint = OutPoint(withdrawingOutPoint.txHash, "0x00"))
         )
         val deposits = gateway.getDaoDeposits(ctx()).getOrThrow()
@@ -654,7 +767,7 @@ class DaoGatewayUnlockTest {
             txHash = unlockTxHash, status = poolStatus, confirmations = 0,
         )
 
-        coEvery { depositReader.list(any(), any(), any()) } returns emptyList()
+        coEvery { depositReader.list(any(), any(), any(), any()) } returns emptyList()
         val deposits = gateway.getDaoDeposits(ctx()).getOrThrow()
 
         assertTrue("an aged marker must be taken to the chain", unlockTxHash in chainQueries)
@@ -687,7 +800,7 @@ class DaoGatewayUnlockTest {
     fun `a wallet switch during the broadcast files the unlock marker under the initiating wallet`() = runTest {
         val otherWalletId = "wallet-2"
         var active = walletId
-        coEvery { depositReader.list(any(), any(), any()) } returns listOf(withdrawingDeposit())
+        coEvery { depositReader.list(any(), any(), any(), any()) } returns listOf(withdrawingDeposit())
         val headerResolver = mockk<DaoHeaderResolver>()
         coEvery { headerResolver.getOrFetchHeader(any(), any()) } returns tipHeader()
         val builder = mockk<TransactionBuilder>(relaxed = true)
@@ -728,6 +841,7 @@ class DaoGatewayUnlockTest {
             transactionBuilder = builder,
             sendPipeline = pipeline,
             logger = NoopLogger,
+            verificationCacheGate = verificationGate,
         )
 
         val result = switching.unlockDao(ctx(walletIdOf = { active }), withdrawingOutPoint, privateKey = ByteArray(32))
@@ -743,6 +857,31 @@ class DaoGatewayUnlockTest {
             db.pendingDaoUnlockDao().getByWalletAndNetwork(otherWalletId, network.name).isEmpty(),
         )
     }
+    @Test fun `empty post-epoch scan preserves unlock marker until later verified inclusion`() = runTest {
+        markUnlockInFlight("UNVERIFIED")
+        coEvery { depositReader.list(any(), any(), any(), any()) } returns emptyList()
+        chainStatus = null
+        assertTrue(gateway.getDaoDeposits(ctx()).getOrThrow().isEmpty())
+        assertEquals(1, db.pendingDaoUnlockDao().getByWalletAndNetwork(walletId, network.name).size)
+        chainStatus = committedOnChain()
+        gateway.getDaoDeposits(ctx()).getOrThrow()
+        assertTrue(db.pendingDaoUnlockDao().getByWalletAndNetwork(walletId, network.name).isEmpty())
+    }
+
+    @Test fun `empty post-epoch scan preserves withdraw marker until later verified inclusion`() = runTest {
+        val dao = db.pendingDaoWithdrawDao()
+        dao.upsert(com.rjnr.pocketnode.data.database.entity.PendingDaoWithdrawEntity(
+            withdrawingOutPoint.txHash, withdrawingOutPoint.index, unlockTxHash, walletId, network.name, 1))
+        db.transactionDao().insert(unlockTxRow("UNVERIFIED"))
+        coEvery { depositReader.list(any(), any(), any(), any()) } returns emptyList()
+        chainStatus = null
+        gateway.getDaoDeposits(ctx()).getOrThrow()
+        assertEquals(1, dao.getByWalletAndNetwork(walletId, network.name).size)
+        chainStatus = committedOnChain()
+        gateway.getDaoDeposits(ctx()).getOrThrow()
+        assertTrue(dao.getByWalletAndNetwork(walletId, network.name).isEmpty())
+    }
+
 }
 
 /**
@@ -787,7 +926,8 @@ class DaoUnlockShadowLightClientNative {
      * own answer when the node does not know the transaction.
      */
     @Implementation
-    fun nativeGetTransaction(hash: String): String? = transactionOverride?.also { transactionQueries += hash }
+    fun nativeGetTransaction(hash: String): String? = transactionsByHash[hash]?.also { transactionQueries += hash }
+        ?: transactionOverride?.also { transactionQueries += hash }
         ?: chainStatus.also { transactionQueries += hash }?.let {
             Json.encodeToString(
                 JniTransactionWithStatus(
@@ -808,6 +948,12 @@ class DaoUnlockShadowLightClientNative {
         @Suppress("UNUSED_PARAMETER") cursor: String?,
     ): String? = cellsPage
 
+    @Implementation
+    fun nativeGetHeaderByNumber(number: String): String? = headersByNumber[number]
+
+    @Implementation
+    fun nativeGetHeader(hash: String): String? = headersByHash[hash]
+
     data class MaxWithdrawCall(val depositDao: String, val endDao: String, val occupied: Long)
 
     companion object {
@@ -824,10 +970,15 @@ class DaoUnlockShadowLightClientNative {
          */
         var transactionOverride: String? = null
 
+        val transactionsByHash = mutableMapOf<String, String>()
+        val headersByNumber = mutableMapOf<String, String>()
+        val headersByHash = mutableMapOf<String, String>()
+
         /** Every max-withdraw calculation asked of the bridge. */
         val maxWithdrawCalls = mutableListOf<MaxWithdrawCall>()
 
         /** Every transaction asked of the chain. */
         val transactionQueries = mutableListOf<String>()
     }
+
 }

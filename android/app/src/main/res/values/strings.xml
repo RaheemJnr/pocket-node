@@ -472,6 +472,8 @@
     <string name="dao_deposit_cta">Deposit</string>
     <string name="dao_make_first_deposit">Make First Deposit</string>
     <string name="dao_card_withdraw">Withdraw</string>
+    <string name="dao_unlock_less_than_hour">Withdrawal in progress · Unlock in &lt;1h</string>
+    <string name="dao_waiting_deposit_details">Waiting for deposit details</string>
     <string name="dao_card_unlock">Unlock</string>
     <string name="dao_sheet_cancel">Cancel</string>
     <string name="dao_sheet_deposit">Deposit</string>
@@ -536,7 +538,7 @@
     <string name="send_bulk_cta">Send Bulk Airdrop</string>
     <string name="send_bulk_recipients_label">Recipient Addresses</string>
     <string name="send_bulk_recipients_placeholder">Paste one CKB address per line</string>
-    <string name="send_bulk_summary">%1$d valid · %2$d duplicates removed · %3$d invalid · %4$d batches</string>
+    <string name="send_bulk_summary">%1$d recipients · %2$d duplicates removed · %3$d invalid · %4$d batches</string>
     <string name="send_bulk_total_amount">Total send amount: %1$s CKB</string>
     <!-- #490: pre-broadcast review sheet -->
     <string name="send_review_title">Review transaction</string>
@@ -622,4 +624,6 @@
     <string name="restore_hint_unreadable">This file could not be read.</string>
     <!-- endregion -->
 
+    <string name="wallet_removed_cleanup_pending">Wallet removed. Some local key copies could not be removed. Restart the app to retry cleanup.</string>
+    <string name="wallet_removed_title">Wallet removed</string>
 </resources>

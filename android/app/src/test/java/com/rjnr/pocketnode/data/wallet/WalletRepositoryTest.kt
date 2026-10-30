@@ -1,5 +1,7 @@
 package com.rjnr.pocketnode.data.wallet
 
+import com.rjnr.pocketnode.data.crypto.writeBackup
+
 import android.content.Context
 import androidx.room.Room
 import androidx.test.core.app.ApplicationProvider
@@ -58,8 +60,8 @@ class WalletRepositoryTest {
         encryptionManager = KeystoreEncryptionManager.createForTest()
         val migrationPrefs = context.getSharedPreferences("test_repo_migration", Context.MODE_PRIVATE)
         migrationPrefs.edit().clear().commit()
-        keyManager.keyStoreMigrationHelper = KeyStoreMigrationHelper(db.keyMaterialDao(), encryptionManager, migrationPrefs, NoopLogger)
-        v2Helper = KeystoreV2MigrationHelper(db.keyMaterialDao(), encryptionManager, migrationPrefs, logger = NoopLogger)
+        keyManager.keyStoreMigrationHelper = KeyStoreMigrationHelper(db.keyMaterialDao(), encryptionManager, migrationPrefs, NoopLogger, database = db)
+        v2Helper = KeystoreV2MigrationHelper(db.keyMaterialDao(), encryptionManager, migrationPrefs, logger = NoopLogger, database = db)
         walletPreferences = WalletPreferences(context, NoopLogger)
         repo = WalletRepository(
             walletDao, keyManager, walletPreferences, walletPreferences, mnemonicManager, db,
@@ -74,11 +76,11 @@ class WalletRepositoryTest {
         db.close()
     }
 
-    private fun newRepo(dao: WalletDao = walletDao, km: KeyManager = keyManager, keys: com.rjnr.pocketnode.data.database.dao.KeyMaterialDao = db.keyMaterialDao(), mnemonics: MnemonicManager = mnemonicManager) = WalletRepository(
+    private fun newRepo(dao: WalletDao = walletDao, km: KeyManager = keyManager, keys: com.rjnr.pocketnode.data.database.dao.KeyMaterialDao = db.keyMaterialDao(), mnemonics: MnemonicManager = mnemonicManager, housekeepingPrefs: WalletPreferences = walletPreferences) = WalletRepository(
         dao, km, walletPreferences, walletPreferences, mnemonics, db,
         db.transactionDao(), db.balanceCacheDao(), db.daoCellDao(),
         db.pendingDaoWithdrawDao(), db.pendingDaoUnlockDao(), keys,
-        db.subAccountCandidateDao(), SubAccountDiscovery(mnemonics, km), walletPreferences, NoopLogger
+        db.subAccountCandidateDao(), SubAccountDiscovery(mnemonics, km), housekeepingPrefs, NoopLogger
     )
 
     @Test
@@ -239,6 +241,7 @@ class WalletRepositoryTest {
         val km = io.mockk.spyk(keyManager)
         var calls = 0
         io.mockk.coEvery { km.deleteWalletKeys(any()) } coAnswers {
+            assertTrue("Room must exclude replacement commits through file cleanup", db.inTransaction())
             calls++
             if (calls == 1) throw IllegalStateException("keystore busy")
             keyManager.deleteWalletKeys(firstArg())
@@ -253,7 +256,7 @@ class WalletRepositoryTest {
 
     /** #563 review F4: the rows are gone, so a key deletion that keeps failing does not fail the delete. */
     @Test
-    fun `deleteWallet whose key deletion keeps failing still completes`() = runTest {
+    fun `deleteWallet whose key cleanup keeps failing reports removed wallet with pending cleanup`() = runTest {
         val gone = repo.createWallet(
             name = "Gone",
             persistKeys = { walletId, bundle -> fakePersistV2(walletId, bundle) },
@@ -265,8 +268,9 @@ class WalletRepositoryTest {
         val km = io.mockk.spyk(keyManager)
         io.mockk.coEvery { km.deleteWalletKeys(any()) } throws IllegalStateException("keystore gone")
 
-        newRepo(km = km).deleteWallet(gone.walletId)
+        val failure = runCatching { newRepo(km = km).deleteWallet(gone.walletId) }.exceptionOrNull()
 
+        assertNotNull("Post-commit cleanup failure must not be silently swallowed", failure)
         io.mockk.coVerify(exactly = 2) { km.deleteWalletKeys(gone.walletId) }
         assertNull(walletDao.getById(gone.walletId))
     }
@@ -808,8 +812,7 @@ class WalletRepositoryTest {
 
     private val backups by lazy {
         com.rjnr.pocketnode.data.crypto.KeyBackupManager(
-            java.nio.file.Files.createTempDirectory("reset_backups").toFile(), NoopLogger,
-        ).apply {
+            java.nio.file.Files.createTempDirectory("reset_backups").toFile(), NoopLogger, com.rjnr.pocketnode.data.wallet.WalletStorageBoundary(androidx.test.core.app.ApplicationProvider.getApplicationContext())).apply {
             argon2Iterations = 1
             argon2MemoryKb = 8
             argon2Parallelism = 1
@@ -915,16 +918,14 @@ class WalletRepositoryTest {
             name = "Stuck",
             persistKeys = { walletId, bundle -> fakePersistV2(walletId, bundle) },
         ).getOrThrow()
-        val stuckDao = object : WalletDao by walletDao {
-            override suspend fun delete(walletId: String) = throw IllegalStateException("disk I/O error")
-        }
+        db.openHelper.writableDatabase.execSQL("CREATE TRIGGER refuse_wallet_delete BEFORE DELETE ON wallets BEGIN SELECT RAISE(ABORT, 'disposable I/O failure'); END")
         val pinManager = pinManagerWithPin()
 
         val error = runCatching {
-            localReset(repository = newRepo(dao = stuckDao), pinManager = pinManager).removeAllWalletsAndPin()
+            localReset(pinManager = pinManager).removeAllWalletsAndPin()
         }.exceptionOrNull()
 
-        assertTrue(error is IllegalStateException)
+        assertNotNull(error)
         assertEquals(1, walletDao.count())
         assertTrue(pinManager.hasPin())
     }
@@ -935,17 +936,15 @@ class WalletRepositoryTest {
             name = "Stuck keys",
             persistKeys = { walletId, bundle -> fakePersistV2(walletId, bundle) },
         ).getOrThrow()
-        val failingKeys = object : com.rjnr.pocketnode.data.database.dao.KeyMaterialDao by db.keyMaterialDao() {
-            override suspend fun delete(walletId: String) = throw IllegalStateException("storage unavailable")
-        }
+        db.openHelper.writableDatabase.execSQL("CREATE TRIGGER refuse_key_delete BEFORE DELETE ON key_material BEGIN SELECT RAISE(ABORT, 'disposable I/O failure'); END")
         val pinManager = pinManagerWithPin()
 
         val error = runCatching {
-            localReset(repository = newRepo(keys = failingKeys), pinManager = pinManager).removeAllWalletsAndPin()
+            localReset(pinManager = pinManager).removeAllWalletsAndPin()
         }.exceptionOrNull()
 
         // Atomic deletion rolled back metadata and protection together; the PIN stays.
-        assertTrue(error is IllegalStateException)
+        assertNotNull(error)
         assertEquals(1, walletDao.count())
         assertNotNull(db.keyMaterialDao().getByWalletId(stuck.walletId))
         assertNotNull(db.walletVaultDao().get(stuck.walletId))
@@ -956,7 +955,7 @@ class WalletRepositoryTest {
     fun `LocalWalletReset keeps the PIN when a backup file is left`() = runTest {
         legacyPrefs
         val stuckBackups = io.mockk.spyk(backups)
-        io.mockk.every { stuckBackups.deleteBackup(any()) } returns Unit
+        io.mockk.every { stuckBackups.deleteAllChecked() } returns Unit
         backups.writeBackup("default", backupMaterial(), "123456".toCharArray())
         val pinManager = pinManagerWithPin()
         recoveryState.markIncomplete()
@@ -972,6 +971,33 @@ class WalletRepositoryTest {
         assertTrue(pinManager.hasPin())
         // Something is left: recovery is not over.
         assertTrue(recoveryState.isIncomplete())
+    }
+
+    @Test
+    fun `factoryReset removes orphaned default preferences without wallet rows`() = runTest {
+        val context = ApplicationProvider.getApplicationContext<Context>()
+        val legacy = context.getSharedPreferences("ckb_wallet_keys", Context.MODE_PRIVATE)
+        legacy.edit().putString("private_key", "00".repeat(31) + "02").commit()
+        keyManager.testPrefs = legacy
+        assertTrue(keyManager.hasWallet())
+        assertEquals(0, walletDao.count())
+        repo.factoryReset()
+        val fresh = KeyManager(context, mnemonicManager, NoopLogger).also { it.testPrefs = legacy }
+        assertFalse("reset must remove legacy fallback even without a wallet row", fresh.hasWallet())
+        assertFalse(legacy.contains("private_key"))
+    }
+
+    @Test
+    fun `factoryReset removes orphaned unreadable preference and backup copies`() = runTest {
+        val context = ApplicationProvider.getApplicationContext<Context>()
+        val copies = listOf(
+            java.io.File(context.filesDir.parentFile, "shared_prefs/ckb_wallet_keys_default.xml.bak"),
+            java.io.File(context.filesDir.parentFile, "shared_prefs/ckb_wallet_keys_orphan.xml"),
+            java.io.File(context.filesDir, "key_backups/orphan.enc.tmp"),
+        )
+        copies.forEach { it.parentFile!!.mkdirs(); it.writeText("unreadable disposable fixture") }
+        repo.factoryReset()
+        copies.forEach { assertFalse("reset left an app-owned copy: ${it.name}", it.exists()) }
     }
 
     @Test
@@ -1017,4 +1043,163 @@ class WalletRepositoryTest {
         assertNull(db.keyMaterialDao().getByWalletId(gone.walletId))
         assertTrue(backups.hasBackup(gone.walletId))
     }
+    @Test
+    fun `failed ordinary deletion persists cleanup and preserves its intent through repository recreation`() = runTest {
+        val gone = repo.createWallet("Gone", { id, bundle -> fakePersistV2(id, bundle) }).getOrThrow()
+        repo.createWallet("Keep", { id, bundle -> fakePersistV2(id, bundle) }).getOrThrow()
+        val directory = java.nio.file.Files.createTempDirectory("ordinary-delete").toFile()
+        try {
+            val backup = com.rjnr.pocketnode.data.crypto.KeyBackupManager(directory, NoopLogger, keyManager.walletStorage)
+            keyManager.setBackupManager(backup)
+            val pending = java.io.File(directory, "${gone.walletId}.enc.tmp").apply { mkdir() }
+            java.io.File(pending, "blocker").writeText("synthetic")
+            val failure = runCatching { repo.deleteWallet(gone.walletId) }.exceptionOrNull()
+            assertNotNull("Wallet removal must report cleanup remains", failure)
+            assertNull(walletDao.getById(gone.walletId))
+            db.openHelper.readableDatabase.query("SELECT keepBackup FROM wallet_pending_cleanup WHERE walletId = ?", arrayOf(gone.walletId)).use {
+                assertTrue("Deletion intent must survive", it.moveToFirst()); assertEquals(0, it.getInt(0))
+            }
+            assertFalse(newRepo().retryPendingWalletCleanup())
+            assertNotNull(db.walletPendingCleanupDao().get(gone.walletId))
+            pending.deleteRecursively()
+            assertTrue(newRepo().retryPendingWalletCleanup())
+            assertNull(db.walletPendingCleanupDao().get(gone.walletId))
+            assertFalse(backup.hasAnyBackups())
+        } finally { directory.deleteRecursively() }
+    }
+
+    @Test
+    fun `pending cleanup refuses reused wallet identity and leaves replacement files`() = runTest {
+        val replacement = repo.createWallet("Replacement", { id, bundle -> fakePersistV2(id, bundle) }).getOrThrow()
+        val intent = com.rjnr.pocketnode.data.database.entity.WalletPendingCleanupEntity(replacement.walletId, false)
+        db.walletPendingCleanupDao().insert(intent)
+        val directory = java.nio.file.Files.createTempDirectory("replacement-cleanup").toFile()
+        try {
+            val backup = com.rjnr.pocketnode.data.crypto.KeyBackupManager(directory, NoopLogger, keyManager.walletStorage)
+            keyManager.setBackupManager(backup)
+            val copy = java.io.File(directory, "${replacement.walletId}.enc").apply { writeText("replacement synthetic ciphertext") }
+            assertFalse(repo.retryPendingWalletCleanup())
+            assertTrue(copy.exists())
+            assertNotNull(walletDao.getById(replacement.walletId))
+            assertEquals(intent, db.walletPendingCleanupDao().get(replacement.walletId))
+        } finally { directory.deleteRecursively() }
+    }
+
+    @Test fun `replacement removal supersedes stale cleanup with keep backup`() = replacementRemoval(true)
+    @Test fun `replacement removal supersedes stale cleanup with delete backup`() = replacementRemoval(false)
+    @Test fun `replacement removal rollback restores stale cleanup intent`() = replacementRemoval(true, rollback = true)
+
+    private fun replacementRemoval(keepBackup: Boolean, rollback: Boolean = false) = runTest {
+        val replacement = repo.createWallet("Replacement", { id, bundle -> fakePersistV2(id, bundle) }).getOrThrow()
+        repo.createWallet("Keep", { id, bundle -> fakePersistV2(id, bundle) }).getOrThrow()
+        val oldIntent = com.rjnr.pocketnode.data.database.entity.WalletPendingCleanupEntity(replacement.walletId, !keepBackup)
+        db.walletPendingCleanupDao().insert(oldIntent)
+        val directory = java.nio.file.Files.createTempDirectory("replacement-removal").toFile()
+        try {
+            keyManager.setBackupManager(com.rjnr.pocketnode.data.crypto.KeyBackupManager(directory, NoopLogger, keyManager.walletStorage))
+            val copies = listOf("enc", "enc.tmp").map { suffix ->
+                java.io.File(directory, "${replacement.walletId}.$suffix").apply { writeText("synthetic $suffix") }
+            }
+            assertFalse(repo.retryPendingWalletCleanup())
+            assertEquals(oldIntent, db.walletPendingCleanupDao().get(replacement.walletId))
+            assertNotNull(walletDao.getById(replacement.walletId))
+            assertTrue(copies.all { it.exists() })
+            if (rollback) {
+                val failure = IllegalStateException("synthetic removal failure")
+                val failingDao = object : WalletDao by walletDao {
+                    override suspend fun delete(walletId: String) { throw failure }
+                }
+                val observed = runCatching {
+                    newRepo(dao = failingDao).deleteWallet(replacement.walletId, keepBackupFile = keepBackup)
+                }.exceptionOrNull()
+                // Coroutine stack recovery may copy the exception across the Room dispatcher.
+                assertEquals(failure.javaClass, observed?.javaClass)
+                assertEquals(failure.message, observed?.message)
+                assertEquals(oldIntent, db.walletPendingCleanupDao().get(replacement.walletId))
+                assertNotNull(walletDao.getById(replacement.walletId))
+                assertNotNull(db.keyMaterialDao().getByWalletId(replacement.walletId))
+                assertNotNull(db.walletVaultDao().get(replacement.walletId))
+                assertTrue(copies.all { it.exists() })
+            } else {
+                repo.deleteWallet(replacement.walletId, keepBackupFile = keepBackup)
+                assertNull(walletDao.getById(replacement.walletId))
+                assertNull(db.keyMaterialDao().getByWalletId(replacement.walletId))
+                assertNull(db.walletVaultDao().get(replacement.walletId))
+                assertNull(db.walletPendingCleanupDao().get(replacement.walletId))
+                copies.forEach { assertEquals(keepBackup, it.exists()) }
+                if (keepBackup) copies.zip(listOf("enc", "enc.tmp")).forEach { (copy, suffix) -> assertEquals("synthetic $suffix", copy.readText()) }
+            }
+        } finally { directory.deleteRecursively() }
+    }
+
+    @Test
+    fun `recovery cleanup retry preserves committed and interrupted backups`() = runTest {
+        val context = ApplicationProvider.getApplicationContext<Context>()
+        val directory = java.nio.file.Files.createTempDirectory("keep-backups").toFile()
+        val id = "lost"
+        val xml = java.io.File(context.applicationInfo.dataDir, "shared_prefs/ckb_wallet_keys_$id.xml")
+        try {
+            val backup = com.rjnr.pocketnode.data.crypto.KeyBackupManager(directory, NoopLogger, keyManager.walletStorage)
+            keyManager.setBackupManager(backup)
+            val enc = java.io.File(directory, "$id.enc").apply { writeText("synthetic committed") }
+            val tmp = java.io.File(directory, "$id.enc.tmp").apply { writeText("synthetic interrupted") }
+            xml.parentFile!!.mkdirs(); xml.mkdir(); java.io.File(xml, "blocker").writeText("synthetic")
+            db.walletPendingCleanupDao().insert(com.rjnr.pocketnode.data.database.entity.WalletPendingCleanupEntity(id, true))
+            assertFalse(repo.retryPendingWalletCleanup())
+            assertTrue(db.walletPendingCleanupDao().get(id)!!.keepBackup)
+            xml.deleteRecursively()
+            assertTrue(newRepo().retryPendingWalletCleanup())
+            assertEquals("synthetic committed", enc.readText()); assertEquals("synthetic interrupted", tmp.readText())
+            assertNull(db.walletPendingCleanupDao().get(id))
+        } finally { xml.deleteRecursively(); directory.deleteRecursively() }
+    }
+
+    @Test
+    fun `installation reset clears pending ordinary deletion intent`() = runTest {
+        db.walletPendingCleanupDao().insert(com.rjnr.pocketnode.data.database.entity.WalletPendingCleanupEntity("gone", false))
+        repo.factoryReset()
+        assertTrue(db.walletPendingCleanupDao().all().isEmpty())
+        assertTrue(runCatching { repo.retryPendingWalletCleanup() }.isFailure)
+    }
+
+    @Test fun `vacuum failure preserves committed pending cleanup outcome`() = postcommitMaintenanceFailure(pending = true, sweep = false)
+    @Test fun `vacuum failure preserves committed clean outcome`() = postcommitMaintenanceFailure(pending = false, sweep = false)
+    @Test fun `sweep failure preserves committed pending cleanup outcome`() = postcommitMaintenanceFailure(pending = true, sweep = true)
+    @Test fun `sweep failure preserves committed clean outcome`() = postcommitMaintenanceFailure(pending = false, sweep = true)
+
+    @Test fun `vacuum cancellation propagates and retains committed pending intent`() = postcommitMaintenanceFailure(pending = true, sweep = false, cancelled = true)
+    @Test fun `sweep cancellation propagates and retains committed pending intent`() = postcommitMaintenanceFailure(pending = true, sweep = true, cancelled = true)
+
+    private fun postcommitMaintenanceFailure(pending: Boolean, sweep: Boolean, cancelled: Boolean = false) = runTest {
+        val gone = repo.createWallet("Gone", { id, bundle -> fakePersistV2(id, bundle) }).getOrThrow()
+        repo.createWallet("Keep", { id, bundle -> fakePersistV2(id, bundle) }).getOrThrow()
+        val directory = java.nio.file.Files.createTempDirectory("housekeeping-failure").toFile()
+        val backup = com.rjnr.pocketnode.data.crypto.KeyBackupManager(directory, NoopLogger, keyManager.walletStorage)
+        keyManager.setBackupManager(backup)
+        val obstruction = java.io.File(directory, "${gone.walletId}.enc.tmp")
+        val maintenancePrefs = io.mockk.spyk(walletPreferences)
+        if (pending) { obstruction.mkdir(); java.io.File(obstruction, "blocker").writeText("synthetic") }
+        val maintenanceFailure = if (cancelled) kotlinx.coroutines.CancellationException("synthetic cancellation")
+            else android.database.sqlite.SQLiteFullException("private diagnostic sentinel")
+        io.mockk.mockkObject(com.rjnr.pocketnode.data.database.DatabaseMaintenanceUtil)
+        try {
+            if (sweep) {
+                io.mockk.every { maintenancePrefs.clearSweepTxHashes(gone.walletId) } throws maintenanceFailure
+            } else {
+                io.mockk.every { com.rjnr.pocketnode.data.database.DatabaseMaintenanceUtil.vacuum(db) } throws maintenanceFailure
+            }
+            val failure = runCatching { newRepo(housekeepingPrefs = maintenancePrefs).deleteWallet(gone.walletId) }.exceptionOrNull()
+            if (cancelled) assertSame(maintenanceFailure, failure)
+            else if (pending) assertTrue("Must report pending cleanup, not maintenance failure", failure is WalletCleanupPendingException)
+            else assertNull("Committed clean removal must succeed despite housekeeping failure", failure)
+            assertNull(walletDao.getById(gone.walletId))
+            assertNull(db.keyMaterialDao().getByWalletId(gone.walletId))
+            assertEquals(pending, db.walletPendingCleanupDao().get(gone.walletId) != null)
+            assertEquals(pending, obstruction.exists())
+        } finally {
+            io.mockk.unmockkObject(com.rjnr.pocketnode.data.database.DatabaseMaintenanceUtil)
+            directory.deleteRecursively()
+        }
+    }
+
 }

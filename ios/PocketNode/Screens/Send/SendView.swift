@@ -412,6 +412,7 @@ struct SendView: View {
     private func icon(for indicator: AddressIndicator) -> String {
         switch indicator {
         case .invalid: return "xmark.circle.fill"
+        case let .policy(_, canSend): return canSend ? "exclamationmark.triangle.fill" : "xmark.circle.fill"
         case .wrongNetwork: return "exclamationmark.triangle.fill"
         case .valid: return "checkmark.circle.fill"
         }
@@ -420,6 +421,7 @@ struct SendView: View {
     private func colour(for indicator: AddressIndicator) -> Color {
         switch indicator {
         case .invalid: return Theme.errorRed
+        case let .policy(_, canSend): return canSend ? Theme.pendingAmber : Theme.errorRed
         case .wrongNetwork: return Theme.pendingAmber
         case .valid: return theme.primary
         }

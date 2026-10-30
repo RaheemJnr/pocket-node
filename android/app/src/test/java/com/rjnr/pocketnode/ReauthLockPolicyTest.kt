@@ -75,30 +75,29 @@ class ReauthLockPolicyTest {
     }
 
     @Test
-    fun `onStop in the cold-start flow does not lock (S2)`() {
+    fun `onStop in the cold-start flow locks independently of navigation`() {
         val a = Activity()
         a.policy.onStop(listOf(Screen.Auth.route), hasWallet = true, hasPin = true, isChangingConfigurations = false)
         a.policy.onStop(
             listOf(Screen.Auth.route, Screen.PinEntry.route),
             hasWallet = true, hasPin = true, isChangingConfigurations = false,
         )
-        assertFalse(a.gate.locked)
+        assertTrue(a.gate.locked)
     }
 
     @Test
-    fun `onStop on the cold-start Forgot PIN does not lock (N-c)`() {
+    fun `onStop on Forgot PIN locks independently of navigation`() {
         val a = Activity()
         a.policy.onStop(
             listOf(Screen.Auth.route, Screen.PinEntry.route, Screen.ForgotPin.route),
             hasWallet = true, hasPin = true, isChangingConfigurations = false,
         )
-        assertFalse(a.gate.locked)
+        assertTrue(a.gate.locked)
     }
 
     @Test
-    fun `onStop without a wallet or a PIN does not lock`() {
+    fun `onStop without a PIN does not lock`() {
         val a = Activity()
-        a.policy.onStop(main, hasWallet = false, hasPin = true, isChangingConfigurations = false)
         a.policy.onStop(main, hasWallet = true, hasPin = false, isChangingConfigurations = false)
         assertFalse(a.gate.locked)
     }
@@ -121,10 +120,10 @@ class ReauthLockPolicyTest {
     }
 
     @Test
-    fun `saving state in the cold-start flow does not lock`() {
+    fun `saving state in the cold-start flow locks`() {
         val a = Activity()
         a.save(listOf(Screen.Auth.route, Screen.PinEntry.route))
-        assertFalse(a.gate.locked)
+        assertTrue(a.gate.locked)
     }
 
     // --- restore (S3) ---
@@ -231,14 +230,14 @@ class ReauthLockPolicyTest {
     }
 
     @Test
-    fun `restore of a cold-start flow save does not lock (no double ask)`() {
+    fun `restore of a cold-start flow keeps the activity gate locked`() {
         val a = Activity()
         val saved = a.save(listOf(Screen.Auth.route))
 
         val b = Activity()
         b.policy.onRestore(saved, hasWallet = true, hasPin = true)
 
-        assertFalse(b.gate.locked)
+        assertTrue(b.gate.locked)
     }
 
     @Test
@@ -254,15 +253,15 @@ class ReauthLockPolicyTest {
     private val recovery = listOf(Screen.Recovery.route)
 
     @Test
-    fun `a configuration change on the Recovery start stays unlocked and on Recovery`() {
+    fun `configuration restore without live authorization requires unlock`() {
         val a = Activity()
         a.policy.onColdStart(Screen.Recovery.route)
         assertFalse(process.unlocked)
 
         val b = a.restoreFrom(a.stopAndSave(recovery, changingConfig = true))
 
-        assertFalse(b.gate.locked)
-        assertEquals(0, newLocks)
+        assertTrue(b.gate.locked)
+        assertEquals(1, newLocks)
         // Not marked unlocked: only the configuration change was let through.
         assertFalse(process.unlocked)
     }
@@ -314,7 +313,7 @@ class ReauthLockPolicyTest {
 
         assertTrue(a.gate.locked)
         assertFalse(process.unlocked)
-        assertEquals(1, secretsCleared)
+        assertEquals(3, secretsCleared)
     }
 
     @Test
@@ -323,6 +322,76 @@ class ReauthLockPolicyTest {
         a.policy.onStop(main, hasWallet = true, hasPin = true, isChangingConfigurations = false)
         a.policy.onUnlocked(a.gate.session)
         a.policy.onUnlocked(a.gate.session)
+        assertEquals(1, secretsCleared)
+    }
+    @Test fun `cold auth entry hides navigation before graph attachment`() {
+        val a = Activity()
+        a.policy.onColdStart(Screen.Auth.route)
+        assertTrue(a.gate.locked)
+    }
+
+    @Test fun `Auth route underneath an arbitrary protected route cannot suppress background lock`() {
+        val a = Activity()
+        a.policy.onStop(listOf(Screen.Auth.route, Screen.Main.route), true, true, false)
+        assertTrue(a.gate.locked)
+    }
+
+    @Test fun `saved cold start marker cannot authorize restored navigation in a new process`() {
+        val state = Bundle().apply { putBoolean("reauth_cold_start_flow", true) }
+        val a = Activity(ProcessUnlockState())
+        a.policy.onRestore(state, true, true)
+        assertTrue(a.gate.locked)
+    }
+
+    @Test fun `first wallet locks after PIN setup despite stale initial wallet cache`() {
+        val a = Activity()
+        a.policy.onStop(main, hasWallet = false, hasPin = true, isChangingConfigurations = false)
+        assertTrue(a.gate.locked)
+    }
+
+    @Test fun `background before first PIN revokes auth without broadcasting vault cancellation`() {
+        val a = Activity()
+        a.policy.onColdStart(Screen.Onboarding.route)
+        a.policy.onStop(listOf(Screen.InitialPinSetup.route), false, false, false)
+        assertFalse(process.unlocked)
+        assertFalse(a.gate.locked)
+        assertEquals(0, newLocks)
+        assertEquals(1, secretsCleared)
+        // The already-authorized setup write persisted its first PIN while stopped.
+        a.policy.onStart(hasPin = true)
+        assertTrue(a.gate.locked)
+        assertEquals(1, newLocks)
+    }
+
+    @Test fun `onboarding with no PIN remains usable after background and restore`() {
+        val a = Activity()
+        a.policy.onColdStart(Screen.Onboarding.route)
+        a.policy.onStop(listOf(Screen.Onboarding.route), false, false, false)
+        a.policy.onStart(hasPin = false)
+        assertFalse(a.gate.locked)
+        val b = Activity(ProcessUnlockState())
+        b.policy.onRestore(Bundle(), hasWallet = false, hasPin = false)
+        b.policy.onStart(hasPin = false)
+        assertFalse(b.gate.locked)
+    }
+
+    @Test fun `initial start preserves recovery and reset router precedence`() {
+        for (route in listOf(Screen.Recovery.route, Screen.ForgotPin.route)) {
+            val a = Activity()
+            a.policy.onColdStart(route)
+            a.policy.onStart(hasPin = true)
+            assertFalse(a.gate.locked)
+        }
+    }
+
+    @Test fun `rotation is not treated as a real background return`() {
+        val a = Activity()
+        process.unlocked = true
+        a.policy.onStop(main, true, true, true)
+        a.policy.onStart(hasPin = true)
+        assertFalse(a.gate.locked)
+        assertTrue(process.unlocked)
         assertEquals(0, secretsCleared)
     }
+
 }

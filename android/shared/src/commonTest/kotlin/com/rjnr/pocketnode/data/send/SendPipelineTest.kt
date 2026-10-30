@@ -140,6 +140,52 @@ class SendPipelineTest {
     private fun signer() = PrivateKeySigner(TEST_KEY.copyOf())
 
 
+    @Test fun maxQuoteUsesCapturedCustomDestinationAndMatchesPreview() = runTest {
+        val custom = AddressUtils.encode(FROM_SCRIPT.copy(codeHash = "0x" + "42".repeat(32),
+            args = "0x" + "bb".repeat(1024)), NetworkType.TESTNET)
+        val cells = LIVE_CELLS.map { it.copy(capacity = "0x${2000_00000000L.toString(16)}") }
+        val max = pipelineOver(api(cells = cells)).maxSendable(ctx(this), FROM_ADDRESS, custom)
+        val plan = pipelineOver(api(cells = cells)).previewTransfer(ctx(this), FROM_ADDRESS,
+            listOf(RecipientOutput(custom, max)))
+        assertEquals(0L, plan.changeShannons)
+        assertTrue(plan.feeShannons > 1000L)
+        assertEquals(cells.sumOf { it.capacityAsLong() } - plan.feeShannons, max)
+    }
+
+    @Test fun contradictoryDestinationIsRejectedBySingleBulkPreviewAndReviewedEntryPoints() = runTest {
+        val malformed = AddressUtils.encode(FROM_SCRIPT.copy(hashType = "data"), NetworkType.TESTNET)
+        val recipients = listOf(RecipientOutput(malformed, 100_00000000L))
+        val pipeline = pipelineOver(api())
+        kotlin.test.assertFailsWith<IllegalArgumentException> { pipeline.previewTransfer(ctx(this), FROM_ADDRESS, recipients) }
+        kotlin.test.assertFailsWith<IllegalArgumentException> { pipeline.previewBatches(ctx(this), FROM_ADDRESS, listOf(recipients)) }
+        assertTrue(pipeline.prepareAndSend(ctx(this), FROM_ADDRESS, malformed, 100_00000000L, signer()).exceptionOrNull() is IllegalArgumentException)
+        assertTrue(pipeline.prepareAndSendBulk(ctx(this), FROM_ADDRESS, recipients, signer()).exceptionOrNull() is IllegalArgumentException)
+        kotlin.test.assertFailsWith<IllegalArgumentException> {
+            ReviewedTransfer(WALLET, FROM_ADDRESS, NetworkType.TESTNET, recipients, 1000, 1)
+        }
+        assertTrue(broadcasts.byHash.isEmpty())
+    }
+
+    @Test fun customDestinationStaysSendableThroughSingleBulkAndReviewedPaths() = runTest {
+        val customScript = FROM_SCRIPT.copy(codeHash = "0x" + "42".repeat(32), hashType = "data2")
+        val custom = AddressUtils.encode(customScript, NetworkType.TESTNET)
+        val outputs = listOf(RecipientOutput(custom, 100_00000000L))
+        val plan = pipelineOver(api()).previewTransfer(ctx(backgroundScope), FROM_ADDRESS, outputs)
+        for (mode in 0..2) {
+            val store = FakePendingBroadcastStore()
+            val pipeline = pipelineOver(api(sendAnswer = "\"$PENDING_HASH\""), store)
+            val hash = when (mode) {
+                0 -> pipeline.prepareAndSend(ctx(backgroundScope), FROM_ADDRESS, custom, 100_00000000L, signer()).getOrThrow()
+                1 -> pipeline.prepareAndSendBulk(ctx(backgroundScope), FROM_ADDRESS, outputs, signer()).getOrThrow()
+                else -> pipeline.sendReviewed(ctx(backgroundScope),
+                    ReviewedTransfer(WALLET, FROM_ADDRESS, NetworkType.TESTNET, outputs, plan.feeShannons, 1), signer(), { true })
+            }
+            val sent = json.decodeFromString<Transaction>(assertNotNull(store.byHash[hash]).signedTxJson)
+            assertEquals(customScript, sent.cellOutputs.first().lock)
+            assertEquals(100_00000000L, sent.cellOutputs.first().capacity.removePrefix("0x").toLong(16))
+        }
+    }
+
     @Test fun cancellationAtBroadcastPreservesExactPendingSignedTransaction() = runTest {
         val bridge = object : FakeLightClientApi() {
             override fun sendTransaction(txJson: String): String? {
@@ -632,6 +678,20 @@ class SendPipelineTest {
         }
     }
 
+    @Test fun syntheticPendingDataCannotBecomeSpendableCapacity() = runTest {
+        for (data in listOf(listOf("0x01"), listOf("0x00"), emptyList())) {
+            val store = FakePendingBroadcastStore()
+            val tx = PENDING_TX.copy(outputsData = data)
+            val hash = TransactionBuilder(NetworkValidator()).computeTxHash(tx)
+            store.insert(pendingRow(hash, "BROADCASTING", LIVE_CELLS.map { it.outPoint }, json.encodeToString(tx)))
+            val pipeline = pipelineOver(api(sendAnswer = "\"$hash\""), store)
+            pipeline.sendTransaction(ctx(this), tx).getOrThrow()
+            assertEquals(0L, pipeline.maxSendable(ctx(this), FROM_ADDRESS))
+            assertTrue(runCatching { pipeline.previewTransfer(ctx(this), FROM_ADDRESS,
+                listOf(RecipientOutput(TO_ADDRESS, 100_00000000L))) }.isFailure)
+        }
+    }
+
     /**
      * Parks the FIRST compare-and-set on [gate]. That is the first suspension
      * point after the broadcast, so holding it holds a send exactly where the
@@ -691,6 +751,101 @@ class SendPipelineTest {
             lastCursor = null,
         )
     )
+
+    @Test fun reviewedSendRefusesChangedSourceOrGenerationBeforeAnySignature() = runTest {
+        for (sourceChanged in listOf(false, true)) {
+            var signatures = 0
+            val recordingSigner = object : com.rjnr.pocketnode.data.transaction.Signer {
+                override fun signRecoverable(messageHash: ByteArray): ByteArray { signatures++; return ByteArray(65) }
+            }
+            val review = ReviewedTransfer(WALLET, FROM_ADDRESS, NetworkType.TESTNET,
+                listOf(RecipientOutput(TO_ADDRESS, 100_00000000L)), 1000, 1)
+            val context = if (sourceChanged) ctx(this).copy(walletId = "other") else ctx(this)
+            val failure = runCatching { pipelineOver(api()).sendReviewed(context, review, recordingSigner, { sourceChanged }) }
+            assertTrue(failure.isFailure)
+            assertEquals(0, signatures)
+            assertTrue(broadcasts.byHash.isEmpty())
+        }
+    }
+
+    @Test fun sourceChangeOrCancellationDuringMutexReadCannotReachSigner() = runTest {
+        for (cancel in listOf(false, true)) {
+            val gate = CompletableDeferred<Unit>()
+            val entered = CompletableDeferred<Unit>()
+            var current = true
+            var signatures = 0
+            val store = object : PendingBroadcastStore by broadcasts {
+                override suspend fun getActive(walletId: String, network: String): List<PendingBroadcastRecord> {
+                    entered.complete(Unit)
+                    kotlinx.coroutines.withContext(kotlinx.coroutines.NonCancellable) { gate.await() }
+                    return emptyList()
+                }
+            }
+            val operation = async {
+                runCatching { pipelineOver(api(), store).sendReviewed(ctx(backgroundScope),
+                    ReviewedTransfer(WALLET, FROM_ADDRESS, NetworkType.TESTNET,
+                        listOf(RecipientOutput(TO_ADDRESS, 100_00000000L)), 1000, 1),
+                    object : com.rjnr.pocketnode.data.transaction.Signer {
+                        override fun signRecoverable(messageHash: ByteArray): ByteArray { signatures++; return ByteArray(65) }
+                    }, { current }) }
+            }
+            entered.await()
+            if (cancel) operation.cancel() else current = false
+            gate.complete(Unit)
+            runCatching { operation.await() }
+            assertEquals(0, signatures)
+            assertTrue(broadcasts.byHash.isEmpty())
+        }
+    }
+
+    @Test fun reviewedFeeMismatchNeverReachesSigningOrReservation() = runTest {
+        var signatures = 0
+        val result = runCatching { pipelineOver(api()).sendReviewed(ctx(backgroundScope),
+            ReviewedTransfer(WALLET, FROM_ADDRESS, NetworkType.TESTNET,
+                listOf(RecipientOutput(TO_ADDRESS, 100_00000000L)), 1001, 1),
+            object : com.rjnr.pocketnode.data.transaction.Signer {
+                override fun signRecoverable(messageHash: ByteArray): ByteArray { signatures++; return ByteArray(65) }
+            }, { true }) }
+        assertTrue(result.isFailure)
+        assertEquals(0, signatures)
+        assertTrue(broadcasts.byHash.isEmpty())
+    }
+
+    @Test fun bulkPreviewAndRealSequentialSignedOutputsAgreeIncludingSelfRecipients() = runTest {
+        val builder = TransactionBuilder(NetworkValidator())
+        val bridge = object : FakeLightClientApi() {
+            override fun sendTransaction(txJson: String): String {
+                super.sendTransaction(txJson)
+                return "\"${builder.computeTxHash(json.decodeFromString<Transaction>(txJson))}\""
+            }
+        }.enqueue("getTipHeader", LightClientFixtures.TIP_HEADER)
+            .enqueue("getTransactions", LightClientFixtures.GET_TRANSACTIONS_PAGE)
+            .enqueue("getCells", cellsPage(listOf(SMALLEST_CELL)))
+        val pipeline = pipelineOver(bridge)
+        val batches = listOf(
+            listOf(RecipientOutput(FROM_ADDRESS, 100_00000000L)),
+            listOf(RecipientOutput(TO_ADDRESS, 150_00000000L)),
+            listOf(RecipientOutput(TO_ADDRESS_2, 80_00000000L)))
+        val fees = pipeline.previewBatches(ctx(backgroundScope), FROM_ADDRESS, batches)
+        assertEquals(listOf(1000L, 1000L, 1000L), fees)
+        batches.forEachIndexed { index, batch ->
+            pipeline.sendReviewed(ctx(backgroundScope), ReviewedTransfer(WALLET, FROM_ADDRESS,
+                NetworkType.TESTNET, batch, fees[index], 1, true), signer(), { true })
+        }
+        val sent = bridge.callsTo("sendTransaction").map { json.decodeFromString<Transaction>(it.args[0] as String) }
+        assertEquals(3, sent.size)
+        val spent = sent.flatMap { tx -> tx.cellInputs.map { it.previousOutput } }
+        assertEquals(spent.size, spent.distinct().size, "a synthetic change outpoint must never be selected twice")
+        assertEquals(TO_SCRIPT_2, sent[2].cellOutputs.first().lock)
+        assertEquals(80_00000000L, sent[2].cellOutputs.first().capacity.removePrefix("0x").toLong(16))
+        assertEquals(149_99998000L - 1000, sent[2].cellOutputs.sumOf { it.capacity.removePrefix("0x").toLong(16) })
+        assertEquals(FROM_SCRIPT, sent[0].cellOutputs.first().lock)
+        assertEquals(100_00000000L, sent[0].cellOutputs.first().capacity.removePrefix("0x").toLong(16))
+        assertEquals(TO_SCRIPT, sent[1].cellOutputs.first().lock)
+        assertEquals(150_00000000L, sent[1].cellOutputs.first().capacity.removePrefix("0x").toLong(16))
+        assertEquals(2, sent[1].cellInputs.size, "second batch must reuse the self-recipient and change")
+        assertEquals(299_99999000L - 1000, sent[1].cellOutputs.sumOf { it.capacity.removePrefix("0x").toLong(16) })
+    }
 
     private companion object {
         /**

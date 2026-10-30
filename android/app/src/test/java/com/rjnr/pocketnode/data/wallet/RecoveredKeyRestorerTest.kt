@@ -1,5 +1,7 @@
 package com.rjnr.pocketnode.data.wallet
 
+import com.rjnr.pocketnode.data.crypto.writeBackup
+
 import android.content.Context
 import androidx.fragment.app.FragmentActivity
 import androidx.room.Room
@@ -210,7 +212,7 @@ class RecoveredKeyRestorerTest {
         assertEquals(RecoveredKeyRestorer.Outcome.AddressMismatch, outcome)
         assertNull(keyMaterialDao.getByWalletId("w1"))
         coVerify(exactly = 0) { authManager.authenticateForCipher(any(), any(), any(), any()) }
-        verify(exactly = 0) { keyBackupManager.deleteBackup(any()) }
+        verify(exactly = 0) { keyBackupManager.deleteBackupChecked(any()) }
     }
 
     @Test
@@ -263,7 +265,7 @@ class RecoveredKeyRestorerTest {
         assertEquals(RecoveredKeyRestorer.Outcome.NoWalletRow, outcome)
         assertNull(keyMaterialDao.getByWalletId("orphan"))
         assertNull(walletDao.getById("orphan"))
-        verify(exactly = 0) { keyBackupManager.deleteBackup(any()) }
+        verify(exactly = 0) { keyBackupManager.deleteBackupChecked(any()) }
     }
 
     @Test

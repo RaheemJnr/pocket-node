@@ -10,7 +10,7 @@ use ckb_shared::{Shared, SharedBuilder};
 use ckb_types::{core, prelude::*};
 
 use crate::{
-    storage::Storage,
+    storage::{LightClientStorage, Storage},
     tests::{prelude::*, ALWAYS_SUCCESS_SCRIPT},
 };
 
@@ -59,11 +59,8 @@ impl RunningChainExt for MockRunningChain {
 
 impl MockChain {
     pub(crate) fn new(resource: &Resource, prefix: &str) -> Self {
-        // See the comment on `tests::utils::new_storage`: `Storage::new` wants a
-        // db *file* path, and `into_path()` keeps the directory alive for the
-        // sqlite connection's lifetime instead of deleting it on drop.
         let tmp_dir = tempfile::Builder::new().prefix(prefix).tempdir().unwrap();
-        let storage = Storage::new(tmp_dir.into_path().join("store.db"));
+        let storage = Storage::new(tmp_dir.path().join("store.db"));
         let chain_spec = ChainSpec::load_from(resource).expect("load spec should be OK");
         let consensus = chain_spec
             .build_consensus()

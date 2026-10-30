@@ -1,5 +1,7 @@
 package com.rjnr.pocketnode.data.vault
 
+import com.rjnr.pocketnode.data.crypto.writeBackup
+
 import com.rjnr.pocketnode.core.log.NoopLogger
 import com.rjnr.pocketnode.data.crypto.*
 import com.rjnr.pocketnode.data.database.entity.*
@@ -129,7 +131,7 @@ class WalletDefaultCleanupOwnershipTest {
                 runBlocking { f.legacy.migrateWallet("default", f.material.privateKey, null, "raw_key", false) }
                 bytes
             }
-            val helper = KeyStoreMigrationHelper(f.db.keyMaterialDao(), encryption, f.prefs, NoopLogger)
+            val helper = KeyStoreMigrationHelper(f.db.keyMaterialDao(), encryption, f.prefs, NoopLogger, database = f.db)
             assertFalse(cleanup(f, helper).clean("a", 0, f.material))
             assertNotEquals(source, f.db.keyMaterialDao().getByWalletId("default")); assertTrue(file.exists())
         }
@@ -144,7 +146,7 @@ class WalletDefaultCleanupOwnershipTest {
                 runBlocking { f.store.rotate(f.pass.toCharArray(), "another public disposable passphrase".toCharArray()) }
                 bytes
             }
-            val helper = KeyStoreMigrationHelper(f.db.keyMaterialDao(), encryption, f.prefs, NoopLogger)
+            val helper = KeyStoreMigrationHelper(f.db.keyMaterialDao(), encryption, f.prefs, NoopLogger, database = f.db)
             assertFalse(cleanup(f, helper).clean("a", 0, f.material))
             assertEquals(source, f.db.keyMaterialDao().getByWalletId("default")); assertTrue(file.exists())
         }

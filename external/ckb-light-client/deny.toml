@@ -10,22 +10,18 @@
 
 [advisories]
 ignore = [
-    { id = "RUSTSEC-2025-0024", reason = "crossbeam-channel double-free on Drop, transitive via ckb-channel/ckb-network. Review by 2026-12-28." },
-    { id = "RUSTSEC-2026-0204", reason = "crossbeam-epoch invalid pointer deref in a Debug fmt impl, transitive, not on a reachable path. Review by 2026-12-28." },
-    { id = "RUSTSEC-2026-0258", reason = "h2 unbounded empty DATA frames DoS, transitive via the tentacle/hyper stack, not exercised by this light client's RPC surface. Review by 2026-12-28." },
-    { id = "RUSTSEC-2025-0004", reason = "openssl use-after-free in select_next_proto, ALPN negotiation is not used here. Review by 2026-12-28." },
-    { id = "RUSTSEC-2025-0022", reason = "openssl use-after-free in Md::fetch/Cipher::fetch, transitive via tentacle-secio. Review by 2026-12-28." },
-    { id = "RUSTSEC-2024-0437", reason = "protobuf uncontrolled recursion, transitive, not on a network-facing decode path here. Review by 2026-12-28." },
+    { id = "RUSTSEC-2024-0437", reason = "protobuf recursion; inspected metrics path encodes only, prometheus 0.13 pins protobuf 2; upstream metrics migration required. Review by 2026-12-28." },
+    { id = "RUSTSEC-2026-0374", reason = "basic-toml unmaintained in Askama/UniFFI binding generation; advisory reports maintenance status, no specific vulnerable operation; generator migration required. Review by 2026-12-28." },
+    { id = "RUSTSEC-2025-0141", reason = "bincode 1.3.3 unmaintained; direct runtime/storage serialization retained for format compatibility, replacement requires migration; advisory reports maintenance status, no specific vulnerable operation. Review by 2026-12-28." },
     { id = "RUSTSEC-2025-0057", reason = "fxhash unmaintained, transitive hashing utility, no known vulnerability. Review by 2026-12-28." },
     { id = "RUSTSEC-2024-0384", reason = "instant unmaintained, transitive via parking_lot/governor. Review by 2026-12-28." },
     { id = "RUSTSEC-2025-0119", reason = "number_prefix unmaintained, transitive build-time dependency only. Review by 2026-12-28." },
     { id = "RUSTSEC-2024-0436", reason = "paste unmaintained, proc-macro helper, no known vulnerability. Review by 2026-12-28." },
     { id = "RUSTSEC-2024-0370", reason = "proc-macro-error unmaintained, build-time proc-macro dependency only. Review by 2026-12-28." },
-    { id = "RUSTSEC-2026-0190", reason = "anyhow Error::downcast_mut unsoundness, we do not call downcast_mut on anyhow::Error here. Review by 2026-12-28." },
-    { id = "RUSTSEC-2026-0306", reason = "faster-hex AVX2 hex_decode_unchecked read past src, we do not use the unchecked decode API. Review by 2026-12-28." },
-    { id = "RUSTSEC-2026-0253", reason = "lru LruCache::pop panic-safety unsoundness, transitive, no panicking Drop/Eq in the cached types we use. Review by 2026-12-28." },
-    { id = "RUSTSEC-2026-0186", reason = "memmap2 unchecked pointer offset, transitive via storage backends, no untrusted offsets fed in here. Review by 2026-12-28." },
-    { id = "RUSTSEC-2026-0097", reason = "rand unsound with a custom logger using rand::rng(), we do not install a custom log::Log that reenters rand. Review by 2026-12-28." },
+    { id = "RUSTSEC-2026-0306", reason = "faster-hex 0.6 AVX2 unchecked decode; shipped ARM excludes AVX2, no direct mobile call found; x86 emulator qualification separate. Review by 2026-12-28." },
+    { id = "RUSTSEC-2026-0253", reason = "lru 0.7 pop panic safety; inspected CKB verification cache uses Byte32 keys with no panicking Drop; upstream major update required. Review by 2026-12-28." },
+    { id = "RUSTSEC-2026-0186", reason = "memmap2 0.5 via cacache/chain-spec; no affected range advise/flush call found in inspected cache path; upstream major update required. Review by 2026-12-28." },
+    { id = "RUSTSEC-2026-0097", reason = "rand 0.7 via ckb-vm/numext: custom RNG-reentrant logger required; 0.8/0.9 fixed. Review by 2026-12-28." },
 ]
 
 [licenses]
@@ -47,9 +43,9 @@ allow = [
     "Zlib",
 ]
 
-# light-client-db-common is a local no-op stub crate (see
-# wasm/light-client-db-common/Cargo.toml), never published, with no license
-# file of its own to match against.
+# light-client-db-common is the retained upstream WASM helper crate (see
+# wasm/light-client-db-common/Cargo.toml), with no standalone license file.
+# It is not compiled into the native mobile libraries.
 [[licenses.clarify]]
 crate = "light-client-db-common"
 expression = "MIT"

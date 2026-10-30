@@ -99,12 +99,12 @@ class PinManagerTest {
     }
 
     @Test
-    fun `changing PIN updates hash`() {
+    fun `setup cannot replace existing PIN through either input form`() {
         pinManager.setPin("123456")
+        assertThrows(IllegalStateException::class.java) { pinManager.setPin("654321") }
+        assertThrows(IllegalStateException::class.java) { pinManager.setPinFromChars("654321".toCharArray()) }
         assertTrue(pinManager.verifyPin("123456"))
-        pinManager.setPin("654321")
-        assertFalse(pinManager.verifyPin("123456"))
-        assertTrue(pinManager.verifyPin("654321"))
+        assertFalse(pinManager.verifyPin("654321"))
     }
 
     // -- Lockout cycle --
@@ -246,17 +246,17 @@ class PinManagerTest {
     }
 
     @Test
-    fun `setPin resets failed attempts and lockout`() {
+    fun `setup cannot clear existing PIN lockout`() {
         pinManager.setPin("123456")
         repeat(PinManager.MAX_ATTEMPTS) {
             pinManager.verifyPin("000000")
         }
         assertTrue(pinManager.isLockedOut())
 
-        pinManager.setPin("654321")
-        assertFalse(pinManager.isLockedOut())
-        assertEquals(PinManager.MAX_ATTEMPTS, pinManager.getRemainingAttempts())
-        assertTrue(pinManager.verifyPin("654321"))
+        val remaining = pinManager.getRemainingAttempts()
+        assertThrows(IllegalStateException::class.java) { pinManager.setPin("654321") }
+        assertTrue(pinManager.isLockedOut())
+        assertEquals(remaining, pinManager.getRemainingAttempts())
     }
 
     @Test
@@ -418,4 +418,26 @@ class PinManagerTest {
             prefs.getInt("pin_kdf_version", -1)
         )
     }
+    @Test fun `two setup requests cannot overwrite each other`() {
+        val pool = java.util.concurrent.Executors.newFixedThreadPool(2)
+        try {
+            val go = java.util.concurrent.CountDownLatch(1)
+            val results = listOf("123456", "654321").map { candidate ->
+                pool.submit<String?> { go.await(); runCatching { pinManager.setPin(candidate); candidate }.getOrNull() }
+            }
+            go.countDown()
+            val winners = results.mapNotNull { it.get(5, java.util.concurrent.TimeUnit.SECONDS) }
+            assertEquals(1, winners.size)
+            assertTrue(pinManager.verifyPin(winners.single()))
+        } finally { pool.shutdownNow() }
+    }
+
+    @Test fun `pending reset prevents new PIN writes through either input form`() {
+        val context = ApplicationProvider.getApplicationContext<Context>()
+        com.rjnr.pocketnode.data.wallet.WalletStorageBoundary(context).beginReset()
+        assertThrows(IllegalStateException::class.java) { pinManager.setPin("123456") }
+        assertThrows(IllegalStateException::class.java) { pinManager.setPinFromChars("123456".toCharArray()) }
+        assertFalse(pinManager.hasPin())
+    }
+
 }

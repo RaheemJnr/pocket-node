@@ -45,7 +45,7 @@ final class SendViewModelTests: XCTestCase {
     func testAnAddressOnTheSelectedNetworkReadsAsValid() {
         model.updateRecipient(SendFixtures.testnetAddress)
 
-        XCTAssertEqual(model.addressIndicator?.message, "Valid CKB testnet address")
+        XCTAssertEqual(model.addressIndicator?.message, "Recognized address format")
         XCTAssertEqual(model.addressIndicator?.isProblem, false)
     }
 
@@ -70,6 +70,29 @@ final class SendViewModelTests: XCTestCase {
             model.addressIndicator?.message,
             "This is a testnet address on mainnet"
         )
+    }
+
+    func testCustomDestinationWarnsInEntryAndFrozenReviewWithoutBlocking() async throws {
+        let custom = AddressUtils.shared.encode(script: Script(codeHash: "0x" + String(repeating: "42", count: 32), hashType: "data2", args: "0x" + String(repeating: "11", count: 20)), network: .testnet)
+        model.updateRecipient(custom)
+        model.updateAmount("100")
+        XCTAssertEqual(model.addressIndicator?.message, DestinationPolicy.shared.CUSTOM_GUIDANCE)
+        XCTAssertEqual(model.addressIndicator?.isProblem, true)
+        await model.submit()
+        let review = try XCTUnwrap(model.review)
+        XCTAssertEqual(review.intent.destinationAssessments.first?.message, DestinationPolicy.shared.CUSTOM_GUIDANCE)
+        XCTAssertEqual(review.destinationGuidance, DestinationPolicy.shared.CUSTOM_GUIDANCE)
+        XCTAssertTrue(service.sendCalls.isEmpty)
+    }
+
+    func testContradictoryBuiltinDoesNotOpenReview() async {
+        let bad = AddressUtils.shared.encode(script: Script(codeHash: Script.companion.SECP256K1_CODE_HASH, hashType: "data", args: "0x" + String(repeating: "11", count: 20)), network: .testnet)
+        model.updateRecipient(bad)
+        model.updateAmount("100")
+        await model.submit()
+        XCTAssertNil(model.review)
+        XCTAssertNotNil(model.alert)
+        XCTAssertTrue(service.sendCalls.isEmpty)
     }
 
     // MARK: - Amount entry
@@ -699,5 +722,169 @@ final class SendViewModelTests: XCTestCase {
         model.updateRecipient(SendFixtures.testnetAddress)
         model.updateAmount(amount)
         await model.submit()
+    }
+    func testEditedPreviewCannotPublishStalePayment() async {
+        model.updateRecipient(SendFixtures.testnetAddress)
+        model.updateAmount("100")
+        service.onPreview = { [weak self] in self?.model.updateAmount("150") }
+        await model.submit()
+        XCTAssertNil(model.review)
+        await model.confirm()
+        XCTAssertTrue(service.sendCalls.isEmpty)
+    }
+
+    func testCurrentSuspendedPreviewFailureStillShowsItsError() async {
+        await assertSuspendedPreviewFailure(isStale: false) {}
+    }
+
+    func testEditedDraftDiscardsSuspendedPreviewFailure() async {
+        await assertSuspendedPreviewFailure(isStale: true) { model.updateAmount("150") }
+        await assertSuspendedPreviewFailure(isStale: true) { model.updateRecipient("edited recipient") }
+    }
+
+    func testChangedSourceDiscardsSuspendedPreviewFailure() async {
+        await assertSuspendedPreviewFailure(isStale: true) { service.walletId = "another-wallet" }
+        await assertSuspendedPreviewFailure(isStale: true) { service.fromAddress = SendFixtures.mainnetAddress }
+        await assertSuspendedPreviewFailure(isStale: true) { service.network = .mainnet }
+    }
+
+    func testCancelledPreviewDiscardsItsLateFailure() async {
+        await assertSuspendedPreviewFailure(isStale: true, cancel: true) {}
+    }
+
+    private func assertSuspendedPreviewFailure(
+        isStale: Bool, cancel: Bool = false, change: () -> Void
+    ) async {
+        service = FakeSendService()
+        model = SendViewModel(service: service)
+        model.updateRecipient(SendFixtures.testnetAddress)
+        model.updateAmount("100")
+        let gate = PreviewFailureGate()
+        service.previewError = SendError(message: "Preview unavailable")
+        service.onPreview = { await gate.suspend() }
+        let request = Task { await model.submit() }
+        await gate.waitForEntry()
+        change()
+        if cancel { request.cancel() }
+        gate.release()
+        await request.value
+        if isStale {
+            XCTAssertNil(model.alert)
+        } else {
+            XCTAssertEqual(model.alert?.message, "Preview unavailable")
+        }
+        XCTAssertNil(model.review)
+        XCTAssertFalse(model.isPreparing)
+        XCTAssertTrue(service.sendCalls.isEmpty)
+    }
+
+    func testSourceChangedAfterReviewRequiresAnotherReview() async {
+        model.updateRecipient(SendFixtures.testnetAddress)
+        model.updateAmount("100")
+        await model.submit()
+        XCTAssertNotNil(model.review)
+        service.fromAddress = SendFixtures.mainnetAddress
+        service.network = .mainnet
+        await model.confirm()
+        XCTAssertTrue(service.sendCalls.isEmpty)
+    }
+
+    func testLateMaxCannotReplaceReviewedManualAmount() async {
+        model.updateRecipient(SendFixtures.testnetAddress)
+        service.maxSendable = 999 * ckb
+        service.onMax = { [weak self] in
+            // Manual UI edits run in their own task, independently of the MAX request
+            // they cancel. The MAX fixture deliberately still returns its old result.
+            await Task { @MainActor in
+                self?.model.updateAmount("100")
+                await self?.model.submit()
+            }.value
+        }
+        await model.setMaxAmount()
+        XCTAssertEqual(model.amount, "100")
+        XCTAssertEqual(model.review?.amountShannons, 100 * ckb)
+    }
+
+    func testChangingRecipientRepricesActualCustomOutputBytes() {
+        let builder = TransactionBuilder(networkValidator: NetworkValidator(), logger: NoopLogger.shared)
+        service.feeEstimator = { inputs, recipients, change in
+            builder.estimateTransferFeeForDraft(inputCount: Int32(inputs), recipientAddresses: recipients,
+                changeAddress: SendFixtures.testnetAddress, includeChange: change)
+        }
+        model.updateAmount("100")
+        XCTAssertEqual(model.estimatedFeeShannons, 1000)
+        let custom = AddressUtils.shared.encode(script: Script(codeHash: "0x" + String(repeating: "42", count: 32),
+            hashType: "data2", args: "0x" + String(repeating: "11", count: 1024)), network: .testnet)
+        model.updateRecipient(custom)
+        XCTAssertEqual(model.estimatedFeeShannons, 1670)
+    }
+
+    func testMaxCapturesDestinationAndDiscardsResultAfterDestinationEdit() async {
+        model.updateRecipient(SendFixtures.testnetAddress)
+        model.updateAmount("100")
+        service.maxSendable = 999 * ckb
+        service.onMax = { [weak self] in
+            await Task { @MainActor in self?.model.updateRecipient("edited destination") }.value
+        }
+        await model.setMaxAmount()
+        XCTAssertEqual(service.maxRecipients, [SendFixtures.testnetAddress])
+        XCTAssertEqual(model.amount, "100")
+        XCTAssertEqual(model.recipient, "edited destination")
+        XCTAssertNil(model.alert)
+    }
+
+    func testFailedMaxPreservesAmountAndShowsReadError() async {
+        model.updateAmount("123")
+        service.maxError = SendError(message: "Cell data unavailable")
+        await model.setMaxAmount()
+        XCTAssertEqual(model.amount, "123")
+        XCTAssertNotNil(model.alert)
+    }
+
+    func testLateFailedMaxCannotPublishAnErrorIntoANewDraft() async {
+        service.maxError = SendError(message: "Cell data unavailable")
+        service.onMax = { [weak self] in
+            await Task { @MainActor in self?.model.updateAmount("123") }.value
+        }
+        await model.setMaxAmount()
+        XCTAssertEqual(model.amount, "123")
+        XCTAssertNil(model.alert)
+    }
+
+    func testSuccessfulEmptyMaxRemainsDistinctFromAnUnresolvedRead() async {
+        model.updateAmount("123")
+        service.maxSendable = 0
+        await model.setMaxAmount()
+        XCTAssertEqual(model.amount, "0")
+        XCTAssertNil(model.alert)
+    }
+
+}
+
+/// Explicit rendezvous: edits/source changes occur only after preview suspends,
+/// and the failure cannot return until the test releases it. No timers or sleeps.
+@MainActor
+private final class PreviewFailureGate {
+    private var entered = false
+    private var entryWaiter: CheckedContinuation<Void, Never>?
+    private var suspended: CheckedContinuation<Void, Never>?
+
+    func suspend() async {
+        await withCheckedContinuation { continuation in
+            suspended = continuation
+            entered = true
+            entryWaiter?.resume()
+            entryWaiter = nil
+        }
+    }
+
+    func waitForEntry() async {
+        if entered { return }
+        await withCheckedContinuation { entryWaiter = $0 }
+    }
+
+    func release() {
+        suspended?.resume()
+        suspended = nil
     }
 }

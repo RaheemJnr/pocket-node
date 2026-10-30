@@ -53,8 +53,8 @@ class KeystoreV2MigrationRunnerTest {
         prefs = ctx.getSharedPreferences("test_v2_migration", Context.MODE_PRIVATE)
         prefs.edit().clear().commit()
 
-        legacyHelper = KeyStoreMigrationHelper(keyMaterialDao, encryptionManager, prefs, NoopLogger)
-        helper = KeystoreV2MigrationHelper(keyMaterialDao, encryptionManager, prefs, logger = NoopLogger)
+        legacyHelper = KeyStoreMigrationHelper(keyMaterialDao, encryptionManager, prefs, NoopLogger, database = db)
+        helper = KeystoreV2MigrationHelper(keyMaterialDao, encryptionManager, prefs, logger = NoopLogger, database = db)
         authManager = mockk(relaxed = true)
         runner = KeystoreV2MigrationRunner(helper, encryptionManager, authManager, NoopLogger)
         activity = mockk(relaxed = true)

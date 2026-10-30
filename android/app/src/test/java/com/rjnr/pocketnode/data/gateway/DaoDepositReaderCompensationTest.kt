@@ -3,6 +3,7 @@ package com.rjnr.pocketnode.data.gateway
 import com.rjnr.pocketnode.core.log.NoopLogger
 import com.rjnr.pocketnode.data.database.entity.DaoCellEntity
 import com.rjnr.pocketnode.data.gateway.DaoUnlockShadowLightClientNative.MaxWithdrawCall
+import com.rjnr.pocketnode.data.gateway.models.CellInput
 import com.rjnr.pocketnode.data.gateway.models.CellOutput
 import com.rjnr.pocketnode.data.gateway.models.DaoConstants
 import com.rjnr.pocketnode.data.gateway.models.JniCell
@@ -16,6 +17,8 @@ import com.rjnr.pocketnode.data.gateway.models.OutPoint
 import com.rjnr.pocketnode.data.gateway.models.Script
 import io.mockk.coEvery
 import io.mockk.mockk
+import io.mockk.coVerify
+import io.mockk.spyk
 import kotlinx.coroutines.test.runTest
 import kotlinx.serialization.encodeToString
 import kotlinx.serialization.json.Json
@@ -71,7 +74,7 @@ class DaoDepositReaderCompensationTest {
     private val headersByHash by lazy {
         mapOf(
             depositBlockHash to header(depositBlockHash, depositDao),
-            withdrawBlockHash to header(withdrawBlockHash, withdrawDao),
+            withdrawBlockHash to header(withdrawBlockHash, withdrawDao).copy(number = "0xc8"),
             tipBlockHash to header(tipBlockHash, tipDao),
         )
     }
@@ -83,12 +86,14 @@ class DaoDepositReaderCompensationTest {
         resetShadow()
         DaoUnlockShadowLightClientNative.tipHeader = json.encodeToString(header(tipBlockHash, tipDao))
 
+        DaoUnlockShadowLightClientNative.headersByNumber["0x64"] = json.encodeToString(headersByHash.getValue(depositBlockHash))
+        DaoUnlockShadowLightClientNative.headersByNumber["0xc8"] = json.encodeToString(headersByHash.getValue(withdrawBlockHash))
         val resolver = mockk<DaoHeaderResolver>()
         // The deposited cell sits in the deposit block, the withdrawing cell in
         // the withdraw block; its original deposit header comes via header_deps.
         coEvery { resolver.getBlockHashForCell(depositTx) } returns depositBlockHash
         coEvery { resolver.getBlockHashForCell(withdrawTx) } returns withdrawBlockHash
-        coEvery { resolver.getOrFetchHeader(any(), any()) } answers { headersByHash[firstArg()] }
+        coEvery { resolver.getOrFetchHeader(any(), any(), any()) } answers { headersByHash[firstArg()] }
 
         reader = DaoDepositReader(json, resolver, NoopLogger)
     }
@@ -97,12 +102,26 @@ class DaoDepositReaderCompensationTest {
     fun teardown() = resetShadow()
 
     private fun resetShadow() {
+        DaoUnlockShadowLightClientNative.headersByNumber.clear()
+        DaoUnlockShadowLightClientNative.transactionsByHash.clear()
         DaoUnlockShadowLightClientNative.tipHeader = null
         DaoUnlockShadowLightClientNative.chainStatus = null
         DaoUnlockShadowLightClientNative.cellsPage = null
         DaoUnlockShadowLightClientNative.transactionOverride = null
         DaoUnlockShadowLightClientNative.maxWithdrawCalls.clear()
         DaoUnlockShadowLightClientNative.transactionQueries.clear()
+    }
+
+    @Test fun `staged header lookup does not cache while default send lookup still does`() = runTest {
+        val cache = mockk<DaoSyncManager>(relaxed = true)
+        coEvery { cache.getCachedHeader(any()) } returns null
+        val lookup = spyk(DaoHeaderResolver(json, cache, NoopLogger))
+        val expected = header(depositBlockHash, depositDao)
+        coEvery { lookup.fetchHeaderWithRetry(depositBlockHash) } returns expected
+        assertEquals(expected, lookup.getOrFetchHeader(depositBlockHash, NetworkType.TESTNET, cacheResult = false))
+        coVerify(exactly = 0) { cache.cacheHeader(any(), any()) }
+        assertEquals(expected, lookup.getOrFetchHeader(depositBlockHash, NetworkType.TESTNET))
+        coVerify(exactly = 1) { cache.cacheHeader(expected, "TESTNET") }
     }
 
     @Test
@@ -118,7 +137,7 @@ class DaoDepositReaderCompensationTest {
     @Test
     fun `withdrawing cell compensation uses the deposit cell occupied capacity`() = runTest {
         DaoUnlockShadowLightClientNative.cellsPage = cellsJson(withdrawingCell())
-        DaoUnlockShadowLightClientNative.transactionOverride = json.encodeToString(phaseOneTx())
+        DaoUnlockShadowLightClientNative.transactionsByHash[withdrawTx] = json.encodeToString(phaseOneTx())
 
         val deposit = reader.list(walletScript, currentEpoch = null, network = NetworkType.TESTNET).single()
 
@@ -184,13 +203,25 @@ class DaoDepositReaderCompensationTest {
             version = "0x0",
             cellDeps = emptyList(),
             headerDeps = listOf(depositBlockHash),
-            inputs = emptyList(),
-            outputs = emptyList(),
-            outputsData = emptyList(),
+            inputs = listOf(CellInput(previousOutput = OutPoint(depositTx, "0x0"))),
+            outputs = listOf(withdrawingCell().output),
+            outputsData = listOf(withdrawingCell().outputData!!),
             witnesses = emptyList(),
         ),
         txStatus = JniTxStatus(status = "committed", blockHash = withdrawBlockHash),
     )
+
+    @Test fun `historical withdrawal locator cannot be a compensation endpoint without epoch proof`() = runTest {
+        val row = cachedRow(withdrawBlockNumber = 200L, withdrawBlockHash = withdrawBlockHash)
+            .copy(withdrawEpochHex = null)
+        val requested = mutableListOf<String>()
+        assertNull(reader.recomputeCachedCompensation(row) { hash ->
+            requested += hash
+            headersByHash[hash]?.dao
+        })
+        assertEquals(emptyList<String>(), requested)
+        assertEquals(emptyList<MaxWithdrawCall>(), calls)
+    }
 
     private fun cachedRow(
         withdrawBlockNumber: Long? = null,
@@ -203,10 +234,10 @@ class DaoDepositReaderCompensationTest {
         status = if (withdrawBlockNumber != null) "UNLOCKABLE" else "DEPOSITED",
         depositBlockNumber = 100L,
         depositBlockHash = depositBlockHash,
-        depositEpochHex = null,
+        depositEpochHex = "0x70800000000064",
         withdrawBlockNumber = withdrawBlockNumber,
         withdrawBlockHash = withdrawBlockHash,
-        withdrawEpochHex = null,
+        withdrawEpochHex = if (withdrawBlockNumber != null) "0x708000000000c8" else null,
         compensation = compensation,
         unlockEpochHex = null,
         depositTimestamp = 0L,

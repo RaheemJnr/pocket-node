@@ -12,12 +12,11 @@ use ckb_types::{
     packed::Byte32,
     prelude::*,
     utilities::merkle_mountain_range::VerifiableHeader,
-    H256, U256,
+    H256,
 };
 use dashmap::DashMap;
 use governor::{clock::DefaultClock, state::keyed::DefaultKeyedStateStore, Quota, RateLimiter};
 
-use super::prelude::*;
 use crate::{
     mutex_lock,
     protocols::{Status, StatusCode, BAD_MESSAGE_ALLOWED_EACH_HOUR, MESSAGE_TIMEOUT},
@@ -256,14 +255,6 @@ impl LastState {
         }
     }
 
-    pub(crate) fn total_difficulty(&self) -> U256 {
-        self.as_ref().total_difficulty()
-    }
-
-    pub(crate) fn header(&self) -> &HeaderView {
-        self.as_ref().header()
-    }
-
     pub(crate) fn update_ts(&self) -> u64 {
         self.update_ts
     }
@@ -380,28 +371,6 @@ impl ProveState {
             reorg_last_headers,
             last_headers,
         }
-    }
-
-    pub(crate) fn new_child(&self, child_last_state: LastState, last_n_blocks: usize) -> Self {
-        let parent_header = self.get_last_header().header();
-        let mut last_headers = self.last_headers.clone();
-        let reorg_last_headers = self.reorg_last_headers.clone();
-        // To avoid unlimited memory growth.
-        if last_headers.len() >= last_n_blocks {
-            last_headers.remove(0);
-        }
-        last_headers.push(parent_header.clone());
-        Self {
-            last_state: child_last_state,
-            reorg_last_headers,
-            last_headers,
-        }
-    }
-
-    pub(crate) fn is_parent_of(&self, child_last_state: &LastState) -> bool {
-        self.get_last_header()
-            .header()
-            .is_parent_of(child_last_state.header())
     }
 
     pub fn get_last_header(&self) -> &VerifiableHeader {
@@ -687,14 +656,6 @@ impl LatestBlockFilterHashes {
             );
             return Err(StatusCode::Ignore.with_context(errmsg));
         }
-        let mut end_number = start_number + block_filter_hashes.len() as BlockNumber - 1;
-        if finalized_check_point_number >= end_number {
-            let errmsg = format!(
-                "finalized check point ({}) is not less than end number ({})",
-                finalized_check_point_number, end_number,
-            );
-            return Err(StatusCode::Ignore.with_context(errmsg));
-        }
         if start_number > last_proved_number {
             let errmsg = format!(
                 "start number ({}) is greater than the proved number ({})",
@@ -702,8 +663,28 @@ impl LatestBlockFilterHashes {
             );
             return Err(StatusCode::Ignore.with_context(errmsg));
         }
+        // The slice is nonempty. Subtract before adding so a range ending at
+        // u64::MAX is valid, and never narrow a block number to pointer width.
+        let end_number = match start_number.checked_add(block_filter_hashes.len() as BlockNumber - 1) {
+            Some(v) => v,
+            None => {
+                let errmsg = format!(
+                    "overflow computing end number: start_number ({}) + len ({}) - 1",
+                    start_number,
+                    block_filter_hashes.len()
+                );
+                return Err(StatusCode::Ignore.with_context(errmsg));
+            }
+        };
+        if finalized_check_point_number >= end_number {
+            let errmsg = format!(
+                "finalized check point ({}) is not less than end number ({})",
+                finalized_check_point_number, end_number,
+            );
+            return Err(StatusCode::Ignore.with_context(errmsg));
+        }
         let last_filter_number = self.get_last_number();
-        if start_number > last_filter_number + 1 {
+        if start_number.saturating_sub(1) > last_filter_number {
             let errmsg = format!(
                 "start number ({}) is continuous with last filter block number ({})",
                 start_number, last_filter_number
@@ -714,7 +695,6 @@ impl LatestBlockFilterHashes {
             let diff = end_number - last_proved_number;
             let new_length = block_filter_hashes.len() - diff as usize;
             block_filter_hashes = &block_filter_hashes[..new_length];
-            end_number = last_proved_number;
         }
         // Check block filter hashes.
         let (start_index_for_old, start_index_for_new) = if start_number
@@ -743,7 +723,13 @@ impl LatestBlockFilterHashes {
         } else {
             let diff = start_number - finalized_check_point_number;
             let index = diff as usize - 2;
-            let filter_hash = &self.inner[index];
+            let Some(filter_hash) = self.inner.get(index) else {
+                let errmsg = format!(
+                    "filter hash index {index} out of bounds, inner len: {}",
+                    self.inner.len()
+                );
+                return Err(StatusCode::Ignore.with_context(errmsg));
+            };
             if filter_hash != parent_block_filter_hash {
                 let errmsg = format!(
                     "filter hash for block {} is {:#x} but parent hash is {:#}",
@@ -761,7 +747,7 @@ impl LatestBlockFilterHashes {
             .enumerate()
         {
             if old_hash != new_hash {
-                let number = start_number + (start_index_for_old + index) as BlockNumber;
+                let number = start_number + (start_index_for_new + index) as BlockNumber;
                 let errmsg = format!(
                     "old filter hash for block {} is {:#x} but new is {:#}",
                     number, old_hash, new_hash
@@ -769,11 +755,16 @@ impl LatestBlockFilterHashes {
                 return Err(StatusCode::Ignore.with_context(errmsg));
             }
         }
-        // Update block filter hashes.
-        let index = start_index_for_new + self.inner[start_index_for_old..].len();
-        self.inner.extend_from_slice(&block_filter_hashes[index..]);
-        if end_number < last_proved_number {
-            Ok(Some(end_number + 1))
+        // All supplied overlap has been checked. A shorter matching response
+        // confirms a prefix; only a response extending our coverage adds data.
+        let overlap = self.inner[start_index_for_old..].len();
+        let incoming = &block_filter_hashes[start_index_for_new..];
+        if incoming.len() > overlap {
+            self.inner.extend_from_slice(&incoming[overlap..]);
+        }
+        let covered_number = self.get_last_number().min(last_proved_number);
+        if covered_number < last_proved_number {
+            Ok(Some(covered_number + 1))
         } else {
             Ok(None)
         }
@@ -1898,7 +1889,7 @@ impl Peers {
                 .get_latest_block_filter_hashes(finalized_check_point_index)
                 .len();
             finalized_check_point_number + latest_block_filter_hashes_count as BlockNumber
-                >= min_filtered_block_number + 1
+                > min_filtered_block_number
         } else {
             // Check:
             // - If cached block filter hashes is same check point as the required,
@@ -2065,4 +2056,183 @@ fn if_verifiable_headers_are_same(lhs: &VerifiableHeader, rhs: &VerifiableHeader
                     .expect("checked: is not none")
                     .as_slice()))
         && lhs.total_difficulty() == rhs.total_difficulty()
+}
+
+#[cfg(test)]
+mod filter_range_regressions {
+    use super::*;
+
+    #[test]
+    fn shorter_filter_overlap_preserves_cache_and_next_request() {
+        let hash = packed::Byte32::default();
+        // Cover responses including the checkpoint, immediately after it, and
+        // beginning inside the existing cache.
+        for start in [100, 101, 102] {
+            let original = vec![hash.clone(); 10];
+            let mut hashes = LatestBlockFilterHashes::mock(100, original.clone());
+            let next = hashes
+                .update_latest_block_filter_hashes(
+                    120,
+                    100,
+                    &hash,
+                    start,
+                    &hash,
+                    &vec![hash.clone(); 3],
+                )
+                .unwrap();
+            assert_eq!(hashes.get_hashes(), original);
+            assert_eq!(next, Some(111));
+        }
+    }
+
+    #[test]
+    fn conflicting_shorter_filter_overlap_is_rejected_without_mutation() {
+        let hash = packed::Byte32::default();
+        let conflict = packed::Byte32::from_slice(&[1; 32]).unwrap();
+        let original = vec![hash.clone(); 10];
+        let mut hashes = LatestBlockFilterHashes::mock(100, original.clone());
+        let error = hashes
+            .update_latest_block_filter_hashes(
+                120,
+                100,
+                &hash,
+                102,
+                &hash,
+                &[hash.clone(), conflict],
+            )
+            .unwrap_err();
+        assert_eq!(error.code(), StatusCode::Ignore);
+        assert_eq!(hashes.get_hashes(), original);
+    }
+
+    #[test]
+    fn filter_range_above_u32_max_keeps_full_block_numbers() {
+        let checkpoint = u64::from(u32::MAX) + 5;
+        let hash = packed::Byte32::default();
+        let mut hashes = LatestBlockFilterHashes::new(checkpoint);
+        let next = hashes
+            .update_latest_block_filter_hashes(
+                checkpoint + 10,
+                checkpoint,
+                &hash,
+                checkpoint + 1,
+                &hash,
+                &[hash.clone(), hash.clone()],
+            )
+            .unwrap();
+        assert_eq!(next, Some(checkpoint + 3));
+        assert_eq!(hashes.get_last_number(), checkpoint + 2);
+    }
+
+    #[test]
+    fn retained_filter_coverage_stops_at_proved_tip() {
+        let hash = packed::Byte32::default();
+        let mut hashes = LatestBlockFilterHashes::mock(100, vec![hash.clone(); 10]);
+        let next = hashes
+            .update_latest_block_filter_hashes(110, 100, &hash, 102, &hash, &vec![hash.clone(); 3])
+            .unwrap();
+        assert_eq!(next, None);
+        assert_eq!(hashes.get_hashes(), vec![hash; 10]);
+    }
+
+    #[test]
+    fn extending_filter_overlap_is_capped_at_proved_tip() {
+        let hash = packed::Byte32::default();
+        let mut hashes = LatestBlockFilterHashes::mock(100, vec![hash.clone(); 3]);
+        let next = hashes
+            .update_latest_block_filter_hashes(106, 100, &hash, 102, &hash, &vec![hash.clone(); 10])
+            .unwrap();
+        assert_eq!(next, None);
+        assert_eq!(hashes.get_hashes(), vec![hash; 6]);
+    }
+
+    #[test]
+    fn extending_filter_overlap_requests_first_missing_hash() {
+        let hash = packed::Byte32::default();
+        let mut hashes = LatestBlockFilterHashes::mock(100, vec![hash.clone(); 3]);
+        let next = hashes
+            .update_latest_block_filter_hashes(
+                106,
+                100,
+                &hash,
+                103,
+                &hash,
+                &[hash.clone(), hash.clone()],
+            )
+            .unwrap();
+        assert_eq!(next, Some(105));
+        assert_eq!(hashes.get_hashes(), vec![hash; 4]);
+    }
+
+    #[test]
+    fn filter_range_ending_at_u64_max_is_valid() {
+        let checkpoint = u64::MAX - 3;
+        let hash = packed::Byte32::default();
+        let mut hashes = LatestBlockFilterHashes::new(checkpoint);
+        let next = hashes
+            .update_latest_block_filter_hashes(
+                u64::MAX,
+                checkpoint,
+                &hash,
+                checkpoint + 1,
+                &hash,
+                &vec![hash.clone(); 3],
+            )
+            .unwrap();
+        assert_eq!(next, None);
+        assert_eq!(hashes.get_last_number(), u64::MAX);
+        let repeated = hashes
+            .update_latest_block_filter_hashes(
+                u64::MAX,
+                checkpoint,
+                &hash,
+                u64::MAX,
+                &hash,
+                &[hash.clone()],
+            )
+            .unwrap();
+        assert_eq!(repeated, None);
+        assert_eq!(hashes.get_hashes(), vec![hash; 3]);
+    }
+
+    #[test]
+    fn maximum_height_conflicting_filter_repeat_is_ignored() {
+        let checkpoint = u64::MAX - 3;
+        let hash = packed::Byte32::default();
+        let original = vec![hash.clone(); 3];
+        let mut hashes = LatestBlockFilterHashes::mock(checkpoint, original.clone());
+        let conflict = packed::Byte32::from_slice(&[1; 32]).unwrap();
+        let error = hashes
+            .update_latest_block_filter_hashes(
+                u64::MAX,
+                checkpoint,
+                &hash,
+                u64::MAX,
+                &hash,
+                &[conflict],
+            )
+            .unwrap_err();
+        assert_eq!(error.code(), StatusCode::Ignore);
+        assert_eq!(hashes.get_hashes(), original);
+        assert_eq!(hashes.get_last_number(), u64::MAX);
+    }
+
+    #[test]
+    fn overflowing_filter_range_is_ignored_without_mutating_cached_hashes() {
+        let mut hashes = LatestBlockFilterHashes::new(0);
+        let hash = packed::Byte32::default();
+        let error = hashes
+            .update_latest_block_filter_hashes(
+                u64::MAX,
+                0,
+                &hash,
+                u64::MAX,
+                &hash,
+                &[hash.clone(), hash.clone()],
+            )
+            .unwrap_err();
+        assert_eq!(error.code(), StatusCode::Ignore);
+        assert!(hashes.get_hashes().is_empty());
+        assert_eq!(hashes.get_last_number(), 0);
+    }
 }

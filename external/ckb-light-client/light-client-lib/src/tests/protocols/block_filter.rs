@@ -12,15 +12,112 @@ use ckb_types::{
     H256, U256,
 };
 
-use crate::storage::SetScriptsCommand;
+use crate::storage::{LightClientStorage, SetScriptsCommand};
 use crate::storage::{ScriptStatus, ScriptType};
 use crate::{
-    protocols::{BAD_MESSAGE_BAN_TIME, GET_BLOCK_FILTERS_TOKEN},
+    protocols::{
+        light_client::constant::REFRESH_PEERS_TOKEN, BAD_MESSAGE_BAN_TIME, CHECK_POINT_INTERVAL,
+        GET_BLOCK_FILTERS_TOKEN, GET_BLOCK_FILTER_HASHES_TOKEN,
+    },
     tests::{
         prelude::*,
         utils::{setup, MockChain, MockNetworkContext},
     },
 };
+
+#[tokio::test]
+async fn shorter_finalized_filter_reply_preserves_cache_and_next_request() {
+    check_finalized_filter_reply(10, 3, false, 10, Some(11)).await;
+}
+
+#[tokio::test]
+async fn conflicting_shorter_finalized_filter_reply_preserves_cache() {
+    check_finalized_filter_reply(10, 3, true, 10, None).await;
+}
+
+#[tokio::test]
+async fn finalized_filter_requests_stop_at_checkpoint() {
+    let boundary = CHECK_POINT_INTERVAL as usize;
+    check_finalized_filter_reply(
+        boundary - 1,
+        3,
+        false,
+        boundary - 1,
+        Some(CHECK_POINT_INTERVAL),
+    )
+    .await;
+    check_finalized_filter_reply(boundary, 3, false, boundary, None).await;
+    check_finalized_filter_reply(10, boundary + 3, false, boundary, None).await;
+}
+
+async fn check_finalized_filter_reply(
+    cached_len: usize,
+    response_len: usize,
+    conflicting: bool,
+    expected_len: usize,
+    expected_next: Option<u64>,
+) {
+    let chain = MockChain::new_with_dummy_pow("short-filter-reply");
+    let nc = MockNetworkContext::new(SupportProtocols::Filter);
+    let peers = chain.create_peers();
+    let peer = PeerIndex::new(1);
+    peers.add_peer(peer);
+    let tip = VerifiableHeader::new(
+        HeaderBuilder::default()
+            .epoch(EpochNumberWithFraction::new(0, 0, 100).full_value())
+            .number(CHECK_POINT_INTERVAL * 2)
+            .build(),
+        Default::default(),
+        None,
+        Default::default(),
+    );
+    peers.mock_prove_state(peer, tip).unwrap();
+    let storage = chain.client_storage();
+    let (_, checkpoint) = storage.get_last_check_point();
+    storage.update_check_points(1, &[packed::Byte32::default()]);
+    storage.update_max_check_point_index(1);
+    let cached = vec![packed::Byte32::default(); cached_len];
+    peers
+        .update_cached_block_filter_hashes(cached.clone())
+        .await;
+    let mut response = vec![packed::Byte32::default(); response_len];
+    if conflicting {
+        response[1] = packed::Byte32::from_slice(&[1; 32]).unwrap();
+    }
+    let content = packed::BlockFilterHashes::new_builder()
+        .start_number(1u64)
+        .parent_block_filter_hash(checkpoint)
+        .block_filter_hashes(response)
+        .build();
+    let message = packed::BlockFilterMessage::new_builder()
+        .set(content)
+        .build();
+    let mut protocol = chain.create_filter_protocol(Arc::clone(&peers));
+    protocol
+        .received(nc.context(), peer, message.as_bytes())
+        .await;
+    assert_eq!(
+        peers.get_cached_block_filter_hashes().await,
+        (0, vec![packed::Byte32::default(); expected_len])
+    );
+    assert!(nc.not_banned(peer));
+    let sent = nc.sent_messages().borrow();
+    let requests = sent
+        .iter()
+        .filter_map(|(_, _, bytes)| {
+            match packed::BlockFilterMessageReader::from_slice(bytes)
+                .unwrap()
+                .to_enum()
+            {
+                packed::BlockFilterMessageUnionReader::GetBlockFilterHashes(request) => {
+                    Some(request.start_number().unpack())
+                }
+                _ => None,
+            }
+        })
+        .collect::<Vec<u64>>();
+    assert_eq!(requests, expected_next.into_iter().collect::<Vec<_>>());
+}
 
 #[tokio::test]
 async fn test_block_filter_malformed_message() {
@@ -529,6 +626,81 @@ async fn test_block_filter_notify_ask_filters() {
 }
 
 #[tokio::test]
+async fn test_filter_hash_request_after_checkpoint_quorum_loss() {
+    let chain = MockChain::new_with_dummy_pow("test-block-filter");
+    let light_client_network_context = MockNetworkContext::new(SupportProtocols::LightClient);
+    let filter_network_context = MockNetworkContext::new(SupportProtocols::Filter);
+
+    let storage = chain.client_storage();
+    let (initial_check_point_index, initial_check_point) = storage.get_last_check_point();
+    assert_eq!(initial_check_point_index, 0);
+
+    let next_check_point = H256(rand::random()).pack();
+    let proved_number = CHECK_POINT_INTERVAL * 2;
+    let tip_header = VerifiableHeader::new(
+        HeaderBuilder::default()
+            .epoch(EpochNumberWithFraction::new(0, 0, 100).full_value())
+            .number(proved_number)
+            .build(),
+        Default::default(),
+        None,
+        Default::default(),
+    );
+    let peer_indexes = (1..=4).map(PeerIndex::new).collect::<Vec<_>>();
+    let peers = chain.create_peers();
+    peers.set_max_outbound_peers(8);
+    for peer_index in &peer_indexes {
+        peers.add_peer(*peer_index);
+        peers
+            .mock_prove_state(*peer_index, tip_header.clone())
+            .unwrap();
+        let next_start_number = peers
+            .add_check_points(
+                *peer_index,
+                proved_number,
+                0,
+                &[initial_check_point.clone(), next_check_point.clone()],
+            )
+            .unwrap();
+        assert!(next_start_number.is_none());
+    }
+
+    let mut light_client_protocol = chain.create_light_client_protocol(Arc::clone(&peers));
+    light_client_protocol
+        .notify(light_client_network_context.context(), REFRESH_PEERS_TOKEN)
+        .await;
+    assert_eq!(storage.get_last_check_point(), (1, next_check_point));
+
+    peers.remove_peer(peer_indexes[3]).await;
+    light_client_protocol
+        .notify(light_client_network_context.context(), REFRESH_PEERS_TOKEN)
+        .await;
+
+    let mut filter_protocol = chain.create_filter_protocol(peers);
+    filter_protocol
+        .notify(
+            filter_network_context.context(),
+            GET_BLOCK_FILTER_HASHES_TOKEN,
+        )
+        .await;
+
+    let expected_message = packed::BlockFilterMessage::new_builder()
+        .set(
+            packed::GetBlockFilterHashes::new_builder()
+                .start_number(1u64)
+                .build(),
+        )
+        .build()
+        .as_bytes();
+    let sent_messages = filter_network_context.sent_messages().borrow();
+    assert_eq!(sent_messages.len(), 1);
+    let (protocol_id, peer_index, message) = &sent_messages[0];
+    assert_eq!(*protocol_id, SupportProtocols::Filter.protocol_id());
+    assert!(peer_indexes[..3].contains(peer_index));
+    assert_eq!(message, &expected_message);
+}
+
+#[tokio::test]
 async fn test_block_filter_notify_no_proved_peers() {
     let chain = MockChain::new_with_dummy_pow("test-block-filter");
     let nc = MockNetworkContext::new(SupportProtocols::Filter);
@@ -814,5 +986,48 @@ async fn test_block_filter_without_enough_hashes() {
     protocol.received(nc.context(), peer_index, message).await;
     assert!(nc.not_banned(peer_index));
 
+    assert!(nc.sent_messages().borrow().is_empty());
+}
+
+
+#[test]
+fn truncated_gcs_filter_returns_protocol_error_without_advancing_progress() {
+    let chain = MockChain::new_with_dummy_pow("truncated-gcs");
+    chain.client_storage().update_filter_scripts(vec![ScriptStatus {
+        script: Script::default(), script_type: ScriptType::Lock, block_number: 0,
+    }], Default::default());
+    let protocol = chain.create_filter_protocol(chain.create_peers());
+    // A valid Molecule envelope containing a truncated Golomb-coded set.
+    let filters = packed::BlockFilters::new_builder().start_number(1u64)
+        .block_hashes(vec![packed::Byte32::default()])
+        .filters(vec![Bytes::from(1u64.to_le_bytes().to_vec()).pack()]).build();
+    let error = protocol.check_filters_data(filters, 1).unwrap_err();
+    assert_eq!(error.code(), crate::protocols::StatusCode::MalformedProtocolMessage);
+    assert_eq!(chain.client_storage().get_min_filtered_block_number(), 0);
+    assert!(chain.client_storage().get_earliest_matched_blocks().is_none());
+}
+
+#[tokio::test]
+async fn exhausted_filter_height_does_not_wrap_or_advance() {
+    let chain = MockChain::new_with_dummy_pow("filter-height-boundary");
+    chain.client_storage().update_filter_scripts(vec![ScriptStatus {
+        script: Script::default(), script_type: ScriptType::Lock, block_number: u64::MAX,
+    }], Default::default());
+    let peer = PeerIndex::new(3);
+    let peers = chain.create_peers();
+    peers.add_peer(peer);
+    peers.mock_prove_state(peer, VerifiableHeader::new(
+        HeaderBuilder::default().epoch(EpochNumberWithFraction::new(0, 0, 100).full_value())
+            .number(u64::MAX).build(), Default::default(), None, Default::default(),
+    )).unwrap();
+    let mut protocol = chain.create_filter_protocol(peers);
+    let nc = MockNetworkContext::new(SupportProtocols::Filter);
+    let content = packed::BlockFilters::new_builder().start_number(0u64)
+        .block_hashes(vec![packed::Byte32::default()])
+        .filters(vec![Bytes::from_static(&[0]).pack()]).build();
+    let message = packed::BlockFilterMessage::new_builder().set(content).build();
+    protocol.received(nc.context(), peer, message.as_bytes()).await;
+    assert_eq!(chain.client_storage().get_min_filtered_block_number(), u64::MAX);
+    assert!(chain.client_storage().get_earliest_matched_blocks().is_none());
     assert!(nc.sent_messages().borrow().is_empty());
 }

@@ -8,7 +8,7 @@ use ckb_types::{
 use log::{debug, error, info};
 use rand::seq::SliceRandom;
 
-use crate::storage::HeaderWithExtension;
+use crate::storage::{HeaderWithExtension, LightClientStorage};
 
 use super::{
     super::{LightClientProtocol, Status, StatusCode},
@@ -57,6 +57,33 @@ impl<'a> SendBlocksProofProcess<'a> {
         };
 
         let last_header: VerifiableHeader = self.message.last_header().to_entity().into();
+        let headers_len = self.message.headers().len();
+        // Parse the V1 extra fields with a verifying reader up front, before any
+        // early return, so that all later access is over validated bytes and can
+        // never panic on malformed/unchecked input.
+        let message_v1 = if self.message.count_extra_fields() >= 2 {
+            match packed::SendBlocksProofV1Reader::from_compatible_slice(self.message.as_slice()) {
+                Ok(message_v1) => {
+                    let uncle_hashes_len = message_v1.blocks_uncles_hash().len();
+                    let extensions_len = message_v1.blocks_extension().len();
+                    if uncle_hashes_len != headers_len || extensions_len != headers_len {
+                        let error_message = format!(
+                            "SendBlocksProof v1 field length mismatch: \
+                             headers={}, uncle_hashes={}, extensions={}",
+                            headers_len, uncle_hashes_len, extensions_len
+                        );
+                        return StatusCode::MalformedProtocolMessage.with_context(error_message);
+                    }
+                    Some(message_v1)
+                }
+                Err(_) => {
+                    return StatusCode::MalformedProtocolMessage
+                        .with_context("SendBlocksProof v1 extra fields are malformed");
+                }
+            }
+        } else {
+            None
+        };
 
         // Update the last state if the response contains a new one.
         if original_request.last_hash() != last_header.header().hash() {
@@ -108,7 +135,7 @@ impl<'a> SendBlocksProofProcess<'a> {
         }
 
         // If all blocks are missing.
-        if self.message.headers().is_empty() {
+        if headers.is_empty() {
             if !self.message.proof().is_empty() {
                 error!(
                     "peer {} send a proof when all blocks are missing",
@@ -121,16 +148,12 @@ impl<'a> SendBlocksProofProcess<'a> {
             return_if_failed!(self.protocol.check_pow_for_headers(headers.iter()));
 
             // Check extra hash for blocks
-            let is_v1 = self.message.count_extra_fields() >= 2;
-            let extensions = if is_v1 {
-                let message_v1 =
-                    packed::SendBlocksProofV1Reader::new_unchecked(self.message.as_slice());
+            let extensions = if let Some(message_v1) = message_v1 {
                 let uncle_hashes: Vec<_> = message_v1
                     .blocks_uncles_hash()
                     .iter()
                     .map(|uncle_hashes| uncle_hashes.to_entity())
                     .collect();
-
                 let extensions: Vec<_> = message_v1
                     .blocks_extension()
                     .iter()
@@ -140,6 +163,12 @@ impl<'a> SendBlocksProofProcess<'a> {
                 return_if_failed!(verify_extra_hash(&headers, &uncle_hashes, &extensions));
                 extensions
             } else {
+                // A legacy (v0) response carries neither uncle hashes nor
+                // block extensions. Only accept it for headers which commit
+                // to no such data; otherwise a malicious peer could omit a
+                // CKB2023 block extension and the client would verify
+                // transactions against incomplete data.
+                return_if_failed!(verify_legacy_extra_hash(&headers));
                 vec![None; headers.len()]
             };
 
@@ -214,7 +243,7 @@ impl<'a> SendBlocksProofProcess<'a> {
                 }
             }
 
-            for (header, extension) in headers.into_iter().zip(extensions.into_iter()) {
+            for (header, extension) in headers.into_iter().zip(extensions) {
                 if self.protocol.peers().remove_fetching_header(&header.hash()) {
                     self.protocol
                         .storage()
@@ -303,5 +332,28 @@ pub(crate) fn verify_extra_hash(
         }
     }
 
+    Ok(())
+}
+
+/// Verifies that headers in a legacy (v0) proof message commit to no extra
+/// data.
+///
+/// A legacy `SendBlocksProof`/`SendTransactionsProof` message carries neither
+/// uncle hashes nor block extensions. For a block without uncles and without
+/// an extension, `extra_hash` is `Byte32::zero()`; any other value commits to
+/// data the legacy message cannot provide. Accepting such a header would let
+/// a malicious peer omit a CKB2023 block extension and make the client verify
+/// transactions against incomplete data.
+pub(crate) fn verify_legacy_extra_hash(headers: &[HeaderView]) -> Result<(), Status> {
+    for header in headers {
+        if header.extra_hash() != packed::Byte32::zero() {
+            let errmsg = format!(
+                "legacy proof message omits uncle hashes/extensions committed by block#{} (hash: {:#x})",
+                header.number(),
+                header.hash(),
+            );
+            return Err(StatusCode::InvalidProof.with_context(errmsg));
+        }
+    }
     Ok(())
 }

@@ -10,7 +10,7 @@ use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use crate::protocols::{Peers, BAD_MESSAGE_BAN_TIME};
-use crate::storage::Storage;
+use crate::storage::{LightClientStorage, Storage};
 use crate::types::{Duration, Instant, RwLock};
 use crate::{read_lock, write_lock};
 
@@ -141,10 +141,13 @@ impl CKBProtocolHandler for RelayProtocol {
         let flag = read_lock!(self.pending_txs).is_not_empty_and_updated_at(60);
 
         if flag {
-            let peer_id = nc
+            let Some(peer_id) = nc
                 .get_peer(peer)
                 .and_then(|p| extract_peer_id(&p.connected_addr))
-                .unwrap();
+            else {
+                warn!("RelayProtocol failed to extract peer_id for peer={}", peer);
+                return;
+            };
             let tx_hashes =
                 write_lock!(self.pending_txs).fetch_transaction_hashes_for_broadcast(peer_id);
             if !tx_hashes.is_empty() {

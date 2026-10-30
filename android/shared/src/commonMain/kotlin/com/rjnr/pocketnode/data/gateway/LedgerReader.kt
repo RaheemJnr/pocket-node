@@ -133,7 +133,7 @@ class LedgerReader(
         val cap = json.decodeFromString<JniCellsCapacity>(responseJson)
 
         // Convert to balance response
-        var capacityVal = cap.capacity.removePrefix("0x").toLongOrNull(16) ?: 0L
+        var capacityVal = 0L
 
         // The light client's getCellsCapacity may include spent cells
         // We need to calculate the true balance by getting live cells only
@@ -155,7 +155,7 @@ class LedgerReader(
                 while (pages < MAX_CELL_PAGES) {
                     val pageJson = lightClient.getCells(
                         json.encodeToString(searchKey), "desc", 100, c
-                    ) ?: break
+                    ) ?: throw Exception("Cell data unavailable for spendable balance")
                     val page = json.decodeFromString<JniPagination<JniCell>>(pageJson)
                     allBalanceCells.addAll(page.objects)
                     pages++
@@ -169,22 +169,21 @@ class LedgerReader(
             if (allBalanceCells.isNotEmpty()) {
                 var liveCapacity = 0L
                 var liveCellCount = 0
-                var typedCellCount = 0
+                var protectedCellCount = 0
 
                 allBalanceCells.forEach { cell ->
                     val outpointKey = "${cell.outPoint.txHash}:${cell.outPoint.index}"
                     if (outpointKey !in spentOutpoints) {
-                        // Exclude cells with type scripts (DAO cells, etc.) from available balance
-                        // Like Neuron: typeHash IS NULL AND hasData = false
+                        // Only observed-empty, untyped cells at this source lock are spendable.
                         // Skip a record with an unparseable capacity rather than
                         // letting one bad value throw and poison the whole balance
                         // page (#321). toLongOrNull also guards u64 > Long.MAX.
                         val cellCapacity = cell.output.capacity.removePrefix("0x").toLongOrNull(16)
                         if (cellCapacity == null) {
                             logger.w(TAG, "Skipping cell $outpointKey with unparseable capacity ${cell.output.capacity}")
-                        } else if (cell.output.type != null) {
-                            typedCellCount++
-                            logger.d(TAG, "🔒 DAO/typed cell excluded from balance: $outpointKey = $cellCapacity shannons")
+                        } else if (!cell.toCell().isPlainCapacity(myScript)) {
+                            if (cell.output.lock == myScript) protectedCellCount++
+                            logger.d(TAG, "🔒 Protected cell excluded from balance: $outpointKey = $cellCapacity shannons")
                         } else {
                             liveCapacity += cellCapacity
                             liveCellCount++
@@ -199,7 +198,7 @@ class LedgerReader(
                 capacityVal = liveCapacity
 
                 // Rescue rescan (#332): only for a wallet that is GENUINELY
-                // empty (no spendable AND no typed/DAO cells) yet has history,
+                // empty (no spendable AND no protected cells) yet has history,
                 // at most once per wallet per process, and never while sync is
                 // still catching up. The old `liveCapacity == 0` trigger
                 // counted DAO deposits as nothing and re-fired after every
@@ -216,7 +215,7 @@ class LedgerReader(
                     val txPag = json.decodeFromString<JniPagination<JniTxWithCell>>(ascTxJson)
                     if (shouldAttemptZeroCellRescan(
                             spendableCapacity = liveCapacity,
-                            typedCellCount = typedCellCount,
+                            typedCellCount = protectedCellCount,
                             hasTransactions = txPag.objects.isNotEmpty(),
                             // Persisted across launches (knmo): without this the
                             // in-memory set re-armed every cold start and a
@@ -262,7 +261,8 @@ class LedgerReader(
             }
         } catch (e: Exception) {
             logger.e(TAG, "Failed to calculate live balance: ${e.message}")
-            // Fall back to the raw capacity value if filtering fails
+            // Raw capacity includes protected cells and cannot represent spendable funds.
+            throw e
         }
 
         val ckbVal = capacityVal / 100_000_000.0
@@ -306,16 +306,17 @@ class LedgerReader(
         val responseJson = lightClient.getCellsCapacity(searchKeyJson)
             ?: throw Exception(readPathNullMessage("get balance", lightClientReadyForRead()))
         val cap = json.decodeFromString<JniCellsCapacity>(responseJson)
-        var capacityVal = cap.capacity.removePrefix("0x").toLongOrNull(16) ?: 0L
+        var capacityVal = 0L
 
-        // Same live-cell filtering as readBalance: drop spent + typed cells.
+        // Same plain-capacity policy as readBalance, including observed empty data.
         try {
             val spentOutpoints = fetchAllSpentOutpoints(searchKeyJson)
             val allBalanceCells = mutableListOf<JniCell>()
             var c: String? = null
             var pages = 0
             while (pages < MAX_CELL_PAGES) {
-                val pageJson = lightClient.getCells(searchKeyJson, "desc", 100, c) ?: break
+                val pageJson = lightClient.getCells(searchKeyJson, "desc", 100, c)
+                    ?: throw Exception("Cell data unavailable for spendable balance")
                 val page = json.decodeFromString<JniPagination<JniCell>>(pageJson)
                 allBalanceCells.addAll(page.objects)
                 pages++
@@ -328,15 +329,14 @@ class LedgerReader(
                     val outpointKey = "${cell.outPoint.txHash}:${cell.outPoint.index}"
                     if (outpointKey !in spentOutpoints) {
                         val cellCapacity = cell.output.capacity.removePrefix("0x").toLongOrNull(16)
-                        if (cellCapacity != null && cell.output.type == null) liveCapacity += cellCapacity
+                        if (cellCapacity != null && cell.toCell().isPlainCapacity(script)) liveCapacity += cellCapacity
                     }
                 }
                 capacityVal = liveCapacity
             }
         } catch (e: Exception) {
-            // Wording kept verbatim from the repository method this replaces:
-            // it is what a user's logcat report is grepped for.
-            logger.w(TAG, "refreshBalanceForWallet($walletId): live filter failed, using raw capacity: ${e.message}")
+            logger.w(TAG, "refreshBalanceForWallet($walletId): spendable balance unavailable: ${e.message}")
+            throw e
         }
 
         BalanceResponse(
@@ -349,7 +349,7 @@ class LedgerReader(
 
     /**
      * Live, spendable cells for [script]: the complete cursor walk minus every
-     * spent outpoint and every cell carrying a type script.
+     * spent outpoint and every cell not proven to be plain capacity at the source lock.
      *
      * The caller resolves [script] (from an explicit address on the send path,
      * or from the active wallet) so the snapshot taken under the send mutex
@@ -400,12 +400,7 @@ class LedgerReader(
             if (!isLive) {
                 logger.d(TAG, "❌ getCells: Filtering out spent cell: $outpointKey")
             }
-            // Also exclude cells with type scripts (DAO cells) — they can't be spent as regular inputs
-            val hasTypeScript = cell.output.type != null
-            if (hasTypeScript && isLive) {
-                logger.d(TAG, "🔒 getCells: Excluding typed cell (DAO): $outpointKey")
-            }
-            isLive && !hasTypeScript
+            isLive && cell.toCell().isPlainCapacity(script)
         }.map { it.toCell() }
 
         logger.d(TAG, "✅ getCells: ${liveCells.size} live cells (filtered from ${allCells.size} total)")

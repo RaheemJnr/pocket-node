@@ -3,6 +3,7 @@
 //! Each function returns the exact JSON string the corresponding JNI export
 //! returns, so the platform bridges only have to marshal a `String`.
 
+use crate::storage::LightClientStorage;
 use super::error::BridgeError;
 use super::types::*;
 use crate::service::{
@@ -15,7 +16,6 @@ use crate::verify::verify_tx;
 use ckb_jsonrpc_types::{BlockView, HeaderView, JsonBytes, Transaction};
 use ckb_network::extract_peer_id;
 use ckb_systemtime::unix_time_as_millis;
-use ckb_traits::HeaderProvider;
 use ckb_types::{
     core, packed,
     prelude::{IntoBlockView, IntoHeaderView, IntoTransactionView, *},

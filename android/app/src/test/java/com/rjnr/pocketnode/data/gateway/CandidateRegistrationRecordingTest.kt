@@ -54,7 +54,7 @@ class CandidateRegistrationRecordingTest {
             RoomSubAccountCandidateStore(db.subAccountCandidateDao()),
             RoomTransactionStore(
                 db.transactionDao(),
-                CacheManager(db.transactionDao(), db.balanceCacheDao(), NoopLogger),
+                CacheManager(db.transactionDao(), db.balanceCacheDao(), NoopLogger, verificationCacheGate = com.rjnr.pocketnode.data.gateway.readyVerificationGate()),
             ),
             mockk(relaxed = true),
             WalletPreferences(context, NoopLogger),

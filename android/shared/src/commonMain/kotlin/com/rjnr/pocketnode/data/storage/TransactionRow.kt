@@ -52,27 +52,30 @@ data class TransactionRow(
     val confirmations: Int,
     val blockTimestampHex: String?,
     val network: String,
-    val status: String,      // "PENDING", "CONFIRMED", "FAILED"
+    val status: String,      // "PENDING", "CONFIRMED", "FAILED", "UNVERIFIED"
     val isLocal: Boolean,    // true = broadcast but not yet seen on chain
     val cachedAt: Long,
     @ColumnInfo(defaultValue = "''") val walletId: String = "",
     // Null means "fee not known yet", NOT zero: see TransactionRecord.feeShannons.
     @ColumnInfo(name = "fee_shannons") val feeShannons: Long? = null,
 ) {
-    fun toRecord(): TransactionRecord = TransactionRecord(
-        txHash = txHash,
-        blockNumber = blockNumber,
-        blockHash = blockHash,
-        timestamp = timestamp,
-        balanceChange = balanceChange,
-        direction = direction,
-        fee = fee,
-        confirmations = confirmations,
-        blockTimestampHex = blockTimestampHex,
-        isDaoRelated = direction.startsWith("dao_"),
-        status = status,
-        feeShannons = feeShannons,
-    )
+    fun toRecord(): TransactionRecord {
+        check(status != "UNVERIFIED") { "Chain evidence requires revalidation" }
+        return TransactionRecord(
+            txHash = txHash,
+            blockNumber = blockNumber,
+            blockHash = blockHash,
+            timestamp = timestamp,
+            balanceChange = balanceChange,
+            direction = direction,
+            fee = fee,
+            confirmations = confirmations,
+            blockTimestampHex = blockTimestampHex,
+            isDaoRelated = direction.startsWith("dao_"),
+            status = status,
+            feeShannons = feeShannons,
+        )
+    }
 }
 
 /** One row of [TransactionRoomDao.getKnownFees]. */

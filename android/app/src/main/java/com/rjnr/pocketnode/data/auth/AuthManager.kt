@@ -24,19 +24,65 @@ class AuthManager @Inject constructor(
     @VisibleForTesting
     internal var testPrefs: SharedPreferences? = null
 
+    private val walletStorage = com.rjnr.pocketnode.data.wallet.WalletStorageBoundary(context)
+    // In-memory revocation must not wait for a PIN KDF or filesystem work. Publication
+    // alone takes both locks, always files -> session; never acquire files under session.
+    private val sessionLock = Any()
     private var sessionPin: CharArray? = null
+    private var generation = 0L
 
-    fun setSessionPin(pin: CharArray) {
-        clearSession()
+    fun setSessionPin(pin: CharArray) = walletStorage.readOrWriteFiles {
+        synchronized(sessionLock) { replaceSessionPinLocked(pin) }
+    }
+
+    internal fun sessionGeneration(): Long = synchronized(sessionLock) { generation }
+
+    /** Atomically reject an authentication result started before session revocation. */
+    internal fun setSessionPinIfCurrent(pin: CharArray, expectedGeneration: Long): Boolean =
+        setSessionPinAndGetGenerationIfCurrent(pin, expectedGeneration) != null
+
+    /** The credential check runs under the files fence, before taking the short session lock. */
+    internal fun setSessionPinAndGetGenerationIfCurrent(
+        pin: CharArray,
+        expectedGeneration: Long,
+        isCredentialCurrent: () -> Boolean = { true },
+    ): Long? = walletStorage.readOrWriteFiles {
+        if (!isCredentialCurrent()) return@readOrWriteFiles null
+        synchronized(sessionLock) {
+            if (generation != expectedGeneration) null else {
+                replaceSessionPinLocked(pin)
+                generation
+            }
+        }
+    }
+
+    internal fun isSessionCurrent(expectedGeneration: Long): Boolean = synchronized(sessionLock) {
+        generation == expectedGeneration && sessionPin != null
+    }
+
+    /** Called under the files fence after staging a replacement verifier. Never runs disk/KDF work. */
+    internal fun claimPinChange(expectedGeneration: Long): Boolean = synchronized(sessionLock) {
+        if (generation != expectedGeneration || sessionPin == null) false else {
+            clearSessionLocked()
+            true
+        }
+    }
+
+    fun getSessionPin(): CharArray? = synchronized(sessionLock) { sessionPin?.copyOf() }
+
+    fun hasSessionPin(): Boolean = synchronized(sessionLock) { sessionPin != null }
+
+    fun clearSession() = synchronized(sessionLock) { clearSessionLocked() }
+
+    /** Caller holds sessionLock, and the installation fence when publishing. */
+    private fun replaceSessionPinLocked(pin: CharArray) {
+        clearSessionLocked()
         sessionPin = pin.copyOf()
     }
 
-    fun getSessionPin(): CharArray? = sessionPin?.copyOf()
-
-    fun hasSessionPin(): Boolean = sessionPin != null
-
-    fun clearSession() {
-        sessionPin?.let { java.util.Arrays.fill(it, '\u0000') }
+    private fun clearSessionLocked() {
+        generation++
+        sessionPin?.fill('\u0000')
         sessionPin = null
     }
 

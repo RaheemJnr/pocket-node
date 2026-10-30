@@ -9,6 +9,8 @@ import com.rjnr.pocketnode.data.database.entity.DaoCellEntity
 import com.rjnr.pocketnode.data.database.entity.HeaderCacheEntity
 import com.rjnr.pocketnode.data.gateway.models.JniHeaderView
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.ensureActive
 import javax.inject.Inject
 import javax.inject.Singleton
 
@@ -19,12 +21,14 @@ class DaoSyncManager @Inject constructor(
     private val pendingDaoWithdrawDao: PendingDaoWithdrawDao,
     private val pendingDaoUnlockDao: PendingDaoUnlockDao,
     private val logger: Logger,
+    private val verificationCacheGate: VerificationCacheGate,
 ) {
     // --- Header cache (permanent — block headers are immutable) ---
 
     suspend fun getCachedHeader(blockHash: String): HeaderCacheEntity? {
+        val revision = verificationCacheGate.currentRevision()
         return try {
-            headerCacheDao.getByBlockHash(blockHash)
+            headerCacheDao.getByBlockHash(blockHash)?.takeIf { verificationCacheGate.isReady(it.network) && verificationCacheGate.currentRevision() == revision }
         } catch (e: CancellationException) {
             throw e
         } catch (e: Exception) {
@@ -45,10 +49,26 @@ class DaoSyncManager @Inject constructor(
 
     // --- DAO cell lifecycle ---
 
+    /**
+     * Proof-sensitive history read: absence is meaningful only after a successful
+     * database read under one ready revision. UI readers below remain tolerant.
+     */
+    suspend fun requireActiveDepositHistory(network: String, walletId: String): List<DaoCellEntity> {
+        require(walletId.isNotBlank()) { "walletId is required" }
+        currentCoroutineContext().ensureActive()
+        val ticket = verificationCacheGate.requireReadyRevision(network)
+        val rows = daoCellDao.getActiveByWalletAndNetwork(walletId, network)
+        currentCoroutineContext().ensureActive()
+        verificationCacheGate.requireCurrent(network, ticket)
+        return rows
+    }
+
     suspend fun getActiveDeposits(network: String, walletId: String): List<DaoCellEntity> {
+        val revision = verificationCacheGate.currentRevision()
         require(walletId.isNotBlank()) { "walletId is required" }
         return try {
-            daoCellDao.getActiveByWalletAndNetwork(walletId, network)
+            if (verificationCacheGate.isReady(network)) daoCellDao.getActiveByWalletAndNetwork(walletId, network)
+                .takeIf { verificationCacheGate.isReady(network) && verificationCacheGate.currentRevision() == revision } ?: emptyList() else emptyList()
         } catch (e: CancellationException) {
             throw e
         } catch (e: Exception) {
@@ -58,9 +78,11 @@ class DaoSyncManager @Inject constructor(
     }
 
     suspend fun getCompletedDeposits(network: String, walletId: String): List<DaoCellEntity> {
+        val revision = verificationCacheGate.currentRevision()
         require(walletId.isNotBlank()) { "walletId is required" }
         return try {
-            daoCellDao.getCompletedByWalletAndNetwork(walletId, network)
+            if (verificationCacheGate.isReady(network)) daoCellDao.getCompletedByWalletAndNetwork(walletId, network)
+                .takeIf { verificationCacheGate.isReady(network) && verificationCacheGate.currentRevision() == revision } ?: emptyList() else emptyList()
         } catch (e: CancellationException) {
             throw e
         } catch (e: Exception) {
@@ -70,8 +92,9 @@ class DaoSyncManager @Inject constructor(
     }
 
     suspend fun getByOutPoint(txHash: String, index: String): DaoCellEntity? {
+        val revision = verificationCacheGate.currentRevision()
         return try {
-            daoCellDao.getByOutPoint(txHash, index)
+            daoCellDao.getByOutPoint(txHash, index)?.takeIf { verificationCacheGate.isReady(it.network) && verificationCacheGate.currentRevision() == revision }
         } catch (e: CancellationException) {
             throw e
         } catch (e: Exception) {

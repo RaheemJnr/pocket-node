@@ -170,7 +170,7 @@ class GatewayRepository @Inject constructor(
                 // Copy per-wallet lastSyncedBlock from SharedPreferences to Room sync_progress (#105)
                 walletMigrationHelper.migrateSyncProgressToRoomIfNeeded()
                 // Migrate key material from ESP to Room (one-time, for upgrading users)
-                keyManager.migrateEspToRoomIfNeeded(walletDao)
+                keyManager.migrateEspToRoomIfNeeded(appDatabase)
                 // Delete ESP files after successful migration
                 keyManager.deleteEspFilesIfSafe()
                 reassignActiveWallet(walletPreferences.getActiveWalletId() ?: "")
@@ -1045,6 +1045,19 @@ class GatewayRepository @Inject constructor(
         fromAddress: String,
         recipients: List<RecipientOutput>,
     ): TransferPlan = sendPipeline.previewTransfer(sendContext(), fromAddress, recipients)
+
+    suspend fun previewBatches(fromAddress: String, batches: List<List<RecipientOutput>>): List<Long> =
+        sendPipeline.previewBatches(sendContext(), fromAddress, batches)
+
+    suspend fun sendReviewed(
+        review: com.rjnr.pocketnode.data.send.ReviewedTransfer,
+        privateKey: ByteArray,
+        isCurrent: () -> Boolean,
+        onSigned: () -> Unit = {},
+    ): String = sendPipeline.sendReviewed(sendContext(), review, PrivateKeySigner(privateKey), {
+        val current = sendContext()
+        isCurrent() && current.walletId == review.walletId && current.network == review.network && current.activeScript == review.sourceScript
+    }, onSigned)
 
     /**
      * Plain secp256k1 transfer. fromAddress is the authoritative sender

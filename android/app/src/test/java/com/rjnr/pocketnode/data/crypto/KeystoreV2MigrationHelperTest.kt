@@ -41,14 +41,13 @@ class KeystoreV2MigrationHelperTest {
         migrationPrefs.edit().clear().commit()
 
         // V1 helper to seed pre-v1.7.0 wallets into the in-memory DB
-        v1Helper = KeyStoreMigrationHelper(keyMaterialDao, encryptionManager, migrationPrefs, NoopLogger)
+        v1Helper = KeyStoreMigrationHelper(keyMaterialDao, encryptionManager, migrationPrefs, NoopLogger, database = db)
         v2Helper = KeystoreV2MigrationHelper(
             keyMaterialDao,
             encryptionManager,
             migrationPrefs,
             nowProvider = { fakeNow },
-            logger = NoopLogger,
-        )
+            logger = NoopLogger, database = db)
     }
 
     @After
@@ -211,8 +210,7 @@ class KeystoreV2MigrationHelperTest {
             encryptionManager,
             migrationPrefs,
             nowProvider = { fakeNow },
-            logger = NoopLogger,
-        )
+            logger = NoopLogger, database = db)
         val resumed = v2HelperAfterCrash.pendingWalletIds()
         assertEquals(listOf("gamma"), resumed)
 
