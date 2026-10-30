@@ -920,6 +920,14 @@ public func callRpc(method: String)throws  -> String  {
     )
 })
 }
+public func cancelDaoRecovery(requestId: String)throws  -> String  {
+    return try  FfiConverterString.lift(try rustCallWithError(FfiConverterTypeLightClientError_lift) {
+        uniffiCallStatus in
+    uniffi_ckb_light_client_lib_fn_func_cancel_dao_recovery(
+        FfiConverterString.lower(requestId),uniffiCallStatus
+    )
+})
+}
 /**
  * Estimate the cycles a JSON transaction consumes. Not implemented yet: always throws.
  */
@@ -1136,6 +1144,22 @@ public func localNodeInfo()throws  -> String  {
     )
 })
 }
+public func pollDaoRecovery(requestId: String)throws  -> String  {
+    return try  FfiConverterString.lift(try rustCallWithError(FfiConverterTypeLightClientError_lift) {
+        uniffiCallStatus in
+    uniffi_ckb_light_client_lib_fn_func_poll_dao_recovery(
+        FfiConverterString.lower(requestId),uniffiCallStatus
+    )
+})
+}
+public func requestDaoRecovery(txHash: String)throws  -> String  {
+    return try  FfiConverterString.lift(try rustCallWithError(FfiConverterTypeLightClientError_lift) {
+        uniffiCallStatus in
+    uniffi_ckb_light_client_lib_fn_func_request_dao_recovery(
+        FfiConverterString.lower(txHash),uniffiCallStatus
+    )
+})
+}
 /**
  * Verify a JSON transaction and queue it for broadcast; returns its hash as JSON.
  */
@@ -1192,6 +1216,15 @@ public func stopLightClient()throws   {try rustCallWithError(FfiConverterTypeLig
     )
 }
 }
+public func validateDaoRecovery(requestId: String, receiptId: String)throws  -> String  {
+    return try  FfiConverterString.lift(try rustCallWithError(FfiConverterTypeLightClientError_lift) {
+        uniffiCallStatus in
+    uniffi_ckb_light_client_lib_fn_func_validate_dao_recovery(
+        FfiConverterString.lower(requestId),
+        FfiConverterString.lower(receiptId),uniffiCallStatus
+    )
+})
+}
 
 private enum InitializationResult {
     case ok
@@ -1215,6 +1248,9 @@ private let initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_ckb_light_client_lib_checksum_func_call_rpc() != 17826) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_ckb_light_client_lib_checksum_func_cancel_dao_recovery() != 45096) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_ckb_light_client_lib_checksum_func_estimate_cycles() != 2689) {
@@ -1271,6 +1307,12 @@ private let initializationResult: InitializationResult = {
     if (uniffi_ckb_light_client_lib_checksum_func_local_node_info() != 22703) {
         return InitializationResult.apiChecksumMismatch
     }
+    if (uniffi_ckb_light_client_lib_checksum_func_poll_dao_recovery() != 17434) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_ckb_light_client_lib_checksum_func_request_dao_recovery() != 6529) {
+        return InitializationResult.apiChecksumMismatch
+    }
     if (uniffi_ckb_light_client_lib_checksum_func_send_transaction() != 34763) {
         return InitializationResult.apiChecksumMismatch
     }
@@ -1281,6 +1323,9 @@ private let initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_ckb_light_client_lib_checksum_func_stop_light_client() != 42447) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_ckb_light_client_lib_checksum_func_validate_dao_recovery() != 37559) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_ckb_light_client_lib_checksum_method_statuslistener_on_status() != 1869) {

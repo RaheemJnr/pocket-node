@@ -477,22 +477,52 @@ pub trait LightClientStorage: StorageBackend {
         batch.commit().expect("batch commit should be ok");
     }
 
-    /// Add fetched transaction
+    /// Add fetched transaction with the existing unknown-ordinal sentinel.
     fn add_fetched_tx(&self, tx: &Transaction, hwe: &HeaderWithExtension) {
+        self.try_add_fetched_txs(&[(tx, hwe)])
+            .expect("batch commit should be ok");
+    }
+
+    /// Persist verified associations atomically without swallowing backend failure.
+    /// This does not change script indexes or claim output liveness/index completeness.
+    /// Membership proofs do not provide the transaction's block-order ordinal.
+    /// Indexed coordinates are retained; absent/unknown records change only if their
+    /// snapshot still matches at commit. A concurrent index write wins without error.
+    /// Receipts carry the proven header independently of these indexing coordinates.
+    fn try_add_fetched_txs(
+        &self,
+        transactions: &[(&Transaction, &HeaderWithExtension)],
+    ) -> crate::error::Result<()> {
+        if transactions.is_empty() {
+            return Ok(());
+        }
         let mut batch = self.batch();
-        let block_hash = hwe.header.calc_header_hash();
-        let block_number: u64 = hwe.header.raw().number().unpack();
-        batch.put(&Key::BlockHash(&block_hash).into_vec(), &hwe.to_vec());
-        batch.put(
-            &Key::BlockNumber(block_number).into_vec(),
-            block_hash.as_slice(),
-        );
-        let tx_hash = tx.calc_tx_hash();
-        let tx_index = u32::MAX;
-        let key = Key::TxHash(&tx_hash).into_vec();
-        let value: Vec<u8> = Value::Transaction(block_number, tx_index as TxIndex, tx).into();
-        batch.put(&key, &value);
-        batch.commit().expect("batch commit should be ok");
+        for (tx, hwe) in transactions {
+            let block_hash = hwe.header.calc_header_hash();
+            let block_number: u64 = hwe.header.raw().number().unpack();
+            batch.put(&Key::BlockHash(&block_hash).into_vec(), &hwe.to_vec());
+            batch.put(
+                &Key::BlockNumber(block_number).into_vec(),
+                block_hash.as_slice(),
+            );
+            let tx_hash = tx.calc_tx_hash();
+            let key = Key::TxHash(&tx_hash).into_vec();
+            let previous = StorageBackend::get(self, key.clone())?;
+            if let Some(stored) = &previous {
+                let ordinal = stored.get(8..12).ok_or_else(||
+                    crate::error::Error::runtime("invalid stored transaction coordinates"))?;
+                // Real coordinates belong to the script indexes, even across fork heights.
+                // Membership recovery may add headers but cannot relocate indexed cells.
+                if ordinal != u32::MAX.to_be_bytes() {
+                    continue;
+                }
+            }
+            let value: Vec<u8> = Value::Transaction(block_number, u32::MAX as TxIndex, tx).into();
+            // Filtering may index this transaction after our read. Check the snapshot
+            // inside the atomic commit so it cannot be replaced by an unknown ordinal.
+            batch.compare_and_put(&key, previous.as_deref(), &value)?;
+        }
+        batch.commit()
     }
 
     /// Filter and store block data

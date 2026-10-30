@@ -397,3 +397,75 @@ pub extern "C" fn Java_com_nervosnetwork_ckblightclient_LightClientNative_native
         }
     })
 }
+
+#[no_mangle]
+pub extern "C" fn Java_com_nervosnetwork_ckblightclient_LightClientNative_nativeRequestDaoRecovery(
+    mut env: JNIEnv,
+    _class: JClass,
+    tx_hash: JString,
+) -> jstring {
+    guard_jni(ptr::null_mut(), move || {
+        let tx_hash = match jstring_to_string(&mut env, &tx_hash, "nativeRequestDaoRecovery") {
+            Some(s) => s, None => return ptr::null_mut(),
+        };
+        match crate::bridge_core::dao_recovery::request_dao_recovery(&tx_hash) {
+            Ok(json) => json_to_jstring(&mut env, &json),
+            Err(_) => ptr::null_mut(),
+        }
+    })
+}
+
+#[no_mangle]
+pub extern "C" fn Java_com_nervosnetwork_ckblightclient_LightClientNative_nativePollDaoRecovery(
+    mut env: JNIEnv,
+    _class: JClass,
+    request_id: JString,
+) -> jstring {
+    guard_jni(ptr::null_mut(), move || {
+        let request_id = match jstring_to_string(&mut env, &request_id, "nativePollDaoRecovery") {
+            Some(s) => s, None => return ptr::null_mut(),
+        };
+        match crate::bridge_core::dao_recovery::poll_dao_recovery(&request_id) {
+            Ok(json) => json_to_jstring(&mut env, &json),
+            Err(_) => ptr::null_mut(),
+        }
+    })
+}
+
+#[no_mangle]
+pub extern "C" fn Java_com_nervosnetwork_ckblightclient_LightClientNative_nativeValidateDaoRecovery(
+    mut env: JNIEnv,
+    _class: JClass,
+    request_id: JString,
+    receipt_id: JString,
+) -> jstring {
+    guard_jni(ptr::null_mut(), move || {
+        let request_id = match jstring_to_string(&mut env, &request_id, "nativeValidateDaoRecovery") {
+            Some(s) => s, None => return ptr::null_mut(),
+        };
+        let receipt_id = match jstring_to_string(&mut env, &receipt_id, "nativeValidateDaoRecovery") {
+            Some(s) => s, None => return ptr::null_mut(),
+        };
+        match crate::bridge_core::dao_recovery::validate_dao_recovery(&request_id, &receipt_id) {
+            Ok(json) => json_to_jstring(&mut env, &json),
+            Err(_) => ptr::null_mut(),
+        }
+    })
+}
+
+#[no_mangle]
+pub extern "C" fn Java_com_nervosnetwork_ckblightclient_LightClientNative_nativeCancelDaoRecovery(
+    mut env: JNIEnv,
+    _class: JClass,
+    request_id: JString,
+) -> jstring {
+    guard_jni(ptr::null_mut(), move || {
+        let request_id = match jstring_to_string(&mut env, &request_id, "nativeCancelDaoRecovery") {
+            Some(s) => s, None => return ptr::null_mut(),
+        };
+        match crate::bridge_core::dao_recovery::cancel_dao_recovery(&request_id) {
+            Ok(json) => json_to_jstring(&mut env, &json),
+            Err(_) => ptr::null_mut(),
+        }
+    })
+}

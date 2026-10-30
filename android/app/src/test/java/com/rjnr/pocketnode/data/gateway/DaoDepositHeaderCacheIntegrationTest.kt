@@ -18,6 +18,7 @@ import io.mockk.spyk
 import io.mockk.every
 import io.mockk.mockk
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.async
 import kotlinx.coroutines.test.runTest
 import kotlinx.serialization.encodeToString
 import kotlinx.serialization.json.Json
@@ -40,6 +41,7 @@ class DaoDepositHeaderCacheIntegrationTest {
     private val native get() = DaoUnlockShadowLightClientNative
     private lateinit var db: AppDatabase
     private lateinit var gate: VerificationCacheGate
+    private lateinit var recovery: DaoRecoveryCoordinator
     private lateinit var reader: DaoDepositReader
     private lateinit var resolver: DaoHeaderResolver
     private lateinit var gateway: DaoGateway
@@ -66,10 +68,11 @@ class DaoDepositHeaderCacheIntegrationTest {
         gate.reconcile(api, network)
         sync = DaoSyncManager(db.headerCacheDao(), db.daoCellDao(), db.pendingDaoWithdrawDao(),
             db.pendingDaoUnlockDao(), NoopLogger, gate)
+        recovery = DaoRecoveryCoordinator(db, gate, api, json, DaoRecoveryLifetime().apply { onStarted() })
         resolver = DaoHeaderResolver(json, sync, NoopLogger)
-        reader = DaoDepositReader(json, resolver, NoopLogger)
+        reader = DaoDepositReader(json, resolver, NoopLogger, recovery)
         gateway = DaoGateway(db, sync, reader, resolver, LightClientReadOnly(api, json, NoopLogger),
-            mockk(relaxed = true), mockk(relaxed = true), NoopLogger, gate)
+            mockk(relaxed = true), mockk(relaxed = true), NoopLogger, gate, recovery)
         listOf(deposit, withdraw).forEach {
             native.headersByHash[it.hash] = json.encodeToString(it)
             native.headersByNumber[it.number] = json.encodeToString(it)
@@ -88,6 +91,183 @@ class DaoDepositHeaderCacheIntegrationTest {
         native.headersByHash.clear(); native.headersByNumber.clear(); native.transactionsByHash.clear()
         native.tipHeader = null; native.chainStatus = null; native.cellsPage = null; native.transactionOverride = null
         native.maxWithdrawCalls.clear(); native.transactionQueries.clear()
+    }
+
+    @Test fun `gate invalidation during final suspended projection prevents publication`() = runTest {
+        val finalProjection = spyk(recovery)
+        coEvery { finalProjection.project(any(), any(), any()) } coAnswers {
+            val projected = recovery.project(firstArg(), secondArg(), thirdArg())
+            // Staged reads happen before insertion; only the final projection sees it.
+            if (db.daoCellDao().allRows().isNotEmpty()) gate.close()
+            projected
+        }
+        val finalGateway = DaoGateway(db, sync, reader, resolver, LightClientReadOnly(api, json, NoopLogger),
+            mockk(relaxed = true), mockk(relaxed = true), NoopLogger, gate, finalProjection)
+        assertTrue(finalGateway.getDaoDeposits(ctx()).isFailure)
+        assertTrue(db.daoCellDao().allRows().isNotEmpty())
+    }
+
+    @Test fun `adapter invalidation while final second position suspends rejects earlier actionable position`() = runTest {
+        gateway.getDaoDeposits(ctx()).getOrThrow()
+        adoptLocator()
+        val secondCell = cell.copy(outPoint = OutPoint(hash("a2"), "0x0"), outputData = "0x0000000000000000", blockNumber = "0x64")
+        native.cellsPage = json.encodeToString(JniPagination(listOf(cell, secondCell), null))
+        val projectedA = kotlinx.coroutines.CompletableDeferred<DaoDeposit>()
+        val releaseB = kotlinx.coroutines.CompletableDeferred<Unit>()
+        val parkedB = kotlinx.coroutines.CompletableDeferred<Unit>()
+        val finalProjection = spyk(recovery)
+        every { finalProjection.invalidation } returns recovery.invalidation
+        var committed = false
+        val publicationGate = spyk(gate)
+        coEvery { publicationGate.commitIfCurrent(any(), any(), any()) } coAnswers {
+            gate.commitIfCurrent(firstArg(), secondArg(), thirdArg())
+            committed = true
+        }
+        coEvery { finalProjection.project(any(), any(), any()) } coAnswers {
+            val position = thirdArg<DaoDeposit>()
+            if (position.outPoint == secondCell.outPoint && committed) { parkedB.complete(Unit); releaseB.await() }
+            val projected = recovery.project(firstArg(), secondArg(), position)
+            if (position.outPoint == cell.outPoint && committed) projectedA.complete(projected)
+            projected
+        }
+        val finalGateway = DaoGateway(db, sync, reader, resolver, LightClientReadOnly(api, json, NoopLogger),
+            mockk(relaxed = true), mockk(relaxed = true), NoopLogger, publicationGate, finalProjection)
+        val revision = gate.currentRevision()
+        val pending = async { finalGateway.getDaoDeposits(ctx()) }
+        assertNotNull(projectedA.await().recoveryReceiptId)
+        parkedB.await()
+        recoveryValid = false
+        recovery.refreshNativeValidity()
+        assertTrue(recovery.invalidation.value > 0)
+        assertEquals(recovery.invalidation.value, finalProjection.invalidation.value)
+        assertTrue(gate.isReady(network.name))
+        assertEquals(revision, gate.currentRevision())
+        releaseB.complete(Unit)
+        assertTrue("old multi-position publication must be rejected", pending.await().isFailure)
+    }
+
+    @Test fun `persisted recovery obligation blocks retained matching mappings after restart`() = runTest {
+        db.daoRecoveryDao().putGuard(com.rjnr.pocketnode.data.database.entity.DaoRecoveryEntity(
+            "wallet", network.name, hash("01"), phaseHash, 0L, 100_000_000_000L, 100L,
+            json.encodeToString(script), 200L, withdraw.hash, "old-store", "old-run", 1))
+        repeat(2) {
+            val result = gateway.getDaoDeposits(ctx()).getOrThrow().single()
+            assertNull("matching retained native mappings cannot authorize a guarded position", result.unlockEpoch)
+            assertEquals(0L, result.compensation)
+        }
+        db.daoCellDao().deleteAll()
+        assertNull(gateway.getDaoDeposits(ctx()).getOrThrow().single().unlockEpoch)
+    }
+
+    private var recoveryValid = true
+    private var proofSequence = 1
+    private var proofReceipt: DaoRecoveryReceipt? = null
+    private val recoveredHeader get() = withdraw.copy(hash = hash("f1"), number = "0x12c", epoch = "0x7080000000012c")
+
+    private suspend fun adoptLocator(): DaoRecoveryContext {
+        if (db.walletDao().getActive() == null) db.walletDao().insert(
+            com.rjnr.pocketnode.data.database.entity.WalletEntity("wallet", "Synthetic", "raw_key", null, null, isActive = true))
+        val identity = DaoRecoveryIdentity(hash("01"), "e".repeat(32), "0x" + "02".repeat(16))
+        val h = recoveredHeader
+        val header = DaoRecoveryHeader("0x0", "0x0", h.timestamp, h.number, h.epoch, h.parentHash,
+            h.transactionsRoot, h.proposalsHash, h.extraHash, h.dao, h.nonce, h.hash)
+        val token = proofSequence.toString(16).padStart(2, '0')
+        val request = "dr1.q.$token"
+        val receipt = DaoRecoveryReceipt(1, "raw_transaction_membership", "dr1.r.$token", request, "dr1.a.$token",
+            identity, "1", header, phaseHash, DaoRecoveryRawTransaction("0x0", emptyList(), listOf(deposit.hash),
+                listOf(DaoRecoveryInput("0x0", OutPoint(parentHash, "0x0"))),
+                listOf(DaoRecoveryOutput(output.capacity, output.lock, output.type)), listOf(cell.outputData!!)), header, null)
+        proofReceipt = receipt
+        every { api.requestDaoRecovery(any()) } returns
+            """{"schema_version":1,"operation":"request","result":{"request_id":"$request","transaction_hash":"$phaseHash","identity":${json.encodeToString(identity)}}}"""
+        every { api.pollDaoRecovery(any()) } answers {
+            """{"schema_version":1,"operation":"poll","result":{"request_id":"$request","status":"verified","receipt":${json.encodeToString(receipt)}}}"""
+        }
+        every { api.validateDaoRecovery(any(), any()) } answers {
+            if (recoveryValid && secondArg<String>() == receipt.receiptId)
+                """{"schema_version":1,"operation":"validate","result":{"request_id":"$request","valid":true,"receipt":${json.encodeToString(receipt)}}}"""
+            else """{"schema_version":1,"operation":"validate","error":{"code":"invalid_receipt"}}"""
+        }
+        val context = recovery.begin("wallet", network, script, hash("01"), cell.outPoint)
+        assertEquals(RecoveryOutcome.Adopted, recovery.recover(context))
+        // The native association/header store moved, but its script index remains old.
+        native.headersByHash[h.hash] = json.encodeToString(h)
+        native.headersByNumber[h.number] = json.encodeToString(h)
+        return context
+    }
+
+    @Test fun `validated receipt replaces stale live script index locator without trusting retained native phase association`() = runTest {
+        gateway.getDaoDeposits(ctx()).getOrThrow()
+        adoptLocator()
+        val position = gateway.getDaoDeposits(ctx()).getOrThrow().single()
+        assertEquals(300L, position.withdrawBlockNumber)
+        assertEquals(recoveredHeader.hash, position.withdrawBlockHash)
+        assertNotNull(position.unlockEpoch)
+        assertEquals("dr1.r.01", position.recoveryReceiptId)
+        assertEquals("0xc8", json.decodeFromString<JniPagination<JniCell>>(native.cellsPage!!).objects.single().blockNumber)
+        assertEquals(withdraw.hash, json.decodeFromString<JniTransactionWithStatus>(native.transactionsByHash.getValue(phaseHash)).txStatus.blockHash)
+    }
+
+    @Test fun `native invalidation after reader preparation suppresses late projection and repeated retained mapping refreshes`() = runTest {
+        gateway.getDaoDeposits(ctx()).getOrThrow()
+        adoptLocator()
+        val realReader = reader
+        val staged = spyk(reader)
+        coEvery { staged.list(any(), any(), any(), any()) } coAnswers {
+            val result = realReader.list(firstArg(), secondArg(), thirdArg(), arg(3))
+            recoveryValid = false
+            result
+        }
+        gateway = DaoGateway(db, sync, staged, resolver, LightClientReadOnly(api, json, NoopLogger),
+            mockk(relaxed = true), mockk(relaxed = true), NoopLogger, gate, recovery)
+        repeat(2) { unresolved(gateway.getDaoDeposits(ctx()).getOrThrow().single()) }
+        assertEquals(1, recovery.guards(network, cell.outPoint).size)
+        assertTrue(recovery.invalidation.value > 0)
+    }
+
+    @Test fun `adoption fences a real refresh staged before native proof and SQL commit`() = runTest {
+        gateway.getDaoDeposits(ctx()).getOrThrow()
+        val entered = kotlinx.coroutines.CompletableDeferred<Unit>()
+        val resume = kotlinx.coroutines.CompletableDeferred<Unit>()
+        val realReader = reader
+        val staged = spyk(reader)
+        coEvery { staged.list(any(), any(), any(), any()) } coAnswers {
+            val result = realReader.list(firstArg(), secondArg(), thirdArg(), arg(3))
+            entered.complete(Unit); resume.await(); result
+        }
+        val oldGateway = DaoGateway(db, sync, staged, resolver, LightClientReadOnly(api, json, NoopLogger),
+            mockk(relaxed = true), mockk(relaxed = true), NoopLogger, gate, recovery)
+        val job = async { oldGateway.getDaoDeposits(ctx()) }
+        entered.await()
+        adoptLocator()
+        resume.complete(Unit)
+        assertTrue(job.await().isFailure)
+        assertEquals(300L, db.daoCellDao().allRows().single().withdrawBlockNumber)
+    }
+
+    @Test fun `completed recovered alias stays terminal and outside window proof does not make position live`() = runTest {
+        gateway.getDaoDeposits(ctx()).getOrThrow()
+        adoptLocator()
+        native.cellsPage = null
+        val outside = gateway.getDaoDeposits(ctx()).getOrThrow().single()
+        assertTrue(outside.outsideSyncWindow)
+        assertNotNull(outside.recoveryReceiptId)
+        val row = db.daoCellDao().allRows().single()
+        db.daoCellDao().upsert(row.copy(index = "00", status = "COMPLETED"))
+        native.cellsPage = json.encodeToString(JniPagination(listOf(cell), null))
+        assertEquals(DaoCellStatus.COMPLETED, gateway.getDaoDeposits(ctx()).getOrThrow().single().status)
+    }
+
+    @Test fun `compensation invalidated while reading cached headers is not published`() = runTest {
+        gateway.getDaoDeposits(ctx()).getOrThrow()
+        adoptLocator()
+        gateway.getDaoDeposits(ctx()).getOrThrow()
+        val stored = db.daoCellDao().allRows().single()
+        val result = reader.recomputeCachedCompensation(stored) { hash ->
+            recoveryValid = false
+            if (hash == deposit.hash) deposit.dao else recoveredHeader.dao
+        }
+        assertNull(result)
     }
 
     @Test fun `withdrawal header cached projection preserves single deposit resolution`() = runTest {
@@ -419,7 +599,7 @@ class DaoDepositHeaderCacheIntegrationTest {
         sync = DaoSyncManager(db.headerCacheDao(), faultingDao, db.pendingDaoWithdrawDao(),
             db.pendingDaoUnlockDao(), NoopLogger, gate)
         gateway = DaoGateway(db, sync, reader, resolver, LightClientReadOnly(api, json, NoopLogger),
-            mockk(relaxed = true), mockk(relaxed = true), NoopLogger, gate)
+            mockk(relaxed = true), mockk(relaxed = true), NoopLogger, gate, recovery)
     }
 
     @Test fun `normalized duplicate cannot hide a historical withdrawal contradiction`() = runTest {
@@ -605,7 +785,7 @@ class DaoDepositHeaderCacheIntegrationTest {
             result
         }
         gateway = DaoGateway(db, sync, scheduled, resolver, LightClientReadOnly(api, json, NoopLogger),
-            mockk(relaxed = true), mockk(relaxed = true), NoopLogger, gate)
+            mockk(relaxed = true), mockk(relaxed = true), NoopLogger, gate, recovery)
     }
 
     private fun unresolved(position: DaoDeposit) {

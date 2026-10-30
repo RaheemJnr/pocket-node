@@ -164,6 +164,11 @@ open class FakeLightClientApi : LightClientApi {
 
     override fun estimateCycles(txJson: String): String? = next("estimateCycles", txJson)
 
+    override fun requestDaoRecovery(txHash: String): String? = next("requestDaoRecovery", txHash)
+    override fun pollDaoRecovery(requestId: String): String? = next("pollDaoRecovery", requestId)
+    override fun validateDaoRecovery(requestId: String, receiptId: String): String? = next("validateDaoRecovery", requestId, receiptId)
+    override fun cancelDaoRecovery(requestId: String): String? = next("cancelDaoRecovery", requestId)
+
     // ---- Node info ----
 
     override fun localNodeInfo(): String? = next("localNodeInfo")

@@ -123,19 +123,6 @@ class DaoSyncManager @Inject constructor(
         }
     }
 
-    /** Compensation-only write-back for a cached row (#550); see [DaoCellDao.updateCompensation]. */
-    suspend fun updateCompensation(entity: DaoCellEntity, compensation: Long) {
-        try {
-            daoCellDao.updateCompensation(
-                entity.txHash, entity.index, entity.network, entity.walletId, compensation,
-            )
-        } catch (e: CancellationException) {
-            throw e
-        } catch (e: Exception) {
-            logger.w(TAG, "Failed to update DAO cell compensation", e)
-        }
-    }
-
     suspend fun updateStatus(txHash: String, index: String, status: String) {
         try {
             daoCellDao.updateStatus(txHash, index, status)

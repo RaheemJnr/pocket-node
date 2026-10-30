@@ -112,6 +112,7 @@ class SendPipeline(
     private val uiPreferences: UiPreferences,
     private val json: Json,
     private val logger: Logger,
+    private val inputAuthorizer: InputSubmissionAuthorizer,
     private val clock: Clock = SystemClock,
     private val queryContext: CoroutineContext = Dispatchers.Default,
 ) {
@@ -321,17 +322,16 @@ class SendPipeline(
      * Re-broadcasting the identical signed tx reuses the exact same inputs, so
      * the original and the retry conflict and at most one can ever commit — no
      * double-pay possible — and the recipient is whatever the original tx
-     * already encodes, with no heuristic. We drop the FAILED row first so
-     * [sendTransaction] re-inserts a fresh BROADCASTING row for the same hash
-     * and the watchdog re-tracks it.
+     * already encodes, with no heuristic. Preserve the FAILED row and activity
+     * through every authorization boundary; only accepted submission may CAS
+     * the broadcast row back to BROADCAST. Concurrent terminal progress wins.
      *
      * Public #538 review: [sendTransaction]'s own insert always shows "out"
      * and the recipient amount, which is wrong for a "self" row (a
      * self-transfer or a gap-limit sweep): that reads as "Sent 0 CKB" (or the
      * wrong amount) again until the confirmed row takes over. The cached
-     * row's direction/fee are read here BEFORE it is deleted below and
-     * threaded back through so a retried self row still shows "self" with
-     * its fee.
+     * row and its direction/fee remain intact through retry, including refusal.
+     * History reconciliation owns their eventual update.
      */
     suspend fun retryBroadcast(ctx: SendContext, txHash: String): Result<String> = runCatching {
         val row = pendingBroadcasts.getFailedRow(txHash)
@@ -345,16 +345,10 @@ class SendPipeline(
             logger.w(TAG, "retryBroadcast: cached row lookup failed for $txHash: ${e.message}")
             null
         }
-        pendingBroadcasts.delete(txHash)
-        transactions.deleteTransaction(txHash)
+        require(row.walletId == ctx.walletId && row.network == ctx.network.name) { "Wallet changed before retry" }
         val override = retryPendingOverride(cached?.first, cached?.second)
-        if (override != null) {
-            sendTransaction(
-                ctx, tx, pendingDirection = override.first, pendingFeeShannons = override.second,
-            ).getOrThrow()
-        } else {
-            sendTransaction(ctx, tx).getOrThrow()
-        }
+        submit(ctx, tx, pendingDirection = override?.first ?: "out", pendingFeeShannons = override?.second,
+            retryRecord = row).getOrThrow()
     }
 
     suspend fun sendTransaction(
@@ -384,7 +378,23 @@ class SendPipeline(
          * [pendingFeeShannons] is shown instead.
          */
         pendingDirection: String = "out",
-    ): Result<String> = runCatching {
+        requireCurrentSelection: suspend () -> Unit = {},
+    ): Result<String> = submit(ctx, transaction, expectedWalletId, pendingFeeShannons, pendingDirection,
+        requireCurrentSelection = requireCurrentSelection)
+
+    private suspend fun submit(
+        ctx: SendContext, transaction: Transaction, expectedWalletId: String? = null,
+        pendingFeeShannons: Long? = null, pendingDirection: String = "out",
+        retryRecord: PendingBroadcastRecord? = null,
+        freshRecord: PendingBroadcastRecord? = null,
+        requireCurrentSelection: suspend () -> Unit = {},
+    ): Result<String> {
+        var owned = freshRecord
+        var bridgeEntered = false
+        return runCatching {
+        val authorization = inputAuthorizer.authorize(ctx, transaction)
+        authorization.requireCurrent()
+        requireCurrentSelection()
         logger.d(TAG, "📤 sendTransaction: building JSON")
         logger.d(TAG, "  Inputs: ${transaction.cellInputs.size}, Outputs: ${transaction.cellOutputs.size}")
 
@@ -408,8 +418,8 @@ class SendPipeline(
         val network = ctx.network.name
         val tipNumber = currentTipNumberOrZero()
         publishTip(tipNumber)
-        val txJson = json.encodeToString(transaction)
-        val txHash = transactionBuilder.computeTxHash(transaction)
+        val txJson = retryRecord?.signedTxJson ?: json.encodeToString(transaction)
+        val txHash = retryRecord?.txHash ?: transactionBuilder.computeTxHash(transaction)
         val reservedJson = json.encodeToString(
             transaction.cellInputs.map { it.previousOutput }
         )
@@ -446,11 +456,16 @@ class SendPipeline(
         // Idempotent: skip insert if a row already exists for this hash
         // (prepareAndSend pre-inserts under its own mutex hold).
         sendMutex.withLock {
+            authorization.requireCurrent()
+            requireCurrentSelection()
+            if (retryRecord != null) {
+                check(pendingBroadcasts.getFailedRow(txHash) == retryRecord) { "Retry state changed" }
+                return@withLock
+            }
             val existing = pendingBroadcasts.getActive(walletId, network)
                 .firstOrNull { it.txHash == txHash }
             if (existing == null) {
-                pendingBroadcasts.insert(
-                    PendingBroadcastRecord(
+                val record = PendingBroadcastRecord(
                         txHash = txHash,
                         walletId = walletId,
                         network = network,
@@ -462,7 +477,11 @@ class SendPipeline(
                         createdAt = now,
                         lastCheckedAt = now
                     )
-                )
+                // Capture ownership even if cancellation races the committed insert's return.
+                withContext(kotlinx.coroutines.NonCancellable) {
+                    check(pendingBroadcasts.insertFresh(record)) { "Submission state changed" }
+                    owned = record
+                }
                 transactions.insertPendingTransaction(
                     txHash = txHash,
                     network = network,
@@ -477,22 +496,32 @@ class SendPipeline(
             }
         }
 
+        // All persistence/mutex suspensions precede this mandatory input check.
+        // On refusal keep exact signed bytes and all prior retry records untouched.
+        requireCurrentSelection()
+        authorization.requireCurrent()
+        currentCoroutineContext().ensureActive()
         // Bridge broadcast — outside the mutex (long-running, no need to serialize).
         val rawResult = try {
+            bridgeEntered = true
             lightClient.sendTransaction(txJson)
         } catch (e: CancellationException) {
             // The bridge may already have accepted the signed transaction. Preserve its exact
             // pending bytes and reservations for reconciliation/retry; never claim it was unsent.
             throw e
         } catch (e: Exception) {
-            pendingBroadcasts.delete(txHash)
-            transactions.deleteTransaction(txHash)
+            if (retryRecord == null) {
+                pendingBroadcasts.delete(txHash)
+                transactions.deleteTransaction(txHash)
+            }
             throw e
         }
 
         if (rawResult == null) {
-            pendingBroadcasts.delete(txHash)
-            transactions.deleteTransaction(txHash)
+            if (retryRecord == null) {
+                pendingBroadcasts.delete(txHash)
+                transactions.deleteTransaction(txHash)
+            }
             throw Exception("Send failed - native returned null")
         }
 
@@ -502,8 +531,10 @@ class SendPipeline(
         // network. Clean up the row we inserted, same as the null path.
         if (rawResult.startsWith(BROADCAST_ERROR_PREFIX)) {
             val reason = rawResult.removePrefix(BROADCAST_ERROR_PREFIX)
-            pendingBroadcasts.delete(txHash)
-            transactions.deleteTransaction(txHash)
+            if (retryRecord == null) {
+                pendingBroadcasts.delete(txHash)
+                transactions.deleteTransaction(txHash)
+            }
             throw Exception("Broadcast rejected: $reason")
         }
 
@@ -548,14 +579,16 @@ class SendPipeline(
                 feeShannons = pendingFeeShannons
             )
         } else {
-            val ok = pendingBroadcasts.compareAndUpdateState(
+            val ok = if (retryRecord != null) pendingBroadcasts.rearmAcceptedRetry(
+                txHash, retryRecord.lastCheckedAt, currentTipNumberOrZero().takeIf { it > 0 } ?: tipNumber, clock.nowMs()
+            ) else pendingBroadcasts.compareAndUpdateState(
                 hash = txHash,
                 expected = "BROADCASTING",
                 next = "BROADCAST",
                 now = clock.nowMs()
             )
             if (ok != 1) {
-                logger.w(TAG, "compareAndUpdateState saw row not in BROADCASTING (race?); proceeding")
+                logger.w(TAG, "Accepted broadcast did not replace concurrently advanced pending state")
             }
         }
 
@@ -614,6 +647,15 @@ class SendPipeline(
         }
 
         returnedHash
+        }.onFailure { failure ->
+            if (!bridgeEntered) owned?.let { record ->
+                try {
+                    withContext(kotlinx.coroutines.NonCancellable) {
+                        pendingBroadcasts.failKnownUnsent(record, clock.nowMs())
+                    }
+                } catch (cleanup: Exception) { failure.addSuppressed(cleanup) }
+            }
+        }
     }
 
     /**
@@ -658,7 +700,8 @@ class SendPipeline(
         val tipNumber = currentTipNumberOrZero()
         publishTip(tipNumber)
 
-        val signedTx = sendMutex.withLock {
+        var owned: PendingBroadcastRecord? = null
+        val signedTx = try { sendMutex.withLock {
             val filtered = resolveSpendableCells(fromAddress, senderNetwork, walletId, network)
             currentCoroutineContext().ensureActive()
 
@@ -739,8 +782,7 @@ class SendPipeline(
                 null
             }
 
-            pendingBroadcasts.insert(
-                PendingBroadcastRecord(
+            val record = PendingBroadcastRecord(
                     txHash = txHash,
                     walletId = walletId,
                     network = network,
@@ -752,7 +794,10 @@ class SendPipeline(
                     createdAt = now,
                     lastCheckedAt = now
                 )
-            )
+            withContext(kotlinx.coroutines.NonCancellable) {
+                check(pendingBroadcasts.insertFresh(record)) { "Submission state changed" }
+                owned = record
+            }
             transactions.insertPendingTransaction(
                 txHash = txHash,
                 network = network,
@@ -767,12 +812,18 @@ class SendPipeline(
                 feeShannons = plannedFeeShannons
             )
             signed
+        } } catch (failure: Throwable) {
+            owned?.let { record ->
+                try { withContext(kotlinx.coroutines.NonCancellable) { pendingBroadcasts.failKnownUnsent(record, clock.nowMs()) } }
+                catch (cleanup: Exception) { failure.addSuppressed(cleanup) }
+            }
+            throw failure
         }
 
         // sendTransaction owns the broadcast + post-broadcast CAS.
         // Its insert path is idempotent: it sees the row we just inserted
         // and skips re-insertion, then performs broadcast + state CAS.
-        return sendTransaction(ctx, signedTx).getOrThrow()
+        return submit(ctx, signedTx, freshRecord = owned).getOrThrow()
     }
 
     // ========================================

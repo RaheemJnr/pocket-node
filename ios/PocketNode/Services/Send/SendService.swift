@@ -255,6 +255,7 @@ final class SendService: SendServicing {
             uiPreferences: preferences,
             json: runtime.json,
             logger: log,
+            inputAuthorizer: NoDaoRecoveryAdoption.shared,
             clock: SystemClock.shared,
             queryContext: runtime.defaultContext
         )

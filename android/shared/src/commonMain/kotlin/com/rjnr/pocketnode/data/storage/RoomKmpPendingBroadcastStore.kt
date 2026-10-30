@@ -27,12 +27,20 @@ class RoomKmpPendingBroadcastStore(
     override suspend fun insert(record: PendingBroadcastRecord) =
         dao.insert(PendingBroadcastRow.from(record))
 
+    override suspend fun insertFresh(record: PendingBroadcastRecord): Boolean = dao.insertFresh(PendingBroadcastRow.from(record)) != -1L
+
+    override suspend fun failKnownUnsent(expected: PendingBroadcastRecord, now: Long): Boolean =
+        dao.failKnownUnsent(PendingBroadcastRow.from(expected), now)
+
     override suspend fun compareAndUpdateState(
         hash: String,
         expected: String,
         next: String,
         now: Long,
     ): Int = dao.compareAndUpdateState(hash, expected, next, now)
+
+    override suspend fun rearmAcceptedRetry(hash: String, expectedLastCheckedAt: Long, submittedAt: Long, now: Long): Int =
+        dao.rearmAcceptedRetry(hash, expectedLastCheckedAt, submittedAt, now)
 
     override suspend fun updateNullCount(hash: String, count: Int, now: Long) =
         dao.updateNullCount(hash, count, now)

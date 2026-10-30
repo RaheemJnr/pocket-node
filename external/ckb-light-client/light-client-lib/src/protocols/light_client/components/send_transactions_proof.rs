@@ -1,3 +1,4 @@
+use crate::protocols::light_client::recovery::{Instant, ProvenTransaction, RecoveryError};
 use ckb_network::{BoxedCKBProtocolContext, PeerIndex};
 use ckb_types::{
     packed,
@@ -39,10 +40,37 @@ impl<'a> SendTransactionsProofProcess<'a> {
     }
 
     pub(crate) async fn execute(self) -> Status {
+        let peer = return_if_failed!(self.protocol.get_peer(&self.peer_index));
+        if peer.txs_quarantined {
+            return StatusCode::PeerIsNotOnProcess.into();
+        }
         let status = self.execute_internally().await;
-        self.protocol
+        if let Some(attempt) = peer
+            .get_txs_proof_request()
+            .and_then(|r| r.recovery.as_ref())
+        {
+            // Completes unsuccessful/missing recipients, leaving Verified untouched.
+            self.protocol.peers().recovery().fail_attempt(attempt);
+        }
+        if !status.is_ok() {
+            // Preserve generic retry eligibility too, including local storage failures.
+            self.protocol
+                .peers()
+                .mark_fetching_txs_timeout(self.peer_index);
+            let _ = self
+                ._nc
+                .disconnect(self.peer_index, "transaction proof attempt failed");
+        }
+        if self
+            .protocol
             .peers()
-            .update_txs_proof_request(self.peer_index, None);
+            .get_peer(&self.peer_index)
+            .is_some_and(|p| !p.txs_quarantined && p.connection == peer.connection)
+        {
+            self.protocol
+                .peers()
+                .update_txs_proof_request(self.peer_index, None);
+        }
         status
     }
 
@@ -55,6 +83,14 @@ impl<'a> SendTransactionsProofProcess<'a> {
             error!("peer {} isn't waiting for a proof", self.peer_index);
             return StatusCode::PeerIsNotOnProcess.into();
         };
+
+        if original_request
+            .recovery
+            .as_ref()
+            .is_some_and(|a| a.session != peer.connection)
+        {
+            return StatusCode::UnexpectedResponse.into();
+        }
 
         let last_header: VerifiableHeader = self.message.last_header().to_entity().into();
         let filtered_blocks_len = self.message.filtered_blocks().len();
@@ -101,6 +137,11 @@ impl<'a> SendTransactionsProofProcess<'a> {
                 self.protocol
                     .peers()
                     .mark_fetching_txs_timeout(self.peer_index);
+                // This valid response closes the attempt, but its quarantined slot
+                // still needs a drain before another request can use the session.
+                let _ = self
+                    ._nc
+                    .disconnect(self.peer_index, "transaction proof tip changed");
                 return Status::ok();
             } else {
                 // Since the last state is different, then no data should be contained.
@@ -216,28 +257,79 @@ impl<'a> SendTransactionsProofProcess<'a> {
             }
             debug!("verify SendTransactionsProof ok");
 
-            for (filtered_block, extension) in filtered_blocks.into_iter().zip(extensions.iter()) {
-                let header = filtered_block.header().into_view();
-                for tx in filtered_block.transactions() {
-                    if self
-                        .protocol
-                        .peers()
-                        .remove_fetching_transaction(&tx.calc_tx_hash(), &header.hash())
-                    {
-                        self.protocol.storage().add_fetched_tx(
-                            &tx,
-                            &HeaderWithExtension {
-                                header: header.data(),
-                                extension: extension.as_ref().cloned(),
+            let transactions: Vec<_> = filtered_blocks
+                .into_iter()
+                .zip(extensions)
+                .flat_map(|(block, extension)| {
+                    let header = block.header();
+                    block.transactions().into_iter().map(move |tx| {
+                        (
+                            tx,
+                            HeaderWithExtension {
+                                header: header.clone(),
+                                extension: extension.clone(),
                             },
-                        );
-                    }
-                }
+                        )
+                    })
+                })
+                .collect();
+            let proven: Vec<_> = transactions
+                .iter()
+                .map(|(tx, hwe)| ProvenTransaction {
+                    transaction: tx.clone(),
+                    header: hwe.header.clone(),
+                })
+                .collect();
+            // Snapshot generic waiters before acquiring recovery state; never invert locks.
+            let generic: std::collections::HashSet<_> = transactions
+                .iter()
+                .filter_map(|(tx, _)| {
+                    let hash = tx.calc_tx_hash();
+                    self.protocol.peers().get_tx_fetch_info(&hash).map(|_| hash)
+                })
+                .collect();
+            let mut stored = Vec::new();
+            let persist = |active: bool| {
+                let selected: Vec<_> = transactions
+                    .iter()
+                    .filter(|(tx, _)| active || generic.contains(&tx.calc_tx_hash()))
+                    .map(|(tx, hwe)| (tx, hwe))
+                    .collect();
+                self.protocol
+                    .storage()
+                    .try_add_fetched_txs(&selected)
+                    .map_err(|_| RecoveryError::Storage)?;
+                stored = selected
+                    .iter()
+                    .map(|(tx, hwe)| (tx.calc_tx_hash(), hwe.header.calc_header_hash()))
+                    .collect();
+                Ok(())
+            };
+            let result = if let Some(attempt) = &original_request.recovery {
+                self.protocol
+                    .peers()
+                    .recovery()
+                    .publish(attempt, &proven, Instant::now(), persist)
+                    .map(|_| ())
+            } else {
+                let mut persist = persist;
+                persist(false)
+            };
+            if result.is_err() {
+                return StatusCode::InternalError
+                    .with_context("verified transaction association could not be persisted");
+            }
+            for (hash, block_hash) in stored {
+                self.protocol.peers().remove_requested_transaction(
+                    &hash,
+                    &block_hash,
+                    original_request,
+                );
             }
         }
         self.protocol
             .peers()
-            .mark_fetching_txs_missing(&missing_tx_hashes);
+            .mark_requested_txs_missing(&missing_tx_hashes, original_request);
         Status::ok()
     }
 }

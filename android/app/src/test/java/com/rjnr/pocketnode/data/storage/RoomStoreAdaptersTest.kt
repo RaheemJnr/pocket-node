@@ -258,6 +258,78 @@ class RoomStoreAdaptersTest {
         assertEquals("{}", active.single().signedTxJson)
     }
 
+    @Test
+    fun `accepted retry atomically rearms only captured failed observation`() = runTest {
+        val store = RoomPendingBroadcastStore(db.pendingBroadcastDao())
+        val original = PendingBroadcastRecord(txHash = "tx-retry", walletId = "w1", network = "TESTNET", signedTxJson = "signed bytes",
+            reservedInputs = "[]", state = "FAILED", submittedAtTipBlock = 100, nullCount = 3, createdAt = 10, lastCheckedAt = 20)
+        store.insert(original)
+        assertEquals(0, store.rearmAcceptedRetry(original.txHash, 19, 130, 30))
+        assertEquals(original, store.getFailedRow(original.txHash))
+        assertEquals(1, store.rearmAcceptedRetry(original.txHash, 20, 130, 30))
+        assertEquals(original.copy(state = "BROADCAST", submittedAtTipBlock = 130, nullCount = 0, lastCheckedAt = 30),
+            store.getActive("w1", "TESTNET").single())
+        assertEquals(0, store.rearmAcceptedRetry(original.txHash, 20, 140, 40))
+        store.compareAndUpdateState(original.txHash, "BROADCAST", "CONFIRMED", 50)
+        assertEquals(0, store.rearmAcceptedRetry(original.txHash, 50, 150, 60))
+    }
+
+    private fun retryActivity(hash: String, status: String = "FAILED") = TransactionEntity(
+        txHash = hash, blockNumber = "0x0", blockHash = "", timestamp = 10,
+        balanceChange = "0x1", direction = "dao_unlock", fee = "0x0", confirmations = 0,
+        blockTimestampHex = null, network = "TESTNET", status = status, isLocal = true,
+        cachedAt = 20, walletId = "w1", feeShannons = 7L,
+    )
+
+    @Test
+    fun `accepted retry restores failed activity with pending CAS and preserves history`() = runTest {
+        val store = RoomPendingBroadcastStore(db.pendingBroadcastDao())
+        val row = broadcast("retry-activity", "w1", "TESTNET", "FAILED")
+        val activity = retryActivity(row.txHash)
+        db.pendingBroadcastDao().insert(row)
+        db.transactionDao().insert(activity)
+        assertEquals(1, store.rearmAcceptedRetry(row.txHash, row.lastCheckedAt, 130, 30))
+        assertEquals(activity.copy(status = "PENDING", cachedAt = 30), db.transactionDao().getByTxHash(row.txHash))
+        assertEquals(row.copy(state = "BROADCAST", submittedAtTipBlock = 130, nullCount = 0, lastCheckedAt = 30),
+            db.pendingBroadcastDao().getByHash(row.txHash))
+    }
+
+    @Test
+    fun `retry never rewinds advanced activity or rearms activity after losing pending CAS`() = runTest {
+        val store = RoomPendingBroadcastStore(db.pendingBroadcastDao())
+        for (mode in listOf("CONFIRMED", "PENDING", "UNVERIFIED", "OTHER_WALLET", "OTHER_NETWORK", "NONLOCAL", "STALE_PENDING")) {
+            val row = broadcast(mode, "w1", "TESTNET", "FAILED")
+            val activity = retryActivity(mode, if (mode in listOf("CONFIRMED", "PENDING", "UNVERIFIED")) mode else "FAILED")
+                .let { when (mode) {
+                    "OTHER_WALLET" -> it.copy(walletId = "w2")
+                    "OTHER_NETWORK" -> it.copy(network = "MAINNET")
+                    "NONLOCAL" -> it.copy(isLocal = false)
+                    else -> it
+                } }
+            db.pendingBroadcastDao().insert(row)
+            db.transactionDao().insert(activity)
+            val checkedAt = if (mode == "STALE_PENDING") row.lastCheckedAt - 1 else row.lastCheckedAt
+            store.rearmAcceptedRetry(row.txHash, checkedAt, 130, 30)
+            assertEquals(mode, activity, db.transactionDao().getByTxHash(mode))
+            if (mode == "STALE_PENDING") assertEquals(row, db.pendingBroadcastDao().getByHash(mode))
+        }
+    }
+
+    @Test
+    fun `retry activity write failure rolls back pending rearm`() = runTest {
+        val store = RoomPendingBroadcastStore(db.pendingBroadcastDao())
+        val row = broadcast("retry-rollback", "w1", "TESTNET", "FAILED")
+        val activity = retryActivity(row.txHash)
+        db.pendingBroadcastDao().insert(row)
+        db.transactionDao().insert(activity)
+        db.openHelper.writableDatabase.execSQL("CREATE TRIGGER fail_retry_activity BEFORE UPDATE OF status ON transactions " +
+            "WHEN NEW.status = 'PENDING' BEGIN SELECT RAISE(ABORT, 'injected activity failure'); END")
+        val failure = runCatching { store.rearmAcceptedRetry(row.txHash, row.lastCheckedAt, 130, 30) }.exceptionOrNull()
+        org.junit.Assert.assertNotNull(failure)
+        assertEquals(row, db.pendingBroadcastDao().getByHash(row.txHash))
+        assertEquals(activity, db.transactionDao().getByTxHash(row.txHash))
+    }
+
     private fun record(
         hash: String,
         direction: String,

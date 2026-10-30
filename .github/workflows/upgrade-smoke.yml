@@ -2,7 +2,7 @@ name: Upgrade Smoke
 
 on:
   pull_request:
-    branches: [main]
+    branches: [main, codex/security-maintenance-batch-1]
 
 concurrency:
   group: upgrade-smoke-${{ github.ref }}

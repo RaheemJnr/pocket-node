@@ -26,7 +26,7 @@ package com.rjnr.pocketnode.data.gateway
  *
  * ## Error contract
  *
- * Queries return `null` on **any** failure, and never throw, except [callRpc],
+ * Ordinary queries return `null` on failure, and never throw, except [callRpc],
  * which reports JSON-RPC errors in-band. That is the historical JNI contract
  * (see `bridge_core/error.rs`: the JNI bridge collapses every `BridgeError`
  * onto `JNI_FALSE` / `null`), and it is the contract the whole Android app is
@@ -43,6 +43,11 @@ package com.rjnr.pocketnode.data.gateway
  * Lifecycle functions answer `Boolean` for the same reason, and
  * [calculateMaxWithdraw] answers `-1` because that is the sentinel the JNI DAO
  * bridge already returns on failure.
+ *
+ * Dedicated DAO recovery methods return versioned JSON success/error envelopes.
+ * Registry and argument errors are non-null error envelopes; lifecycle/transport
+ * failures return null. [DaoRecoveryClient] maps both onto typed failures and
+ * binds all successful receipts to the expected network and request identity.
  *
  * No default methods are declared: Kotlin interface defaults are invisible to
  * Swift, so a Swift implementation would silently fail to satisfy the protocol.
@@ -170,6 +175,16 @@ interface LightClientApi {
 
     /** Cycles [txJson] would consume. Not implemented in the bridge yet: always null. */
     fun estimateCycles(txJson: String): String?
+
+    // ---- Fresh DAO membership (ephemeral, requires validation at each use) ----
+
+    /** V1 JSON envelopes. Use DaoRecoveryClient to decode and bind the context.
+     * Membership does not prove unspentness; tokens are never durable authority. */
+
+    fun requestDaoRecovery(txHash: String): String?
+    fun pollDaoRecovery(requestId: String): String?
+    fun validateDaoRecovery(requestId: String, receiptId: String): String?
+    fun cancelDaoRecovery(requestId: String): String?
 
     // ---- Node info ----
 

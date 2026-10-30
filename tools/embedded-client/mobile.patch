@@ -7261,6 +7261,409 @@ index 0000000000000000000000000000000000000000..7527852fa5d2b6f626925cb5189f489d
 +
 +    Ok(format!("0x{:x}", since_value))
 +}
+diff --git a/light-client-lib/src/bridge_core/dao_recovery.rs b/light-client-lib/src/bridge_core/dao_recovery.rs
+new file mode 100644
+index 0000000000000000000000000000000000000000..1a4fe6e3a7efcf07141d41de620f1a92bfa30a5e
+--- /dev/null
++++ b/light-client-lib/src/bridge_core/dao_recovery.rs
+@@ -0,0 +1,397 @@
++//! Dedicated v1 fresh-membership operations; never routed through read-only RPC.
++//! Receipts authenticate raw transaction membership, not witnesses or unspentness.
++use super::{types::*, BridgeError};
++use crate::protocols::light_client::recovery::*;
++use ckb_jsonrpc_types::{HeaderView, Transaction};
++use ckb_types::{packed, prelude::*, H256};
++use serde::{de::DeserializeOwned, Serialize};
++use serde_json::{json, Value};
++use std::str::FromStr;
++
++const MAX_TOKEN_BYTES: usize = 2048;
++fn hex(bytes: &[u8]) -> String {
++    bytes.iter().map(|b| format!("{b:02x}")).collect()
++}
++fn token<T: Serialize>(kind: &str, id: &T) -> String {
++    // The ID types contain only fixed-size integers/arrays; serialization is infallible.
++    format!(
++        "dr1.{kind}.{}",
++        hex(&serde_json::to_vec(id).expect("fixed recovery ID"))
++    )
++}
++fn decode<T: DeserializeOwned + Serialize>(kind: &str, input: &str) -> Result<T, &'static str> {
++    let prefix = format!("dr1.{kind}.");
++    let data = input.strip_prefix(&prefix).ok_or("invalid_token")?;
++    if input.len() > MAX_TOKEN_BYTES || data.is_empty() || data.len() % 2 != 0 {
++        return Err("invalid_token");
++    }
++    let bytes = data
++        .as_bytes()
++        .chunks_exact(2)
++        .map(|pair| {
++            let nibble = |c| match c {
++                b'0'..=b'9' => Some(c - b'0'),
++                b'a'..=b'f' => Some(c - b'a' + 10),
++                _ => None,
++            };
++            Ok(nibble(pair[0]).ok_or("invalid_token")? * 16
++                + nibble(pair[1]).ok_or("invalid_token")?)
++        })
++        .collect::<Result<Vec<u8>, &str>>()?;
++    let id: T = serde_json::from_slice(&bytes).map_err(|_| "invalid_token")?;
++    if token(kind, &id) != input {
++        return Err("invalid_token");
++    }
++    Ok(id)
++}
++fn error_code(error: RecoveryError) -> &'static str {
++    match error {
++        RecoveryError::Unavailable => "unavailable",
++        RecoveryError::Capacity => "capacity",
++        RecoveryError::UnknownRequest => "unknown_request",
++        RecoveryError::Expired => "expired",
++        RecoveryError::SequenceExhausted => "sequence_exhausted",
++        RecoveryError::Storage => "storage",
++        RecoveryError::InvalidReceipt => "invalid_receipt",
++    }
++}
++fn identity(value: &RecoveryIdentity) -> Value {
++    json!({"genesis_hash":format!("{:#x}",value.genesis_hash), "store_generation":value.store_generation,
++        "run_nonce":format!("0x{}",hex(&value.run_nonce))})
++}
++fn receipt(value: &RecoveryReceipt) -> Value {
++    let tx = packed::Transaction::new_builder()
++        .raw(value.transaction.clone())
++        .build();
++    let mut raw = serde_json::to_value(Transaction::from(tx)).expect("raw transaction JSON");
++    raw.as_object_mut()
++        .expect("transaction object")
++        .remove("witnesses");
++    json!({"schema_version":value.schema_version,"proof_kind":"raw_transaction_membership",
++        "receipt_id":token("r",&value.id),"request_id":token("q",&value.request_id),
++        "attempt_id":token("a",&value.attempt_id),"identity":identity(&value.identity),
++        "revision":value.revision.to_string(),"chain_anchor":HeaderView::from(value.chain.anchor.clone().into_view()),
++        "transaction_hash":format!("{:#x}",value.transaction.calc_tx_hash()),
++        "raw_transaction":raw,"header":HeaderView::from(value.header.clone().into_view()),
++        "transaction_index":value.transaction_index})
++}
++struct Adapter<'a> {
++    state: u8,
++    registry: &'a RecoveryRegistry,
++}
++impl Adapter<'_> {
++    fn result(&self, operation: &str, first: &str, second: &str) -> Result<Value, &'static str> {
++        let now = Instant::now();
++        match operation {
++            "request" => {
++                let hash = H256::from_str(first.strip_prefix("0x").unwrap_or(first))
++                    .map_err(|_| "invalid_hash")?;
++                let identity_snapshot = self.registry.identity().map_err(error_code)?;
++                let id = self
++                    .registry
++                    .request(hash.pack(), now)
++                    .map_err(error_code)?;
++                Ok(
++                    json!({"request_id":token("q",&id),"transaction_hash":format!("{hash:#x}"),"identity":identity(&identity_snapshot)}),
++                )
++            }
++            "poll" => {
++                let id = decode::<RequestId>("q", first)?;
++                let (status, proof) = match self.registry.poll(id, now).map_err(error_code)? {
++                    RecoveryStatus::Queued => ("queued", None),
++                    RecoveryStatus::Fetching => ("fetching", None),
++                    RecoveryStatus::Verified(r) => ("verified", Some(receipt(&r))),
++                    RecoveryStatus::Unavailable => ("unavailable", None),
++                    RecoveryStatus::Expired => ("expired", None),
++                    RecoveryStatus::Cancelled => ("cancelled", None),
++                };
++                Ok(json!({"request_id":first,"status":status,"receipt":proof}))
++            }
++            "validate" => {
++                let id = decode::<RequestId>("q", first)?;
++                let rid = decode::<ReceiptId>("r", second)?;
++                let proof = self.registry.validate(id, rid, now).map_err(error_code)?;
++                Ok(json!({"request_id":first,"valid":true,"receipt":receipt(&proof)}))
++            }
++            "cancel" => {
++                let id = decode::<RequestId>("q", first)?;
++                self.registry.cancel(id).map_err(error_code)?;
++                Ok(json!({"request_id":first,"status":"cancelled"}))
++            }
++            _ => Err("unknown_operation"),
++        }
++    }
++    fn call(&self, operation: &str, first: &str, second: &str) -> Result<String, BridgeError> {
++        ensure_running(self.state)?;
++        let mut envelope = json!({"schema_version":RECOVERY_SCHEMA_VERSION,"operation":operation});
++        match self.result(operation, first, second) {
++            Ok(result) => envelope["result"] = result,
++            Err(code) => envelope["error"] = json!({"code":code}),
++        }
++        serde_json::to_string(&envelope).map_err(|e| BridgeError::Internal(e.to_string()))
++    }
++}
++fn ensure_running(state: u8) -> Result<(), BridgeError> {
++    match state {
++        STATE_RUNNING => Ok(()),
++        STATE_STOPPED => Err(BridgeError::Stopped),
++        _ => Err(BridgeError::NotInitialized),
++    }
++}
++fn call(operation: &str, first: &str, second: &str) -> Result<String, BridgeError> {
++    ensure_running(get_state())?;
++    let storage = STORAGE_WITH_DATA.get().ok_or(BridgeError::NotInitialized)?;
++    Adapter {
++        state: get_state(),
++        registry: storage.recovery(),
++    }
++    .call(operation, first, second)
++}
++/// Register a fresh request even when this transaction is cached or pending.
++pub fn request_dao_recovery(tx_hash: &str) -> Result<String, BridgeError> {
++    call("request", tx_hash, "")
++}
++pub fn poll_dao_recovery(request_id: &str) -> Result<String, BridgeError> {
++    call("poll", request_id, "")
++}
++/// Point-in-time validation; callers must repeat it at each authorization boundary.
++pub fn validate_dao_recovery(request_id: &str, receipt_id: &str) -> Result<String, BridgeError> {
++    call("validate", request_id, receipt_id)
++}
++pub fn cancel_dao_recovery(request_id: &str) -> Result<String, BridgeError> {
++    call("cancel", request_id, "")
++}
++
++/// Test seam for real protocol fixtures; uses the production envelope adapter.
++#[cfg(test)]
++pub(crate) fn protocol_fixture_call(
++    registry: &RecoveryRegistry, operation: &str, first: &str, second: &str,
++) -> Value {
++    serde_json::from_str(&Adapter { state: STATE_RUNNING, registry }
++        .call(operation, first, second).unwrap()).unwrap()
++}
++
++#[cfg(test)]
++pub(crate) fn protocol_fixture_request_id(envelope: &Value) -> RequestId {
++    decode("q", envelope["result"]["request_id"].as_str().unwrap()).unwrap()
++}
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++    use ckb_types::packed;
++    use serde_json::{json, Value};
++    fn make_registry() -> RecoveryRegistry {
++        RecoveryRegistry::new(
++            RecoveryIdentity {
++                genesis_hash: packed::Byte32::default(),
++                store_generation: "synthetic-store".into(),
++                run_nonce: [7; 16],
++            },
++            ChainSnapshot {
++                anchor: packed::Header::default(),
++            },
++        )
++    }
++    fn value(adapter: &Adapter, op: &str, first: &str, second: &str) -> Value {
++        serde_json::from_str(&adapter.call(op, first, second).unwrap()).unwrap()
++    }
++    fn transaction() -> packed::Transaction {
++        packed::Transaction::new_builder()
++            .raw(
++                packed::RawTransaction::new_builder()
++                    .cell_deps(vec![packed::CellDep::default()])
++                    .header_deps(vec![packed::Byte32::default()])
++                    .inputs(vec![packed::CellInput::default()])
++                    .outputs(vec![packed::CellOutput::new_builder()
++                        .capacity(100_000_000u64)
++                        .build()])
++                    .outputs_data(vec![ckb_types::bytes::Bytes::from(vec![0u8; 8]).pack()])
++                    .build(),
++            )
++            .build()
++    }
++    fn hash() -> String {
++        format!("{:#x}", transaction().calc_tx_hash())
++    }
++    #[test]
++    fn dao_recovery_bridge_request_poll_cancel() {
++        let registry = make_registry();
++        let a = Adapter {
++            state: STATE_RUNNING,
++            registry: &registry,
++        };
++        let request = value(&a, "request", &hash(), "");
++        assert_eq!(request["schema_version"], 1);
++        assert_eq!(request["operation"], "request");
++        assert_eq!(
++            request["result"]["identity"]["store_generation"],
++            "synthetic-store"
++        );
++        assert_eq!(request["result"]["transaction_hash"], hash());
++        let id = request["result"]["request_id"].as_str().unwrap();
++        assert_eq!(value(&a, "poll", id, "")["result"]["status"], "queued");
++        assert_eq!(value(&a, "cancel", id, "")["result"]["status"], "cancelled");
++        assert_eq!(value(&a, "poll", id, "")["result"]["status"], "cancelled");
++    }
++    #[test]
++    fn dao_recovery_bridge_verified_snapshot_roundtrip() {
++        let registry = make_registry();
++        let a = Adapter {
++            state: STATE_RUNNING,
++            registry: &registry,
++        };
++        let request = value(&a, "request", &hash(), "");
++        let id = request["result"]["request_id"].as_str().unwrap();
++        let tx = transaction();
++        let header = packed::Header::default();
++        let attempt = registry
++            .freeze(&[tx.calc_tx_hash()], [8; 16], &header, Instant::now())
++            .unwrap()
++            .unwrap();
++        registry
++            .publish(
++                &attempt,
++                &[ProvenTransaction {
++                    transaction: tx,
++                    header,
++                }],
++                Instant::now(),
++                |_| Ok(()),
++            )
++            .unwrap();
++        let poll = value(&a, "poll", id, "");
++        let receipt = &poll["result"]["receipt"];
++        assert_eq!(poll["result"]["status"], "verified");
++        assert_eq!(receipt["transaction_hash"], hash());
++        assert_eq!(receipt["transaction_index"], Value::Null);
++        assert!(receipt["raw_transaction"].get("witnesses").is_none());
++        assert!(receipt["header"]["hash"]
++            .as_str()
++            .unwrap()
++            .starts_with("0x"));
++        let rid = receipt["receipt_id"].as_str().unwrap();
++        let validated = value(&a, "validate", id, rid);
++        assert_eq!(validated["result"]["valid"], true);
++        assert_eq!(validated["result"]["receipt"], *receipt);
++        if let Ok(path) = std::env::var("POCKET_DAO_FIXTURE_PATH") {
++            std::fs::write(
++                path,
++                serde_json::to_string_pretty(
++                    &json!({"request":request,"poll":poll,"validate":validated}),
++                )
++                .unwrap(),
++            )
++            .unwrap();
++        }
++        value(&a, "cancel", id, "");
++        assert_eq!(
++            value(&a, "validate", id, rid)["error"]["code"],
++            "invalid_receipt"
++        );
++    }
++    #[test]
++    fn dao_recovery_bridge_bad_inputs_fail_closed() {
++        let registry = make_registry();
++        let a = Adapter {
++            state: STATE_RUNNING,
++            registry: &registry,
++        };
++        assert_eq!(
++            value(&a, "request", "bad", "")["error"]["code"],
++            "invalid_hash"
++        );
++        for token in ["", "null", "dr1.q.00", "dr2.q.00", "dr1.r.00", "dr1.q.zz"] {
++            assert_eq!(
++                value(&a, "poll", token, "")["error"]["code"],
++                "invalid_token"
++            );
++        }
++        let foreign = make_registry();
++        let other = Adapter {
++            state: STATE_RUNNING,
++            registry: &foreign,
++        };
++        let id = value(&a, "request", &hash(), "")["result"]["request_id"]
++            .as_str()
++            .unwrap()
++            .to_owned();
++        assert_eq!(
++            value(&other, "poll", &id, "")["error"]["code"],
++            "unknown_request"
++        );
++        assert!(value(&a, "unknown", "", "").get("result").is_none());
++        let _ = json!({"schema_version": 1});
++    }
++    #[test]
++    fn dao_recovery_bridge_not_running_and_revoked() {
++        let r = make_registry();
++        for state in [STATE_INIT, STATE_STOPPED] {
++            let a = Adapter {
++                state,
++                registry: &r,
++            };
++            for op in ["request", "poll", "validate", "cancel"] {
++                assert!(a.call(op, &hash(), "bad").is_err());
++            }
++        }
++        let a = Adapter {
++            state: STATE_RUNNING,
++            registry: &r,
++        };
++        r.revoke_run();
++        assert_eq!(
++            value(&a, "request", &hash(), "")["error"]["code"],
++            "unavailable"
++        );
++    }
++    #[test]
++    fn dao_recovery_bridge_tokens_are_bounded_canonical_and_typed() {
++        let registry = make_registry();
++        let id = registry
++            .request(Default::default(), Instant::now())
++            .unwrap();
++        let encoded = token("q", &id);
++        assert_eq!(decode::<RequestId>("q", &encoded).unwrap(), id);
++        for invalid in [
++            format!("{encoded}00"),
++            encoded.replace("dr1.q.", "dr1.r."),
++            "a".repeat(2049),
++        ] {
++            assert!(decode::<RequestId>("q", &invalid).is_err());
++        }
++        let mut value = serde_json::to_value(id).unwrap();
++        value["unknown"] = json!(1);
++        let noncanonical = format!("dr1.q.{}", hex(&serde_json::to_vec(&value).unwrap()));
++        assert!(decode::<RequestId>("q", &noncanonical).is_err());
++    }
++    #[test]
++    fn dao_recovery_bridge_identity_busy_and_rpc_are_non_authorizing() {
++        let registry = make_registry();
++        assert!(registry.identity().is_ok());
++        let update = registry.begin_chain_update().unwrap();
++        assert_eq!(registry.identity(), Err(RecoveryError::Unavailable));
++        registry
++            .finish_chain_update(
++                update,
++                ChainSnapshot {
++                    anchor: Default::default(),
++                },
++            )
++            .unwrap();
++        assert!(registry.identity().is_ok());
++        for method in [
++            "request_dao_recovery",
++            "poll_dao_recovery",
++            "validate_dao_recovery",
++            "cancel_dao_recovery",
++        ] {
++            let answer: Value =
++                serde_json::from_str(&super::super::rpc::call_rpc(method).unwrap()).unwrap();
++            assert!(answer.get("error").is_some());
++            assert!(answer.get("result").is_none());
++        }
++        registry.revoke_run();
++        assert_eq!(registry.identity(), Err(RecoveryError::Unavailable));
++    }
++}
 diff --git a/light-client-lib/src/bridge_core/error.rs b/light-client-lib/src/bridge_core/error.rs
 new file mode 100644
 index 0000000000000000000000000000000000000000..02fbd4011c922bbdfd7fbc8888949ab3d0207f85
@@ -7311,10 +7714,10 @@ index 0000000000000000000000000000000000000000..02fbd4011c922bbdfd7fbc8888949ab3
 +}
 diff --git a/light-client-lib/src/bridge_core/lifecycle.rs b/light-client-lib/src/bridge_core/lifecycle.rs
 new file mode 100644
-index 0000000000000000000000000000000000000000..a60e389042ac7cdafdc2c27020abe90195e638c4
+index 0000000000000000000000000000000000000000..1b367d326f6efa18c8dd09e5156ad594cd29c156
 --- /dev/null
 +++ b/light-client-lib/src/bridge_core/lifecycle.rs
-@@ -0,0 +1,838 @@
+@@ -0,0 +1,866 @@
 +//! Lifecycle management for the platform bridges
 +//!
 +//! Implements init/start/stop/status functions that mirror light-client-bin/src/subcmds.rs.
@@ -7527,6 +7930,21 @@ index 0000000000000000000000000000000000000000..a60e389042ac7cdafdc2c27020abe901
 +        storage.get_last_check_point(),
 +        BAD_MESSAGE_ALLOWED_EACH_HOUR,
 +    ));
++
++    let generation = super::verification_epoch::read(&storage)?.generation;
++    peers
++        .recovery()
++        .initialize(
++            crate::protocols::light_client::recovery::RecoveryIdentity {
++                genesis_hash: consensus.genesis_block().hash(),
++                store_generation: generation,
++                run_nonce: rand::random(),
++            },
++            crate::protocols::light_client::recovery::ChainSnapshot {
++                anchor: storage.get_tip_header(),
++            },
++        )
++        .map_err(|_| BridgeError::Storage("recovery authority initialization failed".into()))?;
 +
 +    // Initialize protocols
 +    info!("Initializing protocols...");
@@ -7827,6 +8245,9 @@ index 0000000000000000000000000000000000000000..a60e389042ac7cdafdc2c27020abe901
 +        return Err(BridgeError::NotInitialized);
 +    }
 +
++    if let Some(swc) = STORAGE_WITH_DATA.get() {
++        swc.peers().recovery().revoke_run();
++    }
 +    info!("Stopping CKB Light Client...");
 +
 +    match shutdown_sequence(
@@ -8125,6 +8546,10 @@ index 0000000000000000000000000000000000000000..a60e389042ac7cdafdc2c27020abe901
 +        )
 +        .expect("init");
 +        start().expect("start");
++        let recovery = STORAGE_WITH_DATA.get().unwrap().recovery();
++        let recovery_request = recovery
++            .request(Default::default(), std::time::Instant::now())
++            .unwrap();
 +
 +        let began = std::time::Instant::now();
 +        stop().expect("stop");
@@ -8132,6 +8557,12 @@ index 0000000000000000000000000000000000000000..a60e389042ac7cdafdc2c27020abe901
 +
 +        assert!(elapsed < Duration::from_secs(10), "stop took {elapsed:?}");
 +        assert!(is_stopped());
++        assert!(recovery
++            .poll(recovery_request, std::time::Instant::now())
++            .is_err());
++        assert!(recovery
++            .request(Default::default(), std::time::Instant::now())
++            .is_err());
 +        assert!(
 +            matches!(start(), Err(BridgeError::Stopped)),
 +            "start after stop must report Stopped"
@@ -8155,10 +8586,10 @@ index 0000000000000000000000000000000000000000..a60e389042ac7cdafdc2c27020abe901
 +}
 diff --git a/light-client-lib/src/bridge_core/mod.rs b/light-client-lib/src/bridge_core/mod.rs
 new file mode 100644
-index 0000000000000000000000000000000000000000..62c4d26c416f99fcef8408892a7c52e1e6cec4bc
+index 0000000000000000000000000000000000000000..6755f78b40cf07ef6ade270fe4cad66b584ec533
 --- /dev/null
 +++ b/light-client-lib/src/bridge_core/mod.rs
-@@ -0,0 +1,32 @@
+@@ -0,0 +1,33 @@
 +//! Platform-neutral core of the mobile bridges.
 +//!
 +//! `jni_bridge` (Android) and `ffi` (iOS/UniFFI) are thin marshalling layers on
@@ -8182,6 +8613,7 @@ index 0000000000000000000000000000000000000000..62c4d26c416f99fcef8408892a7c52e1
 +//! - 2 (STOPPED): Stopped
 +
 +pub mod dao;
++pub mod dao_recovery;
 +pub mod error;
 +pub mod lifecycle;
 +pub mod query;
@@ -10855,10 +11287,10 @@ index 7a7d39c1365c94fd87eba099e1accdd35749f126..6db510572cc437bcbfc98ced7b109a44
      #[error("db error: {0}")]
 diff --git a/light-client-lib/src/ffi/mod.rs b/light-client-lib/src/ffi/mod.rs
 new file mode 100644
-index 0000000000000000000000000000000000000000..2ddbee4af219e78645b0de1fc10af3f4de8df765
+index 0000000000000000000000000000000000000000..c3d6aae99e59a35b01a4cc29d42456f03ccc4244
 --- /dev/null
 +++ b/light-client-lib/src/ffi/mod.rs
-@@ -0,0 +1,278 @@
+@@ -0,0 +1,298 @@
 +//! UniFFI bridge for iOS
 +//!
 +//! Thin marshalling layer over [`crate::bridge_core`], mirroring what
@@ -11136,6 +11568,26 @@ index 0000000000000000000000000000000000000000..2ddbee4af219e78645b0de1fc10af3f4
 +#[uniffi::export]
 +pub fn call_rpc(method: String) -> Result<String, LightClientError> {
 +    rpc::call_rpc(&method).map_err(Into::into)
++}
++
++#[uniffi::export]
++pub fn request_dao_recovery(tx_hash: String) -> Result<String, LightClientError> {
++    crate::bridge_core::dao_recovery::request_dao_recovery(&tx_hash).map_err(Into::into)
++}
++
++#[uniffi::export]
++pub fn poll_dao_recovery(request_id: String) -> Result<String, LightClientError> {
++    crate::bridge_core::dao_recovery::poll_dao_recovery(&request_id).map_err(Into::into)
++}
++
++#[uniffi::export]
++pub fn validate_dao_recovery(request_id: String, receipt_id: String) -> Result<String, LightClientError> {
++    crate::bridge_core::dao_recovery::validate_dao_recovery(&request_id, &receipt_id).map_err(Into::into)
++}
++
++#[uniffi::export]
++pub fn cancel_dao_recovery(request_id: String) -> Result<String, LightClientError> {
++    crate::bridge_core::dao_recovery::cancel_dao_recovery(&request_id).map_err(Into::into)
 +}
 diff --git a/light-client-lib/src/jni_bridge/callbacks.rs b/light-client-lib/src/jni_bridge/callbacks.rs
 new file mode 100644
@@ -11573,10 +12025,10 @@ index 0000000000000000000000000000000000000000..33b03eaeb8026bbec386e63904c23f2d
 +}
 diff --git a/light-client-lib/src/jni_bridge/query.rs b/light-client-lib/src/jni_bridge/query.rs
 new file mode 100644
-index 0000000000000000000000000000000000000000..243dc499725a0e32ae00628c640d44a8487c8a3d
+index 0000000000000000000000000000000000000000..30c5a9c5ae5c716f4bfb08005cc22fc01f39a893
 --- /dev/null
 +++ b/light-client-lib/src/jni_bridge/query.rs
-@@ -0,0 +1,399 @@
+@@ -0,0 +1,471 @@
 +//! Query APIs for JNI bridge
 +//!
 +//! Marshalling only: every export reads its arguments off the JVM, calls the
@@ -11976,6 +12428,78 @@ index 0000000000000000000000000000000000000000..243dc499725a0e32ae00628c640d44a8
 +        }
 +    })
 +}
++
++#[no_mangle]
++pub extern "C" fn Java_com_nervosnetwork_ckblightclient_LightClientNative_nativeRequestDaoRecovery(
++    mut env: JNIEnv,
++    _class: JClass,
++    tx_hash: JString,
++) -> jstring {
++    guard_jni(ptr::null_mut(), move || {
++        let tx_hash = match jstring_to_string(&mut env, &tx_hash, "nativeRequestDaoRecovery") {
++            Some(s) => s, None => return ptr::null_mut(),
++        };
++        match crate::bridge_core::dao_recovery::request_dao_recovery(&tx_hash) {
++            Ok(json) => json_to_jstring(&mut env, &json),
++            Err(_) => ptr::null_mut(),
++        }
++    })
++}
++
++#[no_mangle]
++pub extern "C" fn Java_com_nervosnetwork_ckblightclient_LightClientNative_nativePollDaoRecovery(
++    mut env: JNIEnv,
++    _class: JClass,
++    request_id: JString,
++) -> jstring {
++    guard_jni(ptr::null_mut(), move || {
++        let request_id = match jstring_to_string(&mut env, &request_id, "nativePollDaoRecovery") {
++            Some(s) => s, None => return ptr::null_mut(),
++        };
++        match crate::bridge_core::dao_recovery::poll_dao_recovery(&request_id) {
++            Ok(json) => json_to_jstring(&mut env, &json),
++            Err(_) => ptr::null_mut(),
++        }
++    })
++}
++
++#[no_mangle]
++pub extern "C" fn Java_com_nervosnetwork_ckblightclient_LightClientNative_nativeValidateDaoRecovery(
++    mut env: JNIEnv,
++    _class: JClass,
++    request_id: JString,
++    receipt_id: JString,
++) -> jstring {
++    guard_jni(ptr::null_mut(), move || {
++        let request_id = match jstring_to_string(&mut env, &request_id, "nativeValidateDaoRecovery") {
++            Some(s) => s, None => return ptr::null_mut(),
++        };
++        let receipt_id = match jstring_to_string(&mut env, &receipt_id, "nativeValidateDaoRecovery") {
++            Some(s) => s, None => return ptr::null_mut(),
++        };
++        match crate::bridge_core::dao_recovery::validate_dao_recovery(&request_id, &receipt_id) {
++            Ok(json) => json_to_jstring(&mut env, &json),
++            Err(_) => ptr::null_mut(),
++        }
++    })
++}
++
++#[no_mangle]
++pub extern "C" fn Java_com_nervosnetwork_ckblightclient_LightClientNative_nativeCancelDaoRecovery(
++    mut env: JNIEnv,
++    _class: JClass,
++    request_id: JString,
++) -> jstring {
++    guard_jni(ptr::null_mut(), move || {
++        let request_id = match jstring_to_string(&mut env, &request_id, "nativeCancelDaoRecovery") {
++            Some(s) => s, None => return ptr::null_mut(),
++        };
++        match crate::bridge_core::dao_recovery::cancel_dao_recovery(&request_id) {
++            Ok(json) => json_to_jstring(&mut env, &json),
++            Err(_) => ptr::null_mut(),
++        }
++    })
++}
 diff --git a/light-client-lib/src/jni_bridge/rpc_handler.rs b/light-client-lib/src/jni_bridge/rpc_handler.rs
 new file mode 100644
 index 0000000000000000000000000000000000000000..bb37b98f93868c78ba533281838fff36906010f5
@@ -12153,6 +12677,179 @@ index b706cb0faecef34c2f5371d1f24366eb7fbc1264..50730123bc968064a388b990a93f25d5
          let last_n_blocks = self.protocol.last_n_blocks() as usize;
  
          trace!(
+diff --git a/light-client-lib/src/protocols/light_client/components/send_transactions_proof.rs b/light-client-lib/src/protocols/light_client/components/send_transactions_proof.rs
+index e70b69277175ef8207cb427748aac5ef402d58b7..fb4dcecbb5d1c400026c2802f5fd0bb7914ef081 100644
+--- a/light-client-lib/src/protocols/light_client/components/send_transactions_proof.rs
++++ b/light-client-lib/src/protocols/light_client/components/send_transactions_proof.rs
+@@ -1,3 +1,4 @@
++use crate::protocols::light_client::recovery::{Instant, ProvenTransaction, RecoveryError};
+ use ckb_network::{BoxedCKBProtocolContext, PeerIndex};
+ use ckb_types::{
+     packed,
+@@ -39,10 +40,37 @@ impl<'a> SendTransactionsProofProcess<'a> {
+     }
+ 
+     pub(crate) async fn execute(self) -> Status {
++        let peer = return_if_failed!(self.protocol.get_peer(&self.peer_index));
++        if peer.txs_quarantined {
++            return StatusCode::PeerIsNotOnProcess.into();
++        }
+         let status = self.execute_internally().await;
+-        self.protocol
++        if let Some(attempt) = peer
++            .get_txs_proof_request()
++            .and_then(|r| r.recovery.as_ref())
++        {
++            // Completes unsuccessful/missing recipients, leaving Verified untouched.
++            self.protocol.peers().recovery().fail_attempt(attempt);
++        }
++        if !status.is_ok() {
++            // Preserve generic retry eligibility too, including local storage failures.
++            self.protocol
++                .peers()
++                .mark_fetching_txs_timeout(self.peer_index);
++            let _ = self
++                ._nc
++                .disconnect(self.peer_index, "transaction proof attempt failed");
++        }
++        if self
++            .protocol
+             .peers()
+-            .update_txs_proof_request(self.peer_index, None);
++            .get_peer(&self.peer_index)
++            .is_some_and(|p| !p.txs_quarantined && p.connection == peer.connection)
++        {
++            self.protocol
++                .peers()
++                .update_txs_proof_request(self.peer_index, None);
++        }
+         status
+     }
+ 
+@@ -56,6 +84,14 @@ impl<'a> SendTransactionsProofProcess<'a> {
+             return StatusCode::PeerIsNotOnProcess.into();
+         };
+ 
++        if original_request
++            .recovery
++            .as_ref()
++            .is_some_and(|a| a.session != peer.connection)
++        {
++            return StatusCode::UnexpectedResponse.into();
++        }
++
+         let last_header: VerifiableHeader = self.message.last_header().to_entity().into();
+         let filtered_blocks_len = self.message.filtered_blocks().len();
+         // Parse the V1 extra fields with a verifying reader up front, before any
+@@ -101,6 +137,11 @@ impl<'a> SendTransactionsProofProcess<'a> {
+                 self.protocol
+                     .peers()
+                     .mark_fetching_txs_timeout(self.peer_index);
++                // This valid response closes the attempt, but its quarantined slot
++                // still needs a drain before another request can use the session.
++                let _ = self
++                    ._nc
++                    .disconnect(self.peer_index, "transaction proof tip changed");
+                 return Status::ok();
+             } else {
+                 // Since the last state is different, then no data should be contained.
+@@ -216,28 +257,79 @@ impl<'a> SendTransactionsProofProcess<'a> {
+             }
+             debug!("verify SendTransactionsProof ok");
+ 
+-            for (filtered_block, extension) in filtered_blocks.into_iter().zip(extensions.iter()) {
+-                let header = filtered_block.header().into_view();
+-                for tx in filtered_block.transactions() {
+-                    if self
+-                        .protocol
+-                        .peers()
+-                        .remove_fetching_transaction(&tx.calc_tx_hash(), &header.hash())
+-                    {
+-                        self.protocol.storage().add_fetched_tx(
+-                            &tx,
+-                            &HeaderWithExtension {
+-                                header: header.data(),
+-                                extension: extension.as_ref().cloned(),
++            let transactions: Vec<_> = filtered_blocks
++                .into_iter()
++                .zip(extensions)
++                .flat_map(|(block, extension)| {
++                    let header = block.header();
++                    block.transactions().into_iter().map(move |tx| {
++                        (
++                            tx,
++                            HeaderWithExtension {
++                                header: header.clone(),
++                                extension: extension.clone(),
+                             },
+-                        );
+-                    }
+-                }
++                        )
++                    })
++                })
++                .collect();
++            let proven: Vec<_> = transactions
++                .iter()
++                .map(|(tx, hwe)| ProvenTransaction {
++                    transaction: tx.clone(),
++                    header: hwe.header.clone(),
++                })
++                .collect();
++            // Snapshot generic waiters before acquiring recovery state; never invert locks.
++            let generic: std::collections::HashSet<_> = transactions
++                .iter()
++                .filter_map(|(tx, _)| {
++                    let hash = tx.calc_tx_hash();
++                    self.protocol.peers().get_tx_fetch_info(&hash).map(|_| hash)
++                })
++                .collect();
++            let mut stored = Vec::new();
++            let persist = |active: bool| {
++                let selected: Vec<_> = transactions
++                    .iter()
++                    .filter(|(tx, _)| active || generic.contains(&tx.calc_tx_hash()))
++                    .map(|(tx, hwe)| (tx, hwe))
++                    .collect();
++                self.protocol
++                    .storage()
++                    .try_add_fetched_txs(&selected)
++                    .map_err(|_| RecoveryError::Storage)?;
++                stored = selected
++                    .iter()
++                    .map(|(tx, hwe)| (tx.calc_tx_hash(), hwe.header.calc_header_hash()))
++                    .collect();
++                Ok(())
++            };
++            let result = if let Some(attempt) = &original_request.recovery {
++                self.protocol
++                    .peers()
++                    .recovery()
++                    .publish(attempt, &proven, Instant::now(), persist)
++                    .map(|_| ())
++            } else {
++                let mut persist = persist;
++                persist(false)
++            };
++            if result.is_err() {
++                return StatusCode::InternalError
++                    .with_context("verified transaction association could not be persisted");
++            }
++            for (hash, block_hash) in stored {
++                self.protocol.peers().remove_requested_transaction(
++                    &hash,
++                    &block_hash,
++                    original_request,
++                );
+             }
+         }
+         self.protocol
+             .peers()
+-            .mark_fetching_txs_missing(&missing_tx_hashes);
++            .mark_requested_txs_missing(&missing_tx_hashes, original_request);
+         Status::ok()
+     }
+ }
 diff --git a/light-client-lib/src/protocols/light_client/components/tests/send_last_state_proof.rs b/light-client-lib/src/protocols/light_client/components/tests/send_last_state_proof.rs
 index 869358bfc36f2c9f26663c4febbf92d817cb665e..310516ea46a9d852b7eb9ffa6cfeed288939af66 100644
 --- a/light-client-lib/src/protocols/light_client/components/tests/send_last_state_proof.rs
@@ -12201,10 +12898,18 @@ index 869358bfc36f2c9f26663c4febbf92d817cb665e..310516ea46a9d852b7eb9ffa6cfeed28
 +    }
 +}
 diff --git a/light-client-lib/src/protocols/light_client/mod.rs b/light-client-lib/src/protocols/light_client/mod.rs
-index 9b5f30a907e8e517cac6f5860751e86b5f1a4174..61694ab67135c411d97ca771d195a64b13c1c7c6 100644
+index 9b5f30a907e8e517cac6f5860751e86b5f1a4174..c765c9ad7a7e77585531959f5907522d950c6f66 100644
 --- a/light-client-lib/src/protocols/light_client/mod.rs
 +++ b/light-client-lib/src/protocols/light_client/mod.rs
-@@ -298,7 +298,11 @@ impl LightClientProtocol {
+@@ -29,6 +29,7 @@ mod components;
+ pub mod constant;
+ mod peers;
+ pub(crate) mod prelude;
++pub mod recovery;
+ mod sampling;
+ 
+ #[cfg(test)]
+@@ -298,7 +299,11 @@ impl LightClientProtocol {
              );
              return Err(StatusCode::InvalidChainRoot.with_context(errmsg));
          }
@@ -12217,11 +12922,196 @@ index 9b5f30a907e8e517cac6f5860751e86b5f1a4174..61694ab67135c411d97ca771d195a64b
          let parent_total_difficulty: U256 = verifiable_header
              .parent_chain_root()
              .total_difficulty()
+@@ -345,6 +350,8 @@ impl LightClientProtocol {
+         let (old_total_difficulty, prev_last_header) = self.storage.get_last_state();
+         let new_total_difficulty = new_prove_state.get_last_header().total_difficulty();
+         if new_total_difficulty > old_total_difficulty {
++            // A failed/unwound update remains unavailable. No lock crosses await.
++            let recovery_update = self.peers.recovery().begin_chain_update().ok();
+             let reorg_last_headers = new_prove_state.get_reorg_last_headers();
+             if reorg_last_headers.is_empty() {
+                 let prev_last_header_number: BlockNumber = prev_last_header.raw().number().unpack();
+@@ -407,6 +414,14 @@ impl LightClientProtocol {
+                     matched_blocks.clear();
+                 } else {
+                     warn!("long fork detected");
++                    if let Some(update) = recovery_update {
++                        let _ = self.peers.recovery().finish_chain_update(
++                            update,
++                            recovery::ChainSnapshot {
++                                anchor: prev_last_header,
++                            },
++                        );
++                    }
+                     return Ok(false);
+                 }
+             }
+@@ -416,6 +431,14 @@ impl LightClientProtocol {
+                 &new_prove_state.get_last_header().header().data(),
+                 new_prove_state.get_last_headers(),
+             );
++            if let Some(update) = recovery_update {
++                let _ = self.peers.recovery().finish_chain_update(
++                    update,
++                    recovery::ChainSnapshot {
++                        anchor: new_prove_state.get_last_header().header().data(),
++                    },
++                );
++            }
+         }
+         self.peers()
+             .update_prove_state(peer_index, new_prove_state)?;
+@@ -716,7 +739,11 @@ impl LightClientProtocol {
+     }
+ 
+     async fn fetch_headers_txs(&mut self, nc: &BoxedCKBProtocolContext) {
+-        if !self.peers.has_fetching_info() {
++        let recovery_hashes = self
++            .peers
++            .recovery()
++            .queued_hashes(recovery::Instant::now());
++        if !self.peers.has_fetching_info() && recovery_hashes.is_empty() {
+             trace!("no fetching headers/transactions needed");
+             return;
+         }
+@@ -771,15 +798,15 @@ impl LightClientProtocol {
+             }
+         }
+ 
+-        for tx_hashes in self
+-            .peers
+-            .get_txs_to_fetch()
+-            .chunks(GET_TRANSACTIONS_PROOF_LIMIT)
+-        {
++        let mut txs_to_fetch = self.peers.get_txs_to_fetch();
++        txs_to_fetch.extend(recovery_hashes);
++        let mut seen = std::collections::HashSet::new();
++        txs_to_fetch.retain(|hash| seen.insert(hash.clone()));
++        for tx_hashes in txs_to_fetch.chunks(GET_TRANSACTIONS_PROOF_LIMIT) {
+             if let Some(peer_index) = best_peers.iter().find(|peer_index| {
+                 self.peers
+                     .get_peer(peer_index)
+-                    .map(|peer| peer.get_txs_proof_request().is_none())
++                    .map(|peer| !peer.txs_quarantined && peer.get_txs_proof_request().is_none())
+                     .unwrap_or(false)
+             }) {
+                 debug!("send transaction proof request to peer: {}", peer_index);
+@@ -799,8 +826,31 @@ impl LightClientProtocol {
+                     .set(content.clone())
+                     .build();
+ 
+-                self.peers
+-                    .update_txs_proof_request(*peer_index, Some(content));
++                let Some(peer) = self.peers.get_peer(peer_index) else {
++                    continue;
++                };
++                let attempt = self
++                    .peers
++                    .recovery()
++                    .freeze(
++                        &dedup_hashes,
++                        peer.connection,
++                        &tip_header,
++                        recovery::Instant::now(),
++                    )
++                    .ok()
++                    .flatten();
++                if !self.peers.install_txs_proof_request(
++                    *peer_index,
++                    peer.connection,
++                    content,
++                    attempt.clone(),
++                ) {
++                    if let Some(attempt) = attempt {
++                        self.peers.recovery().fail_attempt(&attempt);
++                    }
++                    continue;
++                }
+                 if let Err(err) = nc.send_message(
+                     SupportProtocols::LightClient.protocol_id(),
+                     *peer_index,
+@@ -809,8 +859,11 @@ impl LightClientProtocol {
+                     let error_message =
+                         format!("nc.send_message LightClientMessage, error: {:?}", err);
+                     info!("{}", error_message);
++                    self.peers.mark_fetching_txs_timeout(*peer_index);
++                    let _ = nc.disconnect(*peer_index, "transaction proof send failed");
++                    continue;
+                 }
+-                self.peers.fetching_idle_txs(&dedup_hashes, now);
++                self.peers.mark_txs_request_sent(*peer_index, now);
+             } else {
+                 debug!("all valid peers are busy for fetching transactions");
+                 break;
 diff --git a/light-client-lib/src/protocols/light_client/peers.rs b/light-client-lib/src/protocols/light_client/peers.rs
-index 367ea21195ceee718b3a5954caa4ee5257b58bb3..31769887b62fa5b8062036bbebab7f4a51301a8f 100644
+index 367ea21195ceee718b3a5954caa4ee5257b58bb3..5abafe28b0dfa1a1dd769c523eeccb9434c5ec07 100644
 --- a/light-client-lib/src/protocols/light_client/peers.rs
 +++ b/light-client-lib/src/protocols/light_client/peers.rs
-@@ -663,12 +663,10 @@ impl LatestBlockFilterHashes {
+@@ -28,6 +28,7 @@ use crate::{
+ pub type BadMessageRateLimiter<T> = RateLimiter<T, DefaultKeyedStateStore<T>, DefaultClock>;
+ 
+ pub struct Peers {
++    recovery: super::recovery::RecoveryRegistry,
+     inner: DashMap<PeerIndex, Peer>,
+     // The headers are fetching, the value is:
+     fetching_headers: DashMap<Byte32, FetchInfo>,
+@@ -63,6 +64,8 @@ pub struct Peers {
+ 
+ #[derive(Clone)]
+ pub struct Peer {
++    pub(crate) connection: [u8; 16],
++    pub(crate) txs_quarantined: bool,
+     // The peer is just discovered when it's `None`.
+     state: PeerState,
+     blocks_proof_request: Option<BlocksProofRequest>,
+@@ -73,6 +76,7 @@ pub struct Peer {
+ }
+ 
+ pub struct FetchInfo {
++    generation: [u8; 16],
+     // the added timestamp
+     added_ts: u64,
+     // the first fetch timestamp
+@@ -176,6 +180,8 @@ pub(crate) struct BlocksRequest {
+ 
+ #[derive(Clone)]
+ pub(crate) struct TransactionsProofRequest {
++    pub(crate) recovery: Option<super::recovery::RecoveryAttempt>,
++    pub(crate) generic_generations: Option<HashMap<Byte32, [u8; 16]>>,
+     content: packed::GetTransactionsProof,
+     when_sent: u64,
+ }
+@@ -200,6 +206,7 @@ pub(crate) struct LatestBlockFilterHashes {
+ impl FetchInfo {
+     pub fn new(added_ts: u64, first_sent: u64, timeout: bool, missing: bool) -> FetchInfo {
+         FetchInfo {
++            generation: rand::random(),
+             added_ts,
+             first_sent,
+             timeout,
+@@ -216,6 +223,7 @@ impl FetchInfo {
+     }
+     fn new_add(added_ts: u64) -> FetchInfo {
+         FetchInfo {
++            generation: rand::random(),
+             added_ts,
+             first_sent: 0,
+             timeout: false,
+@@ -457,7 +465,12 @@ impl BlocksRequest {
+ 
+ impl TransactionsProofRequest {
+     fn new(content: packed::GetTransactionsProof, when_sent: u64) -> Self {
+-        Self { content, when_sent }
++        Self {
++            content,
++            when_sent,
++            recovery: None,
++            generic_generations: None,
++        }
+     }
+ 
+     pub(crate) fn last_hash(&self) -> Byte32 {
+@@ -663,12 +676,10 @@ impl LatestBlockFilterHashes {
              );
              return Err(StatusCode::Ignore.with_context(errmsg));
          }
@@ -12238,7 +13128,7 @@ index 367ea21195ceee718b3a5954caa4ee5257b58bb3..31769887b62fa5b8062036bbebab7f4a
              None => {
                  let errmsg = format!(
                      "overflow computing end number: start_number ({}) + len ({}) - 1",
-@@ -686,7 +684,7 @@ impl LatestBlockFilterHashes {
+@@ -686,7 +697,7 @@ impl LatestBlockFilterHashes {
              return Err(StatusCode::Ignore.with_context(errmsg));
          }
          let last_filter_number = self.get_last_number();
@@ -12247,7 +13137,7 @@ index 367ea21195ceee718b3a5954caa4ee5257b58bb3..31769887b62fa5b8062036bbebab7f4a
              let errmsg = format!(
                  "start number ({}) is continuous with last filter block number ({})",
                  start_number, last_filter_number
-@@ -697,7 +695,6 @@ impl LatestBlockFilterHashes {
+@@ -697,7 +708,6 @@ impl LatestBlockFilterHashes {
              let diff = end_number - last_proved_number;
              let new_length = block_filter_hashes.len() - diff as usize;
              block_filter_hashes = &block_filter_hashes[..new_length];
@@ -12255,7 +13145,7 @@ index 367ea21195ceee718b3a5954caa4ee5257b58bb3..31769887b62fa5b8062036bbebab7f4a
          }
          // Check block filter hashes.
          let (start_index_for_old, start_index_for_new) = if start_number
-@@ -750,7 +747,7 @@ impl LatestBlockFilterHashes {
+@@ -750,7 +760,7 @@ impl LatestBlockFilterHashes {
              .enumerate()
          {
              if old_hash != new_hash {
@@ -12264,7 +13154,7 @@ index 367ea21195ceee718b3a5954caa4ee5257b58bb3..31769887b62fa5b8062036bbebab7f4a
                  let errmsg = format!(
                      "old filter hash for block {} is {:#x} but new is {:#}",
                      number, old_hash, new_hash
-@@ -758,11 +755,16 @@ impl LatestBlockFilterHashes {
+@@ -758,11 +768,16 @@ impl LatestBlockFilterHashes {
                  return Err(StatusCode::Ignore.with_context(errmsg));
              }
          }
@@ -12286,7 +13176,168 @@ index 367ea21195ceee718b3a5954caa4ee5257b58bb3..31769887b62fa5b8062036bbebab7f4a
          } else {
              Ok(None)
          }
-@@ -2055,3 +2057,182 @@ fn if_verifiable_headers_are_same(lhs: &VerifiableHeader, rhs: &VerifiableHeader
+@@ -1077,6 +1092,8 @@ impl Peer {
+         let check_point_number = check_point_interval * BlockNumber::from(start_check_point.0);
+         let latest_block_filter_hashes = LatestBlockFilterHashes::new(check_point_number);
+         Self {
++            connection: rand::random(),
++            txs_quarantined: false,
+             state: Default::default(),
+             blocks_proof_request: None,
+             blocks_request: None,
+@@ -1112,6 +1129,9 @@ impl Peer {
+ }
+ 
+ impl Peers {
++    pub fn recovery(&self) -> &super::recovery::RecoveryRegistry {
++        &self.recovery
++    }
+     pub fn new(
+         max_outbound_peers: u32,
+         check_point_interval: BlockNumber,
+@@ -1133,6 +1153,7 @@ impl Peers {
+         };
+ 
+         Self {
++            recovery: Default::default(),
+             inner: Default::default(),
+             fetching_headers: DashMap::new(),
+             fetching_txs: DashMap::new(),
+@@ -1212,6 +1233,7 @@ impl Peers {
+                     // Insert with missing=true to prevent infinite retry loop
+                     // This will be cleaned up when the DB range is removed
+                     FetchInfo {
++                        generation: rand::random(),
+                         added_ts: unix_time_as_millis(),
+                         first_sent: 0,
+                         timeout: false,
+@@ -1266,6 +1288,18 @@ impl Peers {
+         }
+     }
+     pub(crate) fn mark_fetching_txs_timeout(&self, peer_index: PeerIndex) {
++        // Keep the occupied slot quarantined until disconnected drains this session.
++        let attempt = if let Some(mut peer) = self.inner.get_mut(&peer_index) {
++            peer.txs_quarantined = true;
++            peer.txs_proof_request
++                .as_ref()
++                .and_then(|r| r.recovery.clone())
++        } else {
++            None
++        };
++        if let Some(attempt) = attempt {
++            self.recovery.fail_attempt(&attempt);
++        }
+         if let Some(peer) = self.get_peer(&peer_index) {
+             if let Some(request) = peer.get_txs_proof_request() {
+                 for tx_hash in request.tx_hashes() {
+@@ -1286,13 +1320,20 @@ impl Peers {
+             }
+         }
+     }
+-    pub(crate) fn fetching_idle_txs(&self, tx_hashes: &[Byte32], now: u64) {
+-        for tx_hash in tx_hashes {
+-            if let Some(mut value) = self.fetching_txs.get_mut(tx_hash) {
+-                if value.first_sent == 0 {
+-                    value.first_sent = now;
++    pub(crate) fn mark_txs_request_sent(&self, index: PeerIndex, now: u64) {
++        // App enqueue may race the network send. Mark only the frozen generation;
++        // a replacement must remain unsent and eligible for its own attempt.
++        let request = self.get_peer(&index).and_then(|p| p.txs_proof_request);
++        if let Some(generations) = request.and_then(|r| r.generic_generations) {
++            for (hash, expected) in generations {
++                if let Some(mut entry) = self.fetching_txs.get_mut(&hash) {
++                    if entry.generation == expected {
++                        if entry.first_sent == 0 {
++                            entry.first_sent = now;
++                        }
++                        entry.timeout = false;
++                    }
+                 }
+-                value.timeout = false;
+             }
+         }
+     }
+@@ -1609,6 +1650,79 @@ impl Peers {
+                 hashes.map(|hashes| BlocksRequest::new(hashes, unix_time_as_millis()));
+         }
+     }
++    pub(crate) fn install_txs_proof_request(
++        &self,
++        index: PeerIndex,
++        connection: [u8; 16],
++        content: packed::GetTransactionsProof,
++        recovery: Option<super::recovery::RecoveryAttempt>,
++    ) -> bool {
++        let generic_generations = Some(
++            content
++                .tx_hashes()
++                .into_iter()
++                .filter_map(|hash| {
++                    self.fetching_txs
++                        .get(&hash)
++                        .map(|e| (hash.clone(), e.generation))
++                })
++                .collect(),
++        );
++        let mut request = TransactionsProofRequest::new(content, unix_time_as_millis());
++        request.recovery = recovery;
++        request.generic_generations = generic_generations;
++        if let Some(mut peer) = self.inner.get_mut(&index) {
++            if peer.connection == connection
++                && !peer.txs_quarantined
++                && peer.txs_proof_request.is_none()
++            {
++                peer.txs_proof_request = Some(request);
++                return true;
++            }
++        }
++        false
++    }
++    pub(crate) fn mark_requested_txs_missing(
++        &self,
++        hashes: &[Byte32],
++        request: &TransactionsProofRequest,
++    ) {
++        if let Some(generations) = &request.generic_generations {
++            for hash in hashes {
++                if let Some(expected) = generations.get(hash) {
++                    if let Some(mut entry) = self.fetching_txs.get_mut(hash) {
++                        if &entry.generation == expected {
++                            entry.missing = true;
++                        }
++                    }
++                }
++            }
++        } else {
++            self.mark_fetching_txs_missing(hashes);
++        }
++    }
++
++    pub(crate) fn remove_requested_transaction(
++        &self,
++        hash: &Byte32,
++        block: &Byte32,
++        request: &TransactionsProofRequest,
++    ) {
++        if let Some(generations) = &request.generic_generations {
++            if let Some(expected) = generations.get(hash) {
++                if self
++                    .fetching_txs
++                    .remove_if(hash, |_, e| &e.generation == expected)
++                    .is_some()
++                {
++                    self.remove_fetching_header(block);
++                }
++            }
++        } else {
++            self.remove_fetching_transaction(hash, block);
++        }
++    }
++
+     pub(crate) fn update_txs_proof_request(
+         &self,
+         index: PeerIndex,
+@@ -2055,3 +2169,182 @@ fn if_verifiable_headers_are_same(lhs: &VerifiableHeader, rhs: &VerifiableHeader
                      .as_slice()))
          && lhs.total_difficulty() == rhs.total_difficulty()
  }
@@ -12467,6 +13518,808 @@ index 367ea21195ceee718b3a5954caa4ee5257b58bb3..31769887b62fa5b8062036bbebab7f4a
 +        assert_eq!(error.code(), StatusCode::Ignore);
 +        assert!(hashes.get_hashes().is_empty());
 +        assert_eq!(hashes.get_last_number(), 0);
++    }
++}
+diff --git a/light-client-lib/src/protocols/light_client/recovery.rs b/light-client-lib/src/protocols/light_client/recovery.rs
+new file mode 100644
+index 0000000000000000000000000000000000000000..ce3de7ec35aaf6f0bd1638dc9d468abfc1e9e27e
+--- /dev/null
++++ b/light-client-lib/src/protocols/light_client/recovery.rs
+@@ -0,0 +1,796 @@
++//! Ephemeral v1 authority for locally registered, independently verified membership.
++//!
++//! Lock order: owned peer/request snapshots -> registry -> synchronous storage batch.
++//! Never acquire a peer guard from this module, or retain the mutex across an await.
++//! Chain writers close authority before mutation and reopen with an update token.
++use ckb_types::{packed, prelude::*};
++#[cfg(not(target_arch = "wasm32"))]
++pub use std::time::Instant;
++use std::{
++    collections::{HashMap, HashSet},
++    sync::{Mutex, MutexGuard},
++    time::Duration,
++};
++#[cfg(target_arch = "wasm32")]
++pub use web_time::Instant;
++
++pub const RECOVERY_SCHEMA_VERSION: u32 = 1;
++const MAX_REQUESTS: usize = 128;
++const REQUEST_LIFETIME: Duration = Duration::from_secs(30);
++
++#[derive(Clone, Debug, PartialEq, Eq)]
++pub struct RecoveryIdentity {
++    pub genesis_hash: packed::Byte32,
++    pub store_generation: String,
++    pub run_nonce: [u8; 16],
++}
++#[derive(Clone, Debug)]
++pub struct ChainSnapshot {
++    pub anchor: packed::Header,
++}
++#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
++/// Opaque operation identity. Bridges encode it as a token, not app-owned fields.
++pub struct RequestId {
++    run: [u8; 16],
++    sequence: u64,
++}
++#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
++pub struct AttemptId {
++    run: [u8; 16],
++    sequence: u64,
++}
++#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
++pub struct ReceiptId {
++    request: RequestId,
++    attempt: AttemptId,
++}
++#[derive(Clone, Debug)]
++pub struct RecoveryReceipt {
++    pub schema_version: u32,
++    pub id: ReceiptId,
++    pub identity: RecoveryIdentity,
++    pub request_id: RequestId,
++    pub attempt_id: AttemptId,
++    pub chain: ChainSnapshot,
++    pub revision: u64,
++    /// Membership authenticates raw fields, not arbitrary supplied witness bytes.
++    pub transaction: packed::RawTransaction,
++    pub header: packed::Header,
++    /// Unknown for SendTransactionsProof: its CBMT indices are heap positions.
++    pub transaction_index: Option<u32>,
++}
++impl PartialEq for ChainSnapshot {
++    fn eq(&self, other: &Self) -> bool {
++        self.anchor.as_slice() == other.anchor.as_slice()
++    }
++}
++impl Eq for ChainSnapshot {}
++impl PartialEq for RecoveryReceipt {
++    fn eq(&self, other: &Self) -> bool {
++        self.schema_version == other.schema_version
++            && self.id == other.id
++            && self.identity == other.identity
++            && self.request_id == other.request_id
++            && self.attempt_id == other.attempt_id
++            && self.chain == other.chain
++            && self.revision == other.revision
++            && self.transaction.as_slice() == other.transaction.as_slice()
++            && self.header.as_slice() == other.header.as_slice()
++            && self.transaction_index == other.transaction_index
++    }
++}
++impl Eq for RecoveryReceipt {}
++
++#[derive(Clone, Debug)]
++pub(crate) struct RecoveryAttempt {
++    pub(crate) id: AttemptId,
++    pub(crate) session: [u8; 16],
++    snapshot: ChainSnapshot,
++    revision: u64,
++    recipients: Vec<RequestId>,
++}
++#[derive(Clone, Debug)]
++pub(crate) struct ProvenTransaction {
++    pub transaction: packed::Transaction,
++    pub header: packed::Header,
++}
++#[derive(Clone, Copy, Debug)]
++pub(crate) struct ChainUpdate {
++    revision: u64,
++}
++#[derive(Clone, Debug, PartialEq, Eq)]
++pub enum RecoveryError {
++    Unavailable,
++    Capacity,
++    UnknownRequest,
++    Expired,
++    SequenceExhausted,
++    Storage,
++    InvalidReceipt,
++}
++/// V1 status. Only Verified carries authority, and it must be revalidated at use.
++#[derive(Clone, Debug, PartialEq, Eq)]
++pub enum RecoveryStatus {
++    Queued,
++    Fetching,
++    Verified(RecoveryReceipt),
++    Unavailable,
++    Expired,
++    Cancelled,
++}
++struct Entry {
++    hash: packed::Byte32,
++    deadline: Instant,
++    attempt: Option<AttemptId>,
++    status: RecoveryStatus,
++}
++#[derive(Default)]
++struct State {
++    identity: Option<RecoveryIdentity>,
++    snapshot: Option<ChainSnapshot>,
++    running: bool,
++    updating: bool,
++    revision: u64,
++    sequence: u64,
++    entries: HashMap<RequestId, Entry>,
++}
++impl State {
++    fn available(&self) -> bool {
++        self.running && !self.updating && self.snapshot.is_some()
++    }
++    fn next(&mut self) -> Result<u64, RecoveryError> {
++        match self.sequence.checked_add(1) {
++            Some(next) => {
++                self.sequence = next;
++                Ok(next)
++            }
++            None => {
++                self.running = false;
++                self.entries.clear();
++                Err(RecoveryError::SequenceExhausted)
++            }
++        }
++    }
++    fn expire(&mut self, now: Instant) {
++        for entry in self.entries.values_mut() {
++            if now >= entry.deadline {
++                entry.status = RecoveryStatus::Expired;
++            }
++        }
++    }
++}
++#[derive(Default)]
++pub struct RecoveryRegistry {
++    state: Mutex<State>,
++}
++impl RecoveryRegistry {
++    fn lock(&self) -> Result<MutexGuard<'_, State>, RecoveryError> {
++        self.state.lock().map_err(|_| RecoveryError::Unavailable)
++    }
++    pub(crate) fn initialize(
++        &self,
++        identity: RecoveryIdentity,
++        snapshot: ChainSnapshot,
++    ) -> Result<(), RecoveryError> {
++        let mut state = self.lock()?;
++        if state.identity.is_some() || identity.store_generation.is_empty() {
++            return Err(RecoveryError::Unavailable);
++        }
++        state.identity = Some(identity);
++        state.snapshot = Some(snapshot);
++        state.running = true;
++        Ok(())
++    }
++    /// A binding snapshot for bridge registration, never authorization by itself.
++    pub fn identity(&self) -> Result<RecoveryIdentity, RecoveryError> {
++        let state = self.lock()?;
++        if !state.available() {
++            return Err(RecoveryError::Unavailable);
++        }
++        state.identity.clone().ok_or(RecoveryError::Unavailable)
++    }
++    pub fn new(identity: RecoveryIdentity, snapshot: ChainSnapshot) -> Self {
++        let registry = Self::default();
++        // A rejected identity leaves the registry unavailable.
++        let _ = registry.initialize(identity, snapshot);
++        registry
++    }
++    pub fn request(
++        &self,
++        tx_hash: packed::Byte32,
++        now: Instant,
++    ) -> Result<RequestId, RecoveryError> {
++        let mut state = self.lock()?;
++        if !state.available() {
++            return Err(RecoveryError::Unavailable);
++        }
++        let effective_now = now.max(Instant::now());
++        state
++            .entries
++            .retain(|_, entry| effective_now < entry.deadline);
++        if state.entries.len() >= MAX_REQUESTS {
++            return Err(RecoveryError::Capacity);
++        }
++        let sequence = state.next()?;
++        let id = RequestId {
++            run: state
++                .identity
++                .as_ref()
++                .ok_or(RecoveryError::Unavailable)?
++                .run_nonce,
++            sequence,
++        };
++        let deadline = now
++            .checked_add(REQUEST_LIFETIME)
++            .ok_or(RecoveryError::Unavailable)?;
++        state.entries.insert(
++            id,
++            Entry {
++                hash: tx_hash,
++                deadline,
++                attempt: None,
++                status: RecoveryStatus::Queued,
++            },
++        );
++        Ok(id)
++    }
++    pub fn poll(&self, id: RequestId, now: Instant) -> Result<RecoveryStatus, RecoveryError> {
++        let mut state = self.lock()?;
++        state.expire(now.max(Instant::now()));
++        let entry = state
++            .entries
++            .get(&id)
++            .ok_or(RecoveryError::UnknownRequest)?;
++        Ok(entry.status.clone())
++    }
++    /// Point-in-time validation. Call again at each later authorization boundary.
++    pub fn validate(
++        &self,
++        id: RequestId,
++        receipt: ReceiptId,
++        now: Instant,
++    ) -> Result<RecoveryReceipt, RecoveryError> {
++        let mut state = self.lock()?;
++        state.expire(now.max(Instant::now()));
++        if !state.available() {
++            return Err(RecoveryError::Unavailable);
++        }
++        let entry = state
++            .entries
++            .get(&id)
++            .ok_or(RecoveryError::UnknownRequest)?;
++        match &entry.status {
++            RecoveryStatus::Verified(r)
++                if r.id == receipt
++                    && r.request_id == id
++                    && Some(&r.identity) == state.identity.as_ref()
++                    && Some(&r.chain) == state.snapshot.as_ref()
++                    && r.revision == state.revision
++                    && Some(r.attempt_id) == entry.attempt
++                    && r.transaction.calc_tx_hash() == entry.hash =>
++            {
++                Ok(r.clone())
++            }
++            RecoveryStatus::Expired => Err(RecoveryError::Expired),
++            _ => Err(RecoveryError::InvalidReceipt),
++        }
++    }
++    pub fn cancel(&self, id: RequestId) -> Result<(), RecoveryError> {
++        let mut state = self.lock()?;
++        let entry = state
++            .entries
++            .get_mut(&id)
++            .ok_or(RecoveryError::UnknownRequest)?;
++        entry.status = RecoveryStatus::Cancelled;
++        Ok(())
++    }
++    pub fn revoke_run(&self) {
++        if let Ok(mut state) = self.lock() {
++            state.running = false;
++            state.entries.clear();
++        }
++    }
++    pub(crate) fn begin_chain_update(&self) -> Result<ChainUpdate, RecoveryError> {
++        let mut state = self.lock()?;
++        if !state.available() {
++            return Err(RecoveryError::Unavailable);
++        }
++        state.updating = true;
++        state.revision = match state.revision.checked_add(1) {
++            Some(revision) => revision,
++            None => {
++                state.running = false;
++                state.entries.clear();
++                return Err(RecoveryError::SequenceExhausted);
++            }
++        };
++        for entry in state.entries.values_mut() {
++            if !matches!(
++                entry.status,
++                RecoveryStatus::Cancelled | RecoveryStatus::Expired
++            ) {
++                entry.status = RecoveryStatus::Unavailable;
++            }
++        }
++        Ok(ChainUpdate {
++            revision: state.revision,
++        })
++    }
++    pub(crate) fn finish_chain_update(
++        &self,
++        update: ChainUpdate,
++        snapshot: ChainSnapshot,
++    ) -> Result<(), RecoveryError> {
++        let mut state = self.lock()?;
++        if !state.running || !state.updating || state.revision != update.revision {
++            return Err(RecoveryError::Unavailable);
++        }
++        state.snapshot = Some(snapshot);
++        state.updating = false;
++        Ok(())
++    }
++    pub(crate) fn queued_hashes(&self, now: Instant) -> Vec<packed::Byte32> {
++        let Ok(mut state) = self.lock() else {
++            return vec![];
++        };
++        state.expire(now.max(Instant::now()));
++        if !state.available() {
++            return vec![];
++        }
++        state
++            .entries
++            .values()
++            .filter(|e| e.status == RecoveryStatus::Queued)
++            .map(|e| e.hash.clone())
++            .collect::<HashSet<_>>()
++            .into_iter()
++            .collect()
++    }
++    pub(crate) fn freeze(
++        &self,
++        hashes: &[packed::Byte32],
++        session: [u8; 16],
++        anchor: &packed::Header,
++        now: Instant,
++    ) -> Result<Option<RecoveryAttempt>, RecoveryError> {
++        let mut state = self.lock()?;
++        state.expire(now.max(Instant::now()));
++        if !state.available()
++            || state.snapshot.as_ref().map(|s| s.anchor.as_slice()) != Some(anchor.as_slice())
++        {
++            return Ok(None);
++        }
++        let recipients: Vec<_> = state
++            .entries
++            .iter()
++            .filter(|(_, e)| e.status == RecoveryStatus::Queued && hashes.contains(&e.hash))
++            .map(|(id, _)| *id)
++            .collect();
++        if recipients.is_empty() {
++            return Ok(None);
++        }
++        let sequence = state.next()?;
++        let id = AttemptId {
++            run: state
++                .identity
++                .as_ref()
++                .ok_or(RecoveryError::Unavailable)?
++                .run_nonce,
++            sequence,
++        };
++        for recipient in &recipients {
++            let e = state.entries.get_mut(recipient).unwrap();
++            e.attempt = Some(id);
++            e.status = RecoveryStatus::Fetching;
++        }
++        Ok(Some(RecoveryAttempt {
++            id,
++            session,
++            snapshot: state.snapshot.clone().ok_or(RecoveryError::Unavailable)?,
++            revision: state.revision,
++            recipients,
++        }))
++    }
++    pub(crate) fn fail_attempt(&self, attempt: &RecoveryAttempt) {
++        if let Ok(mut state) = self.lock() {
++            for id in &attempt.recipients {
++                if let Some(e) = state.entries.get_mut(id) {
++                    if e.attempt == Some(attempt.id) && e.status == RecoveryStatus::Fetching {
++                        e.status = RecoveryStatus::Unavailable;
++                    }
++                }
++            }
++        }
++    }
++    /// The caller has fully verified membership. The callback persists exactly once,
++    /// under the revision lock, before any success is visible. `active` controls
++    /// recovery-only writes; generic fetches may still persist when it is false.
++    pub(crate) fn publish(
++        &self,
++        attempt: &RecoveryAttempt,
++        proof: &[ProvenTransaction],
++        now: Instant,
++        persist: impl FnOnce(bool) -> Result<(), RecoveryError>,
++    ) -> Result<bool, RecoveryError> {
++        let mut state = self.lock()?;
++        state.expire(now.max(Instant::now()));
++        let active = state.available()
++            && state.revision == attempt.revision
++            && state.snapshot.as_ref() == Some(&attempt.snapshot)
++            && state.identity.as_ref().map(|i| i.run_nonce) == Some(attempt.id.run)
++            && attempt.recipients.iter().any(|id| {
++                state.entries.get(id).is_some_and(|e| {
++                    e.attempt == Some(attempt.id) && e.status == RecoveryStatus::Fetching
++                })
++            });
++        if let Err(error) = persist(active) {
++            for id in &attempt.recipients {
++                if let Some(e) = state.entries.get_mut(id) {
++                    if e.attempt == Some(attempt.id) && e.status == RecoveryStatus::Fetching {
++                        e.status = RecoveryStatus::Unavailable;
++                    }
++                }
++            }
++            return Err(error);
++        }
++        // A synchronous storage stall cannot extend the registration deadline.
++        state.expire(now.max(Instant::now()));
++        let active = active
++            && attempt.recipients.iter().any(|id| {
++                state.entries.get(id).is_some_and(|e| {
++                    e.attempt == Some(attempt.id) && e.status == RecoveryStatus::Fetching
++                })
++            });
++        if !active {
++            return Ok(false);
++        }
++        let identity = state.identity.clone().ok_or(RecoveryError::Unavailable)?;
++        for id in &attempt.recipients {
++            if let Some(entry) = state.entries.get_mut(id) {
++                if entry.attempt != Some(attempt.id) || entry.status != RecoveryStatus::Fetching {
++                    continue;
++                }
++                entry.status = match proof
++                    .iter()
++                    .find(|p| p.transaction.calc_tx_hash() == entry.hash)
++                {
++                    Some(p) => RecoveryStatus::Verified(RecoveryReceipt {
++                        schema_version: RECOVERY_SCHEMA_VERSION,
++                        id: ReceiptId {
++                            request: *id,
++                            attempt: attempt.id,
++                        },
++                        identity: identity.clone(),
++                        request_id: *id,
++                        attempt_id: attempt.id,
++                        chain: attempt.snapshot.clone(),
++                        revision: attempt.revision,
++                        transaction: p.transaction.raw(),
++                        header: p.header.clone(),
++                        transaction_index: None,
++                    }),
++                    None => RecoveryStatus::Unavailable,
++                };
++            }
++        }
++        Ok(true)
++    }
++}
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++    use std::time::Duration;
++    fn registry() -> RecoveryRegistry {
++        RecoveryRegistry::new(
++            RecoveryIdentity {
++                genesis_hash: Default::default(),
++                store_generation: "synthetic-store".into(),
++                run_nonce: [1; 16],
++            },
++            ChainSnapshot {
++                anchor: Default::default(),
++            },
++        )
++    }
++    #[test]
++    fn recovery_new_calls_never_inherit_authority() {
++        let r = registry();
++        let now = Instant::now();
++        let a = r.request(Default::default(), now).unwrap();
++        let b = r.request(Default::default(), now).unwrap();
++        assert_ne!(a, b);
++        assert_eq!(r.poll(a, now).unwrap(), RecoveryStatus::Queued);
++        assert_eq!(r.poll(b, now).unwrap(), RecoveryStatus::Queued);
++    }
++    #[test]
++    fn recovery_bound_expiry_and_eviction() {
++        let r = registry();
++        let now = Instant::now();
++        let first = r.request(Default::default(), now).unwrap();
++        for _ in 1..128 {
++            r.request(Default::default(), now).unwrap();
++        }
++        assert_eq!(
++            r.request(Default::default(), now),
++            Err(RecoveryError::Capacity)
++        );
++        assert_eq!(
++            r.poll(first, now + Duration::from_secs(30)).unwrap(),
++            RecoveryStatus::Expired
++        );
++        assert!(r
++            .request(Default::default(), now + Duration::from_secs(30))
++            .is_ok());
++    }
++    #[test]
++    fn recovery_cancel_and_stop_are_terminal() {
++        let r = registry();
++        let now = Instant::now();
++        let id = r.request(Default::default(), now).unwrap();
++        r.cancel(id).unwrap();
++        assert_eq!(r.poll(id, now).unwrap(), RecoveryStatus::Cancelled);
++        r.revoke_run();
++        assert_eq!(
++            r.request(Default::default(), now),
++            Err(RecoveryError::Unavailable)
++        );
++        assert!(!matches!(
++            r.poll(id, now),
++            Ok(RecoveryStatus::Queued | RecoveryStatus::Fetching)
++        ));
++    }
++    fn dispatched(
++        r: &RecoveryRegistry,
++        now: Instant,
++    ) -> (RequestId, RecoveryAttempt, ProvenTransaction) {
++        let tx = packed::Transaction::default();
++        let id = r.request(tx.calc_tx_hash(), now).unwrap();
++        let attempt = r
++            .freeze(
++                &[tx.calc_tx_hash()],
++                [2; 16],
++                &packed::Header::default(),
++                now,
++            )
++            .unwrap()
++            .unwrap();
++        (
++            id,
++            attempt,
++            ProvenTransaction {
++                transaction: tx,
++                header: packed::Header::default(),
++            },
++        )
++    }
++    #[test]
++    fn recovery_only_frozen_recipients_receive_receipts() {
++        let r = registry();
++        let now = Instant::now();
++        let (id, attempt, proof) = dispatched(&r, now);
++        let later = r.request(proof.transaction.calc_tx_hash(), now).unwrap();
++        assert!(r
++            .publish(&attempt, &[proof.clone()], now, |active| {
++                assert!(active);
++                Ok(())
++            })
++            .unwrap());
++        let receipt = match r.poll(id, now).unwrap() {
++            RecoveryStatus::Verified(receipt) => receipt,
++            other => panic!("{other:?}"),
++        };
++        assert_eq!(receipt.schema_version, 1);
++        assert_eq!(
++            receipt.transaction.as_slice(),
++            proof.transaction.raw().as_slice()
++        );
++        assert_eq!(receipt.header.as_slice(), proof.header.as_slice());
++        assert_eq!(receipt.transaction_index, None);
++        assert_eq!(r.validate(id, receipt.id, now).unwrap(), receipt);
++        assert!(r.validate(later, receipt.id, now).is_err());
++        assert_eq!(r.poll(later, now).unwrap(), RecoveryStatus::Queued);
++    }
++    #[test]
++    fn recovery_storage_failure_cannot_publish() {
++        let r = registry();
++        let now = Instant::now();
++        let (id, attempt, proof) = dispatched(&r, now);
++        assert_eq!(
++            r.publish(&attempt, &[proof], now, |_| Err(RecoveryError::Storage)),
++            Err(RecoveryError::Storage)
++        );
++        assert_eq!(r.poll(id, now).unwrap(), RecoveryStatus::Unavailable);
++    }
++    #[test]
++    fn recovery_tip_change_invalidates_queued_inflight_and_verified() {
++        for publish in [false, true] {
++            let r = registry();
++            let now = Instant::now();
++            let (id, attempt, proof) = dispatched(&r, now);
++            let queued = r.request(Default::default(), now).unwrap();
++            let receipt = if publish {
++                r.publish(&attempt, &[proof.clone()], now, |_| Ok(()))
++                    .unwrap();
++                match r.poll(id, now).unwrap() {
++                    RecoveryStatus::Verified(r) => Some(r),
++                    _ => panic!("missing receipt"),
++                }
++            } else {
++                None
++            };
++            let update = r.begin_chain_update().unwrap();
++            assert_eq!(
++                r.request(Default::default(), now),
++                Err(RecoveryError::Unavailable)
++            );
++            assert_eq!(r.poll(id, now).unwrap(), RecoveryStatus::Unavailable);
++            assert_eq!(r.poll(queued, now).unwrap(), RecoveryStatus::Unavailable);
++            r.finish_chain_update(
++                update,
++                ChainSnapshot {
++                    anchor: Default::default(),
++                },
++            )
++            .unwrap();
++            assert!(!r
++                .publish(&attempt, &[proof], now, |active| {
++                    assert!(!active);
++                    Ok(())
++                })
++                .unwrap());
++            if let Some(receipt) = receipt {
++                assert!(r.validate(id, receipt.id, now).is_err());
++            }
++        }
++    }
++    #[test]
++    fn recovery_foreign_run_and_identity_fail_closed() {
++        let r = registry();
++        let now = Instant::now();
++        let (id, attempt, proof) = dispatched(&r, now);
++        r.publish(&attempt, &[proof], now, |_| Ok(())).unwrap();
++        let receipt = match r.poll(id, now).unwrap() {
++            RecoveryStatus::Verified(r) => r,
++            _ => panic!("missing receipt"),
++        };
++        let foreign = RecoveryRegistry::new(
++            RecoveryIdentity {
++                run_nonce: [3; 16],
++                ..receipt.identity.clone()
++            },
++            receipt.chain.clone(),
++        );
++        assert!(foreign.validate(id, receipt.id, now).is_err());
++        assert!(r
++            .validate(id, receipt.id, now + Duration::from_secs(30))
++            .is_err());
++        r.revoke_run();
++        assert!(r.validate(id, receipt.id, now).is_err());
++    }
++
++    #[test]
++    fn recovery_expiry_during_storage_does_not_publish_authority() {
++        let r = registry();
++        let now = Instant::now();
++        let (id, attempt, proof) = dispatched(&r, now);
++        r.state
++            .lock()
++            .unwrap()
++            .entries
++            .get_mut(&id)
++            .unwrap()
++            .deadline = now + Duration::from_millis(5);
++        let published = r
++            .publish(&attempt, &[proof], now, |_| {
++                std::thread::sleep(Duration::from_millis(15));
++                Ok(())
++            })
++            .unwrap();
++        assert!(!published, "storage delay must not extend receipt lifetime");
++        assert_eq!(r.poll(id, now).unwrap(), RecoveryStatus::Expired);
++    }
++    #[test]
++    fn recovery_sequences_fail_closed_before_wraparound() {
++        for revision in [false, true] {
++            let r = registry();
++            let now = Instant::now();
++            let (id, attempt, proof) = dispatched(&r, now);
++            r.publish(&attempt, &[proof], now, |_| Ok(())).unwrap();
++            let receipt = match r.poll(id, now).unwrap() {
++                RecoveryStatus::Verified(r) => r,
++                _ => panic!(),
++            };
++            if revision {
++                r.state.lock().unwrap().revision = u64::MAX;
++                assert!(matches!(
++                    r.begin_chain_update(),
++                    Err(RecoveryError::SequenceExhausted)
++                ));
++            } else {
++                r.state.lock().unwrap().sequence = u64::MAX;
++                assert_eq!(
++                    r.request(Default::default(), now),
++                    Err(RecoveryError::SequenceExhausted)
++                );
++            }
++            assert!(r.validate(id, receipt.id, now).is_err());
++            assert_eq!(
++                r.request(Default::default(), now),
++                Err(RecoveryError::Unavailable)
++            );
++        }
++    }
++    #[test]
++    fn recovery_poison_and_wrong_identity_fail_closed() {
++        let r = registry();
++        let now = Instant::now();
++        let (id, attempt, proof) = dispatched(&r, now);
++        r.publish(&attempt, &[proof], now, |_| Ok(())).unwrap();
++        let receipt = match r.poll(id, now).unwrap() {
++            RecoveryStatus::Verified(r) => r,
++            _ => panic!(),
++        };
++        for identity in [
++            RecoveryIdentity {
++                store_generation: "wrong-store".into(),
++                ..receipt.identity.clone()
++            },
++            RecoveryIdentity {
++                run_nonce: [9; 16],
++                ..receipt.identity.clone()
++            },
++            RecoveryIdentity {
++                genesis_hash: ckb_types::h256!("0x1").pack(),
++                ..receipt.identity.clone()
++            },
++        ] {
++            r.state.lock().unwrap().identity = Some(identity);
++            assert!(r.validate(id, receipt.id, now).is_err());
++        }
++        let _ = std::panic::catch_unwind(|| {
++            let _guard = r.state.lock().unwrap();
++            panic!("injected poison");
++        });
++        assert_eq!(
++            r.request(Default::default(), now),
++            Err(RecoveryError::Unavailable)
++        );
++        assert!(r.poll(id, now).is_err());
++        assert!(r.queued_hashes(now).is_empty());
++    }
++    #[test]
++    fn recovery_chain_update_waits_for_storage_then_revokes_publication() {
++        use std::sync::{mpsc, Arc};
++        let r = Arc::new(registry());
++        let now = Instant::now();
++        let (id, attempt, proof) = dispatched(&r, now);
++        let (start, receive) = mpsc::channel();
++        let other = r.clone();
++        let writer = std::thread::spawn(move || {
++            receive.recv().unwrap();
++            other.begin_chain_update().unwrap()
++        });
++        r.publish(&attempt, &[proof], now, |_| {
++            start.send(()).unwrap();
++            Ok(())
++        })
++        .unwrap();
++        let update = writer.join().unwrap();
++        assert_eq!(
++            r.poll(id, Instant::now()).unwrap(),
++            RecoveryStatus::Unavailable
++        );
++        r.finish_chain_update(
++            update,
++            ChainSnapshot {
++                anchor: Default::default(),
++            },
++        )
++        .unwrap();
++        assert_eq!(
++            r.poll(id, Instant::now()).unwrap(),
++            RecoveryStatus::Unavailable
++        );
 +    }
 +}
 diff --git a/light-client-lib/src/protocols/light_client/sampling.rs b/light-client-lib/src/protocols/light_client/sampling.rs
@@ -13668,6 +15521,24 @@ index 4f9fbd4e8af82bd00b76a38413f0aaecfa72d0ff..4695df0ea70c71d8a79c8e42b909e998
  #[serde(rename_all = "snake_case")]
  pub enum CellType {
      Input,
+diff --git a/light-client-lib/src/storage/backend.rs b/light-client-lib/src/storage/backend.rs
+index 02581c3f396ed63bd7b34f07e6b9ecd5ff58dbdb..15b6fb3018b9d934f9d7c79e4e422bf063321238 100644
+--- a/light-client-lib/src/storage/backend.rs
++++ b/light-client-lib/src/storage/backend.rs
+@@ -22,6 +22,13 @@ pub trait BatchWriter {
+     /// Add a key-value pair to the batch
+     fn put(&mut self, key: &[u8], value: &[u8]);
+ 
++    /// Stage a write conditional on the value at commit time, including absence.
++    /// A mismatch is a successful no-op; other batch writes still commit atomically.
++    /// Backends must not emulate this with a read followed by an unconditional write.
++    fn compare_and_put(&mut self, _key: &[u8], _expected: Option<&[u8]>, _value: &[u8]) -> Result<()> {
++        Err(crate::error::Error::runtime("backend lacks atomic conditional batch writes"))
++    }
++
+     /// Add a delete operation to the batch
+     fn delete(&mut self, key: &[u8]);
+ 
 diff --git a/light-client-lib/src/storage/db/mod.rs b/light-client-lib/src/storage/db/mod.rs
 index 38c18a5dd9258f9140dd9018db640dc2d4b88a56..8b477fffae8c905a0db8f10005e542af5189b811 100644
 --- a/light-client-lib/src/storage/db/mod.rs
@@ -13695,7 +15566,7 @@ index 38c18a5dd9258f9140dd9018db640dc2d4b88a56..8b477fffae8c905a0db8f10005e542af
  mod browser;
  #[cfg(target_arch = "wasm32")]
 diff --git a/light-client-lib/src/storage/db/sqlite.rs b/light-client-lib/src/storage/db/sqlite.rs
-index 250eca2bac43f6ec6381c6ffe7756d9cf2d8508a..a5b744af1c066d3facc6f6be036f122826d448ed 100644
+index 250eca2bac43f6ec6381c6ffe7756d9cf2d8508a..8c2844002851013971a70499dba28173d62ca5f0 100644
 --- a/light-client-lib/src/storage/db/sqlite.rs
 +++ b/light-client-lib/src/storage/db/sqlite.rs
 @@ -16,7 +16,7 @@ use ckb_types::{
@@ -13811,7 +15682,38 @@ index 250eca2bac43f6ec6381c6ffe7756d9cf2d8508a..a5b744af1c066d3facc6f6be036f1228
              .map_err(|e| crate::error::Error::runtime(format!("Failed to prepare get: {}", e)))?;
  
          let result = stmt.query_row(rusqlite::params![key.as_ref()], |row| {
-@@ -131,7 +172,7 @@ impl BatchWriter for Batch {
+@@ -108,6 +149,7 @@ pub struct Batch {
+ enum BatchOp {
+     Put(Vec<u8>, Vec<u8>),
+     Delete(Vec<u8>),
++    CompareAndPut(Vec<u8>, Option<Vec<u8>>, Vec<u8>),
+ }
+ 
+ // Implement BatchWriter trait for Batch
+@@ -117,12 +159,21 @@ impl BatchWriter for Batch {
+             .push(BatchOp::Put(key.to_vec(), value.to_vec()));
+     }
+ 
++    fn compare_and_put(&mut self, key: &[u8], expected: Option<&[u8]>, value: &[u8]) -> Result<()> {
++        self.operations.push(BatchOp::CompareAndPut(
++            key.to_vec(), expected.map(<[u8]>::to_vec), value.to_vec(),
++        ));
++        Ok(())
++    }
++
+     fn delete(&mut self, key: &[u8]) {
+         self.operations.push(BatchOp::Delete(key.to_vec()));
+     }
+ 
+     fn commit(self) -> Result<()> {
+-        let conn = self.conn.lock().unwrap();
++        let conn = self.conn.lock().map_err(|_| {
++            crate::error::Error::runtime("storage batch lock poisoned")
++        })?;
+         let tx = conn.unchecked_transaction().map_err(|e| {
+             crate::error::Error::runtime(format!("Failed to begin transaction: {}", e))
+         })?;
+@@ -131,16 +182,30 @@ impl BatchWriter for Batch {
              match op {
                  BatchOp::Put(key, value) => {
                      tx.execute(
@@ -13820,8 +15722,23 @@ index 250eca2bac43f6ec6381c6ffe7756d9cf2d8508a..a5b744af1c066d3facc6f6be036f1228
                          rusqlite::params![&key, &value],
                      )
                      .map_err(|e| {
-@@ -140,7 +181,7 @@ impl BatchWriter for Batch {
+                         crate::error::Error::runtime(format!("Failed to put in batch: {}", e))
+                     })?;
                  }
++                BatchOp::CompareAndPut(key, expected, value) => {
++                    // Evaluate under the same SQL transaction as the rest of the batch.
++                    // A filter batch that committed since the snapshot must win.
++                    match expected {
++                        Some(expected) => tx.execute(
++                            "UPDATE kv SET value = ?2 WHERE key = ?1 AND value = ?3",
++                            rusqlite::params![&key, &value, &expected],
++                        ),
++                        None => tx.execute(
++                            "INSERT INTO kv (key, value) VALUES (?1, ?2) ON CONFLICT(key) DO NOTHING",
++                            rusqlite::params![&key, &value],
++                        ),
++                    }.map_err(|e| crate::error::Error::runtime(format!("Failed conditional batch put: {}", e)))?;
++                }
                  BatchOp::Delete(key) => {
                      tx.execute(
 -                        "DELETE FROM kv_store WHERE key = ?",
@@ -13829,7 +15746,7 @@ index 250eca2bac43f6ec6381c6ffe7756d9cf2d8508a..a5b744af1c066d3facc6f6be036f1228
                          rusqlite::params![&key],
                      )
                      .map_err(|e| {
-@@ -168,7 +209,7 @@ impl StorageBackend for Storage {
+@@ -168,7 +233,7 @@ impl StorageBackend for Storage {
      fn put(&self, key: Vec<u8>, value: Vec<u8>) -> Result<()> {
          let conn = self.conn.lock().unwrap();
          conn.execute(
@@ -13838,7 +15755,7 @@ index 250eca2bac43f6ec6381c6ffe7756d9cf2d8508a..a5b744af1c066d3facc6f6be036f1228
              rusqlite::params![key.as_slice(), value.as_slice()],
          )
          .map_err(|e| crate::error::Error::runtime(format!("Failed to put: {}", e)))?;
-@@ -177,7 +218,7 @@ impl StorageBackend for Storage {
+@@ -177,7 +242,7 @@ impl StorageBackend for Storage {
  
      fn delete(&self, key: &[u8]) -> Result<()> {
          let conn = self.conn.lock().unwrap();
@@ -13847,7 +15764,7 @@ index 250eca2bac43f6ec6381c6ffe7756d9cf2d8508a..a5b744af1c066d3facc6f6be036f1228
              .map_err(|e| crate::error::Error::runtime(format!("Failed to delete: {}", e)))?;
          Ok(())
      }
-@@ -201,13 +242,15 @@ impl StorageBackend for Storage {
+@@ -201,13 +266,15 @@ impl StorageBackend for Storage {
          let rows: Vec<(Vec<u8>, Vec<u8>)> = {
              let conn = self.conn.lock().unwrap();
  
@@ -13867,7 +15784,7 @@ index 250eca2bac43f6ec6381c6ffe7756d9cf2d8508a..a5b744af1c066d3facc6f6be036f1228
                  comparison, order_clause
              );
  
-@@ -222,10 +265,8 @@ impl StorageBackend for Storage {
+@@ -222,10 +289,8 @@ impl StorageBackend for Storage {
  
              // Collect rows that pass the take_while condition.
              // We need to eagerly collect because the lock must be released before filter_map_fn runs.
@@ -13878,7 +15795,7 @@ index 250eca2bac43f6ec6381c6ffe7756d9cf2d8508a..a5b744af1c066d3facc6f6be036f1228
                  .take_while(|(key, _)| take_while_fn(key))
                  .collect()
          };
-@@ -295,3 +336,107 @@ impl CellProvider for Storage {
+@@ -295,3 +360,107 @@ impl CellProvider for Storage {
          CellStatus::Unknown
      }
  }
@@ -13987,7 +15904,7 @@ index 250eca2bac43f6ec6381c6ffe7756d9cf2d8508a..a5b744af1c066d3facc6f6be036f1228
 +    }
 +}
 diff --git a/light-client-lib/src/storage/mod.rs b/light-client-lib/src/storage/mod.rs
-index 5ef7fb0d8277467881bd491790401c530b8789b1..8a3d5cdc9d13ac692bf7896279943eb3d4346e74 100644
+index 5ef7fb0d8277467881bd491790401c530b8789b1..0a5b967ee8733eb7198b8868eb4e9d929ccd4e76 100644
 --- a/light-client-lib/src/storage/mod.rs
 +++ b/light-client-lib/src/storage/mod.rs
 @@ -17,6 +17,8 @@ use ckb_types::{
@@ -13995,7 +15912,7 @@ index 5ef7fb0d8277467881bd491790401c530b8789b1..8a3d5cdc9d13ac692bf7896279943eb3
  mod backend;
  mod db;
 +#[cfg(not(target_arch = "wasm32"))]
-+pub use db::{IteratorMode, Direction};
++pub use db::{Direction, IteratorMode};
  mod storage_trait;
  
  // Re-export storage backend trait (low-level KV operations)
@@ -14008,6 +15925,88 @@ index 5ef7fb0d8277467881bd491790401c530b8789b1..8a3d5cdc9d13ac692bf7896279943eb3
  pub enum ScriptType {
      Lock,
      Type,
+@@ -154,6 +156,10 @@ impl StorageWithChainData {
+         &self.peers
+     }
+ 
++    pub fn recovery(&self) -> &crate::protocols::light_client::recovery::RecoveryRegistry {
++        self.peers.recovery()
++    }
++
+     pub fn pending_txs(&self) -> &RwLock<PendingTxs> {
+         &self.pending_txs
+     }
+diff --git a/light-client-lib/src/storage/storage_trait.rs b/light-client-lib/src/storage/storage_trait.rs
+index d562a63d40b31644b084e68d46e71213f5be5625..0ab87de90d3506147f3ada9ba349a461f64d4d22 100644
+--- a/light-client-lib/src/storage/storage_trait.rs
++++ b/light-client-lib/src/storage/storage_trait.rs
+@@ -477,22 +477,52 @@ pub trait LightClientStorage: StorageBackend {
+         batch.commit().expect("batch commit should be ok");
+     }
+ 
+-    /// Add fetched transaction
++    /// Add fetched transaction with the existing unknown-ordinal sentinel.
+     fn add_fetched_tx(&self, tx: &Transaction, hwe: &HeaderWithExtension) {
++        self.try_add_fetched_txs(&[(tx, hwe)])
++            .expect("batch commit should be ok");
++    }
++
++    /// Persist verified associations atomically without swallowing backend failure.
++    /// This does not change script indexes or claim output liveness/index completeness.
++    /// Membership proofs do not provide the transaction's block-order ordinal.
++    /// Indexed coordinates are retained; absent/unknown records change only if their
++    /// snapshot still matches at commit. A concurrent index write wins without error.
++    /// Receipts carry the proven header independently of these indexing coordinates.
++    fn try_add_fetched_txs(
++        &self,
++        transactions: &[(&Transaction, &HeaderWithExtension)],
++    ) -> crate::error::Result<()> {
++        if transactions.is_empty() {
++            return Ok(());
++        }
+         let mut batch = self.batch();
+-        let block_hash = hwe.header.calc_header_hash();
+-        let block_number: u64 = hwe.header.raw().number().unpack();
+-        batch.put(&Key::BlockHash(&block_hash).into_vec(), &hwe.to_vec());
+-        batch.put(
+-            &Key::BlockNumber(block_number).into_vec(),
+-            block_hash.as_slice(),
+-        );
+-        let tx_hash = tx.calc_tx_hash();
+-        let tx_index = u32::MAX;
+-        let key = Key::TxHash(&tx_hash).into_vec();
+-        let value: Vec<u8> = Value::Transaction(block_number, tx_index as TxIndex, tx).into();
+-        batch.put(&key, &value);
+-        batch.commit().expect("batch commit should be ok");
++        for (tx, hwe) in transactions {
++            let block_hash = hwe.header.calc_header_hash();
++            let block_number: u64 = hwe.header.raw().number().unpack();
++            batch.put(&Key::BlockHash(&block_hash).into_vec(), &hwe.to_vec());
++            batch.put(
++                &Key::BlockNumber(block_number).into_vec(),
++                block_hash.as_slice(),
++            );
++            let tx_hash = tx.calc_tx_hash();
++            let key = Key::TxHash(&tx_hash).into_vec();
++            let previous = StorageBackend::get(self, key.clone())?;
++            if let Some(stored) = &previous {
++                let ordinal = stored.get(8..12).ok_or_else(||
++                    crate::error::Error::runtime("invalid stored transaction coordinates"))?;
++                // Real coordinates belong to the script indexes, even across fork heights.
++                // Membership recovery may add headers but cannot relocate indexed cells.
++                if ordinal != u32::MAX.to_be_bytes() {
++                    continue;
++                }
++            }
++            let value: Vec<u8> = Value::Transaction(block_number, u32::MAX as TxIndex, tx).into();
++            // Filtering may index this transaction after our read. Check the snapshot
++            // inside the atomic commit so it cannot be replaced by an unknown ordinal.
++            batch.compare_and_put(&key, previous.as_deref(), &value)?;
++        }
++        batch.commit()
+     }
+ 
+     /// Filter and store block data
 diff --git a/light-client-lib/src/tests/protocols/block_filter.rs b/light-client-lib/src/tests/protocols/block_filter.rs
 index 0cc6e19c259ad35f5be39826ca4b6648e31a1e22..d8379333613ebf60090567334a269fad439d52fa 100644
 --- a/light-client-lib/src/tests/protocols/block_filter.rs
@@ -14217,14 +16216,13 @@ index 2101d6ba1d21dbd6b1fb3cf80d1c35e375ee968d..58abbf2ab39081d93e817160f4376539
  async fn reject_last_header_with_overflowing_total_difficulty() {
      let chain = MockChain::new_with_dummy_pow("test-light-client").start();
 diff --git a/light-client-lib/src/tests/protocols/light_client/send_transactions_proof.rs b/light-client-lib/src/tests/protocols/light_client/send_transactions_proof.rs
-index 03be056b0463e8985a596f3e1e75bc3eac491c80..d390d3aef0ba1ca33cd46f3435934a2b51af0441 100644
+index 03be056b0463e8985a596f3e1e75bc3eac491c80..c6ff5026a53ebc7cae44bf5441c0856b3cdd4815 100644
 --- a/light-client-lib/src/tests/protocols/light_client/send_transactions_proof.rs
 +++ b/light-client-lib/src/tests/protocols/light_client/send_transactions_proof.rs
-@@ -811,3 +811,38 @@ async fn test_send_headers_txs_request() {
+@@ -811,3 +811,994 @@ async fn test_send_headers_txs_request() {
      assert_eq!(peers.get_txs_to_fetch().len(), 1);
      assert_eq!(peers.get_headers_to_fetch().len(), 1);
  }
-+
 +
 +#[tokio::test(flavor = "multi_thread")]
 +async fn deduplicated_transaction_proof_retains_legitimate_repeated_enqueues() {
@@ -14238,10 +16236,16 @@ index 03be056b0463e8985a596f3e1e75bc3eac491c80..d390d3aef0ba1ca33cd46f3435934a2b
 +    // Real enqueue API: the map itself coalesces repeated requests. This
 +    // verifies observable request behavior, not an artificial duplicate Vec.
 +    for hash in [a.clone(), b.clone(), a.clone(), c.clone(), b.clone()] {
-+        peers.fetching_txs().insert(hash, FetchInfo::new(111, 0, false, false));
++        peers
++            .fetching_txs()
++            .insert(hash, FetchInfo::new(111, 0, false, false));
 +    }
-+    let tip = VerifiableHeader::new(chain.client_storage().get_tip_header().into_view(),
-+        Default::default(), None, Default::default());
++    let tip = VerifiableHeader::new(
++        chain.client_storage().get_tip_header().into_view(),
++        Default::default(),
++        None,
++        Default::default(),
++    );
 +    peers.add_peer(peer_index);
 +    peers.mock_prove_state(peer_index, tip).unwrap();
 +    let mut protocol = chain.create_light_client_protocol(Arc::clone(&peers));
@@ -14255,10 +16259,1071 @@ index 03be056b0463e8985a596f3e1e75bc3eac491c80..d390d3aef0ba1ca33cd46f3435934a2b
 +    };
 +    let hashes = request.tx_hashes().into_iter().collect::<Vec<_>>();
 +    assert_eq!(hashes.len(), 3);
-+    assert_eq!(hashes.into_iter().collect::<std::collections::HashSet<_>>(),
-+        [a, b, c].into_iter().collect());
-+    assert!(peers.get_txs_to_fetch().is_empty(), "all unique requests marked in flight");
++    assert_eq!(
++        hashes.into_iter().collect::<std::collections::HashSet<_>>(),
++        [a, b, c].into_iter().collect()
++    );
++    assert!(
++        peers.get_txs_to_fetch().is_empty(),
++        "all unique requests marked in flight"
++    );
 +}
++
++// This exercises the real scheduler and received-message dispatch; cached data
++// must not suppress a fresh wire attempt or satisfy a later registration.
++async fn recovery_dispatch_case(case: &str) {
++    use crate::protocols::light_client::recovery::{
++        ChainSnapshot, RecoveryIdentity, RecoveryStatus,
++    };
++    use std::time::Instant;
++    let chain = MockChain::new_with_dummy_pow("recovery-dispatch").start();
++    chain.mine_to(20);
++    let block = chain.shared().snapshot().get_block_by_number(5).unwrap();
++    let tx = block.transactions()[0].data();
++    let last = chain
++        .shared()
++        .snapshot()
++        .get_verifiable_header_by_number(20)
++        .unwrap();
++    let peers = chain.create_peers();
++    let peer = PeerIndex::new(3);
++    peers.add_peer(peer);
++    peers.mock_prove_state(peer, last.clone().into()).unwrap();
++    let header: VerifiableHeader = last.clone().into();
++    chain.client_storage().update_last_state(
++        &header.total_difficulty(),
++        &header.header().data(),
++        &[],
++    );
++    let cached_block = if case == "storage" {
++        chain.shared().snapshot().get_block_by_number(4).unwrap()
++    } else {
++        block.clone()
++    };
++    if case != "pending" {
++        chain.client_storage().add_fetched_tx(
++            &tx,
++            &crate::storage::HeaderWithExtension {
++                header: cached_block.header().data(),
++                extension: cached_block.extension(),
++            },
++        );
++    }
++    let pending = Arc::new(crate::types::RwLock::new(
++        crate::protocols::PendingTxs::default(),
++    ));
++    if case == "pending" {
++        pending.write().unwrap().push(tx.clone().into_view(), 0);
++    }
++    let swc = crate::storage::StorageWithChainData::new(
++        chain.client_storage().clone(),
++        peers.clone(),
++        pending.clone(),
++    );
++    if matches!(case, "generic" | "generic_missing" | "generic_during_send") {
++        peers.add_fetch_tx(tx.calc_tx_hash(), 111);
++    }
++    peers
++        .recovery()
++        .initialize(
++            RecoveryIdentity {
++                genesis_hash: chain.consensus().genesis_block().hash(),
++                store_generation: "isolated-test-store".into(),
++                run_nonce: [7; 16],
++            },
++            ChainSnapshot {
++                anchor: header.header().data(),
++            },
++        )
++        .unwrap();
++    let a = swc
++        .recovery()
++        .request(tx.calc_tx_hash(), Instant::now())
++        .unwrap();
++    let b = peers
++        .recovery()
++        .request(tx.calc_tx_hash(), Instant::now())
++        .unwrap();
++    let mut protocol = chain.create_light_client_protocol(Arc::clone(&peers));
++    let nc = MockNetworkContext::new(SupportProtocols::LightClient);
++    if case == "generic_during_send" {
++        let peers = peers.clone();
++        let hash = tx.calc_tx_hash();
++        nc.on_next_send(move || peers.add_fetch_tx(hash, 112));
++    }
++    protocol.notify(nc.context(), FETCH_HEADER_TX_TOKEN).await;
++    assert!(
++        peers
++            .get_peer(&peer)
++            .unwrap()
++            .get_txs_proof_request()
++            .is_some(),
++        "cached tx must issue proof request"
++    );
++    assert_eq!(
++        peers.recovery().poll(a, Instant::now()).unwrap(),
++        RecoveryStatus::Fetching
++    );
++    assert_eq!(
++        peers.recovery().poll(b, Instant::now()).unwrap(),
++        RecoveryStatus::Fetching
++    );
++    let later = peers
++        .recovery()
++        .request(tx.calc_tx_hash(), Instant::now())
++        .unwrap();
++    if matches!(case, "generic" | "generic_missing") {
++        peers.add_fetch_tx(tx.calc_tx_hash(), 112);
++    }
++    let merkle = CBMT::build_merkle_proof(
++        &block
++            .transactions()
++            .iter()
++            .map(|t| t.hash())
++            .collect::<Vec<_>>(),
++        &[0],
++    )
++    .unwrap();
++    let filtered = packed::FilteredBlock::new_builder()
++        .header(block.header().data())
++        .witnesses_root(block.calc_witnesses_root())
++        .transactions(vec![tx.clone()].pack())
++        .proof(
++            packed::MerkleProof::new_builder()
++                .indices(merkle.indices().to_vec().pack())
++                .lemmas(merkle.lemmas().to_vec().pack())
++                .build(),
++        )
++        .build();
++    let proof = if case == "invalid_mmr" {
++        packed::HeaderDigestVec::default()
++    } else {
++        chain.build_proof_by_numbers(20, &[5])
++    };
++    let filtered = if case == "duplicate" {
++        vec![filtered.clone(), filtered]
++    } else if matches!(case, "missing" | "generic_missing") {
++        vec![]
++    } else {
++        vec![filtered]
++    };
++    let mut builder = packed::SendTransactionsProofV1::new_builder()
++        .last_header(last)
++        .proof(proof.pack())
++        .filtered_blocks(
++            packed::FilteredBlockVec::new_builder()
++                .set(filtered.clone())
++                .build(),
++        )
++        .blocks_uncles_hash(vec![block.calc_uncles_hash(); filtered.len()].pack())
++        .blocks_extension(vec![
++            packed::BytesOpt::new_builder()
++                .set(block.extension())
++                .build();
++            filtered.len()
++        ]);
++    if matches!(case, "missing" | "generic_missing") {
++        builder = builder
++            .proof(Vec::<packed::HeaderDigest>::new().pack())
++            .missing_tx_hashes(vec![tx.calc_tx_hash()].pack());
++    }
++    if case == "partition" {
++        builder = builder.missing_tx_hashes(vec![tx.calc_tx_hash()].pack());
++    }
++    if case == "wrong_anchor" {
++        builder = builder.last_header(
++            chain
++                .shared()
++                .snapshot()
++                .get_verifiable_header_by_number(19)
++                .unwrap(),
++        );
++    }
++    let content = builder.build();
++    if case == "storage" {
++        // Fetched records may be inserted or conditionally updated. Inject a real
++        // TxHash write failure in either case, after the header writes are staged.
++        chain.client_storage().conn.lock().unwrap().execute_batch(
++            "CREATE TRIGGER recovery_fail_insert BEFORE INSERT ON kv WHEN hex(substr(NEW.key, 1, 1)) = '00' BEGIN SELECT RAISE(ABORT, 'injected recovery failure'); END;
++             CREATE TRIGGER recovery_fail_update BEFORE UPDATE ON kv WHEN hex(substr(NEW.key, 1, 1)) = '00' BEGIN SELECT RAISE(ABORT, 'injected recovery failure'); END;"
++        ).unwrap();
++    }
++    if case == "timeout" {
++        peers.mark_fetching_txs_timeout(peer);
++    }
++    if case == "disconnect" {
++        protocol.disconnected(nc.context(), peer).await;
++        peers.add_peer(peer);
++    }
++    if case == "tip" {
++        let update = peers.recovery().begin_chain_update().unwrap();
++        peers
++            .recovery()
++            .finish_chain_update(
++                update,
++                ChainSnapshot {
++                    anchor: chain
++                        .shared()
++                        .snapshot()
++                        .get_header_by_number(19)
++                        .unwrap()
++                        .data(),
++                },
++            )
++            .unwrap();
++    }
++
++    let message = packed::LightClientMessage::new_builder()
++        .set(content)
++        .build();
++    protocol
++        .received(nc.context(), peer, message.as_bytes())
++        .await;
++    if matches!(
++        case,
++        "success" | "pending" | "generic" | "generic_during_send"
++    ) {
++        assert!(nc.not_banned(peer));
++        assert_eq!(
++            peers.recovery().poll(later, Instant::now()).unwrap(),
++            RecoveryStatus::Queued
++        );
++        let mut receipts = Vec::new();
++        for id in [a, b] {
++            let receipt = match peers.recovery().poll(id, Instant::now()).unwrap() {
++                RecoveryStatus::Verified(r) => r,
++                other => panic!("expected verified receipt: {other:?}"),
++            };
++            assert_eq!(receipt.transaction.as_slice(), tx.raw().as_slice());
++            assert_eq!(receipt.header.as_slice(), block.header().data().as_slice());
++            assert_eq!(receipt.transaction_index, None);
++            assert!(peers
++                .recovery()
++                .validate(id, receipt.id, Instant::now())
++                .is_ok());
++            receipts.push((id, receipt));
++        }
++        let update = peers.recovery().begin_chain_update().unwrap();
++        peers
++            .recovery()
++            .finish_chain_update(
++                update,
++                ChainSnapshot {
++                    anchor: header.header().data(),
++                },
++            )
++            .unwrap();
++        for (id, receipt) in receipts {
++            assert!(peers
++                .recovery()
++                .validate(id, receipt.id, Instant::now())
++                .is_err());
++        }
++        if case == "pending" {
++            assert!(pending.read().unwrap().get(&tx.calc_tx_hash()).is_some());
++        }
++        if case == "generic" {
++            assert!(
++                peers.get_tx_fetch_info(&tx.calc_tx_hash()).is_some(),
++                "later generic waiter must survive"
++            );
++        }
++        assert_eq!(
++            chain
++                .client_storage()
++                .get_transaction(&tx.calc_tx_hash())
++                .unwrap()
++                .1,
++            u32::MAX
++        );
++    } else {
++        assert!(
++            !matches!(
++                peers.recovery().poll(a, Instant::now()),
++                Ok(RecoveryStatus::Verified(_))
++            ),
++            "{case} minted a receipt"
++        );
++        assert_ne!(
++            peers.recovery().poll(a, Instant::now()).unwrap(),
++            RecoveryStatus::Fetching
++        );
++    }
++    if case == "generic_during_send" {
++        assert_eq!(
++            peers
++                .fetching_txs()
++                .get(&tx.calc_tx_hash())
++                .unwrap()
++                .first_sent(),
++            0,
++            "an enqueue during send must remain eligible for its own request"
++        );
++        assert!(peers.get_txs_to_fetch().contains(&tx.calc_tx_hash()));
++    }
++    if case == "storage" {
++        assert_eq!(
++            chain
++                .client_storage()
++                .get_transaction_with_header(&tx.calc_tx_hash())
++                .unwrap()
++                .1
++                .calc_header_hash(),
++            cached_block.hash()
++        );
++        assert!(
++            chain.client_storage().get_header(&block.hash()).is_none(),
++            "earlier header write must roll back with tx write"
++        );
++    }
++    if case == "generic_missing" {
++        assert!(
++            !peers
++                .fetching_txs()
++                .get(&tx.calc_tx_hash())
++                .unwrap()
++                .missing(),
++            "old missing response must not overwrite new generic waiter"
++        );
++    }
++    if case == "invalid_mmr" {
++        assert!(
++            peers.get_peer(&peer).unwrap().txs_quarantined,
++            "failed recovery attempt must drain before slot reuse"
++        );
++    }
++    if !matches!(
++        case,
++        "success" | "pending" | "generic" | "generic_during_send" | "tip"
++    ) {
++        assert_eq!(
++            peers.recovery().poll(later, Instant::now()).unwrap(),
++            RecoveryStatus::Queued
++        );
++    }
++}
++
++#[tokio::test(flavor = "multi_thread")]
++async fn recovery_cached_transaction_dispatches_fresh_attempt() {
++    recovery_dispatch_case("success").await;
++}
++#[tokio::test(flavor = "multi_thread")]
++async fn recovery_rejected_proofs_never_publish() {
++    for case in ["invalid_mmr", "duplicate", "partition", "wrong_anchor"] {
++        recovery_dispatch_case(case).await;
++    }
++}
++#[tokio::test(flavor = "multi_thread")]
++async fn recovery_missing_partition_is_unavailable() {
++    recovery_dispatch_case("missing").await;
++}
++#[tokio::test(flavor = "multi_thread")]
++async fn recovery_storage_failure_never_publishes() {
++    recovery_dispatch_case("storage").await;
++}
++#[tokio::test(flavor = "multi_thread")]
++async fn recovery_timeout_and_old_connection_never_publish() {
++    for case in ["timeout", "disconnect"] {
++        recovery_dispatch_case(case).await;
++    }
++}
++#[tokio::test(flavor = "multi_thread")]
++async fn recovery_tip_change_during_flight_never_publishes() {
++    recovery_dispatch_case("tip").await;
++}
++
++#[tokio::test(flavor = "multi_thread")]
++async fn recovery_pending_transaction_cannot_satisfy_membership() {
++    recovery_dispatch_case("pending").await;
++}
++#[tokio::test(flavor = "multi_thread")]
++async fn recovery_does_not_remove_later_generic_waiter() {
++    recovery_dispatch_case("generic").await;
++}
++
++fn recovery_proof_message(
++    chain: &impl RunningChainExt,
++    tip: u64,
++    number: u64,
++    tx_hash: &packed::Byte32,
++) -> packed::LightClientMessage {
++    let snapshot = chain.shared().snapshot();
++    let block = snapshot.get_block_by_number(number).unwrap();
++    let transactions = block.transactions();
++    let index = transactions
++        .iter()
++        .position(|tx| &tx.hash() == tx_hash)
++        .unwrap();
++    let tx = transactions[index].data();
++    let proof = CBMT::build_merkle_proof(
++        &transactions.iter().map(|t| t.hash()).collect::<Vec<_>>(),
++        &[index as u32],
++    )
++    .unwrap();
++    let filtered = packed::FilteredBlock::new_builder()
++        .header(block.header().data())
++        .witnesses_root(block.calc_witnesses_root())
++        .transactions(vec![tx].pack())
++        .proof(
++            packed::MerkleProof::new_builder()
++                .indices(proof.indices().to_vec().pack())
++                .lemmas(proof.lemmas().to_vec().pack())
++                .build(),
++        )
++        .build();
++    let content = packed::SendTransactionsProofV1::new_builder()
++        .last_header(snapshot.get_verifiable_header_by_number(tip).unwrap())
++        .proof(chain.build_proof_by_numbers(tip, &[number]))
++        .filtered_blocks(
++            packed::FilteredBlockVec::new_builder()
++                .set(vec![filtered])
++                .build(),
++        )
++        .blocks_uncles_hash(vec![block.calc_uncles_hash()].pack())
++        .blocks_extension(vec![packed::BytesOpt::new_builder()
++            .set(block.extension())
++            .build()])
++        .build();
++    packed::LightClientMessage::new_builder()
++        .set(content)
++        .build()
++}
++
++#[tokio::test(flavor = "multi_thread")]
++async fn recovery_old_generic_inflight_proof_cannot_authorize_new_registration() {
++    recovery_old_generic_case(false).await;
++}
++
++#[tokio::test(flavor = "multi_thread")]
++async fn recovery_old_generic_timeout_requires_disconnect_before_slot_reuse() {
++    recovery_old_generic_case(true).await;
++}
++
++async fn recovery_old_generic_case(timeout: bool) {
++    use crate::protocols::light_client::recovery::{
++        ChainSnapshot, RecoveryIdentity, RecoveryStatus,
++    };
++    use std::time::Instant;
++    let chain = MockChain::new_with_dummy_pow("recovery-old-flight").start();
++    chain.mine_to(20);
++    let block = chain.shared().snapshot().get_block_by_number(5).unwrap();
++    let hash = block.transactions()[0].hash();
++    let last: VerifiableHeader = chain
++        .shared()
++        .snapshot()
++        .get_verifiable_header_by_number(20)
++        .unwrap()
++        .into();
++    chain
++        .client_storage()
++        .update_last_state(&last.total_difficulty(), &last.header().data(), &[]);
++    let peers = chain.create_peers();
++    let peer = PeerIndex::new(3);
++    peers.add_peer(peer);
++    peers.mock_prove_state(peer, last.clone()).unwrap();
++    peers
++        .recovery()
++        .initialize(
++            RecoveryIdentity {
++                genesis_hash: chain.consensus().genesis_block().hash(),
++                store_generation: "isolated-test-store".into(),
++                run_nonce: [6; 16],
++            },
++            ChainSnapshot {
++                anchor: last.header().data(),
++            },
++        )
++        .unwrap();
++    let mut protocol = chain.create_light_client_protocol(peers.clone());
++    let nc = MockNetworkContext::new(SupportProtocols::LightClient);
++    peers.add_fetch_tx(hash.clone(), 111);
++    protocol.notify(nc.context(), FETCH_HEADER_TX_TOKEN).await;
++    let original_connection = peers.get_peer(&peer).unwrap().connection;
++    let sent_before_timeout = nc.sent_messages().borrow().len();
++    if timeout {
++        // The production refresh path uses this for generic and recovery requests alike.
++        peers.mark_fetching_txs_timeout(peer);
++        assert!(peers.get_peer(&peer).unwrap().txs_quarantined);
++    }
++    let id = peers
++        .recovery()
++        .request(hash.clone(), Instant::now())
++        .unwrap();
++    if timeout {
++        protocol.notify(nc.context(), FETCH_HEADER_TX_TOKEN).await;
++        assert_eq!(nc.sent_messages().borrow().len(), sent_before_timeout);
++    }
++    let message = recovery_proof_message(&chain, 20, 5, &hash);
++    protocol
++        .received(nc.context(), peer, message.as_bytes())
++        .await;
++    assert_eq!(
++        peers.recovery().poll(id, Instant::now()).unwrap(),
++        RecoveryStatus::Queued
++    );
++    if timeout {
++        // A late generic response cannot release the quarantined slot either.
++        protocol.notify(nc.context(), FETCH_HEADER_TX_TOKEN).await;
++        assert_eq!(nc.sent_messages().borrow().len(), sent_before_timeout);
++        assert!(peers.get_peer(&peer).unwrap().txs_quarantined);
++        assert_eq!(
++            peers.recovery().poll(id, Instant::now()).unwrap(),
++            RecoveryStatus::Queued
++        );
++        protocol.disconnected(nc.context(), peer).await;
++        assert!(peers.get_peer(&peer).is_none());
++        peers.add_peer(peer);
++        peers.mock_prove_state(peer, last.clone()).unwrap();
++        assert_ne!(peers.get_peer(&peer).unwrap().connection, original_connection);
++    }
++    protocol.notify(nc.context(), FETCH_HEADER_TX_TOKEN).await;
++    assert_eq!(
++        peers.recovery().poll(id, Instant::now()).unwrap(),
++        RecoveryStatus::Fetching
++    );
++    protocol
++        .received(nc.context(), peer, message.as_bytes())
++        .await;
++    assert!(matches!(
++        peers.recovery().poll(id, Instant::now()).unwrap(),
++        RecoveryStatus::Verified(_)
++    ));
++}
++
++#[tokio::test(flavor = "multi_thread")]
++async fn recovery_changed_tip_drains_generic_request() {
++    recovery_changed_tip_case(false).await;
++}
++
++#[tokio::test(flavor = "multi_thread")]
++async fn recovery_changed_tip_drains_recovery_request() {
++    recovery_changed_tip_case(true).await;
++}
++
++async fn recovery_changed_tip_case(with_recovery: bool) {
++    use crate::protocols::light_client::recovery::{
++        ChainSnapshot, RecoveryIdentity, RecoveryStatus,
++    };
++    use std::time::Instant;
++    let chain = MockChain::new_with_dummy_pow("recovery-old-flight").start();
++    chain.mine_to(20);
++    let block = chain.shared().snapshot().get_block_by_number(5).unwrap();
++    let hash = block.transactions()[0].hash();
++    let last: VerifiableHeader = chain
++        .shared()
++        .snapshot()
++        .get_verifiable_header_by_number(20)
++        .unwrap()
++        .into();
++    chain
++        .client_storage()
++        .update_last_state(&last.total_difficulty(), &last.header().data(), &[]);
++    let peers = chain.create_peers();
++    let peer = PeerIndex::new(3);
++    peers.add_peer(peer);
++    peers.mock_prove_state(peer, last.clone()).unwrap();
++    peers
++        .recovery()
++        .initialize(
++            RecoveryIdentity {
++                genesis_hash: chain.consensus().genesis_block().hash(),
++                store_generation: "isolated-test-store".into(),
++                run_nonce: [6; 16],
++            },
++            ChainSnapshot {
++                anchor: last.header().data(),
++            },
++        )
++        .unwrap();
++    let mut protocol = chain.create_light_client_protocol(peers.clone());
++    let nc = MockNetworkContext::new(SupportProtocols::LightClient);
++    peers.add_fetch_tx(hash.clone(), 111);
++    let old_id = with_recovery.then(|| {
++        peers
++            .recovery()
++            .request(hash.clone(), Instant::now())
++            .unwrap()
++    });
++    protocol.notify(nc.context(), FETCH_HEADER_TX_TOKEN).await;
++    assert!(!peers.get_txs_to_fetch().contains(&hash));
++    let connection = peers.get_peer(&peer).unwrap().connection;
++    chain.mine_to(21);
++    let changed_tip = chain
++        .shared()
++        .snapshot()
++        .get_verifiable_header_by_number(21)
++        .unwrap();
++    let empty = packed::SendTransactionsProofV1::new_builder()
++        .last_header(changed_tip)
++        .build();
++    let changed = packed::LightClientMessage::new_builder().set(empty).build();
++    protocol
++        .received(nc.context(), peer, changed.as_bytes())
++        .await;
++    assert!(
++        nc.not_banned(peer),
++        "valid changed-tip response must be accepted"
++    );
++    assert!(
++        nc.disconnect_requested(peer),
++        "quarantine must promptly request drain"
++    );
++    assert!(peers.get_peer(&peer).unwrap().txs_quarantined);
++    assert!(peers
++        .get_peer(&peer)
++        .unwrap()
++        .get_txs_proof_request()
++        .is_some());
++    assert!(
++        peers.get_txs_to_fetch().contains(&hash),
++        "generic waiter must remain retryable"
++    );
++    if let Some(id) = old_id {
++        assert_eq!(
++            peers.recovery().poll(id, Instant::now()).unwrap(),
++            RecoveryStatus::Unavailable
++        );
++    }
++    let fresh_id = peers
++        .recovery()
++        .request(hash.clone(), Instant::now())
++        .unwrap();
++    let old_response = recovery_proof_message(&chain, 20, 5, &hash);
++    protocol
++        .received(nc.context(), peer, old_response.as_bytes())
++        .await;
++    assert_eq!(
++        peers.recovery().poll(fresh_id, Instant::now()).unwrap(),
++        RecoveryStatus::Queued
++    );
++    assert!(peers.get_txs_to_fetch().contains(&hash));
++    let sent = nc.sent_messages().borrow().len();
++    protocol.notify(nc.context(), FETCH_HEADER_TX_TOKEN).await;
++    assert_eq!(nc.sent_messages().borrow().len(), sent);
++    protocol.disconnected(nc.context(), peer).await;
++    assert!(peers.get_peer(&peer).is_none());
++    peers.add_peer(peer);
++    // The peer hint did not advance our proven local tip. The replacement proves
++    // that current local anchor before it is eligible for a fresh attempt.
++    peers.mock_prove_state(peer, last).unwrap();
++    assert_ne!(peers.get_peer(&peer).unwrap().connection, connection);
++    protocol.notify(nc.context(), FETCH_HEADER_TX_TOKEN).await;
++    assert_eq!(
++        peers.recovery().poll(fresh_id, Instant::now()).unwrap(),
++        RecoveryStatus::Fetching
++    );
++    protocol
++        .received(nc.context(), peer, old_response.as_bytes())
++        .await;
++    assert!(matches!(
++        peers.recovery().poll(fresh_id, Instant::now()).unwrap(),
++        RecoveryStatus::Verified(_)
++    ));
++    assert!(peers.get_tx_fetch_info(&hash).is_none());
++}
++
++#[tokio::test(flavor = "multi_thread")]
++async fn recovery_real_fork_reinclusion_and_commit_invalidation() {
++    recovery_fork_fixture(false).await;
++}
++
++/// Synthetic DAO-shaped membership only: producer skips full-node consensus
++/// checks, while the unchanged light-client handler verifies all proof fields.
++#[tokio::test(flavor = "multi_thread")]
++async fn recovery_dao_protocol_bridge_fixture() {
++    recovery_fork_fixture(true).await;
++}
++
++fn fixture_all_switches<T: FromIterator<T> + std::ops::Not<Output = T>>() -> T {
++    !std::iter::empty::<T>().collect::<T>()
++}
++
++fn mine_membership_fixture(chain: &impl RunningChainExt, block: ckb_types::core::BlockView) {
++    let number = block.number();
++    // Switch::DISABLE_ALL, inferred to avoid adding a direct transitive dependency.
++    // Only this synthetic producer bypasses consensus; no protocol switch exists.
++    assert!(chain.controller().blocking_process_block_with_switch(
++        Arc::new(block), fixture_all_switches()).unwrap());
++    while chain.tx_pool().get_tx_pool_info().unwrap().tip_number != number {}
++}
++
++async fn recovery_fork_fixture(dao_fixture: bool) {
++    use crate::bridge_core::dao_recovery::{protocol_fixture_call as bridge, protocol_fixture_request_id};
++    use serde_json::json;
++    use crate::protocols::light_client::recovery::{
++        ChainSnapshot, RecoveryIdentity, RecoveryStatus,
++    };
++    use crate::protocols::{LastState, ProveRequest, ProveState};
++    use std::{collections::HashSet, time::Instant};
++    let chain = MockChain::new_with_dummy_pow("recovery-real-fork").start();
++    chain.mine_to(20);
++    let base_tx = chain.get_cellbase_as_input(13);
++    let tx = if dao_fixture {
++        let dao_type = packed::Script::new_builder()
++            .code_hash(h256!("0x82d76d1b75fe2fd9a27dfbaa65a039221a380d76c926f378d3f81cf3e7e13f2e").pack())
++            .hash_type(ckb_types::core::ScriptHashType::Type).build();
++        base_tx.as_advanced_builder()
++            .set_outputs(vec![base_tx.outputs().get(0).unwrap().as_builder().type_(Some(dao_type).pack()).build()])
++            .set_outputs_data(vec![ckb_types::bytes::Bytes::from(13u64.to_le_bytes().to_vec()).pack()])
++            .build()
++    } else { base_tx };
++    chain.mine_block(|block| {
++        block
++            .as_advanced_builder()
++            .proposals(vec![tx.proposal_short_id()])
++            .build()
++    });
++    chain.mine_blocks(1);
++    if dao_fixture {
++        let block: packed::Block = chain.shared().get_block_template(None, None, None).unwrap().unwrap().into();
++        mine_membership_fixture(&chain, block.as_advanced_builder().transaction(tx.clone()).build());
++    } else {
++        chain.mine_block(|block| block.as_advanced_builder().transaction(tx.clone()).build());
++    }
++    chain.mine_to(25);
++    let old = chain.shared().snapshot().get_block_by_number(23).unwrap();
++    let last: VerifiableHeader = chain
++        .shared()
++        .snapshot()
++        .get_verifiable_header_by_number(25)
++        .unwrap()
++        .into();
++    let old_headers: Vec<_> = (20..25)
++        .map(|n| chain.shared().snapshot().get_header_by_number(n).unwrap())
++        .collect();
++    chain.client_storage().update_last_state(
++        &last.total_difficulty(),
++        &last.header().data(),
++        &old_headers,
++    );
++    chain.client_storage().add_fetched_tx(
++        &tx.data(),
++        &crate::storage::HeaderWithExtension {
++            header: old.header().data(),
++            extension: old.extension(),
++        },
++    );
++    let peers = chain.create_peers();
++    let peer = PeerIndex::new(3);
++    peers.add_peer(peer);
++    peers.mock_prove_state(peer, last.clone()).unwrap();
++    peers
++        .recovery()
++        .initialize(
++            RecoveryIdentity {
++                genesis_hash: chain.consensus().genesis_block().hash(),
++                store_generation: "e".repeat(32),
++                run_nonce: [5; 16],
++            },
++            ChainSnapshot {
++                anchor: last.header().data(),
++            },
++        )
++        .unwrap();
++    let mut protocol = chain.create_light_client_protocol(peers.clone());
++    let nc = MockNetworkContext::new(SupportProtocols::LightClient);
++    let id = peers.recovery().request(tx.hash(), Instant::now()).unwrap();
++    protocol.notify(nc.context(), FETCH_HEADER_TX_TOKEN).await;
++    let old_message = recovery_proof_message(&chain, 25, 23, &tx.hash());
++    protocol
++        .received(nc.context(), peer, old_message.as_bytes())
++        .await;
++    let old_receipt = match peers.recovery().poll(id, Instant::now()).unwrap() {
++        RecoveryStatus::Verified(r) => r,
++        other => panic!("{other:?}"),
++    };
++    let inflight = peers.recovery().request(tx.hash(), Instant::now()).unwrap();
++    protocol.notify(nc.context(), FETCH_HEADER_TX_TOKEN).await;
++    let queued = peers.recovery().request(tx.hash(), Instant::now()).unwrap();
++
++    // Build a genuine competing branch that re-includes the same raw tx at 25.
++    chain.rollback_to(22, HashSet::new());
++    for _ in 0..2 {
++        chain.mine_block(|block| {
++            let cellbase = block.transactions().get(0).unwrap().into_view();
++            block
++                .as_advanced_builder()
++                .set_transactions(vec![cellbase])
++                .build()
++        });
++    }
++    let include = |block: packed::Block| {
++        let cellbase = block.transactions().get(0).unwrap().into_view();
++        block.as_advanced_builder().set_transactions(vec![cellbase, tx.clone()]).build()
++    };
++    if dao_fixture {
++        let block: packed::Block = chain.shared().get_block_template(None, None, None).unwrap().unwrap().into();
++        mine_membership_fixture(&chain, include(block));
++    } else { chain.mine_block(include); }
++    chain.mine_to(28);
++    let fresh = chain.shared().snapshot().get_block_by_number(25).unwrap();
++    assert_ne!(fresh.hash(), old.hash());
++    let new_last: VerifiableHeader = chain
++        .shared()
++        .snapshot()
++        .get_verifiable_header_by_number(28)
++        .unwrap()
++        .into();
++    let request = ProveRequest::new(LastState::new(new_last.clone()), Default::default());
++    peers.mock_prove_request(peer, request.clone()).unwrap();
++    let reorg = (20..23)
++        .map(|n| chain.shared().snapshot().get_header_by_number(n).unwrap())
++        .collect();
++    let headers = (23..28)
++        .map(|n| chain.shared().snapshot().get_header_by_number(n).unwrap())
++        .collect();
++    assert!(protocol
++        .commit_prove_state(peer, ProveState::new_from_request(request, reorg, headers))
++        .await
++        .unwrap());
++    for request in [id, inflight, queued] {
++        assert_eq!(
++            peers.recovery().poll(request, Instant::now()).unwrap(),
++            RecoveryStatus::Unavailable
++        );
++    }
++    assert!(peers
++        .recovery()
++        .validate(id, old_receipt.id, Instant::now())
++        .is_err());
++    // Production rollback intentionally retained the stale association.
++    assert_eq!(
++        chain
++            .client_storage()
++            .get_transaction_with_header(&tx.hash())
++            .unwrap()
++            .1
++            .calc_header_hash(),
++        old.hash()
++    );
++    protocol
++        .received(nc.context(), peer, old_message.as_bytes())
++        .await;
++    assert!(peers
++        .recovery()
++        .validate(id, old_receipt.id, Instant::now())
++        .is_err());
++    let request_envelope = bridge(peers.recovery(), "request", &format!("{:#x}", tx.hash()), "");
++    let recovered = protocol_fixture_request_id(&request_envelope);
++    protocol.notify(nc.context(), FETCH_HEADER_TX_TOKEN).await;
++    protocol
++        .received(
++            nc.context(),
++            peer,
++            recovery_proof_message(&chain, 28, 25, &tx.hash()).as_bytes(),
++        )
++        .await;
++    let receipt = match peers.recovery().poll(recovered, Instant::now()).unwrap() {
++        RecoveryStatus::Verified(r) => r,
++        other => panic!("{other:?}"),
++    };
++    assert_eq!(receipt.transaction.as_slice(), tx.data().raw().as_slice());
++    assert_eq!(receipt.header.calc_header_hash(), fresh.hash());
++    assert_eq!(receipt.transaction_index, None);
++    assert_eq!(
++        chain
++            .client_storage()
++            .get_transaction_with_header(&tx.hash())
++            .unwrap()
++            .1
++            .calc_header_hash(),
++        fresh.hash()
++    );
++    assert!(peers
++        .recovery()
++        .validate(recovered, receipt.id, Instant::now())
++        .is_ok());
++
++    if dao_fixture {
++        let request_token = request_envelope["result"]["request_id"].as_str().unwrap();
++        let poll = bridge(peers.recovery(), "poll", request_token, "");
++        let receipt_token = poll["result"]["receipt"]["receipt_id"].as_str().unwrap();
++        let validate = bridge(peers.recovery(), "validate", request_token, receipt_token);
++        assert_eq!(validate["result"]["valid"], true);
++        assert_eq!(poll["result"]["receipt"]["header"]["number"], "0x19");
++        // Expiry advances the actual registry clock observation, not a JSON edit.
++        peers.recovery().poll(recovered, Instant::now() + std::time::Duration::from_secs(31)).unwrap();
++        let expired_poll = bridge(peers.recovery(), "poll", request_token, "");
++        let expired_validate = bridge(peers.recovery(), "validate", request_token, receipt_token);
++        assert_eq!(expired_poll["result"]["status"], "expired");
++        assert!(expired_validate.get("error").is_some());
++        let restarted = crate::protocols::light_client::recovery::RecoveryRegistry::new(
++            RecoveryIdentity { genesis_hash: chain.consensus().genesis_block().hash(),
++                store_generation: "e".repeat(32), run_nonce: [6;16] },
++            ChainSnapshot { anchor: new_last.header().data() });
++        let restart_validate = bridge(&restarted, "validate", request_token, receipt_token);
++        assert!(restart_validate.get("error").is_some());
++        if let Ok(path) = std::env::var("POCKET_DAO_PROTOCOL_FIXTURE_PATH") {
++            std::fs::write(path, serde_json::to_string_pretty(&json!({
++                "producer": "recovery_dao_protocol_bridge_fixture; dummy PoW; synthetic producer DISABLE_ALL; real light-client handler",
++                "old_header": ckb_jsonrpc_types::HeaderView::from(old.header()),
++                "request": request_envelope, "poll": poll, "validate": validate,
++                "expired_poll": expired_poll, "expired_validate": expired_validate,
++                "restart_validate": restart_validate
++            })).unwrap()).unwrap();
++        }
++    }
++}
++
++#[tokio::test]
++async fn recovery_no_eligible_peer_expires_without_cache_fallback() {
++    use crate::protocols::light_client::recovery::{
++        ChainSnapshot, RecoveryIdentity, RecoveryStatus,
++    };
++    use std::time::{Duration, Instant};
++    let chain = MockChain::new_with_dummy_pow("recovery-no-peer");
++    let peers = chain.create_peers();
++    peers
++        .recovery()
++        .initialize(
++            RecoveryIdentity {
++                genesis_hash: chain.consensus().genesis_block().hash(),
++                store_generation: "isolated-no-peer".into(),
++                run_nonce: [4; 16],
++            },
++            ChainSnapshot {
++                anchor: chain.client_storage().get_tip_header(),
++            },
++        )
++        .unwrap();
++    let now = Instant::now();
++    let id = peers.recovery().request(Default::default(), now).unwrap();
++    let mut protocol = chain.create_light_client_protocol(peers.clone());
++    let nc = MockNetworkContext::new(SupportProtocols::LightClient);
++    protocol.notify(nc.context(), FETCH_HEADER_TX_TOKEN).await;
++    assert!(nc.sent_messages().borrow().is_empty());
++    assert_eq!(
++        peers.recovery().poll(id, now).unwrap(),
++        RecoveryStatus::Queued
++    );
++    assert_eq!(
++        peers
++            .recovery()
++            .poll(id, now + Duration::from_secs(30))
++            .unwrap(),
++        RecoveryStatus::Expired
++    );
++}
++
++#[tokio::test(flavor = "multi_thread")]
++async fn recovery_missing_response_preserves_later_generic_waiter() {
++    recovery_dispatch_case("generic_missing").await;
++}
++
++#[tokio::test(flavor = "multi_thread")]
++async fn recovery_generic_enqueue_during_send_keeps_retry_eligibility() {
++    recovery_dispatch_case("generic_during_send").await;
++}
+diff --git a/light-client-lib/src/tests/storage.rs b/light-client-lib/src/tests/storage.rs
+index db9e610e8efe9f2330c4ce4a475e002b24399f2d..bf48c5a728aa5f44d390040f1bba80c801ad208f 100644
+--- a/light-client-lib/src/tests/storage.rs
++++ b/light-client-lib/src/tests/storage.rs
+@@ -24,3 +24,105 @@ fn test_forget_update_min_filtred_number() {
+     );
+     assert_eq!(storage.get_min_filtered_block_number(), 33);
+ }
++
++fn indexed_recovery_fixture(proven_height: u64, rollback_spend: bool) {
++    use ckb_types::{core::{BlockBuilder, TransactionBuilder}, packed::{CellInput, CellOutput, OutPoint}, prelude::*};
++    use crate::storage::{HeaderWithExtension, Key, StorageBackend, ScriptStatus, ScriptType};
++    let (storage, _dir) = new_storage("indexed_recovery");
++    let lock = Script::new_builder().args(vec![1u8].pack()).build();
++    let type_script = Script::new_builder().args(vec![2u8].pack()).build();
++    storage.update_filter_scripts(vec![
++        ScriptStatus { script: lock.clone(), script_type: ScriptType::Lock, block_number: 1 },
++        ScriptStatus { script: type_script.clone(), script_type: ScriptType::Type, block_number: 1 },
++    ], Default::default());
++    let tx = TransactionBuilder::default()
++        .output(CellOutput::new_builder().capacity(100u64).lock(lock.clone()).type_(Some(type_script.clone()).pack()).build())
++        .output_data(vec![0u8; 8].pack()).build();
++    let block = BlockBuilder::default().epoch(ckb_types::core::EpochNumberWithFraction::new(0, 0, 100).full_value()).number(10u64)
++        .transaction(TransactionBuilder::default().build()).transaction(tx.clone()).build();
++    storage.filter_block(block.data());
++    let fetched = BlockBuilder::default().epoch(ckb_types::core::EpochNumberWithFraction::new(0, 0, 100).full_value()).number(proven_height).transaction(tx.clone()).build();
++    storage.try_add_fetched_txs(&[(&tx.data(), &HeaderWithExtension { header: fetched.data().header(), extension: None })]).unwrap();
++    assert!(storage.get_header(&fetched.hash()).is_some());
++    let spend = TransactionBuilder::default()
++        .input(CellInput::new_builder().previous_output(OutPoint::new(tx.hash(), 0)).build()).build();
++    storage.filter_block(BlockBuilder::default().epoch(ckb_types::core::EpochNumberWithFraction::new(0, 0, 100).full_value()).number(30u64).transaction(spend).build().data());
++    if rollback_spend {
++        storage.update_filter_scripts(vec![
++            ScriptStatus { script: lock.clone(), script_type: ScriptType::Lock, block_number: 30 },
++            ScriptStatus { script: type_script.clone(), script_type: ScriptType::Type, block_number: 30 },
++        ], Default::default());
++        storage.rollback_to_block(30);
++    }
++    for (script, is_type) in [(&lock, false), (&type_script, true)] {
++        let key = |height, ordinal| if is_type { Key::CellTypeScript(script, height, ordinal, 0).into_vec() }
++            else { Key::CellLockScript(script, height, ordinal, 0).into_vec() };
++        assert_eq!(StorageBackend::get(&storage, key(10, 1)).unwrap(),
++            if rollback_spend { Some(tx.hash().as_slice().to_vec()) } else { None }, "real indexed cell after spend/rollback");
++        assert_eq!(StorageBackend::get(&storage, key(proven_height, u32::MAX)).unwrap(), None, "no synthetic ordinal cell");
++    }
++    let (height, ordinal, stored) = storage.get_transaction(&tx.hash()).unwrap();
++    assert_eq!((height, ordinal), (10, 1));
++    assert_eq!(stored.as_slice(), tx.data().as_slice());
++}
++
++#[test] fn recovery_same_height_preserves_indexed_spend() { indexed_recovery_fixture(10, false); }
++#[test] fn recovery_other_height_preserves_indexed_spend() { indexed_recovery_fixture(20, false); }
++#[test] fn recovery_same_height_preserves_indexed_rollback() { indexed_recovery_fixture(10, true); }
++#[test] fn recovery_other_height_preserves_indexed_rollback() { indexed_recovery_fixture(20, true); }
++
++// Park a proof batch after it has observed storage, then commit a real indexed block
++// before its writes land. This deterministic ordering reproduces the concurrent race.
++struct IndexBeforeCommit {
++    storage: storage::Storage,
++    block: ckb_types::packed::Block,
++}
++struct IndexBeforeCommitBatch {
++    inner: storage::Batch,
++    storage: storage::Storage,
++    block: ckb_types::packed::Block,
++}
++impl storage::BatchWriter for IndexBeforeCommitBatch {
++    fn put(&mut self, key: &[u8], value: &[u8]) { self.inner.put(key, value); }
++    fn compare_and_put(&mut self, key: &[u8], expected: Option<&[u8]>, value: &[u8]) -> crate::error::Result<()> {
++        self.inner.compare_and_put(key, expected, value)
++    }
++    fn delete(&mut self, key: &[u8]) { self.inner.delete(key); }
++    fn commit(self) -> crate::error::Result<()> {
++        self.storage.filter_block(self.block);
++        self.inner.commit()
++    }
++}
++impl storage::StorageBackend for IndexBeforeCommit {
++    type Batch = IndexBeforeCommitBatch;
++    fn get(&self, key: Vec<u8>) -> crate::error::Result<Option<Vec<u8>>> { self.storage.get(key) }
++    fn put(&self, key: Vec<u8>, value: Vec<u8>) -> crate::error::Result<()> { storage::StorageBackend::put(&self.storage, key, value) }
++    fn delete(&self, key: &[u8]) -> crate::error::Result<()> { storage::StorageBackend::delete(&self.storage, key) }
++    fn batch(&self) -> Self::Batch {
++        IndexBeforeCommitBatch { inner: storage::StorageBackend::batch(&self.storage), storage: self.storage.clone(), block: self.block.clone() }
++    }
++    fn collect_iterator(&self, start: storage::IteratorStart, direction: storage::IteratorDirection,
++        take: storage::TakeWhileFn, map: storage::FilterMapFn, limit: usize) -> Vec<storage::KVPair> {
++        storage::StorageBackend::collect_iterator(&self.storage, start, direction, take, map, limit)
++    }
++}
++impl LightClientStorage for IndexBeforeCommit {}
++
++fn recovery_races_filter(existing_unknown: bool) {
++    use ckb_types::{core::{BlockBuilder, TransactionBuilder}, packed::CellOutput, prelude::*};
++    use crate::storage::{HeaderWithExtension, ScriptStatus, ScriptType};
++    let (storage, _dir) = new_storage("recovery_races_filter");
++    let script = Script::default();
++    storage.update_filter_scripts(vec![ScriptStatus { script: script.clone(), script_type: ScriptType::Lock, block_number: 1 }], Default::default());
++    let tx = TransactionBuilder::default().output(CellOutput::new_builder().lock(script).build()).output_data(vec![1u8].pack()).build();
++    let indexed = BlockBuilder::default().epoch(ckb_types::core::EpochNumberWithFraction::new(0, 0, 100).full_value()).number(10u64).transaction(TransactionBuilder::default().build()).transaction(tx.clone()).build();
++    let fetched = BlockBuilder::default().epoch(ckb_types::core::EpochNumberWithFraction::new(0, 0, 100).full_value()).number(20u64).transaction(tx.clone()).build();
++    let hwe = HeaderWithExtension { header: fetched.data().header(), extension: None };
++    if existing_unknown { storage.add_fetched_tx(&tx.data(), &hwe); }
++    let interleaved = IndexBeforeCommit { storage: storage.clone(), block: indexed.data() };
++    interleaved.try_add_fetched_txs(&[(&tx.data(), &hwe)]).unwrap();
++    let (height, ordinal, _) = storage.get_transaction(&tx.hash()).unwrap();
++    assert_eq!((height, ordinal), (10, 1), "indexed commit wins over stale fetched snapshot");
++}
++#[test] fn recovery_absent_snapshot_cannot_overwrite_concurrent_index() { recovery_races_filter(false); }
++#[test] fn recovery_unknown_snapshot_cannot_overwrite_concurrent_index() { recovery_races_filter(true); }
 diff --git a/light-client-lib/src/tests/utils/chain.rs b/light-client-lib/src/tests/utils/chain.rs
 index fd4a593481bf888d5d2c3a63f721914a1ac5af84..5f0740b2d8f007faca06db36c3aaacb534e1351c 100644
 --- a/light-client-lib/src/tests/utils/chain.rs
@@ -14284,6 +17349,67 @@ index 776a88f024a0ba18a11848e8adf9fb45c1806ea8..096d611e2f2bcf1e98cbcca7fd4eeca1
 +    let storage = Storage::new(tmp_dir.path().join("store.db"));
      (storage, tmp_dir)
  }
+diff --git a/light-client-lib/src/tests/utils/network_context.rs b/light-client-lib/src/tests/utils/network_context.rs
+index 7ef8ed245d6ebc007df9e6c52f94355302879a91..22399c539f9581f10511dd944df0caa811188137 100644
+--- a/light-client-lib/src/tests/utils/network_context.rs
++++ b/light-client-lib/src/tests/utils/network_context.rs
+@@ -14,9 +14,11 @@ use crate::protocols::{Status, StatusCode};
+ 
+ struct MockProtocolContext {
+     protocol: SupportProtocols,
++    on_send: RefCell<Option<Box<dyn FnOnce()>>>,
+     sent_messages: RefCell<Vec<(ProtocolId, PeerIndex, P2pBytes)>>,
+     banned_peers: RefCell<Vec<(PeerIndex, Duration, String)>>,
+     connected_peers: RefCell<HashSet<PeerIndex>>,
++    disconnect_requests: RefCell<Vec<PeerIndex>>,
+ }
+ 
+ pub(crate) struct MockNetworkContext {
+@@ -31,9 +33,11 @@ impl MockProtocolContext {
+     fn new(protocol: SupportProtocols) -> Self {
+         Self {
+             protocol,
++            on_send: RefCell::new(None),
+             sent_messages: Default::default(),
+             banned_peers: Default::default(),
+             connected_peers: Default::default(),
++            disconnect_requests: Default::default(),
+         }
+     }
+ }
+@@ -45,6 +49,14 @@ impl MockNetworkContext {
+         Self { inner }
+     }
+ 
++    pub(crate) fn disconnect_requested(&self, peer: PeerIndex) -> bool {
++        self.inner.disconnect_requests.borrow().contains(&peer)
++    }
++
++    pub(crate) fn on_next_send(&self, callback: impl FnOnce() + 'static) {
++        *self.inner.on_send.borrow_mut() = Some(Box::new(callback));
++    }
++
+     pub(crate) fn sent_messages(&self) -> &RefCell<Vec<(ProtocolId, PeerIndex, P2pBytes)>> {
+         &self.inner.sent_messages
+     }
+@@ -186,6 +198,9 @@ impl CKBProtocolContext for MockProtocolContext {
+         peer_index: PeerIndex,
+         data: P2pBytes,
+     ) -> Result<(), Error> {
++        if let Some(callback) = self.on_send.borrow_mut().take() {
++            callback();
++        }
+         self.sent_messages
+             .borrow_mut()
+             .push((proto_id, peer_index, data));
+@@ -200,6 +215,7 @@ impl CKBProtocolContext for MockProtocolContext {
+         unimplemented!();
+     }
+     fn disconnect(&self, peer_index: PeerIndex, _message: &str) -> Result<(), Error> {
++        self.disconnect_requests.borrow_mut().push(peer_index);
+         self.connected_peers.borrow_mut().remove(&peer_index);
+         Ok(())
+     }
 diff --git a/light-client-lib/tests/cursor_roundtrip.rs b/light-client-lib/tests/cursor_roundtrip.rs
 new file mode 100644
 index 0000000000000000000000000000000000000000..0ae69b53e604b4a62f1f2fe7ead58547ceb102e2

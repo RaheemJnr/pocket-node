@@ -18,6 +18,32 @@ interface PendingBroadcastRoomDao {
     @Insert(onConflict = OnConflictStrategy.REPLACE)
     suspend fun insert(row: PendingBroadcastRow)
 
+    @Insert(onConflict = OnConflictStrategy.IGNORE)
+    suspend fun insertFresh(row: PendingBroadcastRow): Long
+
+    @Query("SELECT * FROM pending_broadcasts WHERE txHash = :hash")
+    suspend fun getByHash(hash: String): PendingBroadcastRow?
+
+    @Query("SELECT EXISTS(SELECT 1 FROM transactions WHERE txHash = :hash AND network = :network " +
+        "AND (walletId != :wallet OR status != 'PENDING' OR isLocal != 1))")
+    suspend fun hasAdvancedActivity(hash: String, network: String, wallet: String): Boolean
+
+    @Query("UPDATE transactions SET status = 'FAILED', cachedAt = :now WHERE txHash = :hash " +
+        "AND network = :network AND walletId = :wallet AND status = 'PENDING' AND isLocal = 1")
+    suspend fun failLocalActivity(hash: String, network: String, wallet: String, now: Long)
+
+    @androidx.room.Transaction
+    suspend fun failKnownUnsent(expected: PendingBroadcastRow, now: Long): Boolean {
+        val current = getByHash(expected.txHash) ?: return false
+        // Watchdog observations do not transfer ownership; submission/confirmation do.
+        if (expected.state != "BROADCASTING" ||
+            current.copy(nullCount = expected.nullCount, lastCheckedAt = expected.lastCheckedAt) != expected ||
+            hasAdvancedActivity(expected.txHash, expected.network, expected.walletId)) return false
+        if (compareAndUpdateState(expected.txHash, "BROADCASTING", "FAILED", now) != 1) return false
+        failLocalActivity(expected.txHash, expected.network, expected.walletId, now)
+        return true
+    }
+
     /**
      * CAS update: only writes if the current state matches [expected]. Returns
      * rows affected. Callers must check `== 1` before treating the transition
@@ -34,6 +60,26 @@ interface PendingBroadcastRoomDao {
         next: String,
         now: Long,
     ): Int
+
+    @Query("UPDATE pending_broadcasts SET state = 'BROADCAST', submittedAtTipBlock = :submittedAt, " +
+        "nullCount = 0, lastCheckedAt = :now WHERE txHash = :hash AND state = 'FAILED' " +
+        "AND lastCheckedAt = :expectedLastCheckedAt")
+    suspend fun rearmPendingRetry(hash: String, expectedLastCheckedAt: Long, submittedAt: Long, now: Long): Int
+
+    @Query("UPDATE transactions SET status = 'PENDING', cachedAt = :now WHERE txHash = :hash " +
+        "AND network = :network AND walletId = :wallet AND status = 'FAILED' AND isLocal = 1")
+    suspend fun rearmLocalFailedActivity(hash: String, network: String, wallet: String, now: Long)
+
+    @androidx.room.Transaction
+    suspend fun rearmAcceptedRetry(hash: String, expectedLastCheckedAt: Long, submittedAt: Long, now: Long): Int {
+        val current = getByHash(hash) ?: return 0
+        val changed = rearmPendingRetry(hash, expectedLastCheckedAt, submittedAt, now)
+        if (changed == 1) {
+            // The two rows publish together; chain-derived or advanced activity always wins.
+            rearmLocalFailedActivity(hash, current.network, current.walletId, now)
+        }
+        return changed
+    }
 
     @Query(
         "UPDATE pending_broadcasts SET nullCount = :count, lastCheckedAt = :now WHERE txHash = :hash"

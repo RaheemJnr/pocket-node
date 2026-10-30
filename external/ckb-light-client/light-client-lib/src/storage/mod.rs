@@ -18,7 +18,7 @@ use ckb_types::{
 mod backend;
 mod db;
 #[cfg(not(target_arch = "wasm32"))]
-pub use db::{IteratorMode, Direction};
+pub use db::{Direction, IteratorMode};
 mod storage_trait;
 
 // Re-export storage backend trait (low-level KV operations)
@@ -154,6 +154,10 @@ impl StorageWithChainData {
 
     pub fn peers(&self) -> &Arc<Peers> {
         &self.peers
+    }
+
+    pub fn recovery(&self) -> &crate::protocols::light_client::recovery::RecoveryRegistry {
+        self.peers.recovery()
     }
 
     pub fn pending_txs(&self) -> &RwLock<PendingTxs> {

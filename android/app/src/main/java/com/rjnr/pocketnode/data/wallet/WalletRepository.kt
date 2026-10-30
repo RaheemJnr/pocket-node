@@ -46,6 +46,7 @@ class WalletRepository @Inject constructor(
     private val subAccountDiscovery: SubAccountDiscovery,
     private val walletPreferences: WalletPreferences,
     private val logger: Logger,
+    private val recoveryLifetime: com.rjnr.pocketnode.data.gateway.DaoRecoveryLifetime = com.rjnr.pocketnode.data.gateway.DaoRecoveryLifetime(),
 ) {
     /** Operation-owned proposed metadata; only new UUID creation paths issue this context. */
     class Creation internal constructor(internal val wallet: WalletEntity, internal val expectedParent: WalletEntity? = null) {
@@ -463,6 +464,7 @@ class WalletRepository @Inject constructor(
      * Switch active wallet. Updates Room, preferences, and last-active timestamp.
      */
     suspend fun switchActiveWallet(walletId: String) {
+        recoveryLifetime.invalidate()
         val wallet = walletDao.getById(walletId)
             ?: throw IllegalArgumentException("Wallet not found: $walletId")
         // One transaction (#563 review F3): a failure part-way must leave
@@ -537,6 +539,8 @@ class WalletRepository @Inject constructor(
             // import are this wallet's rows too. Left behind, a wallet
             // removed right after import (Cancel on the sync sheet) would
             // leave them orphaned.
+            appDatabase.daoRecoveryDao().deleteGuardsForWallet(walletId)
+            appDatabase.daoRecoveryDao().deleteBudgetsForWallet(walletId)
             appDatabase.syncProgressDao().deleteForWallet(walletId)
             subAccountCandidateDao.deleteForParent(walletId)
             // Its send records (pending, broadcast and failed) go with it.
@@ -651,6 +655,7 @@ class WalletRepository @Inject constructor(
 
     /** Explicit installation reset. The marker survives failure, cancellation and process death. */
     suspend fun factoryReset() {
+        recoveryLifetime.invalidate()
         appDatabase.withTransaction { keyManager.walletStorage.beginReset() }
         com.rjnr.pocketnode.ui.screens.auth.ReauthLockEvents.onLocked()
         keyManager.deleteInstallationFiles()
@@ -678,7 +683,7 @@ class WalletRepository @Inject constructor(
     private companion object {
         val SECRET_TABLES = listOf("wallets", "key_material", "wallet_vault", "wallet_vault_legacy", "wallet_passphrase_profile")
         val RESET_TABLES = SECRET_TABLES + listOf("wallet_pending_cleanup", "transactions", "balance_cache", "dao_cells", "pending_dao_withdraws",
-            "pending_dao_unlocks", "sync_progress", "sub_account_candidates", "pending_broadcasts")
+            "pending_dao_unlocks", "dao_recovery_guards", "dao_recovery_retry_budget", "sync_progress", "sub_account_candidates", "pending_broadcasts")
     }
 
 }

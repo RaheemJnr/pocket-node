@@ -5,6 +5,9 @@ import com.rjnr.pocketnode.data.database.entity.DaoCellEntity
 
 @Dao
 interface DaoCellDao {
+    @Query("SELECT * FROM dao_cells")
+    suspend fun allRows(): List<DaoCellEntity>
+
 
     @Query("SELECT * FROM dao_cells WHERE network = :network AND status NOT IN ('COMPLETED')")
     suspend fun getActiveByNetwork(network: String): List<DaoCellEntity>

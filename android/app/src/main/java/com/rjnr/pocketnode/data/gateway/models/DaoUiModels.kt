@@ -35,5 +35,6 @@ data class DaoUiState(
     // #332: cached deposits that predate the sync window — drives the
     // deeper-rescan banner on DaoScreen.
     val outsideWindowCount: Int = 0,
-    val isDeepRescanning: Boolean = false
+    val isDeepRescanning: Boolean = false,
+    val checkingWithdrawal: OutPoint? = null
 )

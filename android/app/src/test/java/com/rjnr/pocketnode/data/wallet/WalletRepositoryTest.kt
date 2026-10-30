@@ -383,9 +383,19 @@ class WalletRepositoryTest {
                 )
             )
         }
+        for (wallet in listOf(wallet1, wallet2)) {
+            db.daoRecoveryDao().putGuard(com.rjnr.pocketnode.data.database.entity.DaoRecoveryEntity(
+                wallet.walletId, "TESTNET", "genesis", wallet.walletId, 16, 1000, 100, "script", 200, "block", "store", "run", 1))
+            db.daoRecoveryDao().putBudget(com.rjnr.pocketnode.data.database.entity.DaoRecoveryRetryEntity(
+                wallet.walletId, "TESTNET", "genesis", wallet.walletId, 16, 3, 1000, 1050, 601050))
+        }
         assertEquals(1, db.pendingDaoUnlockDao().getByWalletAndNetwork(wallet1.walletId, "TESTNET").size)
 
         repo.deleteWallet(wallet1.walletId)
+        assertTrue(db.daoRecoveryDao().guards("TESTNET", wallet1.walletId, 16).isEmpty())
+        assertNull(db.daoRecoveryDao().budget(wallet1.walletId, "TESTNET", "genesis", wallet1.walletId, 16))
+        assertEquals(1, db.daoRecoveryDao().guards("TESTNET", wallet2.walletId, 16).size)
+        assertNotNull(db.daoRecoveryDao().budget(wallet2.walletId, "TESTNET", "genesis", wallet2.walletId, 16))
 
         // Left behind, a marker re-attaches to a wallet re-imported under the
         // same id and overlays a confirming state on a position with nothing
@@ -971,6 +981,16 @@ class WalletRepositoryTest {
         assertTrue(pinManager.hasPin())
         // Something is left: recovery is not over.
         assertTrue(recoveryState.isIncomplete())
+    }
+
+    @Test fun `factory reset removes orphan recovery obligations and retry budgets`() = runTest {
+        db.daoRecoveryDao().putGuard(com.rjnr.pocketnode.data.database.entity.DaoRecoveryEntity(
+            "orphan", "TESTNET", "genesis", "hash", 16, 1000, 100, "script", 200, "block", "store", "run", 1))
+        db.daoRecoveryDao().putBudget(com.rjnr.pocketnode.data.database.entity.DaoRecoveryRetryEntity(
+            "orphan", "TESTNET", "genesis", "hash", 16, 3, 1000, 1050, 601050))
+        repo.factoryReset()
+        assertTrue(db.daoRecoveryDao().guards("TESTNET", "hash", 16).isEmpty())
+        assertNull(db.daoRecoveryDao().budget("orphan", "TESTNET", "genesis", "hash", 16))
     }
 
     @Test

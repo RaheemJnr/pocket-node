@@ -35,6 +35,7 @@ fun DaoDepositCard(
     // flight. The chain-visible status lags the broadcast by minutes, so the
     // button must close on what the app knows, not on what the scan shows.
     actionEnabled: Boolean = true,
+    checkingWithdrawal: Boolean = false,
 ) {
     Surface(
         modifier = modifier.fillMaxWidth(),
@@ -79,7 +80,9 @@ fun DaoDepositCard(
             Spacer(modifier = Modifier.height(6.dp))
 
             // Cycle countdown text
-            val cycleText = when (deposit.status) {
+            val cycleText = if (checkingWithdrawal && deposit.status in setOf(DaoCellStatus.LOCKED, DaoCellStatus.UNLOCKABLE)) {
+                stringResource(R.string.dao_checking_withdrawal_details)
+            } else when (deposit.status) {
                 DaoCellStatus.DEPOSITED -> {
                     val remainingProgress = 1f - deposit.compensationCycleProgress
                     val remainingDays = (remainingProgress * DaoConstants.WITHDRAW_EPOCHS * DaoConstants.HOURS_PER_EPOCH / 24).toInt()
@@ -90,7 +93,8 @@ fun DaoDepositCard(
                     // Missing evidence cannot be presented as a zero-hour wait.
                     val hours = deposit.lockRemainingHours
                     if (deposit.unlockEpoch == null || hours == null) {
-                        stringResource(R.string.dao_waiting_deposit_details)
+                        stringResource(if (deposit.withdrawBlockNumber != null) R.string.dao_withdrawal_details_unavailable
+                            else R.string.dao_waiting_deposit_details)
                     } else if (hours == 0) {
                         stringResource(R.string.dao_unlock_less_than_hour)
                     } else {
@@ -147,7 +151,7 @@ fun DaoDepositCard(
                     Spacer(modifier = Modifier.height(12.dp))
                     Button(
                         onClick = onWithdraw,
-                        enabled = actionEnabled,
+                        enabled = actionEnabled && !checkingWithdrawal,
                         modifier = Modifier.fillMaxWidth(),
                         shape = RoundedCornerShape(8.dp),
                         colors = ButtonDefaults.buttonColors(
@@ -162,7 +166,7 @@ fun DaoDepositCard(
                     Spacer(modifier = Modifier.height(12.dp))
                     Button(
                         onClick = onUnlock,
-                        enabled = actionEnabled,
+                        enabled = actionEnabled && !checkingWithdrawal,
                         modifier = Modifier.fillMaxWidth(),
                         shape = RoundedCornerShape(8.dp),
                         colors = ButtonDefaults.buttonColors(

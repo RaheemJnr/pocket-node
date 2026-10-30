@@ -76,6 +76,7 @@ class SendPipelineTest {
     private fun pipelineOver(
         api: FakeLightClientApi,
         pendingBroadcasts: PendingBroadcastStore = broadcasts,
+        authorizer: InputSubmissionAuthorizer = NoDaoRecoveryAdoption,
     ): SendPipeline {
         val syncPreferences = FakeSyncPreferences()
         val ledger = LedgerReader(
@@ -111,6 +112,7 @@ class SendPipelineTest {
             uiPreferences = uiPreferences,
             json = json,
             logger = NoopLogger,
+            inputAuthorizer = authorizer,
             clock = clock,
             // Keep every hop on the test dispatcher so the post-broadcast
             // re-register is observable from the test body: with a real
@@ -470,6 +472,87 @@ class SendPipelineTest {
     // ---- retry ----
 
     @Test
+    fun rejectedGuardedRetryPreservesOriginalSignedBytesAndFailedRecord() = runTest {
+        val original = pendingRow(txHash = PENDING_HASH, state = "FAILED",
+            reserved = listOf(LIVE_CELLS[0].outPoint), signedTx = pendingChangeTx(), nullCount = 3)
+        broadcasts.insert(original)
+        val bridge = api(sendAnswer = "\"$PENDING_HASH\"")
+        val result = pipelineOver(bridge, authorizer = InputSubmissionAuthorizer { _, _ ->
+            error("Recovery unavailable")
+        }).retryBroadcast(ctx(this), PENDING_HASH)
+        assertTrue(result.isFailure)
+        assertEquals(original, broadcasts.byHash[PENDING_HASH])
+        assertTrue(bridge.callsTo("sendTransaction").isEmpty())
+    }
+
+    @Test
+    fun lateGuardRefusalPreservesRetryBytesAndConcurrentConfirmation() = runTest {
+        val original = pendingRow(txHash = PENDING_HASH, state = "FAILED",
+            reserved = listOf(LIVE_CELLS[0].outPoint), signedTx = pendingChangeTx(), nullCount = 3)
+        broadcasts.insert(original)
+        val bridge = api(sendAnswer = "\"$PENDING_HASH\"")
+        var checks = 0
+        val result = pipelineOver(bridge, authorizer = InputSubmissionAuthorizer { _, _ ->
+            SubmissionAuthorization {
+                checks++
+                if (checks == 3) {
+                    broadcasts.compareAndUpdateState(PENDING_HASH, "FAILED", "CONFIRMED", 999)
+                    error("Recovery invalidated after preparation")
+                }
+            }
+        }).retryBroadcast(ctx(this), PENDING_HASH)
+        assertTrue(result.isFailure)
+        assertEquals(original.copy(state = "CONFIRMED", lastCheckedAt = 999), broadcasts.byHash[PENDING_HASH])
+        assertTrue(bridge.callsTo("sendTransaction").isEmpty())
+    }
+
+    @Test
+    fun invalidationDuringPendingPersistenceAbortsBeforeBridgeSubmission() = runTest {
+        var valid = true
+        val store = object : PendingBroadcastStore by broadcasts {
+            override suspend fun insertFresh(record: PendingBroadcastRecord): Boolean {
+                val inserted = broadcasts.insertFresh(record)
+                valid = false
+                return inserted
+            }
+        }
+        val bridge = api(sendAnswer = "\"$PENDING_HASH\"")
+        val signed = json.decodeFromString<Transaction>(pendingChangeTx())
+        val result = pipelineOver(bridge, store, InputSubmissionAuthorizer { _, _ ->
+            SubmissionAuthorization { check(valid) { "Recovery expired" } }
+        }).sendTransaction(ctx(this), signed)
+        assertTrue(result.isFailure)
+        assertTrue(bridge.callsTo("sendTransaction").isEmpty())
+        assertEquals(json.encodeToString(signed), broadcasts.byHash.values.single().signedTxJson)
+        assertEquals("FAILED", broadcasts.byHash.values.single().state)
+        assertTrue(broadcasts.getActive(WALLET, NetworkType.TESTNET.name).isEmpty())
+    }
+
+    @Test
+    fun cancellationAfterInsertCommitBeforeReturnReleasesKnownUnsentReservation() = runTest {
+        val inserted = CompletableDeferred<Unit>()
+        val release = CompletableDeferred<Unit>()
+        val store = object : PendingBroadcastStore by broadcasts {
+            override suspend fun insertFresh(record: PendingBroadcastRecord): Boolean {
+                val result = broadcasts.insertFresh(record)
+                inserted.complete(Unit)
+                release.await()
+                return result
+            }
+        }
+        val bridge = api(sendAnswer = "\"$PENDING_HASH\"")
+        val signed = json.decodeFromString<Transaction>(pendingChangeTx())
+        val sending = async { pipelineOver(bridge, store).sendTransaction(ctx(this), signed) }
+        inserted.await()
+        sending.cancel()
+        release.complete(Unit)
+        sending.join()
+        assertEquals("FAILED", broadcasts.byHash.values.single().state)
+        assertEquals(json.encodeToString(signed), broadcasts.byHash.values.single().signedTxJson)
+        assertTrue(bridge.callsTo("sendTransaction").isEmpty())
+    }
+
+    @Test
     fun retryReBroadcastsTheStoredBytesRatherThanRebuilding() = runTest {
         val stored = pendingChangeTx()
         broadcasts.insert(
@@ -494,8 +577,50 @@ class SendPipelineTest {
             json.decodeFromString<Transaction>(broadcastJson),
         )
         assertEquals("BROADCAST", broadcasts.byHash.getValue(PENDING_HASH).state)
-        // The FAILED row's nullCount is not carried into the retry.
+        // Acceptance rearms observation; refusals retain the captured counters.
         assertEquals(0, broadcasts.byHash.getValue(PENDING_HASH).nullCount)
+    }
+
+    @Test
+    fun acceptedRetryDoesNotOverwriteProgressDuringNativeSubmission() = runTest {
+        val original = pendingRow(PENDING_HASH, "FAILED", listOf(LIVE_CELLS[0].outPoint), pendingChangeTx(), 3)
+        for (state in listOf("CONFIRMED", "BROADCAST")) {
+            broadcasts.insert(original)
+            val advanced = original.copy(state = state, lastCheckedAt = 999)
+            val bridge = object : FakeLightClientApi() {
+                override fun sendTransaction(txJson: String): String? {
+                    assertEquals(original.signedTxJson, txJson)
+                    broadcasts.byHash[PENDING_HASH] = advanced
+                    return "\"$PENDING_HASH\""
+                }
+            }.enqueue("getTipHeader", LightClientFixtures.TIP_HEADER)
+                .enqueue("getTransactions", LightClientFixtures.GET_TRANSACTIONS_PAGE)
+                .enqueue("getCells", cellsPage(LIVE_CELLS))
+            pipelineOver(bridge).retryBroadcast(ctx(this), PENDING_HASH).getOrThrow()
+            assertEquals(advanced, broadcasts.byHash[PENDING_HASH])
+        }
+    }
+
+    @Test
+    fun acceptedRetryGetsFreshWatchdogWindowForInPoolAndNotFound() = runTest {
+        val original = pendingRow(PENDING_HASH, "FAILED", listOf(LIVE_CELLS[0].outPoint), pendingChangeTx(), 3)
+        val currentTip = LightClientFixtures.TIP_HEADER_NUMBER
+        for (status in listOf(com.rjnr.pocketnode.data.sync.TxFetchResult.InPool, com.rjnr.pocketnode.data.sync.TxFetchResult.NotFound)) {
+            broadcasts.insert(original)
+            pipelineOver(api(sendAnswer = "\"$PENDING_HASH\"")).retryBroadcast(ctx(this), PENDING_HASH).getOrThrow()
+            val wd = com.rjnr.pocketnode.data.sync.BroadcastWatchdog(broadcasts,
+                com.rjnr.pocketnode.data.sync.TransactionStatusGateway { status }, transactions,
+                object : com.rjnr.pocketnode.data.gateway.TipSource {
+                    override val tipFlow = kotlinx.coroutines.flow.MutableStateFlow(currentTip)
+                    override suspend fun fetchAndPublishTip() = currentTip
+                    override fun activeWalletAndNetworkOrNull() = WALLET to "TESTNET"
+                }, { true }, kotlinx.coroutines.test.StandardTestDispatcher(testScheduler), NoopLogger, clock)
+            repeat(3) { wd.checkAll(currentTip, WALLET, "TESTNET") }
+            assertEquals("BROADCAST", broadcasts.byHash.getValue(PENDING_HASH).state)
+            assertEquals(currentTip, broadcasts.byHash.getValue(PENDING_HASH).submittedAtTipBlock)
+            wd.checkAll(currentTip + 25, WALLET, "TESTNET")
+            assertEquals("FAILED", broadcasts.byHash.getValue(PENDING_HASH).state)
+        }
     }
 
     @Test

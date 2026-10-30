@@ -211,6 +211,21 @@ pub fn init(
         BAD_MESSAGE_ALLOWED_EACH_HOUR,
     ));
 
+    let generation = super::verification_epoch::read(&storage)?.generation;
+    peers
+        .recovery()
+        .initialize(
+            crate::protocols::light_client::recovery::RecoveryIdentity {
+                genesis_hash: consensus.genesis_block().hash(),
+                store_generation: generation,
+                run_nonce: rand::random(),
+            },
+            crate::protocols::light_client::recovery::ChainSnapshot {
+                anchor: storage.get_tip_header(),
+            },
+        )
+        .map_err(|_| BridgeError::Storage("recovery authority initialization failed".into()))?;
+
     // Initialize protocols
     info!("Initializing protocols...");
     let sync_protocol = SyncProtocol::new(storage.clone(), Arc::clone(&peers));
@@ -510,6 +525,9 @@ pub fn stop() -> Result<(), BridgeError> {
         return Err(BridgeError::NotInitialized);
     }
 
+    if let Some(swc) = STORAGE_WITH_DATA.get() {
+        swc.peers().recovery().revoke_run();
+    }
     info!("Stopping CKB Light Client...");
 
     match shutdown_sequence(
@@ -808,6 +826,10 @@ listen_address = "127.0.0.1:0"
         )
         .expect("init");
         start().expect("start");
+        let recovery = STORAGE_WITH_DATA.get().unwrap().recovery();
+        let recovery_request = recovery
+            .request(Default::default(), std::time::Instant::now())
+            .unwrap();
 
         let began = std::time::Instant::now();
         stop().expect("stop");
@@ -815,6 +837,12 @@ listen_address = "127.0.0.1:0"
 
         assert!(elapsed < Duration::from_secs(10), "stop took {elapsed:?}");
         assert!(is_stopped());
+        assert!(recovery
+            .poll(recovery_request, std::time::Instant::now())
+            .is_err());
+        assert!(recovery
+            .request(Default::default(), std::time::Instant::now())
+            .is_err());
         assert!(
             matches!(start(), Err(BridgeError::Stopped)),
             "start after stop must report Stopped"
