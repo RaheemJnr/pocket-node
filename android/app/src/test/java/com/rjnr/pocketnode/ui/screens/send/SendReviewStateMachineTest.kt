@@ -993,6 +993,54 @@ class SendReviewStateMachineTest {
         } finally { gate.complete(Unit); androidx.lifecycle.ViewModelStore().apply { put("readiness", vm); clear() }; runCurrent() }
     }
 
+    @Test fun `bulk resync epoch gets bounded post-scan count and rejects obsolete same-address completions`() = runTest(testDispatcher) {
+        for (oldFailure in listOf(false, true)) {
+            val complete = com.rjnr.pocketnode.data.gateway.CellCountStage.CAUGHT_UP
+            val stages = MutableStateFlow<com.rjnr.pocketnode.data.gateway.CellCountReadiness?>(readiness(stage = complete))
+            every { repository.cellCountReadiness } returns stages
+            val oldGate = kotlinx.coroutines.CompletableDeferred<Unit>()
+            var calls = 0
+            coEvery { repository.getCells(any()) } coAnswers {
+                val call = ++calls
+                kotlinx.coroutines.yield()
+                when (call) {
+                    1 -> {
+                        kotlinx.coroutines.withContext(kotlinx.coroutines.NonCancellable) { oldGate.await() }
+                        if (oldFailure) Result.failure(kotlinx.coroutines.CancellationException("obsolete"))
+                        else Result.success(com.rjnr.pocketnode.data.gateway.models.CellsResponse(plannedTransfer.selectedCells.take(1), null))
+                    }
+                    2 -> Result.failure(IllegalStateException("rescan in progress"))
+                    else -> Result.success(com.rjnr.pocketnode.data.gateway.models.CellsResponse(plannedTransfer.selectedCells, null))
+                }
+            }
+            val vm = newViewModel(); runCurrent()
+            try {
+                vm.updateSendMode(SendMode.BULK); runCurrent()
+                assertEquals(1, calls)
+                stages.value = readiness(epoch = 2).copy(activationEpoch = 1); runCurrent()
+                assertEquals(2, calls)
+                assertEquals(0, vm.uiState.value.spendableCellCount)
+                stages.value = readiness(epoch = 2, stage = complete).copy(activationEpoch = 1); runCurrent()
+                assertEquals(3, calls)
+                assertEquals(4, vm.uiState.value.spendableCellCount)
+                val fresh = vm.uiState.value
+                oldGate.complete(Unit); runCurrent()
+                assertEquals(fresh, vm.uiState.value)
+                repeat(3) {
+                    stages.value = readiness(epoch = 2).copy(activationEpoch = 1); runCurrent()
+                    stages.value = readiness(epoch = 2, stage = complete).copy(activationEpoch = 1); runCurrent()
+                }
+                assertEquals(3, calls)
+                vm.updateSendMode(SendMode.SINGLE)
+                stages.value = readiness(epoch = 3).copy(activationEpoch = 1); runCurrent()
+                assertEquals(3, calls)
+            } finally {
+                oldGate.complete(Unit)
+                androidx.lifecycle.ViewModelStore().apply { put("resyncEpoch", vm); clear() }; runCurrent()
+            }
+        }
+    }
+
     @Test fun `bulk final count failure retains the successful same-source count without retrying`() = runTest(testDispatcher) {
         assertFinalBulkCountResult(failure = true)
     }

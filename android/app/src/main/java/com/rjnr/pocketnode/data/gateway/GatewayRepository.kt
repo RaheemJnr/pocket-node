@@ -555,6 +555,8 @@ class GatewayRepository @Inject constructor(
         // No-op when the last landed set was already computed for the
         // active wallet (#539 "make sure the active wallet is registered").
         skipIfActiveRegistered: Boolean = false,
+        // Explicit resync acquisition only; invoked before post-set bookkeeping.
+        onSetLanded: () -> Unit = {},
     ): Result<Unit> = runCatching {
         // Force IO dispatcher — see registerAllWalletScripts above for the same
         // reasoning. ACTIVE_ONLY callers also block Main without this. (#109)
@@ -680,6 +682,7 @@ class GatewayRepository @Inject constructor(
                 onLanded = {
                     landed = true
                     _isRegistered.value = true
+                    onSetLanded()
                     markCellCountRegistered(countActivation)
                     if (savePreference) {
                         val wId = walletId.ifEmpty { null }
@@ -713,6 +716,21 @@ class GatewayRepository @Inject constructor(
         // Reading activeWalletId again later would reset, register or roll
         // back whichever wallet happens to be active by then.
         val walletId = activeWalletId
+        val countSource = cellCountReadiness.value?.takeIf { it.walletId == walletId && it.network == currentNetwork }
+        var countResync: CellCountReadiness? = null
+        // Bind after suspending pre-set work, under the registration lock. Two
+        // queued intents in the same activation each bind the epoch their own set
+        // replaces; a wallet A -> B -> A activation cannot adopt an old intent.
+        fun bindCountResync() {
+            val current = cellCountReadiness.value
+            countResync = current.takeIf {
+                countSource != null && it?.activationEpoch == countSource.activationEpoch &&
+                    isCurrentCellCountSource(countSource) && isCurrentCellCountSource(it)
+            }
+        }
+        fun countResyncLanded() {
+            if (isCurrentCellCountSource(countResync)) cellCountReadinessTracker.resyncLanded(countResync)
+        }
         _isRegistered.value = false
         // Snapshot for the rollbacks below, taken under the registration
         // lock right before the progress is zeroed (#539).
@@ -741,9 +759,16 @@ class GatewayRepository @Inject constructor(
                 // for this wallet only reads its progress as 0; other
                 // wallets resume.
                 var persisted = false
+                val context = makeSyncContext()
                 runCatching {
                     syncCoordinator.registerAllWalletScripts(
-                        ctx = makeSyncContext().copy(
+                        ctx = context.copy(
+                            onScriptsRegistered = {
+                                // Supersede the old epoch before its normal registration
+                                // callback can emit an intermediate readiness stage.
+                                countResyncLanded()
+                                context.onScriptsRegistered()
+                            },
                             getWalletSyncBlock = { id ->
                                 if (id == walletId) 0L else getWalletSyncBlock(id)
                             },
@@ -768,6 +793,7 @@ class GatewayRepository @Inject constructor(
                                     walletPreferences.setCustomBlockHeight(customBlockHeight, walletId = wId)
                                 }
                                 walletPreferences.setInitialSyncCompleted(true, walletId = wId)
+                                bindCountResync()
                             },
                             // Still under the mutex, and only when the set
                             // did not land: undo the writes above before any
@@ -803,7 +829,9 @@ class GatewayRepository @Inject constructor(
                         previousSyncBlock = getWalletSyncBlock(walletId)
                         zeroed = true
                         setWalletSyncBlock(walletId, 0L)
+                        bindCountResync()
                     },
+                    onSetLanded = ::countResyncLanded,
                     onNotLanded = {
                         if (zeroed) setWalletSyncBlock(walletId, previousSyncBlock)
                     },

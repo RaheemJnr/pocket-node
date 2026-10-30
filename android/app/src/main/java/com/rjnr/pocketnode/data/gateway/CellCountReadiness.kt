@@ -16,9 +16,11 @@ data class CellCountReadiness(
     val address: String,
     val script: Script,
     val stage: CellCountStage,
+    /** Stable across resync epochs; replaced when wallet/network/address activation changes. */
+    val activationEpoch: Long = epoch,
 )
 
-/** Bounded initial-acquisition hints, not transaction authority or a continuously fresh index guarantee. */
+/** Bounded count-acquisition hints, not transaction authority or a continuously fresh index guarantee. */
 internal class CellCountReadinessTracker {
     private val state = MutableStateFlow<CellCountReadiness?>(null)
     val readiness = state.asStateFlow()
@@ -38,6 +40,14 @@ internal class CellCountReadinessTracker {
         val current = state.value ?: return
         if (expected?.epoch != current.epoch || current.stage != CellCountStage.WAITING) return
         state.value = current.copy(stage = CellCountStage.REGISTERED)
+    }
+
+    /** One explicit resync set landed for this serialized acquisition token. */
+    @Synchronized
+    fun resyncLanded(expected: CellCountReadiness?) {
+        val current = state.value ?: return
+        if (expected?.epoch != current.epoch) return
+        state.value = current.copy(epoch = ++epoch, stage = CellCountStage.REGISTERED)
     }
 
     /** Called only for a fresh chain read held under the repository's registration lock. */

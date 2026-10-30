@@ -40,6 +40,34 @@ class CellCountReadinessTrackerTest {
         assertEquals(complete, tracker.readiness.value)
     }
 
+    @Test fun `landed resync replaces an epoch once and rejects duplicate stale and ABA callbacks`() {
+        val tracker = CellCountReadinessTracker()
+        tracker.activate("a", NetworkType.TESTNET, info)
+        tracker.registered(tracker.readiness.value)
+        tracker.observe(tracker.readiness.value, chain(100, 100))
+        val original = tracker.readiness.value!!
+        tracker.resyncLanded(original)
+        val first = tracker.readiness.value!!
+        assertEquals(original.epoch + 1, first.epoch)
+        assertEquals(original.activationEpoch, first.activationEpoch)
+        assertEquals(CellCountStage.REGISTERED, first.stage)
+        tracker.resyncLanded(original)
+        tracker.observe(original, chain(100, 100))
+        assertEquals(first, tracker.readiness.value)
+        tracker.resyncLanded(first) // A second serialized set binds the first set's new epoch.
+        assertEquals(first.epoch + 1, tracker.readiness.value!!.epoch)
+        val stale = tracker.readiness.value!!
+        tracker.activate("b", NetworkType.TESTNET, info.copy(testnetAddress = "other"))
+        val other = tracker.readiness.value
+        tracker.resyncLanded(stale)
+        assertEquals(other, tracker.readiness.value)
+        tracker.activate("a", NetworkType.TESTNET, info)
+        val returned = tracker.readiness.value
+        assertNotEquals(original.activationEpoch, returned!!.activationEpoch)
+        tracker.resyncLanded(stale)
+        assertEquals(returned, tracker.readiness.value)
+    }
+
     @Test fun `old source registration and completion cannot advance new activation including ABA`() {
         val tracker = CellCountReadinessTracker()
         tracker.activate("a", NetworkType.TESTNET, info)
