@@ -136,6 +136,8 @@ class ProvenanceTest(unittest.TestCase):
         result = subprocess.run(['bash','-e','-c',step['run']], cwd=self.root, env=env, capture_output=True, text=True)
         self.assertEqual(result.returncode,0,result.stderr)
         self.assertEqual((self.root / 'calls.txt').read_text().splitlines(), ['sign','verify'])
+        self.assertIn('Signer #1 certificate SHA-256 digest: ' + 'b'*64, result.stdout)
+        self.assertIn('Android build-tools: fixture', result.stdout)
         self.assertEqual((self.root / 'PocketNode-fixture.apk').read_bytes(), b'signed fixture')
 
     def test_signed_artifact_and_certificate_outputs(self):
