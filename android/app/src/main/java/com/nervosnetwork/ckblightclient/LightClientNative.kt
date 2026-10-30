@@ -137,6 +137,9 @@ object LightClientNative {
         cursor: String?
     ): String?
 
+    /** Complete canonical history membership for one lock script, or null if unproven. */
+    external fun nativeGetHistorySnapshot(scriptJson: String): String?
+
     /**
      * Get transactions
      * @param searchKeyJson JSON of SearchKey

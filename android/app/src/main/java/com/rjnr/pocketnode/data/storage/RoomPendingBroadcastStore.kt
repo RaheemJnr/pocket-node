@@ -30,6 +30,9 @@ class RoomPendingBroadcastStore @Inject constructor(
     override suspend fun failKnownUnsent(expected: PendingBroadcastRecord, now: Long): Boolean =
         dao.failKnownUnsent(expected.toEntity(), now)
 
+    override suspend fun reconcileObservation(expected: PendingBroadcastRecord, next: String, nullCount: Int, now: Long): Boolean =
+        dao.reconcileObservation(expected.toEntity(), next, nullCount, now)
+
     override suspend fun compareAndUpdateState(
         hash: String,
         expected: String,

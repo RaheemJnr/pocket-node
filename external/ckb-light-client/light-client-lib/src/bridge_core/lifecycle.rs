@@ -570,8 +570,83 @@ pub fn status() -> u8 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use ckb_types::prelude::*;
     use std::cell::RefCell;
     use std::sync::atomic::{AtomicU8, AtomicUsize};
+
+    // These are the exact resources passed to the mobile bridge, including on
+    // app upgrades (both platform installers refresh the generated TOML).
+    const MOBILE_CONFIGS: [&str; 4] = [
+        include_str!("../../../../../android/app/src/main/assets/mainnet.toml"),
+        include_str!("../../../../../android/app/src/main/assets/testnet.toml"),
+        include_str!("../../../../../ios/PocketNode/Resources/mainnet.toml"),
+        include_str!("../../../../../ios/PocketNode/Resources/testnet.toml"),
+    ];
+
+    #[test]
+    fn mobile_configs_are_outbound_only_with_discovery() {
+        for (index, config) in MOBILE_CONFIGS.iter().enumerate() {
+            let env: RunEnv = toml::from_str(config).expect("mobile config must parse");
+            assert!(
+                env.network.listen_addresses.is_empty(),
+                "config {index} binds a P2P listener"
+            );
+            assert_eq!(
+                env.chain,
+                if index % 2 == 0 { "mainnet" } else { "testnet" }
+            );
+            assert!(!env.network.bootnodes.is_empty());
+            assert!(env.network.outbound_peer_service_enabled());
+            assert_eq!(env.network.max_outbound_peers, 8);
+            assert!(!env.network.upnp);
+            assert!(!env.network.discovery_local_address);
+            assert!(!env.network.bootnode_mode);
+        }
+    }
+
+    /// Run separately: native init publishes process-global state. Only seed
+    /// destinations are removed from the real resource, preventing live-peer
+    /// access; the listener policy, protocols and outbound scheduler stay real.
+    #[test]
+    #[ignore = "isolated native startup; run alone with POCKET_MOBILE_CONFIG_INDEX=0..3"]
+    fn mobile_outbound_only_native_startup() {
+        let index: usize = std::env::var("POCKET_MOBILE_CONFIG_INDEX")
+            .expect("select a mobile resource 0..3")
+            .parse()
+            .unwrap();
+        let mut env: RunEnv = toml::from_str(MOBILE_CONFIGS[index]).unwrap();
+        assert!(env.network.listen_addresses.is_empty());
+        env.network.bootnodes.clear();
+        env.network.dns_seeds.clear();
+        env.network.whitelist_peers.clear();
+        let dir = tempfile::tempdir().unwrap();
+        let config_path = dir.path().join("mobile.toml");
+        fs::write(&config_path, toml::to_string(&env).unwrap()).unwrap();
+        init(
+            config_path.to_str().unwrap(),
+            dir.path().to_str().unwrap(),
+            None,
+        )
+        .unwrap();
+        start().unwrap();
+        assert_eq!(status(), STATE_RUNNING);
+        let controller = NET_CONTROL.get().unwrap();
+        assert!(controller.public_urls(usize::MAX).is_empty());
+        assert!(controller.connected_peers().is_empty());
+        let storage = STORAGE_WITH_DATA.get().unwrap();
+        assert_eq!(
+            storage.storage().get_tip_header().as_slice(),
+            CONSENSUS
+                .get()
+                .unwrap()
+                .genesis_block()
+                .data()
+                .header()
+                .as_slice()
+        );
+        stop().unwrap();
+        assert_eq!(status(), STATE_STOPPED);
+    }
 
     /// `shutdown_sequence` must broadcast first and only then start polling:
     /// that ordering is the whole bug in #487, where the wait ran against a

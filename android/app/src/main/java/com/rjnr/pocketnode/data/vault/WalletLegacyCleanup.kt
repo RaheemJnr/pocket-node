@@ -64,8 +64,11 @@ class WalletLegacyCleanup(
                 if (authenticated == null && !acknowledged || authenticated != null && !preserved(authenticated)) return@withContext false
             }
             val scopedReadable = scopedArchive?.let { legacy.legacySourceForVaultCleanup(it) }
-            if (scopedReadable != null && addresses(scopedReadable.privateKeyHex) == identity &&
-                scopedReadable.mnemonic != null && scopedReadable.mnemonic != verifiedMaterial.mnemonic) return@withContext false
+            // A scoped namespace does not prove the archive's identity or seed capability.
+            // In particular, a temporary V1 read failure must not retire a recoverable seed.
+            if (scopedArchive?.kdfVersion == 1 && (scopedReadable == null ||
+                addresses(scopedReadable.privateKeyHex) != identity ||
+                scopedReadable.mnemonic != null && scopedReadable.mnemonic != verifiedMaterial.mnemonic)) return@withContext false
             val scopedBackup = backup.cleanupSnapshot(walletId)
             // A readable row proves only its own capabilities, never opaque backup contents.
             if (scopedBackup.any { it != null } && witnessed[walletId] == null) return@withContext false

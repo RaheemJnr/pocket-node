@@ -10,7 +10,9 @@ path = "data/store"
 [network]
 path = "data/network"
 
-listen_addresses = ["/ip4/0.0.0.0/tcp/8118"]
+# Mobile clients sync through outbound peers; do not accept inbound P2P.
+# An explicit empty list is supported by the pinned native network client.
+listen_addresses = []
 ### Specify the public and routable network addresses
 # public_addresses = []
 

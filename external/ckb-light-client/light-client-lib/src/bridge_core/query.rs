@@ -373,20 +373,12 @@ fn set_scripts_ordered(
 ) -> Result<(), BridgeError> {
     let peers = get_peers()?;
 
+    // Match the service/RPC lock order: exclude old filter/index work BEFORE
+    // landing new registration progress. Clear the old matched set after the write.
+    // Peers lookup still precedes every mutation (#555).
+    let mut matched_blocks = peers.matched_blocks().blocking_write();
     update_storage();
 
-    // Clear matched blocks when scripts change.
-    // Lock matched_blocks and clear them.
-    // `blocking_write` panics inside a tokio runtime context, so this must only
-    // ever be called from a plain platform thread (the JNI and UniFFI callers).
-    //
-    // This step runs after the storage write and cannot move ahead of it
-    // (clearing matched blocks for the *new* script set only makes sense once
-    // that set has landed). It cannot itself return an error: `blocking_write`
-    // only panics (a programmer error, not a runtime condition) and
-    // `clear_matched_blocks` is infallible, so it cannot turn a landed write
-    // back into a reported failure.
-    let mut matched_blocks = peers.matched_blocks().blocking_write();
     peers.clear_matched_blocks(&mut matched_blocks);
 
     Ok(())
@@ -550,12 +542,16 @@ pub fn get_cells(
         BridgeError::Storage("storage not initialized".to_owned())
     })?;
 
+    let peers = PEERS.get().ok_or_else(|| BridgeError::Storage("cells unavailable".into()))?;
+
     // Build prefix based on script type (use Cell prefix, not Tx prefix)
     let prefix = search_prefix(
         &search_key,
         KeyPrefix::CellLockScript,
         KeyPrefix::CellTypeScript,
     );
+    let _matched = super::cell_read::acquire(peers.matched_blocks(), peers.recovery(), |chain|
+        super::history::cells_ready(swc.storage(), &prefix, chain))?;
 
     // Determine from_key based on cursor
     let (from_key, skip) = from_key_for(&prefix, direction, cursor_str);
@@ -814,12 +810,16 @@ pub fn get_cells_capacity(search_key_str: &str) -> Result<String, BridgeError> {
         BridgeError::Storage("storage not initialized".to_owned())
     })?;
 
+    let peers = PEERS.get().ok_or_else(|| BridgeError::Storage("cells unavailable".into()))?;
+
     // Build prefix based on script type
     let prefix = search_prefix(
         &search_key,
         KeyPrefix::CellLockScript,
         KeyPrefix::CellTypeScript,
     );
+    let _matched = super::cell_read::acquire(peers.matched_blocks(), peers.recovery(), |chain|
+        super::history::cells_ready(swc.storage(), &prefix, chain))?;
 
     // Iterate over cells and sum capacity
     let mode = IteratorMode::From(prefix.as_ref(), Direction::Forward);
@@ -1132,6 +1132,14 @@ mod tests {
             !storage_written.get(),
             "storage must not be written when the peers lookup fails"
         );
+    }
+
+    #[test]
+    fn registration_storage_write_excludes_old_filter_work() {
+        let peers = test_peers();
+        set_scripts_ordered(|| Ok(Arc::clone(&peers)), || {
+            assert!(peers.matched_blocks().try_write().is_err(), "registration must exclude in-flight old filter work");
+        }).unwrap();
     }
 
     /// Happy path: once the peers lookup succeeds, storage is written and the

@@ -26,6 +26,9 @@ class RoomKmpTransactionStore(
     private val clock: Clock = SystemClock,
 ) : TransactionStore {
 
+    override suspend fun reconcileCanonicalHistory(snapshot: com.rjnr.pocketnode.data.gateway.CanonicalHistorySnapshot, walletId: String, network: String, isCurrent: suspend () -> Boolean) =
+        dao.reconcileCanonicalHistory(snapshot, walletId, network, isCurrent)
+
     override suspend fun getBlockNumbers(walletId: String, network: String): List<String> =
         dao.getBlockNumbers(walletId, network)
 
@@ -103,9 +106,11 @@ class RoomKmpTransactionStore(
     override suspend fun getOrphanPendingHashes(walletId: String, network: String): List<String> =
         dao.getOrphanPendingHashes(walletId, network)
 
+    override suspend fun reconcileOrphan(hash: String, walletId: String, network: String, status: String) =
+        dao.reconcileOrphan(hash, walletId, network, status, clock.nowMs())
+
     override suspend fun updateTransactionStatus(hash: String, status: String) {
-        // Propagates on purpose: the watchdog calls this BEFORE the terminal
-        // CAS so a database hiccup leaves the pending row recoverable.
+        // Propagate store failures; reconciliation uses its separate conditional APIs.
         dao.updateStatusOnly(hash, status, clock.nowMs())
     }
 

@@ -23,6 +23,8 @@
 pub mod dao;
 pub mod dao_recovery;
 pub mod error;
+mod cell_read;
+pub mod history;
 pub mod lifecycle;
 pub mod query;
 pub mod rpc;

@@ -159,6 +159,10 @@ final class UniffiLightClientApi: NSObject, LightClientApi, @unchecked Sendable 
         }
     }
 
+    func getHistorySnapshot(scriptJson: String) -> String? {
+        query("getHistorySnapshot") { try CkbLightClient.getHistorySnapshot(scriptJson: scriptJson) }
+    }
+
     func getTransactions(
         searchKeyJson: String,
         order: String,

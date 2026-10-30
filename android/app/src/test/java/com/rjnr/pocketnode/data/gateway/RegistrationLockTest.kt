@@ -34,6 +34,7 @@ import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withTimeout
 import kotlinx.serialization.encodeToString
@@ -112,7 +113,11 @@ class RegistrationLockTest {
             return tipJson
         }
 
-        override fun getScripts(): String? = scripts()
+        @Volatile var onScriptsRead: () -> Unit = {}
+        override fun getScripts(): String? {
+            onScriptsRead()
+            return scripts()
+        }
     }
 
     private class SignalLogger : Logger {
@@ -256,6 +261,267 @@ class RegistrationLockTest {
 
     private fun argsOf(payload: String): Set<String> =
         json.decodeFromString<List<JniScriptStatus>>(payload).map { it.script.args }.toSet()
+
+    @Test
+    fun `cell count readiness requires landed registration and a fresh complete exact-script poll`() = runBlocking {
+        build()
+        assertNotNull("wallet initialization publishes its epoch", repository.cellCountReadiness.value)
+        assertEquals(CellCountStage.WAITING, repository.cellCountReadiness.value!!.stage)
+        reportedScripts = statusesJson(activeScript to tip)
+        repository.getAccountStatus().getOrThrow()
+        assertEquals(CellCountStage.WAITING, repository.cellCountReadiness.value!!.stage)
+        walletPreferences.setSyncStrategy(SyncStrategy.ACTIVE_ONLY)
+        repository.registerAccountWithStrategy(savePreference = false).getOrThrow()
+        assertEquals(CellCountStage.REGISTERED, repository.cellCountReadiness.value!!.stage)
+        reportedScripts = statusesJson(activeScript to tip - 1)
+        repository.getAccountStatus().getOrThrow()
+        assertEquals(CellCountStage.REGISTERED, repository.cellCountReadiness.value!!.stage)
+        reportedScripts = statusesJson(activeScript to tip)
+        repository.getAccountStatus().getOrThrow()
+        assertEquals(CellCountStage.CAUGHT_UP, repository.cellCountReadiness.value!!.stage)
+
+        // ALL registration uses a different callback and must own the next activation.
+        walletPreferences.setSyncStrategy(SyncStrategy.ALL_WALLETS)
+        val other = db.walletDao().getById(OTHER)!!
+        repository.onActiveWalletChanged(other)
+        assertEquals(OTHER, repository.cellCountReadiness.value!!.walletId)
+        assertEquals(CellCountStage.REGISTERED, repository.cellCountReadiness.value!!.stage)
+        repository.getAccountStatus().getOrThrow() // Old wallet's complete script cannot complete OTHER.
+        assertEquals(CellCountStage.REGISTERED, repository.cellCountReadiness.value!!.stage)
+        reportedScripts = statusesJson(otherScript to tip)
+        repository.getAccountStatus().getOrThrow()
+        assertEquals(CellCountStage.CAUGHT_UP, repository.cellCountReadiness.value!!.stage)
+    }
+
+    @Test
+    fun `cell count readiness adopts a set landed before walletInfo without another registration`() = runBlocking {
+        build()
+        walletPreferences.setSyncStrategy(SyncStrategy.ALL_WALLETS)
+        repository.registerAccountWithStrategy(savePreference = false).getOrThrow()
+        db.walletDao().deactivateAll()
+        db.walletDao().activate(OTHER)
+        repository.needsMnemonicBackup() // Reassigns and registers before walletInfo adoption.
+        withTimeout(10_000) { assertNotNullJob().join() }
+        assertEquals(OTHER, coordinator.registeredActiveWalletId)
+        assertEquals(activeScript, repository.walletInfo.value!!.script)
+        repository.initializeWallet().getOrThrow()
+        assertEquals(CellCountStage.WAITING, repository.cellCountReadiness.value!!.stage)
+        reportedScripts = statusesJson(otherScript to tip)
+        repository.getAccountStatus().getOrThrow()
+        assertEquals(OTHER, repository.cellCountReadiness.value!!.walletId)
+        assertEquals(CellCountStage.CAUGHT_UP, repository.cellCountReadiness.value!!.stage)
+        assertEquals("readiness must not re-register", 2, bridge.landed.size)
+    }
+
+    @Test
+    fun `cell count readiness ignores complete fallback reads while registration lock is busy`() = runBlocking {
+        build()
+        walletPreferences.setSyncStrategy(SyncStrategy.ACTIVE_ONLY)
+        repository.registerAccountWithStrategy(savePreference = false).getOrThrow()
+        reportedScripts = statusesJson(activeScript to tip)
+        bridge.onSetScripts = {
+            assertTrue(coordinator.isRegistrationLocked)
+            repository.getAccountStatus().getOrThrow()
+            assertEquals(CellCountStage.REGISTERED, repository.cellCountReadiness.value!!.stage)
+        }
+        repository.registerAccountWithStrategy(savePreference = false).getOrThrow()
+        bridge.onSetScripts = {}
+        repository.getAccountStatus().getOrThrow()
+        assertEquals(CellCountStage.CAUGHT_UP, repository.cellCountReadiness.value!!.stage)
+    }
+
+    @Test
+    fun `cell count readiness discards a poll suspended across wallet activation`() = runBlocking {
+        build()
+        walletPreferences.setSyncStrategy(SyncStrategy.ALL_WALLETS)
+        repository.registerAccountWithStrategy(savePreference = false).getOrThrow()
+        val original = repository.cellCountReadiness.value!!
+        reportedScripts = statusesJson(activeScript to tip)
+        val entered = CompletableDeferred<Unit>()
+        val release = CompletableDeferred<Unit>()
+        bridge.onScriptsRead = {
+            entered.complete(Unit)
+            runBlocking { release.await() }
+        }
+        val poll = launch(Dispatchers.IO) { repository.getAccountStatus().getOrThrow() }
+        var switch: kotlinx.coroutines.Job? = null
+        try {
+            withTimeout(10_000) { entered.await() }
+            val other = db.walletDao().getById(OTHER)!!
+            switch = launch(Dispatchers.IO) { repository.onActiveWalletChanged(other) }
+            val pending = withTimeout(10_000) { repository.cellCountReadiness.first { it?.walletId == OTHER } }!!
+            assertTrue(pending.epoch > original.epoch)
+            assertEquals(CellCountStage.WAITING, pending.stage)
+            bridge.onScriptsRead = {}
+            release.complete(Unit)
+            withTimeout(10_000) { poll.join(); switch.join() }
+            assertEquals(OTHER, repository.cellCountReadiness.value!!.walletId)
+            assertEquals(CellCountStage.REGISTERED, repository.cellCountReadiness.value!!.stage)
+            reportedScripts = statusesJson(otherScript to tip)
+            repository.getAccountStatus().getOrThrow()
+            assertEquals(CellCountStage.CAUGHT_UP, repository.cellCountReadiness.value!!.stage)
+        } finally {
+            bridge.onScriptsRead = {}; release.complete(Unit)
+            poll.cancel(); switch?.cancel()
+        }
+    }
+
+    private suspend fun prepareCaughtUp(strategy: SyncStrategy): CellCountReadiness {
+        walletPreferences.setSyncStrategy(strategy)
+        repository.registerAccountWithStrategy(savePreference = false).getOrThrow()
+        reportedScripts = statusesJson(activeScript to tip)
+        repository.getAccountStatus().getOrThrow()
+        return repository.cellCountReadiness.value!!.also { assertEquals(CellCountStage.CAUGHT_UP, it.stage) }
+    }
+
+    private fun assertExplicitResyncEpochs(strategy: SyncStrategy) = runBlocking {
+        build()
+        val original = prepareCaughtUp(strategy)
+        repository.registerAccountWithStrategy(savePreference = false).getOrThrow()
+        assertEquals("ordinary registration does not rearm", original, repository.cellCountReadiness.value)
+        // The policy includes earlier, equal and later starts, not inferred native undo.
+        for ((cursor, start) in listOf(tip to CUSTOM_HEIGHT, tip to tip, (tip - 100) to (tip - 50))) {
+            reportedScripts = statusesJson(activeScript to cursor)
+            val previous = repository.cellCountReadiness.value!!
+            repository.resyncAccount(SyncMode.CUSTOM, start).getOrThrow()
+            val pending = repository.cellCountReadiness.value!!
+            assertEquals(previous.epoch + 1, pending.epoch)
+            assertEquals(CellCountStage.REGISTERED, pending.stage)
+            assertEquals(previous.walletId, pending.walletId)
+            reportedScripts = statusesJson(activeScript to tip - 1)
+            repository.getAccountStatus().getOrThrow()
+            assertEquals(pending, repository.cellCountReadiness.value)
+            reportedScripts = statusesJson(activeScript to tip)
+            repository.getAccountStatus().getOrThrow()
+            assertEquals(CellCountStage.CAUGHT_UP, repository.cellCountReadiness.value!!.stage)
+            assertEquals(pending.epoch, repository.cellCountReadiness.value!!.epoch)
+        }
+    }
+
+    @Test fun `explicit resync readiness rearms once for each ACTIVE_ONLY landed intent`() = assertExplicitResyncEpochs(SyncStrategy.ACTIVE_ONLY)
+    @Test fun `explicit resync readiness rearms once for each ALL_WALLETS landed intent`() = assertExplicitResyncEpochs(SyncStrategy.ALL_WALLETS)
+    @Test fun `explicit resync readiness rearms once for each BALANCED landed intent`() = assertExplicitResyncEpochs(SyncStrategy.BALANCED)
+
+    private fun assertFailedResyncEpoch(strategy: SyncStrategy, afterLanding: Boolean, cancellation: Boolean) = runBlocking {
+        var fail = false
+        val real = db.syncProgressDao()
+        val fault = object : SyncProgressDao by real {
+            override suspend fun updateLightStart(walletId: String, network: String, lightStart: Long, ts: Long): Int {
+                if (fail && afterLanding) {
+                    if (cancellation) throw CancellationException("cancelled after landing")
+                    throw IllegalStateException("bookkeeping failed after landing")
+                }
+                return real.updateLightStart(walletId, network, lightStart, ts)
+            }
+            override suspend fun updateLocalSaved(walletId: String, network: String, block: Long, ts: Long): Int {
+                val updated = real.updateLocalSaved(walletId, network, block, ts)
+                if (fail && !afterLanding && block == 0L && cancellation) throw CancellationException("cancelled before landing")
+                return updated
+            }
+        }
+        build(coordinatorDao = fault, repositoryDao = fault)
+        val original = prepareCaughtUp(strategy)
+        val landedBefore = bridge.landed.size
+        fail = true
+        if (!afterLanding && !cancellation) bridge.results.addLast(false)
+        assertTrue(repository.resyncAccount(SyncMode.CUSTOM, CUSTOM_HEIGHT).isFailure)
+        val current = repository.cellCountReadiness.value!!
+        if (afterLanding) {
+            assertEquals(original.epoch + 1, current.epoch)
+            assertEquals(CellCountStage.REGISTERED, current.stage)
+            assertEquals(landedBefore + 1, bridge.landed.size)
+            assertEquals(0L, repository.getWalletSyncBlock(ACTIVE))
+        } else {
+            assertEquals(original, current)
+            assertEquals(landedBefore, bridge.landed.size)
+            assertEquals(tip, repository.getWalletSyncBlock(ACTIVE))
+        }
+    }
+
+    @Test fun `explicit resync readiness preserves ACTIVE_ONLY state when native refuses`() = assertFailedResyncEpoch(SyncStrategy.ACTIVE_ONLY, false, false)
+    @Test fun `explicit resync readiness preserves ALL state when native refuses`() = assertFailedResyncEpoch(SyncStrategy.ALL_WALLETS, false, false)
+    @Test fun `explicit resync readiness preserves ACTIVE_ONLY state when cancelled before landing`() = assertFailedResyncEpoch(SyncStrategy.ACTIVE_ONLY, false, true)
+    @Test fun `explicit resync readiness preserves ALL state when cancelled before landing`() = assertFailedResyncEpoch(SyncStrategy.ALL_WALLETS, false, true)
+    @Test fun `explicit resync readiness keeps ACTIVE_ONLY new epoch after bookkeeping failure`() = assertFailedResyncEpoch(SyncStrategy.ACTIVE_ONLY, true, false)
+    @Test fun `explicit resync readiness keeps ALL new epoch after bookkeeping failure`() = assertFailedResyncEpoch(SyncStrategy.ALL_WALLETS, true, false)
+    @Test fun `explicit resync readiness keeps ACTIVE_ONLY new epoch after post-land cancellation`() = assertFailedResyncEpoch(SyncStrategy.ACTIVE_ONLY, true, true)
+    @Test fun `explicit resync readiness keeps ALL new epoch after post-land cancellation`() = assertFailedResyncEpoch(SyncStrategy.ALL_WALLETS, true, true)
+
+    private fun assertQueuedResyncsEachRenew(strategy: SyncStrategy) = runBlocking {
+        build()
+        val original = prepareCaughtUp(strategy)
+        val firstInSet = CompletableDeferred<Unit>()
+        val releaseFirst = CompletableDeferred<Unit>()
+        val secondAtLock = CompletableDeferred<Unit>()
+        var tipReads = 0
+        coEvery { lightClient.getTipHeader() } answers {
+            if (++tipReads == 2) secondAtLock.complete(Unit)
+            tipJson(tip)
+        }
+        var registrations = 0
+        coordinatorLogger.onDebug = { msg -> if (msg.startsWith("Registering") && ++registrations == 2) secondAtLock.complete(Unit) }
+        bridge.onSetScripts = {
+            bridge.onSetScripts = {}
+            firstInSet.complete(Unit)
+            releaseFirst.await()
+        }
+        val first = launch(Dispatchers.IO) { repository.resyncAccount(SyncMode.CUSTOM, CUSTOM_HEIGHT).getOrThrow() }
+        var second: kotlinx.coroutines.Job? = null
+        try {
+            withTimeout(10_000) { firstInSet.await() }
+            second = launch(Dispatchers.IO) { repository.resyncAccount(SyncMode.CUSTOM, CUSTOM_HEIGHT + 1).getOrThrow() }
+            withTimeout(10_000) { secondAtLock.await() }
+            assertEquals(original, repository.cellCountReadiness.value)
+            releaseFirst.complete(Unit)
+            withTimeout(10_000) { first.join(); second.join() }
+            assertEquals(original.epoch + 2, repository.cellCountReadiness.value!!.epoch)
+            assertEquals(CellCountStage.REGISTERED, repository.cellCountReadiness.value!!.stage)
+        } finally { releaseFirst.complete(Unit); first.cancel(); second?.cancel(); coordinatorLogger.onDebug = {} }
+    }
+
+    @Test fun `explicit resync readiness binds each queued ALL intent at its serialized set boundary`() = assertQueuedResyncsEachRenew(SyncStrategy.ALL_WALLETS)
+    @Test fun `explicit resync readiness binds each queued ACTIVE_ONLY intent at its serialized set boundary`() = assertQueuedResyncsEachRenew(SyncStrategy.ACTIVE_ONLY)
+
+    private fun assertQueuedResyncCannotRebind(strategy: SyncStrategy, returnToOriginal: Boolean) = runBlocking {
+        build()
+        val original = prepareCaughtUp(strategy)
+        val locked = CompletableDeferred<Unit>()
+        val release = CompletableDeferred<Unit>()
+        val resyncAtLock = CompletableDeferred<Unit>()
+        val holder = launch(Dispatchers.IO) {
+            coordinator.withRegistrationLock { locked.complete(Unit); release.await() }
+        }
+        withTimeout(10_000) { locked.await() }
+        coordinatorLogger.onDebug = { msg -> if (msg.startsWith("Registering")) resyncAtLock.complete(Unit) }
+        coEvery { lightClient.getTipHeader() } answers { resyncAtLock.complete(Unit); tipJson(tip) }
+        val resync = launch(Dispatchers.IO) { repository.resyncAccount(SyncMode.CUSTOM, CUSTOM_HEIGHT) }
+        val switches = mutableListOf<kotlinx.coroutines.Job>()
+        try {
+            withTimeout(10_000) { resyncAtLock.await() }
+            val other = db.walletDao().getById(OTHER)!!
+            switches += launch(Dispatchers.IO) { runCatching { repository.onActiveWalletChanged(other) } }
+            var replacement = withTimeout(10_000) { repository.cellCountReadiness.first { it?.walletId == OTHER } }!!
+            if (returnToOriginal) {
+                val active = db.walletDao().getById(ACTIVE)!!
+                switches += launch(Dispatchers.IO) { repository.onActiveWalletChanged(active) }
+                replacement = withTimeout(10_000) {
+                    repository.cellCountReadiness.first { it?.walletId == ACTIVE && it.epoch > original.epoch }
+                }!!
+            }
+            release.complete(Unit)
+            withTimeout(10_000) { holder.join(); resync.join(); switches.forEach { it.join() } }
+            assertEquals("old intent cannot renew the replacement activation", replacement.epoch, repository.cellCountReadiness.value!!.epoch)
+            assertEquals(replacement.walletId, repository.cellCountReadiness.value!!.walletId)
+        } finally {
+            release.complete(Unit); holder.cancel(); resync.cancel(); switches.forEach { it.cancel() }
+            coordinatorLogger.onDebug = {}
+        }
+    }
+
+    @Test fun `explicit resync readiness rejects queued ACTIVE_ONLY intent after A to B`() = assertQueuedResyncCannotRebind(SyncStrategy.ACTIVE_ONLY, false)
+    @Test fun `explicit resync readiness rejects queued ALL intent after A to B`() = assertQueuedResyncCannotRebind(SyncStrategy.ALL_WALLETS, false)
+    @Test fun `explicit resync readiness rejects queued ACTIVE_ONLY intent after A to B to A`() = assertQueuedResyncCannotRebind(SyncStrategy.ACTIVE_ONLY, true)
+    @Test fun `explicit resync readiness rejects queued ALL intent after A to B to A`() = assertQueuedResyncCannotRebind(SyncStrategy.ALL_WALLETS, true)
 
     // ------------------------------------------------------------------
     // S-A: the sync poll vs a resync
@@ -806,6 +1072,95 @@ class RegistrationLockTest {
 
         assertEquals(null, db.syncProgressDao().get(OTHER, network.name))
         assertEquals(ACTIVE_PROGRESS, repository.getWalletSyncBlock(ACTIVE))
+    }
+
+    private suspend fun seedChainCandidate(byte: String, state: String, registeredFrom: Long = 0L) {
+        db.subAccountCandidateDao().insertAll(listOf(
+            com.rjnr.pocketnode.data.database.entity.SubAccountCandidateEntity(
+                parentWalletId = ACTIVE, derivationPath = "m/44'/309'/0'/1/$byte", accountIndex = 0,
+                scriptArgs = script(byte).args, state = state, createdAt = 1L, registeredFromBlock = registeredFrom,
+            )
+        ))
+    }
+
+    @Test
+    fun `FOUND candidate cursor survives both ALL registration callers while discovery keeps history`() = runBlocking {
+        build()
+        seedChainCandidate("dd", "FOUND", registeredFrom = 1_234L)
+        seedChainCandidate("ee", "FOUND")
+        seedChainCandidate("ff", "PENDING")
+        reportedScripts = statusesJson(script("dd") to 19_950_000L, script("ff") to 19_960_000L)
+        var cursorReads = 0
+        bridge.onScriptsRead = {
+            assertTrue("candidate cursor snapshot must be inside the registration lock", coordinator.isRegistrationLocked)
+            cursorReads++
+        }
+        for (strategy in listOf(SyncStrategy.ACTIVE_ONLY, SyncStrategy.ALL_WALLETS)) {
+            walletPreferences.setSyncStrategy(strategy)
+            bridge.setScriptsCalls.clear()
+            repository.registerAccountWithStrategy(savePreference = false).getOrThrow()
+            val (payload, command) = bridge.setScriptsCalls.single()
+            assertEquals(SyncCoordinator.CMD_SET_SCRIPTS_ALL, command)
+            val statuses = json.decodeFromString<List<JniScriptStatus>>(payload)
+            fun start(byte: String) = statuses.single { it.script == script(byte) && it.scriptType == "lock" }
+                .blockNumber.removePrefix("0x").toLong(16)
+            assertEquals("$strategy preserves FOUND", 19_950_000L, start("dd"))
+            assertEquals("$strategy starts absent FOUND historically", 19_800_000L, start("ee"))
+            assertEquals("$strategy does not clamp PENDING discovery", 19_800_000L, start("ff"))
+            assertEquals(1_234L, db.subAccountCandidateDao().getForParent(ACTIVE).single { it.scriptArgs == script("dd").args }.registeredFromBlock)
+        }
+        assertEquals(2, cursorReads)
+    }
+
+    @Test
+    fun `FOUND candidate does not borrow cursor from another full script or script type`() = runBlocking {
+        build()
+        seedChainCandidate("dd", "FOUND")
+        val expected = script("dd")
+        val collisions = listOf(
+            JniScriptStatus(expected.copy(codeHash = "0x" + "11".repeat(32)), "lock", "0x1306950"),
+            JniScriptStatus(expected.copy(hashType = "data"), "lock", "0x1306950"),
+            JniScriptStatus(expected, "type", "0x1306950"),
+        )
+        for (strategy in listOf(SyncStrategy.ACTIVE_ONLY, SyncStrategy.ALL_WALLETS)) {
+            walletPreferences.setSyncStrategy(strategy)
+            for (collision in collisions) {
+                reportedScripts = json.encodeToString(listOf(collision))
+                bridge.setScriptsCalls.clear()
+                repository.registerAccountWithStrategy(savePreference = false).getOrThrow()
+                val sent = json.decodeFromString<List<JniScriptStatus>>(bridge.setScriptsCalls.single().first)
+                val found = sent.single { it.script == expected && it.scriptType == "lock" }
+                assertEquals("$strategy $collision", 19_800_000L, found.blockNumber.removePrefix("0x").toLong(16))
+            }
+        }
+    }
+
+    @Test
+    fun `FOUND candidate unreadable snapshot aborts both ALL callers without recording registration`() = runBlocking {
+        build()
+        seedChainCandidate("dd", "FOUND", registeredFrom = 1_234L)
+        val valid = JniScriptStatus(script("dd"), "lock", "0x1306950")
+        val unreadable = listOf(
+            null, "not json", "{}",
+            json.encodeToString(listOf(valid)).replace("\"script_type\":\"lock\",", ""),
+            json.encodeToString(listOf(valid.copy(scriptType = "unknown"))),
+            json.encodeToString(listOf(valid.copy(script = script("dd").copy(codeHash = "bad")))),
+            json.encodeToString(listOf(valid.copy(blockNumber = "not-hex"))),
+            json.encodeToString(listOf(valid.copy(blockNumber = "0x-1"))),
+            json.encodeToString(listOf(valid.copy(blockNumber = "0xffffffffffffffff"))),
+            json.encodeToString(listOf(valid, valid.copy(blockNumber = "0x100"))),
+        )
+        for (strategy in listOf(SyncStrategy.ACTIVE_ONLY, SyncStrategy.ALL_WALLETS)) {
+            walletPreferences.setSyncStrategy(strategy)
+            for (snapshot in unreadable) {
+                reportedScripts = snapshot
+                bridge.setScriptsCalls.clear()
+                val result = repository.registerAccountWithStrategy(savePreference = false)
+                assertTrue("$strategy must refuse unreadable cursor snapshot: $snapshot", result.isFailure)
+                assertTrue("no ALL set may land on snapshot failure", bridge.setScriptsCalls.isEmpty())
+                assertEquals(1_234L, db.subAccountCandidateDao().getForParent(ACTIVE).single().registeredFromBlock)
+            }
+        }
     }
 
     private fun assertNotNullJob(): kotlinx.coroutines.Job {

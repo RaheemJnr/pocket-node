@@ -34,7 +34,7 @@ final class SendUITests: XCTestCase {
     /// shows what the model kept rather than what was typed.
     ///
     /// The second half is what only a running screen can prove. The model's
-    /// truncation is already pinned by `SendViewModelTests`; that the field is
+    /// excess precision rejection is already pinned by `SendViewModelTests`; that the field is
     /// actually redrawn to match is a property of `SendView.amountText`, and a
     /// plain sanitising `Binding` does not have it.
     func testATypedNinthDecimalIsDroppedFromTheField() throws {

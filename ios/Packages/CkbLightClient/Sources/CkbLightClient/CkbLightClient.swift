@@ -1030,6 +1030,17 @@ public func getHeaderByNumber(blockNumber: String)throws  -> String  {
 })
 }
 /**
+ * Complete history membership, or unavailable; never a partial page.
+ */
+public func getHistorySnapshot(scriptJson: String)throws  -> String  {
+    return try  FfiConverterString.lift(try rustCallWithError(FfiConverterTypeLightClientError_lift) {
+        uniffiCallStatus in
+    uniffi_ckb_light_client_lib_fn_func_get_history_snapshot(
+        FfiConverterString.lower(scriptJson),uniffiCallStatus
+    )
+})
+}
+/**
  * Connected peers as a JSON string.
  */
 public func getPeers()throws  -> String  {
@@ -1278,6 +1289,9 @@ private let initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_ckb_light_client_lib_checksum_func_get_header_by_number() != 6313) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_ckb_light_client_lib_checksum_func_get_history_snapshot() != 10826) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_ckb_light_client_lib_checksum_func_get_peers() != 46096) {

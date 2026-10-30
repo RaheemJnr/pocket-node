@@ -65,6 +65,8 @@ class RecoveryViewModelTest {
         vm.recoverExternal(activity, "a", true); advanceUntilIdle()
         coVerify(exactly = 1) { operations.external(activity, "a", true) }
         assertEquals(0, vm.uiState.value.restoredWalletCount)
+        assertTrue(vm.uiState.value.outcomes.getValue("a").contains("blocked"))
+        assertTrue(vm.uiState.value.outcomes.getValue("a").contains("Keep"))
         coEvery { operations.cleanup(activity, "a") } returns RecoveredKeyRestorer.Outcome.Cancelled
         vm.resumeCleanup(activity, "a"); advanceUntilIdle()
         assertTrue(vm.uiState.value.missingWallets.first().cleanupPending)

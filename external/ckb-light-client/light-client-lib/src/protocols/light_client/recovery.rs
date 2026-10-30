@@ -181,6 +181,24 @@ impl RecoveryRegistry {
         state.running = true;
         Ok(())
     }
+    /// Freeze canonical chain identity while a bounded synchronous storage read runs.
+    /// Lock order is registry then storage, identical to recovery persistence.
+    pub(crate) fn with_chain_snapshot<T>(&self, read: impl FnOnce(&RecoveryIdentity, &ChainSnapshot) -> T) -> Result<T, RecoveryError> {
+        self.try_with_chain_snapshot(read)?.ok_or(RecoveryError::Unavailable)
+    }
+
+    /// None means contention only; unavailable authority and poisoned state fail immediately.
+    pub(crate) fn try_with_chain_snapshot<T>(&self, read: impl FnOnce(&RecoveryIdentity, &ChainSnapshot) -> T) -> Result<Option<T>, RecoveryError> {
+        let state = match self.state.try_lock() {
+            Ok(state) => state,
+            Err(std::sync::TryLockError::WouldBlock) => return Ok(None),
+            Err(std::sync::TryLockError::Poisoned(_)) => return Err(RecoveryError::Unavailable),
+        };
+        if !state.available() { return Err(RecoveryError::Unavailable); }
+        Ok(Some(read(state.identity.as_ref().ok_or(RecoveryError::Unavailable)?,
+            state.snapshot.as_ref().ok_or(RecoveryError::Unavailable)?)))
+    }
+
     /// A binding snapshot for bridge registration, never authorization by itself.
     pub fn identity(&self) -> Result<RecoveryIdentity, RecoveryError> {
         let state = self.lock()?;

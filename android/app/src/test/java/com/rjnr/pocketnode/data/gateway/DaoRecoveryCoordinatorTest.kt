@@ -159,6 +159,8 @@ class DaoRecoveryCoordinatorTest {
         val firstAllocated = kotlinx.coroutines.CompletableDeferred<Unit>()
         val cleanupEntered = kotlinx.coroutines.CompletableDeferred<Unit>()
         val successorAllocated = kotlinx.coroutines.CompletableDeferred<Unit>()
+        val successorPolling = kotlinx.coroutines.CompletableDeferred<Unit>()
+        val releaseSuccessorPoll = java.util.concurrent.CountDownLatch(1)
         val releaseRequest = java.util.concurrent.CountDownLatch(1)
         val releaseCleanup = java.util.concurrent.CountDownLatch(1)
         val count = java.util.concurrent.atomic.AtomicInteger()
@@ -187,6 +189,10 @@ class DaoRecoveryCoordinatorTest {
             """{"schema_version":1,"operation":"cancel","result":{"request_id":"$id","status":"cancelled"}}"""
         }
         every { api.pollDaoRecovery(any()) } answers {
+            if (firstArg<String>() == nextRequest) {
+                successorPolling.complete(Unit)
+                check(releaseSuccessorPoll.await(5, java.util.concurrent.TimeUnit.SECONDS))
+            }
             """{"schema_version":1,"operation":"poll","result":{"request_id":"${firstArg<String>()}","status":"fetching","receipt":null}}"""
         }
         val scheduler = DaoRecoveryScheduler(db, recovery, api, gate, json)
@@ -216,14 +222,21 @@ class DaoRecoveryCoordinatorTest {
             assertEquals(listOf("allocated:$firstRequest", "cancelled:$firstRequest", "allocated:$nextRequest"), events.toList())
             assertEquals(setOf(nextRequest), live.toSet())
             assertTrue(recovery.guards(network, point).isEmpty())
+            // Force cancellation inside recover, exercising its cleanup and the runner finally.
+            kotlinx.coroutines.withTimeout(5_000) { successorPolling.await() }
+            successor.cancel()
+            releaseSuccessorPoll.countDown()
+            successor.join()
+            assertTrue(recovery.guards(network, point).isEmpty())
         } finally {
-            releaseRequest.countDown(); releaseCleanup.countDown()
+            releaseRequest.countDown(); releaseCleanup.countDown(); releaseSuccessorPoll.countDown()
             owner.cancel(); owner.join()
             successor?.cancel(); successor?.join()
         }
         assertTrue(live.isEmpty())
         verify(exactly = 1) { api.cancelDaoRecovery(firstRequest) }
-        verify(exactly = 1) { api.cancelDaoRecovery(nextRequest) }
+        // recover and the runner both clean up on cancellation; native cancel is idempotent.
+        verify(atLeast = 1) { api.cancelDaoRecovery(nextRequest) }
     }
 
     @Test fun `begin request null and error have no ticket to cancel while normal context remains usable`() = runTest {

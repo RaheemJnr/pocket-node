@@ -94,6 +94,8 @@ class SendSweepWarningTest {
         )
         every { repository.balance } returns balanceFlow
         every { repository.network } returns MutableStateFlow(NetworkType.TESTNET)
+        every { repository.walletInfo } returns MutableStateFlow(null)
+        every { repository.cellCountReadiness } returns MutableStateFlow(null)
         every { repository.currentNetwork } returns NetworkType.TESTNET
         every { repository.getCurrentAddress() } returns senderAddress
         coEvery { repository.getPrivateKey() } returns ByteArray(32) { 1 }

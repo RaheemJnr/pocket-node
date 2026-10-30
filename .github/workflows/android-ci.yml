@@ -4,7 +4,10 @@ on:
   push:
     branches: [main]
   pull_request:
-    branches: [main, codex/security-maintenance-batch-1]
+    branches: [main, codex/security-maintenance-batch-1, codex/dao-association-recovery]
+
+permissions:
+  contents: read
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
@@ -115,7 +118,11 @@ jobs:
 
       - name: Run ckb-light-client-lib unit tests
         working-directory: external/ckb-light-client
-        run: cargo test -p ckb-light-client-lib --lib
+        env:
+          # Pinned RocksDB omits cstdint in public headers; newer GCC no longer
+          # supplies these integer types transitively. Keep dependency pins intact.
+          CXXFLAGS: "-include cstdint"
+        run: cargo test -p ckb-light-client-lib --lib --locked
 
   prev-jni-build:
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'

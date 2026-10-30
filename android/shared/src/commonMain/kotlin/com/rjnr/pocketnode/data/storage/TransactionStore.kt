@@ -14,11 +14,22 @@ import com.rjnr.pocketnode.data.gateway.models.TransactionRecord
  *    failing the read that called them;
  *  - [getBlockNumbers] and [getOrphanPendingHashes] propagate, because they
  *    are plain queries with no fallback answer that would be honest;
- *  - [updateTransactionStatus] propagates on purpose. The broadcast watchdog
- *    calls it before the terminal CAS precisely so a database failure leaves
- *    the pending row recoverable; swallowing here would silently break that.
+ *  - [updateTransactionStatus] propagates store failures. Reconciliation uses
+ *    scoped conditional writes instead; pending-broadcast observations are committed
+ *    atomically through [PendingBroadcastStore.reconcileObservation].
  */
 interface TransactionStore {
+    /**
+     * Remove confirmed receipts only within the snapshot's proven horizon and scope.
+     * Implementations recheck [isCurrent] after their candidate read, inside the same
+     * transaction as conditional deletions. The suspendable check may dispatch native
+     * reads, but must not access this transaction from another dispatcher; database
+     * work resumes in the transaction context. Exceptions/cancellation roll back the pass.
+     * A store without this capability retains receipts. [snapshot] is trusted only
+     * after validation against the requested script/network at the read boundary.
+     */
+    suspend fun reconcileCanonicalHistory(snapshot: com.rjnr.pocketnode.data.gateway.CanonicalHistorySnapshot, walletId: String, network: String, isCurrent: suspend () -> Boolean = { true }) = Unit
+
 
     /**
      * Block numbers of every cached transaction for a wallet, as the
@@ -57,9 +68,12 @@ interface TransactionStore {
 
     /**
      * Move one row to [status]. Propagates a store failure rather than
-     * swallowing it: see the class KDoc for why the watchdog depends on that.
+     * swallowing it. Reconciliation must use the conditional APIs instead.
      */
     suspend fun updateTransactionStatus(hash: String, status: String)
+
+    /** Settle only a still-PENDING orphan on this wallet/network; advanced rows win. */
+    suspend fun reconcileOrphan(hash: String, walletId: String, network: String, status: String)
 
     /**
      * Write the optimistic activity row for a broadcast that has just been

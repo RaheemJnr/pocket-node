@@ -45,6 +45,12 @@ class AndroidLightClientApiTest {
 
     private val stringCases: List<StringCase> = listOf(
         StringCase(
+            "getHistorySnapshot",
+            { n, v -> every { n.nativeGetHistorySnapshot(any()) } returns v },
+            { it.getHistorySnapshot("""{"code_hash":"0x123","args":"0x456","hash_type":"type"}""") },
+            { verify(exactly = 1) { it.nativeGetHistorySnapshot("""{"code_hash":"0x123","args":"0x456","hash_type":"type"}""") } },
+        ),
+        StringCase(
             "requestDaoRecovery",
             { n, v -> every { n.nativeRequestDaoRecovery(any()) } returns v },
             { it.requestDaoRecovery("0xhash") },
@@ -215,9 +221,11 @@ class AndroidLightClientApiTest {
     @Test
     fun `the adapter covers every function on the shared interface`() {
         // Guards against a function being added to LightClientApi and quietly
-        // going untested here. 18 string queries plus init, start, stop,
-        // status, isInitialized, setScripts and calculateMaxWithdraw.
-        val declared = LightClientApi::class.java.declaredMethods.map { it.name }.toSet()
+        // going untested here. Only compiler-generated synthetic access helpers
+        // are excluded; every public interface method must have a forwarding case.
+        val declared = LightClientApi::class.java.declaredMethods
+            .filter { java.lang.reflect.Modifier.isPublic(it.modifiers) && !it.isSynthetic }
+            .map { it.name }.toSet()
         val covered = stringCases.map { it.name }.toSet() + setOf(
             "init", "start", "stop", "status", "isInitialized",
             "setScripts", "calculateMaxWithdraw",

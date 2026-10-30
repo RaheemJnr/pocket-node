@@ -1,0 +1,59 @@
+"""Release trust-boundary regression checks; no GitHub API or release execution."""
+from pathlib import Path
+import unittest
+import yaml
+
+ROOT = Path(__file__).resolve().parents[2]
+BUNDLE = {'PocketNode-*.apk', 'SHA256SUMS', 'SIGNING-CERTIFICATE-SHA256.txt', 'release-provenance.json'}
+PRIVATE = {'KEYSTORE_BASE64', 'KEYSTORE_PASSWORD', 'KEY_ALIAS', 'KEY_PASSWORD'}
+
+class ReleasePermissionsTest(unittest.TestCase):
+    def setUp(self):
+        self.workflow = yaml.safe_load((ROOT / '.github/workflows/release.yml').read_text())
+        self.jobs = self.workflow['jobs']
+
+    def test_repository_write_is_confined_to_publisher(self):
+        self.assertEqual(self.workflow['permissions'], {'contents': 'read'})
+        self.assertEqual(set(self.jobs), {'build', 'sign', 'publish'})
+        for name, job in self.jobs.items():
+            effective = job.get('permissions', self.workflow['permissions'])
+            self.assertEqual(effective, {'contents': 'write' if name == 'publish' else 'read'}, name)
+
+    def test_publisher_only_downloads_bundle_and_creates_release(self):
+        self.assertIn('publish', self.jobs, 'signing and publishing must use separate runners')
+        publish = self.jobs['publish']
+        self.assertEqual(set(publish['needs']), {'build', 'sign'})
+        self.assertNotIn('environment', publish)
+        self.assertNotIn('env', publish)
+        steps = publish['steps']
+        self.assertEqual(len(steps), 2)
+        self.assertIn('actions/download-artifact@', steps[0]['uses'])
+        self.assertIn('softprops/action-gh-release@', steps[1]['uses'])
+        upload = next(s for s in self.jobs['sign']['steps'] if 'actions/upload-artifact@' in s.get('uses', ''))
+        self.assertEqual(upload['with']['name'], steps[0]['with']['name'])
+        self.assertEqual(set(upload['with']['path'].splitlines()), BUNDLE)
+        self.assertEqual(upload['with']['if-no-files-found'], 'error')
+        self.assertEqual(set(steps[1]['with']['files'].splitlines()), BUNDLE)
+        self.assertTrue(steps[1]['with']['fail_on_unmatched_files'])
+        self.assertEqual(steps[1]['with']['tag_name'], '${{ needs.build.outputs.release_tag }}')
+
+    def test_signing_credentials_only_exist_in_existing_sign_steps(self):
+        allowed = {'Decode keystore': {'KEYSTORE_BASE64'}, 'Zipalign, sign, and verify': PRIVATE - {'KEYSTORE_BASE64'}}
+        seen = set()
+        for job_name, job in self.jobs.items():
+            self.assertNotIn('env', job)
+            for step in job['steps']:
+                for key in PRIVATE:
+                    expression = 'secrets.' + key
+                    if expression in yaml.safe_dump(step):
+                        self.assertEqual(job_name, 'sign')
+                        self.assertIn(key, allowed.get(step.get('name'), set()))
+                        self.assertEqual(step['env'][key], '${{ ' + expression + ' }}')
+                        seen.add(key)
+        self.assertEqual(seen, PRIVATE)
+        for job_name in ('build', 'sign'):
+            self.assertFalse(any('softprops/action-gh-release@' in s.get('uses', '') for s in self.jobs[job_name]['steps']))
+        self.assertFalse(any('checkout@' in s.get('uses', '') for s in self.jobs['sign']['steps']))
+
+if __name__ == '__main__':
+    unittest.main()

@@ -13,6 +13,7 @@ import com.rjnr.pocketnode.data.contacts.ContactRepository
 import com.rjnr.pocketnode.data.database.dao.KeyMaterialDao
 import com.rjnr.pocketnode.data.database.entity.ContactEntity
 import com.rjnr.pocketnode.data.database.entity.WalletEntity
+import com.rjnr.pocketnode.data.gateway.CellCountStage
 import com.rjnr.pocketnode.data.gateway.GatewayRepository
 import com.rjnr.pocketnode.data.gateway.models.NetworkType
 import com.rjnr.pocketnode.data.gateway.models.TransactionStatusResponse
@@ -25,6 +26,7 @@ import com.rjnr.pocketnode.data.wallet.AddressUtils
 import com.rjnr.pocketnode.data.wallet.KeyManager
 import com.rjnr.pocketnode.data.wallet.WalletKeyReader
 import com.rjnr.pocketnode.data.wallet.WalletRepository
+import com.rjnr.pocketnode.core.format.ckbToShannons
 import com.rjnr.pocketnode.util.sanitizeAmount
 import dagger.hilt.android.lifecycle.HiltViewModel
 import kotlinx.coroutines.Job
@@ -33,7 +35,6 @@ import kotlinx.coroutines.flow.*
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.ensureActive
 import java.math.BigDecimal
-import java.math.RoundingMode
 import com.rjnr.pocketnode.data.auth.AuthMethod
 import javax.inject.Inject
 
@@ -152,7 +153,7 @@ data class SendUiState(
     val errorDetail: String? = null,
     val txHash: String? = null,
     val availableBalance: Long = 0L,
-    /** Spendable cell count, fetched on entering bulk mode, for a realistic bulk fee estimate (review item 3). */
+    /** Spendable cell count, fetched on entering bulk mode and when its source changes, for a realistic bulk fee estimate (review item 3). */
     val spendableCellCount: Int = 0,
     val estimatedFee: Long = 0L,
     val networkType: NetworkType = NetworkType.MAINNET,
@@ -224,6 +225,81 @@ class SendViewModel @Inject constructor(
     private var generation = 0L
     private var maxJob: Job? = null
     private var reviewJob: Job? = null
+    private var bulkCellCountJob: Job? = null
+    private var bulkCellCountGeneration = 0L
+    private data class BulkCellCountSource(val walletId: String, val network: NetworkType, val address: String, val epoch: Long)
+    private var bulkCellCountSource: BulkCellCountSource? = null
+    private var bulkCellCountStage = CellCountStage.WAITING
+    private var bulkCellCountWallets: List<WalletEntity> = emptyList()
+
+    // Count requests belong to the source, not to amount/recipient edits.
+    private fun invalidateBulkCellCount() {
+        bulkCellCountGeneration++
+        bulkCellCountJob?.cancel()
+        bulkCellCountJob = null
+        bulkCellCountSource = null
+        bulkCellCountStage = CellCountStage.WAITING
+        _uiState.update { it.copy(spendableCellCount = 0).refreshBulkPreview() }
+    }
+
+    private fun refreshBulkCellCount() {
+        val walletId = walletPreferencesActiveId()
+        val network = repository.currentNetwork
+        val address = repository.getCurrentAddress()
+        val wallet = bulkCellCountWallets.find { it.isActive && it.walletId == walletId }
+        val expectedAddress = when (network) {
+            NetworkType.MAINNET -> wallet?.mainnetAddress
+            NetworkType.TESTNET -> wallet?.testnetAddress
+        }
+        // Room/preferences can select a wallet before the repository initializes
+        // its address. Wait for both observations to agree, in either order.
+        val readiness = repository.cellCountReadiness.value
+        val source = if (wallet != null && !address.isNullOrBlank() && address == expectedAddress &&
+            readiness?.walletId == wallet.walletId && readiness.network == network && readiness.address == address) {
+            BulkCellCountSource(wallet.walletId, network, address, readiness.epoch)
+        } else null
+        if (source != bulkCellCountSource) {
+            invalidateBulkCellCount()
+            bulkCellCountSource = source
+        }
+        if (source == null || _uiState.value.sendMode != SendMode.BULK) return
+        // At most a registration snapshot and one completed-sync replacement per
+        // activation. Already-caught-up sources coalesce both into one read. A
+        // duplicate tick or failed final read never rearms this finite budget.
+        val stage = readiness?.stage ?: return
+        if (stage <= bulkCellCountStage || bulkCellCountJob?.isActive == true) return
+        bulkCellCountStage = stage
+
+        val request = bulkCellCountGeneration
+        fun isCurrentSource() = bulkCellCountGeneration == request &&
+            walletPreferencesActiveId() == source.walletId && repository.currentNetwork == source.network &&
+            repository.getCurrentAddress() == source.address &&
+            repository.cellCountReadiness.value?.epoch == source.epoch && _uiState.value.sendMode == SendMode.BULK
+        val job = viewModelScope.launch(start = kotlinx.coroutines.CoroutineStart.LAZY) {
+            try {
+                if (!isCurrentSource()) return@launch
+                val result = repository.getCells(address = source.address)
+                // Result can contain cancellation; obsolete requests must not
+                // change a replacement request's preview.
+                coroutineContext.ensureActive()
+                if (!isCurrentSource()) return@launch
+                // Failure is not an empty wallet: retain this source's last
+                // successful snapshot without rearming the bounded read budget.
+                val count = result.getOrNull()?.items?.size ?: return@launch
+                _uiState.update { it.copy(spendableCellCount = count).refreshBulkPreview() }
+            } finally {
+                if (isCurrentSource()) {
+                    bulkCellCountJob = null
+                    // A completed-sync notification may have arrived during the
+                    // registration read. Start its sole replacement only now.
+                    refreshBulkCellCount()
+                }
+            }
+        }
+        // Install ownership before an immediate result can schedule its successor.
+        bulkCellCountJob = job
+        job.start()
+    }
 
     private fun invalidateDraft() {
         generation++
@@ -319,6 +395,8 @@ class SendViewModel @Inject constructor(
                 val active = wallets.find { it.isActive }
                 val others = wallets.filter { it.walletId != active?.walletId }
                 _uiState.update { it.copy(otherWallets = others).refreshBulkPreview() }
+                bulkCellCountWallets = wallets
+                refreshBulkCellCount()
             }
         }
 
@@ -333,8 +411,14 @@ class SendViewModel @Inject constructor(
                         isLoading = false, transactionState = TransactionState.IDLE,
                         statusMessage = "Network changed. Check the original network for pending transactions before retrying.").refreshBulkPreview() }
                 }
-
+                refreshBulkCellCount()
             }
+        }
+        viewModelScope.launch {
+            repository.walletInfo.collect { refreshBulkCellCount() }
+        }
+        viewModelScope.launch {
+            repository.cellCountReadiness.collect { refreshBulkCellCount() }
         }
     }
 
@@ -366,6 +450,7 @@ class SendViewModel @Inject constructor(
     }
 
     fun updateSendMode(mode: SendMode) {
+        invalidateBulkCellCount()
         invalidateDraft()
         _uiState.update {
             it.copy(
@@ -378,16 +463,9 @@ class SendViewModel @Inject constructor(
         if (mode == SendMode.BULK) {
             suggestionsJob?.cancel()
             _uiState.update { it.copy(recipientSuggestions = emptyList(), matchedContact = null) }
-            // Item 3: fetch the real spendable cell count so the bulk fee
-            // preview and the insufficient-balance gate reflect how many inputs
-            // each batch will gather (a fragmented wallet needs many inputs ->
-            // higher fee). The actual per-tx fee is still computed dynamically
-            // at build time; this only stops the PREVIEW from assuming 1 input
-            // per batch and under-gating.
-            viewModelScope.launch {
-                val count = repository.getCells().map { it.items.size }.getOrNull() ?: 0
-                _uiState.update { it.copy(spendableCellCount = count).refreshBulkPreview() }
-            }
+            // Snapshot count improves fragmentation estimates; the actual fee
+            // is still computed from the selected inputs during review/build.
+            refreshBulkCellCount()
         }
     }
 
@@ -444,15 +522,9 @@ class SendViewModel @Inject constructor(
         if (query.isBlank()) recentContacts() else contactRepository.search(query)
 
     fun updateAmount(amount: String) {
-        val sanitized = sanitizeAmount(amount) ?: return  // silently reject invalid chars
+        val sanitized = sanitizeAmount(amount) ?: return // Reject the whole edit.
         invalidateDraft()
-        val amountShannons = try {
-            if (sanitized.isEmpty()) 0L
-            else BigDecimal(sanitized).setScale(8, RoundingMode.DOWN)
-                .multiply(BigDecimal(100_000_000)).longValueExact()
-        } catch (e: Exception) {
-            0L
-        }
+        val amountShannons = ckbToShannons(sanitized) ?: 0L
 
         if (_uiState.value.sendMode == SendMode.BULK) {
             _uiState.update {
@@ -701,10 +773,7 @@ class SendViewModel @Inject constructor(
             _uiState.update { it.copy(error = com.rjnr.pocketnode.ui.util.UiMessage.Resource(com.rjnr.pocketnode.R.string.vm_error_enter_amount)) }
             return false
         }
-        val amountShannons = try {
-            BigDecimal(state.amountCkb).setScale(8, RoundingMode.DOWN)
-                .multiply(BigDecimal(100_000_000)).longValueExact()
-        } catch (e: Exception) {
+        val amountShannons = ckbToShannons(state.amountCkb) ?: run {
             _uiState.update { it.copy(error = com.rjnr.pocketnode.ui.util.UiMessage.Resource(com.rjnr.pocketnode.R.string.vm_error_invalid_amount)) }
             return false
         }
@@ -1227,12 +1296,7 @@ class SendViewModel @Inject constructor(
         )
     }
 
-    private fun parseAmountShannons(amount: String): Long? = try {
-        BigDecimal(amount).setScale(8, RoundingMode.DOWN)
-            .multiply(BigDecimal(100_000_000)).longValueExact()
-    } catch (e: Exception) {
-        null
-    }
+    private fun parseAmountShannons(amount: String): Long? = ckbToShannons(amount)
 }
 
 /**

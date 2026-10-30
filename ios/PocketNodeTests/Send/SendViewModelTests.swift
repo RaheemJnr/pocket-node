@@ -98,8 +98,7 @@ final class SendViewModelTests: XCTestCase {
     // MARK: - Amount entry
 
     /// Every keystroke goes through the shared `sanitizeAmount`, so a stray
-    /// letter or a second decimal point is dropped rather than rejected and
-    /// the field never fights the user mid-entry.
+    /// letter or a second decimal point refuses the whole edit.
     func testAmountEntryRunsThroughTheSharedSanitiser() {
         model.updateAmount("12.34")
         XCTAssertEqual(model.amount, "12.34")
@@ -112,9 +111,9 @@ final class SendViewModelTests: XCTestCase {
         model.updateAmount("12.3x")
         XCTAssertEqual(model.amount, "12.34")
 
-        // A ninth decimal is truncated rather than refused.
+        // A ninth decimal refuses the whole edit.
         model.updateAmount("1.123456789")
-        XCTAssertEqual(model.amount, "1.12345678")
+        XCTAssertEqual(model.amount, "12.34")
     }
 
     func testTheAvailableRowIsFormattedByTheSharedCore() {

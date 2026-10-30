@@ -49,10 +49,14 @@ package com.rjnr.pocketnode.data.gateway
  * failures return null. [DaoRecoveryClient] maps both onto typed failures and
  * binds all successful receipts to the expected network and request identity.
  *
- * No default methods are declared: Kotlin interface defaults are invisible to
- * Swift, so a Swift implementation would silently fail to satisfy the protocol.
+ * Kotlin defaults do not satisfy Swift protocol requirements. The optional
+ * [getHistorySnapshot] defaults to unavailable for Kotlin compatibility; Swift
+ * implementations must still implement it explicitly, as the production adapter does.
  */
 interface LightClientApi {
+    /** Complete canonical membership with immutable restore provenance, or null (never absence). */
+    fun getHistorySnapshot(scriptJson: String): String? = null
+
 
     // ---- Lifecycle ----
 

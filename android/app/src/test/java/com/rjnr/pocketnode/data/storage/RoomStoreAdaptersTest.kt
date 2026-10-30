@@ -14,6 +14,11 @@ import com.rjnr.pocketnode.data.gateway.models.BalanceResponse
 import com.rjnr.pocketnode.data.gateway.models.JniHeaderView
 import com.rjnr.pocketnode.data.gateway.models.TransactionRecord
 import kotlinx.coroutines.test.runTest
+import kotlinx.coroutines.*
+import java.util.concurrent.CountDownLatch
+import java.util.concurrent.Executors
+import java.util.concurrent.TimeUnit
+import kotlin.coroutines.ContinuationInterceptor
 import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNull
@@ -274,6 +279,70 @@ class RoomStoreAdaptersTest {
         assertEquals(0, store.rearmAcceptedRetry(original.txHash, 50, 150, 60))
     }
 
+    @Test
+    fun `observation atomically confirms owned snapshot and cannot overwrite advanced activity`() = runTest {
+        val store = RoomPendingBroadcastStore(db.pendingBroadcastDao())
+        db.pendingBroadcastDao().insert(broadcast("observed", "w1", "TESTNET", "BROADCAST"))
+        val original = store.getActive("w1", "TESTNET").single()
+        val activity = retryActivity(original.txHash, "PENDING")
+        db.transactionDao().insert(activity)
+        assertEquals(true, store.reconcileObservation(original, "CONFIRMED", 0, 50))
+        assertNull(db.pendingBroadcastDao().getByHash(original.txHash))
+        assertEquals(activity.copy(status = "CONFIRMED", cachedAt = 50), db.transactionDao().getByTxHash(original.txHash))
+        assertEquals(false, store.reconcileObservation(original, "FAILED", 0, 60))
+        assertEquals("CONFIRMED", db.transactionDao().getByTxHash(original.txHash)?.status)
+    }
+
+    @Test
+    fun `rejection cannot downgrade advanced activity or a changed attempt`() = runTest {
+        val store = RoomPendingBroadcastStore(db.pendingBroadcastDao())
+        for (mode in listOf("CONFIRMED", "UNVERIFIED", "NEW_ATTEMPT", "OTHER_WALLET", "NONLOCAL")) {
+            db.pendingBroadcastDao().insert(broadcast(mode, "w1", "TESTNET", "BROADCAST"))
+            val original = store.getActive("w1", "TESTNET").first { it.txHash == mode }
+            val activity = retryActivity(mode, if (mode in listOf("CONFIRMED", "UNVERIFIED")) mode else "PENDING")
+                .let { when (mode) {
+                    "OTHER_WALLET" -> it.copy(walletId = "w2")
+                    "NONLOCAL" -> it.copy(isLocal = false)
+                    else -> it
+                } }
+            db.transactionDao().insert(activity)
+            if (mode == "NEW_ATTEMPT") store.insert(original.copy(lastCheckedAt = 999))
+            assertEquals(mode, false, store.reconcileObservation(original, "FAILED", 0, 60))
+            assertEquals(activity, db.transactionDao().getByTxHash(mode))
+            assertEquals("BROADCAST", db.pendingBroadcastDao().getByHash(mode)?.state)
+        }
+    }
+
+    @Test
+    fun `observation rollback preserves both rows when pending deletion fails`() = runTest {
+        val store = RoomPendingBroadcastStore(db.pendingBroadcastDao())
+        db.pendingBroadcastDao().insert(broadcast("rollback-observation", "w1", "TESTNET", "BROADCAST"))
+        val original = store.getActive("w1", "TESTNET").single()
+        val activity = retryActivity(original.txHash, "PENDING")
+        db.transactionDao().insert(activity)
+        db.openHelper.writableDatabase.execSQL("CREATE TRIGGER reject_observation BEFORE DELETE ON pending_broadcasts BEGIN SELECT RAISE(ABORT, 'fixture'); END")
+        org.junit.Assert.assertNotNull(runCatching { store.reconcileObservation(original, "CONFIRMED", 0, 50) }.exceptionOrNull())
+        assertEquals(original, store.getActive("w1", "TESTNET").single())
+        assertEquals(activity, db.transactionDao().getByTxHash(original.txHash))
+    }
+
+    @Test
+    fun `orphan update is scoped and cannot regress terminal or newly claimed rows`() = runTest {
+        val dao = db.transactionDao()
+        val pending = retryActivity("orphan", "PENDING")
+        dao.insert(pending)
+        dao.reconcileOrphan(pending.txHash, "w2", "TESTNET", "FAILED", 50)
+        dao.reconcileOrphan(pending.txHash, "w1", "MAINNET", "FAILED", 50)
+        assertEquals(pending, dao.getByTxHash(pending.txHash))
+        db.pendingBroadcastDao().insert(broadcast(pending.txHash, "w1", "TESTNET", "BROADCAST"))
+        dao.reconcileOrphan(pending.txHash, "w1", "TESTNET", "FAILED", 50)
+        assertEquals(pending, dao.getByTxHash(pending.txHash))
+        db.pendingBroadcastDao().delete(pending.txHash)
+        dao.reconcileOrphan(pending.txHash, "w1", "TESTNET", "CONFIRMED", 50)
+        dao.reconcileOrphan(pending.txHash, "w1", "TESTNET", "FAILED", 60)
+        assertEquals(pending.copy(status = "CONFIRMED", cachedAt = 50), dao.getByTxHash(pending.txHash))
+    }
+
     private fun retryActivity(hash: String, status: String = "FAILED") = TransactionEntity(
         txHash = hash, blockNumber = "0x0", blockHash = "", timestamp = 10,
         balanceChange = "0x1", direction = "dao_unlock", fee = "0x0", confirmations = 0,
@@ -390,4 +459,107 @@ class RoomStoreAdaptersTest {
         cachedAt = 0L,
         walletId = walletId,
     )
+
+    private fun historyProof() = com.rjnr.pocketnode.data.gateway.CanonicalHistorySnapshot(
+        1, true, "TESTNET", "0x" + "1".repeat(64), "store",
+        com.rjnr.pocketnode.data.gateway.models.Script("0x" + "1".repeat(64), "type", "0x01"),
+        "a".repeat(32), "0", "20", "0x" + "2".repeat(64), "20", emptySet())
+
+    @Test fun `canonical cleanup retains incomplete wrong scope horizon and broadcast owned rows`() = runTest {
+        val hash = "0x" + "a".repeat(64)
+        val original = transaction(hash, "w1", "TESTNET", "0xa").copy(cachedAt = 10)
+        db.transactionDao().insert(original)
+        val proof = historyProof()
+        for (bad in listOf(proof.copy(complete = false), proof.copy(processedThrough = "19"), proof.copy(network = "MAINNET"), proof.copy(startHeight = "10"), proof.copy(tipHash = "bad"))) {
+            transactionStore().reconcileCanonicalHistory(bad, "w1", "TESTNET")
+            assertEquals(original, db.transactionDao().getByTxHash(hash))
+        }
+        transactionStore().reconcileCanonicalHistory(proof, "w2", "TESTNET")
+        assertEquals(original, db.transactionDao().getByTxHash(hash))
+        db.pendingBroadcastDao().insert(broadcast(hash, "w1", "TESTNET", "BROADCAST"))
+        transactionStore().reconcileCanonicalHistory(proof, "w1", "TESTNET")
+        assertEquals(original, db.transactionDao().getByTxHash(hash))
+        db.pendingBroadcastDao().delete(hash)
+        transactionStore().reconcileCanonicalHistory(proof, "w1", "TESTNET")
+        assertNull(db.transactionDao().getByTxHash(hash))
+    }
+
+    @Test fun `canonical conditional deletion cannot erase late reinclusion or pending transition`() = runTest {
+        val hash = "0x" + "a".repeat(64)
+        val original = transaction(hash, "w1", "TESTNET", "0xa").copy(cachedAt = 10)
+        for (advanced in listOf(original.copy(blockNumber = "0xb", blockHash = "new", cachedAt = 11), original.copy(status = "PENDING"))) {
+            db.transactionDao().insert(advanced)
+            db.transactionDao().deleteCanonicalOrphan(hash, "w1", "TESTNET", original.blockNumber, original.blockHash, original.cachedAt)
+            assertEquals(advanced, db.transactionDao().getByTxHash(hash))
+        }
+    }
+
+    @Test fun `canonical cleanup failure rolls back earlier deletions`() = runTest {
+        val hash = "0x" + "a".repeat(64)
+        val original = transaction(hash, "w1", "TESTNET", "0xa").copy(cachedAt = 10)
+        db.transactionDao().insert(original)
+        db.transactionDao().insert(original.copy(txHash = "0x" + "b".repeat(64)))
+        db.openHelper.writableDatabase.execSQL("CREATE TRIGGER reject_history BEFORE DELETE ON transactions WHEN OLD.txHash = '0x${"b".repeat(64)}' BEGIN SELECT RAISE(ABORT, 'fixture'); END")
+        val failure = runCatching { transactionStore().reconcileCanonicalHistory(historyProof(), "w1", "TESTNET") }.exceptionOrNull()
+        org.junit.Assert.assertNotNull(failure)
+        assertEquals(original, db.transactionDao().getByTxHash(hash))
+        assertEquals(2, db.transactionDao().canonicalCandidates("w1", "TESTNET").size)
+    }
+
+    @Test fun `canonical revalidation can suspend off transaction dispatcher and resume before deletion`() = runBlocking {
+        val hash = "0x" + "a".repeat(64)
+        val original = transaction(hash, "w1", "TESTNET", "0xa").copy(cachedAt = 10)
+        Executors.newSingleThreadExecutor().asCoroutineDispatcher().use { query ->
+            for (current in listOf(false, true)) {
+                db.transactionDao().insert(original)
+                var checked = false
+                transactionStore().reconcileCanonicalHistory(historyProof(), "w1", "TESTNET") {
+                    val transactionContext = currentCoroutineContext()[ContinuationInterceptor]
+                    withContext(query) {
+                        org.junit.Assert.assertNotEquals(transactionContext, currentCoroutineContext()[ContinuationInterceptor])
+                        checked = true
+                    }
+                    assertEquals(transactionContext, currentCoroutineContext()[ContinuationInterceptor])
+                    // SQL must still be usable in the original transaction after the native-only hop.
+                    assertEquals(original, db.transactionDao().getByTxHash(hash))
+                    current
+                }
+                org.junit.Assert.assertTrue(checked)
+                assertEquals(if (current) null else original, db.transactionDao().getByTxHash(hash))
+            }
+        }
+    }
+
+    @Test fun `cancelled suspended canonical revalidation retains receipt and releases transaction`() = runBlocking {
+        val hash = "0x" + "a".repeat(64)
+        val original = transaction(hash, "w1", "TESTNET", "0xa").copy(cachedAt = 10)
+        db.transactionDao().insert(original)
+        val entered = CompletableDeferred<Unit>()
+        val release = CountDownLatch(1)
+        Executors.newSingleThreadExecutor().asCoroutineDispatcher().use { query ->
+            val operation = async {
+                transactionStore().reconcileCanonicalHistory(historyProof(), "w1", "TESTNET") {
+                    withContext(query) {
+                        entered.complete(Unit)
+                        check(release.await(5, TimeUnit.SECONDS)) { "caller could not release revalidation" }
+                        true
+                    }
+                }
+            }
+            try {
+                withTimeout(5_000) { entered.await() }
+                operation.cancel()
+                release.countDown()
+                operation.join()
+                org.junit.Assert.assertTrue(operation.isCancelled)
+                assertEquals(original, db.transactionDao().getByTxHash(hash))
+                // A fresh transaction remains usable after the cancelled pass.
+                transactionStore().reconcileCanonicalHistory(historyProof(), "w1", "TESTNET") { true }
+                assertNull(db.transactionDao().getByTxHash(hash))
+            } finally {
+                release.countDown()
+                operation.cancelAndJoin()
+            }
+        }
+    }
 }

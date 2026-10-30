@@ -68,7 +68,13 @@ class TransactionBuilder(
         const val DEFAULT_FEE = 100_000L // initial selection allowance; large outputs are repriced
         const val FEE_RATE = 1000L       // shannons per KB (standard minimum relay fee)
         const val MIN_FEE = 1_000L       // floor: 0.00001 CKB
-        private const val MAX_TX_SIZE = 596 * 1024 // 596KB CKB protocol limit
+        // Wallet policy, NOT a consensus per-transaction limit. Pinned CKB 1.0.0
+        // mainnet/testnet allow 597000 block bytes. Reserve 27000 for block
+        // framing/header, cellbase, proposals (1500 * 10), up to two uncles
+        // (228 each), and extension/headroom. Miner-selected cellbase/extension
+        // sizes and other transactions still determine actual inclusion.
+        // Count the transaction's 4-byte in-block offset, as CKB does.
+        private const val MAX_TX_SIZE = 570_000
 
         // SECP256K1 cell deps for different networks
         // Testnet (Pudge)
@@ -174,6 +180,20 @@ class TransactionBuilder(
         val capacities = cells.filter { it.isPlainCapacity() }.mapNotNull { it.capacity.removePrefix("0x").toLongOrNull(16) }
         if (capacities.isEmpty()) return 0L
         val total = capacities.fold(0L, ::checkedAdd)
+        // MAX means every eligible input, never an undisclosed subset. Refuse an
+        // unbuildable amount using the same serialized signed shape as preparation.
+        val outputLock = AddressUtils.parseAddress(recipientAddress ?: "")
+            ?: Script(Script.SECP256K1_CODE_HASH, "type", "0x" + "00".repeat(20))
+        val shape = Transaction(
+            version = "0x0",
+            cellDeps = listOf(CellDep(OutPoint(TESTNET_SECP256K1_TX_HASH, "0x0"), "dep_group")),
+            headerDeps = emptyList(),
+            cellInputs = List(capacities.size) { CellInput(previousOutput = OutPoint("0x" + "00".repeat(32), "0x0"), since = "0x0") },
+            cellOutputs = listOf(CellOutput("0x${total.toString(16)}", outputLock, null)),
+            outputsData = listOf("0x"),
+            witnesses = listOf(serializeWitnessArgs(ByteArray(65), null, null).toHexString()) + List(capacities.size - 1) { "0x" },
+        )
+        validateTransactionSize(shape)
         val fee = estimateTransferFeeForDraft(capacities.size, listOf(recipientAddress ?: ""), null, false)
         return (total - fee).coerceAtLeast(0L)
     }
@@ -221,10 +241,11 @@ class TransactionBuilder(
             witnesses = inputs.map { "0x" },
         )
 
-        val estimatedSize = estimateTransactionSize(tx)
-        if (estimatedSize > MAX_TX_SIZE) {
-            throw IllegalStateException("Sweep too large: $estimatedSize bytes (max $MAX_TX_SIZE)")
-        }
+        val groupStarts = inputs.map { it.lockArgs }.withIndex()
+            .groupBy({ it.value }, { it.index }).values.map { it.first() }.toSet()
+        validateTransactionSize(tx.copy(witnesses = inputs.indices.map {
+            if (it in groupStarts) serializeWitnessArgs(ByteArray(65), null, null).toHexString() else "0x"
+        }))
 
         SweepPlan(
             transaction = tx,
@@ -260,6 +281,10 @@ class TransactionBuilder(
             require(keysByLockArgs.containsKey(args)) { "No key provided for lock group $args" }
         }
 
+        val groupStarts = groups.values.map { it.first() }.toSet()
+        validateTransactionSize(tx.copy(witnesses = tx.cellInputs.indices.map {
+            if (it in groupStarts) serializeWitnessArgs(ByteArray(65), null, null).toHexString() else "0x"
+        }))
         val txHash = blake2bHash(serializeRawTransaction(tx))
         val emptyWitnessArgs = serializeWitnessArgs(ByteArray(65), null, null)
         val witnesses = MutableList(tx.cellInputs.size) { "0x" }
@@ -280,7 +305,7 @@ class TransactionBuilder(
             witnesses[memberIndices.first()] = signedWitness.toHexString()
         }
 
-        tx.copy(witnesses = witnesses)
+        tx.copy(witnesses = witnesses).also(::validateTransactionSize)
     }
 
     private fun checkedAdd(left: Long, right: Long): Long {
@@ -564,16 +589,6 @@ class TransactionBuilder(
             witnesses = inputs.map { "0x" }
         )
 
-        // Validate transaction size before signing
-        val estimatedSize = estimateTransactionSize(unsignedTx)
-        if (estimatedSize > MAX_TX_SIZE) {
-            throw IllegalStateException(
-                "Transaction too large: $estimatedSize bytes (max: $MAX_TX_SIZE). " +
-                        "Try sending a smaller amount or consolidate cells first."
-            )
-        }
-
-        logger.d(TAG, "  Signing transaction with ${inputs.size} inputs, ${outputs.size} outputs (est. ${estimatedSize} bytes)")
         return PreparedTransfer(unsignedTx, selectedCells.toList()).also(::validateTransferFee)
     }
 
@@ -854,22 +869,16 @@ class TransactionBuilder(
         return signTransaction(unsignedTx, signer, 1, witnessInputType = depositHeaderIndex)
     }
 
-    /**
-     * Exact molecule size of [tx] as it goes on the wire: the serialized raw
-     * body plus the witnesses dynvec plus the Transaction wrapper.
-     *
-     * Unlike [estimateTransactionSize] this carries no safety fudge, so a test
-     * can assert that a fee estimate covers the real bytes. `internal` for the
-     * fee tests — same reason [selectCells] is (#490).
-     */
-    internal fun serializedSizeWithWitnesses(tx: Transaction): Int {
-        val rawSize = serializeRawTransaction(tx).size
-        // dynvec: total size (4) + one offset per item (4) + each item's
-        // length prefix (4) and payload.
-        val witnessesSize = 4 + tx.witnesses.size * 4 +
-            tx.witnesses.sumOf { 4 + it.removePrefix("0x").length / 2 }
-        // Transaction wrapper table hdr (12) + in-block serialization offset (4)
-        return rawSize + witnessesSize + 16
+    /** Exact serialized Molecule transaction plus its four-byte in-block offset. */
+    internal fun serializedSizeWithWitnesses(tx: Transaction): Int =
+        serializeTable(listOf(serializeRawTransaction(tx), serializeBytesVec(tx.witnesses))).size + 4
+
+    private fun validateTransactionSize(tx: Transaction) {
+        val size = serializedSizeWithWitnesses(tx)
+        require(size <= MAX_TX_SIZE) {
+            "Transaction too large: $size bytes (wallet maximum: $MAX_TX_SIZE). " +
+                "Try sending a smaller amount or consolidate cells first."
+        }
     }
 
     /** Recheck paid capacity against actual output bytes and the signature witness before signing. */
@@ -879,6 +888,7 @@ class TransactionBuilder(
         val signedShape = tx.copy(witnesses = tx.cellInputs.indices.map {
             if (it == 0) serializeWitnessArgs(ByteArray(65), null, null).toHexString() else "0x"
         })
+        validateTransactionSize(signedShape)
         val inputTotal = prepared.selectedCells.fold(0L) { sum, cell ->
             checkedAdd(sum, requireNotNull(parseCapacity(cell.capacity)))
         }
@@ -888,23 +898,6 @@ class TransactionBuilder(
         require(inputTotal >= outputTotal && inputTotal - outputTotal >=
             calculateFeeForSize(serializedSizeWithWitnesses(signedShape).toLong())) {
             "Transaction fee does not cover its serialized size. Review the payment again."
-        }
-    }
-
-    private fun estimateTransactionSize(tx: Transaction): Int {
-        return try {
-            val rawSize = serializeRawTransaction(tx).size
-            // witnesses dynvec: 4 + n*offset(4) + first (len 4 + WitnessArgs 85)
-            // + each remaining "0x" (len 4); + Transaction wrapper hdr 12 +
-            // in-block offset 4. Same accounting as estimateTransferFee — the
-            // old n*69+100 form dropped the per-witness dynvec offset and
-            // undershot past ~25 inputs (Alex, Telegram 2026-07).
-            val n = tx.cellInputs.size
-            val witnessOverhead = 4 + n * 4 + (4 + 85) + (n - 1).coerceAtLeast(0) * 4
-            rawSize + witnessOverhead + 16 + 100
-        } catch (e: Exception) {
-            logger.w(TAG, "Transaction size estimation failed: ${e.message}")
-            Int.MAX_VALUE // fail-safe: reject if we can't estimate size
         }
     }
 
@@ -991,6 +984,10 @@ class TransactionBuilder(
         inputCount: Int,
         witnessInputType: ByteArray? = null
     ): Transaction {
+        // Exact expected signed shape before invoking the signer. Recheck the
+        // returned payload too; a Signer implementation can return other bytes.
+        val expectedWitness = serializeWitnessArgs(ByteArray(65), witnessInputType, null).toHexString()
+        validateTransactionSize(tx.copy(witnesses = listOf(expectedWitness) + List((inputCount - 1).coerceAtLeast(0)) { "0x" }))
         // 1. Serialize the raw transaction and compute its hash
         val rawTxBytes = serializeRawTransaction(tx)
         val txHash = blake2bHash(rawTxBytes)
@@ -1025,7 +1022,7 @@ class TransactionBuilder(
             witnesses.add("0x")
         }
 
-        return tx.copy(witnesses = witnesses)
+        return tx.copy(witnesses = witnesses).also(::validateTransactionSize)
     }
 
     /**

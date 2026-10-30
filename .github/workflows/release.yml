@@ -4,12 +4,12 @@ on:
   workflow_dispatch:
     inputs:
       tag:
-        description: 'Existing release tag to build (must match v*)'
+        description: 'Existing release tag to build (v plus letters, digits, dots, underscores or hyphens)'
         required: true
         type: string
 
 permissions:
-  contents: write
+  contents: read
 
 jobs:
   # Job 1: build the native library + UNSIGNED release APK. Runs the untrusted
@@ -50,8 +50,8 @@ jobs:
             exit 1
           fi
 
-          if [[ "$RELEASE_TAG" != v* ]]; then
-            echo "::error::Release tag '$RELEASE_TAG' must match v*."
+          if [[ ! "$RELEASE_TAG" =~ ^v[0-9A-Za-z._-]+$ ]]; then
+            echo "::error::Release tag '$RELEASE_TAG' must use v followed by letters, digits, dots, underscores or hyphens."
             exit 1
           fi
 
@@ -154,6 +154,17 @@ jobs:
             echo "::warning::GOOGLE_SERVICES_JSON secret not set — using dummy config. Firebase features will be non-functional."
           fi
 
+      - name: Require clean native rebuild and capture reviewed source
+        run: |
+          set -euo pipefail
+          rm -rf external/ckb-light-client/target android/app/src/main/jniLibs release-input
+          python3 tools/release/build_provenance.py prepare
+          {
+            rustc --version
+            java -version 2>&1
+            cat "$ANDROID_NDK_HOME/source.properties"
+          } > release-toolchains.txt
+
       - name: Build UNSIGNED release APK
         working-directory: android
         # No keystore here — the untrusted Cargo/Gradle build must not run in a
@@ -163,27 +174,21 @@ jobs:
           RELEASE_CERT_SHA256: ${{ secrets.RELEASE_CERT_SHA256 }}
         run: ./gradlew assembleRelease -PunsignedRelease=true --no-build-cache --dependency-verification=strict
 
-      - name: Verify native library is packaged
-        run: |
-          APK=$(find android/app/build/outputs/apk/release -name '*.apk' | head -1)
-          for abi in arm64-v8a armeabi-v7a; do
-            if ! unzip -l "$APK" | grep -q "lib/$abi/libckb_light_client_lib.so"; then
-              echo "::error::Release APK is missing lib/$abi/libckb_light_client_lib.so — the app will crash on JNI calls."
-              exit 1
-            fi
-          done
-          echo "Native library found in APK for both ABIs."
+      - name: Bind build evidence to unsigned APK and native outputs
+        run: python3 tools/release/build_provenance.py finish
 
-      - name: Upload unsigned APK
+      - name: Upload unsigned APK and data-only build provenance
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: unsigned-release-apk
-          path: android/app/build/outputs/apk/release/*.apk
+          path: |
+            release-input/unsigned.apk
+            release-input/build-provenance.json
           retention-days: 1
           if-no-files-found: error
 
   # Job 2: minimal, isolated signing. Holds the keystore, runs ONLY apksigner /
-  # zipalign (trusted Android SDK tools) — no Cargo, no Gradle, no app build.
+  # zipalign and trusted inline data verification — no release-tag code execution.
   sign:
     needs: build
     runs-on: ubuntu-latest
@@ -223,8 +228,9 @@ jobs:
           RELEASE_TAG: ${{ needs.build.outputs.release_tag }}
         run: |
           set -euo pipefail
-          BT="$(ls -d "$ANDROID_HOME"/build-tools/* | sort -V | tail -1)"
-          UNSIGNED="$(find unsigned -name '*.apk' | head -1)"
+          BT="$(find "$ANDROID_HOME/build-tools" -mindepth 1 -maxdepth 1 -type d | sort -V | tail -1)"
+          UNSIGNED="unsigned/unsigned.apk"
+          trap 'rm -f release.jks aligned.apk' EXIT
           OUT="PocketNode-${RELEASE_TAG}.apk"
 
           "$BT/zipalign" -f -p 4 "$UNSIGNED" aligned.apk
@@ -234,25 +240,107 @@ jobs:
             --key-pass "pass:${KEY_PASSWORD}" \
             --ks-key-alias "${KEY_ALIAS}" \
             --out "$OUT" aligned.apk
-          "$BT/apksigner" verify --print-certs "$OUT"
+          "$BT/apksigner" verify --print-certs "$OUT" > verified-certificate.txt
 
           # Fail the release if the signing cert does not match the fingerprint
           # baked into the APK — otherwise the in-app updater would reject this
           # build for every existing user (URL/channel-substitution guard, #293).
-          ACTUAL="$("$BT/apksigner" verify --print-certs "$OUT" \
-            | awk -F': ' '/SHA-256 digest/{print $2; exit}' | tr 'A-F' 'a-f' | tr -d ': ')"
+          ACTUAL="$(awk -F': ' '/^Signer #1 certificate SHA-256 digest:/{print $2}' verified-certificate.txt | tr 'A-F' 'a-f' | tr -d ': ')"
           EXPECTED="$(printf '%s' "${RELEASE_CERT_SHA256:-}" | tr 'A-F' 'a-f' | tr -d ': ')"
-          echo "signed cert SHA-256: $ACTUAL"
-          if [ -n "$EXPECTED" ] && [ "$ACTUAL" != "$EXPECTED" ]; then
-            echo "::error::Signing cert SHA-256 ($ACTUAL) != embedded RELEASE_CERT_SHA256 ($EXPECTED). In-app updater would reject this build."
+          if [[ ! "$EXPECTED" =~ ^[0-9a-f]{64}$ ]] || [ "$ACTUAL" != "$EXPECTED" ]; then
+            echo "::error::Missing/invalid expected certificate or signing certificate mismatch."
             exit 1
           fi
 
-          rm -f release.jks aligned.apk
+      - name: Generate release verification artifacts
+        # Trusted workflow code only. Never execute scripts from the release tag
+        # or the downloaded build artifact in this secret-bearing job.
+        env:
+          RELEASE_TAG: ${{ needs.build.outputs.release_tag }}
+          SOURCE_COMMIT: ${{ needs.build.outputs.tag_commit }}
+          RELEASE_CERT_SHA256: ${{ secrets.RELEASE_CERT_SHA256 }}
+          BUILD_RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          python3 - <<'PYVERIFY'
+          import hashlib, json, os, re, zipfile
+          from pathlib import Path
+          def sha(path):
+              return hashlib.sha256(path.read_bytes()).hexdigest()
+          def native(path):
+              with zipfile.ZipFile(path) as apk:
+                  names = apk.namelist()
+                  if len(names) != len(set(names)):
+                      raise SystemExit('duplicate APK entries')
+                  return {n: hashlib.sha256(apk.read(n)).hexdigest() for n in names if n.startswith('lib/') and n.endswith('.so')}
+          tag = os.environ['RELEASE_TAG']
+          if not re.fullmatch(r'v[0-9A-Za-z._-]+', tag):
+              raise SystemExit('unsafe release artifact name')
+          signed = Path(f'PocketNode-{tag}.apk')
+          unsigned = Path('unsigned/unsigned.apk')
+          evidence_path = Path('unsigned/build-provenance.json')
+          if evidence_path.stat().st_size > 4 * 1024 * 1024:
+              raise SystemExit('oversized build evidence')
+          evidence = json.loads(evidence_path.read_text())
+          if evidence.get('schema_version') != 1 or evidence.get('source_commit') != os.environ['SOURCE_COMMIT']:
+              raise SystemExit('source commit/schema mismatch')
+          if evidence.get('unsigned_apk_sha256') != sha(unsigned):
+              raise SystemExit('unsigned APK digest mismatch')
+          packaged = native(signed)
+          if packaged != native(unsigned) or packaged != evidence.get('packaged_native_sha256'):
+              raise SystemExit('packaged native digest mismatch')
+          for abi in ('arm64-v8a', 'armeabi-v7a'):
+              if f'lib/{abi}/libckb_light_client_lib.so' not in packaged:
+                  raise SystemExit('missing native ABI')
+          certs = re.findall(r'^Signer #[0-9]+ certificate SHA-256 digest: ([0-9a-fA-F]{64})$', Path('verified-certificate.txt').read_text(), re.M)
+          expected = re.sub(r'[:\s]', '', os.environ['RELEASE_CERT_SHA256']).lower()
+          if len(certs) != 1 or not re.fullmatch('[0-9a-f]{64}', expected) or certs[0].lower() != expected:
+              raise SystemExit('verified signing certificate mismatch')
+          digest = sha(signed)
+          Path('SHA256SUMS').write_text(f'{digest}  {signed.name}\n')
+          Path('SIGNING-CERTIFICATE-SHA256.txt').write_text(expected + '\n')
+          manifest = {'schema_version': 1, 'release_tag': tag, 'source_commit': os.environ['SOURCE_COMMIT'],
+                      'build_run_url': os.environ['BUILD_RUN_URL'], 'apk': {'name': signed.name, 'sha256': digest},
+                      'signing_certificate_sha256': expected, 'packaged_native_sha256': packaged,
+                      'build_evidence_sha256': sha(evidence_path), 'build_evidence': evidence,
+                      'limitations': 'Build evidence is supplied by the untrusted build job. Colocated checksums are not independent authenticity proof; this is not an attestation or proof of reproducibility.'}
+          Path('release-provenance.json').write_text(json.dumps(manifest, sort_keys=True, indent=2) + '\n')
+          PYVERIFY
+
+      - name: Upload signed APK and verification bundle
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: signed-release-bundle
+          path: |
+            PocketNode-*.apk
+            SHA256SUMS
+            SIGNING-CERTIFICATE-SHA256.txt
+            release-provenance.json
+          retention-days: 1
+          if-no-files-found: error
+
+  # Job 3: repository-write capability is confined to publishing verified files.
+  # No checkout, build tools, signing environment, or signing secrets here.
+  publish:
+    needs: [build, sign]
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: write
+
+    steps:
+      - name: Download signed APK and verification bundle
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: signed-release-bundle
 
       - name: Create GitHub Release
         uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2
         with:
           tag_name: ${{ needs.build.outputs.release_tag }}
-          files: PocketNode-*.apk
+          files: |
+            PocketNode-*.apk
+            SHA256SUMS
+            SIGNING-CERTIFICATE-SHA256.txt
+            release-provenance.json
+          fail_on_unmatched_files: true
           generate_release_notes: true

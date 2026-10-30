@@ -17,6 +17,8 @@ import com.rjnr.pocketnode.data.gateway.models.Script
 import com.rjnr.pocketnode.data.send.ReviewedTransfer
 import com.rjnr.pocketnode.data.transaction.TransactionBuilder
 import com.rjnr.pocketnode.data.transaction.TransferPlan
+import com.rjnr.pocketnode.data.database.entity.WalletEntity
+import com.rjnr.pocketnode.data.wallet.WalletInfo
 import com.rjnr.pocketnode.data.wallet.KeyManager
 import com.rjnr.pocketnode.data.wallet.WalletKeyReader
 import com.rjnr.pocketnode.data.wallet.WalletRepository
@@ -112,6 +114,9 @@ class SendReviewStateMachineTest {
         every { repository.network } returns MutableStateFlow(NetworkType.TESTNET)
         every { repository.currentNetwork } returns NetworkType.TESTNET
         every { repository.getCurrentAddress() } returns senderAddress
+        every { repository.walletInfo } returns MutableStateFlow<WalletInfo?>(countWalletInfo())
+        every { repository.cellCountReadiness } returns MutableStateFlow(readiness())
+        coEvery { repository.getCells(senderAddress) } throws kotlinx.coroutines.CancellationException("Sequencing fixture skips cell-count preview")
         coEvery { repository.getPrivateKey() } returns ByteArray(32) { 1 }
         // Sequencing fixtures stop explicitly at the repository boundary. Race tests below
         // assemble real transactions and inspect semantic outputs independently.
@@ -131,7 +136,7 @@ class SendReviewStateMachineTest {
         every { authManager.isBiometricEnrolled() } returns false
 
         walletRepository = mockk(relaxed = true)
-        every { walletRepository.walletsFlow } returns MutableStateFlow(emptyList())
+        every { walletRepository.walletsFlow } returns MutableStateFlow(listOf(countWallet()))
         every { walletRepository.activeWalletIdSnapshot() } returns "w1"
 
         walletKeyReader = mockk(relaxed = true)
@@ -174,6 +179,33 @@ class SendReviewStateMachineTest {
     private suspend fun SendViewModel.fillForm(amount: String = "100") {
         updateRecipient(recipient)
         updateAmount(amount)
+    }
+
+    @Test fun `amount edits reject whole invalid pastes and preserve exact review shannons`() = runTest(testDispatcher) {
+        // The unrelated cell-count preview uses Result, which relaxed MockK cannot unbox.
+        coEvery { repository.getCells() } throws kotlinx.coroutines.CancellationException("fixture skips cell-count preview")
+        val vm = newViewModel(); advanceUntilIdle()
+        vm.updateRecipient(recipient)
+        listOf("٦١", "６１", "6١", "-61", "+61", "6e1", "1,000", "61,5", " 61 ",
+            "61.000000009", "92233720368.54775808").forEach { invalid ->
+            vm.updateAmount("")
+            vm.updateAmount(invalid)
+            assertEquals(invalid, "", vm.uiState.value.amountCkb)
+        }
+        listOf("", ".", "0", ".5", "60.99999999").forEach { incompleteOrSmall ->
+            vm.updateAmount(incompleteOrSmall); vm.sendTransaction(); advanceUntilIdle()
+            assertNull(incompleteOrSmall, vm.uiState.value.reviewRequest)
+            assertNotNull(vm.uiState.value.error)
+        }
+        vm.updateAmount("61.00000001"); vm.sendTransaction(); advanceUntilIdle()
+        assertNotNull(vm.uiState.value.reviewRequest)
+        coVerify { repository.previewTransfer(senderAddress, listOf(com.rjnr.pocketnode.data.transaction.RecipientOutput(recipient, 6_100_000_001L))) }
+        assertEquals(6_100_000_001L, vm.uiState.value.reviewRequest!!.transfers.single().amountShannons)
+        vm.updateSendMode(SendMode.BULK); vm.updateBulkRecipients(recipient)
+        vm.updateAmount("61."); vm.updateAmount("６１")
+        assertEquals("61.", vm.uiState.value.amountCkb)
+        vm.sendTransaction(); advanceUntilIdle()
+        assertEquals(6_100_000_000L, vm.uiState.value.reviewRequest!!.transfers.single().amountShannons)
     }
 
     @Test fun `single and bulk reject contradictory locks while custom review preserves guidance`() = runTest(testDispatcher) {
@@ -768,6 +800,23 @@ class SendReviewStateMachineTest {
         } finally { androidx.lifecycle.ViewModelStore().apply { put("max", vm); clear() }; runCurrent() }
     }
 
+    @Test fun `oversized MAX shows refusal and preserves entered amount`() = runTest(testDispatcher) {
+        transactionBuilder = TransactionBuilder(com.rjnr.pocketnode.data.validation.NetworkValidator())
+        val base = plannedTransfer.selectedCells.first()
+        val many = List(12000) { base.copy(outPoint = base.outPoint.copy(index = "0x${it.toString(16)}"), capacity = "0x2540be400") }
+        coEvery { repository.getCells() } coAnswers {
+            kotlinx.coroutines.yield()
+            Result.success(com.rjnr.pocketnode.data.gateway.models.CellsResponse(many, null))
+        }
+        val vm = newViewModel(); runCurrent()
+        try {
+            vm.fillForm()
+            vm.setMaxAmount(); runCurrent()
+            assertEquals("100", vm.uiState.value.amountCkb)
+            assertTrue(vm.uiState.value.error.toString().contains("too large"))
+        } finally { androidx.lifecycle.ViewModelStore().apply { put("max-size", vm); clear() }; runCurrent() }
+    }
+
     @Test fun `MAX quotes only observed empty cells at its captured source lock`() = runTest(testDispatcher) {
         transactionBuilder = TransactionBuilder(com.rjnr.pocketnode.data.validation.NetworkValidator())
         val base = plannedTransfer.selectedCells.first()
@@ -908,6 +957,416 @@ class SendReviewStateMachineTest {
         } finally { androidx.lifecycle.ViewModelStore().apply { put("lateMaxError", vm); clear() }; runCurrent() }
     }
 
+    private fun readiness(walletId: String = "w1", info: WalletInfo = countWalletInfo(),
+        epoch: Long = 1, stage: com.rjnr.pocketnode.data.gateway.CellCountStage = com.rjnr.pocketnode.data.gateway.CellCountStage.REGISTERED,
+        network: NetworkType = NetworkType.TESTNET) = com.rjnr.pocketnode.data.gateway.CellCountReadiness(
+            epoch, walletId, network, if (network == NetworkType.TESTNET) info.testnetAddress else info.mainnetAddress, info.script, stage)
+
+    @Test fun `bulk readiness defers until registration and replaces provisional count once after completed sync`() = runTest(testDispatcher) {
+        val stages = MutableStateFlow<com.rjnr.pocketnode.data.gateway.CellCountReadiness?>(readiness(stage = com.rjnr.pocketnode.data.gateway.CellCountStage.WAITING))
+        every { repository.cellCountReadiness } returns stages
+        val gate = kotlinx.coroutines.CompletableDeferred<Unit>()
+        var calls = 0
+        coEvery { repository.getCells(any()) } coAnswers {
+            val call = ++calls; kotlinx.coroutines.yield()
+            if (call == 1) gate.await()
+            Result.success(com.rjnr.pocketnode.data.gateway.models.CellsResponse(if (call == 1) emptyList() else plannedTransfer.selectedCells, null))
+        }
+        val vm = newViewModel(); runCurrent()
+        try {
+            vm.updateSendMode(SendMode.BULK); runCurrent()
+            assertEquals(0, calls)
+            stages.value = readiness(); runCurrent()
+            assertEquals(1, calls)
+            stages.value = readiness(stage = com.rjnr.pocketnode.data.gateway.CellCountStage.CAUGHT_UP); runCurrent()
+            assertEquals(1, calls) // Completion coalesces behind the running registration read.
+            vm.updateAmount("600")
+            gate.complete(Unit); runCurrent()
+            assertEquals(2, calls)
+            assertEquals(4, vm.uiState.value.spendableCellCount)
+            repeat(3) {
+                stages.value = readiness(); runCurrent()
+                stages.value = readiness(stage = com.rjnr.pocketnode.data.gateway.CellCountStage.CAUGHT_UP); runCurrent()
+            }
+            assertEquals(2, calls)
+            assertEquals(4, vm.uiState.value.spendableCellCount)
+        } finally { gate.complete(Unit); androidx.lifecycle.ViewModelStore().apply { put("readiness", vm); clear() }; runCurrent() }
+    }
+
+    @Test fun `bulk resync epoch gets bounded post-scan count and rejects obsolete same-address completions`() = runTest(testDispatcher) {
+        for (oldFailure in listOf(false, true)) {
+            val complete = com.rjnr.pocketnode.data.gateway.CellCountStage.CAUGHT_UP
+            val stages = MutableStateFlow<com.rjnr.pocketnode.data.gateway.CellCountReadiness?>(readiness(stage = complete))
+            every { repository.cellCountReadiness } returns stages
+            val oldGate = kotlinx.coroutines.CompletableDeferred<Unit>()
+            var calls = 0
+            coEvery { repository.getCells(any()) } coAnswers {
+                val call = ++calls
+                kotlinx.coroutines.yield()
+                when (call) {
+                    1 -> {
+                        kotlinx.coroutines.withContext(kotlinx.coroutines.NonCancellable) { oldGate.await() }
+                        if (oldFailure) Result.failure(kotlinx.coroutines.CancellationException("obsolete"))
+                        else Result.success(com.rjnr.pocketnode.data.gateway.models.CellsResponse(plannedTransfer.selectedCells.take(1), null))
+                    }
+                    2 -> Result.failure(IllegalStateException("rescan in progress"))
+                    else -> Result.success(com.rjnr.pocketnode.data.gateway.models.CellsResponse(plannedTransfer.selectedCells, null))
+                }
+            }
+            val vm = newViewModel(); runCurrent()
+            try {
+                vm.updateSendMode(SendMode.BULK); runCurrent()
+                assertEquals(1, calls)
+                stages.value = readiness(epoch = 2).copy(activationEpoch = 1); runCurrent()
+                assertEquals(2, calls)
+                assertEquals(0, vm.uiState.value.spendableCellCount)
+                stages.value = readiness(epoch = 2, stage = complete).copy(activationEpoch = 1); runCurrent()
+                assertEquals(3, calls)
+                assertEquals(4, vm.uiState.value.spendableCellCount)
+                val fresh = vm.uiState.value
+                oldGate.complete(Unit); runCurrent()
+                assertEquals(fresh, vm.uiState.value)
+                repeat(3) {
+                    stages.value = readiness(epoch = 2).copy(activationEpoch = 1); runCurrent()
+                    stages.value = readiness(epoch = 2, stage = complete).copy(activationEpoch = 1); runCurrent()
+                }
+                assertEquals(3, calls)
+                vm.updateSendMode(SendMode.SINGLE)
+                stages.value = readiness(epoch = 3).copy(activationEpoch = 1); runCurrent()
+                assertEquals(3, calls)
+            } finally {
+                oldGate.complete(Unit)
+                androidx.lifecycle.ViewModelStore().apply { put("resyncEpoch", vm); clear() }; runCurrent()
+            }
+        }
+    }
+
+    @Test fun `bulk final count failure retains the successful same-source count without retrying`() = runTest(testDispatcher) {
+        assertFinalBulkCountResult(failure = true)
+    }
+
+    @Test fun `bulk final successful empty count clears the previous count without retrying`() = runTest(testDispatcher) {
+        assertFinalBulkCountResult(failure = false)
+    }
+
+    private suspend fun kotlinx.coroutines.test.TestScope.assertFinalBulkCountResult(failure: Boolean) {
+        val stages = MutableStateFlow<com.rjnr.pocketnode.data.gateway.CellCountReadiness?>(readiness())
+        every { repository.cellCountReadiness } returns stages
+        val gate = kotlinx.coroutines.CompletableDeferred<Unit>()
+        var calls = 0
+        coEvery { repository.getCells(any()) } coAnswers {
+            val call = ++calls; kotlinx.coroutines.yield()
+            if (call == 1) {
+                Result.success(com.rjnr.pocketnode.data.gateway.models.CellsResponse(plannedTransfer.selectedCells, null))
+            } else {
+                gate.await()
+                if (failure) Result.failure(IllegalStateException("cell read unavailable"))
+                else Result.success(com.rjnr.pocketnode.data.gateway.models.CellsResponse(emptyList(), null))
+            }
+        }
+        every { transactionBuilder.estimateTransferFeeForDraft(any(), any(), any(), any()) } answers { firstArg<Int>().toLong() * 1000L }
+        val vm = newViewModel(); runCurrent()
+        try {
+            vm.updateSendMode(SendMode.BULK); vm.updateBulkRecipients(recipient); vm.updateAmount("600"); runCurrent()
+            assertEquals(4, vm.uiState.value.spendableCellCount)
+            assertEquals(3000L, vm.uiState.value.estimatedFee)
+            stages.value = readiness(stage = com.rjnr.pocketnode.data.gateway.CellCountStage.CAUGHT_UP); runCurrent()
+            assertEquals(2, calls)
+            assertEquals(4, vm.uiState.value.spendableCellCount)
+            gate.complete(Unit); runCurrent()
+            assertEquals(if (failure) 4 else 0, vm.uiState.value.spendableCellCount)
+            assertEquals(if (failure) 3000L else 1000L, vm.uiState.value.estimatedFee)
+            val finalPreview = vm.uiState.value
+            repeat(3) {
+                stages.value = readiness(); runCurrent()
+                stages.value = readiness(stage = com.rjnr.pocketnode.data.gateway.CellCountStage.CAUGHT_UP); runCurrent()
+            }
+            assertEquals(2, calls)
+            assertEquals(finalPreview, vm.uiState.value)
+            stages.value = readiness(epoch = 2, stage = com.rjnr.pocketnode.data.gateway.CellCountStage.WAITING); runCurrent()
+            assertEquals(0, vm.uiState.value.spendableCellCount)
+            assertEquals(2, calls)
+        } finally { gate.complete(Unit); androidx.lifecycle.ViewModelStore().apply { put("finalCountResult", vm); clear() }; runCurrent() }
+    }
+
+    @Test fun `bulk readiness already caught up coalesces stages and never rearms failed final read`() = runTest(testDispatcher) {
+        val stages = MutableStateFlow<com.rjnr.pocketnode.data.gateway.CellCountReadiness?>(readiness(stage = com.rjnr.pocketnode.data.gateway.CellCountStage.CAUGHT_UP))
+        every { repository.cellCountReadiness } returns stages
+        var calls = 0
+        coEvery { repository.getCells(any()) } coAnswers {
+            calls++; kotlinx.coroutines.yield()
+            Result.failure(IllegalStateException("unavailable"))
+        }
+        val vm = newViewModel(); runCurrent()
+        try {
+            assertEquals(0, calls)
+            vm.updateSendMode(SendMode.BULK); runCurrent()
+            assertEquals(1, calls)
+            repeat(3) {
+                stages.value = readiness(); runCurrent()
+                stages.value = readiness(stage = com.rjnr.pocketnode.data.gateway.CellCountStage.CAUGHT_UP); runCurrent()
+            }
+            vm.updateAmount("600"); runCurrent()
+            assertEquals(1, calls)
+            assertEquals(0, vm.uiState.value.spendableCellCount)
+            vm.updateSendMode(SendMode.SINGLE)
+            stages.value = readiness(epoch = 2); runCurrent()
+            assertEquals(1, calls)
+        } finally { androidx.lifecycle.ViewModelStore().apply { put("readyFailure", vm); clear() }; runCurrent() }
+    }
+
+    private fun countWalletInfo(args: String = "aa") = WalletInfo(
+        publicKey = "", script = Script(Script.SECP256K1_CODE_HASH, "type", "0x" + args.repeat(20)),
+        testnetAddress = com.rjnr.pocketnode.data.wallet.AddressUtils.encode(Script(Script.SECP256K1_CODE_HASH, "type", "0x" + args.repeat(20)), NetworkType.TESTNET),
+        mainnetAddress = com.rjnr.pocketnode.data.wallet.AddressUtils.encode(Script(Script.SECP256K1_CODE_HASH, "type", "0x" + args.repeat(20)), NetworkType.MAINNET),
+    )
+
+    private fun countWallet(id: String = "w1", info: WalletInfo = countWalletInfo()) = WalletEntity(
+        walletId = id, name = id, type = KeyManager.WALLET_TYPE_MNEMONIC,
+        derivationPath = null, parentWalletId = null, isActive = true,
+        testnetAddress = info.testnetAddress, mainnetAddress = info.mainnetAddress,
+    )
+
+    @Test fun `bulk source refresh waits for matching wallet address and rejects old completions`() = runTest(testDispatcher) {
+        // Removing the source-change refresh strands this on zero. Refreshing before
+        // address readiness would query A under B's identity and fail the query log.
+        for (addressFirst in listOf(false, true)) for (oldFailure in listOf(false, true)) {
+            val infoA = countWalletInfo()
+            val infoB = countWalletInfo("cc")
+            val infos = MutableStateFlow<WalletInfo?>(infoA)
+            val stages = MutableStateFlow<com.rjnr.pocketnode.data.gateway.CellCountReadiness?>(readiness())
+            every { repository.cellCountReadiness } returns stages
+            val wallets = MutableStateFlow(listOf(countWallet()))
+            var walletId = "w1"
+            every { repository.walletInfo } returns infos
+            every { repository.getCurrentAddress() } answers { infos.value?.testnetAddress }
+            every { walletRepository.walletsFlow } returns wallets
+            every { walletRepository.activeWalletIdSnapshot() } answers { walletId }
+            val oldGate = kotlinx.coroutines.CompletableDeferred<Unit>()
+            val newGate = kotlinx.coroutines.CompletableDeferred<Unit>()
+            val queries = mutableListOf<String>()
+            coEvery { repository.getCells(any()) } coAnswers {
+                val address = firstArg<String>()
+                queries += address
+                kotlinx.coroutines.yield()
+                if (address == infoA.testnetAddress) {
+                    kotlinx.coroutines.withContext(kotlinx.coroutines.NonCancellable) { oldGate.await() }
+                    if (oldFailure) Result.failure(kotlinx.coroutines.CancellationException("obsolete"))
+                    else Result.success(com.rjnr.pocketnode.data.gateway.models.CellsResponse(plannedTransfer.selectedCells.take(1), null))
+                } else {
+                    newGate.await()
+                    Result.success(com.rjnr.pocketnode.data.gateway.models.CellsResponse(plannedTransfer.selectedCells, null))
+                }
+            }
+            every { transactionBuilder.estimateTransferFeeForDraft(any(), any(), any(), any()) } answers { firstArg<Int>().toLong() * 1000L }
+            val vm = newViewModel(); runCurrent()
+            try {
+                vm.updateSendMode(SendMode.BULK); vm.updateBulkRecipients(recipient); vm.updateAmount("600"); runCurrent()
+                walletId = "w2"
+                stages.value = readiness("w2", infoB, epoch = 2)
+                if (addressFirst) infos.value = infoB else wallets.value = listOf(countWallet("w2", infoB))
+                runCurrent()
+                assertEquals(listOf(infoA.testnetAddress), queries)
+                assertEquals(0, vm.uiState.value.spendableCellCount)
+                if (addressFirst) wallets.value = listOf(countWallet("w2", infoB)) else infos.value = infoB
+                runCurrent()
+                assertEquals(listOf(infoA.testnetAddress, infoB.testnetAddress), queries)
+                vm.updateAmount("601") // Draft edits must retain the replacement request.
+                newGate.complete(Unit); runCurrent()
+                assertEquals(SendMode.BULK, vm.uiState.value.sendMode)
+                assertEquals(4, vm.uiState.value.spendableCellCount)
+                assertEquals(3000L, vm.uiState.value.estimatedFee)
+                val fresh = vm.uiState.value
+                oldGate.complete(Unit); runCurrent()
+                assertEquals(fresh, vm.uiState.value)
+            } finally {
+                oldGate.complete(Unit); newGate.complete(Unit)
+                androidx.lifecycle.ViewModelStore().apply { put("autoWalletCount", vm); clear() }; runCurrent()
+            }
+        }
+    }
+
+    @Test fun `bulk source refresh automatically counts current network address`() = runTest(testDispatcher) {
+        val info = countWalletInfo()
+        val networks = MutableStateFlow(NetworkType.TESTNET)
+        val stages = MutableStateFlow<com.rjnr.pocketnode.data.gateway.CellCountReadiness?>(readiness())
+        every { repository.cellCountReadiness } returns stages
+        every { repository.network } returns networks
+        every { repository.currentNetwork } answers { networks.value }
+        every { repository.getCurrentAddress() } answers {
+            if (networks.value == NetworkType.TESTNET) info.testnetAddress else info.mainnetAddress
+        }
+        val gate = kotlinx.coroutines.CompletableDeferred<Unit>()
+        val queries = mutableListOf<String>()
+        coEvery { repository.getCells(any()) } coAnswers {
+            val address = firstArg<String>(); queries += address
+            kotlinx.coroutines.yield()
+            if (address == info.mainnetAddress) gate.await()
+            Result.success(com.rjnr.pocketnode.data.gateway.models.CellsResponse(plannedTransfer.selectedCells.take(if (address == info.mainnetAddress) 4 else 1), null))
+        }
+        val vm = newViewModel(); runCurrent()
+        try {
+            vm.updateSendMode(SendMode.BULK); runCurrent()
+            assertEquals(1, vm.uiState.value.spendableCellCount)
+            networks.value = NetworkType.MAINNET
+            stages.value = readiness(network = NetworkType.MAINNET, epoch = 2); runCurrent()
+            assertEquals(0, vm.uiState.value.spendableCellCount)
+            gate.complete(Unit); runCurrent()
+            assertEquals(listOf(info.testnetAddress, info.mainnetAddress), queries)
+            assertEquals(4, vm.uiState.value.spendableCellCount)
+        } finally { gate.complete(Unit); androidx.lifecycle.ViewModelStore().apply { put("autoNetworkCount", vm); clear() }; runCurrent() }
+    }
+
+    @Test fun `bulk source refresh waits for initialization and does not query in single mode`() = runTest(testDispatcher) {
+        val infos = MutableStateFlow<WalletInfo?>(null)
+        every { repository.walletInfo } returns infos
+        every { repository.getCurrentAddress() } answers { infos.value?.testnetAddress }
+        val queries = mutableListOf<String>()
+        coEvery { repository.getCells(any()) } coAnswers {
+            queries += firstArg<String>(); kotlinx.coroutines.yield()
+            Result.success(com.rjnr.pocketnode.data.gateway.models.CellsResponse(plannedTransfer.selectedCells, null))
+        }
+        val vm = newViewModel(); runCurrent()
+        try {
+            vm.updateSendMode(SendMode.BULK); runCurrent()
+            assertEquals(0, vm.uiState.value.spendableCellCount)
+            assertTrue(queries.isEmpty())
+            infos.value = countWalletInfo(); runCurrent()
+            assertEquals(4, vm.uiState.value.spendableCellCount)
+            vm.updateSendMode(SendMode.SINGLE); runCurrent()
+            infos.value = null; runCurrent()
+            infos.value = countWalletInfo(); runCurrent()
+            assertEquals(listOf(senderAddress), queries)
+            assertEquals(0, vm.uiState.value.spendableCellCount)
+            vm.updateSendMode(SendMode.BULK); runCurrent()
+            assertEquals(4, vm.uiState.value.spendableCellCount)
+        } finally { androidx.lifecycle.ViewModelStore().apply { put("initialCount", vm); clear() }; runCurrent() }
+    }
+
+    @Test fun `bulk cell count ignores late success after source identity changes`() = runTest(testDispatcher) {
+        for (changed in listOf("wallet", "network", "address")) {
+            var wallet = "w1"
+            var network = NetworkType.TESTNET
+            var address = senderAddress
+            every { walletRepository.activeWalletIdSnapshot() } answers { wallet }
+            every { repository.currentNetwork } answers { network }
+            every { repository.getCurrentAddress() } answers { address }
+            val gate = kotlinx.coroutines.CompletableDeferred<Unit>()
+            coEvery { repository.getCells(any()) } coAnswers {
+                kotlinx.coroutines.yield() // MockK inline Result requires a suspended response.
+                kotlinx.coroutines.withContext(kotlinx.coroutines.NonCancellable) { gate.await() }
+                Result.success(com.rjnr.pocketnode.data.gateway.models.CellsResponse(plannedTransfer.selectedCells, null))
+            }
+            val vm = newViewModel(); runCurrent()
+            try {
+                vm.updateSendMode(SendMode.BULK); runCurrent()
+                when (changed) {
+                    "wallet" -> wallet = "w2"
+                    "network" -> network = NetworkType.MAINNET
+                    "address" -> address = recipient
+                }
+                gate.complete(Unit); runCurrent()
+                assertEquals(changed, 0, vm.uiState.value.spendableCellCount)
+            } finally { gate.complete(Unit); androidx.lifecycle.ViewModelStore().apply { put("sourceCount", vm); clear() }; runCurrent() }
+        }
+    }
+
+    @Test fun `bulk cell count ignores older success after replacement completes`() = runTest(testDispatcher) {
+        assertBulkCountReplacementIgnoresLateResult(failure = false)
+    }
+
+    @Test fun `bulk cell count ignores older cancellation failure after replacement completes`() = runTest(testDispatcher) {
+        assertBulkCountReplacementIgnoresLateResult(failure = true)
+    }
+
+    private suspend fun kotlinx.coroutines.test.TestScope.assertBulkCountReplacementIgnoresLateResult(failure: Boolean) {
+        val gate = kotlinx.coroutines.CompletableDeferred<Unit>()
+        var calls = 0
+        coEvery { repository.getCells(any()) } coAnswers {
+            kotlinx.coroutines.yield() // MockK inline Result requires a suspended response.
+            if (++calls == 1) {
+                kotlinx.coroutines.withContext(kotlinx.coroutines.NonCancellable) { gate.await() }
+                if (failure) Result.failure(kotlinx.coroutines.CancellationException("old read cancelled"))
+                else Result.success(com.rjnr.pocketnode.data.gateway.models.CellsResponse(plannedTransfer.selectedCells, null))
+            } else Result.success(com.rjnr.pocketnode.data.gateway.models.CellsResponse(plannedTransfer.selectedCells.take(2), null))
+        }
+        val vm = newViewModel(); runCurrent()
+        try {
+            vm.updateSendMode(SendMode.BULK); runCurrent()
+            vm.updateSendMode(SendMode.BULK); runCurrent()
+            assertEquals(2, vm.uiState.value.spendableCellCount)
+            val currentPreview = vm.uiState.value
+            gate.complete(Unit); runCurrent()
+            assertEquals(currentPreview, vm.uiState.value)
+        } finally { gate.complete(Unit); androidx.lifecycle.ViewModelStore().apply { put("replacementCount", vm); clear() }; runCurrent() }
+    }
+
+    @Test fun `bulk cell count uses captured address and survives recipient and amount edits`() = runTest(testDispatcher) {
+        val gate = kotlinx.coroutines.CompletableDeferred<Unit>()
+        var queriedAddress: String? = null
+        coEvery { repository.getCells(any()) } coAnswers {
+            kotlinx.coroutines.yield() // MockK inline Result requires a suspended response.
+            queriedAddress = firstArg()
+            gate.await()
+            Result.success(com.rjnr.pocketnode.data.gateway.models.CellsResponse(plannedTransfer.selectedCells, null))
+        }
+        every { transactionBuilder.estimateTransferFeeForDraft(any(), any(), any(), any()) } answers { firstArg<Int>().toLong() * 1000L }
+        val vm = newViewModel(); runCurrent()
+        try {
+            vm.updateSendMode(SendMode.BULK); runCurrent()
+            vm.updateBulkRecipients(recipient); vm.updateAmount("600")
+            gate.complete(Unit); runCurrent()
+            assertEquals(senderAddress, queriedAddress)
+            assertEquals(4, vm.uiState.value.spendableCellCount)
+            // 1000 CKB / 4 cells = 250 CKB average; 600 CKB requires 3 inputs.
+            assertEquals(3000L, vm.uiState.value.estimatedFee)
+            assertEquals("600", vm.uiState.value.amountCkb)
+        } finally { gate.complete(Unit); androidx.lifecycle.ViewModelStore().apply { put("editedCount", vm); clear() }; runCurrent() }
+    }
+
+    @Test fun `bulk cell count clears on wallet network and mode changes and cancels old reads`() = runTest(testDispatcher) {
+        for (changed in listOf("wallet", "network", "mode")) {
+            val networks = MutableStateFlow(NetworkType.TESTNET)
+            val wallets = MutableStateFlow(listOf(countWallet()))
+            var wallet = "w1"
+            every { repository.network } returns networks
+            every { repository.currentNetwork } answers { networks.value }
+            every { walletRepository.walletsFlow } returns wallets
+            every { walletRepository.activeWalletIdSnapshot() } answers { wallet }
+            val gate = kotlinx.coroutines.CompletableDeferred<Unit>()
+            var calls = 0
+            var cancelled = false
+            coEvery { repository.getCells(any()) } coAnswers {
+                kotlinx.coroutines.yield() // MockK inline Result requires a suspended response.
+                if (++calls > 1) {
+                    try { gate.await() }
+                    catch (error: kotlinx.coroutines.CancellationException) {
+                        cancelled = true
+                        return@coAnswers Result.failure(error)
+                    }
+                }
+                Result.success(com.rjnr.pocketnode.data.gateway.models.CellsResponse(plannedTransfer.selectedCells, null))
+            }
+            val vm = newViewModel(); runCurrent()
+            try {
+                vm.updateSendMode(SendMode.BULK); runCurrent()
+                assertEquals(4, vm.uiState.value.spendableCellCount)
+                vm.updateSendMode(SendMode.BULK); runCurrent()
+                when (changed) {
+                    "wallet" -> {
+                        wallet = "w2"
+                        wallets.value = listOf(mockk(relaxed = true))
+                    }
+                    "network" -> networks.value = NetworkType.MAINNET
+                    "mode" -> vm.updateSendMode(SendMode.SINGLE)
+                }
+                runCurrent()
+                assertTrue("$changed must cancel the obsolete read", cancelled)
+                assertEquals(changed, 0, vm.uiState.value.spendableCellCount)
+            } finally { gate.complete(Unit); androidx.lifecycle.ViewModelStore().apply { put("cancelCount", vm); clear() }; runCurrent() }
+        }
+    }
+
     /** Only the transport/storage are doubles: real ledger, planner, review validator and signing serializer. */
     private fun recordingPipeline(scope: kotlinx.coroutines.CoroutineScope, signed: MutableList<com.rjnr.pocketnode.data.gateway.models.Transaction>): com.rjnr.pocketnode.data.send.SendPipeline {
         val json = kotlinx.serialization.json.Json { encodeDefaults = true }
@@ -923,7 +1382,9 @@ class SendReviewStateMachineTest {
             throw kotlinx.coroutines.CancellationException("fixture stops after observing exact signed broadcast bytes")
         }
         val ledger = com.rjnr.pocketnode.data.gateway.LedgerReader(api, mockk(relaxed = true), mockk(relaxed = true), mockk(relaxed = true),
-            mockk(relaxed = true), mockk(relaxed = true), mockk(relaxed = true), uiPreferences, json, NoopLogger)
+            mockk(relaxed = true), mockk(relaxed = true), mockk(relaxed = true), uiPreferences, json, NoopLogger,
+            // Keep the synchronous MockK originalCall seam on the caller's test scheduler.
+            queryContext = kotlin.coroutines.EmptyCoroutineContext)
         // Exercise the real repository getCells body without starting its node-owning constructor.
         GatewayRepository::class.java.getDeclaredField("ledgerReader").apply { isAccessible = true }.set(repository, ledger)
         GatewayRepository::class.java.getDeclaredField("_walletInfo").apply { isAccessible = true }.set(repository,
@@ -958,9 +1419,12 @@ class SendReviewStateMachineTest {
         transactionBuilder = TransactionBuilder(com.rjnr.pocketnode.data.validation.NetworkValidator())
         val signed = mutableListOf<com.rjnr.pocketnode.data.gateway.models.Transaction>()
         recordingPipeline(backgroundScope, signed)
+        // Capture through the real repository while active, then emulate late delivery.
+        // MockK originalCall retains its original continuation and cannot re-enter a cancelled read.
+        val lateCells = repository.getCells().getOrThrow()
         coEvery { repository.getCells() } coAnswers {
             kotlinx.coroutines.withContext(kotlinx.coroutines.NonCancellable) { gate.await() }
-            Result.success(invocation.originalCall() as com.rjnr.pocketnode.data.gateway.models.CellsResponse)
+            Result.success(lateCells)
         }
         val vm = newViewModel(); runCurrent()
         try {

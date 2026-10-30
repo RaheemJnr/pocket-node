@@ -2,7 +2,7 @@ name: supply-chain
 
 on:
   pull_request:
-    branches: [main, codex/security-maintenance-batch-1]
+    branches: [main, codex/security-maintenance-batch-1, codex/dao-association-recovery]
   push:
     branches: [main]
   schedule:

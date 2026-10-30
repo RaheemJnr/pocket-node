@@ -33,8 +33,8 @@ import javax.inject.Singleton
  *
  * The counter (and lockout state) live in EncryptedSharedPreferences, which
  * survive an app upgrade / overwrite install by design (#370). Resetting it
- * on reinstall would let an attacker sideload a build to clear the count and
- * keep brute-forcing, so it deliberately persists across upgrades. When
+ * on a normal signed upgrade would grant a fresh guessing budget, so version
+ * bookkeeping never clears it. When
  * attempts run out, the recovery path is "reset and restore from seed"
  * (surfaced by [com.rjnr.pocketnode.ui.screens.auth.PinEntryScreen], #373),
  * not a counter reset.
@@ -294,18 +294,6 @@ class PinManager @Inject constructor(
         policy.removePin()
     }
 
-    /**
-     * #370: clear the failed-attempt counter and any lockout, keeping the PIN
-     * itself. Called once after an overwrite install / version upgrade so a
-     * user who fumbled their PIN before upgrading is not still staring at "out
-     * of attempts" on the freshly upgraded build. Committed synchronously
-     * because the caller runs it during cold start, before the PIN gate reads
-     * the lockout state.
-     */
-    fun resetFailedAttempts() {
-        policy.resetFailedAttempts(durable = true)
-    }
-
     fun getRemainingAttempts(): Int = policy.getRemainingAttempts()
 
     fun isLockedOut(): Boolean = policy.isLockedOut()
@@ -429,14 +417,5 @@ class PinManager @Inject constructor(
         private val PIN_STATE_KEYS = setOf(KEY_PIN_HASH, KEY_SALT, KEY_KDF_VERSION,
             KEY_FAILED_ATTEMPTS, KEY_LAST_FAILED_AT, KEY_LOCKOUT_UNTIL)
 
-        /**
-         * #370: whether an overwrite install / version bump should reset the
-         * failed-attempt counter. True only on a genuine upgrade — a recorded
-         * previous version strictly below the current one. A fresh install
-         * (lastSeen 0) has no counter to reset; a same-version relaunch or a
-         * downgrade must not clear a legitimate lockout.
-         */
-        fun shouldResetAttemptsForUpgrade(lastSeen: Int, current: Int): Boolean =
-            lastSeen in 1 until current
     }
 }

@@ -56,7 +56,7 @@
     <string name="edu_block_height_body">A block is one batch of transactions on the blockchain. The block height is just the count of how many blocks exist so far. Higher numbers are more recent.</string>
 
     <string name="edu_activity_title">About transactions</string>
-    <string name="edu_activity_body">Sent and received transactions appear here. A transaction shows as Pending until the network confirms it — usually under a minute. Tap a row to see details.</string>
+    <string name="edu_activity_body">Sent and received transactions appear here. A transaction shows as Pending while its network outcome is unresolved. Confirmation time varies. Tap a row to see details.</string>
 
     <string name="edu_open_faq">Open FAQ</string>
     <string name="edu_got_it">Got it</string>
@@ -77,21 +77,21 @@
     <string name="tx_elapsed_days">%1$d d</string>
 
     <string name="tx_explain_broadcasting_title">Sending to the network</string>
-    <string name="tx_explain_broadcasting_body">Your phone is handing the signed transaction to the CKB network. This normally takes a few seconds. Nothing has moved on chain yet, and your balance has not changed.</string>
+    <string name="tx_explain_broadcasting_body">The wallet recorded this transaction for submission. Network acceptance or inclusion has not yet been confirmed.</string>
 
     <string name="tx_explain_pending_title">Waiting to be confirmed</string>
-    <string name="tx_explain_pending_body">The network has your transaction and is waiting to include it in a block. This usually takes under a minute. It turns Confirmed as soon as it lands in a block.</string>
-    <string name="tx_explain_pending_next">There is nothing to do while it is Pending, and you do not need to send it again. If the network still has not picked it up after about 6 minutes, the wallet marks it Failed and offers a retry.</string>
+    <string name="tx_explain_pending_body">The wallet has not yet verified that this transaction is in a block. It may still be waiting, or the local node may need time to catch up.</string>
+    <string name="tx_explain_pending_next">You do not need to send it again. The wallet checks for updates while the app is open, but checks may stop before a final status is available. A long wait or an unavailable status does not mean the transaction failed.</string>
 
     <string name="tx_explain_confirmed_title">Confirmed on chain</string>
     <string name="tx_explain_confirmed_body">This transaction is in a block and counted in your balance. Every block added after it makes it harder to reverse.</string>
 
-    <string name="tx_explain_failed_title">This did not go through</string>
+    <string name="tx_explain_failed_title">Marked failed</string>
     <string name="tx_explain_failed_next">Retry re-sends the exact same signed transaction, reusing the same coins, so it can never pay twice.</string>
 
-    <string name="tx_failed_reason_rejected">The network kept it waiting for about 6 minutes and then dropped it. That usually means one of the coins it spends had already been used by another transaction.</string>
-    <string name="tx_failed_reason_dropped">The network stopped reporting this transaction, so it never made it into a block. Nothing was sent and your balance is unchanged.</string>
-    <string name="tx_failed_reason_unknown">The wallet could not find this transaction on chain. Nothing was sent and your balance is unchanged.</string>
+    <string name="tx_failed_reason_rejected">The wallet recorded a submission failure or rejection. Older records may have been marked failed after a long wait. Check the current status before sending a new transaction.</string>
+    <string name="tx_failed_reason_dropped">This transaction was marked failed after it could not be found. Absence alone does not establish whether it was included. Check its current status before sending a new transaction.</string>
+    <string name="tx_failed_reason_unknown">The wallet marked this transaction failed, but its current chain status is not known here. Check the current status before sending a new transaction.</string>
 
     <string name="tx_detail_not_in_block">Not in a block yet</string>
     <string name="tx_detail_submitted">Submitted</string>
@@ -113,7 +113,7 @@
     <string name="faq_activity_body">Your phone has to hear about a transaction from the network before showing it. New transactions usually appear within seconds. If your balance looks wrong, pull down to refresh; if the app is still syncing, wait for the sync to finish first.</string>
 
     <string name="faq_pending_title">What does \"Pending\" mean on a transaction?</string>
-    <string name="faq_pending_body">Pending means your transaction has been sent to the network but not yet included in a block. The network usually picks it up within a minute. If a transaction stays Pending for several minutes, you can retry it from the transaction details.</string>
+    <string name="faq_pending_body">Pending means the transaction outcome is unresolved. Confirmation time varies, and a transaction may remain pending if the network cannot confirm its status. Keep syncing and check its details. Do not resend while it is pending; elapsed time alone does not mean it failed.</string>
 
     <string name="faq_confirmations_title">What are confirmations?</string>
     <string name="faq_confirmations_body">Once your transaction is in a block, more blocks are added on top of it over time. Each new block is one confirmation. More confirmations means it is increasingly impossible to reverse. For most everyday amounts, one or two confirmations is enough.</string>
