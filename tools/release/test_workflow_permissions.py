@@ -1,6 +1,9 @@
 """Release trust-boundary regression checks; no GitHub API or release execution."""
 from pathlib import Path
 import unittest
+import os
+import subprocess
+import tempfile
 import yaml
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -21,6 +24,27 @@ class ReleasePermissionsTest(unittest.TestCase):
         self.assertEqual(self.jobs['publish']['if'], '${{ inputs.publish == true }}')
         self.assertNotIn('if', self.jobs['build'])
         self.assertNotIn('if', self.jobs['sign'])
+
+    def test_certificate_diagnostics_preserve_fail_closed_comparison(self):
+        step = next(s for s in self.jobs['sign']['steps'] if s['name'] == 'Zipalign, sign, and verify')
+        script = 'set -euo pipefail\n' + step['run'].split('ACTUAL=', 1)[1]
+        script = script.replace('set -euo pipefail\n', 'set -euo pipefail\nACTUAL=', 1)
+        trusted = 'a' * 64
+        cases = [
+            (trusted, trusted, 0, 'APK signer SHA-256:'),
+            (trusted, 'b' * 64, 1, 'differs from the configured expected certificate'),
+            (trusted, 'invalid-sensitive-input', 1, 'exactly 64 hexadecimal characters'),
+            ('unparseable', trusted, 1, 'Could not parse a single'),
+            (trusted, '', 1, 'exactly 64 hexadecimal characters'),
+        ]
+        for actual, expected, code, message in cases:
+            with self.subTest(actual=actual, expected=expected), tempfile.TemporaryDirectory() as tmp:
+                Path(tmp, 'verified-certificate.txt').write_text('Signer #1 certificate SHA-256 digest: ' + actual + '\n')
+                result = subprocess.run(['bash', '-c', script], cwd=tmp,
+                    env={**os.environ, 'RELEASE_CERT_SHA256': expected}, capture_output=True, text=True)
+                self.assertEqual(result.returncode, code, result.stderr)
+                self.assertIn(message, result.stdout)
+                self.assertNotIn('invalid-sensitive-input', result.stdout + result.stderr)
 
     def test_repository_write_is_confined_to_publisher(self):
         self.assertEqual(self.workflow['permissions'], {'contents': 'read'})
