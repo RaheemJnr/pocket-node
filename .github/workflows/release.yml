@@ -245,7 +245,10 @@ jobs:
             --key-pass "pass:${KEY_PASSWORD}" \
             --ks-key-alias "${KEY_ALIAS}" \
             --out "$OUT" aligned.apk
-          "$BT/apksigner" verify --print-certs "$OUT" > verified-certificate.txt
+          echo "Android build-tools: $(basename "$BT")"
+          # Verification output contains public certificate/key metadata only.
+          # pipefail preserves verification failures while retaining parse evidence.
+          "$BT/apksigner" verify --print-certs "$OUT" | tee verified-certificate.txt
 
           # Fail the release if the signing cert does not match the fingerprint
           # baked into the APK — otherwise the in-app updater would reject this
