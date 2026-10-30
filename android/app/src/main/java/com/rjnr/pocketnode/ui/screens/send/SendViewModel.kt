@@ -13,6 +13,7 @@ import com.rjnr.pocketnode.data.contacts.ContactRepository
 import com.rjnr.pocketnode.data.database.dao.KeyMaterialDao
 import com.rjnr.pocketnode.data.database.entity.ContactEntity
 import com.rjnr.pocketnode.data.database.entity.WalletEntity
+import com.rjnr.pocketnode.data.gateway.CellCountStage
 import com.rjnr.pocketnode.data.gateway.GatewayRepository
 import com.rjnr.pocketnode.data.gateway.models.NetworkType
 import com.rjnr.pocketnode.data.gateway.models.TransactionStatusResponse
@@ -226,8 +227,9 @@ class SendViewModel @Inject constructor(
     private var reviewJob: Job? = null
     private var bulkCellCountJob: Job? = null
     private var bulkCellCountGeneration = 0L
-    private data class BulkCellCountSource(val walletId: String, val network: NetworkType, val address: String)
+    private data class BulkCellCountSource(val walletId: String, val network: NetworkType, val address: String, val epoch: Long)
     private var bulkCellCountSource: BulkCellCountSource? = null
+    private var bulkCellCountStage = CellCountStage.WAITING
     private var bulkCellCountWallets: List<WalletEntity> = emptyList()
 
     // Count requests belong to the source, not to amount/recipient edits.
@@ -236,6 +238,7 @@ class SendViewModel @Inject constructor(
         bulkCellCountJob?.cancel()
         bulkCellCountJob = null
         bulkCellCountSource = null
+        bulkCellCountStage = CellCountStage.WAITING
         _uiState.update { it.copy(spendableCellCount = 0).refreshBulkPreview() }
     }
 
@@ -250,28 +253,50 @@ class SendViewModel @Inject constructor(
         }
         // Room/preferences can select a wallet before the repository initializes
         // its address. Wait for both observations to agree, in either order.
-        val source = if (wallet != null && !address.isNullOrBlank() && address == expectedAddress) {
-            BulkCellCountSource(wallet.walletId, network, address)
+        val readiness = repository.cellCountReadiness.value
+        val source = if (wallet != null && !address.isNullOrBlank() && address == expectedAddress &&
+            readiness?.walletId == wallet.walletId && readiness.network == network && readiness.address == address) {
+            BulkCellCountSource(wallet.walletId, network, address, readiness.epoch)
         } else null
-        if (source == bulkCellCountSource) return
-        invalidateBulkCellCount()
-        bulkCellCountSource = source
+        if (source != bulkCellCountSource) {
+            invalidateBulkCellCount()
+            bulkCellCountSource = source
+        }
         if (source == null || _uiState.value.sendMode != SendMode.BULK) return
+        // At most a registration snapshot and one completed-sync replacement per
+        // activation. Already-caught-up sources coalesce both into one read. A
+        // duplicate tick or failed final read never rearms this finite budget.
+        val stage = readiness?.stage ?: return
+        if (stage <= bulkCellCountStage || bulkCellCountJob?.isActive == true) return
+        bulkCellCountStage = stage
 
         val request = bulkCellCountGeneration
         fun isCurrentSource() = bulkCellCountGeneration == request &&
             walletPreferencesActiveId() == source.walletId && repository.currentNetwork == source.network &&
-            repository.getCurrentAddress() == source.address && _uiState.value.sendMode == SendMode.BULK
-        bulkCellCountJob = viewModelScope.launch {
-            if (!isCurrentSource()) return@launch
-            val result = repository.getCells(address = source.address)
-            // Result can contain cancellation; neither a late success nor its
-            // fallback zero may overwrite a replacement request's preview.
-            coroutineContext.ensureActive()
-            if (!isCurrentSource()) return@launch
-            val count = result.map { it.items.size }.getOrNull() ?: 0
-            _uiState.update { it.copy(spendableCellCount = count).refreshBulkPreview() }
+            repository.getCurrentAddress() == source.address &&
+            repository.cellCountReadiness.value?.epoch == source.epoch && _uiState.value.sendMode == SendMode.BULK
+        val job = viewModelScope.launch(start = kotlinx.coroutines.CoroutineStart.LAZY) {
+            try {
+                if (!isCurrentSource()) return@launch
+                val result = repository.getCells(address = source.address)
+                // Result can contain cancellation; neither a late success nor its
+                // fallback zero may overwrite a replacement request's preview.
+                coroutineContext.ensureActive()
+                if (!isCurrentSource()) return@launch
+                val count = result.map { it.items.size }.getOrNull() ?: 0
+                _uiState.update { it.copy(spendableCellCount = count).refreshBulkPreview() }
+            } finally {
+                if (isCurrentSource()) {
+                    bulkCellCountJob = null
+                    // A completed-sync notification may have arrived during the
+                    // registration read. Start its sole replacement only now.
+                    refreshBulkCellCount()
+                }
+            }
         }
+        // Install ownership before an immediate result can schedule its successor.
+        bulkCellCountJob = job
+        job.start()
     }
 
     private fun invalidateDraft() {
@@ -389,6 +414,9 @@ class SendViewModel @Inject constructor(
         }
         viewModelScope.launch {
             repository.walletInfo.collect { refreshBulkCellCount() }
+        }
+        viewModelScope.launch {
+            repository.cellCountReadiness.collect { refreshBulkCellCount() }
         }
     }
 

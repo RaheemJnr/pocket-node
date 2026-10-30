@@ -115,6 +115,7 @@ class SendReviewStateMachineTest {
         every { repository.currentNetwork } returns NetworkType.TESTNET
         every { repository.getCurrentAddress() } returns senderAddress
         every { repository.walletInfo } returns MutableStateFlow<WalletInfo?>(countWalletInfo())
+        every { repository.cellCountReadiness } returns MutableStateFlow(readiness())
         coEvery { repository.getCells(senderAddress) } throws kotlinx.coroutines.CancellationException("Sequencing fixture skips cell-count preview")
         coEvery { repository.getPrivateKey() } returns ByteArray(32) { 1 }
         // Sequencing fixtures stop explicitly at the repository boundary. Race tests below
@@ -956,6 +957,68 @@ class SendReviewStateMachineTest {
         } finally { androidx.lifecycle.ViewModelStore().apply { put("lateMaxError", vm); clear() }; runCurrent() }
     }
 
+    private fun readiness(walletId: String = "w1", info: WalletInfo = countWalletInfo(),
+        epoch: Long = 1, stage: com.rjnr.pocketnode.data.gateway.CellCountStage = com.rjnr.pocketnode.data.gateway.CellCountStage.REGISTERED,
+        network: NetworkType = NetworkType.TESTNET) = com.rjnr.pocketnode.data.gateway.CellCountReadiness(
+            epoch, walletId, network, if (network == NetworkType.TESTNET) info.testnetAddress else info.mainnetAddress, info.script, stage)
+
+    @Test fun `bulk readiness defers until registration and replaces provisional count once after completed sync`() = runTest(testDispatcher) {
+        val stages = MutableStateFlow<com.rjnr.pocketnode.data.gateway.CellCountReadiness?>(readiness(stage = com.rjnr.pocketnode.data.gateway.CellCountStage.WAITING))
+        every { repository.cellCountReadiness } returns stages
+        val gate = kotlinx.coroutines.CompletableDeferred<Unit>()
+        var calls = 0
+        coEvery { repository.getCells(any()) } coAnswers {
+            val call = ++calls; kotlinx.coroutines.yield()
+            if (call == 1) gate.await()
+            Result.success(com.rjnr.pocketnode.data.gateway.models.CellsResponse(if (call == 1) emptyList() else plannedTransfer.selectedCells, null))
+        }
+        val vm = newViewModel(); runCurrent()
+        try {
+            vm.updateSendMode(SendMode.BULK); runCurrent()
+            assertEquals(0, calls)
+            stages.value = readiness(); runCurrent()
+            assertEquals(1, calls)
+            stages.value = readiness(stage = com.rjnr.pocketnode.data.gateway.CellCountStage.CAUGHT_UP); runCurrent()
+            assertEquals(1, calls) // Completion coalesces behind the running registration read.
+            vm.updateAmount("600")
+            gate.complete(Unit); runCurrent()
+            assertEquals(2, calls)
+            assertEquals(4, vm.uiState.value.spendableCellCount)
+            repeat(3) {
+                stages.value = readiness(); runCurrent()
+                stages.value = readiness(stage = com.rjnr.pocketnode.data.gateway.CellCountStage.CAUGHT_UP); runCurrent()
+            }
+            assertEquals(2, calls)
+            assertEquals(4, vm.uiState.value.spendableCellCount)
+        } finally { gate.complete(Unit); androidx.lifecycle.ViewModelStore().apply { put("readiness", vm); clear() }; runCurrent() }
+    }
+
+    @Test fun `bulk readiness already caught up coalesces stages and never rearms failed final read`() = runTest(testDispatcher) {
+        val stages = MutableStateFlow<com.rjnr.pocketnode.data.gateway.CellCountReadiness?>(readiness(stage = com.rjnr.pocketnode.data.gateway.CellCountStage.CAUGHT_UP))
+        every { repository.cellCountReadiness } returns stages
+        var calls = 0
+        coEvery { repository.getCells(any()) } coAnswers {
+            calls++; kotlinx.coroutines.yield()
+            Result.failure(IllegalStateException("unavailable"))
+        }
+        val vm = newViewModel(); runCurrent()
+        try {
+            assertEquals(0, calls)
+            vm.updateSendMode(SendMode.BULK); runCurrent()
+            assertEquals(1, calls)
+            repeat(3) {
+                stages.value = readiness(); runCurrent()
+                stages.value = readiness(stage = com.rjnr.pocketnode.data.gateway.CellCountStage.CAUGHT_UP); runCurrent()
+            }
+            vm.updateAmount("600"); runCurrent()
+            assertEquals(1, calls)
+            assertEquals(0, vm.uiState.value.spendableCellCount)
+            vm.updateSendMode(SendMode.SINGLE)
+            stages.value = readiness(epoch = 2); runCurrent()
+            assertEquals(1, calls)
+        } finally { androidx.lifecycle.ViewModelStore().apply { put("readyFailure", vm); clear() }; runCurrent() }
+    }
+
     private fun countWalletInfo(args: String = "aa") = WalletInfo(
         publicKey = "", script = Script(Script.SECP256K1_CODE_HASH, "type", "0x" + args.repeat(20)),
         testnetAddress = com.rjnr.pocketnode.data.wallet.AddressUtils.encode(Script(Script.SECP256K1_CODE_HASH, "type", "0x" + args.repeat(20)), NetworkType.TESTNET),
@@ -975,6 +1038,8 @@ class SendReviewStateMachineTest {
             val infoA = countWalletInfo()
             val infoB = countWalletInfo("cc")
             val infos = MutableStateFlow<WalletInfo?>(infoA)
+            val stages = MutableStateFlow<com.rjnr.pocketnode.data.gateway.CellCountReadiness?>(readiness())
+            every { repository.cellCountReadiness } returns stages
             val wallets = MutableStateFlow(listOf(countWallet()))
             var walletId = "w1"
             every { repository.walletInfo } returns infos
@@ -1002,6 +1067,7 @@ class SendReviewStateMachineTest {
             try {
                 vm.updateSendMode(SendMode.BULK); vm.updateBulkRecipients(recipient); vm.updateAmount("600"); runCurrent()
                 walletId = "w2"
+                stages.value = readiness("w2", infoB, epoch = 2)
                 if (addressFirst) infos.value = infoB else wallets.value = listOf(countWallet("w2", infoB))
                 runCurrent()
                 assertEquals(listOf(infoA.testnetAddress), queries)
@@ -1027,6 +1093,8 @@ class SendReviewStateMachineTest {
     @Test fun `bulk source refresh automatically counts current network address`() = runTest(testDispatcher) {
         val info = countWalletInfo()
         val networks = MutableStateFlow(NetworkType.TESTNET)
+        val stages = MutableStateFlow<com.rjnr.pocketnode.data.gateway.CellCountReadiness?>(readiness())
+        every { repository.cellCountReadiness } returns stages
         every { repository.network } returns networks
         every { repository.currentNetwork } answers { networks.value }
         every { repository.getCurrentAddress() } answers {
@@ -1044,7 +1112,8 @@ class SendReviewStateMachineTest {
         try {
             vm.updateSendMode(SendMode.BULK); runCurrent()
             assertEquals(1, vm.uiState.value.spendableCellCount)
-            networks.value = NetworkType.MAINNET; runCurrent()
+            networks.value = NetworkType.MAINNET
+            stages.value = readiness(network = NetworkType.MAINNET, epoch = 2); runCurrent()
             assertEquals(0, vm.uiState.value.spendableCellCount)
             gate.complete(Unit); runCurrent()
             assertEquals(listOf(info.testnetAddress, info.mainnetAddress), queries)

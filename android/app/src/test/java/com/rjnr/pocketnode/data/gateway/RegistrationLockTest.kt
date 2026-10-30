@@ -34,6 +34,7 @@ import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withTimeout
 import kotlinx.serialization.encodeToString
@@ -260,6 +261,110 @@ class RegistrationLockTest {
 
     private fun argsOf(payload: String): Set<String> =
         json.decodeFromString<List<JniScriptStatus>>(payload).map { it.script.args }.toSet()
+
+    @Test
+    fun `cell count readiness requires landed registration and a fresh complete exact-script poll`() = runBlocking {
+        build()
+        assertNotNull("wallet initialization publishes its epoch", repository.cellCountReadiness.value)
+        assertEquals(CellCountStage.WAITING, repository.cellCountReadiness.value!!.stage)
+        reportedScripts = statusesJson(activeScript to tip)
+        repository.getAccountStatus().getOrThrow()
+        assertEquals(CellCountStage.WAITING, repository.cellCountReadiness.value!!.stage)
+        walletPreferences.setSyncStrategy(SyncStrategy.ACTIVE_ONLY)
+        repository.registerAccountWithStrategy(savePreference = false).getOrThrow()
+        assertEquals(CellCountStage.REGISTERED, repository.cellCountReadiness.value!!.stage)
+        reportedScripts = statusesJson(activeScript to tip - 1)
+        repository.getAccountStatus().getOrThrow()
+        assertEquals(CellCountStage.REGISTERED, repository.cellCountReadiness.value!!.stage)
+        reportedScripts = statusesJson(activeScript to tip)
+        repository.getAccountStatus().getOrThrow()
+        assertEquals(CellCountStage.CAUGHT_UP, repository.cellCountReadiness.value!!.stage)
+
+        // ALL registration uses a different callback and must own the next activation.
+        walletPreferences.setSyncStrategy(SyncStrategy.ALL_WALLETS)
+        val other = db.walletDao().getById(OTHER)!!
+        repository.onActiveWalletChanged(other)
+        assertEquals(OTHER, repository.cellCountReadiness.value!!.walletId)
+        assertEquals(CellCountStage.REGISTERED, repository.cellCountReadiness.value!!.stage)
+        repository.getAccountStatus().getOrThrow() // Old wallet's complete script cannot complete OTHER.
+        assertEquals(CellCountStage.REGISTERED, repository.cellCountReadiness.value!!.stage)
+        reportedScripts = statusesJson(otherScript to tip)
+        repository.getAccountStatus().getOrThrow()
+        assertEquals(CellCountStage.CAUGHT_UP, repository.cellCountReadiness.value!!.stage)
+    }
+
+    @Test
+    fun `cell count readiness adopts a set landed before walletInfo without another registration`() = runBlocking {
+        build()
+        walletPreferences.setSyncStrategy(SyncStrategy.ALL_WALLETS)
+        repository.registerAccountWithStrategy(savePreference = false).getOrThrow()
+        db.walletDao().deactivateAll()
+        db.walletDao().activate(OTHER)
+        repository.needsMnemonicBackup() // Reassigns and registers before walletInfo adoption.
+        withTimeout(10_000) { assertNotNullJob().join() }
+        assertEquals(OTHER, coordinator.registeredActiveWalletId)
+        assertEquals(activeScript, repository.walletInfo.value!!.script)
+        repository.initializeWallet().getOrThrow()
+        assertEquals(CellCountStage.WAITING, repository.cellCountReadiness.value!!.stage)
+        reportedScripts = statusesJson(otherScript to tip)
+        repository.getAccountStatus().getOrThrow()
+        assertEquals(OTHER, repository.cellCountReadiness.value!!.walletId)
+        assertEquals(CellCountStage.CAUGHT_UP, repository.cellCountReadiness.value!!.stage)
+        assertEquals("readiness must not re-register", 2, bridge.landed.size)
+    }
+
+    @Test
+    fun `cell count readiness ignores complete fallback reads while registration lock is busy`() = runBlocking {
+        build()
+        walletPreferences.setSyncStrategy(SyncStrategy.ACTIVE_ONLY)
+        repository.registerAccountWithStrategy(savePreference = false).getOrThrow()
+        reportedScripts = statusesJson(activeScript to tip)
+        bridge.onSetScripts = {
+            assertTrue(coordinator.isRegistrationLocked)
+            repository.getAccountStatus().getOrThrow()
+            assertEquals(CellCountStage.REGISTERED, repository.cellCountReadiness.value!!.stage)
+        }
+        repository.registerAccountWithStrategy(savePreference = false).getOrThrow()
+        bridge.onSetScripts = {}
+        repository.getAccountStatus().getOrThrow()
+        assertEquals(CellCountStage.CAUGHT_UP, repository.cellCountReadiness.value!!.stage)
+    }
+
+    @Test
+    fun `cell count readiness discards a poll suspended across wallet activation`() = runBlocking {
+        build()
+        walletPreferences.setSyncStrategy(SyncStrategy.ALL_WALLETS)
+        repository.registerAccountWithStrategy(savePreference = false).getOrThrow()
+        val original = repository.cellCountReadiness.value!!
+        reportedScripts = statusesJson(activeScript to tip)
+        val entered = CompletableDeferred<Unit>()
+        val release = CompletableDeferred<Unit>()
+        bridge.onScriptsRead = {
+            entered.complete(Unit)
+            runBlocking { release.await() }
+        }
+        val poll = launch(Dispatchers.IO) { repository.getAccountStatus().getOrThrow() }
+        var switch: kotlinx.coroutines.Job? = null
+        try {
+            withTimeout(10_000) { entered.await() }
+            val other = db.walletDao().getById(OTHER)!!
+            switch = launch(Dispatchers.IO) { repository.onActiveWalletChanged(other) }
+            val pending = withTimeout(10_000) { repository.cellCountReadiness.first { it?.walletId == OTHER } }!!
+            assertTrue(pending.epoch > original.epoch)
+            assertEquals(CellCountStage.WAITING, pending.stage)
+            bridge.onScriptsRead = {}
+            release.complete(Unit)
+            withTimeout(10_000) { poll.join(); switch.join() }
+            assertEquals(OTHER, repository.cellCountReadiness.value!!.walletId)
+            assertEquals(CellCountStage.REGISTERED, repository.cellCountReadiness.value!!.stage)
+            reportedScripts = statusesJson(otherScript to tip)
+            repository.getAccountStatus().getOrThrow()
+            assertEquals(CellCountStage.CAUGHT_UP, repository.cellCountReadiness.value!!.stage)
+        } finally {
+            bridge.onScriptsRead = {}; release.complete(Unit)
+            poll.cancel(); switch?.cancel()
+        }
+    }
 
     // ------------------------------------------------------------------
     // S-A: the sync poll vs a resync
