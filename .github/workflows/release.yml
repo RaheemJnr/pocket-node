@@ -252,8 +252,19 @@ jobs:
           # build for every existing user (URL/channel-substitution guard, #293).
           ACTUAL="$(awk -F': ' '/^Signer #1 certificate SHA-256 digest:/{print $2}' verified-certificate.txt | tr 'A-F' 'a-f' | tr -d ': ')"
           EXPECTED="$(printf '%s' "${RELEASE_CERT_SHA256:-}" | tr 'A-F' 'a-f' | tr -d ': ')"
-          if [[ ! "$EXPECTED" =~ ^[0-9a-f]{64}$ ]] || [ "$ACTUAL" != "$EXPECTED" ]; then
-            echo "::error::Missing/invalid expected certificate or signing certificate mismatch."
+          # A certificate fingerprint is public, unlike the keystore/passwords.
+          # Print it only after format validation; never echo secret inputs.
+          if [[ ! "$ACTUAL" =~ ^[0-9a-f]{64}$ ]]; then
+            echo "::error::Could not parse a single SHA-256 signing certificate."
+            exit 1
+          fi
+          echo "APK signer SHA-256: $ACTUAL"
+          if [[ ! "$EXPECTED" =~ ^[0-9a-f]{64}$ ]]; then
+            echo "::error::Expected signing certificate must contain exactly 64 hexadecimal characters."
+            exit 1
+          fi
+          if [ "$ACTUAL" != "$EXPECTED" ]; then
+            echo "::error::APK signing certificate differs from the configured expected certificate."
             exit 1
           fi
 
