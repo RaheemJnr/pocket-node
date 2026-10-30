@@ -17,6 +17,8 @@ import com.rjnr.pocketnode.data.gateway.models.Script
 import com.rjnr.pocketnode.data.send.ReviewedTransfer
 import com.rjnr.pocketnode.data.transaction.TransactionBuilder
 import com.rjnr.pocketnode.data.transaction.TransferPlan
+import com.rjnr.pocketnode.data.database.entity.WalletEntity
+import com.rjnr.pocketnode.data.wallet.WalletInfo
 import com.rjnr.pocketnode.data.wallet.KeyManager
 import com.rjnr.pocketnode.data.wallet.WalletKeyReader
 import com.rjnr.pocketnode.data.wallet.WalletRepository
@@ -112,6 +114,7 @@ class SendReviewStateMachineTest {
         every { repository.network } returns MutableStateFlow(NetworkType.TESTNET)
         every { repository.currentNetwork } returns NetworkType.TESTNET
         every { repository.getCurrentAddress() } returns senderAddress
+        every { repository.walletInfo } returns MutableStateFlow<WalletInfo?>(countWalletInfo())
         coEvery { repository.getCells(senderAddress) } throws kotlinx.coroutines.CancellationException("Sequencing fixture skips cell-count preview")
         coEvery { repository.getPrivateKey() } returns ByteArray(32) { 1 }
         // Sequencing fixtures stop explicitly at the repository boundary. Race tests below
@@ -132,7 +135,7 @@ class SendReviewStateMachineTest {
         every { authManager.isBiometricEnrolled() } returns false
 
         walletRepository = mockk(relaxed = true)
-        every { walletRepository.walletsFlow } returns MutableStateFlow(emptyList())
+        every { walletRepository.walletsFlow } returns MutableStateFlow(listOf(countWallet()))
         every { walletRepository.activeWalletIdSnapshot() } returns "w1"
 
         walletKeyReader = mockk(relaxed = true)
@@ -953,6 +956,128 @@ class SendReviewStateMachineTest {
         } finally { androidx.lifecycle.ViewModelStore().apply { put("lateMaxError", vm); clear() }; runCurrent() }
     }
 
+    private fun countWalletInfo(args: String = "aa") = WalletInfo(
+        publicKey = "", script = Script(Script.SECP256K1_CODE_HASH, "type", "0x" + args.repeat(20)),
+        testnetAddress = com.rjnr.pocketnode.data.wallet.AddressUtils.encode(Script(Script.SECP256K1_CODE_HASH, "type", "0x" + args.repeat(20)), NetworkType.TESTNET),
+        mainnetAddress = com.rjnr.pocketnode.data.wallet.AddressUtils.encode(Script(Script.SECP256K1_CODE_HASH, "type", "0x" + args.repeat(20)), NetworkType.MAINNET),
+    )
+
+    private fun countWallet(id: String = "w1", info: WalletInfo = countWalletInfo()) = WalletEntity(
+        walletId = id, name = id, type = KeyManager.WALLET_TYPE_MNEMONIC,
+        derivationPath = null, parentWalletId = null, isActive = true,
+        testnetAddress = info.testnetAddress, mainnetAddress = info.mainnetAddress,
+    )
+
+    @Test fun `bulk source refresh waits for matching wallet address and rejects old completions`() = runTest(testDispatcher) {
+        // Removing the source-change refresh strands this on zero. Refreshing before
+        // address readiness would query A under B's identity and fail the query log.
+        for (addressFirst in listOf(false, true)) for (oldFailure in listOf(false, true)) {
+            val infoA = countWalletInfo()
+            val infoB = countWalletInfo("cc")
+            val infos = MutableStateFlow<WalletInfo?>(infoA)
+            val wallets = MutableStateFlow(listOf(countWallet()))
+            var walletId = "w1"
+            every { repository.walletInfo } returns infos
+            every { repository.getCurrentAddress() } answers { infos.value?.testnetAddress }
+            every { walletRepository.walletsFlow } returns wallets
+            every { walletRepository.activeWalletIdSnapshot() } answers { walletId }
+            val oldGate = kotlinx.coroutines.CompletableDeferred<Unit>()
+            val newGate = kotlinx.coroutines.CompletableDeferred<Unit>()
+            val queries = mutableListOf<String>()
+            coEvery { repository.getCells(any()) } coAnswers {
+                val address = firstArg<String>()
+                queries += address
+                kotlinx.coroutines.yield()
+                if (address == infoA.testnetAddress) {
+                    kotlinx.coroutines.withContext(kotlinx.coroutines.NonCancellable) { oldGate.await() }
+                    if (oldFailure) Result.failure(kotlinx.coroutines.CancellationException("obsolete"))
+                    else Result.success(com.rjnr.pocketnode.data.gateway.models.CellsResponse(plannedTransfer.selectedCells.take(1), null))
+                } else {
+                    newGate.await()
+                    Result.success(com.rjnr.pocketnode.data.gateway.models.CellsResponse(plannedTransfer.selectedCells, null))
+                }
+            }
+            every { transactionBuilder.estimateTransferFeeForDraft(any(), any(), any(), any()) } answers { firstArg<Int>().toLong() * 1000L }
+            val vm = newViewModel(); runCurrent()
+            try {
+                vm.updateSendMode(SendMode.BULK); vm.updateBulkRecipients(recipient); vm.updateAmount("600"); runCurrent()
+                walletId = "w2"
+                if (addressFirst) infos.value = infoB else wallets.value = listOf(countWallet("w2", infoB))
+                runCurrent()
+                assertEquals(listOf(infoA.testnetAddress), queries)
+                assertEquals(0, vm.uiState.value.spendableCellCount)
+                if (addressFirst) wallets.value = listOf(countWallet("w2", infoB)) else infos.value = infoB
+                runCurrent()
+                assertEquals(listOf(infoA.testnetAddress, infoB.testnetAddress), queries)
+                vm.updateAmount("601") // Draft edits must retain the replacement request.
+                newGate.complete(Unit); runCurrent()
+                assertEquals(SendMode.BULK, vm.uiState.value.sendMode)
+                assertEquals(4, vm.uiState.value.spendableCellCount)
+                assertEquals(3000L, vm.uiState.value.estimatedFee)
+                val fresh = vm.uiState.value
+                oldGate.complete(Unit); runCurrent()
+                assertEquals(fresh, vm.uiState.value)
+            } finally {
+                oldGate.complete(Unit); newGate.complete(Unit)
+                androidx.lifecycle.ViewModelStore().apply { put("autoWalletCount", vm); clear() }; runCurrent()
+            }
+        }
+    }
+
+    @Test fun `bulk source refresh automatically counts current network address`() = runTest(testDispatcher) {
+        val info = countWalletInfo()
+        val networks = MutableStateFlow(NetworkType.TESTNET)
+        every { repository.network } returns networks
+        every { repository.currentNetwork } answers { networks.value }
+        every { repository.getCurrentAddress() } answers {
+            if (networks.value == NetworkType.TESTNET) info.testnetAddress else info.mainnetAddress
+        }
+        val gate = kotlinx.coroutines.CompletableDeferred<Unit>()
+        val queries = mutableListOf<String>()
+        coEvery { repository.getCells(any()) } coAnswers {
+            val address = firstArg<String>(); queries += address
+            kotlinx.coroutines.yield()
+            if (address == info.mainnetAddress) gate.await()
+            Result.success(com.rjnr.pocketnode.data.gateway.models.CellsResponse(plannedTransfer.selectedCells.take(if (address == info.mainnetAddress) 4 else 1), null))
+        }
+        val vm = newViewModel(); runCurrent()
+        try {
+            vm.updateSendMode(SendMode.BULK); runCurrent()
+            assertEquals(1, vm.uiState.value.spendableCellCount)
+            networks.value = NetworkType.MAINNET; runCurrent()
+            assertEquals(0, vm.uiState.value.spendableCellCount)
+            gate.complete(Unit); runCurrent()
+            assertEquals(listOf(info.testnetAddress, info.mainnetAddress), queries)
+            assertEquals(4, vm.uiState.value.spendableCellCount)
+        } finally { gate.complete(Unit); androidx.lifecycle.ViewModelStore().apply { put("autoNetworkCount", vm); clear() }; runCurrent() }
+    }
+
+    @Test fun `bulk source refresh waits for initialization and does not query in single mode`() = runTest(testDispatcher) {
+        val infos = MutableStateFlow<WalletInfo?>(null)
+        every { repository.walletInfo } returns infos
+        every { repository.getCurrentAddress() } answers { infos.value?.testnetAddress }
+        val queries = mutableListOf<String>()
+        coEvery { repository.getCells(any()) } coAnswers {
+            queries += firstArg<String>(); kotlinx.coroutines.yield()
+            Result.success(com.rjnr.pocketnode.data.gateway.models.CellsResponse(plannedTransfer.selectedCells, null))
+        }
+        val vm = newViewModel(); runCurrent()
+        try {
+            vm.updateSendMode(SendMode.BULK); runCurrent()
+            assertEquals(0, vm.uiState.value.spendableCellCount)
+            assertTrue(queries.isEmpty())
+            infos.value = countWalletInfo(); runCurrent()
+            assertEquals(4, vm.uiState.value.spendableCellCount)
+            vm.updateSendMode(SendMode.SINGLE); runCurrent()
+            infos.value = null; runCurrent()
+            infos.value = countWalletInfo(); runCurrent()
+            assertEquals(listOf(senderAddress), queries)
+            assertEquals(0, vm.uiState.value.spendableCellCount)
+            vm.updateSendMode(SendMode.BULK); runCurrent()
+            assertEquals(4, vm.uiState.value.spendableCellCount)
+        } finally { androidx.lifecycle.ViewModelStore().apply { put("initialCount", vm); clear() }; runCurrent() }
+    }
+
     @Test fun `bulk cell count ignores late success after source identity changes`() = runTest(testDispatcher) {
         for (changed in listOf("wallet", "network", "address")) {
             var wallet = "w1"
@@ -1037,7 +1162,7 @@ class SendReviewStateMachineTest {
     @Test fun `bulk cell count clears on wallet network and mode changes and cancels old reads`() = runTest(testDispatcher) {
         for (changed in listOf("wallet", "network", "mode")) {
             val networks = MutableStateFlow(NetworkType.TESTNET)
-            val wallets = MutableStateFlow<List<com.rjnr.pocketnode.data.database.entity.WalletEntity>>(emptyList())
+            val wallets = MutableStateFlow(listOf(countWallet()))
             var wallet = "w1"
             every { repository.network } returns networks
             every { repository.currentNetwork } answers { networks.value }

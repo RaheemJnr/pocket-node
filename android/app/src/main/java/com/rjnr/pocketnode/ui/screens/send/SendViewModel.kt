@@ -152,7 +152,7 @@ data class SendUiState(
     val errorDetail: String? = null,
     val txHash: String? = null,
     val availableBalance: Long = 0L,
-    /** Spendable cell count, fetched on entering bulk mode, for a realistic bulk fee estimate (review item 3). */
+    /** Spendable cell count, fetched on entering bulk mode and when its source changes, for a realistic bulk fee estimate (review item 3). */
     val spendableCellCount: Int = 0,
     val estimatedFee: Long = 0L,
     val networkType: NetworkType = NetworkType.MAINNET,
@@ -226,13 +226,52 @@ class SendViewModel @Inject constructor(
     private var reviewJob: Job? = null
     private var bulkCellCountJob: Job? = null
     private var bulkCellCountGeneration = 0L
+    private data class BulkCellCountSource(val walletId: String, val network: NetworkType, val address: String)
+    private var bulkCellCountSource: BulkCellCountSource? = null
+    private var bulkCellCountWallets: List<WalletEntity> = emptyList()
 
     // Count requests belong to the source, not to amount/recipient edits.
     private fun invalidateBulkCellCount() {
         bulkCellCountGeneration++
         bulkCellCountJob?.cancel()
         bulkCellCountJob = null
+        bulkCellCountSource = null
         _uiState.update { it.copy(spendableCellCount = 0).refreshBulkPreview() }
+    }
+
+    private fun refreshBulkCellCount() {
+        val walletId = walletPreferencesActiveId()
+        val network = repository.currentNetwork
+        val address = repository.getCurrentAddress()
+        val wallet = bulkCellCountWallets.find { it.isActive && it.walletId == walletId }
+        val expectedAddress = when (network) {
+            NetworkType.MAINNET -> wallet?.mainnetAddress
+            NetworkType.TESTNET -> wallet?.testnetAddress
+        }
+        // Room/preferences can select a wallet before the repository initializes
+        // its address. Wait for both observations to agree, in either order.
+        val source = if (wallet != null && !address.isNullOrBlank() && address == expectedAddress) {
+            BulkCellCountSource(wallet.walletId, network, address)
+        } else null
+        if (source == bulkCellCountSource) return
+        invalidateBulkCellCount()
+        bulkCellCountSource = source
+        if (source == null || _uiState.value.sendMode != SendMode.BULK) return
+
+        val request = bulkCellCountGeneration
+        fun isCurrentSource() = bulkCellCountGeneration == request &&
+            walletPreferencesActiveId() == source.walletId && repository.currentNetwork == source.network &&
+            repository.getCurrentAddress() == source.address && _uiState.value.sendMode == SendMode.BULK
+        bulkCellCountJob = viewModelScope.launch {
+            if (!isCurrentSource()) return@launch
+            val result = repository.getCells(address = source.address)
+            // Result can contain cancellation; neither a late success nor its
+            // fallback zero may overwrite a replacement request's preview.
+            coroutineContext.ensureActive()
+            if (!isCurrentSource()) return@launch
+            val count = result.map { it.items.size }.getOrNull() ?: 0
+            _uiState.update { it.copy(spendableCellCount = count).refreshBulkPreview() }
+        }
     }
 
     private fun invalidateDraft() {
@@ -322,7 +361,6 @@ class SendViewModel @Inject constructor(
             walletRepository.walletsFlow.collect { wallets ->
                 val currentWalletId = walletPreferencesActiveId()
                 if (previousWalletId != currentWalletId) {
-                    invalidateBulkCellCount()
                     invalidateDraft()
                     sendJob?.cancel(kotlinx.coroutines.CancellationException("Wallet changed"))
                     previousWalletId = currentWalletId
@@ -330,6 +368,8 @@ class SendViewModel @Inject constructor(
                 val active = wallets.find { it.isActive }
                 val others = wallets.filter { it.walletId != active?.walletId }
                 _uiState.update { it.copy(otherWallets = others).refreshBulkPreview() }
+                bulkCellCountWallets = wallets
+                refreshBulkCellCount()
             }
         }
 
@@ -337,7 +377,6 @@ class SendViewModel @Inject constructor(
         viewModelScope.launch {
             repository.network.collect { network ->
                 if (network != _uiState.value.networkType) {
-                    invalidateBulkCellCount()
                     invalidateDraft()
                     sendJob?.cancel(kotlinx.coroutines.CancellationException("Network changed"))
                     pollingJob?.cancel()
@@ -345,8 +384,11 @@ class SendViewModel @Inject constructor(
                         isLoading = false, transactionState = TransactionState.IDLE,
                         statusMessage = "Network changed. Check the original network for pending transactions before retrying.").refreshBulkPreview() }
                 }
-
+                refreshBulkCellCount()
             }
+        }
+        viewModelScope.launch {
+            repository.walletInfo.collect { refreshBulkCellCount() }
         }
     }
 
@@ -391,29 +433,9 @@ class SendViewModel @Inject constructor(
         if (mode == SendMode.BULK) {
             suggestionsJob?.cancel()
             _uiState.update { it.copy(recipientSuggestions = emptyList(), matchedContact = null) }
-            // Item 3: fetch the real spendable cell count so the bulk fee
-            // preview and the insufficient-balance gate reflect how many inputs
-            // each batch will gather (a fragmented wallet needs many inputs ->
-            // higher fee). The actual per-tx fee is still computed dynamically
-            // at build time; this only stops the PREVIEW from assuming 1 input
-            // per batch and under-gating.
-            val request = bulkCellCountGeneration
-            val walletId = walletPreferencesActiveId()
-            val network = repository.currentNetwork
-            val address = repository.getCurrentAddress() ?: return
-            fun isCurrentSource() = bulkCellCountGeneration == request &&
-                walletPreferencesActiveId() == walletId && repository.currentNetwork == network &&
-                repository.getCurrentAddress() == address && _uiState.value.sendMode == SendMode.BULK
-            bulkCellCountJob = viewModelScope.launch {
-                if (!isCurrentSource()) return@launch
-                val result = repository.getCells(address = address)
-                // Result can contain cancellation; neither a late success nor its
-                // fallback zero may overwrite a replacement request's preview.
-                coroutineContext.ensureActive()
-                if (!isCurrentSource()) return@launch
-                val count = result.map { it.items.size }.getOrNull() ?: 0
-                _uiState.update { it.copy(spendableCellCount = count).refreshBulkPreview() }
-            }
+            // Snapshot count improves fragmentation estimates; the actual fee
+            // is still computed from the selected inputs during review/build.
+            refreshBulkCellCount()
         }
     }
 
