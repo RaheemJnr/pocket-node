@@ -7,6 +7,11 @@ on:
         description: 'Existing release tag to build (v plus letters, digits, dots, underscores or hyphens)'
         required: true
         type: string
+      publish:
+        description: 'Publish a GitHub Release (leave off for artifact-only signed upgrade testing)'
+        required: false
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -321,6 +326,7 @@ jobs:
   # Job 3: repository-write capability is confined to publishing verified files.
   # No checkout, build tools, signing environment, or signing secrets here.
   publish:
+    if: ${{ inputs.publish == true }}
     needs: [build, sign]
     runs-on: ubuntu-latest
     timeout-minutes: 5
