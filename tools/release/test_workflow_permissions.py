@@ -12,6 +12,16 @@ class ReleasePermissionsTest(unittest.TestCase):
         self.workflow = yaml.safe_load((ROOT / '.github/workflows/release.yml').read_text())
         self.jobs = self.workflow['jobs']
 
+    def test_publication_requires_explicit_boolean_opt_in(self):
+        # PyYAML's YAML 1.1 loader reads the workflow `on` key as True.
+        triggers = self.workflow.get('on', self.workflow.get(True))
+        control = triggers['workflow_dispatch']['inputs']['publish']
+        self.assertEqual(control['type'], 'boolean')
+        self.assertIs(control['default'], False)
+        self.assertEqual(self.jobs['publish']['if'], '${{ inputs.publish == true }}')
+        self.assertNotIn('if', self.jobs['build'])
+        self.assertNotIn('if', self.jobs['sign'])
+
     def test_repository_write_is_confined_to_publisher(self):
         self.assertEqual(self.workflow['permissions'], {'contents': 'read'})
         self.assertEqual(set(self.jobs), {'build', 'sign', 'publish'})
