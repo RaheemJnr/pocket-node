@@ -12,21 +12,46 @@ final class ActivityColdStartTests: XCTestCase {
     func testAFailedFirstWalkOnAnEmptyListSchedulesARetry() async {
         let source = FakeActivityPaging()
         source.refreshError = ActivityTestError(message: "the node is not up")
-        let model = ActivityViewModel(source: source, retryDelay: .milliseconds(5))
+        let wait = ControlledRetryWait()
+        defer { wait.close() }
+        let model = ActivityViewModel(source: source, retryWait: wait.sleep)
 
         model.onAppear()
-        await settle()
+        await waitFor { wait.isWaiting }
         XCTAssertEqual(source.refreshCount, 1)
         XCTAssertEqual(model.error, "the node is not up")
+        XCTAssertEqual(wait.requestedDelay, Duration.seconds(3))
 
-        // The node comes up while the retry is pending.
+        // Install the successful response while precisely the first retry is held.
         source.refreshError = nil
         source.rows[ActivityFilter.all] = [ActivityFixtures.item()]
-        await waitFor { source.refreshCount >= 2 }
-        await settle()
+        wait.release()
+        await waitFor { source.refreshCount == 2 && !model.isRefreshing && !model.isLoading && model.rows.count == 1 }
 
+        XCTAssertEqual(source.refreshCount, 2, "one initial walk and exactly one automatic retry")
+        XCTAssertEqual(wait.waitCount, 1)
         XCTAssertNil(model.error, "the retry cleared it without the user touching anything")
         XCTAssertEqual(model.rows.count, 1)
+    }
+
+    func testACancelledHeldRetryCannotWalkAfterManualRecovery() async {
+        let source = FakeActivityPaging()
+        source.refreshError = ActivityTestError(message: "the node is not up")
+        let wait = ControlledRetryWait()
+        defer { wait.close() }
+        let model = ActivityViewModel(source: source, retryWait: wait.sleep)
+        model.onAppear()
+        await waitFor { wait.isWaiting }
+        XCTAssertEqual(source.refreshCount, 1)
+
+        source.refreshError = nil
+        source.rows[ActivityFilter.all] = [ActivityFixtures.item()]
+        model.refresh()
+        await waitFor { source.refreshCount == 2 && !model.isRefreshing && !model.isLoading && model.rows.count == 1 }
+        wait.release()
+        await waitFor { wait.resumeCount == 1 }
+        XCTAssertEqual(source.refreshCount, 2, "the cancelled timer cannot start a third walk")
+        XCTAssertNil(model.error)
     }
 
     func testARetryIsNotScheduledWhenThereAreRowsToShow() async {
@@ -103,5 +128,37 @@ final class ActivityColdStartTests: XCTestCase {
             try? await Task.sleep(for: .milliseconds(10))
         }
         XCTFail("the condition never became true")
+    }
+}
+
+/// A deliberately noncooperative wait lets the model's cancellation check be tested.
+/// close() also handles a late waiter, so assertion failure cannot strand a task.
+@MainActor
+private final class ControlledRetryWait {
+    private var continuation: CheckedContinuation<Void, Never>?
+    private var closed = false
+    private(set) var waitCount = 0
+    private(set) var resumeCount = 0
+    private(set) var requestedDelay: Duration?
+    var isWaiting: Bool { continuation != nil }
+
+    func sleep(_ delay: Duration) async throws {
+        waitCount += 1
+        requestedDelay = delay
+        if !closed {
+            await withCheckedContinuation { continuation = $0 }
+        }
+        resumeCount += 1
+    }
+
+    func release() {
+        let held = continuation
+        continuation = nil
+        held?.resume()
+    }
+
+    func close() {
+        closed = true
+        release()
     }
 }
