@@ -129,7 +129,7 @@ class ProvenanceTest(unittest.TestCase):
         (self.root / 'unsigned/unsigned.apk').write_bytes(b'unsigned fixture')
         (self.root / 'release.jks').write_bytes(b'disposable fixture')
         (sdk / 'zipalign').write_text('#!/bin/sh\ncp "$4" "$5"\n')
-        (sdk / 'apksigner').write_text("#!/usr/bin/env python3\nimport pathlib,sys\nwith open('calls.txt','a') as f: f.write(sys.argv[1]+'\\n')\nif sys.argv[1]=='sign':\n    pathlib.Path(sys.argv[sys.argv.index('--out')+1]).write_bytes(b'signed fixture')\nelif sys.argv[1]=='verify':\n    assert pathlib.Path(sys.argv[-1]).read_bytes()==b'signed fixture'\n    print('Signer #1 certificate SHA-256 digest: '+'b'*64)\nelse: raise AssertionError(sys.argv)\n")
+        (sdk / 'apksigner').write_text("#!/usr/bin/env python3\nimport pathlib,sys\nwith open('calls.txt','a') as f: f.write(sys.argv[1]+'\\n')\nif sys.argv[1]=='sign':\n    assert pathlib.Path(sys.argv[sys.argv.index('--ks')+1]).read_bytes()==b'disposable fixture'\n    pathlib.Path(sys.argv[sys.argv.index('--out')+1]).write_bytes(b'signed fixture')\nelif sys.argv[1]=='verify':\n    assert pathlib.Path(sys.argv[-1]).read_bytes()==b'signed fixture'\n    print('Signer #1 certificate SHA-256 digest: '+'b'*64)\nelse: raise AssertionError(sys.argv)\n")
         for tool in ('zipalign', 'apksigner'): (sdk / tool).chmod(0o755)
         env = {**os.environ, 'ANDROID_HOME':str(self.root / 'sdk'), 'RELEASE_TAG':'fixture',
             'KEYSTORE_PASSWORD':'fixture', 'KEY_PASSWORD':'fixture', 'KEY_ALIAS':'fixture', 'RELEASE_CERT_SHA256':'b'*64}
@@ -142,6 +142,7 @@ class ProvenanceTest(unittest.TestCase):
         # Execute the complete signing step with the observed build-tools 37 label too.
         (sdk / 'apksigner').write_text((sdk / 'apksigner').read_text().replace('Signer #1 certificate', 'V3.0 Signer: certificate'))
         (self.root / 'calls.txt').unlink()
+        (self.root / 'release.jks').write_bytes(b'disposable fixture')
         result = subprocess.run(['bash','-e','-c',step['run']], cwd=self.root, env=env, capture_output=True, text=True)
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertEqual((self.root / 'calls.txt').read_text().splitlines(), ['sign', 'verify'])
