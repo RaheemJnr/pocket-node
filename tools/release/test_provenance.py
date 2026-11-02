@@ -129,7 +129,7 @@ class ProvenanceTest(unittest.TestCase):
         (self.root / 'unsigned/unsigned.apk').write_bytes(b'unsigned fixture')
         (self.root / 'release.jks').write_bytes(b'disposable fixture')
         (sdk / 'zipalign').write_text('#!/bin/sh\ncp "$4" "$5"\n')
-        (sdk / 'apksigner').write_text("#!/usr/bin/env python3\nimport pathlib,sys\nwith open('calls.txt','a') as f: f.write(sys.argv[1]+'\\n')\nif sys.argv[1]=='sign':\n    pathlib.Path(sys.argv[sys.argv.index('--out')+1]).write_bytes(b'signed fixture')\nelif sys.argv[1]=='verify':\n    assert pathlib.Path(sys.argv[-1]).read_bytes()==b'signed fixture'\n    print('Signer #1 certificate SHA-256 digest: '+'b'*64)\nelse: raise AssertionError(sys.argv)\n")
+        (sdk / 'apksigner').write_text("#!/usr/bin/env python3\nimport pathlib,sys\nwith open('calls.txt','a') as f: f.write(sys.argv[1]+'\\n')\nif sys.argv[1]=='sign':\n    assert pathlib.Path(sys.argv[sys.argv.index('--ks')+1]).read_bytes()==b'disposable fixture'\n    pathlib.Path(sys.argv[sys.argv.index('--out')+1]).write_bytes(b'signed fixture')\nelif sys.argv[1]=='verify':\n    assert pathlib.Path(sys.argv[-1]).read_bytes()==b'signed fixture'\n    print('Signer #1 certificate SHA-256 digest: '+'b'*64)\nelse: raise AssertionError(sys.argv)\n")
         for tool in ('zipalign', 'apksigner'): (sdk / tool).chmod(0o755)
         env = {**os.environ, 'ANDROID_HOME':str(self.root / 'sdk'), 'RELEASE_TAG':'fixture',
             'KEYSTORE_PASSWORD':'fixture', 'KEY_PASSWORD':'fixture', 'KEY_ALIAS':'fixture', 'RELEASE_CERT_SHA256':'b'*64}
@@ -139,6 +139,27 @@ class ProvenanceTest(unittest.TestCase):
         self.assertIn('Signer #1 certificate SHA-256 digest: ' + 'b'*64, result.stdout)
         self.assertIn('Android build-tools: fixture', result.stdout)
         self.assertEqual((self.root / 'PocketNode-fixture.apk').read_bytes(), b'signed fixture')
+        # Execute the complete signing step with the observed build-tools 37 label too.
+        (sdk / 'apksigner').write_text((sdk / 'apksigner').read_text().replace('Signer #1 certificate', 'V3.0 Signer: certificate'))
+        (self.root / 'calls.txt').unlink()
+        (self.root / 'release.jks').write_bytes(b'disposable fixture')
+        result = subprocess.run(['bash','-e','-c',step['run']], cwd=self.root, env=env, capture_output=True, text=True)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual((self.root / 'calls.txt').read_text().splitlines(), ['sign', 'verify'])
+        self.assertIn('V3.0 Signer: certificate SHA-256 digest: ' + 'b'*64, result.stdout)
+
+    def test_artifact_generator_observed_format_and_multiple_signer_rejection(self):
+        env = self.verification_fixture()
+        modern = 'V3.0 Signer: certificate SHA-256 digest: ' + 'b' * 64 + '\n'
+        for output, accepted in [(modern, True), (modern + modern, False),
+                (modern + 'Signer #2 certificate SHA-256 digest: ' + 'b' * 64 + '\n', False),
+                (modern.replace('b' * 64, 'c' * 64), False),
+                (modern.replace('b' * 64, 'malformed'), False),
+                (modern.replace('V3.0 Signer:', 'Unknown Signer:'), False)]:
+            with self.subTest(output=output):
+                (self.root / 'verified-certificate.txt').write_text(output)
+                result = self.verify(env)
+                self.assertEqual(result.returncode == 0, accepted, result.stderr)
 
     def test_signed_artifact_and_certificate_outputs(self):
         env = self.verification_fixture()
