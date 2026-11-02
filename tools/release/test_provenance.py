@@ -139,6 +139,26 @@ class ProvenanceTest(unittest.TestCase):
         self.assertIn('Signer #1 certificate SHA-256 digest: ' + 'b'*64, result.stdout)
         self.assertIn('Android build-tools: fixture', result.stdout)
         self.assertEqual((self.root / 'PocketNode-fixture.apk').read_bytes(), b'signed fixture')
+        # Execute the complete signing step with the observed build-tools 37 label too.
+        (sdk / 'apksigner').write_text((sdk / 'apksigner').read_text().replace('Signer #1 certificate', 'V3.0 Signer: certificate'))
+        (self.root / 'calls.txt').unlink()
+        result = subprocess.run(['bash','-e','-c',step['run']], cwd=self.root, env=env, capture_output=True, text=True)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual((self.root / 'calls.txt').read_text().splitlines(), ['sign', 'verify'])
+        self.assertIn('V3.0 Signer: certificate SHA-256 digest: ' + 'b'*64, result.stdout)
+
+    def test_artifact_generator_observed_format_and_multiple_signer_rejection(self):
+        env = self.verification_fixture()
+        modern = 'V3.0 Signer: certificate SHA-256 digest: ' + 'b' * 64 + '\n'
+        for output, accepted in [(modern, True), (modern + modern, False),
+                (modern + 'Signer #2 certificate SHA-256 digest: ' + 'b' * 64 + '\n', False),
+                (modern.replace('b' * 64, 'c' * 64), False),
+                (modern.replace('b' * 64, 'malformed'), False),
+                (modern.replace('V3.0 Signer:', 'Unknown Signer:'), False)]:
+            with self.subTest(output=output):
+                (self.root / 'verified-certificate.txt').write_text(output)
+                result = self.verify(env)
+                self.assertEqual(result.returncode == 0, accepted, result.stderr)
 
     def test_signed_artifact_and_certificate_outputs(self):
         env = self.verification_fixture()

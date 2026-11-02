@@ -46,6 +46,23 @@ class ReleasePermissionsTest(unittest.TestCase):
                 self.assertIn(message, result.stdout)
                 self.assertNotIn('invalid-sensitive-input', result.stdout + result.stderr)
 
+    def test_observed_build_tools_37_format_and_ambiguous_signers(self):
+        step = next(s for s in self.jobs['sign']['steps'] if s['name'] == 'Zipalign, sign, and verify')
+        script = 'set -euo pipefail\nACTUAL=' + step['run'].split('ACTUAL=', 1)[1]
+        digest = 'a' * 64
+        modern = 'V3.0 Signer: certificate SHA-256 digest: ' + digest + '\n'
+        legacy = 'Signer #1 certificate SHA-256 digest: ' + digest + '\n'
+        cases = [(modern, True), (legacy, True), (modern + modern, False),
+                 (modern + legacy, False), (modern + 'Signer #2 certificate SHA-256 digest: ' + digest + '\n', False),
+                 (modern.replace(digest, 'b' * 64), False), (modern.replace(digest, 'malformed'), False),
+                 (modern.replace('V3.0 Signer:', 'Unknown Signer:'), False)]
+        for output, accepted in cases:
+            with self.subTest(output=output), tempfile.TemporaryDirectory() as tmp:
+                Path(tmp, 'verified-certificate.txt').write_text(output)
+                result = subprocess.run(['bash', '-c', script], cwd=tmp,
+                    env={**os.environ, 'RELEASE_CERT_SHA256': digest}, capture_output=True, text=True)
+                self.assertEqual(result.returncode == 0, accepted, result.stdout + result.stderr)
+
     def test_repository_write_is_confined_to_publisher(self):
         self.assertEqual(self.workflow['permissions'], {'contents': 'read'})
         self.assertEqual(set(self.jobs), {'build', 'sign', 'publish'})

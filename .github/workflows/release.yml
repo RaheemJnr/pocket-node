@@ -253,7 +253,7 @@ jobs:
           # Fail the release if the signing cert does not match the fingerprint
           # baked into the APK — otherwise the in-app updater would reject this
           # build for every existing user (URL/channel-substitution guard, #293).
-          ACTUAL="$(awk -F': ' '/^Signer #1 certificate SHA-256 digest:/{print $2}' verified-certificate.txt | tr 'A-F' 'a-f' | tr -d ': ')"
+          ACTUAL="$(awk -F': ' '/certificate SHA-256 digest:/ { if ($0 ~ /^(Signer #1 |V3[.]0 Signer: )certificate SHA-256 digest:/) print $NF; else print "invalid-certificate-label" }' verified-certificate.txt | tr 'A-F' 'a-f' | tr -d ': ')"
           EXPECTED="$(printf '%s' "${RELEASE_CERT_SHA256:-}" | tr 'A-F' 'a-f' | tr -d ': ')"
           # A certificate fingerprint is public, unlike the keystore/passwords.
           # Print it only after format validation; never echo secret inputs.
@@ -310,7 +310,12 @@ jobs:
           for abi in ('arm64-v8a', 'armeabi-v7a'):
               if f'lib/{abi}/libckb_light_client_lib.so' not in packaged:
                   raise SystemExit('missing native ABI')
-          certs = re.findall(r'^Signer #[0-9]+ certificate SHA-256 digest: ([0-9a-fA-F]{64})$', Path('verified-certificate.txt').read_text(), re.M)
+          # Accept the legacy label and the observed build-tools 37 label only.
+          # Count every certificate digest line so an extra/unknown signer fails closed.
+          lines = [line for line in Path('verified-certificate.txt').read_text().splitlines() if 'certificate SHA-256 digest:' in line]
+          certs = [match.group(1) for line in lines if (match := re.fullmatch(r'(?:Signer #1 |V3\.0 Signer: )certificate SHA-256 digest: ([0-9a-fA-F]{64})', line))]
+          if len(lines) != 1:
+              raise SystemExit('expected exactly one signing certificate')
           expected = re.sub(r'[:\s]', '', os.environ['RELEASE_CERT_SHA256']).lower()
           if len(certs) != 1 or not re.fullmatch('[0-9a-f]{64}', expected) or certs[0].lower() != expected:
               raise SystemExit('verified signing certificate mismatch')
