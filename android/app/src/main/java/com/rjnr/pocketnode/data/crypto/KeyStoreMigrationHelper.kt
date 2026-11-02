@@ -1,5 +1,7 @@
 package com.rjnr.pocketnode.data.crypto
 
+import androidx.room.withTransaction
+import com.rjnr.pocketnode.data.database.AppDatabase
 import android.content.SharedPreferences
 import com.rjnr.pocketnode.core.log.Logger
 import com.rjnr.pocketnode.data.database.dao.KeyMaterialDao
@@ -45,6 +47,7 @@ class KeyStoreMigrationHelper(
     private val encryptionManager: KeystoreEncryptionManager,
     private val migrationPrefs: SharedPreferences,
     private val logger: Logger,
+    private val database: AppDatabase,
 ) {
 
     internal suspend fun migrateWallet(
@@ -82,10 +85,16 @@ class KeyStoreMigrationHelper(
         )
 
         if (overwrite) {
-            keyMaterialDao.replaceLegacyV1(entity, source?.iv)
+            database.withTransaction {
+                database.walletStorage.requireOpen()
+                keyMaterialDao.replaceLegacyV1(entity, source?.iv)
+            }
         } else {
             try {
-                keyMaterialDao.insertOrAbort(entity)
+                database.withTransaction {
+                    database.walletStorage.requireOpen()
+                    keyMaterialDao.insertOrAbort(entity)
+                }
             } catch (e: android.database.sqlite.SQLiteConstraintException) {
                 throw IllegalStateException("walletId=$walletId already exists in key_material; refuse to overwrite", e)
             }

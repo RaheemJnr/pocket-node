@@ -1,5 +1,7 @@
 package com.rjnr.pocketnode.ui.screens.send
 
+import com.rjnr.pocketnode.data.send.DestinationPolicy
+import com.rjnr.pocketnode.data.send.DestinationKind
 import android.content.Intent
 import android.net.Uri
 import com.rjnr.pocketnode.data.auth.AuthMethod
@@ -76,6 +78,7 @@ import com.composables.icons.lucide.Check
 import com.composables.icons.lucide.ChevronLeft
 import com.composables.icons.lucide.CircleAlert
 import com.composables.icons.lucide.CircleCheck
+import com.composables.icons.lucide.Clock
 import com.composables.icons.lucide.Lucide
 import com.composables.icons.lucide.ScanLine
 import com.composables.icons.lucide.TriangleAlert
@@ -196,6 +199,7 @@ fun SendScreen(
             statusMessage = uiState.statusMessage,
             confirmations = uiState.confirmations,
             networkType = uiState.networkType,
+            onRetryStatus = viewModel::retryStatusCheck,
             onDismiss = {
                 viewModel.clearTxHash()
                 if (uiState.transactionState == TransactionState.CONFIRMED) {
@@ -583,6 +587,14 @@ private fun SendScreenUI(
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant
                 )
+                uiState.bulkInvalidEntries.forEach { reason ->
+                    Text(reason, style = MaterialTheme.typography.bodySmall, color = ColorInvalidRed)
+                }
+                val customCount = uiState.bulkValidRecipients.count { DestinationPolicy.assess(it, uiState.networkType).isCustom }
+                if (customCount > 0) {
+                    Text("$customCount custom recipients. ${DestinationPolicy.CUSTOM_GUIDANCE}",
+                        style = MaterialTheme.typography.bodySmall, color = ColorWarnAmber)
+                }
                 if (uiState.bulkValidRecipients.isNotEmpty() && uiState.amountCkb.isNotBlank()) {
                     Spacer(modifier = Modifier.height(6.dp))
                     Text(
@@ -838,28 +850,13 @@ fun AddressValidationIndicator(
 ) {
     if (address.isBlank()) return
 
-    val (isValid, addressNetwork) = remember(address) {
-        val valid = AddressUtils.isValid(address)
-        Pair(valid, if (valid) AddressUtils.getNetwork(address) else null)
+    val assessment = remember(address, currentNetwork) { DestinationPolicy.assess(address, currentNetwork) }
+    val (symbol, color) = when (assessment.kind) {
+        DestinationKind.INVALID_FORMAT, DestinationKind.KNOWN_INVALID -> Lucide.X to ColorInvalidRed
+        DestinationKind.WRONG_NETWORK, DestinationKind.CUSTOM -> Lucide.TriangleAlert to ColorWarnAmber
+        DestinationKind.RECOGNIZED -> Lucide.Check to MaterialTheme.colorScheme.primary
     }
-
-    val (symbol, message, color) = when {
-        !isValid -> Triple(Lucide.X, "Invalid address format", ColorInvalidRed)
-        addressNetwork != null && addressNetwork != currentNetwork -> {
-            val networkLabel = if (addressNetwork == NetworkType.TESTNET) "testnet" else "mainnet"
-            Triple(
-                Lucide.TriangleAlert,
-                "This is a $networkLabel address on ${currentNetwork.name.lowercase()}",
-                ColorWarnAmber
-            )
-        }
-
-        else -> Triple(
-            Lucide.Check,
-            "Valid CKB ${currentNetwork.name.lowercase()} address",
-            MaterialTheme.colorScheme.primary
-        )
-    }
+    val message = assessment.message
     // Validation
     Row(
         modifier = Modifier.padding(top = 8.dp, start = 4.dp),
@@ -1025,15 +1022,17 @@ fun TransactionStatusDialog(
     statusMessage: String,
     confirmations: Int,
     networkType: NetworkType = NetworkType.MAINNET,
+    onRetryStatus: () -> Unit = {},
     onDismiss: () -> Unit
 ) {
+    val isTimedOut = transactionState == TransactionState.TIMED_OUT
     val isConfirmed = transactionState == TransactionState.CONFIRMED
     val isFailed = transactionState == TransactionState.FAILED
 
     AlertDialog(
         onDismissRequest = {
-            // Only allow dismissing if confirmed or failed
-            if (isConfirmed || isFailed) {
+            // A finished local poll can be closed even when its outcome is unknown.
+            if (isConfirmed || isFailed || isTimedOut) {
                 onDismiss()
             }
         },
@@ -1056,6 +1055,10 @@ fun TransactionStatusDialog(
                     }
                 }
 
+                isTimedOut -> {
+                    Icon(imageVector = Lucide.Clock, contentDescription = "Not confirmed yet",
+                        modifier = Modifier.size(48.dp), tint = MaterialTheme.colorScheme.onSurfaceVariant)
+                }
                 isFailed -> {
                     Box(
                         modifier = Modifier
@@ -1087,6 +1090,7 @@ fun TransactionStatusDialog(
                 text = when (transactionState) {
                     TransactionState.CONFIRMED -> "Transaction Confirmed!"
                     TransactionState.FAILED -> "Transaction Failed"
+                    TransactionState.TIMED_OUT -> "Not Confirmed Yet"
                     TransactionState.SENDING -> "Sending..."
                     TransactionState.PENDING -> "Waiting for Confirmation"
                     TransactionState.PROPOSED -> "Processing..."
@@ -1110,8 +1114,8 @@ fun TransactionStatusDialog(
                     color = MaterialTheme.colorScheme.onSurfaceVariant
                 )
 
-                // Progress steps (only show when not confirmed/failed)
-                if (!isConfirmed && !isFailed) {
+                // Stop animating once the local poll has finished.
+                if (!isConfirmed && !isFailed && !isTimedOut) {
                     StatusSteps(currentState = transactionState)
                 }
 
@@ -1194,6 +1198,8 @@ fun TransactionStatusDialog(
                 ) {
                     Text(stringResource(R.string.send_done))
                 }
+            } else if (isTimedOut) {
+                Button(onClick = onRetryStatus) { Text("Check status again") }
             } else if (isFailed) {
                 Button(onClick = onDismiss) {
                     Text(stringResource(R.string.send_close))
@@ -1201,7 +1207,9 @@ fun TransactionStatusDialog(
             }
         },
         dismissButton = {
-            if (!isConfirmed && !isFailed) {
+            if (isTimedOut) {
+                TextButton(onClick = onDismiss) { Text(stringResource(R.string.send_close)) }
+            } else if (!isConfirmed && !isFailed) {
                 TextButton(
                     onClick = onDismiss,
                     colors = ButtonDefaults.textButtonColors(

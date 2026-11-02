@@ -168,13 +168,4 @@ final class SendCopyTests: XCTestCase {
         XCTAssertTrue(status.isActive)
     }
 
-    // MARK: - Review sheet
-
-    func testTheReviewTruncatesTheRecipientTheWayTheActivityListDoes() {
-        XCTAssertEqual(
-            SendReviewSheet.truncate(SendFixtures.testnetAddress),
-            "\(SendFixtures.testnetAddress.prefix(10))...\(SendFixtures.testnetAddress.suffix(6))"
-        )
-        XCTAssertEqual(SendReviewSheet.truncate("ckt1short"), "ckt1short")
-    }
 }

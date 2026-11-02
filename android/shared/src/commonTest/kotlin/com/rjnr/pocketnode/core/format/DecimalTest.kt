@@ -182,19 +182,11 @@ class DecimalTest {
         assertEquals(0L, ckbToShannons("0"))
     }
 
-    /**
-     * Truncation, not rounding: a user who typed a ninth decimal must not be
-     * charged for a shannon they did not type.
-     */
     @Test
-    fun aNinthDecimalIsDroppedRatherThanRounded() {
-        assertEquals(100_000_000L, ckbToShannons("1.000000009"))
-        assertEquals(199_999_999L, ckbToShannons("1.9999999999"))
-    }
-
-    @Test
-    fun surroundingSpaceIsIgnored() {
-        assertEquals(6_100_000_000L, ckbToShannons("  61  "))
+    fun excessPrecisionAndWhitespaceAreRejectedWithoutChangingTheAmount() {
+        listOf("1.000000009", "1.9999999999", "1.000000000", "  61  ", "61\n").forEach {
+            assertNull(ckbToShannons(it), it)
+        }
     }
 
     @Test
@@ -225,8 +217,19 @@ class DecimalTest {
      * would be a send for a completely different amount.
      */
     @Test
+    fun maxAndDepositTextRoundTripsEveryShannonAboveDoublePrecision() {
+        listOf(9_007_199_254_740_993L, 2_100_000_000_000_000_001L, Long.MAX_VALUE).forEach {
+            val text = formatCkbTrimmed(it)
+            assertEquals(text, com.rjnr.pocketnode.util.sanitizeAmount(text))
+            assertEquals(it, ckbToShannons(text))
+        }
+    }
+
+    @Test
     fun anAmountTooLargeForALongAnswersNull() {
         assertEquals(Long.MAX_VALUE, ckbToShannons("92233720368.54775807"))
+        assertEquals(Long.MAX_VALUE, ckbToShannons("00092233720368.54775807"))
+        assertEquals(0L, ckbToShannons("000.00000000"))
         assertNull(ckbToShannons("92233720368.54775808"))
         assertNull(ckbToShannons("100000000000000000000"))
     }

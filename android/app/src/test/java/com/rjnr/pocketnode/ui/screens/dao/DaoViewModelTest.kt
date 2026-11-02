@@ -34,6 +34,12 @@ class DaoViewModelTest {
     private lateinit var pinManager: PinManager
     private lateinit var walletKeyReader: WalletKeyReader
     private lateinit var walletRepository: WalletRepository
+    private val checking = MutableStateFlow<com.rjnr.pocketnode.data.gateway.RecoveryOutPoint?>(null)
+    private val invalidation = MutableStateFlow(0L)
+    private val recoveryScheduler = mockk<com.rjnr.pocketnode.data.gateway.DaoRecoveryScheduler>(relaxed = true) {
+        every { checking } returns this@DaoViewModelTest.checking
+        every { invalidation } returns this@DaoViewModelTest.invalidation
+    }
 
     private val testOutPoint = OutPoint("0x" + "ab".repeat(32), "0x0")
     private val otherOutPoint = OutPoint("0x" + "cd".repeat(32), "0x0")
@@ -75,18 +81,82 @@ class DaoViewModelTest {
         Dispatchers.resetMain()
     }
 
+    @Test fun `checking state blocks action across normalized aliases and clears when recovery stops`() = kotlinx.coroutines.test.runTest(testDispatcher) {
+        val active = makeDaoDeposit(status = DaoCellStatus.UNLOCKABLE).copy(withdrawBlockNumber = 200)
+        // Park the unrelated read loop: MockK boxes suspended Result values.
+        coEvery { repository.getDaoDeposits() } coAnswers { awaitCancellation() }
+        val vm = DaoViewModel(repository, authManager, pinManager, walletKeyReader, walletRepository, recoveryScheduler)
+        testDispatcher.scheduler.runCurrent()
+        checking.value = com.rjnr.pocketnode.data.gateway.RecoveryOutPoint.from(testOutPoint.copy(index = "0000"))
+        testDispatcher.scheduler.runCurrent()
+        assertEquals(testOutPoint, vm.uiState.value.checkingWithdrawal)
+        vm.unlock(active)
+        assertNull(vm.uiState.value.pendingAction)
+        checking.value = null
+        testDispatcher.scheduler.runCurrent()
+        assertNull(vm.uiState.value.checkingWithdrawal)
+    }
+
+    @Test fun `newer refresh wins when older actionable result resumes last`() = kotlinx.coroutines.test.runTest(testDispatcher) {
+        val old = makeDaoDeposit(status = DaoCellStatus.UNLOCKABLE).copy(compensation = 99, recoveryReceiptId = "old")
+        val fresh = makeDaoDeposit(status = DaoCellStatus.LOCKED)
+        val continuations = mutableListOf<kotlin.coroutines.Continuation<Any?>>()
+        captureDaoLoads(continuations)
+        val vm = DaoViewModel(repository, authManager, pinManager, walletKeyReader, walletRepository, recoveryScheduler)
+        val store = androidx.lifecycle.ViewModelStore().apply { put("dao", vm) }
+        try {
+            testDispatcher.scheduler.runCurrent()
+            assertEquals(1, continuations.size)
+            invalidation.value++
+            vm.refresh()
+            testDispatcher.scheduler.runCurrent()
+            assertEquals(2, continuations.size)
+            continuations[1].resumeWith(Result.success(Result.success(listOf(fresh))))
+            testDispatcher.scheduler.runCurrent()
+            assertEquals(listOf(fresh), vm.uiState.value.activeDeposits)
+            continuations[0].resumeWith(Result.success(Result.success(listOf(old))))
+            testDispatcher.scheduler.runCurrent()
+            assertEquals(listOf(fresh), vm.uiState.value.activeDeposits)
+            assertEquals(0L, vm.uiState.value.overview.totalCompensation)
+        } finally { store.clear() }
+    }
+
+    @Test fun `observed invalidation suppresses result before a successor refresh even starts`() = kotlinx.coroutines.test.runTest(testDispatcher) {
+        val continuations = mutableListOf<kotlin.coroutines.Continuation<Any?>>()
+        captureDaoLoads(continuations)
+        val vm = DaoViewModel(repository, authManager, pinManager, walletKeyReader, walletRepository, recoveryScheduler)
+        val store = androidx.lifecycle.ViewModelStore().apply { put("dao", vm) }
+        try {
+            testDispatcher.scheduler.runCurrent()
+            assertEquals(1, continuations.size)
+            invalidation.value++
+            continuations.single().resumeWith(Result.success(Result.success(listOf(makeDaoDeposit(status = DaoCellStatus.UNLOCKABLE).copy(recoveryReceiptId = "old")))))
+            testDispatcher.scheduler.runCurrent()
+            assertTrue(vm.uiState.value.activeDeposits.isEmpty())
+        } finally { store.clear() }
+    }
+
+    /** Resume the suspend Result method's JVM ABI directly: MockK otherwise double-boxes Result. */
+    @Suppress("UNCHECKED_CAST")
+    private fun captureDaoLoads(continuations: MutableList<kotlin.coroutines.Continuation<Any?>>) {
+        (coEvery { repository.getDaoDeposits() } as io.mockk.MockKStubScope<Any?, Any?>).answers {
+            continuations += invocation.args.last() as kotlin.coroutines.Continuation<Any?>
+            kotlin.coroutines.intrinsics.COROUTINE_SUSPENDED
+        }
+    }
+
     // --- Synchronous ViewModel operations ---
 
     @Test
     fun `selectTab changes tab to COMPLETED`() {
-        val vm = DaoViewModel(repository, authManager, pinManager, walletKeyReader, walletRepository)
+        val vm = DaoViewModel(repository, authManager, pinManager, walletKeyReader, walletRepository, recoveryScheduler)
         vm.selectTab(DaoTab.COMPLETED)
         assertEquals(DaoTab.COMPLETED, vm.uiState.value.selectedTab)
     }
 
     @Test
     fun `selectTab changes tab back to ACTIVE`() {
-        val vm = DaoViewModel(repository, authManager, pinManager, walletKeyReader, walletRepository)
+        val vm = DaoViewModel(repository, authManager, pinManager, walletKeyReader, walletRepository, recoveryScheduler)
         vm.selectTab(DaoTab.COMPLETED)
         vm.selectTab(DaoTab.ACTIVE)
         assertEquals(DaoTab.ACTIVE, vm.uiState.value.selectedTab)
@@ -94,14 +164,14 @@ class DaoViewModelTest {
 
     @Test
     fun `clearError sets error to null`() {
-        val vm = DaoViewModel(repository, authManager, pinManager, walletKeyReader, walletRepository)
+        val vm = DaoViewModel(repository, authManager, pinManager, walletKeyReader, walletRepository, recoveryScheduler)
         vm.clearError()
         assertNull(vm.uiState.value.error)
     }
 
     @Test
     fun `deposit sets pending action to Depositing`() {
-        val vm = DaoViewModel(repository, authManager, pinManager, walletKeyReader, walletRepository)
+        val vm = DaoViewModel(repository, authManager, pinManager, walletKeyReader, walletRepository, recoveryScheduler)
         val amount = 10_200_000_000L
         vm.deposit(amount)
         assertEquals(DaoAction.Depositing(amount), vm.uiState.value.pendingAction)
@@ -109,7 +179,7 @@ class DaoViewModelTest {
 
     @Test
     fun `withdraw sets pending action to Withdrawing`() {
-        val vm = DaoViewModel(repository, authManager, pinManager, walletKeyReader, walletRepository)
+        val vm = DaoViewModel(repository, authManager, pinManager, walletKeyReader, walletRepository, recoveryScheduler)
         val deposit = makeDaoDeposit()
         vm.withdraw(deposit)
         assertEquals(DaoAction.Withdrawing(deposit.outPoint), vm.uiState.value.pendingAction)
@@ -117,7 +187,7 @@ class DaoViewModelTest {
 
     @Test
     fun `unlock sets pending action to Unlocking`() {
-        val vm = DaoViewModel(repository, authManager, pinManager, walletKeyReader, walletRepository)
+        val vm = DaoViewModel(repository, authManager, pinManager, walletKeyReader, walletRepository, recoveryScheduler)
         val deposit = makeDaoDeposit()
         vm.unlock(deposit)
         assertEquals(DaoAction.Unlocking(deposit.outPoint), vm.uiState.value.pendingAction)
@@ -222,7 +292,7 @@ class DaoViewModelTest {
 
     @Test
     fun `unlock is refused while another action is already in flight for that outPoint`() {
-        val vm = DaoViewModel(repository, authManager, pinManager, walletKeyReader, walletRepository)
+        val vm = DaoViewModel(repository, authManager, pinManager, walletKeyReader, walletRepository, recoveryScheduler)
 
         vm.withdraw(makeDaoDeposit(status = DaoCellStatus.DEPOSITED))
         assertEquals(DaoAction.Withdrawing(testOutPoint), vm.uiState.value.pendingAction)
@@ -237,7 +307,7 @@ class DaoViewModelTest {
     fun `unlock is refused for a deposit already overlaid as UNLOCKING`() {
         // After a relaunch mid-unlock the in-memory pending action is gone;
         // the persisted marker's UNLOCKING overlay is the only guard left.
-        val vm = DaoViewModel(repository, authManager, pinManager, walletKeyReader, walletRepository)
+        val vm = DaoViewModel(repository, authManager, pinManager, walletKeyReader, walletRepository, recoveryScheduler)
 
         vm.unlock(makeDaoDeposit(status = DaoCellStatus.UNLOCKING))
 
@@ -246,7 +316,7 @@ class DaoViewModelTest {
 
     @Test
     fun `a failure on one deposit leaves another deposit's spinner alone`() {
-        val vm = DaoViewModel(repository, authManager, pinManager, walletKeyReader, walletRepository)
+        val vm = DaoViewModel(repository, authManager, pinManager, walletKeyReader, walletRepository, recoveryScheduler)
 
         // One position is genuinely unlocking.
         vm.unlock(makeDaoDeposit(outPoint = testOutPoint, status = DaoCellStatus.UNLOCKABLE))
@@ -261,7 +331,7 @@ class DaoViewModelTest {
 
     @Test
     fun `a failure on the deposit that is in flight clears its spinner`() {
-        val vm = DaoViewModel(repository, authManager, pinManager, walletKeyReader, walletRepository)
+        val vm = DaoViewModel(repository, authManager, pinManager, walletKeyReader, walletRepository, recoveryScheduler)
 
         vm.unlock(makeDaoDeposit(outPoint = testOutPoint, status = DaoCellStatus.UNLOCKABLE))
         vm.failAction(testOutPoint, "This deposit was already unlocked")
@@ -272,7 +342,7 @@ class DaoViewModelTest {
 
     @Test
     fun `withdraw is refused for a deposit already overlaid as WITHDRAWING`() {
-        val vm = DaoViewModel(repository, authManager, pinManager, walletKeyReader, walletRepository)
+        val vm = DaoViewModel(repository, authManager, pinManager, walletKeyReader, walletRepository, recoveryScheduler)
 
         vm.withdraw(makeDaoDeposit(status = DaoCellStatus.WITHDRAWING))
 
@@ -285,7 +355,7 @@ class DaoViewModelTest {
         // no kotlin.Result crosses the MockK resume boundary (see NOTE above).
         coEvery { repository.unlockPreflight(any()) } coAnswers { awaitCancellation() }
         coEvery { repository.getDaoDeposits() } coAnswers { awaitCancellation() } // park the poll
-        val vm = DaoViewModel(repository, authManager, pinManager, walletKeyReader, walletRepository)
+        val vm = DaoViewModel(repository, authManager, pinManager, walletKeyReader, walletRepository, recoveryScheduler)
         val activity = com.rjnr.pocketnode.data.wallet.ForegroundTestHost().activity
         val deposit = makeDaoDeposit(status = DaoCellStatus.UNLOCKABLE)
 
@@ -307,7 +377,7 @@ class DaoViewModelTest {
         every { walletRepository.activeWalletIdSnapshot() } returns "wallet-1"
         coEvery { walletKeyReader.readPrivateKey(any(), any(), any(), any()) } coAnswers { awaitCancellation() }
         coEvery { repository.getDaoDeposits() } coAnswers { awaitCancellation() } // park the poll
-        val vm = DaoViewModel(repository, authManager, pinManager, walletKeyReader, walletRepository)
+        val vm = DaoViewModel(repository, authManager, pinManager, walletKeyReader, walletRepository, recoveryScheduler)
         val activity = com.rjnr.pocketnode.data.wallet.ForegroundTestHost().activity
         val deposit = makeDaoDeposit(status = DaoCellStatus.DEPOSITED)
 
@@ -318,6 +388,43 @@ class DaoViewModelTest {
 
         coVerify(exactly = 1) { walletKeyReader.readPrivateKey(any(), any(), any(), any()) }
         assertEquals(DaoAction.Withdrawing(testOutPoint), vm.uiState.value.pendingAction)
+    }
+
+    @Test fun `legacy unlock carries immutable selected proof into repository authentication`() {
+        coEvery { repository.getDaoDeposits() } coAnswers { awaitCancellation() }
+        var received: DaoDeposit? = null
+        coEvery { repository.unlockDao(any(), any<DaoDeposit>()) } coAnswers {
+            received = secondArg(); awaitCancellation()
+        }
+        val selected = makeDaoDeposit(status = DaoCellStatus.UNLOCKABLE).copy(recoveryReceiptId = "dr1.r.01")
+        val vm = DaoViewModel(repository, authManager, pinManager, walletKeyReader, walletRepository, recoveryScheduler)
+        vm.unlock(selected); testDispatcher.scheduler.runCurrent()
+        try { assertEquals(selected, received) }
+        finally { androidx.lifecycle.ViewModelStore().apply { put("test", vm); clear() }; testDispatcher.scheduler.runCurrent() }
+    }
+
+    @Test fun `activity unlock retains selected proof across suspended authentication`() {
+        coEvery { repository.getDaoDeposits() } coAnswers { awaitCancellation() }
+        coEvery { repository.unlockPreflight(any()) } returns Result.success(Unit)
+        every { walletRepository.activeWalletIdSnapshot() } returns "wallet-1"
+        val authenticated = kotlinx.coroutines.CompletableDeferred<Unit>()
+        val key = ByteArray(32) { 7 }
+        coEvery { walletKeyReader.readPrivateKey(any(), any(), any(), any()) } coAnswers {
+            authenticated.await(); WalletKeyReader.Result.Success(key)
+        }
+        var received: DaoDeposit? = null
+        coEvery { repository.unlockDao(any(), any<ByteArray>(), any<DaoDeposit>()) } coAnswers {
+            received = thirdArg(); awaitCancellation()
+        }
+        val selected = makeDaoDeposit(status = DaoCellStatus.UNLOCKABLE).copy(recoveryReceiptId = "dr1.r.01")
+        val vm = DaoViewModel(repository, authManager, pinManager, walletKeyReader, walletRepository, recoveryScheduler)
+        val host = com.rjnr.pocketnode.data.wallet.ForegroundTestHost()
+        vm.unlockWithActivity(host.activity, selected); testDispatcher.scheduler.runCurrent()
+        assertNull(received)
+        authenticated.complete(Unit); testDispatcher.scheduler.runCurrent()
+        try { assertEquals(selected, received) }
+        finally { androidx.lifecycle.ViewModelStore().apply { put("test", vm); clear() }; testDispatcher.scheduler.runCurrent() }
+        assertTrue(key.all { it == 0.toByte() })
     }
 
     // --- outsideWindowPromptCount (pure function) ---
@@ -353,7 +460,7 @@ class DaoViewModelTest {
             try { awaitCancellation() } finally { cancelled = true }
         }
         val host = com.rjnr.pocketnode.data.wallet.ForegroundTestHost()
-        val vm = DaoViewModel(repository, authManager, pinManager, walletKeyReader, walletRepository)
+        val vm = DaoViewModel(repository, authManager, pinManager, walletKeyReader, walletRepository, recoveryScheduler)
         vm.withdrawWithActivity(host.activity, makeDaoDeposit())
         testDispatcher.scheduler.runCurrent(); assertTrue(entered)
         host.stopResume(); testDispatcher.scheduler.runCurrent()

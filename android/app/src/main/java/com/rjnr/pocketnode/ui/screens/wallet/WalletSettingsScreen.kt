@@ -93,6 +93,17 @@ fun WalletSettingsScreen(
     }
     androidx.compose.runtime.DisposableEffect(viewModel) { onDispose { viewModel.lockSeedPhrase() } }
 
+    if (uiState.cleanupPending) {
+        AlertDialog(
+            onDismissRequest = viewModel::acknowledgeCleanupPending,
+            title = { Text(stringResource(R.string.wallet_removed_title)) },
+            text = { Text(stringResource(R.string.wallet_removed_cleanup_pending)) },
+            confirmButton = {
+                TextButton(onClick = viewModel::acknowledgeCleanupPending) { Text(stringResource(android.R.string.ok)) }
+            },
+        )
+    }
+
     LaunchedEffect(uiState.deleted) {
         if (uiState.deleted) onNavigateBack()
     }

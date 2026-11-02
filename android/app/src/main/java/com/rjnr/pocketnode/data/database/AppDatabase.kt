@@ -32,6 +32,7 @@ import com.rjnr.pocketnode.data.database.entity.WalletEntity
 
 @Database(
     entities = [
+        com.rjnr.pocketnode.data.database.entity.WalletPendingCleanupEntity::class,
         WalletVaultEntity::class,
         WalletPassphraseProfileEntity::class,
         WalletVaultLegacyEntity::class,
@@ -39,6 +40,8 @@ import com.rjnr.pocketnode.data.database.entity.WalletEntity
         BalanceCacheEntity::class,
         HeaderCacheEntity::class,
         DaoCellEntity::class,
+        com.rjnr.pocketnode.data.database.entity.DaoRecoveryEntity::class,
+        com.rjnr.pocketnode.data.database.entity.DaoRecoveryRetryEntity::class,
         WalletEntity::class,
         KeyMaterialEntity::class,
         SyncProgressEntity::class,
@@ -95,7 +98,8 @@ import com.rjnr.pocketnode.data.database.entity.WalletEntity
     // never retired. MIGRATION_16_17 is a single CREATE TABLE + 1 CREATE INDEX.
     // Version 18 adds verified wallet envelopes, the installation passphrase profile,
     // and retained legacy ciphertext. No existing row is converted by the SQL migration.
-    version = 18,
+    // Version 19 records retryable file cleanup atomically with ordinary wallet deletion.
+    version = 20,
     // Schema export re-enabled (#149). It was OFF because Room 2.8.4's
     // bundled kotlinx-serialization-core crashed KSP with an AbstractMethodError
     // against the project's kotlinx-serialization-json:1.8.0. Verified clean
@@ -108,10 +112,20 @@ import com.rjnr.pocketnode.data.database.entity.WalletEntity
     exportSchema = true
 )
 abstract class AppDatabase : RoomDatabase() {
+    lateinit var walletStorage: com.rjnr.pocketnode.data.wallet.WalletStorageBoundary
+        private set
+
+    override fun init(configuration: androidx.room.DatabaseConfiguration) {
+        super.init(configuration)
+        walletStorage = com.rjnr.pocketnode.data.wallet.WalletStorageBoundary(configuration.context)
+    }
+
+    abstract fun walletPendingCleanupDao(): com.rjnr.pocketnode.data.database.dao.WalletPendingCleanupDao
     abstract fun walletVaultDao(): WalletVaultDao
     abstract fun transactionDao(): TransactionDao
     abstract fun balanceCacheDao(): BalanceCacheDao
     abstract fun headerCacheDao(): HeaderCacheDao
+    abstract fun daoRecoveryDao(): com.rjnr.pocketnode.data.database.dao.DaoRecoveryDao
     abstract fun daoCellDao(): DaoCellDao
     abstract fun walletDao(): WalletDao
     abstract fun keyMaterialDao(): KeyMaterialDao

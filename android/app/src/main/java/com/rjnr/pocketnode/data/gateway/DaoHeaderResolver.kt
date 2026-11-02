@@ -121,7 +121,7 @@ class DaoHeaderResolver @Inject constructor(
      * persisted into the Room header cache so subsequent DAO ops on
      * the same block skip both JNI and network round-trips.
      */
-    suspend fun getOrFetchHeader(blockHash: String, network: NetworkType): JniHeaderView? {
+    suspend fun getOrFetchHeader(blockHash: String, network: NetworkType, cacheResult: Boolean = true): JniHeaderView? {
         // 1. Check Room cache
         val cached = daoSyncManager.getCachedHeader(blockHash)
         if (cached != null) {
@@ -132,14 +132,14 @@ class DaoHeaderResolver @Inject constructor(
         val localJson = LightClientNative.nativeGetHeader(blockHash)
         if (localJson != null) {
             val header = json.decodeFromString<JniHeaderView>(localJson)
-            daoSyncManager.cacheHeader(header, network.name)
+            if (cacheResult) daoSyncManager.cacheHeader(header, network.name)
             return header
         }
 
         // 3. Fetch from peers
         val fetched = fetchHeaderWithRetry(blockHash)
         if (fetched != null) {
-            daoSyncManager.cacheHeader(fetched, network.name)
+            if (cacheResult) daoSyncManager.cacheHeader(fetched, network.name)
         }
         return fetched
     }

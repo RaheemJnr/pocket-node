@@ -15,19 +15,9 @@ class ProcessUnlockState(val token: String = UUID.randomUUID().toString()) {
 }
 
 /**
- * When MainActivity locks the re-auth gate (#524). MainActivity only
- * delegates its lifecycle hooks here, so every decision is testable.
- *
- * The one place that does not lock is the cold-start flow: while
- * `Screen.Auth` is anywhere on the back stack (Auth itself, or the PinEntry
- * and ForgotPin screens reached from it) the user has not got past the
- * start-up lock yet, and a successful unlock pops it. Every other screen,
- * including a PinEntry that confirms a Send or reveals a backup, locks:
- * system back from it would otherwise return to the unlocked screen.
- *
- * [onNewLock] runs whenever a new lock session starts (to drop the previous
- * session's ViewModels at once); [clearSessionSecrets] runs when a success
- * arrives for a session that is no longer current.
+ * Activity-owned authentication gate, independent of navigation routes and saved route markers.
+ * Only an unlock in the current lock session authorizes content. A configuration restoration
+ * may keep that live authorization when its process token matches; process death cannot.
  */
 class ReauthLockPolicy(
     private val gate: ReauthGate,
@@ -35,22 +25,23 @@ class ReauthLockPolicy(
     private val onNewLock: () -> Unit = {},
     private val clearSessionSecrets: () -> Unit = {},
 ) {
-    /** Fresh start: onboarding and first PIN setup have nothing to unlock. */
-    fun onColdStart(startRoute: String) {
-        if (startRoute == Screen.Onboarding.route || startRoute == Screen.InitialPinSetup.route) {
-            process.unlocked = true
-        }
+    private var wasStopped = false
+
+    /** Only a real background return needs this re-check; initial startup keeps its router. */
+    fun onStart(hasPin: Boolean) {
+        if (wasStopped && hasPin && !gate.locked) lock()
+        wasStopped = false
     }
 
-    /**
-     * Recreated activity: a saved lock is kept with its session (so a
-     * rotation keeps the lock screen's state); a process that has not been
-     * unlocked starts a new lock unless it was saved in the cold-start flow,
-     * or the save was a configuration change in this same, still-running
-     * process (its token matches), which cannot have passed any credential.
-     */
+    /** Fresh Auth entry is gated before Navigation can attach or restore a destination. */
+    fun onColdStart(startRoute: String) {
+        process.unlocked = startRoute == Screen.Onboarding.route || startRoute == Screen.InitialPinSetup.route
+        if (startRoute == Screen.Auth.route) lock()
+    }
+
+    /** Saved navigation and saved cold-start markers never carry authorization. */
     fun onRestore(savedState: Bundle, hasWallet: Boolean, hasPin: Boolean) {
-        if (!hasWallet || !hasPin) return
+        if (!hasPin) return
         val savedLocked = savedState.getBoolean(KEY_LOCKED)
         val session = savedState.getInt(KEY_SESSION)
         if (savedLocked) {
@@ -59,9 +50,7 @@ class ReauthLockPolicy(
             gate.restore(session = session, locked = false)
             val sameProcessConfigChange =
                 savedState.getString(KEY_CONFIG_CHANGE_TOKEN) == process.token
-            if (!process.unlocked && !savedState.getBoolean(KEY_COLD_START_FLOW) &&
-                !sameProcessConfigChange
-            ) {
+            if (!process.unlocked || !sameProcessConfigChange) {
                 lock()
             }
         }
@@ -80,7 +69,12 @@ class ReauthLockPolicy(
         isChangingConfigurations: Boolean,
     ) {
         if (isChangingConfigurations) return
-        if (shouldLock(backStackRoutes, hasWallet, hasPin)) lock()
+        wasStopped = true
+        if (hasPin) lock() else {
+            // Revoke pending PIN work without cancelling unrelated onboarding storage work.
+            process.unlocked = false
+            clearSessionSecrets()
+        }
     }
 
     /**
@@ -100,7 +94,6 @@ class ReauthLockPolicy(
         }
         outState.putBoolean(KEY_LOCKED, gate.locked)
         outState.putInt(KEY_SESSION, gate.session)
-        outState.putBoolean(KEY_COLD_START_FLOW, isColdStartFlow(backStackRoutes))
         // Only a configuration change carries the token: a save for the
         // background never does, and a new process has a new token, so a
         // restore after process death still locks.
@@ -119,26 +112,27 @@ class ReauthLockPolicy(
         }
     }
 
+    /** A claimed app-PIN change always requires fresh authentication. */
+    fun onPinChanged() = lock()
+
     /** The cold-start Auth route unlocked. */
     fun onColdStartAuthUnlocked() {
         process.unlocked = true
     }
 
     private fun shouldLock(backStackRoutes: List<String>, hasWallet: Boolean, hasPin: Boolean) =
-        hasWallet && hasPin && !isColdStartFlow(backStackRoutes)
+        hasPin
 
     private fun lock() {
+        process.unlocked = false
         gate.lock()
+        clearSessionSecrets()
         onNewLock()
     }
 
     companion object {
         private const val KEY_LOCKED = "reauth_locked"
         private const val KEY_SESSION = "reauth_session"
-        private const val KEY_COLD_START_FLOW = "reauth_cold_start_flow"
         private const val KEY_CONFIG_CHANGE_TOKEN = "reauth_config_change_token"
-
-        fun isColdStartFlow(backStackRoutes: List<String>): Boolean =
-            Screen.Auth.route in backStackRoutes
     }
 }

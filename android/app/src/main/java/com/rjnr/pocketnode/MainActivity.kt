@@ -1,5 +1,6 @@
 package com.rjnr.pocketnode
 
+import android.content.Intent
 import android.os.Bundle
 import android.util.Log
 import androidx.activity.compose.setContent
@@ -24,7 +25,6 @@ import com.rjnr.pocketnode.data.auth.AuthManager
 import com.rjnr.pocketnode.data.auth.PinManager
 import com.rjnr.pocketnode.data.gateway.GatewayRepository
 import com.rjnr.pocketnode.data.sync.SyncWorkScheduler
-import com.rjnr.pocketnode.data.crypto.KeyBackupManager
 import com.rjnr.pocketnode.data.wallet.KeyManager
 import com.rjnr.pocketnode.data.wallet.RecoveredKeyRestorer
 import com.rjnr.pocketnode.ui.navigation.CkbNavGraph
@@ -67,7 +67,10 @@ class MainActivity : FragmentActivity(), com.rjnr.pocketnode.ui.security.WalletS
     lateinit var walletRepository: WalletRepository
 
     @Inject
-    lateinit var keyBackupManager: KeyBackupManager
+    lateinit var localWalletReset: com.rjnr.pocketnode.data.gateway.LocalWalletReset
+
+    @Inject
+    lateinit var appRestarter: com.rjnr.pocketnode.util.AppRestarter
 
     @Inject
     lateinit var authManager: AuthManager
@@ -117,34 +120,25 @@ class MainActivity : FragmentActivity(), com.rjnr.pocketnode.ui.security.WalletS
 
     @OptIn(ExperimentalMaterial3WindowSizeClassApi::class)
     override fun onCreate(savedInstanceState: Bundle?) {
+        intent = sanitizedEntryIntent(intent)
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
 
-        // Clean up any orphaned .tmp files from interrupted PIN re-encryption
-        keyBackupManager.cleanupOrphanedTmpFiles()
+        // Interrupted legacy backups remain intact until authenticated migration or explicit deletion.
 
-        // #370: reset the PIN failed-attempt counter once after an overwrite
-        // install / version upgrade, BEFORE the startup gate below reads the
-        // lockout state. A fresh install (last-seen 0) just records the version;
-        // an ordinary same-version relaunch is a no-op. Note: this is a
-        // deliberate product choice (see #370) that trades a little brute-force
-        // hardening — a sideloaded higher-versionCode build would also clear the
-        // count — for not stranding a user who fumbled their PIN before updating.
-        run {
-            val lastSeen = walletPreferences.getLastSeenVersionCode()
-            val current = BuildConfig.VERSION_CODE
-            if (PinManager.shouldResetAttemptsForUpgrade(lastSeen, current)) {
-                pinManager.resetFailedAttempts()
-                logger.i("MainActivity", "PIN attempt counter reset after upgrade $lastSeen -> $current (#370)")
-            }
-            if (lastSeen != current) walletPreferences.setLastSeenVersionCode(current)
-        }
+        recordStartupVersion(walletPreferences, BuildConfig.VERSION_CODE)
 
         // Startup gate: must resolve synchronously to determine start destination.
         // This is the ONE acceptable runBlocking site — it runs once during cold start
         // on the main thread before any UI is shown.
         val startDestination = runBlocking {
-            cachedHasWallet = repository.hasWallet()
+            val resetStartup = localWalletReset.prepareStartup()
+            if (resetStartup == com.rjnr.pocketnode.data.gateway.LocalWalletReset.Startup.RESTART) appRestarter.restart()
+            val resetPending = resetStartup != com.rjnr.pocketnode.data.gateway.LocalWalletReset.Startup.READY
+            if (!resetPending && !walletRepository.retryPendingWalletCleanup()) {
+                android.widget.Toast.makeText(this@MainActivity, R.string.wallet_removed_cleanup_pending, android.widget.Toast.LENGTH_LONG).show()
+            }
+            cachedHasWallet = !resetPending && repository.hasWallet()
             @Suppress("DEPRECATION")
             val wasReset = keyManager.wasResetDueToCorruption()
             // Suppressed, not removed: the corruption flag guards the ESP
@@ -154,6 +148,7 @@ class MainActivity : FragmentActivity(), com.rjnr.pocketnode.ui.security.WalletS
             // marker and whenever a wallet row lacks keys.
             val hasPin = pinManager.hasPin()
             val decision = StartupRouter.route(
+                resetPending = resetPending,
                 corruptionFlag = wasReset,
                 markerSet = recoveredKeyRestorer.isMarkedIncomplete(),
                 hasWallet = cachedHasWallet,
@@ -165,6 +160,7 @@ class MainActivity : FragmentActivity(), com.rjnr.pocketnode.ui.security.WalletS
             )
             val recoveryPending = decision.recoveryPending
             val route = when (decision.route) {
+                StartupRouter.Route.RESET_RETRY -> Screen.ForgotPin.route
                 StartupRouter.Route.RECOVERY -> Screen.Recovery.route
                 StartupRouter.Route.ONBOARDING -> Screen.Onboarding.route
                 StartupRouter.Route.PIN_SETUP -> Screen.InitialPinSetup.route
@@ -182,7 +178,7 @@ class MainActivity : FragmentActivity(), com.rjnr.pocketnode.ui.security.WalletS
             // line from exactly the signed builds the reporter runs (a debug
             // build can't overwrite their release-signed install). println is not
             // in that strip list, so it survives R8 and still reaches logcat.
-            runCatching {
+            if (!resetPending) runCatching {
                 Log.println(
                     Log.INFO,
                     "StartupGate",
@@ -222,17 +218,22 @@ class MainActivity : FragmentActivity(), com.rjnr.pocketnode.ui.security.WalletS
                     // While locked the nav graph is not composed at all (see
                     // ReauthGateHost); the hoisted NavController keeps the
                     // back stack and its ViewModels.
-                    ReauthGateHost(
+                    if (startDestination == Screen.ForgotPin.route) {
+                        // A saved navigation stack must not bypass a pending installation reset.
+                        com.rjnr.pocketnode.ui.screens.auth.ForgotPinScreen(onBack = { finish() })
+                    } else ReauthGateHost(
                         locked = reauthGate.locked,
                         content = {
                             CkbNavGraph(
                                 navController = navController,
                                 startDestination = startDestination,
                                 pinManager = pinManager,
+                                sessionUnlocked = processUnlockState.unlocked,
                                 needsMnemonicBackup = {
                                     runBlocking { repository.needsMnemonicBackup() }
                                 },
                                 onAuthUnlocked = { reauthPolicy.onColdStartAuthUnlocked() },
+                                onRequireUnlock = { reauthPolicy.onPinChanged() },
                             )
                         },
                         overlay = {
@@ -253,8 +254,19 @@ class MainActivity : FragmentActivity(), com.rjnr.pocketnode.ui.security.WalletS
         }
     }
 
+    override fun onNewIntent(intent: Intent) {
+        val safeIntent = sanitizedEntryIntent(intent)
+        super.onNewIntent(safeIntent)
+        setIntent(safeIntent)
+    }
+
+    @Inject
+    lateinit var daoRecoveryLifetime: com.rjnr.pocketnode.data.gateway.DaoRecoveryLifetime
+
     override fun onStart() {
         super.onStart()
+        daoRecoveryLifetime.onStarted()
+        reauthPolicy.onStart(pinManager.hasPin())
         // Re-arm background sync on every foreground (#286). The FGS dies
         // silently in three ways the preference can't see — Android 15's 6h
         // dataSync budget (onTimeout → stopSelf, nothing reschedules), OEM
@@ -267,6 +279,7 @@ class MainActivity : FragmentActivity(), com.rjnr.pocketnode.ui.security.WalletS
     }
 
     override fun onStop() {
+        daoRecoveryLifetime.onStopped(isChangingConfigurations)
         super.onStop()
         // Play build only (self-gated): enqueue a one-time catch-up so the light
         // client keeps syncing for a few minutes after the app is backgrounded,
@@ -275,15 +288,8 @@ class MainActivity : FragmentActivity(), com.rjnr.pocketnode.ui.security.WalletS
         // during onboarding is covered even though cachedHasWallet (set once in
         // onCreate) is still stale here (Codex #428 P1). No-op on FGS builds.
         syncWorkScheduler.enqueueBackgroundCatchUp()
-        // Use cached value — avoids blocking main thread on every onStop
-        val hasPin = pinManager.hasPin()
-        reauthPolicy.onStop(backStackRoutes(), cachedHasWallet, hasPin, isChangingConfigurations)
-        if (cachedHasWallet && hasPin) {
-            // Wipe the cached session PIN when the app backgrounds so the next
-            // foregrounding forces a fresh unlock before any PIN-gated action.
-            authManager.clearSession()
-            keyManager.clearSessionPin()
-        }
+        // PIN protection also covers a wallet created after the startup cache was read.
+        reauthPolicy.onStop(backStackRoutes(), cachedHasWallet, pinManager.hasPin(), isChangingConfigurations)
     }
 
     override fun onSaveInstanceState(outState: Bundle) {

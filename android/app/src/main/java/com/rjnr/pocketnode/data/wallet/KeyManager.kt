@@ -1,5 +1,6 @@
 package com.rjnr.pocketnode.data.wallet
 
+import androidx.room.withTransaction
 import android.content.Context
 import android.content.SharedPreferences
 import androidx.security.crypto.EncryptedSharedPreferences
@@ -51,6 +52,26 @@ class KeyManager @Inject constructor(
     private val mnemonicManager: MnemonicManager,
     private val logger: Logger,
 ) {
+    internal val walletStorage = WalletStorageBoundary(context)
+    private val legacyFiles = LegacyWalletFiles(context)
+
+    internal fun deleteInstallationFiles() = walletStorage.files {
+        clearSessionPin()
+        authManager?.clearSession()
+        testPrefs?.edit()?.clear()?.commit()?.let { check(it) }
+        testWalletPrefs.values.forEach { check(it.edit().clear().commit()) }
+        legacyFiles.deleteAll()
+        // The production backup manager is wired by Hilt; discover files even before that wiring.
+        val backup = keyBackupManager ?: KeyBackupManager(java.io.File(context.filesDir, "key_backups"), logger, walletStorage)
+        backup.deleteAllChecked()
+    }
+
+    internal fun verifyInstallationFilesEmpty() = walletStorage.files {
+        legacyFiles.verifyEmpty()
+        val backup = keyBackupManager ?: KeyBackupManager(java.io.File(context.filesDir, "key_backups"), logger, walletStorage)
+        check(!backup.hasAnyBackups()) { "Wallet backup copies remain." }
+    }
+
     @VisibleForTesting
     internal var testPrefs: SharedPreferences? = null
 
@@ -81,18 +102,24 @@ class KeyManager @Inject constructor(
     internal var authManager: AuthManager? = null
 
     // Fallback PIN holder, only used by unit tests that don't wire an AuthManager.
-    // Prefer authManager.getSessionPin() in production.
-    @VisibleForTesting
-    internal var sessionPin: CharArray? = null
+    // Like AuthManager, publication takes files -> session; clearing never waits for files.
+    private val sessionLock = Any()
+    private var fallbackSessionPin: CharArray? = null
 
-    fun setSessionPin(pin: CharArray) {
-        sessionPin?.let { java.util.Arrays.fill(it, '\u0000') }
-        sessionPin = pin.copyOf()
+    @VisibleForTesting
+    internal val sessionPin: CharArray?
+        get() = synchronized(sessionLock) { fallbackSessionPin?.copyOf() }
+
+    fun setSessionPin(pin: CharArray) = walletStorage.readOrWriteFiles {
+        synchronized(sessionLock) {
+            fallbackSessionPin?.fill('\u0000')
+            fallbackSessionPin = pin.copyOf()
+        }
     }
 
-    fun clearSessionPin() {
-        sessionPin?.let { java.util.Arrays.fill(it, '\u0000') }
-        sessionPin = null
+    fun clearSessionPin() = synchronized(sessionLock) {
+        fallbackSessionPin?.fill('\u0000')
+        fallbackSessionPin = null
     }
 
     /**
@@ -127,7 +154,7 @@ class KeyManager @Inject constructor(
 
     @Deprecated("ESP fallback — remove after one release cycle")
     private val prefs: SharedPreferences
-        get() = testPrefs ?: encryptedPrefs
+        get() = walletStorage.readOrWriteFiles { testPrefs ?: encryptedPrefs }
 
     @Deprecated("ESP fallback — remove after one release cycle")
     private val encryptedPrefs: SharedPreferences by lazy {
@@ -159,7 +186,7 @@ class KeyManager @Inject constructor(
 
         return EncryptedSharedPreferences.create(
             context,
-            "ckb_wallet_keys",
+            LegacyWalletNamespace.DEFAULT,
             masterKey,
             EncryptedSharedPreferences.PrefKeyEncryptionScheme.AES256_SIV,
             EncryptedSharedPreferences.PrefValueEncryptionScheme.AES256_GCM
@@ -167,12 +194,16 @@ class KeyManager @Inject constructor(
     }
 
     suspend fun hasWallet(): Boolean {
+        if (walletStorage.isClosed()) return false
         val helper = keyStoreMigrationHelper
         if (helper != null) {
             val hasKeys = helper.hasAnyKeys()
             if (hasKeys) return true
         }
-        return prefs.contains(KEY_PRIVATE_KEY)
+        return walletStorage.readOrWriteFiles {
+            if (testPrefs == null && !legacyFiles.exists("default")) false
+            else prefs.contains(KEY_PRIVATE_KEY)
+        }
     }
 
     /**
@@ -229,7 +260,7 @@ class KeyManager @Inject constructor(
     /** Independent XML and backup fingerprints; never opens/restores SharedPreferences. */
     internal fun preferenceCleanupSnapshot(walletId: String): List<String?> {
         require(walletId.matches(Regex("[A-Za-z0-9_-]{1,128}")))
-        val name = if (walletId == "default") "ckb_wallet_keys" else "ckb_wallet_keys_$walletId"
+        val name = LegacyWalletNamespace.preferences(walletId)
         val file = java.io.File(context.filesDir.parentFile, "shared_prefs/$name.xml")
         return listOf(file, java.io.File(file.path + ".bak")).map { source ->
             if (!source.exists()) null else source.inputStream().use { input ->
@@ -255,9 +286,10 @@ class KeyManager @Inject constructor(
      * AEAD, while missing keysets (its key-generation path) are rejected before calling ESP.
      */
     internal fun preferencesForVaultCleanup(walletId: String): DecryptedKeyData? { return try {
+        walletStorage.requireOpen()
         val before = preferenceCleanupSnapshot(walletId)
         val standIn = if (walletId == "default") testPrefs else testWalletPrefs[walletId]
-        val name = if (walletId == "default") "ckb_wallet_keys" else "ckb_wallet_keys_$walletId"
+        val name = LegacyWalletNamespace.preferences(walletId)
         val file = java.io.File(context.filesDir.parentFile, "shared_prefs/$name.xml")
         val copies = listOf(file, java.io.File(file.path + ".bak")).mapIndexedNotNull { index, source ->
             if (before[index] == null) null else {
@@ -386,27 +418,13 @@ class KeyManager @Inject constructor(
     }
 
     suspend fun setMnemonicBackedUp(backedUp: Boolean) {
-        // Flip the plaintext flag in Room without re-encrypting the
-        // bundle — V2 rows cannot be decrypted without an authenticated
-        // Cipher, and this call site has none. The PIN backup blob keeps
-        // its previous mnemonicBackedUp value until the next mnemonic
-        // reveal (which carries a fresh Cipher and refreshes the blob).
+        // Metadata only. Legacy PIN-only ciphertext is never refreshed or created.
         val helper = keyStoreMigrationHelper
         if (helper != null && helper.setMnemonicBackedUpFlag("default", backedUp)) {
             return
         }
         // ESP fallback
-        prefs.edit().putBoolean(KEY_MNEMONIC_BACKED_UP, backedUp).commit()
-        val pk = prefs.getString(KEY_PRIVATE_KEY, null) ?: return
-        val espWalletType = prefs.getString(KEY_WALLET_TYPE, WALLET_TYPE_RAW_KEY) ?: WALLET_TYPE_RAW_KEY
-        writeBackupIfPinAvailable("default") {
-            KeyMaterial(
-                privateKey = pk,
-                mnemonic = prefs.getString(KEY_MNEMONIC, null),
-                walletType = espWalletType,
-                mnemonicBackedUp = backedUp
-            )
-        }
+        walletStorage.readOrWriteFiles { check(prefs.edit().putBoolean(KEY_MNEMONIC_BACKED_UP, backedUp).commit()) }
     }
 
     // -- Shared methods --
@@ -466,38 +484,28 @@ class KeyManager @Inject constructor(
         return Secp256k1Signer.signRecoverable(message, getPrivateKey())
     }
 
-    suspend fun deleteWallet() {
-        keyBackupManager?.deleteBackup("default")
-        // Delete from Room
-        val helper = keyStoreMigrationHelper
-        if (helper != null) {
-            helper.deleteKey("default")
-        }
-        // Also clear ESP (for pre-migration state)
-        prefs.edit()
-            .remove(KEY_PRIVATE_KEY)
-            .remove(KEY_MNEMONIC)
-            .remove(KEY_MNEMONIC_BACKED_UP)
-            .remove(KEY_WALLET_TYPE)
-            .apply()
-    }
+    suspend fun deleteWallet() = deleteWalletKeys(DEFAULT_WALLET_ID)
 
     // -- Wallet-scoped key storage (multi-wallet support) --
 
     @Deprecated("ESP fallback — remove after one release cycle")
     private fun getWalletPrefs(walletId: String): SharedPreferences {
-        testWalletPrefs[walletId]?.let { return it }
-        val fileName = "ckb_wallet_keys_$walletId"
-        return try {
-            createEncryptedPrefsForWallet(fileName, useStrongBox = true)
-        } catch (e: Exception) {
-            logger.w(TAG, "Wallet prefs ($walletId) StrongBox failed, trying without", e)
-            // NEVER delete — may contain user's only key material
-            try {
-                createEncryptedPrefsForWallet(fileName, useStrongBox = false)
-            } catch (e2: Exception) {
-                logger.e(TAG, "Wallet prefs ($walletId) completely unreadable", e2)
+        synchronized(walletStorage.fileLock) {
+            walletStorage.requireOpen()
+            testWalletPrefs[walletId]?.let { return it }
+            if (walletId == DEFAULT_WALLET_ID) return prefs
+            val fileName = LegacyWalletNamespace.preferences(walletId)
+            return try {
                 createEncryptedPrefsForWallet(fileName, useStrongBox = true)
+            } catch (e: Exception) {
+                logger.w(TAG, "Wallet prefs ($walletId) StrongBox failed, trying without", e)
+                // NEVER delete — may contain user's only key material
+                try {
+                    createEncryptedPrefsForWallet(fileName, useStrongBox = false)
+                } catch (e2: Exception) {
+                    logger.e(TAG, "Wallet prefs ($walletId) completely unreadable", e2)
+                    createEncryptedPrefsForWallet(fileName, useStrongBox = true)
+                }
             }
         }
     }
@@ -535,16 +543,7 @@ class KeyManager @Inject constructor(
             return
         }
         // ESP fallback
-        getWalletPrefs(walletId).edit().putBoolean(KEY_MNEMONIC_BACKED_UP, backedUp).commit()
-        writeBackupIfPinAvailable(walletId) {
-            val walletPrefs = getWalletPrefs(walletId)
-            KeyMaterial(
-                privateKey = walletPrefs.getString(KEY_PRIVATE_KEY, null) ?: "",
-                mnemonic = walletPrefs.getString(KEY_MNEMONIC, null),
-                walletType = walletPrefs.getString(KEY_WALLET_TYPE, WALLET_TYPE_RAW_KEY) ?: WALLET_TYPE_RAW_KEY,
-                mnemonicBackedUp = backedUp
-            )
-        }
+        walletStorage.readOrWriteFiles { check(getWalletPrefs(walletId).edit().putBoolean(KEY_MNEMONIC_BACKED_UP, backedUp).commit()) }
     }
 
     suspend fun hasMnemonicBackupForWallet(walletId: String): Boolean {
@@ -562,19 +561,16 @@ class KeyManager @Inject constructor(
 
     /** [keepBackup]: leave the PIN-encrypted backup file in place (Recovery's remove). */
     suspend fun deleteWalletKeys(walletId: String, keepBackup: Boolean = false) {
-        if (!keepBackup) keyBackupManager?.deleteBackup(walletId)
-        // Delete from Room
-        val helper = keyStoreMigrationHelper
-        if (helper != null) {
-            helper.deleteKey(walletId)
+        walletStorage.files {
+            if (!keepBackup) {
+                val backups = keyBackupManager ?: KeyBackupManager(java.io.File(context.filesDir, "key_backups"), logger, walletStorage)
+                check(backups.deleteBackupChecked(walletId)) { "Wallet backup could not be removed." }
+            }
+            val standIn = if (walletId == DEFAULT_WALLET_ID) testPrefs else testWalletPrefs[walletId]
+            standIn?.let { check(it.edit().clear().commit()) }
+            legacyFiles.deleteWallet(walletId)
         }
-        // Also clear ESP (for pre-migration state)
-        getWalletPrefs(walletId).edit()
-            .remove(KEY_PRIVATE_KEY)
-            .remove(KEY_MNEMONIC)
-            .remove(KEY_MNEMONIC_BACKED_UP)
-            .remove(KEY_WALLET_TYPE)
-            .commit()
+        keyStoreMigrationHelper?.deleteKey(walletId)
     }
 
     /**
@@ -595,11 +591,17 @@ class KeyManager @Inject constructor(
      * the corruption flag.
      */
     fun hasLegacyKeyFile(walletId: String): Boolean {
+        if (walletStorage.isClosed()) return false
         if (testWalletPrefs[walletId]?.contains(KEY_PRIVATE_KEY) == true) return true
-        return java.io.File(context.filesDir.parent, "shared_prefs/ckb_wallet_keys_$walletId.xml").exists()
+        return legacyFiles.exists(walletId)
     }
 
-    suspend fun migrateEspToRoomIfNeeded(walletDao: com.rjnr.pocketnode.data.database.dao.WalletDao) {
+    suspend fun migrateEspToRoomIfNeeded(database: com.rjnr.pocketnode.data.database.AppDatabase) = database.withTransaction {
+        if (walletStorage.isClosed()) return@withTransaction
+        migrateEspToRoomOpen(database.walletDao())
+    }
+
+    private suspend fun migrateEspToRoomOpen(walletDao: com.rjnr.pocketnode.data.database.dao.WalletDao) {
         val helper = keyStoreMigrationHelper ?: return
         if (helper.isMigrationComplete()) return
 
@@ -614,7 +616,7 @@ class KeyManager @Inject constructor(
                 // that deleteEspFilesIfSafe would then have to clean up.
                 val espFile = java.io.File(
                     context.filesDir.parent,
-                    "shared_prefs/ckb_wallet_keys_${wallet.walletId}.xml"
+                    "shared_prefs/${LegacyWalletNamespace.preferences(wallet.walletId)}.xml"
                 )
                 if (!espFile.exists()) continue
 
@@ -666,19 +668,6 @@ class KeyManager @Inject constructor(
 
     /** Legacy sources are now retired per wallet only after verified vault activation. */
     fun deleteEspFilesIfSafe() = Unit
-
-    private fun writeBackupIfPinAvailable(walletId: String, buildMaterial: () -> KeyMaterial) {
-        val pin = authManager?.getSessionPin() ?: sessionPin ?: return
-        val manager = keyBackupManager ?: return
-        try {
-            // Hand KeyBackupManager its own copy — if writeBackup defensively zeroes
-            // the PIN array after use, our cached session PIN must stay intact for
-            // later backup writes in the same session.
-            manager.writeBackup(walletId, buildMaterial(), pin.copyOf())
-        } catch (e: Exception) {
-            logger.w(TAG, "Backup write failed for $walletId", e)
-        }
-    }
 
     companion object {
         private const val TAG = "KeyManager"

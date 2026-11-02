@@ -28,6 +28,7 @@ interface NativeLightClient {
     fun nativeFetchHeader(hash: String): String?
     fun nativeGetHeaderByNumber(blockNumber: String): String?
     fun nativeSetScripts(scriptsJson: String, command: Int): Boolean
+    fun nativeGetHistorySnapshot(scriptJson: String): String?
     fun nativeGetScripts(): String?
     fun nativeGetCells(
         searchKeyJson: String,
@@ -57,6 +58,10 @@ interface NativeLightClient {
         occupiedCapacity: Long
     ): Long
     fun nativeCalculateUnlockEpoch(depositEpochHex: String, withdrawEpochHex: String): String?
+    fun nativeRequestDaoRecovery(txHash: String): String?
+    fun nativePollDaoRecovery(requestId: String): String?
+    fun nativeValidateDaoRecovery(requestId: String, receiptId: String): String?
+    fun nativeCancelDaoRecovery(requestId: String): String?
 }
 
 /** Production surface: every function delegates straight to the JNI object. */
@@ -88,6 +93,9 @@ class JniLightClient @Inject constructor() : NativeLightClient {
 
     override fun nativeSetScripts(scriptsJson: String, command: Int): Boolean =
         LightClientNative.nativeSetScripts(scriptsJson, command)
+
+    override fun nativeGetHistorySnapshot(scriptJson: String): String? =
+        LightClientNative.nativeGetHistorySnapshot(scriptJson)
 
     override fun nativeGetScripts(): String? = LightClientNative.nativeGetScripts()
 
@@ -145,4 +153,8 @@ class JniLightClient @Inject constructor() : NativeLightClient {
         depositEpochHex: String,
         withdrawEpochHex: String
     ): String? = LightClientNative.nativeCalculateUnlockEpoch(depositEpochHex, withdrawEpochHex)
+    override fun nativeRequestDaoRecovery(txHash: String): String? = LightClientNative.nativeRequestDaoRecovery(txHash)
+    override fun nativePollDaoRecovery(requestId: String): String? = LightClientNative.nativePollDaoRecovery(requestId)
+    override fun nativeValidateDaoRecovery(requestId: String, receiptId: String): String? = LightClientNative.nativeValidateDaoRecovery(requestId, receiptId)
+    override fun nativeCancelDaoRecovery(requestId: String): String? = LightClientNative.nativeCancelDaoRecovery(requestId)
 }

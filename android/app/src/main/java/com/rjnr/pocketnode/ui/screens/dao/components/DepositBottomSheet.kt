@@ -20,6 +20,8 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.rjnr.pocketnode.R
 import com.rjnr.pocketnode.data.gateway.models.DaoConstants
+import com.rjnr.pocketnode.core.format.ckbToShannons
+import com.rjnr.pocketnode.core.format.formatCkbTrimmed
 import com.rjnr.pocketnode.util.sanitizeAmount
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -36,8 +38,7 @@ fun DepositBottomSheet(
     var reserveEnabled by rememberSaveable { mutableStateOf(true) }
     var showRules by remember { mutableStateOf(false) }
 
-    val amountCkb = amountText.toDoubleOrNull() ?: 0.0
-    val amountShannons = (amountCkb * 100_000_000).toLong()
+    val amountShannons = ckbToShannons(amountText) ?: 0L
     val maxDepositable = if (reserveEnabled) {
         (availableBalance - DaoConstants.RESERVE_SHANNONS).coerceAtLeast(0L)
     } else {
@@ -121,12 +122,7 @@ fun DepositBottomSheet(
                     color = MaterialTheme.colorScheme.primary.copy(alpha = 0.1f),
                     shape = CircleShape,
                     onClick = {
-                        val maxCkb = maxDepositable / 100_000_000.0
-                        // Locale.US — sanitizeAmount rejects comma decimals; on
-                        // de/fr/es devices "%.8f".format(...) emits "0,12" and the
-                        // MAX tap would silently no-op (#321).
-                        amountText = String.format(java.util.Locale.US, "%.8f", maxCkb)
-                            .trimEnd('0').trimEnd('.').ifEmpty { "0" }
+                        amountText = formatCkbTrimmed(maxDepositable)
                     },
                     enabled = maxDepositable >= DaoConstants.MIN_DEPOSIT_SHANNONS,
                 ) {
@@ -192,6 +188,8 @@ fun DepositBottomSheet(
                     color = MaterialTheme.colorScheme.surfaceContainerHigh
                 ) {
                     Column(modifier = Modifier.padding(12.dp)) {
+                        // Approximate reward display only; deposit uses exact amountShannons.
+                        val amountCkb = amountShannons / 100_000_000.0
                         val reward30d = amountCkb * currentApc / 100 / 12
                         val reward360d = amountCkb * currentApc / 100
                         Text(

@@ -3,10 +3,7 @@ package com.rjnr.pocketnode.ui.screens.auth
 import com.rjnr.pocketnode.core.log.Logger
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
-import com.rjnr.pocketnode.data.auth.PinManager
-import com.rjnr.pocketnode.data.gateway.CacheManager
-import com.rjnr.pocketnode.data.gateway.DaoSyncManager
-import com.rjnr.pocketnode.data.wallet.WalletRepository
+import com.rjnr.pocketnode.data.gateway.LocalWalletReset
 import com.rjnr.pocketnode.util.AppRestarter
 import dagger.hilt.android.lifecycle.HiltViewModel
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -32,10 +29,7 @@ private const val TAG = "ForgotPinViewModel"
 @HiltViewModel
 class ForgotPinViewModel @Inject constructor(
     private val appRestarter: AppRestarter,
-    private val walletRepository: WalletRepository,
-    private val pinManager: PinManager,
-    private val cacheManager: CacheManager,
-    private val daoSyncManager: DaoSyncManager,
+    private val localReset: LocalWalletReset,
     private val logger: Logger,
 ) : ViewModel() {
 
@@ -65,10 +59,7 @@ class ForgotPinViewModel @Inject constructor(
 
         viewModelScope.launch {
             try {
-                walletRepository.factoryReset()
-                cacheManager.clearAll()
-                daoSyncManager.clearAll()
-                pinManager.removePin(force = true)
+                localReset.removeAllWalletsAndPin()
                 logger.d(TAG, "factoryReset complete; restarting process")
 
                 // ProcessPhoenix-style restart mirroring switchNetwork in

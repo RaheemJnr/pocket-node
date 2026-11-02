@@ -6,6 +6,9 @@ import com.rjnr.pocketnode.core.time.Clock
 import com.rjnr.pocketnode.core.time.SystemClock
 import com.rjnr.pocketnode.data.gateway.LedgerReader
 import com.rjnr.pocketnode.data.gateway.models.TransactionStatusResponse
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -64,44 +67,24 @@ data class SendProgress(
 )
 
 /**
- * The post-broadcast status machine, lifted out of Android's
- * `SendViewModel.startPollingTransactionStatus`.
- *
- * It is the whole of the send screen's status vocabulary: the pre-broadcast
- * markers ([markBuilding], [markBroadcasting], [markFailed]) as well as the
- * poll, so that every string a user reads during a send has exactly one
- * definition on both platforms.
- *
- * ## Why the loop looks the way it does
- *
- * A light client is not a node with the whole chain. Three of the branches
- * below exist only because of that:
- *
- *  - an `unknown` answer usually means the transaction is in the NETWORK's
- *    mempool and this client has not synced the block yet, so it is reported
- *    as pending rather than as a failure;
- *  - after [UNKNOWN_CONFIRM_THRESHOLD] consecutive unknowns the transaction
- *    has almost certainly landed and the client is simply behind, so the
- *    balance is watched instead of the status, and a balance that moves is
- *    taken as the confirmation;
- *  - running out of attempts with more than [TIMEOUT_UNKNOWN_THRESHOLD]
- *    unknowns is read the same way, while running out with a handful is
- *    reported honestly as [SendState.TIMED_OUT] rather than as either
- *    outcome: terminal for the sheet, still tracked in Activity.
- *
- * ## The balance callback
- *
- * [balanceChangedSinceStart] answers one question and causes nothing: has the
- * wallet's balance moved since this send began. It is a plain function rather
- * than a `suspend` one because Swift cannot hand Kotlin a suspending lambda,
- * and it deliberately does not ask for a fresh reading: the platform owns
- * that. Android refreshes inside its own poll loop and iOS runs a tick beside
- * this one, because `refreshBalance` there is main-actor isolated and this
- * runs on a Kotlin thread. Naming it for what it does is the point; the
- * previous name promised a refresh no implementation performed.
- *
- * Nothing here touches a key, a signature or a transaction body: this only
- * ever reads a status and publishes a string.
+ * Inclusion evidence for a send, scoped to the hash returned by broadcast.
+ * The ledger/native query supplies the committed status and inclusion block;
+ * elapsed time, balance movement and peer availability cannot substitute for it.
+ * Keep this separate from ledger/DAO proof policies.
+ */
+fun TransactionStatusResponse.hasSendInclusionFor(submittedHash: String): Boolean =
+    txHash == submittedHash && isConfirmed() &&
+        blockHash?.let { hash ->
+            hash.length == 66 && hash.startsWith("0x") &&
+                hash.drop(2).all { it in '0'..'9' || it in 'a'..'f' || it in 'A'..'F' }
+        } == true
+
+/**
+ * Post-broadcast status for the submitted hash. Unknown or unavailable reads
+ * remain unresolved until the bounded poll ends in [SendState.TIMED_OUT].
+ * Balance watching only refreshes presentation after evidenced inclusion.
+ * Nothing here builds, signs or broadcasts a transaction; [start] can also
+ * resume a read-only status check for a retained hash.
  */
 class SendStatusPoller(
     private val ledger: LedgerReader,
@@ -207,6 +190,7 @@ class SendStatusPoller(
 
     /** Stop polling. The last published progress stays on screen. */
     fun stop() {
+        generation++
         job?.cancel()
         job = null
     }
@@ -220,94 +204,66 @@ class SendStatusPoller(
     private suspend fun poll(txHash: String, epoch: Int) {
         val startedAt = clock.nowMs()
         var attempts = 0
-        var consecutiveUnknowns = 0
 
         while (attempts < MAX_POLLING_ATTEMPTS) {
             delay(POLLING_INTERVAL_MS)
+            if (!isCurrent(epoch)) return
             attempts++
-
             val status = readStatus(txHash)
-            // A read that threw is not an answer. Android keeps polling
-            // through these rather than failing the send on a transient
-            // bridge error, and so does this.
-            if (status == null) continue
+            if (!isCurrent(epoch)) return
+            // A failed read or response for a different hash is not evidence.
+            if (status == null || status.txHash != txHash) continue
 
-            if (status.isUnknown()) {
-                consecutiveUnknowns++
+            if (status.status == "rejected") {
                 _state.value = _state.value.copy(
-                    state = SendState.PENDING,
-                    statusMessage = AWAITING_NETWORK,
+                    state = SendState.FAILED, confirmations = 0, statusMessage = REJECTED,
                 )
-                if (consecutiveUnknowns > UNKNOWN_CONFIRM_THRESHOLD) {
-                    logger.d(TAG, "$consecutiveUnknowns consecutive unknowns; treating as confirmed")
-                    awaitBalanceChange()
-                    _state.value = _state.value.copy(
-                        state = SendState.CONFIRMED,
-                        confirmations = 1,
-                        statusMessage = CONFIRMED,
-                    )
-                    finish(epoch, startedAt, attempts)
-                    return
-                }
-                continue
+                finish(epoch, startedAt, attempts)
+                return
             }
-
-            consecutiveUnknowns = 0
-            apply(status)
-
-            if (status.isConfirmed() && (status.confirmations ?: 0) >= REQUIRED_CONFIRMATIONS) {
+            apply(status, txHash)
+            if (status.hasSendInclusionFor(txHash) && (status.confirmations ?: 0) >= REQUIRED_CONFIRMATIONS) {
                 awaitBalanceChange()
-                _state.value = _state.value.copy(
-                    statusMessage = fullyConfirmed(status.confirmations ?: 0),
-                )
+                if (!isCurrent(epoch)) return
+                _state.value = _state.value.copy(statusMessage = fullyConfirmed(status.confirmations ?: 0))
                 finish(epoch, startedAt, attempts)
                 return
             }
         }
 
-        // Out of attempts. Mostly-unknown means the client is behind rather
-        // than the transaction being lost, which is the same reading the
-        // in-loop branch above takes.
-        if (consecutiveUnknowns > TIMEOUT_UNKNOWN_THRESHOLD) {
-            awaitBalanceChange()
-            _state.value = _state.value.copy(
-                state = SendState.CONFIRMED,
-                statusMessage = SENT_SUCCESSFULLY,
-            )
-        } else if (_state.value.state != SendState.CONFIRMED) {
-            // Settled from the sheet's point of view, unknown from the
-            // chain's. Leaving it PENDING kept the sheet and the form waiting
-            // on a poll that had already stopped.
-            _state.value = _state.value.copy(
-                state = SendState.TIMED_OUT,
-                statusMessage = TIMED_OUT,
-            )
+        if (!isCurrent(epoch)) return
+        if (_state.value.state != SendState.CONFIRMED) {
+            _state.value = _state.value.copy(state = SendState.TIMED_OUT, confirmations = 0, statusMessage = TIMED_OUT)
         }
-        // A transaction already committed with fewer than
-        // [REQUIRED_CONFIRMATIONS] is on chain: its confirmation count stays
-        // on screen rather than being replaced by "could not confirm".
         finish(epoch, startedAt, attempts)
     }
 
+    private suspend fun isCurrent(epoch: Int): Boolean {
+        currentCoroutineContext().ensureActive()
+        return epoch == generation
+    }
+
     private suspend fun readStatus(txHash: String): TransactionStatusResponse? = try {
-        ledger.getTransactionStatus(txHash).getOrNull()
+        ledger.getTransactionStatus(txHash).getOrElse { error ->
+            if (error is CancellationException) throw error
+            null
+        }
+    } catch (cancelled: CancellationException) {
+        throw cancelled
     } catch (e: Exception) {
         logger.w(TAG, "poll failed: ${e.message}")
         null
     }
 
-    /** The Android `updateTransactionStatus`, unchanged. */
-    private fun apply(status: TransactionStatusResponse) {
+    private fun apply(status: TransactionStatusResponse, txHash: String) {
         val next = when {
-            status.isConfirmed() -> SendState.CONFIRMED
+            status.hasSendInclusionFor(txHash) -> SendState.CONFIRMED
             status.status == "proposed" -> SendState.PROPOSED
-            // An unknown status reads as pending here too; it is only the
-            // consecutive-unknown COUNT that means anything more.
             else -> SendState.PENDING
         }
-        val confirmations = status.confirmations ?: 0
+        val confirmations = if (next == SendState.CONFIRMED) status.confirmations ?: 0 else 0
         val message = when (next) {
-            SendState.PENDING -> PENDING
+            SendState.PENDING -> if (status.isUnknown()) AWAITING_NETWORK else PENDING
             SendState.PROPOSED -> PROPOSED
             SendState.CONFIRMED -> when {
                 confirmations >= REQUIRED_CONFIRMATIONS -> fullyConfirmed(confirmations)
@@ -331,9 +287,9 @@ class SendStatusPoller(
      * the new balance is visible, which is why this exists at all: without it
      * the sheet says "confirmed" over a balance that is still the old one.
      *
-     * Running out of ticks is not an error and is not reported as one. The
-     * balance will land whenever the block does, and the caller's next line is
-     * the confirmation the user was waiting for either way.
+     * Inclusion was already established before this presentation wait. A
+     * balance that never moves cannot revoke it; a balance that moves cannot
+     * establish it. The platform owns refreshes; this callback only reads.
      */
     private suspend fun awaitBalanceChange() {
         var attempts = 0
@@ -365,12 +321,6 @@ class SendStatusPoller(
         /** Fully confirmed at three. */
         const val REQUIRED_CONFIRMATIONS = 3
 
-        /** Consecutive unknowns after which the transaction is taken as landed. */
-        const val UNKNOWN_CONFIRM_THRESHOLD = 20
-
-        /** Unknowns at timeout above which the same reading is taken. */
-        const val TIMEOUT_UNKNOWN_THRESHOLD = 10
-
         /** ~90 seconds of balance watching at [POLLING_INTERVAL_MS]. */
         const val MAX_BALANCE_ATTEMPTS = 30
 
@@ -383,9 +333,8 @@ class SendStatusPoller(
         const val PENDING = "Transaction pending..."
         const val PROPOSED = "Transaction in proposal stage..."
         const val PROCESSING = "Processing..."
-        const val CONFIRMED = "Transaction confirmed"
-        const val SENT_SUCCESSFULLY = "Transaction sent successfully"
         const val FAILED = "Transaction failed"
+        const val REJECTED = "Transaction rejected by the node. Check Activity for details."
         const val TIMED_OUT = "We could not confirm this transaction yet. Check Activity for its status."
     }
 }

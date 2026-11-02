@@ -90,8 +90,7 @@ class MnemonicImportViewModelRestoreHintTest {
         val migrationPrefs = context.getSharedPreferences("restore_hint_vm_test_migration", Context.MODE_PRIVATE)
         migrationPrefs.edit().clear().commit()
         keyManager.keyStoreMigrationHelper = KeyStoreMigrationHelper(
-            db.keyMaterialDao(), KeystoreEncryptionManager.createForTest(), migrationPrefs, NoopLogger,
-        )
+            db.keyMaterialDao(), KeystoreEncryptionManager.createForTest(), migrationPrefs, NoopLogger, database = db)
         val discovery = SubAccountDiscovery(mm, keyManager)
         walletRepository = WalletRepository(
             db.walletDao(), keyManager, prefs, prefs, mm, db,

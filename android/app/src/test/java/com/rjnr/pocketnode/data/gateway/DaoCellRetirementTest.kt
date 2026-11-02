@@ -114,10 +114,10 @@ class DaoCellRetirementTest {
     private val unknown = DaoUnlockChainVerdict.UNKNOWN
 
     @Test
-    fun `the transaction cache decides while it has an answer`() {
+    fun `cache confirmation requires verified block association`() {
         assertEquals(
             DaoUnlockMarkerState.CONFIRMED,
-            daoUnlockMarkerState("CONFIRMED", markerAgeMs = 0L, chainVerdict = unknown),
+            daoUnlockMarkerState("CONFIRMED", markerAgeMs = 0L, chainVerdict = unknown, cacheInclusionVerified = true),
         )
         assertEquals(
             DaoUnlockMarkerState.FAILED,
@@ -132,8 +132,8 @@ class DaoCellRetirementTest {
             daoUnlockMarkerState(null, markerAgeMs = 60_000L, chainVerdict = unknown),
         )
         assertEquals(
-            "the chain is not even consulted yet, so it cannot promote it",
-            DaoUnlockMarkerState.IN_FLIGHT,
+            "a verified live inclusion is authoritative",
+            DaoUnlockMarkerState.CONFIRMED,
             daoUnlockMarkerState(
                 "PENDING",
                 markerAgeMs = 60_000L,
@@ -164,13 +164,13 @@ class DaoCellRetirementTest {
     fun `no answer from the chain never counts as a spend`() {
         val aged = DAO_UNLOCK_MARKER_GRACE_MS + 1
         assertEquals(
-            "the node was unreachable, so hand the position back rather than hide it",
-            DaoUnlockMarkerState.FAILED,
+            "the node was unreachable; retain the marker without claiming failure",
+            DaoUnlockMarkerState.UNKNOWN,
             daoUnlockMarkerState("PENDING", aged, unknown),
         )
         assertEquals(
             "no local row at all says nothing about the chain",
-            DaoUnlockMarkerState.FAILED,
+            DaoUnlockMarkerState.UNKNOWN,
             daoUnlockMarkerState(null, aged, unknown),
         )
     }
@@ -231,4 +231,17 @@ class DaoCellRetirementTest {
             resolvePendingUnlock(false, DaoUnlockMarkerState.FAILED),
         )
     }
+    @Test fun `quarantined and status-only confirmations survive unavailable chain until inclusion`() {
+        val aged = DAO_UNLOCK_MARKER_TTL_MS + 1
+        for (status in listOf("UNVERIFIED", "CONFIRMED")) {
+            val unresolved = daoUnlockMarkerState(status, aged, DaoUnlockChainVerdict.UNKNOWN)
+            assertEquals(DaoUnlockMarkerState.UNKNOWN, unresolved)
+            assertEquals(PendingUnlockResolution.OVERLAY, resolvePendingUnlock(false, unresolved))
+            assertEquals(DaoUnlockMarkerState.CONFIRMED,
+                daoUnlockMarkerState(status, aged, DaoUnlockChainVerdict.COMMITTED))
+            assertEquals(DaoUnlockMarkerState.FAILED,
+                daoUnlockMarkerState(status, aged, DaoUnlockChainVerdict.REJECTED))
+        }
+    }
+
 }

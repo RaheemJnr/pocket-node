@@ -76,6 +76,7 @@ class SendPipelineTest {
     private fun pipelineOver(
         api: FakeLightClientApi,
         pendingBroadcasts: PendingBroadcastStore = broadcasts,
+        authorizer: InputSubmissionAuthorizer = NoDaoRecoveryAdoption,
     ): SendPipeline {
         val syncPreferences = FakeSyncPreferences()
         val ledger = LedgerReader(
@@ -89,6 +90,8 @@ class SendPipelineTest {
             uiPreferences = uiPreferences,
             json = json,
             logger = NoopLogger,
+            // Keep fake bridge calls on runTest's scheduler for advanceUntilIdle assertions.
+            queryContext = EmptyCoroutineContext,
         )
         return SendPipeline(
             lightClient = api,
@@ -111,6 +114,7 @@ class SendPipelineTest {
             uiPreferences = uiPreferences,
             json = json,
             logger = NoopLogger,
+            inputAuthorizer = authorizer,
             clock = clock,
             // Keep every hop on the test dispatcher so the post-broadcast
             // re-register is observable from the test body: with a real
@@ -139,6 +143,52 @@ class SendPipelineTest {
 
     private fun signer() = PrivateKeySigner(TEST_KEY.copyOf())
 
+
+    @Test fun maxQuoteUsesCapturedCustomDestinationAndMatchesPreview() = runTest {
+        val custom = AddressUtils.encode(FROM_SCRIPT.copy(codeHash = "0x" + "42".repeat(32),
+            args = "0x" + "bb".repeat(1024)), NetworkType.TESTNET)
+        val cells = LIVE_CELLS.map { it.copy(capacity = "0x${2000_00000000L.toString(16)}") }
+        val max = pipelineOver(api(cells = cells)).maxSendable(ctx(this), FROM_ADDRESS, custom)
+        val plan = pipelineOver(api(cells = cells)).previewTransfer(ctx(this), FROM_ADDRESS,
+            listOf(RecipientOutput(custom, max)))
+        assertEquals(0L, plan.changeShannons)
+        assertTrue(plan.feeShannons > 1000L)
+        assertEquals(cells.sumOf { it.capacityAsLong() } - plan.feeShannons, max)
+    }
+
+    @Test fun contradictoryDestinationIsRejectedBySingleBulkPreviewAndReviewedEntryPoints() = runTest {
+        val malformed = AddressUtils.encode(FROM_SCRIPT.copy(hashType = "data"), NetworkType.TESTNET)
+        val recipients = listOf(RecipientOutput(malformed, 100_00000000L))
+        val pipeline = pipelineOver(api())
+        kotlin.test.assertFailsWith<IllegalArgumentException> { pipeline.previewTransfer(ctx(this), FROM_ADDRESS, recipients) }
+        kotlin.test.assertFailsWith<IllegalArgumentException> { pipeline.previewBatches(ctx(this), FROM_ADDRESS, listOf(recipients)) }
+        assertTrue(pipeline.prepareAndSend(ctx(this), FROM_ADDRESS, malformed, 100_00000000L, signer()).exceptionOrNull() is IllegalArgumentException)
+        assertTrue(pipeline.prepareAndSendBulk(ctx(this), FROM_ADDRESS, recipients, signer()).exceptionOrNull() is IllegalArgumentException)
+        kotlin.test.assertFailsWith<IllegalArgumentException> {
+            ReviewedTransfer(WALLET, FROM_ADDRESS, NetworkType.TESTNET, recipients, 1000, 1)
+        }
+        assertTrue(broadcasts.byHash.isEmpty())
+    }
+
+    @Test fun customDestinationStaysSendableThroughSingleBulkAndReviewedPaths() = runTest {
+        val customScript = FROM_SCRIPT.copy(codeHash = "0x" + "42".repeat(32), hashType = "data2")
+        val custom = AddressUtils.encode(customScript, NetworkType.TESTNET)
+        val outputs = listOf(RecipientOutput(custom, 100_00000000L))
+        val plan = pipelineOver(api()).previewTransfer(ctx(backgroundScope), FROM_ADDRESS, outputs)
+        for (mode in 0..2) {
+            val store = FakePendingBroadcastStore()
+            val pipeline = pipelineOver(api(sendAnswer = "\"$PENDING_HASH\""), store)
+            val hash = when (mode) {
+                0 -> pipeline.prepareAndSend(ctx(backgroundScope), FROM_ADDRESS, custom, 100_00000000L, signer()).getOrThrow()
+                1 -> pipeline.prepareAndSendBulk(ctx(backgroundScope), FROM_ADDRESS, outputs, signer()).getOrThrow()
+                else -> pipeline.sendReviewed(ctx(backgroundScope),
+                    ReviewedTransfer(WALLET, FROM_ADDRESS, NetworkType.TESTNET, outputs, plan.feeShannons, 1), signer(), { true })
+            }
+            val sent = json.decodeFromString<Transaction>(assertNotNull(store.byHash[hash]).signedTxJson)
+            assertEquals(customScript, sent.cellOutputs.first().lock)
+            assertEquals(100_00000000L, sent.cellOutputs.first().capacity.removePrefix("0x").toLong(16))
+        }
+    }
 
     @Test fun cancellationAtBroadcastPreservesExactPendingSignedTransaction() = runTest {
         val bridge = object : FakeLightClientApi() {
@@ -424,6 +474,87 @@ class SendPipelineTest {
     // ---- retry ----
 
     @Test
+    fun rejectedGuardedRetryPreservesOriginalSignedBytesAndFailedRecord() = runTest {
+        val original = pendingRow(txHash = PENDING_HASH, state = "FAILED",
+            reserved = listOf(LIVE_CELLS[0].outPoint), signedTx = pendingChangeTx(), nullCount = 3)
+        broadcasts.insert(original)
+        val bridge = api(sendAnswer = "\"$PENDING_HASH\"")
+        val result = pipelineOver(bridge, authorizer = InputSubmissionAuthorizer { _, _ ->
+            error("Recovery unavailable")
+        }).retryBroadcast(ctx(this), PENDING_HASH)
+        assertTrue(result.isFailure)
+        assertEquals(original, broadcasts.byHash[PENDING_HASH])
+        assertTrue(bridge.callsTo("sendTransaction").isEmpty())
+    }
+
+    @Test
+    fun lateGuardRefusalPreservesRetryBytesAndConcurrentConfirmation() = runTest {
+        val original = pendingRow(txHash = PENDING_HASH, state = "FAILED",
+            reserved = listOf(LIVE_CELLS[0].outPoint), signedTx = pendingChangeTx(), nullCount = 3)
+        broadcasts.insert(original)
+        val bridge = api(sendAnswer = "\"$PENDING_HASH\"")
+        var checks = 0
+        val result = pipelineOver(bridge, authorizer = InputSubmissionAuthorizer { _, _ ->
+            SubmissionAuthorization {
+                checks++
+                if (checks == 3) {
+                    broadcasts.compareAndUpdateState(PENDING_HASH, "FAILED", "CONFIRMED", 999)
+                    error("Recovery invalidated after preparation")
+                }
+            }
+        }).retryBroadcast(ctx(this), PENDING_HASH)
+        assertTrue(result.isFailure)
+        assertEquals(original.copy(state = "CONFIRMED", lastCheckedAt = 999), broadcasts.byHash[PENDING_HASH])
+        assertTrue(bridge.callsTo("sendTransaction").isEmpty())
+    }
+
+    @Test
+    fun invalidationDuringPendingPersistenceAbortsBeforeBridgeSubmission() = runTest {
+        var valid = true
+        val store = object : PendingBroadcastStore by broadcasts {
+            override suspend fun insertFresh(record: PendingBroadcastRecord): Boolean {
+                val inserted = broadcasts.insertFresh(record)
+                valid = false
+                return inserted
+            }
+        }
+        val bridge = api(sendAnswer = "\"$PENDING_HASH\"")
+        val signed = json.decodeFromString<Transaction>(pendingChangeTx())
+        val result = pipelineOver(bridge, store, InputSubmissionAuthorizer { _, _ ->
+            SubmissionAuthorization { check(valid) { "Recovery expired" } }
+        }).sendTransaction(ctx(this), signed)
+        assertTrue(result.isFailure)
+        assertTrue(bridge.callsTo("sendTransaction").isEmpty())
+        assertEquals(json.encodeToString(signed), broadcasts.byHash.values.single().signedTxJson)
+        assertEquals("FAILED", broadcasts.byHash.values.single().state)
+        assertTrue(broadcasts.getActive(WALLET, NetworkType.TESTNET.name).isEmpty())
+    }
+
+    @Test
+    fun cancellationAfterInsertCommitBeforeReturnReleasesKnownUnsentReservation() = runTest {
+        val inserted = CompletableDeferred<Unit>()
+        val release = CompletableDeferred<Unit>()
+        val store = object : PendingBroadcastStore by broadcasts {
+            override suspend fun insertFresh(record: PendingBroadcastRecord): Boolean {
+                val result = broadcasts.insertFresh(record)
+                inserted.complete(Unit)
+                release.await()
+                return result
+            }
+        }
+        val bridge = api(sendAnswer = "\"$PENDING_HASH\"")
+        val signed = json.decodeFromString<Transaction>(pendingChangeTx())
+        val sending = async { pipelineOver(bridge, store).sendTransaction(ctx(this), signed) }
+        inserted.await()
+        sending.cancel()
+        release.complete(Unit)
+        sending.join()
+        assertEquals("FAILED", broadcasts.byHash.values.single().state)
+        assertEquals(json.encodeToString(signed), broadcasts.byHash.values.single().signedTxJson)
+        assertTrue(bridge.callsTo("sendTransaction").isEmpty())
+    }
+
+    @Test
     fun retryReBroadcastsTheStoredBytesRatherThanRebuilding() = runTest {
         val stored = pendingChangeTx()
         broadcasts.insert(
@@ -448,8 +579,62 @@ class SendPipelineTest {
             json.decodeFromString<Transaction>(broadcastJson),
         )
         assertEquals("BROADCAST", broadcasts.byHash.getValue(PENDING_HASH).state)
-        // The FAILED row's nullCount is not carried into the retry.
+        // Acceptance rearms observation; refusals retain the captured counters.
         assertEquals(0, broadcasts.byHash.getValue(PENDING_HASH).nullCount)
+    }
+
+    @Test
+    fun acceptedRetryDoesNotOverwriteProgressDuringNativeSubmission() = runTest {
+        val original = pendingRow(PENDING_HASH, "FAILED", listOf(LIVE_CELLS[0].outPoint), pendingChangeTx(), 3)
+        for (state in listOf("CONFIRMED", "BROADCAST")) {
+            broadcasts.insert(original)
+            val advanced = original.copy(state = state, lastCheckedAt = 999)
+            val bridge = object : FakeLightClientApi() {
+                override fun sendTransaction(txJson: String): String? {
+                    assertEquals(original.signedTxJson, txJson)
+                    broadcasts.byHash[PENDING_HASH] = advanced
+                    return "\"$PENDING_HASH\""
+                }
+            }.enqueue("getTipHeader", LightClientFixtures.TIP_HEADER)
+                .enqueue("getTransactions", LightClientFixtures.GET_TRANSACTIONS_PAGE)
+                .enqueue("getCells", cellsPage(LIVE_CELLS))
+            pipelineOver(bridge).retryBroadcast(ctx(this), PENDING_HASH).getOrThrow()
+            assertEquals(advanced, broadcasts.byHash[PENDING_HASH])
+        }
+    }
+
+    @Test
+    fun acceptedRetryRemainsUnresolvedForInPoolAndNotFound() = runTest {
+        val original = pendingRow(PENDING_HASH, "FAILED", listOf(LIVE_CELLS[0].outPoint), pendingChangeTx(), 3)
+        val currentTip = LightClientFixtures.TIP_HEADER_NUMBER
+        for (status in listOf(com.rjnr.pocketnode.data.sync.TxFetchResult.InPool, com.rjnr.pocketnode.data.sync.TxFetchResult.NotFound)) {
+            broadcasts.insert(original)
+            pipelineOver(api(sendAnswer = "\"$PENDING_HASH\"")).retryBroadcast(ctx(this), PENDING_HASH).getOrThrow()
+            var statusLookups = 0
+            val wd = com.rjnr.pocketnode.data.sync.BroadcastWatchdog(broadcasts,
+                com.rjnr.pocketnode.data.sync.TransactionStatusGateway { statusLookups++; status }, transactions,
+                object : com.rjnr.pocketnode.data.gateway.TipSource {
+                    override val tipFlow = kotlinx.coroutines.flow.MutableStateFlow(currentTip)
+                    override suspend fun fetchAndPublishTip() = currentTip
+                    override fun activeWalletAndNetworkOrNull() = WALLET to "TESTNET"
+                }, { true }, kotlinx.coroutines.test.StandardTestDispatcher(testScheduler), NoopLogger, clock)
+            // The stored retry row predates the slow-poll age threshold.
+            repeat(3) {
+                clock.advance(60_000L)
+                wd.checkAll(currentTip, WALLET, "TESTNET")
+            }
+            assertEquals(3, statusLookups)
+            assertEquals(if (status == com.rjnr.pocketnode.data.sync.TxFetchResult.NotFound) 3 else 0,
+                broadcasts.byHash.getValue(PENDING_HASH).nullCount)
+            assertEquals("BROADCAST", broadcasts.byHash.getValue(PENDING_HASH).state)
+            assertEquals(currentTip, broadcasts.byHash.getValue(PENDING_HASH).submittedAtTipBlock)
+            clock.advance(60_000L)
+            wd.checkAll(currentTip + 25, WALLET, "TESTNET")
+            assertEquals(4, statusLookups)
+            assertEquals(if (status == com.rjnr.pocketnode.data.sync.TxFetchResult.NotFound) 4 else 0,
+                broadcasts.byHash.getValue(PENDING_HASH).nullCount)
+            assertEquals("BROADCAST", broadcasts.byHash.getValue(PENDING_HASH).state)
+        }
     }
 
     @Test
@@ -632,6 +817,20 @@ class SendPipelineTest {
         }
     }
 
+    @Test fun syntheticPendingDataCannotBecomeSpendableCapacity() = runTest {
+        for (data in listOf(listOf("0x01"), listOf("0x00"), emptyList())) {
+            val store = FakePendingBroadcastStore()
+            val tx = PENDING_TX.copy(outputsData = data)
+            val hash = TransactionBuilder(NetworkValidator()).computeTxHash(tx)
+            store.insert(pendingRow(hash, "BROADCASTING", LIVE_CELLS.map { it.outPoint }, json.encodeToString(tx)))
+            val pipeline = pipelineOver(api(sendAnswer = "\"$hash\""), store)
+            pipeline.sendTransaction(ctx(this), tx).getOrThrow()
+            assertEquals(0L, pipeline.maxSendable(ctx(this), FROM_ADDRESS))
+            assertTrue(runCatching { pipeline.previewTransfer(ctx(this), FROM_ADDRESS,
+                listOf(RecipientOutput(TO_ADDRESS, 100_00000000L))) }.isFailure)
+        }
+    }
+
     /**
      * Parks the FIRST compare-and-set on [gate]. That is the first suspension
      * point after the broadcast, so holding it holds a send exactly where the
@@ -691,6 +890,101 @@ class SendPipelineTest {
             lastCursor = null,
         )
     )
+
+    @Test fun reviewedSendRefusesChangedSourceOrGenerationBeforeAnySignature() = runTest {
+        for (sourceChanged in listOf(false, true)) {
+            var signatures = 0
+            val recordingSigner = object : com.rjnr.pocketnode.data.transaction.Signer {
+                override fun signRecoverable(messageHash: ByteArray): ByteArray { signatures++; return ByteArray(65) }
+            }
+            val review = ReviewedTransfer(WALLET, FROM_ADDRESS, NetworkType.TESTNET,
+                listOf(RecipientOutput(TO_ADDRESS, 100_00000000L)), 1000, 1)
+            val context = if (sourceChanged) ctx(this).copy(walletId = "other") else ctx(this)
+            val failure = runCatching { pipelineOver(api()).sendReviewed(context, review, recordingSigner, { sourceChanged }) }
+            assertTrue(failure.isFailure)
+            assertEquals(0, signatures)
+            assertTrue(broadcasts.byHash.isEmpty())
+        }
+    }
+
+    @Test fun sourceChangeOrCancellationDuringMutexReadCannotReachSigner() = runTest {
+        for (cancel in listOf(false, true)) {
+            val gate = CompletableDeferred<Unit>()
+            val entered = CompletableDeferred<Unit>()
+            var current = true
+            var signatures = 0
+            val store = object : PendingBroadcastStore by broadcasts {
+                override suspend fun getActive(walletId: String, network: String): List<PendingBroadcastRecord> {
+                    entered.complete(Unit)
+                    kotlinx.coroutines.withContext(kotlinx.coroutines.NonCancellable) { gate.await() }
+                    return emptyList()
+                }
+            }
+            val operation = async {
+                runCatching { pipelineOver(api(), store).sendReviewed(ctx(backgroundScope),
+                    ReviewedTransfer(WALLET, FROM_ADDRESS, NetworkType.TESTNET,
+                        listOf(RecipientOutput(TO_ADDRESS, 100_00000000L)), 1000, 1),
+                    object : com.rjnr.pocketnode.data.transaction.Signer {
+                        override fun signRecoverable(messageHash: ByteArray): ByteArray { signatures++; return ByteArray(65) }
+                    }, { current }) }
+            }
+            entered.await()
+            if (cancel) operation.cancel() else current = false
+            gate.complete(Unit)
+            runCatching { operation.await() }
+            assertEquals(0, signatures)
+            assertTrue(broadcasts.byHash.isEmpty())
+        }
+    }
+
+    @Test fun reviewedFeeMismatchNeverReachesSigningOrReservation() = runTest {
+        var signatures = 0
+        val result = runCatching { pipelineOver(api()).sendReviewed(ctx(backgroundScope),
+            ReviewedTransfer(WALLET, FROM_ADDRESS, NetworkType.TESTNET,
+                listOf(RecipientOutput(TO_ADDRESS, 100_00000000L)), 1001, 1),
+            object : com.rjnr.pocketnode.data.transaction.Signer {
+                override fun signRecoverable(messageHash: ByteArray): ByteArray { signatures++; return ByteArray(65) }
+            }, { true }) }
+        assertTrue(result.isFailure)
+        assertEquals(0, signatures)
+        assertTrue(broadcasts.byHash.isEmpty())
+    }
+
+    @Test fun bulkPreviewAndRealSequentialSignedOutputsAgreeIncludingSelfRecipients() = runTest {
+        val builder = TransactionBuilder(NetworkValidator())
+        val bridge = object : FakeLightClientApi() {
+            override fun sendTransaction(txJson: String): String {
+                super.sendTransaction(txJson)
+                return "\"${builder.computeTxHash(json.decodeFromString<Transaction>(txJson))}\""
+            }
+        }.enqueue("getTipHeader", LightClientFixtures.TIP_HEADER)
+            .enqueue("getTransactions", LightClientFixtures.GET_TRANSACTIONS_PAGE)
+            .enqueue("getCells", cellsPage(listOf(SMALLEST_CELL)))
+        val pipeline = pipelineOver(bridge)
+        val batches = listOf(
+            listOf(RecipientOutput(FROM_ADDRESS, 100_00000000L)),
+            listOf(RecipientOutput(TO_ADDRESS, 150_00000000L)),
+            listOf(RecipientOutput(TO_ADDRESS_2, 80_00000000L)))
+        val fees = pipeline.previewBatches(ctx(backgroundScope), FROM_ADDRESS, batches)
+        assertEquals(listOf(1000L, 1000L, 1000L), fees)
+        batches.forEachIndexed { index, batch ->
+            pipeline.sendReviewed(ctx(backgroundScope), ReviewedTransfer(WALLET, FROM_ADDRESS,
+                NetworkType.TESTNET, batch, fees[index], 1, true), signer(), { true })
+        }
+        val sent = bridge.callsTo("sendTransaction").map { json.decodeFromString<Transaction>(it.args[0] as String) }
+        assertEquals(3, sent.size)
+        val spent = sent.flatMap { tx -> tx.cellInputs.map { it.previousOutput } }
+        assertEquals(spent.size, spent.distinct().size, "a synthetic change outpoint must never be selected twice")
+        assertEquals(TO_SCRIPT_2, sent[2].cellOutputs.first().lock)
+        assertEquals(80_00000000L, sent[2].cellOutputs.first().capacity.removePrefix("0x").toLong(16))
+        assertEquals(149_99998000L - 1000, sent[2].cellOutputs.sumOf { it.capacity.removePrefix("0x").toLong(16) })
+        assertEquals(FROM_SCRIPT, sent[0].cellOutputs.first().lock)
+        assertEquals(100_00000000L, sent[0].cellOutputs.first().capacity.removePrefix("0x").toLong(16))
+        assertEquals(TO_SCRIPT, sent[1].cellOutputs.first().lock)
+        assertEquals(150_00000000L, sent[1].cellOutputs.first().capacity.removePrefix("0x").toLong(16))
+        assertEquals(2, sent[1].cellInputs.size, "second batch must reuse the self-recipient and change")
+        assertEquals(299_99999000L - 1000, sent[1].cellOutputs.sumOf { it.capacity.removePrefix("0x").toLong(16) })
+    }
 
     private companion object {
         /**

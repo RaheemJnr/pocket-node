@@ -21,19 +21,7 @@ import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertTrue
 
-/**
- * The post-broadcast status machine under virtual time.
- *
- * What is pinned is the three readings a light client has to make that a full
- * node would not: an `unknown` answer is pending, a long run of them is a
- * confirmation the client has not caught up to yet, and running out of
- * attempts is only reported as success when most of those answers were
- * unknown. Getting any of those wrong shows a user "failed" over a
- * transaction that is on chain, or the reverse.
- *
- * The transaction hash is a made-up `0x` string: nothing here reaches a
- * network, and the fake answers the same payload whatever it is asked about.
- */
+/** Evidence-based post-broadcast status under deterministic virtual time. */
 @OptIn(ExperimentalCoroutinesApi::class)
 class SendStatusPollerTest {
 
@@ -126,7 +114,7 @@ class SendStatusPollerTest {
     @Test
     fun aSingleConfirmationCountsDownToTheRequiredThree() = runTest {
         val api = FakeLightClientApi()
-            .enqueue("getTransaction", statusJson("committed", blockHash = "0xbb"))
+            .enqueue("getTransaction", statusJson("committed", blockHash = "0x" + "bb".repeat(32)))
             .enqueue("getTipHeader", headerJson(100))
             .enqueue("getHeader", headerJson(100))
         val poller = pollerOver(api)
@@ -144,7 +132,7 @@ class SendStatusPollerTest {
     @Test
     fun twoConfirmationsStillCountDown() = runTest {
         val api = FakeLightClientApi()
-            .enqueue("getTransaction", statusJson("committed", blockHash = "0xbb"))
+            .enqueue("getTransaction", statusJson("committed", blockHash = "0x" + "bb".repeat(32)))
             .enqueue("getTipHeader", headerJson(101))
             .enqueue("getHeader", headerJson(100))
         val poller = pollerOver(api)
@@ -161,7 +149,7 @@ class SendStatusPollerTest {
     @Test
     fun threeConfirmationsFinishThePollAfterTheBalanceMoves() = runTest {
         val api = FakeLightClientApi()
-            .enqueue("getTransaction", statusJson("committed", blockHash = "0xbb"))
+            .enqueue("getTransaction", statusJson("committed", blockHash = "0x" + "bb".repeat(32)))
             .enqueue("getTipHeader", headerJson(102))
             .enqueue("getHeader", headerJson(100))
         var balanceChecks = 0
@@ -201,45 +189,77 @@ class SendStatusPollerTest {
         poller.stop()
     }
 
-    /**
-     * Past [SendStatusPoller.UNKNOWN_CONFIRM_THRESHOLD] consecutive unknowns
-     * the transaction has landed and this client is behind, so the balance is
-     * watched instead and a balance that moves is the confirmation.
-     */
     @Test
-    fun aLongRunOfUnknownsIsTakenAsConfirmedOnceTheBalanceMoves() = runTest {
+    fun moreThanTwentyUnknownsCannotConfirmEvenWhenBalanceChanges() = runTest {
         val api = FakeLightClientApi().enqueue("getTransaction", null)
         var balanceChecks = 0
         val poller = pollerOver(api) { balanceChecks++; true }
-
         poller.start(txHash, this)
-        // 21 status ticks to cross the threshold, plus one for the balance check.
-        advanceTimeBy(tick * 22 + 1)
-
-        assertEquals(SendState.CONFIRMED, poller.state.value.state)
-        assertEquals(1, poller.state.value.confirmations)
-        assertEquals(SendStatusPoller.CONFIRMED, poller.state.value.statusMessage)
-        assertEquals(21, api.callsTo("getTransaction").size)
-        assertEquals(1, balanceChecks)
+        advanceTimeBy(tick * 25 + 1)
+        assertEquals(SendState.PENDING, poller.state.value.state)
+        assertEquals(txHash, poller.state.value.txHash)
+        assertEquals(0, poller.state.value.confirmations)
+        assertEquals(25, api.callsTo("getTransaction").size)
+        assertEquals(0, balanceChecks)
+        poller.stop()
     }
 
-    /**
-     * The balance wait is bounded: a balance that never moves does not hold
-     * the sheet on "confirming" forever.
-     */
     @Test
-    fun aBalanceThatNeverMovesStillEndsTheWait() = runTest {
-        val api = FakeLightClientApi().enqueue("getTransaction", null)
-        var balanceChecks = 0
-        val poller = pollerOver(api) { balanceChecks++; false }
-
+    fun delayedSyncNeedsRealInclusionBeforeConfirming() = runTest {
+        val answers = List<String?>(25) { null } + statusJson("committed", "0x" + "bb".repeat(32))
+        val api = FakeLightClientApi().enqueue("getTransaction", *answers.toTypedArray())
+            .enqueue("getTipHeader", headerJson(102)).enqueue("getHeader", headerJson(100))
+        val poller = pollerOver(api) { false }
         poller.start(txHash, this)
-        advanceTimeBy(tick * (21 + SendStatusPoller.MAX_BALANCE_ATTEMPTS) + 1)
-
+        advanceTimeBy(tick * 25 + 1)
+        assertEquals(SendState.PENDING, poller.state.value.state)
+        advanceTimeBy(tick)
         assertEquals(SendState.CONFIRMED, poller.state.value.state)
-        // Exactly the bounded attempts. The callback only reports; the
-        // platform owns the refreshing, so there is no extra read to make.
-        assertEquals(SendStatusPoller.MAX_BALANCE_ATTEMPTS, balanceChecks)
+        assertEquals(3, poller.state.value.confirmations)
+        assertEquals(txHash, poller.state.value.txHash)
+        advanceTimeBy(tick * (SendStatusPoller.MAX_BALANCE_ATTEMPTS + 1))
+        assertEquals(26, api.callsTo("getTransaction").size)
+    }
+
+    @Test
+    fun committedWithoutInclusionBlockIsNotConfirmed() = runTest {
+        val api = FakeLightClientApi().enqueue("getTransaction", statusJson("committed"))
+        val poller = pollerOver(api)
+        poller.start(txHash, this)
+        advanceTimeBy(tick * 121)
+        assertEquals(SendState.TIMED_OUT, poller.state.value.state)
+        assertEquals(0, poller.state.value.confirmations)
+        assertEquals(txHash, poller.state.value.txHash)
+    }
+
+    @Test
+    fun explicitRejectionStopsWithHashRatherThanPendingOrSuccess() = runTest {
+        val api = FakeLightClientApi().enqueue("getTransaction", statusJson("rejected"))
+        val poller = pollerOver(api)
+        poller.start(txHash, this)
+        advanceTimeBy(tick * 130)
+        assertEquals(SendState.FAILED, poller.state.value.state)
+        assertEquals(txHash, poller.state.value.txHash)
+        assertEquals(0, poller.state.value.confirmations)
+        assertEquals(1, api.callsTo("getTransaction").size)
+    }
+
+    @Test
+    fun unavailableThenUnknownTimesOutAndReadOnlyRetryCanFindInclusion() = runTest {
+        val api = FakeLightClientApi().enqueue("getTransaction", "not json", null)
+        val poller = pollerOver(api)
+        poller.start(txHash, this)
+        advanceTimeBy(tick * 121)
+        assertEquals(SendState.TIMED_OUT, poller.state.value.state)
+        assertEquals(txHash, poller.state.value.txHash)
+        api.reset()
+        api.enqueue("getTransaction", statusJson("committed", "0x" + "bb".repeat(32)))
+            .enqueue("getTipHeader", headerJson(102)).enqueue("getHeader", headerJson(100))
+        poller.start(txHash, this)
+        advanceTimeBy(tick * 3)
+        assertEquals(SendState.CONFIRMED, poller.state.value.state)
+        assertEquals(txHash, poller.state.value.txHash)
+        assertEquals(0, api.callsTo("sendTransaction").size)
     }
 
     /**
@@ -306,7 +326,7 @@ class SendStatusPollerTest {
     @Test
     fun runningOutOfAttemptsAfterACommitKeepsTheConfirmation() = runTest {
         val api = FakeLightClientApi()
-            .enqueue("getTransaction", statusJson("committed", blockHash = "0xbb"))
+            .enqueue("getTransaction", statusJson("committed", blockHash = "0x" + "bb".repeat(32)))
             .enqueue("getTipHeader", headerJson(100))
             .enqueue("getHeader", headerJson(100))
         val poller = pollerOver(api)
@@ -320,12 +340,10 @@ class SendStatusPollerTest {
     }
 
     /**
-     * Out of attempts having mostly seen unknowns, but never enough in a row
-     * to trip the in-loop branch: the same reading as that branch, with the
-     * copy that does not claim a confirmation count.
+     * Fifteen final unknowns exercise the former timeout-to-success branch.
      */
     @Test
-    fun runningOutOfAttemptsOnMostlyUnknownAnswersReportsSuccess() = runTest {
+    fun runningOutOfAttemptsAfterFifteenUnknownsRetainsUnverifiedHash() = runTest {
         // 105 pending answers, then 15 unknown: the run never reaches 21, so
         // only the timeout branch can fire.
         val scripted = buildList {
@@ -339,9 +357,10 @@ class SendStatusPollerTest {
         poller.start(txHash, this)
         advanceTimeBy(tick * (SendStatusPoller.MAX_POLLING_ATTEMPTS + 2))
 
-        assertEquals(SendState.CONFIRMED, poller.state.value.state)
-        assertEquals(SendStatusPoller.SENT_SUCCESSFULLY, poller.state.value.statusMessage)
-        assertEquals(1, balanceChecks)
+        assertEquals(SendState.TIMED_OUT, poller.state.value.state)
+        assertEquals(txHash, poller.state.value.txHash)
+        assertEquals(0, poller.state.value.confirmations)
+        assertEquals(0, balanceChecks)
     }
 
     @Test
@@ -414,7 +433,7 @@ class SendStatusPollerTest {
         // The first poll self-terminates on its third confirmation; the second
         // keeps running until it is stopped.
         val api = FakeLightClientApi()
-            .enqueue("getTransaction", statusJson("committed", blockHash = "0xbb"))
+            .enqueue("getTransaction", statusJson("committed", blockHash = "0x" + "bb".repeat(32)))
             .enqueue("getTipHeader", headerJson(102))
             .enqueue("getHeader", headerJson(100))
         val poller = pollerOver(api)
@@ -459,4 +478,71 @@ class SendStatusPollerTest {
 
         assertEquals(txHash, poller.state.value.txHash)
     }
+    @Test
+    fun malformedBlockHashesNeverSupplyInclusionEvidence() = runTest {
+        for (block in listOf("", "0x", "0xbb", "0x" + "gg".repeat(32))) {
+            val api = FakeLightClientApi().enqueue("getTransaction", statusJson("committed", block))
+            val poller = pollerOver(api)
+            poller.start(txHash, this)
+            advanceTimeBy(tick * 121)
+            assertEquals(SendState.TIMED_OUT, poller.state.value.state, block)
+            assertEquals(0, poller.state.value.confirmations)
+        }
+    }
+
+    @Test
+    fun cancellationFromTheBridgeStopsInsteadOfBecomingAnUnavailableRead() = runTest {
+        var reads = 0
+        val api = object : FakeLightClientApi() {
+            override fun getTransaction(hash: String): String? {
+                reads++
+                throw kotlinx.coroutines.CancellationException("poll cancelled")
+            }
+        }
+        val poller = pollerOver(api)
+        poller.start(txHash, this)
+        advanceTimeBy(tick * 125)
+        assertEquals(1, reads)
+        assertEquals(SendState.PENDING, poller.state.value.state)
+        assertEquals(txHash, poller.state.value.txHash)
+    }
+
+    @Test
+    fun replacedPollCannotPublishItsLateInclusionRead() = runTest {
+        lateinit var poller: SendStatusPoller
+        val scope = this
+        val api = object : FakeLightClientApi() {
+            override fun getTransaction(hash: String): String? {
+                if (hash == txHash) {
+                    poller.start("0xnew", scope)
+                    return statusJson("committed", "0x" + "bb".repeat(32))
+                }
+                return null
+            }
+        }
+        poller = pollerOver(api)
+        poller.start(txHash, this)
+        advanceTimeBy(tick + 1)
+        assertEquals("0xnew", poller.state.value.txHash)
+        assertEquals(SendState.PENDING, poller.state.value.state)
+        assertEquals(0, poller.state.value.confirmations)
+        poller.stop()
+    }
+
+    @Test
+    fun cancelledBalanceWaitCannotOverwriteReplacementProgress() = runTest {
+        val api = FakeLightClientApi().enqueue("getTransaction", statusJson("committed", "0x" + "bb".repeat(32)))
+            .enqueue("getTipHeader", headerJson(102)).enqueue("getHeader", headerJson(100))
+        lateinit var poller: SendStatusPoller
+        val scope = this
+        poller = pollerOver(api) { poller.start("0xnew", scope); true }
+        poller.start(txHash, this)
+        advanceTimeBy(tick * 2 + 1)
+        assertEquals("0xnew", poller.state.value.txHash)
+        assertEquals(SendState.PENDING, poller.state.value.state)
+        assertEquals(0, poller.state.value.confirmations)
+        assertEquals(SendStatusPoller.SUBMITTED, poller.state.value.statusMessage)
+        poller.stop()
+    }
+
 }

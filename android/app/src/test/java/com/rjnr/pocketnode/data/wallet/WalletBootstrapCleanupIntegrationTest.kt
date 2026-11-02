@@ -1,5 +1,7 @@
 package com.rjnr.pocketnode.data.wallet
 
+import com.rjnr.pocketnode.data.crypto.writeBackup
+
 import com.rjnr.pocketnode.core.log.NoopLogger
 import com.rjnr.pocketnode.data.migration.WalletMigrationHelper
 import com.rjnr.pocketnode.data.vault.*

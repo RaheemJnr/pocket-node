@@ -12,6 +12,7 @@ import com.rjnr.pocketnode.data.gateway.models.Cell
 import com.rjnr.pocketnode.data.gateway.models.NetworkType
 import com.rjnr.pocketnode.data.gateway.models.OutPoint
 import com.rjnr.pocketnode.data.gateway.models.Script
+import com.rjnr.pocketnode.data.send.ReviewedTransfer
 import com.rjnr.pocketnode.data.transaction.TransactionBuilder
 import com.rjnr.pocketnode.data.transaction.TransferPlan
 import com.rjnr.pocketnode.data.wallet.KeyManager
@@ -67,8 +68,8 @@ class SendSweepWarningTest {
     private lateinit var errorJournal: ErrorJournal
     private lateinit var uiPreferences: com.rjnr.pocketnode.core.prefs.UiPreferences
 
-    private val senderAddress = "ckt1qzda0cr08m85hc8jlnfp3zer7xulejywt49kt2rr0vthywaa50xwsqsender"
-    private val recipient = "ckt1qzda0cr08m85hc8jlnfp3zer7xulejywt49kt2rr0vthywaa50xwsqrecipient"
+    private val senderAddress = com.rjnr.pocketnode.data.wallet.AddressUtils.encode(Script(Script.SECP256K1_CODE_HASH, "type", "0x" + "aa".repeat(20)), NetworkType.TESTNET)
+    private val recipient = com.rjnr.pocketnode.data.wallet.AddressUtils.encode(Script(Script.SECP256K1_CODE_HASH, "type", "0x" + "bb".repeat(20)), NetworkType.TESTNET)
 
     private val ckb = 100_000_000L
 
@@ -83,6 +84,8 @@ class SendSweepWarningTest {
         Dispatchers.setMain(testDispatcher)
 
         repository = mockk(relaxed = true)
+        coEvery { repository.sendReviewed(any(), any(), any(), any()) } throws IllegalStateException("sequencing-only fixture stops before broadcast")
+        coEvery { repository.previewBatches(any(), any()) } answers { arg<List<List<com.rjnr.pocketnode.data.transaction.RecipientOutput>>>(1).map { 1000L } }
         balanceFlow.value = BalanceResponse(
             address = senderAddress,
             capacity = "0x${balanceShannons.toString(16)}",
@@ -91,13 +94,15 @@ class SendSweepWarningTest {
         )
         every { repository.balance } returns balanceFlow
         every { repository.network } returns MutableStateFlow(NetworkType.TESTNET)
+        every { repository.walletInfo } returns MutableStateFlow(null)
+        every { repository.cellCountReadiness } returns MutableStateFlow(null)
         every { repository.currentNetwork } returns NetworkType.TESTNET
         every { repository.getCurrentAddress() } returns senderAddress
         coEvery { repository.getPrivateKey() } returns ByteArray(32) { 1 }
 
         keyManager = mockk(relaxed = true)
         transactionBuilder = mockk(relaxed = true)
-        every { transactionBuilder.estimateTransferFee(any(), any()) } returns 1_000L
+        every { transactionBuilder.estimateTransferFeeForDraft(any(), any(), any(), any()) } returns 1_000L
 
         authManager = mockk(relaxed = true)
         every { authManager.isAuthBeforeSendEnabled() } returns false
@@ -159,6 +164,7 @@ class SendSweepWarningTest {
                     capacity = "0x${balanceShannons.toString(16)}",
                     blockNumber = "0x100",
                     lock = Script(Script.SECP256K1_CODE_HASH, "type", "0x" + "aa".repeat(20)),
+                    data = "0x",
                 )
             ),
             totalInput = balanceShannons,
@@ -274,7 +280,7 @@ class SendSweepWarningTest {
 
         // Sheet still up, nothing signed or broadcast.
         assertNotNull(vm.uiState.value.reviewRequest)
-        coVerify(exactly = 0) { repository.prepareAndSend(any(), any(), any(), any(), any(), any()) }
+        coVerify(exactly = 0) { repository.sendReviewed(any(), any(), any(), any()) }
 
         vm.setSweepWarningAcknowledged(true)
         vm.confirmSend(com.rjnr.pocketnode.data.wallet.ForegroundTestHost().activity)
@@ -282,7 +288,7 @@ class SendSweepWarningTest {
 
         assertNull(vm.uiState.value.reviewRequest)
         coVerify(exactly = 1) {
-            repository.prepareAndSend(senderAddress, recipient, amount, any(), plannedFee, any())
+            repository.sendReviewed(match { it.fromAddress == senderAddress && it.recipients.single().address == recipient && it.amountShannons == amount && it.feeShannons == plannedFee }, any(), any(), any())
         }
     }
 
@@ -297,7 +303,7 @@ class SendSweepWarningTest {
 
         assertNull(vm.uiState.value.reviewRequest)
         coVerify(exactly = 1) {
-            repository.prepareAndSend(senderAddress, recipient, amount, any(), plannedFee, any())
+            repository.sendReviewed(match { it.fromAddress == senderAddress && it.recipients.single().address == recipient && it.amountShannons == amount && it.feeShannons == plannedFee }, any(), any(), any())
         }
     }
 
@@ -318,6 +324,6 @@ class SendSweepWarningTest {
         vm.confirmSend(com.rjnr.pocketnode.data.wallet.ForegroundTestHost().activity)
         advanceUntilIdle()
         assertNotNull(vm.uiState.value.reviewRequest)
-        coVerify(exactly = 0) { repository.prepareAndSend(any(), any(), any(), any(), any(), any()) }
+        coVerify(exactly = 0) { repository.sendReviewed(any(), any(), any(), any()) }
     }
 }

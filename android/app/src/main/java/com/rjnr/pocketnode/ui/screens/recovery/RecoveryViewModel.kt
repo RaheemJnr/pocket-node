@@ -89,7 +89,7 @@ class RecoveryViewModel @Inject constructor(private val operations: RecoveryOper
         val message = when (outcome) {
             RecoveredKeyRestorer.Outcome.Restored -> "Access restored and verified."
             RecoveredKeyRestorer.Outcome.Cancelled -> "Cancelled. Saved recovery data is preserved."
-            RecoveredKeyRestorer.Outcome.CleanupRequired -> "Verified protection is saved. Authenticate retained legacy sources to finish cleanup."
+            RecoveredKeyRestorer.Outcome.CleanupRequired -> "Wallet protection is saved, but this wallet remains blocked by retained legacy sources. Retry in wallet recovery if a source becomes readable. Unreadable or conflicting sources may prevent cleanup indefinitely. Keep all recovery phrases and backups; this screen cannot discard an unknown source."
             RecoveredKeyRestorer.Outcome.AddressMismatch -> "This recovery secret does not match this wallet. Nothing was replaced."
             RecoveredKeyRestorer.Outcome.NoBackup -> "No usable backup. Keep this wallet read-only or use your external recovery secret."
             RecoveredKeyRestorer.Outcome.NoWalletRow -> "Wallet no longer exists."

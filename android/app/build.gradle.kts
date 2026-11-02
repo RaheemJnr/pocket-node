@@ -15,8 +15,8 @@ android {
         applicationId = "com.rjnr.pocketnode"
         minSdk = 26
         targetSdk = 36
-        versionCode = 28
-        versionName = "1.8.6"
+        versionCode = 29
+        versionName = "1.8.7"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
 

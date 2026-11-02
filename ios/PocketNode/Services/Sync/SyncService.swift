@@ -132,6 +132,49 @@ final class SyncService: SyncStatusProviding {
     /// Held for its lifetime, not for its API: the Kotlin store reads through
     /// the DAO, and letting the database go would close the file under it.
     private let database: PocketNodeCoreDatabase
+    private var isShutdown = false
+    private var verificationReady = false
+    @ObservationIgnored private var verificationTask: Task<Bool, Never>?
+
+    /// All cached UI reads and registrations share this one awaited handoff.
+    func ensureVerifiedCache() async throws {
+        guard await waitForNode() else {
+            throw NSError(domain: "PocketNode.Verification", code: 1,
+                          userInfo: [NSLocalizedDescriptionKey: "Chain cache verification is not ready."])
+        }
+    }
+
+    private func reconcileVerificationCache() async -> Bool {
+        guard !isShutdown else { return false }
+        if verificationReady { return true }
+        if let task = verificationTask { return await task.value }
+        let task = Task { @MainActor [weak self] () -> Bool in
+            guard let self else { return false }
+            do {
+                let generation = try VerificationEpoch.shared.requireGeneration(
+                    envelope: self.api.callRpc(method: "get_verification_epoch"))
+                let directory = try AppDirectories.dataDirectory(network: self.network.name.lowercased())
+                let marker = directory.appendingPathComponent("verified-chain-generation")
+                let previous = try? String(contentsOf: marker, encoding: .utf8)
+                if previous != generation {
+                    try await VerificationCacheCleanup(dao: self.database.verificationCache())
+                        .invalidate(network: self.network.name)
+                    // A failed write leaves the gate closed. Repeating cleanup is safe.
+                    try Data(generation.utf8).write(to: marker, options: .atomic)
+                }
+                guard !Task.isCancelled && !self.isShutdown else { return false }
+                self.verificationReady = true
+                return true
+            } catch {
+                self.lastError = "Chain cache verification could not finish. Try again."
+                return false
+            }
+        }
+        verificationTask = task
+        let ready = await task.value
+        if !ready { verificationTask = nil }
+        return ready
+    }
     private let service: SingleWalletSyncService
 
     /// The `sync_progress` store the coordinator writes. Kept so the restore
@@ -441,6 +484,10 @@ final class SyncService: SyncStatusProviding {
     /// M4 network switch, which has to close one network's database before
     /// opening the other's) has one call to make rather than three.
     func shutdown() {
+        isShutdown = true
+        verificationReady = false
+        verificationTask?.cancel()
+        verificationTask = nil
         stopWatchdog()
         observation?.cancel()
         registrationObservation?.cancel()
@@ -486,9 +533,7 @@ final class SyncService: SyncStatusProviding {
         // Points the feed's broadcast flow at this wallet. Safe before the node
         // is up: it is a database subscription, not a bridge call.
         activity.observeBroadcasts(walletId: wallet.id, network: network)
-        // The cached balance is a real number that is already on disk, so it
-        // goes up before the node has started rather than after the first poll.
-        loadCachedBalance(walletId: wallet.id)
+        // Cached chain claims remain gated until the epoch handoff finishes.
 
         service.setWallet(
             wallet: ActiveWallet(address: address, scriptArgs: script.args),
@@ -511,6 +556,7 @@ final class SyncService: SyncStatusProviding {
                 self.lastError = "The light client did not start."
                 return
             }
+            self.loadCachedBalance(walletId: wallet.id)
             if self.mode != nil {
                 await self.reregister()
             }
@@ -573,6 +619,7 @@ final class SyncService: SyncStatusProviding {
     /// found peers yet would otherwise put an error under the sync card that
     /// says nothing the card is not already saying.
     func refreshBalance() {
+        guard verificationReady else { return }
         guard let walletId = activeWalletId, let address = activeAddress else { return }
         // One at a time: a cell walk takes seconds, and the poll ticks faster
         // than that on a catching-up wallet.
@@ -612,6 +659,7 @@ final class SyncService: SyncStatusProviding {
     }
 
     private func publish(_ response: BalanceResponse, isCached: Bool) {
+        guard verificationReady else { return }
         balance = BalanceStatus(
             shannons: response.capacityAsLong(),
             isCached: isCached,
@@ -665,19 +713,20 @@ final class SyncService: SyncStatusProviding {
     /// the transition only on its own refreshes. The Kotlin coordinator has its
     /// own bounded wait for the tip after this one.
     private func waitForNode() async -> Bool {
+        guard !isShutdown else { return false }
         for _ in 0..<(Self.nodeWaitSeconds * 2) {
-            if isNodeRunning { return true }
+            if isNodeRunning { return await reconcileVerificationCache() }
             if Task.isCancelled { return false }
             if lightClient.controls.canStart {
                 await lightClient.start()
             } else {
                 await lightClient.refresh()
             }
-            if isNodeRunning { return true }
+            if isNodeRunning { return await reconcileVerificationCache() }
             try? await Task.sleep(for: .milliseconds(500))
             if Task.isCancelled { return false }
         }
-        return isNodeRunning
+        return isNodeRunning ? await reconcileVerificationCache() : false
     }
 
     static let nodeWaitSeconds = 30
@@ -716,6 +765,19 @@ final class SyncService: SyncStatusProviding {
     }
 }
 
+/// Room dispatches and serializes its transaction on its own query context.
+/// This immutable adapter carries only that thread-safe DAO across SKIE's
+/// nonisolated async boundary; it owns no mutable Swift state.
+private final class VerificationCacheCleanup: @unchecked Sendable {
+    private let dao: any VerificationCacheRoomDao
+
+    init(dao: any VerificationCacheRoomDao) { self.dao = dao }
+
+    func invalidate(network: String) async throws {
+        try await dao.invalidate(network: network)
+    }
+}
+
 // MARK: - Restore hint inputs (#559)
 
 extension SyncService: RestoreHintSources {
@@ -723,9 +785,11 @@ extension SyncService: RestoreHintSources {
 
     /// The node's tip after a fresh read, or nil while it has none.
     func restoreHintTip() async -> RestoreHintTip? {
+        guard verificationReady else { return nil }
         if lightClient.status == .running {
             await lightClient.refresh()
         }
+        guard verificationReady else { return nil }
         let height = Int64(lightClient.tipNumber)
         let hash = lightClient.tipHash
         guard height > 0, !hash.isEmpty else { return nil }
@@ -733,8 +797,10 @@ extension SyncService: RestoreHintSources {
     }
 
     func restoreHintLightStart(walletId: String) async -> Int64? {
+        guard verificationReady else { return nil }
         do {
             let rows = try await progressStore.getAllForNetwork(network: network.name)
+            guard verificationReady else { return nil }
             return rows.first { $0.walletId == walletId }?.lightStartBlockNumber
         } catch {
             logger.error("restore hint: sync progress unreadable: \(error.localizedDescription, privacy: .public)")
@@ -743,8 +809,11 @@ extension SyncService: RestoreHintSources {
     }
 
     func restoreHintBlockNumbers(walletId: String) async -> [String] {
+        guard verificationReady else { return [] }
         do {
-            return try await transactions.getBlockNumbers(walletId: walletId, network: network.name)
+            let numbers = try await transactions.getBlockNumbers(walletId: walletId, network: network.name)
+            guard verificationReady else { return [] }
+            return numbers
         } catch {
             logger.error("restore hint: block numbers unreadable: \(error.localizedDescription, privacy: .public)")
             return []

@@ -202,8 +202,8 @@ class GapLimitGateway(
 
     /**
      * Live spendable capacity for one script: cells walked to the end, spent
-     * outpoints subtracted, typed cells excluded — the same read-path rules
-     * as refreshBalance (nativeGetCellsCapacity alone can overstate; an
+     * outpoints subtracted, only observed-empty untyped cells at the requested
+     * lock included. These are the same read-path rules as refreshBalance (nativeGetCellsCapacity alone can overstate; an
      * inflated "found funds" number would re-create the exact panic #382 is
      * meant to end).
      */
@@ -236,7 +236,7 @@ class GapLimitGateway(
             val page = json.decodeFromString<JniPagination<JniCell>>(pageJson)
             page.objects.forEach { cell ->
                 val key = "${cell.outPoint.txHash}:${cell.outPoint.index}"
-                if (key !in spent && cell.output.type == null &&
+                if (key !in spent && cell.toCell().isPlainCapacity(searchKey.script) &&
                     cell.output.capacity.removePrefix("0x").toLongOrNull(16) != null
                 ) {
                     live += cell

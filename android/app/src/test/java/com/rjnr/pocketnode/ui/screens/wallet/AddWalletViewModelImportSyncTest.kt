@@ -102,7 +102,7 @@ class AddWalletViewModelImportSyncTest {
         val encryptionManager = KeystoreEncryptionManager.createForTest()
         val migrationPrefs = context.getSharedPreferences("add_wallet_vm_test_migration", Context.MODE_PRIVATE)
         migrationPrefs.edit().clear().commit()
-        keyManager.keyStoreMigrationHelper = KeyStoreMigrationHelper(db.keyMaterialDao(), encryptionManager, migrationPrefs, NoopLogger)
+        keyManager.keyStoreMigrationHelper = KeyStoreMigrationHelper(db.keyMaterialDao(), encryptionManager, migrationPrefs, NoopLogger, database = db)
         walletPreferences = WalletPreferences(context, NoopLogger)
         walletRepository = WalletRepository(
             db.walletDao(), keyManager, walletPreferences, walletPreferences, mnemonicManager, db,

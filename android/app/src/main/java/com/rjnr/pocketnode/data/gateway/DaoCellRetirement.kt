@@ -26,6 +26,9 @@ enum class CachedDaoCellFate {
 
 /** How far along a persisted phase-2 unlock marker is (#529). */
 enum class DaoUnlockMarkerState {
+    /** Chain evidence is unavailable or quarantined; keep the local marker. */
+    UNKNOWN,
+
     /** Broadcast, not yet resolved either way. The marker must be kept. */
     IN_FLIGHT,
 
@@ -71,35 +74,23 @@ const val DAO_UNLOCK_MARKER_GRACE_MS: Long = 2 * 60 * 60 * 1000L
 const val DAO_UNLOCK_MARKER_TTL_MS: Long = 24 * 60 * 60 * 1000L
 
 /**
- * How far along one unlock marker is.
- *
- * The local transaction cache is the authority while it has an answer. Past
- * [DAO_UNLOCK_MARKER_GRACE_MS] with no answer, the chain is asked, and only
- * the chain can promote a marker to CONFIRMED.
- *
- * Everything unresolved resolves to FAILED, never CONFIRMED. The two mistakes
- * are not symmetrical: a restored position that was in fact spent costs the
- * user one wasted tap, which the unlock's own fail-fast catches, while a
- * wrongly retired position disappears from the DAO screen and from the
- * balance, and the preflight then insists it was already unlocked. Guessing
- * in favour of the user's funds is the only safe default.
- *
- * Note the asymmetry with phase 1 ([resolvePendingWithdraw]), where the
- * deposit cell disappearing is enough on its own. Phase 2 cannot use that
- * shortcut: an unlock's output is an ordinary cell, so for a deposit outside
- * the sync window "absent from the scan" is indistinguishable from "never
- * visible", which is exactly the case that would hide funds.
+ * Cache status strings are not inclusion proofs. Canonical cache association
+ * or a live verified inclusion is required for CONFIRMED. Revalidation and
+ * unavailable lookups retain local intent without claiming success/failure.
  */
 fun daoUnlockMarkerState(
     unlockTxStatus: String?,
     markerAgeMs: Long,
     chainVerdict: DaoUnlockChainVerdict,
+    cacheInclusionVerified: Boolean = false,
 ): DaoUnlockMarkerState = when {
-    unlockTxStatus == "CONFIRMED" -> DaoUnlockMarkerState.CONFIRMED
+    unlockTxStatus == "CONFIRMED" && cacheInclusionVerified -> DaoUnlockMarkerState.CONFIRMED
     unlockTxStatus == "FAILED" -> DaoUnlockMarkerState.FAILED
-    markerAgeMs < DAO_UNLOCK_MARKER_GRACE_MS -> DaoUnlockMarkerState.IN_FLIGHT
     chainVerdict == DaoUnlockChainVerdict.COMMITTED -> DaoUnlockMarkerState.CONFIRMED
     chainVerdict == DaoUnlockChainVerdict.REJECTED -> DaoUnlockMarkerState.FAILED
+    unlockTxStatus == "UNVERIFIED" || unlockTxStatus == "CONFIRMED" -> DaoUnlockMarkerState.UNKNOWN
+    markerAgeMs < DAO_UNLOCK_MARKER_GRACE_MS -> DaoUnlockMarkerState.IN_FLIGHT
+    chainVerdict == DaoUnlockChainVerdict.UNKNOWN -> DaoUnlockMarkerState.UNKNOWN
     chainVerdict == DaoUnlockChainVerdict.IN_POOL &&
         markerAgeMs < DAO_UNLOCK_MARKER_TTL_MS -> DaoUnlockMarkerState.IN_FLIGHT
     else -> DaoUnlockMarkerState.FAILED
@@ -170,7 +161,7 @@ fun resolveCachedDaoCell(
     cachedStatus == DaoCellStatus.DEPOSITING.name -> CachedDaoCellFate.IGNORE
     consumedByLiveWithdraw -> CachedDaoCellFate.RETIRE
     unlockState == DaoUnlockMarkerState.CONFIRMED -> CachedDaoCellFate.RETIRE
-    unlockState == DaoUnlockMarkerState.IN_FLIGHT -> CachedDaoCellFate.UNLOCK_IN_FLIGHT
+    unlockState == DaoUnlockMarkerState.IN_FLIGHT || unlockState == DaoUnlockMarkerState.UNKNOWN -> CachedDaoCellFate.UNLOCK_IN_FLIGHT
     windowStart > 0 && depositBlockNumber in 1 until windowStart -> CachedDaoCellFate.OUTSIDE_WINDOW
     // Inside the window yet absent from the live scan: the cell was spent,
     // retire the cached row so it doesn't resurrect.

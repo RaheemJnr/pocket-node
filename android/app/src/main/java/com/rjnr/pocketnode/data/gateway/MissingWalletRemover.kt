@@ -30,7 +30,7 @@ class MissingWalletRemover @Inject constructor(
     private val logger: Logger,
 ) {
 
-    enum class Result { REMOVED, NOT_MISSING, ONLY_WALLET }
+    enum class Result { REMOVED, REMOVED_CLEANUP_PENDING, NOT_MISSING, ONLY_WALLET }
 
     suspend fun remove(walletId: String): Result {
         val missingIds = keyRestorer.missingWallets().map { it.walletId }.toSet()
@@ -42,6 +42,7 @@ class MissingWalletRemover @Inject constructor(
 
         // Once the switch or the delete commits, the rest must follow even if
         // the screen goes away mid-way, as in the wallet settings delete.
+        var cleanupPending = false
         withContext(NonCancellable) {
             if (wallet.isActive || walletRepository.activeWalletIdSnapshot() == walletId) {
                 val next = others.firstOrNull { it.parentWalletId == null && it.walletId !in missingIds }
@@ -50,7 +51,11 @@ class MissingWalletRemover @Inject constructor(
                     ?: others.first()
                 walletRepository.switchActiveWallet(next.walletId)
             }
-            walletRepository.deleteWallet(walletId, keepBackupFile = true)
+            try {
+                walletRepository.deleteWallet(walletId, keepBackupFile = true)
+            } catch (_: com.rjnr.pocketnode.data.wallet.WalletCleanupPendingException) {
+                cleanupPending = true
+            }
             recoveryState.removeUnverified(walletId)
             try {
                 gatewayRepository.onWalletDeleted(walletId)
@@ -59,7 +64,7 @@ class MissingWalletRemover @Inject constructor(
             }
         }
         logger.i(TAG, "Removed wallet $walletId from Recovery; its backup file is kept")
-        return Result.REMOVED
+        return if (cleanupPending) Result.REMOVED_CLEANUP_PENDING else Result.REMOVED
     }
 
     private companion object {

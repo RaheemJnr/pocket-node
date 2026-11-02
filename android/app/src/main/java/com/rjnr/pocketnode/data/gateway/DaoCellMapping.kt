@@ -45,6 +45,47 @@ internal fun DaoDeposit.toDaoCellEntity(
     walletId = walletId,
 )
 
+/** A retained withdrawal hash is only a historical locator until both headers resolve. */
+internal fun DaoCellEntity.hasResolvedWithdrawalHeaders(): Boolean =
+    withdrawBlockNumber != null && withdrawBlockHash != null &&
+        withdrawEpochHex?.let(::parseEpochOrNull) != null && depositBlockHash.isNotEmpty() &&
+        depositEpochHex?.let(::parseEpochOrNull) != null
+
+private fun DaoCellEntity.evidenceStatus(freshStatus: String): String = when (status) {
+    DaoCellStatus.WITHDRAWING.name, DaoCellStatus.UNLOCKING.name, DaoCellStatus.COMPLETED.name -> status
+    else -> freshStatus
+}
+
+internal fun DaoCellEntity.withoutWithdrawalEvidence(): DaoCellEntity = copy(
+    status = evidenceStatus(DaoCellStatus.LOCKED.name),
+    depositBlockHash = "", depositEpochHex = null, depositTimestamp = 0L,
+    // Keep the prior hash as a locator: erasing it would let a second refresh
+    // accept the same conflicting height-map association as a new null-to-valid pair.
+    withdrawEpochHex = null, compensation = 0L, unlockEpochHex = null,
+)
+
+/**
+ * Accept metadata under the existing verified-native-store contract only.
+ * A joined current height mapping does not independently prove that an old
+ * transaction moved to a different block. Contradictions remain unresolved.
+ */
+internal fun DaoCellEntity.withWithdrawalEvidence(
+    fresh: DaoCellEntity,
+    historicalWithdrawalHashes: Set<String> = emptySet(),
+): DaoCellEntity {
+    if (!fresh.hasResolvedWithdrawalHeaders() || fresh.withdrawBlockNumber != withdrawBlockNumber ||
+        fresh.capacity != capacity ||
+        historicalWithdrawalHashes.any { !it.equals(fresh.withdrawBlockHash, ignoreCase = true) } ||
+        (withdrawBlockHash != null && !withdrawBlockHash.equals(fresh.withdrawBlockHash, ignoreCase = true))) {
+        return withoutWithdrawalEvidence()
+    }
+    return copy(status = evidenceStatus(fresh.status), depositBlockNumber = fresh.depositBlockNumber,
+        depositBlockHash = fresh.depositBlockHash, depositEpochHex = fresh.depositEpochHex,
+        depositTimestamp = fresh.depositTimestamp, withdrawBlockHash = fresh.withdrawBlockHash,
+        withdrawEpochHex = fresh.withdrawEpochHex, compensation = fresh.compensation,
+        unlockEpochHex = fresh.unlockEpochHex)
+}
+
 /**
  * The cached row as the screen's own record of the position (#529).
  *
@@ -54,10 +95,23 @@ internal fun DaoDeposit.toDaoCellEntity(
  * predates the window. Flagging it would raise the deep-rescan banner for a
  * position that is mid-claim.
  */
-internal fun DaoCellEntity.toCachedDeposit(): DaoDeposit =
-    toOutsideWindowDeposit().copy(outsideSyncWindow = false)
+internal suspend fun DaoCellEntity.toCachedDeposit(recovery: DaoRecoveryCoordinator): DaoDeposit =
+    recovery.project(com.rjnr.pocketnode.data.gateway.models.NetworkType.valueOf(network), walletId,
+        toUnverifiedCacheProjection().copy(outsideSyncWindow = false))
 
-internal fun DaoCellEntity.toOutsideWindowDeposit(): DaoDeposit = DaoDeposit(
+internal suspend fun DaoCellEntity.toOutsideWindowDeposit(recovery: DaoRecoveryCoordinator): DaoDeposit =
+    recovery.project(com.rjnr.pocketnode.data.gateway.models.NetworkType.valueOf(network), walletId,
+        toUnverifiedCacheProjection())
+
+/** Shape conversion only. Production display/action consumers use the guarded suspend projections above. */
+internal fun DaoCellEntity.toUnverifiedCacheProjection(): DaoDeposit {
+    val projected = if (withdrawBlockNumber != null && !hasResolvedWithdrawalHeaders()) {
+        withoutWithdrawalEvidence().copy(withdrawBlockHash = null)
+    } else this
+    return projected.toOutsideWindowProjection()
+}
+
+private fun DaoCellEntity.toOutsideWindowProjection(): DaoDeposit = DaoDeposit(
     outPoint = OutPoint(txHash = txHash, index = index),
     capacity = capacity,
     status = runCatching { DaoCellStatus.valueOf(status) }.getOrDefault(DaoCellStatus.DEPOSITED),

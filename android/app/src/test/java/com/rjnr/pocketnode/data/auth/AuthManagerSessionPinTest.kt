@@ -63,4 +63,18 @@ class AuthManagerSessionPinTest {
         assertFalse(pin1 === pin2) // different instances
         assertEquals(String(pin1), String(pin2)) // same content
     }
+    @Test fun `clearing an empty session revokes pending first PIN authentication`() {
+        val generation = authManager.sessionGeneration()
+        authManager.clearSession()
+        assertFalse(authManager.setSessionPinIfCurrent("123456".toCharArray(), generation))
+        assertFalse(authManager.hasSessionPin())
+    }
+
+    @Test fun `current authentication publishes once and stale result cannot replace it`() {
+        val generation = authManager.sessionGeneration()
+        assertTrue(authManager.setSessionPinIfCurrent("123456".toCharArray(), generation))
+        assertFalse(authManager.setSessionPinIfCurrent("654321".toCharArray(), generation))
+        assertEquals("123456", String(authManager.getSessionPin()!!))
+    }
+
 }

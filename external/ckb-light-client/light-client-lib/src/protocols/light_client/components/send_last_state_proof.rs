@@ -53,6 +53,8 @@ impl<'a> SendLastStateProofProcess<'a> {
 
         let last_header: VerifiableHeader = self.message.last_header().to_entity().into();
 
+        return_if_failed!(self.protocol.check_verifiable_header(&last_header));
+
         // Update the last state if the response contains a new one.
         if !original_request.is_same_as(&last_header) {
             if self.message.proof().is_empty() {
@@ -82,6 +84,11 @@ impl<'a> SendLastStateProofProcess<'a> {
             .iter()
             .map(|header| header.to_entity().into())
             .collect::<Vec<VerifiableHeader>>();
+        // Matching and difficulty logging call total_difficulty(), which uses
+        // unchecked U256 addition. Reject overflow before either can run.
+        for header in &headers {
+            return_if_failed!(LightClientProtocol::check_total_difficulty(header));
+        }
         let last_n_blocks = self.protocol.last_n_blocks() as usize;
 
         trace!(
@@ -254,6 +261,7 @@ impl<'a> SendLastStateProofProcess<'a> {
                     } else if reorg_count == 0 {
                         new_last_headers
                     } else if sampled_count == 0
+                        && reorg_count < headers.len()
                         && check_continuous_headers(&headers[(reorg_count - 1)..=reorg_count])
                             .is_ok()
                     {
@@ -717,6 +725,17 @@ pub(crate) fn check_if_response_is_matched(
     let total_count = headers.len();
 
     let start_number: BlockNumber = prev_request.start_number().unpack();
+    let last_number = last_header.header().number();
+
+    // Reject if start_number is beyond the last header.
+    if start_number > last_number {
+        let errmsg = format!(
+            "start_number ({}) is greater than last_header number ({})",
+            start_number, last_number
+        );
+        return Err(StatusCode::MalformedProtocolMessage.with_context(errmsg));
+    }
+
     let reorg_count = headers
         .iter()
         .take_while(|h| h.header().number() < start_number)
@@ -761,6 +780,13 @@ pub(crate) fn check_if_response_is_matched(
             .count();
         let last_n_count = total_count - before_boundary_count;
         if last_n_count > last_n_blocks {
+            if before_boundary_count < reorg_count {
+                let errmsg = format!(
+                    "inconsistent proof data: reorg_count ({}) > before_boundary_count ({})",
+                    reorg_count, before_boundary_count
+                );
+                return Err(StatusCode::MalformedProtocolMessage.with_context(errmsg));
+            }
             (before_boundary_count - reorg_count, last_n_count)
         } else {
             (total_count - reorg_count - last_n_blocks, last_n_blocks)
@@ -776,7 +802,7 @@ pub(crate) fn check_if_response_is_matched(
             let last_last_n_header_number = headers[headers.len() - 1].header().number();
             let last_number = last_header.header().number();
             if first_last_n_header_number != start_number
-                || last_last_n_header_number + 1 != last_number
+                || last_last_n_header_number.checked_add(1) != Some(last_number)
             {
                 let errmsg = format!(
                 "there should be all blocks of [{}, {}) since no sampled blocks, but got [{}, {}]",
@@ -1122,6 +1148,10 @@ pub(crate) fn verify_mmr_proof<'a, T: Iterator<Item = &'a HeaderView>>(
         );
         return Err(StatusCode::InvalidProof.with_context(errmsg));
     };
+    if last_header.header().is_genesis() {
+        let errmsg = "last_header is genesis, which has no parent chain root to verify against";
+        return Err(StatusCode::InvalidParentBlock.with_context(errmsg));
+    }
     let parent_chain_root = last_header.parent_chain_root();
     let proof: MMRProof = {
         let mmr_size = leaf_index_to_mmr_size(parent_chain_root.end_number().unpack());
@@ -1146,7 +1176,7 @@ pub(crate) fn verify_mmr_proof<'a, T: Iterator<Item = &'a HeaderView>>(
             Ok(tmp) => tmp,
             Err(err) => {
                 let errmsg = format!("failed to verify all digest since {}", err);
-                return Err(StatusCode::InvalidProof.with_context(errmsg));
+                return Err(StatusCode::InvalidParentBlock.with_context(errmsg));
             }
         }
     };

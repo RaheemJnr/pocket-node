@@ -5,6 +5,8 @@ import com.rjnr.pocketnode.core.log.Logger
 import com.rjnr.pocketnode.core.prefs.NetworkPreferences
 import com.rjnr.pocketnode.data.gateway.models.NetworkType
 import dagger.hilt.android.qualifiers.ApplicationContext
+import kotlinx.coroutines.NonCancellable
+import kotlinx.coroutines.withContext
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -44,6 +46,7 @@ class NodeLifecycle @Inject constructor(
     private val cacheManager: CacheManager,
     private val daoSyncManager: DaoSyncManager,
     private val logger: Logger,
+    private val verificationCacheGate: VerificationCacheGate,
 ) {
 
     private val _nodeStatus = MutableStateFlow("Stopped")
@@ -195,6 +198,7 @@ class NodeLifecycle @Inject constructor(
                     return
                 }
 
+                verificationCacheGate.reconcile(lightClient, targetNetwork)
                 val startResult = lightClient.start()
                 if (startResult) {
                     logger.d(TAG, "Node started successfully on ${targetNetwork.name} (attempt $attempt)")
@@ -230,11 +234,16 @@ class NodeLifecycle @Inject constructor(
      * network from NetworkPreferences. Data directories are isolated per network.
      */
     suspend fun switchNetwork(target: NetworkType): Result<Unit> = runCatching {
-        if (target == currentNetwork) return@runCatching
-        if (_isSwitchingNetwork.value) throw Exception("Network switch already in progress")
+        val originalNetwork = currentNetwork
+        if (target == originalNetwork) return@runCatching
+        check(_isSwitchingNetwork.compareAndSet(false, true)) { "Network switch already in progress" }
 
-        _isSwitchingNetwork.value = true
+        // The native client and registration state stay on this network until process death.
+        // An epoch identifies a generation, not a network: never reconcile the failed target.
+        val canRestoreReadiness = _nodeReady.value == true && verificationCacheGate.isReady(originalNetwork.name)
+        var selectionWriteAttempted = false
         try {
+            verificationCacheGate.close()
             logger.d(TAG, "Switching network: ${currentNetwork.name} -> ${target.name}")
 
             // The JNI light client does not support re-initialization in the same process lifetime:
@@ -247,7 +256,9 @@ class NodeLifecycle @Inject constructor(
             cacheManager.clearAll()
             daoSyncManager.clearAll()
 
-            networkPreferences.setSelectedNetwork(target) // uses commit() — synchronous flush
+            // A failed commit can still publish the target in SharedPreferences memory.
+            selectionWriteAttempted = true
+            networkPreferences.setSelectedNetwork(target) // checked synchronous commit
             logger.d(TAG, "Persisted ${target.name}, restarting process for clean JNI init")
 
             // ProcessPhoenix-style restart: launch fresh activity before killing process.
@@ -257,7 +268,18 @@ class NodeLifecycle @Inject constructor(
             context.startActivity(intent)
             android.os.Process.killProcess(android.os.Process.myPid())
         } catch (e: Exception) {
-            _isSwitchingNetwork.value = false
+            try {
+                // Keep ownership until rollback and the old native handshake finish, including
+                // when cancellation interrupted a suspend operation after closing the gate.
+                withContext(NonCancellable) {
+                    if (selectionWriteAttempted) networkPreferences.setSelectedNetwork(originalNetwork)
+                    if (canRestoreReadiness) verificationCacheGate.reconcile(lightClient, originalNetwork)
+                }
+            } catch (recoveryFailure: Exception) {
+                if (recoveryFailure !== e) e.addSuppressed(recoveryFailure)
+            } finally {
+                _isSwitchingNetwork.value = false
+            }
             throw e
         }
     }

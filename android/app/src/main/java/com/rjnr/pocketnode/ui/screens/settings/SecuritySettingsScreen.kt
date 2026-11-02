@@ -53,6 +53,7 @@ import com.rjnr.pocketnode.ui.util.resolveString
 fun SecuritySettingsScreen(
     onNavigateBack: () -> Unit = {},
     onNavigateToPinSetup: () -> Unit = {},
+    onNavigateToPinChange: () -> Unit = {},
     onNavigateToPinVerify: () -> Unit = {},
     viewModel: SecuritySettingsViewModel = hiltViewModel(),
     onNavigateToBackup: (String) -> Unit = {},
@@ -221,7 +222,7 @@ fun SecuritySettingsScreen(
                             Spacer(modifier = Modifier.height(12.dp))
 
                             Row {
-                                OutlinedButton(onClick = onNavigateToPinSetup) {
+                                OutlinedButton(onClick = onNavigateToPinChange) {
                                     Text(stringResource(R.string.security_settings_change_pin))
                                 }
                                 Spacer(modifier = Modifier.width(8.dp))

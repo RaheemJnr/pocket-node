@@ -260,7 +260,8 @@ final class AppContainer {
             feed: sync.activity,
             walletId: record.id,
             script: AddressUtils.shared.parseAddress(address: address),
-            network: network
+            network: network,
+            ensureVerified: { [sync] in try await sync.ensureVerifiedCache() }
         )
         return ActivityViewModel(source: service, onRetry: { [send] hash in
             // The outcome goes back to the list, which raises an alert for a

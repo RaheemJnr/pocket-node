@@ -83,8 +83,13 @@ data class Cell(
     val blockNumber: String,
     val lock: Script,
     val type: Script? = null,
-    val data: String = "0x"
+    // Only "0x" is observed empty data. Absent data stays unknown, never spendable.
+    val data: String = ""
 ) {
+    /** Generic capacity spending must preserve typed, data-bearing and unresolved cells. */
+    fun isPlainCapacity(expectedLock: Script? = null): Boolean =
+        type == null && data == "0x" && (expectedLock == null || lock == expectedLock)
+
     // Malformed node data degrades to 0 instead of crashing balance
     // flow collectors with NumberFormatException (#321).
     fun capacityAsLong(): Long = capacity.removePrefix("0x").toLongOrNull(16) ?: 0L

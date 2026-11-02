@@ -143,6 +143,13 @@ class FakeTransactionStore(
     override suspend fun getOrphanPendingHashes(walletId: String, network: String): List<String> =
         orphanPending[walletId to network] ?: emptyList()
 
+    override suspend fun reconcileOrphan(hash: String, walletId: String, network: String, status: String) {
+        val key = walletId to network
+        if (hash !in orphanPending[key].orEmpty()) return
+        orphanPending[key] = orphanPending[key].orEmpty() - hash
+        statusWrites += hash to status
+    }
+
     override suspend fun updateTransactionStatus(hash: String, status: String) {
         statusWrites += hash to status
     }
@@ -215,6 +222,16 @@ class FakeHeaderCache(
  * the same store for the suites written before the widening.
  */
 class FakePendingBroadcastStore : PendingBroadcastStore {
+    var activityStore: FakeTransactionStore? = null
+
+    override suspend fun reconcileObservation(expected: PendingBroadcastRecord, next: String, nullCount: Int, now: Long): Boolean {
+        if (byHash[expected.txHash] != expected || expected.state !in setOf("BROADCASTING", "BROADCAST")) return false
+        if (next in setOf("CONFIRMED", "FAILED")) activityStore?.updateTransactionStatus(expected.txHash, next)
+        if (next == "CONFIRMED") byHash.remove(expected.txHash)
+        else byHash[expected.txHash] = expected.copy(state = next, nullCount = nullCount, lastCheckedAt = now)
+        return true
+    }
+
 
     /** Every row, keyed by hash. */
     val byHash: MutableMap<String, PendingBroadcastRecord> = mutableMapOf()
@@ -244,6 +261,17 @@ class FakePendingBroadcastStore : PendingBroadcastStore {
         byHash[record.txHash] = record
     }
 
+    override suspend fun insertFresh(record: PendingBroadcastRecord): Boolean {
+        if (record.txHash in byHash) return false
+        insert(record)
+        return true
+    }
+    override suspend fun failKnownUnsent(expected: PendingBroadcastRecord, now: Long): Boolean {
+        val current = byHash[expected.txHash] ?: return false
+        if (current.copy(nullCount = expected.nullCount, lastCheckedAt = expected.lastCheckedAt) != expected) return false
+        return compareAndUpdateState(expected.txHash, "BROADCASTING", "FAILED", now) == 1
+    }
+
     override suspend fun compareAndUpdateState(
         hash: String,
         expected: String,
@@ -253,6 +281,13 @@ class FakePendingBroadcastStore : PendingBroadcastStore {
         val existing = byHash[hash] ?: return 0
         if (existing.state != expected) return 0
         byHash[hash] = existing.copy(state = next, lastCheckedAt = now)
+        return 1
+    }
+
+    override suspend fun rearmAcceptedRetry(hash: String, expectedLastCheckedAt: Long, submittedAt: Long, now: Long): Int {
+        val existing = byHash[hash] ?: return 0
+        if (existing.state != "FAILED" || existing.lastCheckedAt != expectedLastCheckedAt) return 0
+        byHash[hash] = existing.copy(state = "BROADCAST", submittedAtTipBlock = submittedAt, nullCount = 0, lastCheckedAt = now)
         return 1
     }
 

@@ -462,7 +462,7 @@ enum M3Parity {
     static let parses: [ParseCase] = [
         ParseCase(text: "61", expected: 6_100_000_000, note: "a whole number of CKB"),
         ParseCase(text: "0.00000001", expected: 1, note: "one shannon"),
-        ParseCase(text: "12.345678901", expected: 1_234_567_890, note: "a ninth decimal is truncated, never rounded up"),
+        ParseCase(text: "12.345678901", expected: nil, note: "excess precision is rejected without changing the amount"),
         ParseCase(text: "1234.5", expected: 123_450_000_000, note: "a single decimal"),
         ParseCase(text: "99999999999999999999", expected: nil, note: "too large for a Long, so it is refused rather than wrapped"),
     ]

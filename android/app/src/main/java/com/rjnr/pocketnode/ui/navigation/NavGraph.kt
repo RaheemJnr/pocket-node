@@ -83,6 +83,7 @@ sealed class Screen(val route: String) {
         }
     }
     object MnemonicImport : Screen("mnemonic_import")
+    object PinChange : Screen("pin_change")
     object Auth : Screen("auth")
     object PinEntry : Screen("pin_entry/{mode}") {
         fun createRoute(mode: String) = "pin_entry/$mode"
@@ -140,10 +141,12 @@ fun CkbNavGraph(
     navController: NavHostController,
     startDestination: String = Screen.Onboarding.route,
     pinManager: PinManager,
+    sessionUnlocked: Boolean = false,
     needsMnemonicBackup: () -> Boolean = { false },
     // Cold-start unlock on the Auth route (#524: lets MainActivity tell a
     // process that has been unlocked from one restored after process death).
     onAuthUnlocked: () -> Unit = {},
+    onRequireUnlock: () -> Unit = {},
 ) {
     // PIN is mandatory: if the user doesn't have one yet, any "go to Main" action
     // must first pass through PIN setup. Once a PIN exists, mnemonic backup is
@@ -233,8 +236,25 @@ fun CkbNavGraph(
             )
         }
 
+        composable(Screen.PinChange.route) {
+            com.rjnr.pocketnode.ui.screens.auth.PinChangeScreen(
+                onBack = { navController.popBackStack() },
+                onRequireUnlock = {
+                    navController.popBackStack()
+                    onRequireUnlock()
+                },
+            )
+        }
+
         composable(Screen.Auth.route) { backStackEntry ->
-            AuthScreen(
+            if (sessionUnlocked) {
+                // The activity overlay already performed authentication and migration.
+                LaunchedEffect(Unit) {
+                    navController.navigate(destinationAfterWalletReady()) {
+                        popUpTo(Screen.Auth.route) { inclusive = true }
+                    }
+                }
+            } else AuthScreen(
                 onAuthSuccess = {
                     onAuthUnlocked()
                     navController.navigate(destinationAfterWalletReady()) {
@@ -402,6 +422,7 @@ fun CkbNavGraph(
                 onNavigateToPinSetup = {
                     navController.navigate(Screen.PinEntry.createRoute("setup"))
                 },
+                onNavigateToPinChange = { navController.navigate(Screen.PinChange.route) },
                 onNavigateToPinVerify = {
                     navController.navigate(Screen.PinEntry.createRoute("verify"))
                 },
@@ -627,7 +648,9 @@ fun CkbNavGraph(
 
         composable(Screen.InitialPinSetup.route) {
             InitialPinSetupScreen(
+                onForgotPin = { navController.navigate(Screen.ForgotPin.route) },
                 onPinCreated = {
+                    onAuthUnlocked()
                     // #286: surface background sync at the point of choice,
                     // right after the mandatory PIN step. The opt-in screen
                     // self-skips when the preference is already set.

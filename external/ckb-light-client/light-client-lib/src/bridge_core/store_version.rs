@@ -3,24 +3,18 @@
 //! The store is a SQLite key-value file (`<data_dir>/store.db`, one per
 //! network). Its layout version lives in the SQLite header as
 //! `PRAGMA user_version`. Stores written before this module existed carry 0,
-//! which is the same layout as [`STORE_FORMAT_VERSION`] 1.
+//! which uses the original version-1 layout.
 //!
 //! [`ensure_store_version`] runs in [`super::lifecycle::init`] before the
 //! storage layer opens the file, so both platform bridges go through it and
 //! neither the JNI nor the UniFFI surface changes:
 //!
-//! | On disk                         | Action                                     |
-//! |---------------------------------|--------------------------------------------|
-//! | no file                         | create an empty store stamped 1            |
-//! | user_version 0 (pre-versioning) | stamp 1, then upgrade as a version-1 store |
-//! | user_version 1                  | nothing                                    |
-//! | 0 < v < 1 + registered steps    | run each step in order, stamping after it  |
-//! | step missing, or step error     | set aside, fresh store stamped 1           |
-//! | transient step error, or any    | error; store left in place, rolled back,   |
-//! |   begin / stamp / commit error  |   retried on the next start                |
-//! | v > 1 (store from a newer build)| set aside, fresh store stamped 1           |
-//! | not a SQLite file / corrupt     | set aside, fresh store stamped 1           |
-//! | a directory (old RocksDB store) | set aside, fresh store stamped 1           |
+//! Format 2 keeps the mobile `kv` schema. The 1 -> 2 step invalidates
+//! chain-derived evidence and records a verification identity atomically;
+//! wallet scripts are retained separately as inactive recovery metadata.
+//! Version 0 is first treated as version 1. Unknown newer layouts and corrupt
+//! files retain the existing set-aside recovery policy. Transient errors and
+//! transaction-boundary errors roll back and are retried on the next launch.
 //!
 //! "Set aside" renames `store.db` (and its `-wal` / `-shm` siblings, if any)
 //! to `store.db.incompatible-<version>-<unix seconds>`; nothing is deleted.
@@ -39,7 +33,7 @@ use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 /// Layout version of the store this build reads and writes.
-pub const STORE_FORMAT_VERSION: u32 = 1;
+pub const STORE_FORMAT_VERSION: u32 = 2;
 
 /// Stores written before versioning existed carry `user_version` 0 and have
 /// this layout.
@@ -57,7 +51,7 @@ pub struct UpgradeStep {
 
 /// Registered upgrade steps, in any order. Adding a layout change later means
 /// bumping [`STORE_FORMAT_VERSION`] and adding one entry here.
-const UPGRADE_STEPS: &[UpgradeStep] = &[];
+const UPGRADE_STEPS: &[UpgradeStep] = &[UpgradeStep { from: 1, run: super::verification_epoch::upgrade }];
 
 /// What [`ensure_store_version`] did. Logged by `init`; not surfaced to the
 /// platform bridges.
@@ -428,13 +422,13 @@ mod tests {
         let path = dir.path().join("nested").join("store.db");
 
         assert_eq!(
-            ensure_store_version(&path).unwrap(),
+            ensure_store_version_with(&path, 1, &[]).unwrap(),
             StoreVersionAction::Created
         );
         // The storage layer then opens it as usual, and the stamp survives.
         let storage = Storage::new(&path);
         drop(storage);
-        assert_eq!(user_version(&path), STORE_FORMAT_VERSION);
+        assert_eq!(user_version(&path), 1);
         assert_eq!(row_count(&path), 0);
     }
 
@@ -447,7 +441,7 @@ mod tests {
         let before = rows(&path);
 
         assert_eq!(
-            ensure_store_version(&path).unwrap(),
+            ensure_store_version_with(&path, 1, &[]).unwrap(),
             StoreVersionAction::Stamped
         );
         assert_eq!(user_version(&path), 1);
@@ -483,7 +477,7 @@ mod tests {
         let before = rows(&path);
 
         assert_eq!(
-            ensure_store_version(&path).unwrap(),
+            ensure_store_version_with(&path, 1, &[]).unwrap(),
             StoreVersionAction::Current
         );
         assert_eq!(user_version(&path), 1);
@@ -499,7 +493,7 @@ mod tests {
         set_version(&path, 2);
         let original = fs::read(&path).unwrap();
 
-        let action = ensure_store_version(&path).unwrap();
+        let action = ensure_store_version_with(&path, 1, &[]).unwrap();
         let StoreVersionAction::SetAside { found, renamed_to } = action else {
             panic!("expected SetAside, got {:?}", action);
         };
@@ -543,7 +537,7 @@ mod tests {
         }
         drop(live);
 
-        let action = ensure_store_version(&path).unwrap();
+        let action = ensure_store_version_with(&path, 1, &[]).unwrap();
         let StoreVersionAction::SetAside { found, renamed_to } = action else {
             panic!("expected SetAside, got {:?}", action);
         };
@@ -565,7 +559,7 @@ mod tests {
         fs::write(dir.path().join("store.db-wal"), b"wal bytes").unwrap();
         fs::write(dir.path().join("store.db-shm"), b"shm bytes").unwrap();
 
-        let action = ensure_store_version(&path).unwrap();
+        let action = ensure_store_version_with(&path, 1, &[]).unwrap();
         let StoreVersionAction::SetAside { found, renamed_to } = action else {
             panic!("expected SetAside, got {:?}", action);
         };
@@ -594,7 +588,7 @@ mod tests {
         bytes.extend(std::iter::repeat_n(0xAB, 4096));
         fs::write(&path, &bytes).unwrap();
 
-        let action = ensure_store_version(&path).unwrap();
+        let action = ensure_store_version_with(&path, 1, &[]).unwrap();
         let StoreVersionAction::SetAside { found, renamed_to } = action else {
             panic!("expected SetAside, got {:?}", action);
         };
@@ -610,7 +604,7 @@ mod tests {
         fs::create_dir(&path).unwrap();
         fs::write(path.join("CURRENT"), b"MANIFEST-000001").unwrap();
 
-        let action = ensure_store_version(&path).unwrap();
+        let action = ensure_store_version_with(&path, 1, &[]).unwrap();
         let StoreVersionAction::SetAside { found, renamed_to } = action else {
             panic!("expected SetAside, got {:?}", action);
         };
@@ -628,13 +622,13 @@ mod tests {
         let path = dir.path().join("store.db");
         fs::write(&path, b"first junk store file").unwrap();
         let StoreVersionAction::SetAside { renamed_to: a, .. } =
-            ensure_store_version(&path).unwrap()
+            ensure_store_version_with(&path, 1, &[]).unwrap()
         else {
             panic!()
         };
         fs::write(&path, b"second junk store file").unwrap();
         let StoreVersionAction::SetAside { renamed_to: b, .. } =
-            ensure_store_version(&path).unwrap()
+            ensure_store_version_with(&path, 1, &[]).unwrap()
         else {
             panic!()
         };
@@ -670,8 +664,9 @@ mod tests {
     }
 
     #[test]
-    fn production_has_no_upgrade_steps() {
-        assert!(UPGRADE_STEPS.is_empty());
+    fn production_registers_verification_upgrade() {
+        assert_eq!(UPGRADE_STEPS.len(), 1);
+        assert_eq!(UPGRADE_STEPS[0].from, 1);
     }
 
     #[test]
@@ -936,12 +931,12 @@ mod tests {
         let dir = TempDir::new().unwrap();
         let path = dir.path().join("store.db");
         assert_eq!(
-            ensure_store_version(&path).unwrap(),
+            ensure_store_version_with(&path, 1, &[]).unwrap(),
             StoreVersionAction::Created
         );
         write_store(&path, ROWS);
         assert_eq!(
-            ensure_store_version(&path).unwrap(),
+            ensure_store_version_with(&path, 1, &[]).unwrap(),
             StoreVersionAction::Current
         );
         assert_eq!(row_count(&path), 2);

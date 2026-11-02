@@ -27,7 +27,8 @@ class TransactionBuilderMaxSendTest {
         outPoint = OutPoint(txHash = "0x" + "ab".repeat(32), index = "0x${index.toString(16)}"),
         capacity = "0x" + capacityShannons.toString(16),
         blockNumber = "0x1",
-        lock = lock
+        lock = lock,
+        data = "0x"
     )
 
     @Test

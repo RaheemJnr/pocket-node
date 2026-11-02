@@ -69,6 +69,8 @@ object EmptyTransactionStore : TransactionStore {
         network: String,
     ): List<String> = emptyList()
 
+    override suspend fun reconcileOrphan(hash: String, walletId: String, network: String, status: String) = Unit
+
     override suspend fun updateTransactionStatus(hash: String, status: String) = Unit
 
     /**

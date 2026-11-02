@@ -21,11 +21,15 @@
 //! - 2 (STOPPED): Stopped
 
 pub mod dao;
+pub mod dao_recovery;
 pub mod error;
+mod cell_read;
+pub mod history;
 pub mod lifecycle;
 pub mod query;
 pub mod rpc;
 pub mod store_version;
+pub mod verification_epoch;
 pub mod types;
 
 pub use error::BridgeError;

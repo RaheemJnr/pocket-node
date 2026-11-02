@@ -35,6 +35,7 @@ import androidx.room.RoomDatabaseConstructor
 )
 @ConstructedBy(PocketNodeCoreDatabaseConstructor::class)
 abstract class PocketNodeCoreDatabase : RoomDatabase() {
+    abstract fun verificationCache(): VerificationCacheRoomDao
     abstract fun syncProgress(): SyncProgressRoomDao
     abstract fun transactions(): TransactionRoomDao
     abstract fun pendingBroadcasts(): PendingBroadcastRoomDao

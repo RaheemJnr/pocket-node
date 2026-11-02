@@ -41,6 +41,7 @@ class RestoreHintExporter @Inject constructor(
     private val walletKeyReader: WalletKeyReader,
     private val json: Json,
     private val logger: Logger,
+    private val verificationCacheGate: com.rjnr.pocketnode.data.gateway.VerificationCacheGate,
 ) {
 
     sealed interface ExportResult {
@@ -64,6 +65,8 @@ class RestoreHintExporter @Inject constructor(
         network: NetworkType,
         nowMs: Long = System.currentTimeMillis(),
     ): ExportResult = com.rjnr.pocketnode.data.vault.VaultOperationSession.run(activity) owned@ {
+        val revision = verificationCacheGate.currentRevision()
+        if (!verificationCacheGate.isReady(network.name)) return@owned ExportResult.Failed("Chain cache verification is not ready")
         val active = walletDao.getActive() ?: return@owned ExportResult.Failed("No active wallet")
         val root = active.parentWalletId?.let { walletDao.getById(it) } ?: active
         val tip = readTip() ?: return@owned ExportResult.NoTip
@@ -98,6 +101,7 @@ class RestoreHintExporter @Inject constructor(
 
         return@owned try {
             val payload = buildPayload(root, network, tip.first, tip.second, nowMs)
+            check(verificationCacheGate.currentRevision() == revision && verificationCacheGate.isReady(network.name)) { "Chain cache verification changed" }
             ExportResult.Ready(RestoreHintFormat.fileName(network.name), RestoreHintCodec.seal(payload, secret))
         } catch (e: CancellationException) {
             throw e
@@ -130,6 +134,8 @@ class RestoreHintExporter @Inject constructor(
         tipHash: String,
         nowMs: Long,
     ): RestoreHintPayload {
+        val revision = verificationCacheGate.currentRevision()
+        check(verificationCacheGate.isReady(network.name)) { "Chain cache verification is not ready" }
         val isMnemonic = root.type == KeyManager.WALLET_TYPE_MNEMONIC
         val subAccounts = if (isMnemonic) walletDao.getSubAccountsList(root.walletId) else emptyList()
 
@@ -160,6 +166,7 @@ class RestoreHintExporter @Inject constructor(
             RestoreHintDiscovery()
         }
 
+        check(verificationCacheGate.isReady(network.name) && verificationCacheGate.currentRevision() == revision) { "Chain cache verification changed" }
         return RestoreHintPayload(
             network = network.name,
             createdAtMs = nowMs,

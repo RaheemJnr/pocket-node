@@ -33,6 +33,15 @@ class StartupRouterTest {
     )
 
     @Test
+    fun `pending reset routes to retry before any legacy recovery reads`() = runTest {
+        val result = StartupRouter.route(resetPending = true, corruptionFlag = false, markerSet = false,
+            hasWallet = false, hasPin = true,
+            walletRowCount = { error("must not probe") }, missingWalletCount = { error("must not probe") },
+            markIncomplete = { error("must not mutate recovery") }, completeIfDone = { error("must not complete recovery") })
+        assertEquals(Route.RESET_RETRY, result.route)
+    }
+
+    @Test
     fun `healthy with no flag, no marker and every row with keys`() = runTest {
         val d = route()
         assertEquals(Route.AUTH, d.route)

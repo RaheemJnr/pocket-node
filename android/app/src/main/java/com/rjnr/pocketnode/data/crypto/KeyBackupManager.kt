@@ -7,11 +7,8 @@ import kotlinx.serialization.ExperimentalSerializationApi
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.decodeFromStream
-import kotlinx.serialization.json.encodeToStream
 import java.io.ByteArrayInputStream
-import java.io.ByteArrayOutputStream
 import java.io.File
-import java.security.SecureRandom
 import javax.crypto.Cipher
 import javax.crypto.SecretKeyFactory
 import javax.crypto.spec.GCMParameterSpec
@@ -34,10 +31,12 @@ data class KeyMaterial(
         "KeyMaterial(walletType=$walletType, hasMnemonic=${mnemonic != null}, version=$version)"
 }
 
+/** Read-only compatibility with PIN-only backups. Six digits remain vulnerable to offline guessing. */
 @Singleton
 class KeyBackupManager @Inject constructor(
     private val backupDir: File,
     private val logger: Logger,
+    private val walletStorage: com.rjnr.pocketnode.data.wallet.WalletStorageBoundary,
 ) {
     private val json = Json { ignoreUnknownKeys = true; encodeDefaults = true }
 
@@ -46,7 +45,7 @@ class KeyBackupManager @Inject constructor(
     internal var kdfIterations: Int = KDF_ITERATIONS
 
     // Argon2id parameters for v2 backups. Match PinManager's PIN-hash params
-    // (OWASP ASVS baseline: 64 MB, t=3, p=4). Overridable for fast tests.
+    // (64 MB, t=3, p=4). These costs do not give a six-digit PIN high entropy.
     @VisibleForTesting
     internal var argon2Iterations: Int = 3
 
@@ -60,49 +59,14 @@ class KeyBackupManager @Inject constructor(
         backupDir.mkdirs()
     }
 
-    @Synchronized
-    fun writeBackup(walletId: String, material: KeyMaterial, pin: CharArray) {
-        val salt = ByteArray(SALT_SIZE).also { SecureRandom().nextBytes(it) }
-        val iv = ByteArray(IV_SIZE).also { SecureRandom().nextBytes(it) }
-        // New backups are always written with the strongest KDF (Argon2id, v2).
-        val key = deriveKey(pin, salt, FORMAT_VERSION_ARGON2)
-
-        // Serialize straight to bytes, no String intermediate for the
-        // plaintext key material, and zero the buffer once encrypted (#321).
-        // Serializer-internal buffers and the Strings inside KeyMaterial
-        // itself are beyond reach on the JVM; see #335 for the full rewrite.
-        val plaintext = ByteArrayOutputStream().use { baos ->
-            @OptIn(ExperimentalSerializationApi::class)
-            json.encodeToStream(material, baos)
-            baos.toByteArray()
-        }
-        val ciphertext = try {
-            val cipher = Cipher.getInstance(CIPHER_TRANSFORM)
-            cipher.init(Cipher.ENCRYPT_MODE, key, GCMParameterSpec(GCM_TAG_BITS, iv))
-            cipher.doFinal(plaintext)
-        } finally {
-            plaintext.fill(0)
-        }
-
-        val file = backupFile(walletId)
-        val tmpFile = File(file.parent, "${file.name}.tmp")
-
-        tmpFile.outputStream().use { out ->
-            out.write(MAGIC)
-            out.write(byteArrayOf(FORMAT_VERSION_ARGON2))
-            out.write(salt)
-            out.write(iv)
-            out.write(ciphertext)
-        }
-
-        tmpFile.renameTo(file)
-    }
-
     fun readBackup(walletId: String, pin: CharArray): KeyMaterial? {
-        val file = backupFile(walletId)
-        if (!file.exists()) return null
+        synchronized(walletStorage.fileLock) {
+            walletStorage.requireOpen()
+            val file = backupFile(walletId)
+            if (!file.exists()) return null
 
-        return readCapturedBackup(file.readBytes(), pin)
+            return readCapturedBackup(file.readBytes(), pin)
+        }
     }
 
     /** Decrypt precisely the captured ciphertext; never reopen a mutable file after authentication. */
@@ -139,11 +103,14 @@ class KeyBackupManager @Inject constructor(
 
     /** Both committed and interrupted copies are independently authenticated before retirement. */
     internal fun captureCopies(walletId: String): List<ByteArray?> {
-        require(walletId.matches(Regex("[A-Za-z0-9_-]{1,128}")))
-        return listOf(backupFile(walletId), File(backupDir, "$walletId.enc.tmp")).map { file ->
-            if (!file.exists()) null else {
-                require(file.isFile && file.length() in 1..1_048_576)
-                file.readBytes()
+        synchronized(walletStorage.fileLock) {
+            walletStorage.requireOpen()
+            require(walletId.matches(Regex("[A-Za-z0-9_-]{1,128}")))
+            return listOf(backupFile(walletId), File(backupDir, "$walletId.enc.tmp")).map { file ->
+                if (!file.exists()) null else {
+                    require(file.isFile && file.length() in 1..1_048_576)
+                    file.readBytes()
+                }
             }
         }
     }
@@ -165,29 +132,39 @@ class KeyBackupManager @Inject constructor(
             }
         }
 
-    fun hasAnyBackups(): Boolean = backupDir.listFiles()?.any { it.extension == "enc" } == true
+    fun hasAnyBackups(): Boolean = synchronized(walletStorage.fileLock) { backupCopies().isNotEmpty() }
 
-    @Synchronized
-    fun deleteBackup(walletId: String) {
-        backupFile(walletId).delete()
+    private fun backupCopies(): List<File> {
+        if (!backupDir.exists()) return emptyList()
+        return (backupDir.listFiles() ?: error("Wallet backup directory could not be read."))
+            .filter { it.name.endsWith(".enc") || it.name.endsWith(".enc.tmp") }
+    }
+
+    fun deleteAllChecked() = synchronized(walletStorage.fileLock) {
+        for (file in backupCopies()) {
+            check(file.isFile && file.delete()) { "Wallet backup copy could not be removed." }
+        }
+        check(backupCopies().isEmpty()) { "Wallet backup copies remain." }
     }
 
     /** Retire both committed and interrupted weak backups, checking the filesystem result. */
-    @Synchronized
     fun deleteBackupChecked(walletId: String): Boolean {
-        if (!walletId.matches(Regex("[A-Za-z0-9_-]{1,128}"))) return false
-        val file = backupFile(walletId)
-        val pending = File(file.parentFile, "${file.name}.tmp")
-        file.delete()
-        pending.delete()
-        return !file.exists() && !pending.exists()
+        synchronized(walletStorage.fileLock) {
+            if (!walletId.matches(Regex("[A-Za-z0-9_-]{1,128}"))) return false
+            val file = backupFile(walletId)
+            val pending = File(file.parentFile, "${file.name}.tmp")
+            file.delete()
+            pending.delete()
+            return !file.exists() && !pending.exists()
+        }
     }
 
     /** Compare and delete under the same lock used by every app backup writer. */
-    @Synchronized
     internal fun deleteCapturedCopies(walletId: String, expected: List<String?>): Boolean {
-        if (cleanupSnapshot(walletId) != expected) return false
-        return deleteBackupChecked(walletId)
+        synchronized(walletStorage.fileLock) {
+            if (cleanupSnapshot(walletId) != expected) return false
+            return deleteBackupChecked(walletId)
+        }
     }
 
     fun listBackupWalletIds(): List<String> {
@@ -197,51 +174,11 @@ class KeyBackupManager @Inject constructor(
             ?: emptyList()
     }
 
-    @Synchronized
-    fun reEncryptAll(oldPin: CharArray, newPin: CharArray): Boolean {
-        val backupFiles = backupDir.listFiles()?.filter { it.extension == "enc" } ?: return true
-
-        // Phase 1: decrypt all and re-encrypt to .tmp files
-        val tmpFiles = mutableListOf<Pair<File, File>>()
-        for (file in backupFiles) {
-            val walletId = file.nameWithoutExtension
-            val material = readBackup(walletId, oldPin) ?: return false
-            val tmpFile = File(file.parent, "${file.name}.tmp")
-
-            val salt = ByteArray(SALT_SIZE).also { SecureRandom().nextBytes(it) }
-            val iv = ByteArray(IV_SIZE).also { SecureRandom().nextBytes(it) }
-            // Re-encryption upgrades the blob to the current KDF (Argon2id, v2).
-            val key = deriveKey(newPin, salt, FORMAT_VERSION_ARGON2)
-
-            val plaintext = json.encodeToString(material).toByteArray(Charsets.UTF_8)
-            val cipher = Cipher.getInstance(CIPHER_TRANSFORM)
-            cipher.init(Cipher.ENCRYPT_MODE, key, GCMParameterSpec(GCM_TAG_BITS, iv))
-            val ciphertext = cipher.doFinal(plaintext)
-
-            tmpFile.outputStream().use { out ->
-                out.write(MAGIC)
-                out.write(byteArrayOf(FORMAT_VERSION_ARGON2))
-                out.write(salt)
-                out.write(iv)
-                out.write(ciphertext)
-            }
-            tmpFiles.add(tmpFile to file)
-        }
-
-        // Phase 2: atomic rename all .tmp → .enc
-        for ((tmp, original) in tmpFiles) {
-            tmp.renameTo(original)
-        }
-
-        return true
-    }
-
-    @Synchronized
-    fun cleanupOrphanedTmpFiles() {
-        backupDir.listFiles()
-            ?.filter { it.extension == "tmp" }
-            ?.forEach { it.delete() }
-    }
+    /**
+     * Historical startup hook. Interrupted copies can contain a unique recovery phrase;
+     * only authenticated, capability-preserving migration or explicit deletion may retire them.
+     */
+    fun cleanupOrphanedTmpFiles() = Unit
 
     private fun backupFile(walletId: String): File = File(backupDir, "$walletId.enc")
 
@@ -285,7 +222,7 @@ class KeyBackupManager @Inject constructor(
     companion object {
         private const val TAG = "KeyBackupManager"
         val MAGIC = byteArrayOf('P'.code.toByte(), 'N'.code.toByte(), 'B'.code.toByte(), 'K'.code.toByte())
-        // v1 = PBKDF2-HMAC-SHA256 (read-only legacy); v2 = Argon2id (current).
+        // v1 = PBKDF2-HMAC-SHA256 (read-only legacy); v2 = Argon2id (legacy, read-only).
         const val FORMAT_VERSION_PBKDF2: Byte = 1
         const val FORMAT_VERSION_ARGON2: Byte = 2
         const val HEADER_SIZE = 5

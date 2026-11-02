@@ -514,7 +514,7 @@ object M3ParityFixtures {
     val parses: List<ParseCase> = listOf(
         ParseCase("61", 6_100_000_000L, "a whole number of CKB"),
         ParseCase("0.00000001", 1L, "one shannon"),
-        ParseCase("12.345678901", 1_234_567_890L, "a ninth decimal is truncated, never rounded up"),
+        ParseCase("12.345678901", null, "excess precision is rejected without changing the amount"),
         ParseCase("1234.5", 123_450_000_000L, "a single decimal"),
         ParseCase("99999999999999999999", null, "too large for a Long, so it is refused rather than wrapped"),
     )

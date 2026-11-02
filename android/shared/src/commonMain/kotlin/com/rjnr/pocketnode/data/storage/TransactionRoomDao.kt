@@ -3,6 +3,7 @@ package com.rjnr.pocketnode.data.storage
 import androidx.room.Dao
 import androidx.room.Insert
 import androidx.room.OnConflictStrategy
+import androidx.room.Transaction
 import androidx.room.Query
 
 /**
@@ -16,6 +17,27 @@ import androidx.room.Query
  */
 @Dao
 interface TransactionRoomDao {
+    @Query("SELECT * FROM transactions WHERE walletId = :walletId AND network = :network AND status = 'CONFIRMED'")
+    suspend fun canonicalCandidates(walletId: String, network: String): List<TransactionRow>
+
+    @Query("DELETE FROM transactions WHERE txHash = :hash AND walletId = :walletId AND network = :network " +
+        "AND status = 'CONFIRMED' AND blockNumber = :blockNumber AND blockHash = :blockHash AND cachedAt = :cachedAt " +
+        "AND txHash NOT IN (SELECT txHash FROM pending_broadcasts)")
+    suspend fun deleteCanonicalOrphan(hash: String, walletId: String, network: String, blockNumber: String, blockHash: String, cachedAt: Long)
+
+    /** One atomic scoped pass. Pending ownership and a concurrently advanced receipt win. */
+    @Transaction
+    suspend fun reconcileCanonicalHistory(snapshot: com.rjnr.pocketnode.data.gateway.CanonicalHistorySnapshot, walletId: String, network: String, isCurrent: suspend () -> Boolean = { true }) {
+        if (!snapshot.validFor(snapshot.script, network) || walletId.isBlank()) return
+        val candidates = canonicalCandidates(walletId, network)
+        if (candidates.isEmpty() || !isCurrent()) return
+        for (row in candidates) {
+            if (snapshot.provesAbsent(row.txHash, row.blockNumber)) {
+                deleteCanonicalOrphan(row.txHash, walletId, network, row.blockNumber, row.blockHash, row.cachedAt)
+            }
+        }
+    }
+
 
     /**
      * Fees already known for the given hashes. [RoomKmpTransactionStore]
@@ -25,12 +47,12 @@ interface TransactionRoomDao {
      */
     @Query(
         "SELECT txHash, fee_shannons AS feeShannons FROM transactions " +
-            "WHERE network = :network AND txHash IN (:hashes) AND fee_shannons IS NOT NULL"
+            "WHERE network = :network AND txHash IN (:hashes) AND fee_shannons IS NOT NULL AND status != 'UNVERIFIED'"
     )
     suspend fun getKnownFees(hashes: List<String>, network: String): List<TxFeeRow>
 
     /** Hex block numbers of every cached tx for a wallet. Anchors the candidate scan depth. */
-    @Query("SELECT blockNumber FROM transactions WHERE walletId = :walletId AND network = :network")
+    @Query("SELECT blockNumber FROM transactions WHERE status != 'UNVERIFIED' AND walletId = :walletId AND network = :network")
     suspend fun getBlockNumbers(walletId: String, network: String): List<String>
 
     @Insert(onConflict = OnConflictStrategy.REPLACE)
@@ -45,17 +67,23 @@ interface TransactionRoomDao {
      */
     @Query(
         "SELECT * FROM transactions " +
-            "WHERE walletId = :walletId AND network = :network AND status IN ('PENDING', 'FAILED')"
+            "WHERE status != 'UNVERIFIED' AND walletId = :walletId AND network = :network AND status IN ('PENDING', 'FAILED')"
     )
     suspend fun getNonConfirmedByWallet(walletId: String, network: String): List<TransactionRow>
 
     /** PENDING rows with no `pending_broadcasts` entry: rows the watchdog cannot see. */
     @Query(
         "SELECT txHash FROM transactions " +
-            "WHERE walletId = :walletId AND network = :network AND status = 'PENDING' " +
+            "WHERE status != 'UNVERIFIED' AND walletId = :walletId AND network = :network AND status = 'PENDING' " +
             "AND txHash NOT IN (SELECT txHash FROM pending_broadcasts)"
     )
     suspend fun getOrphanPendingHashes(walletId: String, network: String): List<String>
+
+    /** Settle only a still-pending orphan for this wallet/network. */
+    @Query("UPDATE transactions SET status = :status, cachedAt = :now WHERE txHash = :hash " +
+        "AND walletId = :walletId AND network = :network AND status = 'PENDING' " +
+        "AND txHash NOT IN (SELECT txHash FROM pending_broadcasts)")
+    suspend fun reconcileOrphan(hash: String, walletId: String, network: String, status: String, now: Long)
 
     /**
      * Status-only update. Bumps `cachedAt` so any staleness logic treats the
@@ -111,7 +139,7 @@ interface TransactionRoomDao {
      * needs SOME total order or page 0 and page 1 can overlap or skip.
      */
     @Query(
-        "SELECT * FROM transactions WHERE walletId = :walletId AND network = :network " +
+        "SELECT * FROM transactions WHERE status != 'UNVERIFIED' AND walletId = :walletId AND network = :network " +
             "ORDER BY CASE WHEN status = 'PENDING' THEN 0 ELSE 1 END, timestamp DESC, " +
             "LENGTH(blockNumber) DESC, blockNumber DESC, rowid ASC " +
             "LIMIT :limit OFFSET :offset"
@@ -125,7 +153,7 @@ interface TransactionRoomDao {
 
     /** One page of the list narrowed to [directions]. Same sort as [pageAll], for the same reasons. */
     @Query(
-        "SELECT * FROM transactions WHERE walletId = :walletId AND network = :network " +
+        "SELECT * FROM transactions WHERE status != 'UNVERIFIED' AND walletId = :walletId AND network = :network " +
             "AND direction IN (:directions) " +
             "ORDER BY CASE WHEN status = 'PENDING' THEN 0 ELSE 1 END, timestamp DESC, " +
             "LENGTH(blockNumber) DESC, blockNumber DESC, rowid ASC " +

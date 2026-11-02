@@ -131,33 +131,25 @@ fun formatCkbFixed(shannons: Long, decimals: Int): String =
  * `Long`. `0.1 + 0.2` is the reason, and so is the fact that a `Double`
  * stops representing shannons exactly somewhere around 90 million CKB (#321).
  *
- * Truncates rather than rounds past the eighth decimal, matching Android's
- * `BigDecimal(amount).setScale(8, RoundingMode.DOWN)`: a user who typed nine
- * decimals cannot be charged for a shannon they did not type. An amount too
- * large for a `Long` answers null rather than wrapping, the same outcome
- * `longValueExact` produces by throwing.
- *
- * Accepts only ASCII `0`-`9` and a single `.`, so no sign, no exponent and no
- * grouping. `Char.isDigit` is deliberately not used: it also answers true for
- * Arabic-Indic, Devanagari and fullwidth digits, which `toLongOrNull` would
- * then refuse anyway, but the refusal should come from the rule rather than
- * from an accident of the parser.
- * [com.rjnr.pocketnode.util.sanitizeAmount] has already held the field to that
- * shape; this is the second, independent check.
+ * Accepts only ASCII `0`-`9` and one optional `.`, with at most eight
+ * fraction digits. Leading `.5` and trailing `61.` are numeric; empty text
+ * and `.` alone are mid-entry states, not amounts. Whitespace, signs, exponent,
+ * grouping, localized digits/separators, excess precision (even zero digits)
+ * and Long overflow return null. Nothing is stripped, rounded or truncated.
+ * Input uses this locale-independent form on both platforms; zero/minimum-send
+ * rules belong to business validation, separate from this grammar.
  */
 fun ckbToShannons(text: String): Long? {
-    val trimmed = text.trim()
-    if (trimmed.isEmpty()) return null
-    if (trimmed.count { it == '.' } > 1) return null
-    if (!trimmed.all { it in '0'..'9' || it == '.' }) return null
+    if (text.isEmpty()) return null
+    if (text.count { it == '.' } > 1) return null
+    if (!text.all { it in '0'..'9' || it == '.' }) return null
 
-    val whole = trimmed.substringBefore('.')
-    val rawFraction = if (trimmed.contains('.')) trimmed.substringAfter('.') else ""
-    // "." alone, and "", neither is a number.
+    val whole = text.substringBefore('.')
+    val rawFraction = if (text.contains('.')) text.substringAfter('.') else ""
     if (whole.isEmpty() && rawFraction.isEmpty()) return null
+    if (rawFraction.length > 8) return null
 
-    val fraction = rawFraction.take(8).padEnd(8, '0')
-    // Leading zeros are harmless to `toLongOrNull`, and overflow answers null.
+    val fraction = rawFraction.padEnd(8, '0')
     return (whole + fraction).toLongOrNull()
 }
 

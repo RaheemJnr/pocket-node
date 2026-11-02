@@ -169,15 +169,9 @@ fun elapsedBucket(elapsedMillis: Long): ElapsedBucket {
 }
 
 /**
- * Why a transaction is FAILED, inferred from the broadcast row the watchdog
- * left behind.
- *
- * The watchdog has exactly two routes to FAILED and they are distinguishable by
- * `nullCount`: the not-found route increments it past [BROADCAST_NULL_THRESHOLD]
- * before giving up, while the still-in-pool route resets it to 0 on every
- * healthy check. A row whose broadcast record has already been cleared (a
- * retry, or a FAILED row from before the watchdog shipped) falls back to
- * [TxFailureReason.UNKNOWN].
+ * Legacy reason category retained for existing rows. Counts do not prove rejection;
+ * platform copy must not claim absence or elapsed time establishes failure.
+ * New explicit rejections reset nullCount to zero.
  */
 fun failureReasonOf(broadcast: PendingBroadcastRecord?): TxFailureReason = when {
     broadcast == null -> TxFailureReason.UNKNOWN

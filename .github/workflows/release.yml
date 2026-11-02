@@ -4,12 +4,17 @@ on:
   workflow_dispatch:
     inputs:
       tag:
-        description: 'Existing release tag to build (must match v*)'
+        description: 'Existing release tag to build (v plus letters, digits, dots, underscores or hyphens)'
         required: true
         type: string
+      publish:
+        description: 'Publish a GitHub Release (leave off for artifact-only signed upgrade testing)'
+        required: false
+        type: boolean
+        default: false
 
 permissions:
-  contents: write
+  contents: read
 
 jobs:
   # Job 1: build the native library + UNSIGNED release APK. Runs the untrusted
@@ -32,7 +37,7 @@ jobs:
 
     steps:
       - name: Checkout release workflow branch
-        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           fetch-depth: 0
 
@@ -50,8 +55,8 @@ jobs:
             exit 1
           fi
 
-          if [[ "$RELEASE_TAG" != v* ]]; then
-            echo "::error::Release tag '$RELEASE_TAG' must match v*."
+          if [[ ! "$RELEASE_TAG" =~ ^v[0-9A-Za-z._-]+$ ]]; then
+            echo "::error::Release tag '$RELEASE_TAG' must use v followed by letters, digits, dots, underscores or hyphens."
             exit 1
           fi
 
@@ -84,13 +89,27 @@ jobs:
         # v1.7.0, pass the tag-provenance validation (which inspects
         # refs/tags/v1.7.0), and then have checkout resolve to the malicious
         # branch. SHAs are unambiguous and cannot be shadowed. (#291)
-        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           ref: ${{ steps.validate_tag.outputs.tag_commit }}
           fetch-depth: 0
 
+      - name: Require verified release inputs
+        # Historical tags without reviewed metadata must not bypass verification.
+        run: |
+          test -s android/gradle/verification-metadata.xml
+          grep -Eq '^distributionSha256Sum=[0-9a-f]{64}$' android/gradle/wrapper/gradle-wrapper.properties
+
+      - name: Validate Gradle wrapper
+        uses: gradle/actions/wrapper-validation@ed408507eac070d1f99cc633dbcf757c94c7933a # v4
+
+      - name: Isolate release build inputs
+        run: |
+          echo "GRADLE_USER_HOME=$(mktemp -d "$RUNNER_TEMP/release-gradle.XXXXXX")" >> "$GITHUB_ENV"
+          echo "CARGO_HOME=$(mktemp -d "$RUNNER_TEMP/release-cargo.XXXXXX")" >> "$GITHUB_ENV"
+
       - name: Set up JDK 17
-        uses: actions/setup-java@c1e323688fd81a25caa38c78aa6df2d33d3e20d9 # v4
+        uses: actions/setup-java@cf277c60eb25467037889841efdb72551f06f6c3 # v4
         with:
           java-version: '17'
           distribution: 'temurin'
@@ -113,32 +132,14 @@ jobs:
       - name: Export ANDROID_NDK_HOME
         env:
           NDK_PATH: ${{ steps.setup-ndk.outputs.ndk-path }}
-        run: echo "ANDROID_NDK_HOME=$NDK_PATH" >> $GITHUB_ENV
+        run: echo "ANDROID_NDK_HOME=$NDK_PATH" >> "$GITHUB_ENV"
 
-      - name: Set up Rust (stable + Android targets)
+      - name: Set up pinned Rust with Android targets
         # Two ABIs only — matches RUST_TARGETS in build-android-jni.sh.
-        uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30 # stable (pinned)
+        uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
         with:
+          toolchain: "1.95.0"
           targets: aarch64-linux-android,armv7-linux-androideabi
-
-      - name: Cache Cargo target
-        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
-        with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-            external/ckb-light-client/target
-          key: cargo-${{ hashFiles('external/ckb-light-client/Cargo.lock') }}
-          restore-keys: cargo-
-
-      - name: Cache Gradle
-        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
-        with:
-          path: |
-            ~/.gradle/caches
-            ~/.gradle/wrapper
-          key: gradle-${{ hashFiles('android/**/*.gradle.kts', 'android/gradle/libs.versions.toml') }}
-          restore-keys: gradle-
 
       - name: Write google-services.json
         env:
@@ -158,6 +159,17 @@ jobs:
             echo "::warning::GOOGLE_SERVICES_JSON secret not set — using dummy config. Firebase features will be non-functional."
           fi
 
+      - name: Require clean native rebuild and capture reviewed source
+        run: |
+          set -euo pipefail
+          rm -rf external/ckb-light-client/target android/app/src/main/jniLibs release-input
+          python3 tools/release/build_provenance.py prepare
+          {
+            rustc --version
+            java -version 2>&1
+            cat "$ANDROID_NDK_HOME/source.properties"
+          } > release-toolchains.txt
+
       - name: Build UNSIGNED release APK
         working-directory: android
         # No keystore here — the untrusted Cargo/Gradle build must not run in a
@@ -165,29 +177,23 @@ jobs:
         # baked into the APK so the in-app updater can pin future updates.
         env:
           RELEASE_CERT_SHA256: ${{ secrets.RELEASE_CERT_SHA256 }}
-        run: ./gradlew assembleRelease -PunsignedRelease=true
+        run: ./gradlew assembleRelease -PunsignedRelease=true --no-build-cache --dependency-verification=strict
 
-      - name: Verify native library is packaged
-        run: |
-          APK=$(find android/app/build/outputs/apk/release -name '*.apk' | head -1)
-          for abi in arm64-v8a armeabi-v7a; do
-            if ! unzip -l "$APK" | grep -q "lib/$abi/libckb_light_client_lib.so"; then
-              echo "::error::Release APK is missing lib/$abi/libckb_light_client_lib.so — the app will crash on JNI calls."
-              exit 1
-            fi
-          done
-          echo "Native library found in APK for both ABIs."
+      - name: Bind build evidence to unsigned APK and native outputs
+        run: python3 tools/release/build_provenance.py finish
 
-      - name: Upload unsigned APK
+      - name: Upload unsigned APK and data-only build provenance
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: unsigned-release-apk
-          path: android/app/build/outputs/apk/release/*.apk
+          path: |
+            release-input/unsigned.apk
+            release-input/build-provenance.json
           retention-days: 1
           if-no-files-found: error
 
   # Job 2: minimal, isolated signing. Holds the keystore, runs ONLY apksigner /
-  # zipalign (trusted Android SDK tools) — no Cargo, no Gradle, no app build.
+  # zipalign and trusted inline data verification — no release-tag code execution.
   sign:
     needs: build
     runs-on: ubuntu-latest
@@ -202,7 +208,7 @@ jobs:
           path: unsigned
 
       - name: Set up JDK 17
-        uses: actions/setup-java@c1e323688fd81a25caa38c78aa6df2d33d3e20d9 # v4
+        uses: actions/setup-java@cf277c60eb25467037889841efdb72551f06f6c3 # v4
         with:
           java-version: '17'
           distribution: 'temurin'
@@ -227,8 +233,9 @@ jobs:
           RELEASE_TAG: ${{ needs.build.outputs.release_tag }}
         run: |
           set -euo pipefail
-          BT="$(ls -d "$ANDROID_HOME"/build-tools/* | sort -V | tail -1)"
-          UNSIGNED="$(find unsigned -name '*.apk' | head -1)"
+          BT="$(find "$ANDROID_HOME/build-tools" -mindepth 1 -maxdepth 1 -type d | sort -V | tail -1)"
+          UNSIGNED="unsigned/unsigned.apk"
+          trap 'rm -f release.jks aligned.apk' EXIT
           OUT="PocketNode-${RELEASE_TAG}.apk"
 
           "$BT/zipalign" -f -p 4 "$UNSIGNED" aligned.apk
@@ -238,25 +245,127 @@ jobs:
             --key-pass "pass:${KEY_PASSWORD}" \
             --ks-key-alias "${KEY_ALIAS}" \
             --out "$OUT" aligned.apk
-          "$BT/apksigner" verify --print-certs "$OUT"
+          echo "Android build-tools: $(basename "$BT")"
+          # Verification output contains public certificate/key metadata only.
+          # pipefail preserves verification failures while retaining parse evidence.
+          "$BT/apksigner" verify --print-certs "$OUT" | tee verified-certificate.txt
 
           # Fail the release if the signing cert does not match the fingerprint
           # baked into the APK — otherwise the in-app updater would reject this
           # build for every existing user (URL/channel-substitution guard, #293).
-          ACTUAL="$("$BT/apksigner" verify --print-certs "$OUT" \
-            | awk -F': ' '/SHA-256 digest/{print $2; exit}' | tr 'A-F' 'a-f' | tr -d ': ')"
+          ACTUAL="$(awk -F': ' '/certificate SHA-256 digest:/ { if ($0 ~ /^(Signer #1 |V3[.]0 Signer: )certificate SHA-256 digest:/) print $NF; else print "invalid-certificate-label" }' verified-certificate.txt | tr 'A-F' 'a-f' | tr -d ': ')"
           EXPECTED="$(printf '%s' "${RELEASE_CERT_SHA256:-}" | tr 'A-F' 'a-f' | tr -d ': ')"
-          echo "signed cert SHA-256: $ACTUAL"
-          if [ -n "$EXPECTED" ] && [ "$ACTUAL" != "$EXPECTED" ]; then
-            echo "::error::Signing cert SHA-256 ($ACTUAL) != embedded RELEASE_CERT_SHA256 ($EXPECTED). In-app updater would reject this build."
+          # A certificate fingerprint is public, unlike the keystore/passwords.
+          # Print it only after format validation; never echo secret inputs.
+          if [[ ! "$ACTUAL" =~ ^[0-9a-f]{64}$ ]]; then
+            echo "::error::Could not parse a single SHA-256 signing certificate."
+            exit 1
+          fi
+          echo "APK signer SHA-256: $ACTUAL"
+          if [[ ! "$EXPECTED" =~ ^[0-9a-f]{64}$ ]]; then
+            echo "::error::Expected signing certificate must contain exactly 64 hexadecimal characters."
+            exit 1
+          fi
+          if [ "$ACTUAL" != "$EXPECTED" ]; then
+            echo "::error::APK signing certificate differs from the configured expected certificate."
             exit 1
           fi
 
-          rm -f release.jks aligned.apk
+      - name: Generate release verification artifacts
+        # Trusted workflow code only. Never execute scripts from the release tag
+        # or the downloaded build artifact in this secret-bearing job.
+        env:
+          RELEASE_TAG: ${{ needs.build.outputs.release_tag }}
+          SOURCE_COMMIT: ${{ needs.build.outputs.tag_commit }}
+          RELEASE_CERT_SHA256: ${{ secrets.RELEASE_CERT_SHA256 }}
+          BUILD_RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          python3 - <<'PYVERIFY'
+          import hashlib, json, os, re, zipfile
+          from pathlib import Path
+          def sha(path):
+              return hashlib.sha256(path.read_bytes()).hexdigest()
+          def native(path):
+              with zipfile.ZipFile(path) as apk:
+                  names = apk.namelist()
+                  if len(names) != len(set(names)):
+                      raise SystemExit('duplicate APK entries')
+                  return {n: hashlib.sha256(apk.read(n)).hexdigest() for n in names if n.startswith('lib/') and n.endswith('.so')}
+          tag = os.environ['RELEASE_TAG']
+          if not re.fullmatch(r'v[0-9A-Za-z._-]+', tag):
+              raise SystemExit('unsafe release artifact name')
+          signed = Path(f'PocketNode-{tag}.apk')
+          unsigned = Path('unsigned/unsigned.apk')
+          evidence_path = Path('unsigned/build-provenance.json')
+          if evidence_path.stat().st_size > 4 * 1024 * 1024:
+              raise SystemExit('oversized build evidence')
+          evidence = json.loads(evidence_path.read_text())
+          if evidence.get('schema_version') != 1 or evidence.get('source_commit') != os.environ['SOURCE_COMMIT']:
+              raise SystemExit('source commit/schema mismatch')
+          if evidence.get('unsigned_apk_sha256') != sha(unsigned):
+              raise SystemExit('unsigned APK digest mismatch')
+          packaged = native(signed)
+          if packaged != native(unsigned) or packaged != evidence.get('packaged_native_sha256'):
+              raise SystemExit('packaged native digest mismatch')
+          for abi in ('arm64-v8a', 'armeabi-v7a'):
+              if f'lib/{abi}/libckb_light_client_lib.so' not in packaged:
+                  raise SystemExit('missing native ABI')
+          # Accept the legacy label and the observed build-tools 37 label only.
+          # Count every certificate digest line so an extra/unknown signer fails closed.
+          lines = [line for line in Path('verified-certificate.txt').read_text().splitlines() if 'certificate SHA-256 digest:' in line]
+          certs = [match.group(1) for line in lines if (match := re.fullmatch(r'(?:Signer #1 |V3\.0 Signer: )certificate SHA-256 digest: ([0-9a-fA-F]{64})', line))]
+          if len(lines) != 1:
+              raise SystemExit('expected exactly one signing certificate')
+          expected = re.sub(r'[:\s]', '', os.environ['RELEASE_CERT_SHA256']).lower()
+          if len(certs) != 1 or not re.fullmatch('[0-9a-f]{64}', expected) or certs[0].lower() != expected:
+              raise SystemExit('verified signing certificate mismatch')
+          digest = sha(signed)
+          Path('SHA256SUMS').write_text(f'{digest}  {signed.name}\n')
+          Path('SIGNING-CERTIFICATE-SHA256.txt').write_text(expected + '\n')
+          manifest = {'schema_version': 1, 'release_tag': tag, 'source_commit': os.environ['SOURCE_COMMIT'],
+                      'build_run_url': os.environ['BUILD_RUN_URL'], 'apk': {'name': signed.name, 'sha256': digest},
+                      'signing_certificate_sha256': expected, 'packaged_native_sha256': packaged,
+                      'build_evidence_sha256': sha(evidence_path), 'build_evidence': evidence,
+                      'limitations': 'Build evidence is supplied by the untrusted build job. Colocated checksums are not independent authenticity proof; this is not an attestation or proof of reproducibility.'}
+          Path('release-provenance.json').write_text(json.dumps(manifest, sort_keys=True, indent=2) + '\n')
+          PYVERIFY
+
+      - name: Upload signed APK and verification bundle
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: signed-release-bundle
+          path: |
+            PocketNode-*.apk
+            SHA256SUMS
+            SIGNING-CERTIFICATE-SHA256.txt
+            release-provenance.json
+          retention-days: 1
+          if-no-files-found: error
+
+  # Job 3: repository-write capability is confined to publishing verified files.
+  # No checkout, build tools, signing environment, or signing secrets here.
+  publish:
+    if: ${{ inputs.publish == true }}
+    needs: [build, sign]
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: write
+
+    steps:
+      - name: Download signed APK and verification bundle
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: signed-release-bundle
 
       - name: Create GitHub Release
         uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2
         with:
           tag_name: ${{ needs.build.outputs.release_tag }}
-          files: PocketNode-*.apk
+          files: |
+            PocketNode-*.apk
+            SHA256SUMS
+            SIGNING-CERTIFICATE-SHA256.txt
+            release-provenance.json
+          fail_on_unmatched_files: true
           generate_release_notes: true

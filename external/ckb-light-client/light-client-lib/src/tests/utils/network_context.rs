@@ -14,9 +14,11 @@ use crate::protocols::{Status, StatusCode};
 
 struct MockProtocolContext {
     protocol: SupportProtocols,
+    on_send: RefCell<Option<Box<dyn FnOnce()>>>,
     sent_messages: RefCell<Vec<(ProtocolId, PeerIndex, P2pBytes)>>,
     banned_peers: RefCell<Vec<(PeerIndex, Duration, String)>>,
     connected_peers: RefCell<HashSet<PeerIndex>>,
+    disconnect_requests: RefCell<Vec<PeerIndex>>,
 }
 
 pub(crate) struct MockNetworkContext {
@@ -31,9 +33,11 @@ impl MockProtocolContext {
     fn new(protocol: SupportProtocols) -> Self {
         Self {
             protocol,
+            on_send: RefCell::new(None),
             sent_messages: Default::default(),
             banned_peers: Default::default(),
             connected_peers: Default::default(),
+            disconnect_requests: Default::default(),
         }
     }
 }
@@ -43,6 +47,14 @@ impl MockNetworkContext {
         let context = MockProtocolContext::new(protocol);
         let inner = Arc::new(context);
         Self { inner }
+    }
+
+    pub(crate) fn disconnect_requested(&self, peer: PeerIndex) -> bool {
+        self.inner.disconnect_requests.borrow().contains(&peer)
+    }
+
+    pub(crate) fn on_next_send(&self, callback: impl FnOnce() + 'static) {
+        *self.inner.on_send.borrow_mut() = Some(Box::new(callback));
     }
 
     pub(crate) fn sent_messages(&self) -> &RefCell<Vec<(ProtocolId, PeerIndex, P2pBytes)>> {
@@ -186,6 +198,9 @@ impl CKBProtocolContext for MockProtocolContext {
         peer_index: PeerIndex,
         data: P2pBytes,
     ) -> Result<(), Error> {
+        if let Some(callback) = self.on_send.borrow_mut().take() {
+            callback();
+        }
         self.sent_messages
             .borrow_mut()
             .push((proto_id, peer_index, data));
@@ -200,6 +215,7 @@ impl CKBProtocolContext for MockProtocolContext {
         unimplemented!();
     }
     fn disconnect(&self, peer_index: PeerIndex, _message: &str) -> Result<(), Error> {
+        self.disconnect_requests.borrow_mut().push(peer_index);
         self.connected_peers.borrow_mut().remove(&peer_index);
         Ok(())
     }

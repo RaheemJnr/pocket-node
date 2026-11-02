@@ -1,5 +1,6 @@
 use env_logger::{Builder, Target};
 use log::LevelFilter;
+use tempfile::TempDir;
 
 mod chain;
 mod network_context;
@@ -19,15 +20,11 @@ pub(crate) fn setup() {
     println!();
 }
 
-pub(crate) fn new_storage(prefix: &str) -> Storage {
-    // `Storage::new` opens its argument as the sqlite database *file*, mirroring
-    // `lifecycle::run` which joins "store.db" onto the configured data directory.
-    // Passing the bare tempdir here made every test open the directory itself as
-    // the db file (SqliteFailure(CannotOpen, 14)). `into_path()` also leaks the
-    // TempDir instead of deleting it when this function returns, which would
-    // otherwise remove the directory out from under the open sqlite connection
-    // (e.g. before WAL/SHM files get created on first write).
+/// Create a new storage for testing.
+/// Returns both the Storage and the TempDir to ensure the temp directory
+/// lives as long as the storage is being used.
+pub(crate) fn new_storage(prefix: &str) -> (Storage, TempDir) {
     let tmp_dir = tempfile::Builder::new().prefix(prefix).tempdir().unwrap();
-    let db_path = tmp_dir.into_path().join("store.db");
-    Storage::new(db_path)
+    let storage = Storage::new(tmp_dir.path().join("store.db"));
+    (storage, tmp_dir)
 }

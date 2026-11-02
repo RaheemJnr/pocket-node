@@ -86,7 +86,7 @@ class GatewayRepositorySelfTransferWiringTest {
         db = Room.inMemoryDatabaseBuilder(context, AppDatabase::class.java)
             .allowMainThreadQueries()
             .build()
-        cacheManager = CacheManager(db.transactionDao(), db.balanceCacheDao(), NoopLogger)
+        cacheManager = CacheManager(db.transactionDao(), db.balanceCacheDao(), NoopLogger, verificationCacheGate = com.rjnr.pocketnode.data.gateway.readyVerificationGate())
         transactionBuilder = TransactionBuilder(NetworkValidator())
 
         walletPreferences = WalletPreferences(context, NoopLogger)
@@ -138,6 +138,7 @@ class GatewayRepositorySelfTransferWiringTest {
             walletPreferences,
             json,
             NoopLogger,
+            inputAuthorizer = com.rjnr.pocketnode.data.send.NoDaoRecoveryAdoption,
         )
 
         repository = GatewayRepository(

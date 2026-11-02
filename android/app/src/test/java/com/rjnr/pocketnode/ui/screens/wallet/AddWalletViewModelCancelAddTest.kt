@@ -103,9 +103,8 @@ class AddWalletViewModelCancelAddTest {
         val migrationPrefs = context.getSharedPreferences("add_wallet_cancel_test_migration", Context.MODE_PRIVATE)
         migrationPrefs.edit().clear().commit()
         keyManager.keyStoreMigrationHelper = KeyStoreMigrationHelper(
-            db.keyMaterialDao(), encryptionManager, migrationPrefs, NoopLogger,
-        )
-        v2Helper = KeystoreV2MigrationHelper(db.keyMaterialDao(), encryptionManager, migrationPrefs, logger = NoopLogger)
+            db.keyMaterialDao(), encryptionManager, migrationPrefs, NoopLogger, database = db)
+        v2Helper = KeystoreV2MigrationHelper(db.keyMaterialDao(), encryptionManager, migrationPrefs, logger = NoopLogger, database = db)
         val discovery = SubAccountDiscovery(mm, keyManager)
         walletRepository = WalletRepository(
             db.walletDao(), keyManager, prefs, prefs, mm, db,

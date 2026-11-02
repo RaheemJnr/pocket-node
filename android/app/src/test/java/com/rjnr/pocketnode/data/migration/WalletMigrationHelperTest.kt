@@ -57,7 +57,7 @@ class WalletMigrationHelperTest {
         val encryptionManager = KeystoreEncryptionManager.createForTest()
         val migrationPrefs = context.getSharedPreferences("test_wallet_mig", Context.MODE_PRIVATE)
         migrationPrefs.edit().clear().commit()
-        keyStoreMigrationHelper = KeyStoreMigrationHelper(db.keyMaterialDao(), encryptionManager, migrationPrefs, NoopLogger)
+        keyStoreMigrationHelper = KeyStoreMigrationHelper(db.keyMaterialDao(), encryptionManager, migrationPrefs, NoopLogger, database = db)
         keyManager.keyStoreMigrationHelper = keyStoreMigrationHelper
         legacyPrefs = context.getSharedPreferences("ckb_wallet_prefs", Context.MODE_PRIVATE)
         legacyPrefs.edit().clear().commit()

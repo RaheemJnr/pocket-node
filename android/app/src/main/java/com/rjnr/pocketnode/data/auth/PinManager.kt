@@ -33,8 +33,8 @@ import javax.inject.Singleton
  *
  * The counter (and lockout state) live in EncryptedSharedPreferences, which
  * survive an app upgrade / overwrite install by design (#370). Resetting it
- * on reinstall would let an attacker sideload a build to clear the count and
- * keep brute-forcing, so it deliberately persists across upgrades. When
+ * on a normal signed upgrade would grant a fresh guessing budget, so version
+ * bookkeeping never clears it. When
  * attempts run out, the recovery path is "reset and restore from seed"
  * (surfaced by [com.rjnr.pocketnode.ui.screens.auth.PinEntryScreen], #373),
  * not a counter reset.
@@ -52,6 +52,8 @@ class PinManager @Inject constructor(
 ) {
     @VisibleForTesting
     internal var testPrefs: SharedPreferences? = null
+
+    private val walletStorage = com.rjnr.pocketnode.data.wallet.WalletStorageBoundary(context)
 
     private var backupChecker: (() -> Boolean)? = null
 
@@ -151,7 +153,9 @@ class PinManager @Inject constructor(
         get() = argon2Params.parallelism
         set(value) = setArgon2Params(argon2Params.copy(parallelism = value))
 
-    fun setPin(pin: String) {
+    /** Setup is create-only, including concurrent requests and both public input forms. */
+    fun setPin(pin: String) = walletStorage.readOrWriteFiles {
+        check(!uncertainChange && !policy.hasPin()) { "A PIN already exists. Setup cannot replace it." }
         // Deliberately wider than the policy's own check, which accepts only
         // ASCII 0-9 bytes: `Char.isDigit()` also passes Arabic-Indic and other
         // Unicode digits. The PIN keypad emits ASCII only, so in practice the
@@ -163,20 +167,124 @@ class PinManager @Inject constructor(
         policy.setPin(pin.toByteArray(Charsets.UTF_8))
     }
 
-    fun setPinFromChars(pin: CharArray) {
+    fun setPinFromChars(pin: CharArray) = walletStorage.readOrWriteFiles {
+        check(!uncertainChange && !policy.hasPin()) { "A PIN already exists. Setup cannot replace it." }
         require(pin.size == PIN_LENGTH && pin.all { it.isDigit() }) {
             "PIN must be exactly $PIN_LENGTH digits"
         }
         policy.setPin(charsToUtf8Bytes(pin))
     }
 
-    fun verifyPin(pin: String): Boolean = policy.verify(pin.toByteArray(Charsets.UTF_8))
+    internal class ChangeAuthorization internal constructor(
+        internal val owner: PinManager,
+        internal val auth: AuthManager,
+        internal val generation: Long,
+        internal val hash: String,
+        internal val salt: String?,
+        internal val version: Int?,
+    )
 
-    fun verifyPinFromChars(pin: CharArray): Boolean = policy.verify(charsToUtf8Bytes(pin))
+    internal enum class ChangeResult { CHANGED, REJECTED, FAILED_RESTORED, FAILED_UNCERTAIN }
 
-    fun hasPin(): Boolean = policy.hasPin()
+    // A failed write plus failed restoration has no trustworthy in-process credential outcome.
+    @Volatile private var uncertainChange = false
 
-    fun removePin(force: Boolean = false) {
+    internal fun hasUnconfirmedChange(): Boolean = uncertainChange
+
+    /** Fresh PIN proof can establish a PIN session after a biometric dashboard unlock. */
+    internal fun authorizeChange(pin: CharArray, auth: AuthManager, generation: Long): ChangeAuthorization? {
+        val verified = walletStorage.readOrWriteFiles {
+            if (uncertainChange || auth.sessionGeneration() != generation) return@readOrWriteFiles null
+            val bytes = charsToUtf8Bytes(pin)
+            val verified = try { policy.verify(bytes) } finally { bytes.fill(0) }
+            if (!verified) return@readOrWriteFiles null
+            ChangeAuthorization(this, auth, generation, store.getPinHash()!!,
+                prefs.getString(KEY_SALT, null), store.getKdfVersion())
+        } ?: return null
+        // Recheck the verifier and reset fence at publication, after releasing the verification
+        // lock. A reset/replacement/revocation winning this handoff cannot publish the old PIN.
+        val liveGeneration = auth.setSessionPinAndGetGenerationIfCurrent(pin, generation) {
+            !uncertainChange && !policy.isLockedOut() && sameVerifier(verified)
+        } ?: return null
+        return ChangeAuthorization(this, auth, liveGeneration, verified.hash, verified.salt, verified.version)
+    }
+
+    /** Stage without mutating storage; the short session claim is the authorization commit point. */
+    internal fun changePin(authorization: ChangeAuthorization, pin: CharArray): ChangeResult {
+        require(pin.size == PIN_LENGTH && pin.all { it in '0'..'9' }) { "PIN must be exactly six digits" }
+        if (!walletStorage.readOrWriteFiles { validChange(authorization) }) return ChangeResult.REJECTED
+        val salt = SecureRandomEntropySource.nextBytes(SALT_SIZE)
+        val bytes = charsToUtf8Bytes(pin)
+        val hash = try {
+            val output = Argon2id.hash(bytes, salt, argon2Params)
+            try { output.toHexStringNoPrefix() } finally { output.fill(0) }
+        } finally { bytes.fill(0) }
+        return try {
+            walletStorage.readOrWriteFiles {
+                if (!validChange(authorization)) return@readOrWriteFiles ChangeResult.REJECTED
+                val before = prefs.all.filterKeys { it in PIN_STATE_KEYS }
+                // Lock order is files -> session. Revocation must remain responsive during commit.
+                if (!authorization.auth.claimPinChange(authorization.generation)) return@readOrWriteFiles ChangeResult.REJECTED
+                val saved = runCatching {
+                    val editor = prefs.edit()
+                    PrefsEditor(editor).apply {
+                        pinHash(hash); salt(salt); kdfVersion(PinPolicy.KDF_VERSION_ARGON2ID)
+                        clearFailureState()
+                    }
+                    editor.commit()
+                }.getOrDefault(false)
+                if (saved) ChangeResult.CHANGED else {
+                    // SharedPreferences may publish in-memory values even when commit returns false.
+                    val restored = runCatching {
+                        val editor = prefs.edit()
+                        PIN_STATE_KEYS.forEach { editor.remove(it) }
+                        before.forEach { (key, value) ->
+                            when (value) {
+                                is String -> editor.putString(key, value)
+                                is Int -> editor.putInt(key, value)
+                                is Long -> editor.putLong(key, value)
+                            }
+                        }
+                        editor.commit()
+                    }.getOrDefault(false)
+                    uncertainChange = !restored
+                    if (restored) ChangeResult.FAILED_RESTORED else ChangeResult.FAILED_UNCERTAIN
+                }
+            }
+        } finally { salt.fill(0) }
+    }
+
+    private fun validChange(authorization: ChangeAuthorization): Boolean =
+        !uncertainChange && authorization.owner === this &&
+            authorization.auth.isSessionCurrent(authorization.generation) && !policy.isLockedOut() && sameVerifier(authorization)
+
+    private fun sameVerifier(authorization: ChangeAuthorization): Boolean =
+        authorization.hash == store.getPinHash() && authorization.salt == prefs.getString(KEY_SALT, null) &&
+            authorization.version == store.getKdfVersion()
+
+    // Verification may migrate a legacy hash, so it shares the replacement/reset writer fence.
+    fun verifyPin(pin: String): Boolean {
+        val chars = pin.toCharArray()
+        return try { verifyPinFromChars(chars) } finally { chars.fill('\u0000') }
+    }
+
+    fun verifyPinFromChars(pin: CharArray): Boolean = walletStorage.readOrWriteFiles {
+        if (uncertainChange) return@readOrWriteFiles false
+        val bytes = charsToUtf8Bytes(pin)
+        try { policy.verify(bytes) } finally { bytes.fill(0) }
+    }
+
+    fun hasPin(): Boolean = uncertainChange || policy.hasPin()
+
+    /** Reset has already verified every secret store empty; persist removal before process restart. */
+    internal fun removePinDurablyForReset() = walletStorage.files {
+        check(prefs.edit().remove(KEY_PIN_HASH).remove(KEY_SALT).remove(KEY_KDF_VERSION)
+            .remove(KEY_FAILED_ATTEMPTS).remove(KEY_LAST_FAILED_AT).remove(KEY_LOCKOUT_UNTIL).commit()) {
+            "PIN reset could not be persisted."
+        }
+    }
+
+    fun removePin(force: Boolean = false) = walletStorage.readOrWriteFiles {
         if (!force && backupChecker?.invoke() == true) {
             throw IllegalStateException(
                 "Cannot remove PIN while encrypted backup files exist. " +
@@ -184,18 +292,6 @@ class PinManager @Inject constructor(
             )
         }
         policy.removePin()
-    }
-
-    /**
-     * #370: clear the failed-attempt counter and any lockout, keeping the PIN
-     * itself. Called once after an overwrite install / version upgrade so a
-     * user who fumbled their PIN before upgrading is not still staring at "out
-     * of attempts" on the freshly upgraded build. Committed synchronously
-     * because the caller runs it during cold start, before the PIN gate reads
-     * the lockout state.
-     */
-    fun resetFailedAttempts() {
-        policy.resetFailedAttempts(durable = true)
     }
 
     fun getRemainingAttempts(): Int = policy.getRemainingAttempts()
@@ -318,15 +414,8 @@ class PinManager @Inject constructor(
         private const val KEY_FAILED_ATTEMPTS = "failed_attempts"
         private const val KEY_LAST_FAILED_AT = "last_failed_at"
         private const val KEY_LOCKOUT_UNTIL = "lockout_until"
+        private val PIN_STATE_KEYS = setOf(KEY_PIN_HASH, KEY_SALT, KEY_KDF_VERSION,
+            KEY_FAILED_ATTEMPTS, KEY_LAST_FAILED_AT, KEY_LOCKOUT_UNTIL)
 
-        /**
-         * #370: whether an overwrite install / version bump should reset the
-         * failed-attempt counter. True only on a genuine upgrade — a recorded
-         * previous version strictly below the current one. A fresh install
-         * (lastSeen 0) has no counter to reset; a same-version relaunch or a
-         * downgrade must not clear a legitimate lockout.
-         */
-        fun shouldResetAttemptsForUpgrade(lastSeen: Int, current: Int): Boolean =
-            lastSeen in 1 until current
     }
 }

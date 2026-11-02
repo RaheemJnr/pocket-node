@@ -19,6 +19,8 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -34,6 +36,7 @@ import com.composables.icons.lucide.KeyRound
 import com.composables.icons.lucide.Lucide
 import androidx.compose.material3.Icon
 import com.rjnr.pocketnode.ui.util.uaTestTag
+import androidx.hilt.lifecycle.viewmodel.compose.hiltViewModel
 
 private enum class Phase { INTRO, SETUP, CONFIRM }
 
@@ -46,16 +49,43 @@ private enum class Phase { INTRO, SETUP, CONFIRM }
  */
 @Composable
 fun InitialPinSetupScreen(
-    onPinCreated: () -> Unit
+    onPinCreated: () -> Unit,
+    onForgotPin: () -> Unit,
+    viewModel: PinViewModel = hiltViewModel()
 ) {
     var phase by rememberSaveable { mutableStateOf(Phase.INTRO) }
     var setupPin by remember { mutableStateOf<String?>(null) }
+    val pinState by viewModel.uiState.collectAsState()
+    // Observe async setup completion, including a credential persisted while stopped.
+    // Existence chooses VERIFY; only a live authenticated session can finish setup.
+    val hasPin = remember(pinState) { viewModel.hasPersistedPin() }
+    var completionSent by remember { mutableStateOf(false) }
+    val completeSetup = {
+        if (!completionSent && viewModel.canCompleteInitialSetup()) {
+            completionSent = true
+            onPinCreated()
+        }
+    }
+
+    if (hasPin) {
+        // The gate may have removed CONFIRM and restored its saved phase after fresh
+        // overlay auth. Never remount CONFIRM with its discarded candidate PIN.
+        LaunchedEffect(Unit) { completeSetup() }
+        PinEntryScreen(
+            mode = PinMode.VERIFY,
+            viewModel = viewModel,
+            onPinComplete = { completeSetup() },
+            onForgotPin = onForgotPin
+        )
+        return
+    }
 
     when (phase) {
         Phase.INTRO -> IntroContent(onContinue = { phase = Phase.SETUP })
 
         Phase.SETUP -> PinEntryScreen(
             mode = PinMode.SETUP,
+            viewModel = viewModel,
             onPinComplete = { pin ->
                 setupPin = pin
                 phase = Phase.CONFIRM
@@ -65,10 +95,10 @@ fun InitialPinSetupScreen(
 
         Phase.CONFIRM -> PinEntryScreen(
             mode = PinMode.CONFIRM,
+            viewModel = viewModel,
             setupPin = setupPin,
             onPinComplete = {
-                // PinViewModel already called pinManager.setPin() when CONFIRM matched.
-                onPinCreated()
+                completeSetup()
             },
             onNavigateBack = { phase = Phase.SETUP }
         )

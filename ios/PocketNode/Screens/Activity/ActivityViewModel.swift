@@ -151,6 +151,7 @@ final class ActivityViewModel {
 
     private let source: any ActivityPaging
     private let retryDelay: Duration
+    private let retryWait: @MainActor (Duration) async throws -> Void
     private var nextPageIndex = 0
     private var loadTask: Task<Void, Never>?
 
@@ -168,14 +169,18 @@ final class ActivityViewModel {
     ///   takes ``defaultRetryDelay``, whose product with
     ///   ``maxAutoRetries`` is the same half-minute `SyncService` gives the
     ///   node to start.
+    /// - Parameter retryWait: the cancellable wait; production sleeps for the
+    ///   supplied delay, while tests can hold a scheduled retry at an exact stage.
     init(
         source: any ActivityPaging,
         onRetry: RetryHandler? = nil,
-        retryDelay: Duration = ActivityViewModel.defaultRetryDelay
+        retryDelay: Duration = ActivityViewModel.defaultRetryDelay,
+        retryWait: @escaping @MainActor (Duration) async throws -> Void = { try await Task.sleep(for: $0) }
     ) {
         self.source = source
         self.onRetry = onRetry
         self.retryDelay = retryDelay
+        self.retryWait = retryWait
         // A broadcast row changing is the only thing that moves a row between
         // display states without the ledger row changing, so the loaded pages
         // are re-read rather than patched: the join lives in the shared feed
@@ -247,8 +252,9 @@ final class ActivityViewModel {
         }
         autoRetries += 1
         let delay = retryDelay
+        let wait = retryWait
         retryTask = Task { [weak self] in
-            try? await Task.sleep(for: delay)
+            try? await wait(delay)
             guard !Task.isCancelled else { return }
             self?.refresh()
         }

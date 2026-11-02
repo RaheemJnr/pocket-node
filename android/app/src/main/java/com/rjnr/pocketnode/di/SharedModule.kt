@@ -223,6 +223,7 @@ object SharedModule {
         uiPreferences: UiPreferences,
         json: Json,
         logger: Logger,
+        recovery: com.rjnr.pocketnode.data.gateway.DaoRecoveryCoordinator,
     ): SendPipeline = SendPipeline(
         lightClient,
         transactionBuilder,
@@ -234,6 +235,7 @@ object SharedModule {
         uiPreferences,
         json,
         logger,
+        inputAuthorizer = recovery,
         queryContext = Dispatchers.IO,
     )
 

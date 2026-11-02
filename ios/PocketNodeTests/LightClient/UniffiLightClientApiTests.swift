@@ -62,6 +62,13 @@ final class UniffiLightClientApiTests: XCTestCase {
         XCTAssertNil(api.getTransaction(hash: "0x00"))
     }
 
+    func testDedicatedRecoveryCallsFailClosedWithoutRunningNode() {
+        XCTAssertNil(api.requestDaoRecovery(txHash: "0x00"))
+        XCTAssertNil(api.pollDaoRecovery(requestId: "dr1.q.00"))
+        XCTAssertNil(api.validateDaoRecovery(requestId: "dr1.q.00", receiptId: "dr1.r.00"))
+        XCTAssertNil(api.cancelDaoRecovery(requestId: "dr1.q.00"))
+    }
+
     /// The exception to the null-on-failure contract. `bridge_core/rpc.rs`
     /// reports an uninitialised node and an unknown method *inside* a JSON-RPC
     /// 2.0 response, which the bridge returns as a success, so a caller that

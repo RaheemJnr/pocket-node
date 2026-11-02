@@ -44,6 +44,32 @@ class WalletPreferencesTest {
     }
 
     @Test
+    fun `network selection rejects failed durable commit even when memory changes`() {
+        val delegate = rawPrefs()
+        val failingContext = object : android.content.ContextWrapper(context) {
+            override fun getSharedPreferences(name: String, mode: Int): android.content.SharedPreferences =
+                object : android.content.SharedPreferences by delegate {
+                    override fun edit(): android.content.SharedPreferences.Editor {
+                        val editor = delegate.edit()
+                        return object : android.content.SharedPreferences.Editor by editor {
+                            override fun putString(key: String?, value: String?): android.content.SharedPreferences.Editor {
+                                editor.putString(key, value)
+                                return this
+                            }
+                            override fun commit(): Boolean {
+                                editor.apply()
+                                return false
+                            }
+                        }
+                    }
+                }
+        }
+        val prefs = WalletPreferences(failingContext, NoopLogger)
+        assertTrue(runCatching { prefs.setSelectedNetwork(NetworkType.TESTNET) }.exceptionOrNull() is IllegalStateException)
+        assertEquals(NetworkType.TESTNET, prefs.getSelectedNetwork())
+    }
+
+    @Test
     fun `getSelectedNetwork falls back to MAINNET for unrecognised stored value`() {
         rawPrefs().edit()
             .putString("selected_network", "UNKNOWN_NETWORK")

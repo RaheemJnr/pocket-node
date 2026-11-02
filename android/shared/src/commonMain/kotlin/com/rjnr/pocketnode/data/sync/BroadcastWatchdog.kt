@@ -5,7 +5,8 @@ import com.rjnr.pocketnode.core.time.Clock
 import com.rjnr.pocketnode.core.time.SystemClock
 import com.rjnr.pocketnode.data.gateway.LedgerReader
 import com.rjnr.pocketnode.data.gateway.TipSource
-import com.rjnr.pocketnode.data.storage.PendingBroadcastRecord
+import com.rjnr.pocketnode.data.send.hasSendInclusionFor
+import com.rjnr.pocketnode.data.gateway.models.TransactionStatusResponse
 import com.rjnr.pocketnode.data.storage.PendingBroadcastStore
 import com.rjnr.pocketnode.data.storage.TransactionStore
 import kotlinx.coroutines.CoroutineDispatcher
@@ -14,6 +15,12 @@ import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.ensureActive
+import kotlinx.coroutines.withTimeoutOrNull
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 
 /**
  * Drives `pending_broadcasts` rows to terminal states via the
@@ -45,6 +52,8 @@ class BroadcastWatchdog(
 ) {
 
     private val scope = CoroutineScope(SupervisorJob() + dispatcher)
+    private val checkMutex = Mutex()
+    private val lastPoll = mutableMapOf<String, Long>()
     private var tipJob: Job? = null
     private var fallbackJob: Job? = null
 
@@ -61,12 +70,13 @@ class BroadcastWatchdog(
             while (true) {
                 delay(FALLBACK_INTERVAL_MS)
                 if (!lifecycleProvider.isAtLeastStarted()) continue
-                runCatching {
+                try {
                     val tip = tipSource.fetchAndPublishTip()
                     val (walletId, network) = tipSource.activeWalletAndNetworkOrNull()
-                        ?: return@runCatching
+                        ?: continue
                     checkAll(currentTip = tip, walletId = walletId, network = network)
-                }.onFailure { logger.w(TAG, "fallback checkAll: ${it.message}") }
+                } catch (e: CancellationException) { throw e
+                } catch (e: Exception) { logger.w(TAG, "fallback checkAll: ${e.message}") }
             }
         }
     }
@@ -76,92 +86,66 @@ class BroadcastWatchdog(
         fallbackJob?.cancel(); fallbackJob = null
     }
 
-    /** Public for testability; not called directly by app code. */
-    suspend fun checkAll(currentTip: Long, walletId: String, network: String) {
-        val rows = pendingBroadcasts.getActive(walletId, network)
-        val now = clock.nowMs()
-        for (row in rows) {
-            // Per-row runCatching: cache-update-before-CAS can throw on a DB
-            // hiccup; we want the row to stay non-terminal AND we want sibling
-            // rows in the same pass to still be processed.
-            runCatching { processRow(row, currentTip, now) }
-                .onFailure { logger.w(TAG, "checkAll: row ${row.txHash} failed: ${it.message}") }
+    /** One serialized foreground pass. Height never establishes rejection. */
+    @Suppress("UNUSED_PARAMETER")
+    suspend fun checkAll(currentTip: Long, walletId: String, network: String) = checkMutex.withLock {
+        val context = walletId to network
+        fun isCurrent() = lifecycleProvider.isAtLeastStarted() && tipSource.activeWalletAndNetworkOrNull() == context
+        currentCoroutineContext().ensureActive()
+        if (!isCurrent()) return@withLock
+        val rows = try { pendingBroadcasts.getActive(walletId, network)
+        } catch (e: CancellationException) { throw e
+        } catch (e: Exception) {
+            logger.w(TAG, "Active broadcasts unavailable: ${e.message}")
+            return@withLock
         }
-    }
-
-    private suspend fun processRow(
-        row: PendingBroadcastRecord,
-        currentTip: Long,
-        now: Long
-    ) {
-        when (statusGateway.fetch(row.txHash)) {
-            is TxFetchResult.OnChain -> {
-                // Update cache BEFORE the terminal CAS: if the cache write throws,
-                // the pending row stays in non-terminal state and the watchdog
-                // retries on the next tick. Reverse order would drop the row from
-                // getActive() with a stale PENDING transactions row.
-                transactions.updateTransactionStatus(row.txHash, "CONFIRMED")
-                val ok = pendingBroadcasts.compareAndUpdateState(
-                    hash = row.txHash, expected = row.state,
-                    next = "CONFIRMED", now = now
-                )
-                if (ok == 1) {
-                    pendingBroadcasts.delete(row.txHash)
+        // Bound bookkeeping to currently active rows, not the lifetime history.
+        lastPoll.keys.retainAll(rows.map { it.txHash }.toSet())
+        for (row in rows) {
+            currentCoroutineContext().ensureActive()
+            if (!isCurrent()) return@withLock
+            val now = clock.nowMs()
+            val interval = if (now - row.createdAt >= SLOW_AFTER_MS) SLOW_INTERVAL_MS else FALLBACK_INTERVAL_MS
+            val last = lastPoll[row.txHash]
+            if (last != null && now >= last && now - last < interval) continue
+            lastPoll[row.txHash] = now
+            try {
+                val result = withTimeoutOrNull(LOOKUP_TIMEOUT_MS) { statusGateway.fetch(row.txHash) } ?: TxFetchResult.Exception
+                currentCoroutineContext().ensureActive()
+                if (!isCurrent()) return@withLock
+                val next = when (result) {
+                    is TxFetchResult.OnChain -> "CONFIRMED"
+                    TxFetchResult.Rejected -> "FAILED"
+                    TxFetchResult.InPool -> "BROADCAST"
+                    else -> row.state
                 }
-            }
-            TxFetchResult.InPool -> {
-                // In-pool past the commit window = network rejection masked by
-                // a stale local-mempool entry. CKB proposal+commit completes in
-                // ~12 blocks; if we're still in-pool at submitted+25 (~6.5 min)
-                // the chain has rejected the tx (e.g. double-spend, dependency
-                // on a tx that itself never landed). Mark FAILED so the user
-                // sees a terminal state and the retry CTA, instead of stuck-pending.
-                if (currentTip >= row.submittedAtTipBlock + BLOCK_TIMEOUT) {
-                    logger.w(TAG, "in-pool past +$BLOCK_TIMEOUT blocks for ${row.txHash} (submitted at ${row.submittedAtTipBlock}, tip $currentTip) — network rejected; marking FAILED")
-                    transactions.updateTransactionStatus(row.txHash, "FAILED")
-                    pendingBroadcasts.compareAndUpdateState(
-                        hash = row.txHash, expected = row.state,
-                        next = "FAILED", now = now
-                    )
-                } else {
-                    // Healthy in-pool — waiting for commit.
-                    if (row.state == "BROADCASTING") {
-                        pendingBroadcasts.compareAndUpdateState(row.txHash, "BROADCASTING", "BROADCAST", now)
-                    }
-                    if (row.nullCount != 0) {
-                        pendingBroadcasts.updateNullCount(row.txHash, 0, now)
-                    }
+                val count = when (result) {
+                    TxFetchResult.NotFound -> if (row.nullCount == Int.MAX_VALUE) Int.MAX_VALUE else row.nullCount + 1
+                    TxFetchResult.InPool, TxFetchResult.Rejected -> 0
+                    else -> row.nullCount
                 }
-            }
-            TxFetchResult.NotFound -> {
-                val newCount = row.nullCount + 1
-                pendingBroadcasts.updateNullCount(row.txHash, newCount, now)
-                if (newCount >= NULL_THRESHOLD &&
-                    currentTip >= row.submittedAtTipBlock + BLOCK_TIMEOUT
-                ) {
-                    transactions.updateTransactionStatus(row.txHash, "FAILED")
-                    pendingBroadcasts.compareAndUpdateState(
-                        hash = row.txHash, expected = row.state,
-                        next = "FAILED", now = now
-                    )
-                }
-            }
-            TxFetchResult.Exception -> {
-                logger.w(TAG, "fetch exception for ${row.txHash}; no state change")
+                pendingBroadcasts.reconcileObservation(row, next, count, clock.nowMs())
+            } catch (e: CancellationException) { throw e
+            } catch (e: Exception) {
+                logger.w(TAG, "checkAll: row ${row.txHash} failed: ${e.message}")
             }
         }
     }
 
     companion object {
         private const val TAG = "BroadcastWatchdog"
+        // Kept for legacy failure-reason compatibility; no longer a failure threshold.
         const val NULL_THRESHOLD = 3
-        const val BLOCK_TIMEOUT = 25L
         const val FALLBACK_INTERVAL_MS = 15_000L
+        const val SLOW_AFTER_MS = 360_000L
+        const val SLOW_INTERVAL_MS = 60_000L
+        const val LOOKUP_TIMEOUT_MS = 10_000L
     }
 }
 
 sealed class TxFetchResult {
     data class OnChain(val blockHash: String) : TxFetchResult()
+    data object Rejected : TxFetchResult()
     data object InPool : TxFetchResult()
     data object NotFound : TxFetchResult()
     data object Exception : TxFetchResult()
@@ -185,13 +169,18 @@ fun interface LifecycleProvider {
 class LedgerTransactionStatusGateway(
     private val ledger: LedgerReader,
 ) : TransactionStatusGateway {
-    override suspend fun fetch(hash: String): TxFetchResult = runCatching {
-        val resp = ledger.getTransactionStatus(hash).getOrNull()
-            ?: return TxFetchResult.NotFound
-        when {
-            resp.status == "unknown" -> TxFetchResult.NotFound
-            resp.blockHash != null -> TxFetchResult.OnChain(resp.blockHash!!)
-            else -> TxFetchResult.InPool
-        }
-    }.getOrElse { TxFetchResult.Exception }
+    override suspend fun fetch(hash: String): TxFetchResult = try {
+        ledger.getTransactionStatus(hash).getOrThrow().toBroadcastObservation(hash)
+    } catch (e: CancellationException) { throw e
+    } catch (_: Exception) { TxFetchResult.Exception }
+}
+
+/** Same inclusion boundary as foreground sends; unknown is not a rejection. */
+internal fun TransactionStatusResponse.toBroadcastObservation(hash: String): TxFetchResult = when {
+    txHash != hash -> TxFetchResult.Exception
+    hasSendInclusionFor(hash) -> TxFetchResult.OnChain(blockHash!!)
+    status == "rejected" -> TxFetchResult.Rejected
+    status == "unknown" -> TxFetchResult.NotFound
+    status == "pending" || status == "proposed" -> TxFetchResult.InPool
+    else -> TxFetchResult.Exception
 }

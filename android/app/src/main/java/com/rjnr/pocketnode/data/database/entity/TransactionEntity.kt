@@ -40,7 +40,7 @@ data class TransactionEntity(
     val confirmations: Int,
     val blockTimestampHex: String?,
     val network: String,
-    val status: String,       // "PENDING", "CONFIRMED", "FAILED"
+    val status: String,       // "PENDING", "CONFIRMED", "FAILED", "UNVERIFIED"
     val isLocal: Boolean,     // true = broadcast but not yet synced
     val cachedAt: Long,
     // MIGRATION_2_3 added this column with `DEFAULT ''`. Without the
@@ -52,20 +52,23 @@ data class TransactionEntity(
     // the detail sheet renders as "Pending". Every pre-v16 row starts null.
     @ColumnInfo(name = "fee_shannons") val feeShannons: Long? = null
 ) {
-    fun toTransactionRecord(): TransactionRecord = TransactionRecord(
-        txHash = txHash,
-        blockNumber = blockNumber,
-        blockHash = blockHash,
-        timestamp = timestamp,
-        balanceChange = balanceChange,
-        direction = direction,
-        fee = fee,
-        confirmations = confirmations,
-        blockTimestampHex = blockTimestampHex,
-        isDaoRelated = direction.startsWith("dao_"),
-        status = status,
-        feeShannons = feeShannons
-    )
+    fun toTransactionRecord(): TransactionRecord {
+        check(status != "UNVERIFIED") { "Chain evidence requires revalidation" }
+        return TransactionRecord(
+            txHash = txHash,
+            blockNumber = blockNumber,
+            blockHash = blockHash,
+            timestamp = timestamp,
+            balanceChange = balanceChange,
+            direction = direction,
+            fee = fee,
+            confirmations = confirmations,
+            blockTimestampHex = blockTimestampHex,
+            isDaoRelated = direction.startsWith("dao_"),
+            status = status,
+            feeShannons = feeShannons
+        )
+    }
 
     companion object {
         fun fromTransactionRecord(

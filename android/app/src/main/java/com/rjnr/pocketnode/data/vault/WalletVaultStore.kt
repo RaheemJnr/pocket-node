@@ -374,6 +374,7 @@ class WalletVaultStore(
         mutex.withLock {
             try {
                 db.withTransaction {
+                    db.walletStorage.requireOpen()
                     val result = block()
                     currentCoroutineContext().ensureActive()
                     result

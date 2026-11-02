@@ -23,6 +23,8 @@ data class DaoCellEntity(
     val depositBlockHash: String,
     val depositEpochHex: String?,
     val withdrawBlockNumber: Long?,
+    // Historical association locator when withdrawal epoch / deposit proof is absent.
+    // Only DaoCellMapping exposes a resolved pair; never use this field alone as proof.
     val withdrawBlockHash: String?,
     val withdrawEpochHex: String?,
     val compensation: Long,

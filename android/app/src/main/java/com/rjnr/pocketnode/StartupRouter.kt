@@ -18,11 +18,12 @@ package com.rjnr.pocketnode
  */
 object StartupRouter {
 
-    enum class Route { RECOVERY, ONBOARDING, PIN_SETUP, AUTH }
+    enum class Route { RESET_RETRY, RECOVERY, ONBOARDING, PIN_SETUP, AUTH }
 
     data class Decision(val route: Route, val recoveryPending: Boolean, val markedIncomplete: Boolean)
 
     suspend fun route(
+        resetPending: Boolean = false,
         corruptionFlag: Boolean,
         markerSet: Boolean,
         hasWallet: Boolean,
@@ -32,6 +33,7 @@ object StartupRouter {
         markIncomplete: () -> Unit,
         completeIfDone: suspend () -> Boolean,
     ): Decision {
+        if (resetPending) return Decision(Route.RESET_RETRY, recoveryPending = false, markedIncomplete = false)
         val rows = runCatching { walletRowCount() }.getOrNull()
         val missing = runCatching { missingWalletCount() }.getOrNull()
         val lostKeys = rows != null && rows > 0 && missing != null && missing > 0

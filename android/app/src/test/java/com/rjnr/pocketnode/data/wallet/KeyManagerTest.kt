@@ -58,7 +58,7 @@ class KeyManagerTest {
         val encryptionManager = KeystoreEncryptionManager.createForTest()
         val migrationPrefs = context.getSharedPreferences("test_migration", Context.MODE_PRIVATE)
         migrationPrefs.edit().clear().commit()
-        migrationHelper = KeyStoreMigrationHelper(db.keyMaterialDao(), encryptionManager, migrationPrefs, NoopLogger)
+        migrationHelper = KeyStoreMigrationHelper(db.keyMaterialDao(), encryptionManager, migrationPrefs, NoopLogger, database = db)
         keyManager.keyStoreMigrationHelper = migrationHelper
 
         keyManager.deleteWallet()
@@ -111,4 +111,28 @@ class KeyManagerTest {
         assertEquals(KeyManager.WALLET_TYPE_MNEMONIC, keyManager.getWalletType())
         assertFalse(keyManager.hasMnemonicBackup())
     }
+    @Test
+    fun `legacy metadata update never creates a PIN only backup`() = runTest {
+        val context = ApplicationProvider.getApplicationContext<Context>()
+        val directory = java.nio.file.Files.createTempDirectory("metadata-backups").toFile()
+        try {
+            val backup = com.rjnr.pocketnode.data.crypto.KeyBackupManager(directory, NoopLogger, keyManager.walletStorage).apply {
+                argon2Iterations = 1; argon2MemoryKb = 8; argon2Parallelism = 1
+            }
+            keyManager.setBackupManager(backup)
+            keyManager.setSessionPin("123456".toCharArray())
+            for (id in listOf("default", "legacy")) {
+                val prefs = context.getSharedPreferences("metadata-$id", Context.MODE_PRIVATE)
+                prefs.edit().putString("private_key", "ab".repeat(32))
+                    .putString("mnemonic_words", testMnemonic.joinToString(" "))
+                    .putString("wallet_type", "mnemonic").commit()
+                if (id == "default") keyManager.testPrefs = prefs else keyManager.testWalletPrefs[id] = prefs
+                if (id == "default") keyManager.setMnemonicBackedUp(true) else keyManager.setMnemonicBackedUpForWallet(id, true)
+                assertTrue(prefs.getBoolean("mnemonic_backed_up", false))
+                assertFalse("Metadata must not mint offline-guessable ciphertext", backup.hasAnyBackups())
+                assertEquals("ab".repeat(32), prefs.getString("private_key", null))
+            }
+        } finally { directory.deleteRecursively() }
+    }
+
 }

@@ -64,6 +64,6 @@ final class ScannerUITests: XCTestCase {
         let recipient = app.textFields["send.recipient"]
         XCTAssertTrue(recipient.waitForExistence(timeout: 15), "the scanner did not dismiss")
         XCTAssertEqual(recipient.value as? String, M3UITest.testnetAddress)
-        XCTAssertEqual(M3UITest.label("send.addressState", in: app), "Valid CKB testnet address")
+        XCTAssertEqual(M3UITest.label("send.addressState", in: app), "Recognized address format")
     }
 }

@@ -79,6 +79,11 @@ class SecuritySettingsViewModel @Inject constructor(
     }
 
     fun executePendingAction() {
+        // Saved route results are UI signals, never credentials.
+        if (!authManager.hasSessionPin()) {
+            savedStateHandle.remove<String>(KEY_PENDING_ACTION)
+            return
+        }
         val action = savedStateHandle.get<String>(KEY_PENDING_ACTION)?.let {
             runCatching { PendingSecurityAction.valueOf(it) }.getOrNull()
         }
@@ -187,6 +192,10 @@ class SecuritySettingsViewModel @Inject constructor(
 
     /** Called from the warning dialog when the user accepts the trade-off. */
     fun confirmBiometricEnrollmentWarning() {
+        if (!authManager.hasSessionPin()) {
+            _uiState.update { it.copy(biometricEnrollmentWarning = null) }
+            return
+        }
         val warning = _uiState.value.biometricEnrollmentWarning ?: return
         applyBiometricToggle(warning.enabling)
         _uiState.update { it.copy(biometricEnrollmentWarning = null) }
@@ -197,6 +206,7 @@ class SecuritySettingsViewModel @Inject constructor(
     }
 
     private fun applyBiometricToggle(enabled: Boolean) {
+        if (!authManager.hasSessionPin()) return
         authManager.setBiometricEnabled(enabled)
         _uiState.update { it.copy(isBiometricEnabled = enabled, error = null) }
     }
@@ -210,6 +220,7 @@ class SecuritySettingsViewModel @Inject constructor(
                 }
                 return@launch
             }
+            if (!authManager.hasSessionPin()) return@launch
             pinManager.removePin()
             authManager.setBiometricEnabled(false)
             authManager.setAuthBeforeSendEnabled(false)

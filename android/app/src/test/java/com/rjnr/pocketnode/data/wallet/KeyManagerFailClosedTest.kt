@@ -53,8 +53,7 @@ class KeyManagerFailClosedTest {
             db.keyMaterialDao(),
             KeystoreEncryptionManager.createForTest(),
             migrationPrefs,
-            NoopLogger,
-        )
+            NoopLogger, database = db)
         keyManager = KeyManager(context, MnemonicManager(), NoopLogger)
         keyManager.keyStoreMigrationHelper = migrationHelper
     }

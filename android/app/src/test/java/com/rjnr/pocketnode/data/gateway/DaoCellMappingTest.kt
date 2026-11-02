@@ -41,7 +41,7 @@ class DaoCellMappingTest {
         assertEquals(original.capacity, entity.capacity)
         assertEquals(original.depositBlockNumber, entity.depositBlockNumber)
 
-        val back = entity.toOutsideWindowDeposit()
+        val back = entity.toUnverifiedCacheProjection()
         assertEquals(original.outPoint, back.outPoint)
         assertEquals(original.capacity, back.capacity)
         assertEquals(original.status, back.status)
@@ -54,13 +54,13 @@ class DaoCellMappingTest {
     fun `unknown status string degrades to DEPOSITED not crash`() {
         val entity = deposit().toDaoCellEntity("MAINNET", "w1", 0L)
             .copy(status = "SOMETHING_FUTURE")
-        assertEquals(DaoCellStatus.DEPOSITED, entity.toOutsideWindowDeposit().status)
+        assertEquals(DaoCellStatus.DEPOSITED, entity.toUnverifiedCacheProjection().status)
     }
 
     @Test
     fun `malformed epoch hex degrades to null`() {
         val entity = deposit().toDaoCellEntity("MAINNET", "w1", 0L)
             .copy(depositEpochHex = "0xZZ")
-        assertNull(entity.toOutsideWindowDeposit().depositEpoch)
+        assertNull(entity.toUnverifiedCacheProjection().depositEpoch)
     }
 }

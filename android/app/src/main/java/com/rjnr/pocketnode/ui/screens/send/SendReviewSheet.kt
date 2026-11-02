@@ -1,14 +1,19 @@
 package com.rjnr.pocketnode.ui.screens.send
 
-import androidx.compose.foundation.selection.toggleable
+import com.rjnr.pocketnode.data.send.DestinationAssessment
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.widthIn
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.selection.toggleable
+import androidx.compose.foundation.text.selection.SelectionContainer
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.Checkbox
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.HorizontalDivider
@@ -32,7 +37,6 @@ import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import com.rjnr.pocketnode.R
 import com.rjnr.pocketnode.core.format.formatCkbTrimmed
-import com.rjnr.pocketnode.ui.util.truncateAddress
 import java.math.BigDecimal
 import java.math.RoundingMode
 import java.util.Locale
@@ -65,6 +69,7 @@ fun SendReviewSheet(
             modifier = Modifier
                 .fillMaxWidth()
                 .widthIn(max = com.rjnr.pocketnode.ui.util.centredContentMaxWidth())
+                .verticalScroll(rememberScrollState())
                 .padding(horizontal = 24.dp)
                 .padding(bottom = 32.dp),
         ) {
@@ -91,15 +96,22 @@ fun SendReviewSheet(
                         review.recipientCount,
                     ),
                 )
+                // Use the same frozen ordered outputs that will be signed,
+                // including recipients from every batch.
+                review.transfers.forEach { transfer ->
+                    transfer.recipients.forEachIndexed { index, recipient ->
+                        Spacer(Modifier.height(16.dp))
+                        ReviewRecipient(address = recipient.address, assessment = transfer.destinationAssessments[index])
+                        Spacer(Modifier.height(8.dp))
+                        ReviewRow(
+                            label = stringResource(R.string.send_review_amount),
+                            value = stringResource(R.string.send_review_ckb, formatReviewCkb(recipient.amountShannons)),
+                        )
+                    }
+                }
             } else {
-                ReviewRow(
-                    label = stringResource(R.string.send_review_recipient),
-                    value = review.recipientName ?: review.recipientAddress.truncateAddress(),
-                    // The name answers "who"; the address answers "exactly
-                    // which" — a review that hides one of them is not a review.
-                    secondary = review.recipientName?.let { review.recipientAddress.truncateAddress() },
-                    monospaceValue = review.recipientName == null,
-                )
+                ReviewRecipient(address = review.recipientAddress, name = review.recipientName,
+                    assessment = review.transfers.singleOrNull()?.destinationAssessments?.singleOrNull())
             }
 
             Spacer(Modifier.height(12.dp))
@@ -148,7 +160,7 @@ fun SendReviewSheet(
                     onClick = onCancel,
                     modifier = Modifier
                         .weight(1f)
-                        .height(52.dp),
+                        .heightIn(min = 52.dp),
                 ) {
                     Text(stringResource(R.string.send_review_cancel))
                 }
@@ -159,7 +171,7 @@ fun SendReviewSheet(
                     enabled = !review.isNearlyFullBalance || sweepWarningAcknowledged,
                     modifier = Modifier
                         .weight(1f)
-                        .height(52.dp),
+                        .heightIn(min = 52.dp),
                 ) {
                     Text(stringResource(R.string.send_review_confirm))
                 }
@@ -224,12 +236,37 @@ private fun SweepWarning(
     }
 }
 
+/** Keep the destination on its own full-width line, even for a named contact. */
+@Composable
+private fun ReviewRecipient(address: String, name: String? = null, assessment: DestinationAssessment? = null) {
+    Column(modifier = Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+        Text(
+            text = stringResource(R.string.send_review_recipient),
+            style = MaterialTheme.typography.bodyMedium,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+        if (name != null) {
+            Text(text = name, style = MaterialTheme.typography.bodyMedium, fontWeight = FontWeight.Medium)
+        }
+        SelectionContainer {
+            Text(
+                text = address,
+                style = MaterialTheme.typography.bodyMedium,
+                fontFamily = FontFamily.Monospace,
+                modifier = Modifier.fillMaxWidth(),
+            )
+        }
+        if (assessment?.isCustom == true) {
+            Text(assessment.message, style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.error)
+        }
+    }
+}
+
 @Composable
 private fun ReviewRow(
     label: String,
     value: String,
-    secondary: String? = null,
-    monospaceValue: Boolean = false,
     emphasised: Boolean = false,
 ) {
     Row(
@@ -251,18 +288,8 @@ private fun ReviewRow(
                     MaterialTheme.typography.bodyMedium
                 },
                 fontWeight = if (emphasised) FontWeight.Bold else FontWeight.Medium,
-                fontFamily = if (monospaceValue) FontFamily.Monospace else null,
                 textAlign = TextAlign.End,
             )
-            if (secondary != null) {
-                Text(
-                    text = secondary,
-                    style = MaterialTheme.typography.bodySmall,
-                    fontFamily = FontFamily.Monospace,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    textAlign = TextAlign.End,
-                )
-            }
         }
     }
 }

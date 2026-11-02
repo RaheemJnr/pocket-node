@@ -74,7 +74,7 @@ class KeyBackupCompatibilityTest {
 
     @Test
     fun `restores a v2 backup blob written by the old BouncyCastle KDF`() {
-        val manager = KeyBackupManager(tempDir.root, NoopLogger)
+        val manager = KeyBackupManager(tempDir.root, NoopLogger, com.rjnr.pocketnode.data.wallet.WalletStorageBoundary(androidx.test.core.app.ApplicationProvider.getApplicationContext()))
         val blob = FIXTURE_HEX.hexToByteArray()
         java.io.File(tempDir.root, "fixture.enc").writeBytes(blob)
 

@@ -33,8 +33,7 @@ class DaoSyncManagerTest {
             db.daoCellDao(),
             db.pendingDaoWithdrawDao(),
             db.pendingDaoUnlockDao(),
-            NoopLogger,
-        )
+            NoopLogger, verificationCacheGate = com.rjnr.pocketnode.data.gateway.readyVerificationGate())
     }
 
     @After

@@ -1,5 +1,7 @@
 package com.rjnr.pocketnode.ui.screens.recovery
 
+import com.rjnr.pocketnode.data.crypto.writeBackup
+
 import com.rjnr.pocketnode.core.log.NoopLogger
 import com.rjnr.pocketnode.data.wallet.*
 import com.rjnr.pocketnode.data.vault.*

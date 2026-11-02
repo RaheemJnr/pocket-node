@@ -1,0 +1,2 @@
+# Generated unified diffs contain significant whitespace and blank context lines.
+tools/embedded-client/mobile.patch -whitespace

@@ -97,7 +97,7 @@ class WalletKeyReader @Inject constructor(
                     backedUp, access.backupWitness)
             }
             VaultAccessResult.Cancelled -> MaterialResult.Cancelled
-            VaultAccessResult.CleanupRequired -> MaterialResult.NotAvailable("Wallet protection is saved, but legacy backup cleanup needs a retry. Unlock again to finish.")
+            VaultAccessResult.CleanupRequired -> MaterialResult.NotAvailable("Wallet protection is saved, but this wallet remains blocked by retained legacy sources. Retry in wallet recovery if a source becomes readable. Unreadable or conflicting sources may prevent cleanup indefinitely. Keep all recovery phrases and backups; this screen cannot discard an unknown source.")
             VaultAccessResult.NoVault -> unavailable(walletId, "Wallet vault is missing. Recover with an independent backup.")
             is VaultAccessResult.Unavailable -> MaterialResult.NotAvailable(access.reason, access.kind)
         }

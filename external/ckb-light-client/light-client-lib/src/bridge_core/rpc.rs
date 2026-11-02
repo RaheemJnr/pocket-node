@@ -5,6 +5,7 @@
 //! reported *inside* that response (as a JSON-RPC `error` object), not as a
 //! transport failure — only serializing the response can fail outright.
 
+use crate::storage::LightClientStorage;
 use super::error::BridgeError;
 use super::types::*;
 use crate::service::ScriptStatus;
@@ -63,6 +64,7 @@ pub fn call_rpc(method: &str) -> Result<String, BridgeError> {
 
     // Handle different RPC methods
     match method {
+        "get_verification_epoch" => rpc_response(super::verification_epoch::read(swc.storage())?),
         "get_peers" => {
             // Get network controller
             let net_ctrl = match NET_CONTROL.get() {

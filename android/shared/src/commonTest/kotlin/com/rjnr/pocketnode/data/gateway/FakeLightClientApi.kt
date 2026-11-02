@@ -144,6 +144,8 @@ open class FakeLightClientApi : LightClientApi {
         cursor: String?
     ): String? = next("getCells", searchKeyJson, order, limit, cursor)
 
+    override fun getHistorySnapshot(scriptJson: String): String? = next("getHistorySnapshot", scriptJson)
+
     override fun getTransactions(
         searchKeyJson: String,
         order: String,
@@ -163,6 +165,11 @@ open class FakeLightClientApi : LightClientApi {
     override fun fetchTransaction(hash: String): String? = next("fetchTransaction", hash)
 
     override fun estimateCycles(txJson: String): String? = next("estimateCycles", txJson)
+
+    override fun requestDaoRecovery(txHash: String): String? = next("requestDaoRecovery", txHash)
+    override fun pollDaoRecovery(requestId: String): String? = next("pollDaoRecovery", requestId)
+    override fun validateDaoRecovery(requestId: String, receiptId: String): String? = next("validateDaoRecovery", requestId, receiptId)
+    override fun cancelDaoRecovery(requestId: String): String? = next("cancelDaoRecovery", requestId)
 
     // ---- Node info ----
 

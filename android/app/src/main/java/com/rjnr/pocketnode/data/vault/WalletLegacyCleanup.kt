@@ -64,8 +64,11 @@ class WalletLegacyCleanup(
                 if (authenticated == null && !acknowledged || authenticated != null && !preserved(authenticated)) return@withContext false
             }
             val scopedReadable = scopedArchive?.let { legacy.legacySourceForVaultCleanup(it) }
-            if (scopedReadable != null && addresses(scopedReadable.privateKeyHex) == identity &&
-                scopedReadable.mnemonic != null && scopedReadable.mnemonic != verifiedMaterial.mnemonic) return@withContext false
+            // A scoped namespace does not prove the archive's identity or seed capability.
+            // In particular, a temporary V1 read failure must not retire a recoverable seed.
+            if (scopedArchive?.kdfVersion == 1 && (scopedReadable == null ||
+                addresses(scopedReadable.privateKeyHex) != identity ||
+                scopedReadable.mnemonic != null && scopedReadable.mnemonic != verifiedMaterial.mnemonic)) return@withContext false
             val scopedBackup = backup.cleanupSnapshot(walletId)
             // A readable row proves only its own capabilities, never opaque backup contents.
             if (scopedBackup.any { it != null } && witnessed[walletId] == null) return@withContext false
@@ -112,6 +115,7 @@ class WalletLegacyCleanup(
             if (ownsDefault && source?.kdfVersion == 1 && decoded == null) return@withContext false
 
             db.withTransaction {
+                db.walletStorage.requireOpen()
                 val current = vaults.get(walletId)
                 if (keyManager.preferenceCleanupSnapshot(walletId) != scopedFiles ||
                     keyManager.preferencesForVaultCleanup(walletId) != scopedPreferences) return@withTransaction false
@@ -146,7 +150,7 @@ class WalletLegacyCleanup(
         return try { WalletDerivation.walletInfo(key).let { it.mainnetAddress to it.testnetAddress } } finally { key.fill(0) }
     }
     private fun preferenceFiles(id: String): List<File> {
-        val name = if (id == "default") "ckb_wallet_keys" else "ckb_wallet_keys_$id"
+        val name = com.rjnr.pocketnode.data.wallet.LegacyWalletNamespace.preferences(id)
         val file = File(context.filesDir.parentFile, "shared_prefs/$name.xml")
         return listOf(file, File(file.path + ".bak"))
     }
@@ -161,7 +165,7 @@ class WalletLegacyCleanup(
         digest.digest().joinToString("") { "%02x".format(it) }
     }
     private fun deletePreferences(id: String): Boolean {
-        val name = if (id == "default") "ckb_wallet_keys" else "ckb_wallet_keys_$id"
+        val name = com.rjnr.pocketnode.data.wallet.LegacyWalletNamespace.preferences(id)
         if (preferenceFiles(id).any { it.exists() }) context.deleteSharedPreferences(name)
         return preferenceFiles(id).none { it.exists() }
     }

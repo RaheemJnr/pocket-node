@@ -41,6 +41,7 @@ final class ActivityService: ActivityPaging {
 
     private let feed: ActivityFeed
     private let walletId: String
+    private let ensureVerified: @MainActor () async throws -> Void
 
     /// The wallet's lock script on this network. The shared reader takes it
     /// rather than deriving one, and refuses with "No wallet" when it is nil,
@@ -51,7 +52,8 @@ final class ActivityService: ActivityPaging {
     @ObservationIgnored private nonisolated(unsafe) var broadcastObservation: Task<Void, Never>?
     @ObservationIgnored private var broadcastHandler: (@MainActor () -> Void)?
 
-    init(feed: ActivityFeed, walletId: String, script: Script?, network: NetworkType) {
+    init(feed: ActivityFeed, walletId: String, script: Script?, network: NetworkType, ensureVerified: @escaping @MainActor () async throws -> Void) {
+        self.ensureVerified = ensureVerified
         self.feed = feed
         self.walletId = walletId
         self.script = script
@@ -63,6 +65,7 @@ final class ActivityService: ActivityPaging {
     }
 
     func refreshHistory() async throws {
+        try await ensureVerified()
         try await feed.refresh(
             activeScript: script,
             walletId: walletId,
@@ -71,12 +74,15 @@ final class ActivityService: ActivityPaging {
     }
 
     func page(filter: ActivityFilter, pageIndex: Int) async throws -> [ActivityItem] {
-        try await feed.page(
+        try await ensureVerified()
+        let items = try await feed.page(
             filter: filter,
             walletId: walletId,
             network: network,
             pageIndex: Int32(pageIndex)
         )
+        try await ensureVerified()
+        return items
     }
 
     /// Mirrors the feed's broadcast `StateFlow` onto [handler].

@@ -27,14 +27,14 @@ final class SendUITests: XCTestCase {
 
         Self.clear(recipient, in: app)
         recipient.typeText(M3UITest.testnetAddress)
-        M3UITest.assertLabel("send.addressState", equals: "Valid CKB testnet address", in: app)
+        M3UITest.assertLabel("send.addressState", equals: "Recognized address format", in: app)
     }
 
     /// The shared sanitiser drops a ninth decimal as it is typed, and the field
     /// shows what the model kept rather than what was typed.
     ///
     /// The second half is what only a running screen can prove. The model's
-    /// truncation is already pinned by `SendViewModelTests`; that the field is
+    /// excess precision rejection is already pinned by `SendViewModelTests`; that the field is
     /// actually redrawn to match is a property of `SendView.amountText`, and a
     /// plain sanitising `Binding` does not have it.
     func testATypedNinthDecimalIsDroppedFromTheField() throws {
@@ -133,7 +133,7 @@ final class SendUITests: XCTestCase {
             app.textFields["send.recipient"].waitForExistence(timeout: 15),
             "the scanner did not dismiss"
         )
-        M3UITest.assertLabel("send.addressState", equals: "Valid CKB testnet address", in: app)
+        M3UITest.assertLabel("send.addressState", equals: "Recognized address format", in: app)
     }
 
     // MARK: - Helpers

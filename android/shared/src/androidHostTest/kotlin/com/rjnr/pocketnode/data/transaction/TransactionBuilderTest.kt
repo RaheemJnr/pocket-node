@@ -192,11 +192,7 @@ class TransactionBuilderTest {
                 outPoint = OutPoint(txHash = txHash, index = index),
                 capacity = capacity,
                 blockNumber = "0x100",
-                lock = Script(
-                    codeHash = Script.SECP256K1_CODE_HASH,
-                    hashType = "type",
-                    args = "0x" + "ab".repeat(20)
-                ),
+                lock = TESTNET_SCRIPT,
                 type = null,
                 data = "0x"
             )

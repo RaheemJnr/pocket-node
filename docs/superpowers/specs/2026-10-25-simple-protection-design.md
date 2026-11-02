@@ -1,2 +1,0 @@
-# Simplified wallet protection
-User approved simplified.html on 2026-10-25. Use four overview rows (wallet passphrase, unlock method, app lock, recovery & backup), short sheets for choices, dedicated local sections for app lock and recovery, and a short backup reminder. Keep existing authentication/secret entry, backup retention, cancellation and recovery gates. No overall Protected badge without verified structured state. Existing backend error/status messages stay visible. Backup selection routes by wallet ID; recovery opens the existing recovery screen. No release build.

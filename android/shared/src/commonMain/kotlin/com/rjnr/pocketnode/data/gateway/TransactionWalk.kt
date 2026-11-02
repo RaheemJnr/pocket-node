@@ -20,11 +20,13 @@ import com.rjnr.pocketnode.data.gateway.models.JniTxWithCell
  * rather than only through the ~20-dependency GatewayRepository.
  */
 
-/** Outcome of a paginated walk. [hitCap] is true when the runaway guard bounded it. */
+/** Transport outcome only. [complete] never proves canonical membership or restore coverage. */
 data class WalkResult<T>(
     val items: List<T>,
     val pagesWalked: Int,
     val hitCap: Boolean,
+    /** Transport exhaustion only; never canonical chain or restore-horizon evidence. */
+    val complete: Boolean = false,
 )
 
 /**
@@ -45,7 +47,8 @@ suspend fun <T> walkAllPages(
         val page = fetchPage(cursor) ?: break
         all.addAll(page.objects)
         pages++
-        if (page.objects.isEmpty() || page.objects.size < pageLimit || page.lastCursor.isNullOrEmpty()) break
+        if (page.objects.size < pageLimit) return WalkResult(all, pages, false, true)
+        if (page.lastCursor.isNullOrEmpty()) return WalkResult(all, pages, false, false)
         cursor = page.lastCursor
     }
     return WalkResult(all, pages, pages >= maxPages)

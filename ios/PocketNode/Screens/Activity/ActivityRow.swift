@@ -51,82 +51,85 @@ struct ActivityRow: View {
         let colors = TxStatusColors.forState(item.displayState, theme: theme)
         let isFailed = item.displayState == TxDisplayState.failed
 
-        HStack(spacing: 0) {
-            if item.isInFlight || isFailed {
-                RoundedRectangle(cornerRadius: 2)
-                    .fill(colors.foreground)
-                    .frame(width: 3, height: 36)
-                    .padding(.trailing, 9)
-            }
+        VStack(alignment: .leading, spacing: 8) {
+            HStack(spacing: 0) {
+                if item.isInFlight || isFailed {
+                    RoundedRectangle(cornerRadius: 2)
+                        .fill(colors.foreground)
+                        .frame(width: 3, height: 36)
+                        .padding(.trailing, 9)
+                }
 
-            ZStack {
-                Circle().fill(style.color.opacity(0.15))
-                Image(systemName: style.systemImage)
-                    .font(.footnote.weight(.semibold))
-                    .foregroundStyle(style.color)
-            }
-            .frame(width: 40, height: 40)
+                ZStack {
+                    Circle().fill(style.color.opacity(0.15))
+                    Image(systemName: style.systemImage)
+                        .font(.footnote.weight(.semibold))
+                        .foregroundStyle(style.color)
+                }
+                .frame(width: 40, height: 40)
 
-            VStack(alignment: .leading, spacing: 2) {
-                HStack(spacing: 6) {
-                    Text(ActivityCopy.typeLabel(record))
-                        .font(.subheadline.weight(.medium))
+                VStack(alignment: .leading, spacing: 2) {
+                    HStack(spacing: 6) {
+                        Text(ActivityCopy.typeLabel(record))
+                            .font(.subheadline.weight(.medium))
 
-                    if isFailed || item.isInFlight {
-                        TransactionStatusChip(
-                            state: item.displayState,
-                            elapsed: elapsed,
-                            theme: theme,
-                            compact: true
-                        )
-                    }
-
-                    if item.isBulk {
-                        Text("Bulk")
-                            .font(.caption2)
-                            .foregroundStyle(theme.primary)
-                            .padding(.horizontal, 6)
-                            .padding(.vertical, 2)
-                            .background(
-                                theme.primary.opacity(0.15),
-                                in: RoundedRectangle(cornerRadius: 4)
+                        if isFailed || item.isInFlight {
+                            TransactionStatusChip(
+                                state: item.displayState,
+                                elapsed: elapsed,
+                                theme: theme,
+                                compact: true
                             )
+                        }
+
+                        if item.isBulk {
+                            Text("Bulk")
+                                .font(.caption2)
+                                .foregroundStyle(theme.primary)
+                                .padding(.horizontal, 6)
+                                .padding(.vertical, 2)
+                                .background(
+                                    theme.primary.opacity(0.15),
+                                    in: RoundedRectangle(cornerRadius: 4)
+                                )
+                        }
+                    }
+
+                    // On the row from the moment of broadcast, so it is copyable
+                    // from the detail sheet before the transaction is on chain.
+                    Text(record.shortTxHash())
+                        .font(.caption.monospaced())
+                        .foregroundStyle(.secondary)
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+
+                }
+                .padding(.leading, 12)
+                .frame(maxWidth: .infinity, alignment: .leading)
+
+                VStack(alignment: .trailing, spacing: 2) {
+                    Text(record.formattedAmount())
+                        .font(.subheadline.weight(.semibold))
+                        .foregroundStyle(style.color)
+
+                    // An in-flight transaction has no block timestamp yet, and a
+                    // placeholder there reads as missing data. Its elapsed time is
+                    // on the badge instead.
+                    if !item.isInFlight {
+                        Text(ActivityFormat.blockTimestamp(record.blockTimestampHex))
+                            .font(.caption2)
+                            .foregroundStyle(.secondary)
                     }
                 }
-
-                // On the row from the moment of broadcast, so it is copyable
-                // from the detail sheet before the transaction is on chain.
-                Text(record.shortTxHash())
-                    .font(.caption.monospaced())
-                    .foregroundStyle(.secondary)
-                    .lineLimit(1)
-                    .truncationMode(.middle)
-
-                if isFailed {
-                    Text(ActivityCopy.failureReason(item.failureReason))
-                        .font(.caption2)
-                        .foregroundStyle(Theme.errorRed)
-                        .lineLimit(2)
-                }
+                .padding(.leading, 12)
             }
-            .padding(.leading, 12)
-            .frame(maxWidth: .infinity, alignment: .leading)
-
-            VStack(alignment: .trailing, spacing: 2) {
-                Text(record.formattedAmount())
-                    .font(.subheadline.weight(.semibold))
-                    .foregroundStyle(style.color)
-
-                // An in-flight transaction has no block timestamp yet, and a
-                // placeholder there reads as missing data. Its elapsed time is
-                // on the badge instead.
-                if !item.isInFlight {
-                    Text(ActivityFormat.blockTimestamp(record.blockTimestampHex))
-                        .font(.caption2)
-                        .foregroundStyle(.secondary)
-                }
+            if isFailed {
+                Text(ActivityCopy.failureReason(item.failureReason))
+                    .font(.caption2)
+                    .foregroundStyle(Theme.errorRed)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .frame(maxWidth: .infinity, alignment: .leading)
             }
-            .padding(.leading, 12)
         }
         .padding(.horizontal, 16)
         .padding(.vertical, 12)

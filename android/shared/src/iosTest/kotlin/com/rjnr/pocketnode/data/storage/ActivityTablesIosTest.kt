@@ -78,6 +78,55 @@ class ActivityTablesIosTest {
         lastCheckedAt = NOW,
     )
 
+    @Test fun `known unsent failure releases reservations and preserves bytes and activity atomically`() = runTest {
+        val row = broadcastRow("0xaa")
+        assertTrue(broadcasts.insertFresh(row))
+        transactions.insertPendingTransaction("0xaa", NETWORK, WALLET, "0x1", "dao_unlock", "0x0", 7L)
+        assertTrue(broadcasts.failKnownUnsent(row, NOW + 1))
+        assertTrue(broadcasts.getActive(WALLET, NETWORK).isEmpty())
+        assertEquals(row.copy(state = "FAILED", lastCheckedAt = NOW + 1), broadcasts.getFailedRow("0xaa"))
+        assertEquals("FAILED", transactions.getByHash("0xaa", NETWORK)?.status)
+        assertEquals(7L, transactions.getByHash("0xaa", NETWORK)?.feeShannons)
+    }
+
+    @Test fun `known unsent CAS cannot overwrite independently advanced pending or activity`() = runTest {
+        for (advance in listOf("BROADCAST", "CONFIRMED", "ACTIVITY_CONFIRMED")) {
+            val hash = "0x$advance"
+            val row = broadcastRow(hash)
+            broadcasts.insert(row)
+            transactions.insertPendingTransaction(hash, NETWORK, WALLET, "0x1", "out", "0x0", 7L)
+            if (advance == "ACTIVITY_CONFIRMED") transactions.updateTransactionStatus(hash, "CONFIRMED")
+            else broadcasts.compareAndUpdateState(hash, "BROADCASTING", advance, NOW + 1)
+            assertTrue(!broadcasts.failKnownUnsent(row, NOW + 2))
+            assertNull(broadcasts.getFailedRow(hash))
+            assertEquals(if (advance == "ACTIVITY_CONFIRMED") "CONFIRMED" else "PENDING", transactions.getByHash(hash, NETWORK)?.status)
+        }
+    }
+
+    @Test fun `accepted retry atomically restores local failed activity and preserves history`() = runTest {
+        val row = broadcastRow("0xretry", state = "FAILED", nullCount = 3)
+        broadcasts.insert(row)
+        transactions.insertPendingTransaction(row.txHash, NETWORK, WALLET, "0x1", "dao_unlock", "0x0", 7L)
+        transactions.updateTransactionStatus(row.txHash, "FAILED")
+        val activity = transactions.getByHash(row.txHash, NETWORK)!!
+        assertEquals(0, broadcasts.rearmAcceptedRetry(row.txHash, NOW - 1, 1100, NOW + 1))
+        assertEquals(activity, transactions.getByHash(row.txHash, NETWORK))
+        assertEquals(1, broadcasts.rearmAcceptedRetry(row.txHash, NOW, 1100, NOW + 1))
+        assertEquals(activity.copy(status = "PENDING"), transactions.getByHash(row.txHash, NETWORK))
+        assertEquals(row.copy(state = "BROADCAST", submittedAtTipBlock = 1100, nullCount = 0, lastCheckedAt = NOW + 1),
+            broadcasts.getActive(WALLET, NETWORK).single())
+    }
+
+    @Test fun `accepted retry preserves activity confirmed independently of pending state`() = runTest {
+        val row = broadcastRow("0xconfirmed", state = "FAILED")
+        broadcasts.insert(row)
+        transactions.insertPendingTransaction(row.txHash, NETWORK, WALLET, "0x1", "out", "0x0", 7L)
+        transactions.updateTransactionStatus(row.txHash, "CONFIRMED")
+        val confirmed = transactions.getByHash(row.txHash, NETWORK)
+        broadcasts.rearmAcceptedRetry(row.txHash, NOW, 1100, NOW + 1)
+        assertEquals(confirmed, transactions.getByHash(row.txHash, NETWORK))
+    }
+
     // ---- transactions ----
 
     @Test
