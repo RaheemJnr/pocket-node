@@ -159,7 +159,8 @@ final class SyncService: SyncStatusProviding {
                 let directory = try AppDirectories.dataDirectory(network: self.network.name.lowercased())
                 let marker = directory.appendingPathComponent("verified-chain-generation")
                 let previous = try? String(contentsOf: marker, encoding: .utf8)
-                let recoveryGeneration = try await self.database.historyRecovery().generation(network: self.network.name)
+                let recovery = HistoryRecoveryBookkeeping(dao: self.database.historyRecovery())
+                let recoveryGeneration = try await recovery.generation(network: self.network.name)
                 if previous != generation || recoveryGeneration != generation {
                     try await VerificationCacheCleanup(dao: self.database.verificationCache())
                         .invalidate(network: self.network.name, generation: generation)
@@ -168,7 +169,7 @@ final class SyncService: SyncStatusProviding {
                 }
                 if let walletId = self.activeWalletId,
                    self.preferences.getSyncModeOrNull(network: self.network, walletId: walletId) != nil {
-                    try await self.database.historyRecovery().ensureWallet(walletId: walletId, network: self.network.name, generation: generation)
+                    try await recovery.ensureWallet(walletId: walletId, network: self.network.name, generation: generation)
                 }
                 guard !Task.isCancelled && !self.isShutdown else { return false }
                 self.verificationReady = true
@@ -804,6 +805,23 @@ private final class VerificationCacheCleanup: @unchecked Sendable {
 
     func invalidate(network: String, generation: String) async throws {
         try await dao.invalidate(network: network, generation: generation)
+    }
+}
+
+/// Room queries run on its own query context and the DAO is thread-safe.
+/// The immutable adapter bridges SKIE's nonisolated async methods without
+/// sharing mutable Swift state or declaring every DAO implementation Sendable.
+private final class HistoryRecoveryBookkeeping: @unchecked Sendable {
+    private let dao: any HistoryRecoveryRoomDao
+
+    init(dao: any HistoryRecoveryRoomDao) { self.dao = dao }
+
+    func generation(network: String) async throws -> String? {
+        try await dao.generation(network: network)
+    }
+
+    func ensureWallet(walletId: String, network: String, generation: String) async throws {
+        try await dao.ensureWallet(walletId: walletId, network: network, generation: generation)
     }
 }
 
