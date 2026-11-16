@@ -60,6 +60,19 @@ interface HistoryRecoveryRoomDao {
     @Query("SELECT * FROM dao_history_archive WHERE walletId = :walletId AND network = :network")
     suspend fun daoHints(walletId: String, network: String): List<DaoHistoryArchiveRow>
 
+    // Bounded presentation reads. Existing recovery reconciliation reads stay unchanged.
+    @Query("SELECT * FROM history_archive WHERE walletId = :walletId AND network = :network AND txHash NOT IN (SELECT txHash FROM transactions WHERE walletId = :walletId AND network = :network AND status != 'UNVERIFIED') ORDER BY timestampHint DESC, txHash LIMIT 100")
+    suspend fun displayArchive(walletId: String, network: String): List<HistoryArchiveRow>
+
+    @Query("SELECT * FROM history_archive WHERE walletId = :walletId AND network = :network AND txHash NOT IN (SELECT txHash FROM transactions WHERE walletId = :walletId AND network = :network AND status != 'UNVERIFIED') ORDER BY timestampHint DESC, txHash LIMIT 100")
+    fun observeDisplayArchive(walletId: String, network: String): Flow<List<HistoryArchiveRow>>
+
+    @Query("SELECT * FROM dao_history_archive WHERE walletId = :walletId AND network = :network ORDER BY txHash, outputIndex LIMIT 20")
+    suspend fun displayDaoHints(walletId: String, network: String): List<DaoHistoryArchiveRow>
+
+    @Query("SELECT * FROM dao_history_archive WHERE walletId = :walletId AND network = :network ORDER BY txHash, outputIndex LIMIT 20")
+    fun observeDisplayDaoHints(walletId: String, network: String): Flow<List<DaoHistoryArchiveRow>>
+
     @Query("INSERT OR IGNORE INTO history_recovery_jobs VALUES (:walletId, :network, :generation, 0, NULL, NULL, NULL, NULL, 'PENDING')")
     suspend fun ensureWallet(walletId: String, network: String, generation: String)
 

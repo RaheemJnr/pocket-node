@@ -92,6 +92,7 @@ enum ActivityFixtures {
 /// what a filter switch throws away.
 @MainActor
 final class FakeActivityPaging: ActivityPaging {
+    var recovery: RecoveryPresentation?
 
     let network: NetworkType
 

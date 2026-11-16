@@ -33,6 +33,7 @@ import io.mockk.coEvery
 import io.mockk.every
 import io.mockk.mockk
 import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.runBlocking
@@ -128,13 +129,15 @@ class HomeViewModelWalletChangeTest {
         every { coordinator.registeredActiveWalletId } returns null
         val syncEngine = mockk<SyncEngine>(relaxed = true)
         every { syncEngine.syncProgress } returns MutableStateFlow(SyncProgress())
+        val realCache = com.rjnr.pocketnode.data.gateway.CacheManager(db.transactionDao(), db.balanceCacheDao(), NoopLogger, com.rjnr.pocketnode.data.gateway.readyVerificationGate())
         gateway = testGatewayRepository(
-            db = db, walletPreferences = prefs, nodeLifecycle = nodeLifecycle, keyManager = keyManager,
+            db = db, appDatabase = db, walletPreferences = prefs,
+            cacheManager = realCache, nodeLifecycle = nodeLifecycle, keyManager = keyManager,
             syncCoordinator = coordinator, syncEngine = syncEngine,
             // A real reader over relaxed stores: its reads fail into a real
             // Result.failure, which a MockK stub cannot return.
             ledgerReader = LedgerReader(
-                mockk(relaxed = true), mockk(relaxed = true), mockk(relaxed = true), mockk(relaxed = true),
+                mockk(relaxed = true), com.rjnr.pocketnode.data.storage.RoomBalanceCache(realCache), mockk(relaxed = true), mockk(relaxed = true),
                 mockk(relaxed = true), mockk(relaxed = true), prefs, prefs, Json, NoopLogger,
             ),
         )
@@ -277,6 +280,44 @@ class HomeViewModelWalletChangeTest {
         }
 
         settle { vm.broadcastHashes() == setOf("0xb1") }
+    }
+
+    @Test
+    fun `retained history reacts to wallet and network and completes without hiding unreconfirmed rows`() {
+        fun seed(wallet: String, network: String, hash: String) {
+            db.openHelper.writableDatabase.execSQL("INSERT INTO history_archive VALUES (?, ?, ?, NULL,NULL,NULL,'out',NULL)", arrayOf(wallet, network, hash))
+            runBlocking { db.historyRecovery().ensureWallet(wallet, network, "g") }
+        }
+        seed("A", "TESTNET", "a-history")
+        seed("B", "TESTNET", "b-history")
+        seed("B", "MAINNET", "main-history")
+        val activity = com.rjnr.pocketnode.ui.screens.activity.ActivityViewModel(gateway, db.transactionDao(), db.pendingBroadcastDao(),
+            prefs, prefs, NoopLogger, walletRepository, com.rjnr.pocketnode.data.gateway.readyVerificationGate())
+        val observation = kotlinx.coroutines.CoroutineScope(testDispatcher).launch { activity.recovery.collect { } }
+        val vm = newViewModel(); vm.started()
+        settle { vm.uiState.value.recovery.transactions.singleOrNull()?.identity == "a-history" &&
+            activity.recovery.value.transactions.singleOrNull()?.identity == "a-history" }
+        assertTrue(vm.uiState.value.recovery.isRevalidating)
+        assertTrue(!vm.uiState.value.hasBalance)
+        vm.switchWallet("B")
+        settle { vm.uiState.value.recovery.transactions.singleOrNull()?.identity == "b-history" &&
+            activity.recovery.value.transactions.singleOrNull()?.identity == "b-history" }
+        runBlocking {
+            db.historyRecovery().registered("B", "TESTNET", "g", 10, "script")
+            db.historyRecovery().complete("B", "TESTNET", "g", "script", 10)
+        }
+        settle { !vm.uiState.value.recovery.isRevalidating }
+        assertEquals("b-history", vm.uiState.value.recovery.transactions.single().identity)
+        (gateway.network as MutableStateFlow).value = NetworkType.MAINNET
+        settle { vm.uiState.value.recovery.transactions.singleOrNull()?.identity == "main-history" &&
+            activity.recovery.value.transactions.singleOrNull()?.identity == "main-history" }
+        db.openHelper.writableDatabase.execSQL("INSERT INTO history_archive VALUES ('A','TESTNET','late-old-wallet',NULL,NULL,NULL,NULL,NULL)")
+        settle()
+        assertEquals(listOf("main-history"), vm.uiState.value.recovery.transactions.map { it.identity })
+        assertEquals(listOf("main-history"), activity.recovery.value.transactions.map { it.identity })
+        observation.cancel()
+        androidx.lifecycle.ViewModelStore().apply { put("test", vm); put("activity", activity); clear() }
+        scheduler.runCurrent()
     }
 
     @Test

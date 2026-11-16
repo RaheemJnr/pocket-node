@@ -80,6 +80,7 @@ struct BalanceStatus: Equatable {
 /// reason `WalletRecordStoring` exists for the backup flow.
 @MainActor
 protocol SyncStatusProviding: AnyObject {
+    var recovery: RecoveryPresentation? { get }
     var status: SyncStatus { get }
     var mode: SyncMode? { get }
     var isRegistered: Bool { get }
@@ -112,6 +113,7 @@ protocol SyncStatusProviding: AnyObject {
 @MainActor
 @Observable
 final class SyncService: SyncStatusProviding {
+    private(set) var recovery: RecoveryPresentation?
     private(set) var status = SyncStatus()
     private(set) var isRegistered = false
     private(set) var mode: SyncMode?
@@ -220,6 +222,7 @@ final class SyncService: SyncStatusProviding {
     // property means nothing. `nonisolated(unsafe)` so `deinit`, which is never
     // actor-isolated, can cancel them; `Task` is `Sendable` and these are only
     // ever written from the main actor, so the unchecked part is a formality.
+    @ObservationIgnored private nonisolated(unsafe) var recoveryObservation: Task<Void, Never>?
     @ObservationIgnored private nonisolated(unsafe) var observation: Task<Void, Never>?
     @ObservationIgnored private nonisolated(unsafe) var registrationObservation: Task<Void, Never>?
     @ObservationIgnored private nonisolated(unsafe) var activation: Task<Void, Never>?
@@ -418,6 +421,7 @@ final class SyncService: SyncStatusProviding {
     }
 
     deinit {
+        recoveryObservation?.cancel()
         observation?.cancel()
         registrationObservation?.cancel()
         cachedBalanceObservation?.cancel()
@@ -498,6 +502,7 @@ final class SyncService: SyncStatusProviding {
         verificationTask?.cancel()
         verificationTask = nil
         stopWatchdog()
+        recoveryObservation?.cancel()
         observation?.cancel()
         registrationObservation?.cancel()
         cachedBalanceObservation?.cancel()
@@ -525,6 +530,10 @@ final class SyncService: SyncStatusProviding {
     /// - Parameter force: run even for the wallet already activated. Only
     ///   ``retry()`` passes true; an ordinary appearance must not re-register.
     func activate(wallet: WalletRecord, force: Bool = false) {
+        if activeWalletId != wallet.id {
+            recoveryObservation?.cancel()
+            recovery = nil
+        }
         let address = network == .mainnet ? wallet.mainnetAddress : wallet.testnetAddress
         guard let script = AddressUtils.shared.parseAddress(address: address) else {
             lastError = "This wallet's address could not be read."
@@ -536,6 +545,17 @@ final class SyncService: SyncStatusProviding {
         }
         guard force || activeWalletId != wallet.id else { return }
         activeWalletId = wallet.id
+        recoveryObservation?.cancel()
+        recovery = nil
+        let walletId = wallet.id
+        let recoveryFlow = historyRecovery.observePresentation(walletId: walletId, network: network.name)
+        recoveryObservation = Task { @MainActor [weak self] in
+            for await snapshot in recoveryFlow {
+                guard !Task.isCancelled, let self, !self.isShutdown,
+                      self.activeWalletId == walletId else { return }
+                self.recovery = snapshot
+            }
+        }
         activeWallet = wallet
         activeAddress = address
         activeScript = script

@@ -18,6 +18,10 @@ struct ActivityView: View {
 
     var body: some View {
         VStack(spacing: 0) {
+            if let recovery = model.recovery, recovery.isVisible {
+                HistoryRecoveryView(model: recovery, theme: theme)
+                    .padding(.horizontal)
+            }
             filterTabs
 
             content
@@ -161,7 +165,7 @@ struct ActivityView: View {
                 Image(systemName: "doc.text")
                     .font(.system(size: 48))
                     .foregroundStyle(.secondary.opacity(0.4))
-                Text(ActivityCopy.emptyMessage(model.filter))
+                Text(model.recovery?.isVisible == true ? "No verified activity to show yet" : ActivityCopy.emptyMessage(model.filter))
                     .font(.body)
                     .foregroundStyle(.secondary)
                     .multilineTextAlignment(.center)

@@ -63,6 +63,7 @@ import java.util.Locale
 @Composable
 fun WalletBalanceCard(
     balanceCkb: Double,
+    hasBalance: Boolean = true,
     fiatBalance: String?,
     // #531: when the "Fiat price" network service is off, hide the line
     // entirely instead of falling back to a placeholder or a stale value.
@@ -105,12 +106,12 @@ fun WalletBalanceCard(
             }
             Spacer(modifier = Modifier.height(8.dp))
             Text(
-                text = if (isBalanceHidden) "••••••" else String.format(Locale.US, "%,.2f CKB", balanceCkb),
+                text = if (isBalanceHidden) "••••••" else if (!hasBalance) "Balance unavailable" else String.format(Locale.US, "%,.2f CKB", balanceCkb),
                 color = MaterialTheme.colorScheme.primary,
                 fontSize = 32.sp,
                 fontWeight = FontWeight.Bold
             )
-            if (isFiatEnabled) {
+            if (isFiatEnabled && hasBalance) {
                 Text(
                     text = if (isBalanceHidden) "••••" else (fiatBalance ?: "≈ — USD"),
                     style = MaterialTheme.typography.bodyMedium,

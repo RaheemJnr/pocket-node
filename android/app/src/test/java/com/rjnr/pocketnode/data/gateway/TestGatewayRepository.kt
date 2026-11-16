@@ -23,6 +23,8 @@ import kotlinx.serialization.json.Json
  */
 internal fun testGatewayRepository(
     db: AppDatabase,
+    appDatabase: AppDatabase = mockk(relaxed = true),
+    cacheManager: CacheManager = mockk(relaxed = true),
     walletPreferences: WalletPreferences,
     nodeLifecycle: NodeLifecycle,
     syncCoordinator: SyncCoordinator = mockk(relaxed = true),
@@ -38,10 +40,10 @@ internal fun testGatewayRepository(
     keyManager = keyManager,
     walletPreferences = walletPreferences,
     json = json,
-    cacheManager = mockk(relaxed = true),
+    cacheManager = cacheManager,
     walletMigrationHelper = walletMigrationHelper,
     walletDao = db.walletDao(),
-    appDatabase = mockk(relaxed = true),
+    appDatabase = appDatabase,
     syncProgressDao = syncProgressDao,
     sendPipeline = mockk(relaxed = true),
     syncCoordinator = syncCoordinator,

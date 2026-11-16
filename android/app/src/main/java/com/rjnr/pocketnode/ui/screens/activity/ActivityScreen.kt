@@ -98,6 +98,7 @@ fun ActivityScreen(
     viewModel: ActivityViewModel = hiltViewModel()
 ) {
     val uiState by viewModel.uiState.collectAsState()
+    val recovery by viewModel.recovery.collectAsState()
     // #524: only the hash is saved (it survives the re-auth lock and
     // rotation); the record is read from the current list below.
     var selectedTxHash by rememberSaveable { mutableStateOf<String?>(null) }
@@ -188,6 +189,9 @@ fun ActivityScreen(
                 .fillMaxSize()
                 .padding(paddingValues)
         ) {
+            if (recovery.isVisible) {
+                com.rjnr.pocketnode.ui.components.HistoryRecoveryPanel(recovery)
+            }
             // Filter tabs
             FilterTabRow(
                 currentFilter = uiState.filter,
@@ -230,7 +234,7 @@ fun ActivityScreen(
                 }
 
                 pagingItems.itemCount == 0 && pagingItems.loadState.refresh is LoadState.NotLoading -> {
-                    EmptyState(filter = uiState.filter)
+                    EmptyState(filter = uiState.filter, hasRetainedHistory = recovery.isVisible)
                 }
 
                 else -> {
@@ -558,8 +562,8 @@ private fun ActivityTransactionItem(
 // ─── Empty / Error States ─────────────────────────────────────────────────────
 
 @Composable
-private fun EmptyState(filter: ActivityViewModel.Filter) {
-    val message = when (filter) {
+private fun EmptyState(filter: ActivityViewModel.Filter, hasRetainedHistory: Boolean = false) {
+    val message = if (hasRetainedHistory) "No verified activity to show yet" else when (filter) {
         ActivityViewModel.Filter.ALL -> "No transactions yet"
         ActivityViewModel.Filter.RECEIVED -> "No received transactions"
         ActivityViewModel.Filter.SENT -> "No sent transactions"

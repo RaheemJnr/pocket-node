@@ -155,6 +155,23 @@ class HomeViewModel @Inject constructor(
         }
     }
 
+    @OptIn(kotlinx.coroutines.ExperimentalCoroutinesApi::class)
+    private fun observeRecovery() {
+        viewModelScope.launch {
+            combine(
+                repository.network,
+                walletRepository.getActiveWallet().map { it?.walletId ?: "" }.distinctUntilChanged(),
+            ) { network, walletId -> network to walletId }
+                .distinctUntilChanged()
+                .flatMapLatest { (network, walletId) ->
+                    repository.historyRecovery.observePresentation(walletId, network.name)
+                        .onStart { emit(com.rjnr.pocketnode.data.history.RecoveryPresentation()) }
+                }
+                .catch { e -> logger.w(TAG, "History display unavailable", e) }
+                .collect { recovery -> _uiState.update { it.copy(recovery = recovery) } }
+        }
+    }
+
     private fun formatFiat(ckb: Double, price: Double): String =
         String.format(Locale.US, "≈ $%.2f USD", ckb * price)
 
@@ -242,6 +259,7 @@ class HomeViewModel @Inject constructor(
                     val fiat = if (price != null) formatFiat(ckb, price) else null
                     current.copy(
                         balanceCkb = ckb,
+                        hasBalance = balance != null,
                         fiatBalance = fiat ?: current.fiatBalance
                     )
                 }
@@ -255,6 +273,7 @@ class HomeViewModel @Inject constructor(
         }
 
         observeBroadcastStates()
+        observeRecovery()
 
         viewModelScope.launch {
             repository.isSwitchingNetwork.collect { switching ->
@@ -790,7 +809,7 @@ class HomeViewModel @Inject constructor(
             try {
                 syncStallDetector.reset()
                 stallBannerDismissed = false
-                _uiState.update { it.copy(isSwitchingWallet = true, showSyncStallBanner = false, syncStallMinutes = 0L, showGapLimitBanner = false) }
+                _uiState.update { it.copy(isSwitchingWallet = true, recovery = com.rjnr.pocketnode.data.history.RecoveryPresentation(), showSyncStallBanner = false, syncStallMinutes = 0L, showGapLimitBanner = false) }
                 walletRepository.switchActiveWallet(walletId)
                 val wallet = walletRepository.getById(walletId) ?: return@launch
                 repository.onActiveWalletChanged(wallet)
@@ -840,6 +859,8 @@ class HomeViewModel @Inject constructor(
             _uiState.update {
                 it.copy(
                     balanceCkb = 0.0,
+                    hasBalance = false,
+                    recovery = com.rjnr.pocketnode.data.history.RecoveryPresentation(),
                     fiatBalance = null,
                     ckbUsdPrice = null,
                     transactions = emptyList(),
@@ -1259,6 +1280,8 @@ class HomeViewModel @Inject constructor(
 }
 
 data class HomeUiState(
+    val recovery: com.rjnr.pocketnode.data.history.RecoveryPresentation = com.rjnr.pocketnode.data.history.RecoveryPresentation(),
+    val hasBalance: Boolean = false,
     val isLoading: Boolean = false,
     val isRefreshing: Boolean = false,
     val isSyncing: Boolean = false,
