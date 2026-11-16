@@ -1,4 +1,3 @@
-use std::collections::HashSet;
 use std::sync::Arc;
 
 use ckb_constant::sync::INIT_BLOCKS_IN_TRANSIT_PER_PEER;
@@ -116,27 +115,14 @@ impl CKBProtocolHandler for SyncProtocol {
                 if !matched_blocks.is_empty()
                     && self.peers.all_matched_blocks_downloaded(&matched_blocks)
                 {
-                    let matched_blocks_data = self
-                        .storage
-                        .get_earliest_matched_blocks()
-                        .expect("get matched blocks from storage");
-                    let start_number = matched_blocks_data.start_number;
-                    let blocks_count = matched_blocks_data.blocks_count;
-                    let db_blocks: HashSet<_> = matched_blocks_data
-                        .blocks
-                        .into_iter()
-                        .map(|b| b.hash)
-                        .collect();
-
                     let blocks = self.peers.clear_matched_blocks(&mut matched_blocks);
-                    assert_eq!(blocks.len(), db_blocks.len());
-                    info!(
-                        "all matched blocks downloaded, start_number={}, blocks_count={}, matched_count={}",
-                        start_number,
-                        blocks_count,
-                        db_blocks.len()
-                    );
-                    self.storage.index_matched_range(start_number, blocks_count, blocks);
+                    if let Some(debt) = self.storage.get_earliest_matched_blocks() {
+                        if !self.storage.index_matched_range(debt.start_number, debt.blocks_count, blocks) {
+                            warn!("discarded stale or out-of-order matched bodies; reload durable debt");
+                        }
+                    }
+                    // Stale in-memory bodies are cleared even if their durable
+                    // range was invalidated. Reload only the current earliest debt.
 
                     // send more GetBlocksProof/GetBlocks requests
                     if let Some(db_matched_blocks) = self.storage.get_earliest_matched_blocks() {

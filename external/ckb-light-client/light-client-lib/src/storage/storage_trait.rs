@@ -397,7 +397,16 @@ pub trait LightClientStorage: StorageBackend {
         };
         let (count, _) = parse_matched_blocks(&debt);
         let end = start_number.checked_add(count.checked_sub(1).expect("nonempty matched range")).expect("matched range end");
-        let indexing_frontier = self.get_min_filtered_block_number().max(end);
+        // Every later queued range depends on this contiguous filtered prefix.
+        // Invalidating only this key lets later indexing jump the rewind gap.
+        let prefix = Key::Meta(MATCHED_FILTER_BLOCKS_KEY).into_vec();
+        let suffix = self.collect_iterator(IteratorStart::From(key.clone()), IteratorDirection::Forward,
+            Box::new(move |k| k.starts_with(&prefix)), Box::new(|_, v| Some(v.to_vec())), usize::MAX);
+        let indexing_frontier = suffix.iter().fold(self.get_min_filtered_block_number().max(end), |frontier, row| {
+            let start = u64::from_be_bytes(row.key[row.key.len()-8..].try_into().expect("range start"));
+            let (count, _) = parse_matched_blocks(&row.value);
+            frontier.max(start.saturating_add(count.saturating_sub(1)))
+        });
         let rewind_to = start_number.saturating_sub(1);
         let mut batch = self.batch();
         let mut filtered = self.get_min_filtered_block_number().min(rewind_to);
@@ -411,8 +420,8 @@ pub trait LightClientStorage: StorageBackend {
         }
         batch.put(&Key::Meta(MIN_FILTERED_BLOCK_NUMBER).into_vec(),
             &filtered.to_le_bytes());
-        batch.delete(&key);
-        batch.commit().expect("discard matched range and rewind atomically");
+        for row in suffix { batch.delete(&row.key); }
+        batch.commit().expect("discard matched suffix and rewind atomically");
     }
 
     /// Caller holds the matched-work write guard and has verified the bodies.
@@ -420,22 +429,27 @@ pub trait LightClientStorage: StorageBackend {
     /// Restart replays the entire ascending range; final cells/history are
     /// idempotent, including inputs spending earlier outputs in this range.
     /// Only the last batch advances cursors and acknowledges the range together.
-    fn index_matched_range(&self, start_number: u64, blocks_count: u64, mut blocks: Vec<Block>) {
+    fn index_matched_range(&self, start_number: u64, blocks_count: u64, mut blocks: Vec<Block>) -> bool {
+        // A delayed response may belong to discarded/replaced work. Validate the
+        // entire identity before any index mutation, including durable ordering.
+        let Some(earliest) = self.get_earliest_matched_blocks() else { return false; };
+        if earliest.start_number != start_number || earliest.blocks_count != blocks_count || blocks_count == 0 {
+            return false;
+        }
         let end = start_number.checked_add(blocks_count.checked_sub(1).expect("nonempty range"))
             .expect("matched range overflow");
         let mut debt_key = Key::Meta(MATCHED_FILTER_BLOCKS_KEY).into_vec();
         debt_key.extend(start_number.to_be_bytes());
-        let debt = StorageBackend::get(self, debt_key.clone()).expect("read index debt").expect("durable index debt");
+        let Some(debt) = StorageBackend::get(self, debt_key.clone()).expect("read index debt") else { return false; };
+        if self.get_min_filtered_block_number() < end { return false; }
         let (count, matched) = parse_matched_blocks(&debt);
         let expected: HashSet<_> = matched.into_iter().map(|(hash, _)| hash).collect();
         let actual: HashSet<_> = blocks.iter().map(|block| block.calc_header_hash()).collect();
-        assert_eq!(count, blocks_count);
-        assert_eq!(actual, expected);
-        assert_eq!(actual.len(), blocks.len());
-        assert!(blocks.iter().all(|block| {
-            let number: u64 = block.header().raw().number().unpack();
-            number >= start_number && number <= end
-        }));
+        if count != blocks_count || actual != expected || actual.len() != blocks.len()
+            || !blocks.iter().all(|block| {
+                let number: u64 = block.header().raw().number().unpack();
+                number >= start_number && number <= end
+            }) { return false; }
         blocks.sort_by_key(|block| Unpack::<u64>::unpack(&block.header().raw().number()));
         for block in blocks { self.filter_block(block); }
         let mut batch = self.batch();
@@ -446,6 +460,7 @@ pub trait LightClientStorage: StorageBackend {
         }
         batch.delete(&debt_key);
         batch.commit().expect("index progress and range acknowledgement commit atomically");
+        true
     }
 
     /// Cleanup invalid matched blocks

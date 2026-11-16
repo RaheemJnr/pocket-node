@@ -1031,3 +1031,31 @@ async fn exhausted_filter_height_does_not_wrap_or_advance() {
     assert!(chain.client_storage().get_earliest_matched_blocks().is_none());
     assert!(nc.sent_messages().borrow().is_empty());
 }
+
+
+#[tokio::test]
+async fn partially_missing_range_discards_suffix_before_reloading_work() {
+    let chain = MockChain::new_with_dummy_pow("partial-missing-range");
+    let storage = chain.client_storage();
+    storage.update_filter_scripts(vec![ScriptStatus { script: Script::default(), script_type: ScriptType::Lock, block_number: 0 }], SetScriptsCommand::All);
+    let tip = VerifiableHeader::new(HeaderBuilder::default()
+        .epoch(EpochNumberWithFraction::new(0,0,10000).full_value()).number(5000u64).build(),
+        Default::default(), None, Default::default());
+    storage.update_last_state(&U256::one(), &tip.header().data(), &[]);
+    storage.update_min_filtered_block_number(5000);
+    let peers = chain.create_peers();
+    let peer = PeerIndex::new(3); peers.add_peer(peer);
+    peers.mock_prove_state(peer, tip).unwrap();
+    let missing = packed::Byte32::new([1;32]);
+    let present = packed::Byte32::new([2;32]);
+    storage.add_matched_blocks(10, 3, vec![(missing.clone(), false), (present, true)]);
+    storage.add_matched_blocks(5000, 1, vec![(packed::Byte32::new([3;32]), false)]);
+    peers.mark_fetching_headers_missing(&[missing]);
+    let mut protocol = chain.create_filter_protocol(peers.clone());
+    let nc = MockNetworkContext::new(SupportProtocols::Filter);
+    protocol.notify(nc.context(), GET_BLOCK_FILTERS_TOKEN).await;
+    assert!(storage.get_earliest_matched_blocks().is_none(), "partial missing range cannot replay only its surviving subset");
+    assert!(peers.matched_blocks().read().await.is_empty());
+    assert!(storage.get_min_filtered_block_number() < 10);
+    assert!(storage.get_scripts_hash(11).contains(&Script::default().calc_script_hash()));
+}

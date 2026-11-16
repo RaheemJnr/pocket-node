@@ -198,10 +198,11 @@ impl FilterProtocol {
                         .map(|b| (b.hash.clone(), b.proved))
                         .collect();
 
-                    if filtered_blocks.is_empty() {
-                        // All blocks in this DB range are missing - remove it and load next
+                    if filtered_blocks.len() != db_matched_blocks.blocks.len() {
+                        // A subset cannot settle the durable range identity. Refilter
+                        // the whole range and its dependent suffix under this guard.
                         info!(
-                            "All {} blocks in DB range {} are missing (uncle blocks), removing",
+                            "Missing member in DB range of {} blocks at {}, discarding suffix",
                             db_matched_blocks.blocks.len(),
                             db_matched_blocks.start_number
                         );
@@ -213,7 +214,8 @@ impl FilterProtocol {
                             self.peers.remove_fetching_header(&block.hash);
                         }
 
-                        // Will load next range on next iteration
+                        // No later queued range can leap over the rewind gap.
+                        matched_blocks.clear();
                         return;
                     } else {
                         debug!(

@@ -125,6 +125,7 @@ fn discarded_ranges_reopen_with_coherent_rewind_before_and_after_commit() {
     for after in [false, true] {
         let (storage, dir) = crate::tests::utils::new_storage("discard-range-crash");
         let f = setup(&storage);
+        storage.add_matched_blocks(5000, 1, vec![(packed::Byte32::default(), false)]);
         storage.filter_block(f.blocks[0].clone());
         storage.filter_block(f.blocks[1].clone());
         let crashing = CrashStorage { inner: storage, commits: Arc::new(AtomicUsize::new(0)), stop: 1, after };
@@ -139,7 +140,13 @@ fn discarded_ranges_reopen_with_coherent_rewind_before_and_after_commit() {
             assert!(snapshot(&storage, &f.script, &f.identity, &f.chain, "TESTNET").is_err());
             storage.add_matched_blocks(10, 3, f.blocks.iter().map(|b| (b.calc_header_hash(), true)).collect());
             storage.update_min_filtered_block_number(12);
-        } else { assert!(storage.get_earliest_matched_blocks().is_some()); }
+        } else {
+            assert!(storage.get_earliest_matched_blocks().is_some());
+            assert_eq!(storage.get_latest_matched_blocks().unwrap().start_number, 5000);
+            // Remove only the deliberately unindexed suffix before replaying.
+            storage.remove_matched_blocks(5000);
+            storage.update_min_filtered_block_number(12);
+        }
         storage.index_matched_range(10, 3, f.blocks.clone());
         assert_final_and_undo(&storage, &f);
     }
@@ -200,5 +207,123 @@ fn startup_cleanup_discard_rewinds_missing_and_out_of_range_debt_after_reopen() 
         assert!(snapshot(&storage, &f.script, &f.identity, &f.chain, "TESTNET").is_err());
         let prefix = [vec![KeyPrefix::CellLockScript as u8], extract_raw_data(&f.script)].concat();
         assert!(cells_ready(&storage, &prefix, &f.chain).is_err());
+    }
+}
+
+
+#[test]
+fn discarded_suffix_cannot_skip_earlier_filter_selection_after_reopen() {
+    use crate::protocols::{Peers, FilterProtocol};
+    use golomb_coded_set::{GCSFilterWriter, SipHasher24Builder, M, P};
+    let (storage, dir) = crate::tests::utils::new_storage("discard-suffix-gap");
+    let mut f = setup(&storage);
+    // Later debt is beyond an entire normal filter batch from the earlier spend.
+    let later_tx = TransactionBuilder::default().output(packed::CellOutput::new_builder()
+        .capacity(102u64).lock(f.script.clone()).build()).output_data(Vec::<u8>::new().pack()).build();
+    let later = BlockBuilder::default().epoch(ckb_types::core::EpochNumberWithFraction::new(0,0,10000).full_value())
+        .number(5000u64).transaction(later_tx).build().data();
+    f.chain.anchor = later.header();
+    storage.update_last_state(&ckb_types::U256::zero(), &f.chain.anchor, &[]);
+    storage.add_matched_blocks(5000, 1, vec![(later.calc_header_hash(), true)]);
+    storage.update_min_filtered_block_number(5000);
+    storage.filter_block(f.blocks[0].clone());
+    storage.remove_matched_blocks(10);
+    drop(storage);
+    let storage = Storage::new(dir.path().join("store.db"));
+    // A late response/recovered later range must not mutate indexes or leap cursors.
+    assert!(!storage.index_matched_range(5000, 1, vec![later.clone()]));
+    assert!(storage.get_filter_scripts()[0].block_number < 1000,
+        "later debt jumped over the discarded spend before earlier filter selection");
+    assert!(cell(&storage, &f.script, 5000).is_none(), "stale work must not mutate cells");
+    let peers = Arc::new(Peers::new(1, 2000, storage.get_last_check_point(), 0));
+    let protocol = FilterProtocol::new(storage.clone(), peers);
+    let mut bytes = Vec::new();
+    let mut writer = GCSFilterWriter::new(&mut bytes, SipHasher24Builder::new(0,0), M, P);
+    writer.add_element(f.script.calc_script_hash().as_slice()); writer.finish().unwrap();
+    let filters = packed::BlockFilters::new_builder().start_number(10u64)
+        .block_hashes(vec![f.blocks[1].calc_header_hash()])
+        .filters(vec![ckb_types::bytes::Bytes::from(bytes).pack()]).build();
+    assert_eq!(protocol.check_filters_data(filters, 1).unwrap(), vec![f.blocks[1].calc_header_hash()],
+        "actual earlier GCS selection must retain the wallet script");
+    let prefix = [vec![KeyPrefix::CellLockScript as u8], extract_raw_data(&f.script)].concat();
+    assert!(snapshot(&storage, &f.script, &f.identity, &f.chain, "TESTNET").is_err());
+    assert!(cells_ready(&storage, &prefix, &f.chain).is_err());
+    assert!(storage.get_earliest_matched_blocks().is_none(), "discard invalidates queued suffix atomically");
+    storage.add_matched_blocks(10, 3, f.blocks.iter().map(|b| (b.calc_header_hash(), true)).collect());
+    storage.update_min_filtered_block_number(12);
+    storage.index_matched_range(10, 3, f.blocks.clone());
+    assert!(cell(&storage, &f.script, 10).is_none(), "earlier spend rebuilt");
+    assert!(cell(&storage, &f.script, 12).is_some());
+    assert!(cells_ready(&storage, &prefix, &f.chain).is_err(), "later replacement coverage remains outstanding");
+    storage.add_matched_blocks(5000, 1, vec![(later.calc_header_hash(), true)]);
+    storage.update_min_filtered_block_number(5000);
+    storage.index_matched_range(5000, 1, vec![later]);
+    assert!(snapshot(&storage, &f.script, &f.identity, &f.chain, "TESTNET").is_ok());
+    assert!(cells_ready(&storage, &prefix, &f.chain).is_ok());
+    storage.rollback_to_block(11);
+    assert_eq!(cell(&storage, &f.script, 10).unwrap(), f.funding.calc_tx_hash().as_slice());
+    assert!(cell(&storage, &f.script, 12).is_none());
+    assert!(cell(&storage, &f.script, 5000).is_none());
+}
+
+
+#[test]
+fn non_earliest_range_cannot_mutate_indexes_or_progress() {
+    let (storage, _dir) = crate::tests::utils::new_storage("out-of-order-debt");
+    let f = setup(&storage);
+    let later = BlockBuilder::default().epoch(ckb_types::core::EpochNumberWithFraction::new(0,0,10000).full_value()).number(5000u64).transaction(f.live.clone().into_view()).build().data();
+    storage.add_matched_blocks(5000, 1, vec![(later.calc_header_hash(), true)]);
+    storage.update_min_filtered_block_number(5000);
+    assert!(!storage.index_matched_range(5000, 1, vec![later]));
+    assert_eq!(storage.get_filter_scripts()[0].block_number, 0, "non-earliest work cannot advance the script");
+    assert!(cell(&storage, &f.script, 5000).is_none());
+    assert_eq!(storage.get_latest_matched_blocks().unwrap().start_number, 5000);
+    storage.update_min_filtered_block_number(9);
+    assert!(!storage.index_matched_range(10, 3, f.blocks.clone()), "unfiltered range cannot commit");
+    assert_eq!(storage.get_filter_scripts()[0].block_number, 0);
+    assert!(cell(&storage, &f.script, 10).is_none());
+    assert_eq!(storage.get_earliest_matched_blocks().unwrap().start_number, 10);
+}
+
+
+#[tokio::test]
+async fn synchronizer_drops_stale_bodies_and_reloads_only_current_earliest_debt() {
+    use crate::protocols::{Peers, SyncProtocol};
+    use crate::tests::utils::MockNetworkContext;
+    use ckb_network::{CKBProtocolHandler, PeerIndex, SupportProtocols};
+    for discard in [false, true] {
+        let (storage, _dir) = crate::tests::utils::new_storage("sync-stale-range");
+        let f = setup(&storage);
+        let later = BlockBuilder::default().epoch(ckb_types::core::EpochNumberWithFraction::new(0,0,10000).full_value())
+            .number(5000u64).transaction(f.live.clone().into_view()).build().data();
+        storage.add_matched_blocks(5000, 1, vec![(later.calc_header_hash(), true)]);
+        let peers = Arc::new(Peers::new(1, 2000, storage.get_last_check_point(), 0));
+        {
+            let mut map = peers.matched_blocks().write().await;
+            peers.add_matched_blocks(&mut map, vec![(later.calc_header_hash(), true)]);
+        }
+        if discard { storage.remove_matched_blocks(10); }
+        let mut protocol = SyncProtocol::new(storage.clone(), peers.clone());
+        let nc = MockNetworkContext::new(SupportProtocols::Sync);
+        let msg = packed::SyncMessage::new_builder().set(packed::SendBlock::new_builder().block(later).build()).build();
+        protocol.received(nc.context(), PeerIndex::new(1), msg.as_bytes()).await;
+        assert!(cell(&storage, &f.script, 5000).is_none());
+        assert_eq!(storage.get_filter_scripts()[0].block_number, 0);
+        if discard {
+            assert!(peers.matched_blocks().read().await.is_empty(), "discarded in-memory range must drain");
+        } else {
+            let map = peers.matched_blocks().read().await;
+            assert_eq!(map.len(), f.blocks.len());
+            for block in &f.blocks { assert!(map.contains_key(&block.calc_header_hash().unpack())); }
+            drop(map);
+            for block in &f.blocks {
+                let msg = packed::SyncMessage::new_builder().set(packed::SendBlock::new_builder().block(block.clone()).build()).build();
+                protocol.received(nc.context(), PeerIndex::new(1), msg.as_bytes()).await;
+            }
+            assert_eq!(storage.get_earliest_matched_blocks().unwrap().start_number, 5000);
+            assert_eq!(storage.get_filter_scripts()[0].block_number, 12);
+            assert!(cell(&storage, &f.script, 10).is_none());
+            assert!(cell(&storage, &f.script, 12).is_some());
+        }
     }
 }

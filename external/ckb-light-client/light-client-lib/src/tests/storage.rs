@@ -233,10 +233,13 @@ fn history_rollback_at_replacement_tip(reinclude: bool) {
         storage.update_min_filtered_block_number(20);
         assert!(snapshot().is_err(), "filter cursor alone does not prove matched block processing");
     }
-    storage.filter_block(replacement.data());
-    storage.update_block_number(20);
-    storage.update_min_filtered_block_number(20);
-    if reinclude { storage.remove_matched_blocks(20); }
+    if reinclude {
+        assert!(storage.index_matched_range(20, 1, vec![replacement.data()]));
+    } else {
+        storage.filter_block(replacement.data());
+        storage.update_block_number(20);
+        storage.update_min_filtered_block_number(20);
+    }
     let complete = snapshot().unwrap();
     assert_eq!(complete["tipHeight"], "20");
     assert_eq!(complete["tipHash"], format!("{:#x}", replacement.hash()));
@@ -410,9 +413,10 @@ fn history_rewind_cells_unavailable_until_actual_rebuild() {
     storage.update_block_number(8);
     assert!(cells_ready(&storage, &prefix, &shorter).is_err(), "global coverage is independent");
     storage.update_min_filtered_block_number(8);
-    storage.add_matched_blocks(8,1,vec![(ckb_types::packed::Byte32::default(),false)]);
+    let replacement = block(8u64).build().data();
+    storage.add_matched_blocks(8,1,vec![(replacement.calc_header_hash(),true)]);
     assert!(cells_ready(&storage, &prefix, &shorter).is_err());
-    storage.remove_matched_blocks(8);
+    assert!(storage.index_matched_range(8, 1, vec![replacement]));
     assert!(cells_ready(&storage, &prefix, &shorter).is_ok());
     assert!(StorageBackend::get(&storage, marker_key).unwrap().is_none(), "completed guard retires durably");
     storage.update_filter_scripts(vec![status(8)], SetScriptsCommand::Partial);
