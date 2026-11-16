@@ -125,7 +125,7 @@ abstract class AppDatabase : RoomDatabase() {
         walletStorage = com.rjnr.pocketnode.data.wallet.WalletStorageBoundary(configuration.context)
     }
 
-    abstract fun historyRecovery(): com.rjnr.pocketnode.data.storage.HistoryRecoveryRoomDao
+    abstract fun historyRecovery(): com.rjnr.pocketnode.data.database.dao.AndroidHistoryRecoveryDao
     abstract fun walletPendingCleanupDao(): com.rjnr.pocketnode.data.database.dao.WalletPendingCleanupDao
     abstract fun walletVaultDao(): WalletVaultDao
     abstract fun transactionDao(): TransactionDao
