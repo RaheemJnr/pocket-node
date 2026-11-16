@@ -213,6 +213,7 @@ class SyncCoordinator(
     private val logger: Logger,
     private val clock: Clock = SystemClock,
     private val queryContext: CoroutineContext = Dispatchers.Default,
+    private val historyRecovery: com.rjnr.pocketnode.data.storage.HistoryRecoveryRoomDao? = null,
 ) {
 
     // The three light-client calls this class makes. [LightClientApi] is
@@ -432,6 +433,45 @@ class SyncCoordinator(
         require(statuses.size == walletIds.size) {
             "setScriptsAndRecord: statuses (${statuses.size}) and walletIds (${walletIds.size}) must be parallel"
         }
+        // Explicit durable recovery overrides modes, saved/native cursors and ordinary
+        // rewind clamps. Unselected wallet obligations remain durable under mode/cap filtering.
+        val obligations = historyRecovery?.pending(network.name).orEmpty().associateBy { it.walletId }
+        val registrations = statuses.zip(walletIds).toMutableList()
+        val registry = if (historyRecovery != null) walletRegistry.allWallets() else emptyList()
+        val generation = historyRecovery?.generation(network.name)
+        val candidateInventory = mutableListOf<Pair<com.rjnr.pocketnode.data.storage.WalletRecord, List<SubAccountCandidateRecord>>>()
+        if (generation != null) {
+            for (wallet in registry) {
+                val candidates = subAccountCandidateStore.getForParent(wallet.walletId)
+                    .filter { it.state != SubAccountCandidateRecord.STATE_RESTORED }
+                candidateInventory += wallet to candidates
+                val ownScript = WalletDerivation.lockScriptFromAddress(wallet.testnetAddress.ifBlank { wallet.mainnetAddress })
+                for (candidate in candidates) historyRecovery?.ensureScript(wallet.walletId, network.name,
+                    json.encodeToString(ownScript.copy(args = candidate.scriptArgs)), generation)
+            }
+        }
+        val scriptJobs = historyRecovery?.scripts(network.name).orEmpty().filter { it.status != "COMPLETE" }.associateBy { it.scriptJson }
+        if (cmd == CMD_SET_SCRIPTS_ALL) {
+            val selectedOwners = walletIds.filter { it.isNotEmpty() }.toSet()
+            // Persist all known obligations, but select only the existing bounded
+            // discovery batch. Parent completion cannot retire the remaining queue.
+            for ((wallet, candidates) in candidateInventory) {
+                if (wallet.walletId !in selectedOwners) continue
+                val ownScript = WalletDerivation.lockScriptFromAddress(wallet.testnetAddress.ifBlank { wallet.mainnetAddress })
+                val pending = candidates.filter { json.encodeToString(ownScript.copy(args = it.scriptArgs)) in scriptJobs }
+                    .map { if (it.state == SubAccountCandidateRecord.STATE_EMPTY) it.copy(state = SubAccountCandidateRecord.STATE_PENDING) else it }
+                for (candidate in selectCandidatesForRegistration(pending, MAX_CANDIDATE_SCRIPTS_PER_PARENT)) {
+                    val script = ownScript.copy(args = candidate.scriptArgs)
+                    if (registrations.none { it.first.script == script && it.first.scriptType == "lock" })
+                        registrations += JniScriptStatus(script, "lock", "0x0") to ""
+                }
+            }
+        }
+        val recoveryStatuses = registrations.map { (status, walletId) ->
+            if (walletId in obligations || json.encodeToString(status.script) in scriptJobs)
+                status.copy(blockNumber = "0x0", historyRecovery = true) else status
+        }
+        val effectiveWalletIds = registrations.map { it.second }
         // #332: PARTIAL with an older block rewinds the rust filter scan for
         // hours. Clamp to the currently-registered block per script unless the
         // caller is an intentional rewind (rescue rescan, find-older-deposits).
@@ -452,13 +492,15 @@ class SyncCoordinator(
                     }
                 }
             }.getOrNull() ?: emptyMap()
-            val (clamped, clampedCount) = clampPartialRewinds(statuses, currentByArgs)
+            val (clamped, clampedCount) = clampPartialRewinds(recoveryStatuses, currentByArgs)
             if (clampedCount > 0) {
                 logger.w(TAG, "setScripts PARTIAL: clamped $clampedCount rewind(s) to current block (#332)")
             }
-            clamped
+            clamped.mapIndexed { index, status ->
+                if (recoveryStatuses[index].historyRecovery) recoveryStatuses[index] else status
+            }
         } else {
-            statuses
+            recoveryStatuses
         }
         val jsonStr = json.encodeToString(effectiveStatuses)
         // Diagnostic for the production sync-stall reports (#150). Logs every
@@ -470,7 +512,7 @@ class SyncCoordinator(
         // survives R8 depends on whether the AndroidLogger forwarder is
         // inlined. Do not rely on it being stripped, and do not log anything
         // here that would be unsafe in a release build.
-        effectiveStatuses.zip(walletIds).forEach { (status, walletId) ->
+        effectiveStatuses.zip(effectiveWalletIds).forEach { (status, walletId) ->
             val startBlock = status.blockNumber.removePrefix("0x").toLongOrNull(16) ?: -1L
             logger.i(
                 TAG,
@@ -490,9 +532,23 @@ class SyncCoordinator(
             registeredActiveWalletId = forActiveWallet
         }
 
+        // Native and Room are distinct commits. Until this succeeds the durable job
+        // remains pending; retry intentionally rewinds again instead of assuming success.
+        if (obligations.isNotEmpty() || scriptJobs.isNotEmpty()) {
+            val rawTip = getTipHeaderRaw()
+            val target = runCatching { rawTip?.let { json.decodeFromString<JniHeaderView>(it).number.removePrefix("0x").toLongOrNull(16) } }
+                .getOrNull()?.takeIf { it > 0 } ?: 0L
+            effectiveStatuses.zip(effectiveWalletIds).forEach { (status, walletId) ->
+                val scriptJson = json.encodeToString(status.script)
+                val job = obligations[walletId]
+                if (job != null) historyRecovery?.registered(walletId, network.name, job.generation, target, scriptJson)
+                val scriptJob = scriptJobs[scriptJson]
+                if (scriptJob != null) historyRecovery?.registerScript(scriptJob.parentWalletId, network.name, scriptJson, scriptJob.generation, target)
+            }
+        }
         val now = clock.nowMs()
         val newMapping = mutableMapOf<String, String>()
-        effectiveStatuses.zip(walletIds).forEach { (status, walletId) ->
+        effectiveStatuses.zip(effectiveWalletIds).forEach { (status, walletId) ->
             if (walletId.isEmpty()) return@forEach
             newMapping[status.script.args] = walletId
             // Malformed block number from the node: skip this script's row
@@ -524,6 +580,52 @@ class SyncCoordinator(
         }
         return true
     }
+
+    private var lastScriptRecoveryCheck = 0L
+
+    /** Returns true when the bounded discovery queue can advance. Native absence
+     * is accepted only after a complete canonical, generation-bound genesis scan. */
+    suspend fun refreshScriptRecovery(network: NetworkType): Boolean {
+        val dao = historyRecovery ?: return false
+        val now = clock.nowMs()
+        if (lastScriptRecoveryCheck != 0L && now - lastScriptRecoveryCheck < 30_000L) return false
+        lastScriptRecoveryCheck = now
+        val generation = dao.generation(network.name) ?: return false
+        val owners = walletRegistry.allWallets().associateBy { it.walletId }
+        var completed = false
+        for (job in dao.scripts(network.name).filter { it.status == "REGISTERED" && it.generation == generation }) {
+            val owner = owners[job.parentWalletId] ?: continue
+            val expected = WalletDerivation.lockScriptFromAddress(owner.testnetAddress.ifBlank { owner.mainnetAddress })
+            val script = runCatching { json.decodeFromString<Script>(job.scriptJson) }.getOrNull() ?: continue
+            val candidate = subAccountCandidateStore.getForParent(owner.walletId).firstOrNull {
+                expected.copy(args = it.scriptArgs) == script && it.state != SubAccountCandidateRecord.STATE_RESTORED
+            } ?: continue
+            val snapshot = recoverySnapshot(job.scriptJson) ?: continue
+            if (!snapshot.validFor(script, network.name) || snapshot.durableCoverageVersion != 1 ||
+                snapshot.startHeight != "0" || snapshot.storeGeneration != generation ||
+                (job.targetBlock != null && snapshot.tipHeight.toLong() < job.targetBlock)) continue
+            val current = recoverySnapshot(job.scriptJson)
+            if (current != snapshot || dao.generation(network.name) != generation) continue
+            if (job.targetBlock == null) dao.registerScript(owner.walletId, network.name, job.scriptJson, generation, snapshot.tipHeight.toLong())
+            if (dao.completeScript(owner.walletId, network.name, job.scriptJson, generation, snapshot.tipHeight.toLong()) != 1) continue
+            subAccountCandidateStore.updateRecoveryState(owner.walletId, candidate.derivationPath,
+                if (snapshot.hashes.isEmpty()) SubAccountCandidateRecord.STATE_EMPTY else SubAccountCandidateRecord.STATE_FOUND,
+                network.name, generation, job.scriptJson, candidate.scriptArgs)
+            completed = true
+        }
+        return completed
+    }
+
+    private suspend fun recoverySnapshot(scriptJson: String): CanonicalHistorySnapshot? {
+        val raw = withContext(queryContext) { lightClient.getHistorySnapshot(scriptJson) } ?: return null
+        return runCatching { json.decodeFromString<CanonicalHistorySnapshot>(raw) }.getOrNull()
+    }
+
+    suspend fun candidateRecoveryStates(network: NetworkType): Map<Pair<String, String>, Boolean> = historyRecovery?.scripts(network.name).orEmpty().mapNotNull { job ->
+        runCatching { json.decodeFromString<Script>(job.scriptJson) }.getOrNull()?.let { script ->
+            (job.parentWalletId to script.args) to (job.status == "COMPLETE")
+        }
+    }.toMap()
 
     /**
      * ALL must retain chain-axis FOUND scripts to keep indexing later spends.

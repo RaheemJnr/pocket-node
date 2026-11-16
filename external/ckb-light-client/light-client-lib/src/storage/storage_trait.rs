@@ -82,6 +82,7 @@ pub trait LightClientStorage: StorageBackend {
     /// Update filter scripts
     fn update_filter_scripts(&self, scripts: Vec<ScriptStatus>, command: SetScriptsCommand) {
         let mut should_filter_genesis_block = false;
+        let mut genesis_pending = Vec::new();
         let mut batch = self.batch();
         let key_prefix = Key::Meta(FILTER_SCRIPTS_KEY).into_vec();
 
@@ -106,6 +107,8 @@ pub trait LightClientStorage: StorageBackend {
                     let mut registration_key = registration_prefix.clone();
                     registration_key.extend_from_slice(&kv.key[key_prefix.len()..]);
                     batch.delete(&registration_key);
+                    let segment_key = [Key::Meta("HISTORY_SEGMENT_V1").into_vec(), registration_key[registration_prefix.len()..].to_vec()].concat();
+                    batch.delete(&segment_key);
                 }
 
                 // Insert new scripts
@@ -124,9 +127,16 @@ pub trait LightClientStorage: StorageBackend {
                     batch.put(&key, &ss.block_number.to_be_bytes());
                     let mut registration_key = registration_prefix.clone();
                     registration_key.extend_from_slice(&key[key_prefix.len()..]);
-                    let mut registration = ss.block_number.to_be_bytes().to_vec();
+                    let mut registration = self.history_registration_start(&ss, &key).to_be_bytes().to_vec();
                     registration.extend_from_slice(&registration_nonce);
                     batch.put(&registration_key, &registration);
+                    let segment_key = [Key::Meta("HISTORY_SEGMENT_V1").into_vec(), key[key_prefix.len()..].to_vec()].concat();
+                    batch.put(&segment_key, &registration);
+                    if ss.block_number == 0 {
+                        let pending = [Key::Meta("HISTORY_GENESIS_PENDING_V1").into_vec(), key[key_prefix.len()..].to_vec()].concat();
+                        batch.put(&pending, &registration_nonce);
+                        genesis_pending.push(pending);
+                    }
                 }
             }
             SetScriptsCommand::Partial => {
@@ -151,9 +161,16 @@ pub trait LightClientStorage: StorageBackend {
                     batch.put(&key, &ss.block_number.to_be_bytes());
                     let mut registration_key = registration_prefix.clone();
                     registration_key.extend_from_slice(&key[key_prefix.len()..]);
-                    let mut registration = ss.block_number.to_be_bytes().to_vec();
+                    let mut registration = self.history_registration_start(&ss, &key).to_be_bytes().to_vec();
                     registration.extend_from_slice(&registration_nonce);
                     batch.put(&registration_key, &registration);
+                    let segment_key = [Key::Meta("HISTORY_SEGMENT_V1").into_vec(), key[key_prefix.len()..].to_vec()].concat();
+                    batch.put(&segment_key, &registration);
+                    if ss.block_number == 0 {
+                        let pending = [Key::Meta("HISTORY_GENESIS_PENDING_V1").into_vec(), key[key_prefix.len()..].to_vec()].concat();
+                        batch.put(&pending, &registration_nonce);
+                        genesis_pending.push(pending);
+                    }
                 }
             }
             SetScriptsCommand::Delete => {
@@ -175,6 +192,8 @@ pub trait LightClientStorage: StorageBackend {
                     let mut registration_key = registration_prefix.clone();
                     registration_key.extend_from_slice(&key[key_prefix.len()..]);
                     batch.delete(&registration_key);
+                    let segment_key = [Key::Meta("HISTORY_SEGMENT_V1").into_vec(), registration_key[registration_prefix.len()..].to_vec()].concat();
+                    batch.delete(&segment_key);
                 }
             }
         }
@@ -187,12 +206,58 @@ pub trait LightClientStorage: StorageBackend {
         if should_filter_genesis_block {
             let block = self.get_genesis_block();
             self.filter_block(block);
+            // Genesis filtering commits its own index batch. A crash before this
+            // marker removal causes a safe repeat on the next recovery registration.
+            let mut settled = self.batch();
+            for key in genesis_pending { settled.delete(&key); }
+            settled.commit().expect("genesis completion commit should be ok");
+        }
+    }
+
+    /// A segment is created atomically with a current-code registration. Legacy
+    /// cursors without this marker cannot establish any historical coverage.
+    /// Script progress is combined with global filtering and unsettled matches;
+    /// rollback rewinds these cursors before they can authorize another segment.
+    fn history_segment_coverage(&self, status: &ScriptStatus) -> Option<(u64, u64)> {
+        let suffix = [status.script.as_slice(), match status.script_type { ScriptType::Lock => &[0], ScriptType::Type => &[1] }].concat();
+        let read = |name: &str| StorageBackend::get(self, [Key::Meta(name).into_vec(), suffix.clone()].concat()).ok().flatten();
+        if read("HISTORY_GENESIS_PENDING_V1").is_some() { return None; }
+        let registration = read("HISTORY_REGISTRATION_V1")?;
+        if registration.len() != 24 || read("HISTORY_SEGMENT_V1")? != registration { return None; }
+        let floor = u64::from_be_bytes(registration[..8].try_into().ok()?);
+        let cursor = u64::from_be_bytes(read(FILTER_SCRIPTS_KEY)?.as_slice().try_into().ok()?);
+        let mut through = cursor.min(self.get_min_filtered_block_number());
+        if let Some(pending) = self.get_earliest_matched_blocks() {
+            through = through.min(pending.start_number.checked_sub(1)?);
+        }
+        if floor > through { return None; }
+        Some((floor, through))
+    }
+
+    /// The explicit recovery route always requests genesis. Only native segment
+    /// continuity may turn that request into a safe partial resume.
+    fn history_recovery_resume_start(&self, status: &ScriptStatus) -> u64 {
+        match self.history_segment_coverage(status) {
+            Some((0, through)) => through,
+            _ => 0,
+        }
+    }
+
+    fn history_registration_start(&self, status: &ScriptStatus, _script_key: &[u8]) -> u64 {
+        match self.history_segment_coverage(status) {
+            Some((floor, through)) if status.block_number <= through => floor.min(status.block_number),
+            _ => status.block_number,
         }
     }
 
     /// Rewind cells and their undo history together to the exclusive scan start.
     /// Until rescan completes, cells represent this prefix, not latest spendability.
     fn rewind_after_registration(&self, status: &mut ScriptStatus, batch: &mut Self::Batch) {
+        let pending_genesis = [Key::Meta("HISTORY_GENESIS_PENDING_V1").into_vec(), status.script.as_slice().to_vec(),
+            vec![match status.script_type { ScriptType::Lock => 0, ScriptType::Type => 1 }]].concat();
+        if StorageBackend::get(self, pending_genesis).expect("read pending genesis").is_some() {
+            status.block_number = 0;
+        }
         let cell_prefix = match status.script_type {
             ScriptType::Lock => KeyPrefix::CellLockScript,
             ScriptType::Type => KeyPrefix::CellTypeScript,

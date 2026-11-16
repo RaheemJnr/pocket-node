@@ -18,6 +18,7 @@ data class CanonicalHistorySnapshot(
     val tipHash: String,
     val processedThrough: String,
     val hashes: Set<String>,
+    val durableCoverageVersion: Int = 0,
 ) {
     fun validFor(expectedScript: Script, expectedNetwork: String): Boolean {
         val start = startHeight.toLongOrNull() ?: return false

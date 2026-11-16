@@ -93,11 +93,20 @@ class VerificationCacheGate @Inject constructor(
         val ticket = close()
         val generation = VerificationEpoch.requireGeneration(client.callRpc("get_verification_epoch"))
         val identity = network.name to generation
-        if (identity in dirtyGenerations || applied.getString(network.name, null) != generation) {
+        val needsRecoverySchema = database.historyRecovery().generation(network.name) != generation
+        if (needsRecoverySchema || identity in dirtyGenerations || applied.getString(network.name, null) != generation) {
             state.withLock {
                 check(ticket == currentRevision()) { "Verification superseded by a network change" }
                 database.withTransaction {
+                    if (needsRecoverySchema) {
+                        database.openHelper.writableDatabase.execSQL(
+                            "INSERT OR IGNORE INTO history_recovery_jobs SELECT walletId, ?, '', 0, NULL, NULL, NULL, NULL, 'PENDING' FROM wallets", arrayOf(network.name))
+                    }
+                    if (needsRecoverySchema) database.openHelper.writableDatabase.execSQL(
+                        "INSERT OR IGNORE INTO history_recovery_jobs SELECT DISTINCT walletId, network, '', 0, NULL, NULL, NULL, NULL, 'PENDING' FROM dao_cells WHERE network = ?", arrayOf(network.name))
+                    database.historyRecovery().prepare(network.name, generation)
                     val db = database.openHelper.writableDatabase
+                    db.execSQL("INSERT OR IGNORE INTO dao_history_archive SELECT walletId, network, txHash, `index`, depositBlockNumber, withdrawBlockNumber, capacity, status FROM dao_cells WHERE network = ?", arrayOf(network.name))
                     for (table in listOf("sync_progress", "balance_cache", "header_cache")) {
                         db.execSQL("DELETE FROM $table WHERE network = ?", arrayOf(network.name))
                     }

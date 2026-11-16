@@ -78,6 +78,9 @@ class GatewayRepository @Inject constructor(
     private val logger: Logger,
 ) : TipSource, SyncPollSource {
 
+    /** Read-only unverified history and durable revalidation state for presentation. */
+    val historyRecovery by lazy { com.rjnr.pocketnode.data.storage.HistoryRecoveryReader(appDatabase.historyRecovery()) }
+
     /**
      * Sender identity for one send, snapshotted here and handed to
      * [SendPipeline] so nothing inside the send mutex re-reads a field a
@@ -1039,7 +1042,12 @@ class GatewayRepository @Inject constructor(
             // internally; never allowed to break the status poll. Skipped
             // with the progress writes while a registration is in flight.
             runCatching {
+                if (syncCoordinator.refreshScriptRecovery(currentNetwork)) {
+                    registerAccountWithStrategy(walletPreferences.getSyncMode(walletId = activeWalletId),
+                        walletPreferences.getCustomBlockHeight(walletId = activeWalletId), savePreference = false).getOrThrow()
+                }
                 subAccountReconciler.reconcile(
+                    recoveryByCandidate = syncCoordinator.candidateRecoveryStates(currentNetwork),
                     scannedByArgs = scripts.associate { s ->
                         s.script.args to (s.blockNumber.removePrefix("0x").toLongOrNull(16) ?: 0L)
                     },

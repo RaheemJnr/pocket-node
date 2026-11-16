@@ -657,3 +657,23 @@ val MIGRATION_19_20 = object : Migration(19, 20) {
             PRIMARY KEY(walletId, network, genesisHash, transactionHash, outputIndex))""")
     }
 }
+
+/** Preserve legacy history before any verifier cleanup can erase display fields. */
+val MIGRATION_20_21 = object : Migration(20, 21) {
+    override fun migrate(db: SupportSQLiteDatabase) {
+        db.execSQL("CREATE TABLE IF NOT EXISTS history_script_recovery_jobs (parentWalletId TEXT NOT NULL, network TEXT NOT NULL, scriptJson TEXT NOT NULL, generation TEXT NOT NULL, targetBlock INTEGER, status TEXT NOT NULL, PRIMARY KEY(parentWalletId, network, scriptJson))")
+        db.execSQL("CREATE TABLE IF NOT EXISTS dao_history_archive (walletId TEXT NOT NULL, network TEXT NOT NULL, txHash TEXT NOT NULL, outputIndex TEXT NOT NULL, depositBlockHint INTEGER, withdrawBlockHint INTEGER, capacityHint INTEGER, statusHint TEXT, PRIMARY KEY(walletId, network, txHash, outputIndex))")
+        db.execSQL("INSERT OR IGNORE INTO dao_history_archive SELECT walletId, network, txHash, `index`, depositBlockNumber, withdrawBlockNumber, capacity, status FROM dao_cells")
+        db.execSQL("CREATE TABLE IF NOT EXISTS history_archive (walletId TEXT NOT NULL, network TEXT NOT NULL, txHash TEXT NOT NULL, blockNumberHint TEXT, timestampHint INTEGER, balanceChangeHint TEXT, directionHint TEXT, feeHint TEXT, PRIMARY KEY(walletId, network, txHash))")
+        db.execSQL("CREATE TABLE IF NOT EXISTS history_recovery_jobs (walletId TEXT NOT NULL, network TEXT NOT NULL, generation TEXT NOT NULL, startBlock INTEGER NOT NULL, previousLightStart INTEGER, previousSavedBlock INTEGER, targetBlock INTEGER, scriptJson TEXT, status TEXT NOT NULL, PRIMARY KEY(walletId, network))")
+        db.execSQL("CREATE TABLE IF NOT EXISTS history_recovery_epochs (network TEXT NOT NULL, generation TEXT NOT NULL, PRIMARY KEY(network))")
+        db.execSQL("INSERT OR IGNORE INTO history_archive SELECT walletId, network, txHash, CASE WHEN status = 'UNVERIFIED' THEN NULL ELSE blockNumber END, CASE WHEN timestamp > 0 THEN timestamp ELSE NULL END, CASE WHEN status = 'UNVERIFIED' THEN NULL ELSE balanceChange END, NULLIF(direction, ''), CASE WHEN status = 'UNVERIFIED' THEN NULL ELSE fee END FROM transactions WHERE NOT (isLocal = 1 AND status IN ('PENDING', 'FAILED'))")
+        db.execSQL("INSERT OR IGNORE INTO history_recovery_jobs SELECT walletId, network, '', 0, lightStartBlockNumber, localSavedBlockNumber, NULL, NULL, 'PENDING' FROM sync_progress")
+        db.execSQL("INSERT OR IGNORE INTO history_recovery_jobs SELECT DISTINCT walletId, network, '', 0, NULL, NULL, NULL, NULL, 'PENDING' FROM transactions")
+        db.execSQL("INSERT OR IGNORE INTO history_recovery_jobs SELECT DISTINCT walletId, network, '', 0, NULL, NULL, NULL, NULL, 'PENDING' FROM dao_cells")
+        // An inactive wallet may have lost both caches in 1.8.7. Retain its obligation too.
+        for (network in listOf("MAINNET", "TESTNET")) {
+            db.execSQL("INSERT OR IGNORE INTO history_recovery_jobs SELECT walletId, ?, '', 0, NULL, NULL, NULL, NULL, 'PENDING' FROM wallets", arrayOf(network))
+        }
+    }
+}

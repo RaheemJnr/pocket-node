@@ -42,6 +42,36 @@ class VerificationCacheGateTest {
             db.transactionDao().insert(TransactionEntity(hash, "0x384", "old-block", 1, "100", "out", "2", 10, "0x1", "MAINNET", status, local, 1, "active", 2))
         }
     }
+    @Test fun `pre checkpoint history and inactive recovery survive verification erasure`() = runTest {
+        seed()
+        db.transactionDao().insert(TransactionEntity("historic", "0x1036640", "old", 123, "42", "in", "1", 9, "0x7b", "MAINNET", "CONFIRMED", false, 1, "inactive"))
+        VerificationCacheGate(context, db).reconcile(client(), NetworkType.MAINNET)
+        val sql = db.openHelper.writableDatabase
+        sql.query("SELECT name FROM sqlite_master WHERE type='table' AND name='history_archive'").use {
+            assertTrue("Verification erases pre-18.3M history without a durable archive", it.moveToFirst())
+        }
+        sql.query("SELECT blockNumberHint, balanceChangeHint FROM history_archive WHERE txHash='historic'").use {
+            assertTrue(it.moveToFirst()); assertEquals("0x1036640", it.getString(0)); assertEquals("42", it.getString(1))
+        }
+        sql.query("SELECT startBlock, previousSavedBlock FROM history_recovery_jobs WHERE walletId='inactive' AND network='MAINNET'").use {
+            assertTrue(it.moveToFirst()); assertEquals(0L, it.getLong(0)); assertEquals(900L, it.getLong(1))
+        }
+        assertEquals("UNVERIFIED", db.transactionDao().getByTxHash("historic")!!.status)
+    }
+    @Test fun `already erased same generation identities retain unknown hints and receive recovery`() = runTest {
+        seed()
+        val generation = "a".repeat(32)
+        context.getSharedPreferences("verified_chain_cache", Context.MODE_PRIVATE).edit().putString("MAINNET", generation).commit()
+        db.openHelper.writableDatabase.execSQL("UPDATE transactions SET status='UNVERIFIED', blockNumber='0x0', balanceChange='0', blockTimestampHex=NULL")
+        VerificationCacheGate(context, db).reconcile(client(), NetworkType.MAINNET)
+        val sql = db.openHelper.writableDatabase
+        sql.query("SELECT name FROM sqlite_master WHERE name='history_archive'").use { assertTrue("Same verifier generation still needs archive repair", it.moveToFirst()) }
+        sql.query("SELECT blockNumberHint, balanceChangeHint, timestampHint, directionHint FROM history_archive WHERE txHash='confirmed'").use {
+            assertTrue(it.moveToFirst()); assertTrue(it.isNull(0)); assertTrue(it.isNull(1))
+            assertEquals(1L, it.getLong(2)); assertEquals("out", it.getString(3))
+        }
+        sql.query("SELECT startBlock FROM history_recovery_jobs WHERE walletId='inactive' AND network='MAINNET'").use { assertTrue(it.moveToFirst()); assertEquals(0L, it.getLong(0)) }
+    }
     @Test fun `handoff covers inactive wallets preserves settings and local outgoing records`() = runTest {
         seed()
         val prefs = context.getSharedPreferences("wallet_prefs", Context.MODE_PRIVATE)

@@ -80,6 +80,7 @@ class LedgerReader(
     private val json: Json,
     private val logger: Logger,
     private val queryContext: CoroutineContext = Dispatchers.Default,
+    private val historyRecovery: com.rjnr.pocketnode.data.storage.HistoryRecoveryRoomDao? = null,
 ) {
 
     /**
@@ -814,12 +815,23 @@ class LedgerReader(
             val scriptJson = json.encodeToString(myScript)
             val snapshot = queryHistorySnapshot(scriptJson)
             if (snapshot != null && snapshot.validFor(myScript, network.name)) {
-                transactionStore.reconcileCanonicalHistory(snapshot, activeWalletId, network.name) {
+                val boundJob = historyRecovery?.job(activeWalletId, network.name)
+                if (boundJob != null && boundJob.status == "REGISTERED" && boundJob.scriptJson == scriptJson &&
+                    boundJob.targetBlock == null && snapshot.durableCoverageVersion == 1 && snapshot.startHeight == "0" &&
+                    snapshot.storeGeneration == boundJob.generation) {
+                    historyRecovery.registered(activeWalletId, network.name, boundJob.generation, snapshot.tipHeight.toLong(), scriptJson)
+                }
+                val reconciled = transactionStore.reconcileCanonicalHistory(snapshot, activeWalletId, network.name) {
                     // Revalidate after the suspendable candidate read, inside the cache transaction.
                     // A changed tip/restore generation or unavailable second read retains the cache.
                     // Only the native read leaves the transaction dispatcher; withContext
                     // returns here (or throws cancellation) before any conditional deletion.
                     queryHistorySnapshot(scriptJson) == snapshot
+                }
+                val recoveryJob = historyRecovery?.job(activeWalletId, network.name)
+                if (reconciled && recoveryJob != null && snapshot.durableCoverageVersion == 1 && snapshot.startHeight == "0" &&
+                    snapshot.storeGeneration == recoveryJob.generation && queryHistorySnapshot(scriptJson) == snapshot) {
+                    historyRecovery.complete(activeWalletId, network.name, recoveryJob.generation, scriptJson, snapshot.tipHeight.toLong())
                 }
             }
         } catch (e: CancellationException) {

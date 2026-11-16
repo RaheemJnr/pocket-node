@@ -52,6 +52,9 @@ interface SubAccountCandidateStore {
         fromBlock: Long,
     )
 
+    /** Set only after a current canonical recovery snapshot proves this result. */
+    suspend fun updateRecoveryState(parentId: String, derivationPath: String, state: String, network: String, generation: String, scriptJson: String, scriptArgs: String) = Unit
+
     /**
      * Lock-script args of every candidate on record, across all parents and
      * all lifecycle states. The gap-limit signature check treats them

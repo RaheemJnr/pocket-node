@@ -132,6 +132,7 @@ final class SyncService: SyncStatusProviding {
     /// Held for its lifetime, not for its API: the Kotlin store reads through
     /// the DAO, and letting the database go would close the file under it.
     private let database: PocketNodeCoreDatabase
+    let historyRecovery: HistoryRecoveryReader
     private var isShutdown = false
     private var verificationReady = false
     @ObservationIgnored private var verificationTask: Task<Bool, Never>?
@@ -156,11 +157,16 @@ final class SyncService: SyncStatusProviding {
                 let directory = try AppDirectories.dataDirectory(network: self.network.name.lowercased())
                 let marker = directory.appendingPathComponent("verified-chain-generation")
                 let previous = try? String(contentsOf: marker, encoding: .utf8)
-                if previous != generation {
+                let recoveryGeneration = try await self.database.historyRecovery().generation(network: self.network.name)
+                if previous != generation || recoveryGeneration != generation {
                     try await VerificationCacheCleanup(dao: self.database.verificationCache())
-                        .invalidate(network: self.network.name)
+                        .invalidate(network: self.network.name, generation: generation)
                     // A failed write leaves the gate closed. Repeating cleanup is safe.
                     try Data(generation.utf8).write(to: marker, options: .atomic)
+                }
+                if let walletId = self.activeWalletId,
+                   self.preferences.getSyncModeOrNull(network: self.network, walletId: walletId) != nil {
+                    try await self.database.historyRecovery().ensureWallet(walletId: walletId, network: self.network.name, generation: generation)
                 }
                 guard !Task.isCancelled && !self.isShutdown else { return false }
                 self.verificationReady = true
@@ -284,6 +290,7 @@ final class SyncService: SyncStatusProviding {
             path: Self.databasePath(network: network),
             queryContext: runtime.defaultContext
         )
+        self.historyRecovery = HistoryRecoveryReader(dao: database.historyRecovery())
         let progressStore = RoomKmpSyncProgressStore(dao: database.syncProgress())
         self.progressStore = progressStore
         let registry = InMemoryWalletRegistry()
@@ -312,7 +319,8 @@ final class SyncService: SyncStatusProviding {
             json: runtime.json,
             logger: log,
             clock: SystemClock.shared,
-            queryContext: runtime.defaultContext
+            queryContext: runtime.defaultContext,
+            historyRecovery: database.historyRecovery()
         )
         let engine = SyncEngine(
             lightClient: api,
@@ -352,7 +360,8 @@ final class SyncService: SyncStatusProviding {
             uiPreferences: preferences,
             json: runtime.json,
             logger: log,
-            queryContext: runtime.defaultContext
+            queryContext: runtime.defaultContext,
+            historyRecovery: database.historyRecovery()
         )
         self.ledger = ledger
         self.activity = ActivityFeed(
@@ -773,8 +782,8 @@ private final class VerificationCacheCleanup: @unchecked Sendable {
 
     init(dao: any VerificationCacheRoomDao) { self.dao = dao }
 
-    func invalidate(network: String) async throws {
-        try await dao.invalidate(network: network)
+    func invalidate(network: String, generation: String) async throws {
+        try await dao.invalidate(network: network, generation: generation)
     }
 }
 

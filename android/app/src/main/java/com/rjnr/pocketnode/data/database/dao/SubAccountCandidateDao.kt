@@ -33,6 +33,10 @@ interface SubAccountCandidateDao {
     )
     suspend fun updateState(parentId: String, derivationPath: String, state: String)
 
+    /** Source state and recovery authorization are checked by the same SQL write. */
+    @Query("UPDATE sub_account_candidates SET state = :state WHERE parentWalletId = :parentId AND derivationPath = :derivationPath AND scriptArgs = :scriptArgs AND EXISTS (SELECT 1 FROM history_script_recovery_jobs WHERE parentWalletId = :parentId AND network = :network AND scriptJson = :scriptJson AND generation = :generation AND status = 'COMPLETE' AND generation = (SELECT generation FROM history_recovery_epochs WHERE network = :network))")
+    suspend fun applyRecoveryState(parentId: String, derivationPath: String, state: String, network: String, generation: String, scriptJson: String, scriptArgs: String)
+
     /**
      * Record the scan start for a registration, keeping the LOWEST block ever
      * used (deepest coverage). 0 means never registered.

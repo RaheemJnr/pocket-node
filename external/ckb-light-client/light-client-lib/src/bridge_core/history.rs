@@ -160,9 +160,13 @@ pub(crate) fn snapshot(
     if filtered_through < tip {
         return Err(unavailable());
     }
+    let genesis_pending: bool = conn.query_row("SELECT EXISTS(SELECT 1 FROM kv WHERE key = ?1)", [
+        [Key::Meta("HISTORY_GENESIS_PENDING_V1").into_vec(), suffix.clone()].concat()
+    ], |row| row.get(0)).map_err(|_| unavailable())?;
+    if genesis_pending { return Err(unavailable()); }
     let registration = read(
         &conn,
-        [Key::Meta("HISTORY_REGISTRATION_V1").into_vec(), suffix].concat(),
+        [Key::Meta("HISTORY_REGISTRATION_V1").into_vec(), suffix.clone()].concat(),
     )?;
     if registration.len() != 24 || through < tip {
         return Err(unavailable());
@@ -209,7 +213,11 @@ pub(crate) fn snapshot(
         hashes.insert(format!("{hash:#x}"));
     }
     let hex = |bytes: &[u8]| bytes.iter().map(|b| format!("{b:02x}")).collect::<String>();
-    Ok(json!({"version":1,"complete":true,"network":network,
+    let segment = conn.query_row("SELECT value FROM kv WHERE key = ?1", [
+        [Key::Meta("HISTORY_SEGMENT_V1").into_vec(), suffix].concat()
+    ], |row| row.get::<_, Vec<u8>>(0)).optional().map_err(|_| unavailable())?;
+    let durable_coverage = if segment.as_deref() == Some(registration.as_slice()) { 1 } else { 0 };
+    Ok(json!({"version":1,"durableCoverageVersion":durable_coverage,"complete":true,"network":network,
         "genesisHash":format!("{:#x}",identity.genesis_hash),"storeGeneration":identity.store_generation,
         "script":ckb_jsonrpc_types::Script::from(script.clone()),
         "registration":hex(&registration[8..]),"startHeight":start.to_string(),
@@ -307,6 +315,10 @@ mod tests {
         let before = snapshot(&storage, &script, &identity, &chain, "TESTNET").unwrap();
         assert_eq!(before["hashes"], json!([format!("{:#x}", tx.hash())]));
         assert_eq!(before["startHeight"], "1");
+        let pending_genesis = [Key::Meta("HISTORY_GENESIS_PENDING_V1").into_vec(), script.as_slice().to_vec(), vec![0]].concat();
+        StorageBackend::put(&storage, pending_genesis.clone(), vec![1]).unwrap();
+        assert!(snapshot(&storage, &script, &identity, &chain, "TESTNET").is_err());
+        StorageBackend::delete(&storage, &pending_genesis).unwrap();
         storage.rollback_to_block(10);
         let replacement_tip = tip.clone().as_builder().nonce(1u128).build();
         storage.update_last_state(&U256::zero(), &replacement_tip, &[]);
@@ -345,7 +357,7 @@ mod tests {
         storage.update_block_number(20);
         storage.update_min_filtered_block_number(20);
         let after = snapshot(&storage, &script, &identity, &chain, "TESTNET").unwrap();
-        assert_eq!(after["startHeight"], "15");
+        assert_eq!(after["startHeight"], "1");
         assert_ne!(before["registration"], after["registration"]);
         storage.add_matched_blocks(20, 1, vec![(packed::Byte32::default(), false)]);
         assert!(snapshot(&storage, &script, &identity, &chain, "TESTNET").is_err());
@@ -359,6 +371,65 @@ mod tests {
         StorageBackend::delete(&storage, &Key::TxHash(&tx.hash()).into_vec()).unwrap();
         assert!(snapshot(&storage, &script, &identity, &chain, "TESTNET").is_err());
     }
+    #[test]
+    fn unfinished_scan_resumes_without_losing_floor_and_forward_skip_breaks_it() {
+        let (storage, _dir) = crate::tests::utils::new_storage("history_partial_resume");
+        storage.init_genesis_block(BlockBuilder::default().build().data());
+        let script = packed::Script::default();
+        let register = |height| storage.update_filter_scripts(vec![ScriptStatus {
+            script: script.clone(), script_type: ScriptType::Lock, block_number: height,
+        }], SetScriptsCommand::All);
+        let key = [Key::Meta("HISTORY_REGISTRATION_V1").into_vec(), script.as_slice().to_vec(), vec![0]].concat();
+        let floor = || u64::from_be_bytes(StorageBackend::get(&storage, key.clone()).unwrap().unwrap()[..8].try_into().unwrap());
+        register(0);
+        storage.update_block_number(10);
+        storage.update_min_filtered_block_number(10);
+        // No completed-tip snapshot has ever been requested.
+        register(10);
+        assert_eq!(floor(), 0, "interrupted partial recovery must retain genesis coverage");
+        register(15);
+        assert_eq!(floor(), 15, "requested forward jump must not manufacture coverage");
+    }
+
+    #[test]
+    fn recovery_resume_rejects_interrupted_genesis_and_caps_unsettled_matching() {
+        let (storage, _dir) = crate::tests::utils::new_storage("history_genesis_crash");
+        storage.init_genesis_block(BlockBuilder::default().build().data());
+        let status = ScriptStatus { script: packed::Script::default(), script_type: ScriptType::Lock, block_number: 0 };
+        storage.update_filter_scripts(vec![ScriptStatus { script: status.script.clone(), script_type: ScriptType::Lock, block_number: 0 }], SetScriptsCommand::All);
+        storage.update_block_number(10);
+        storage.update_min_filtered_block_number(10);
+        assert_eq!(storage.history_recovery_resume_start(&status), 10);
+        let pending = [Key::Meta("HISTORY_GENESIS_PENDING_V1").into_vec(), status.script.as_slice().to_vec(), vec![0]].concat();
+        StorageBackend::put(&storage, pending.clone(), vec![1]).unwrap();
+        assert_eq!(storage.history_recovery_resume_start(&status), 0, "genesis commit interruption cannot be skipped");
+        storage.update_filter_scripts(vec![ScriptStatus { script: status.script.clone(), script_type: ScriptType::Lock, block_number: 10 }], SetScriptsCommand::All);
+        assert_eq!(storage.get_filter_scripts()[0].block_number, 0, "ordinary resume must settle pending genesis before advancing");
+        storage.update_block_number(10);
+        storage.update_min_filtered_block_number(10);
+        StorageBackend::delete(&storage, &pending).unwrap();
+        storage.add_matched_blocks(7, 1, vec![(packed::Byte32::default(), false)]);
+        assert_eq!(storage.history_recovery_resume_start(&status), 6, "pending matching must be rescanned");
+    }
+
+    #[test]
+    fn recovery_segment_survives_restart_but_legacy_or_removed_script_does_not_resume() {
+        let (storage, dir) = crate::tests::utils::new_storage("history_restart");
+        storage.init_genesis_block(BlockBuilder::default().build().data());
+        let status = ScriptStatus { script: packed::Script::default(), script_type: ScriptType::Lock, block_number: 0 };
+        storage.update_filter_scripts(vec![ScriptStatus { script: status.script.clone(), script_type: ScriptType::Lock, block_number: 0 }], SetScriptsCommand::All);
+        storage.update_block_number(10);
+        storage.update_min_filtered_block_number(10);
+        drop(storage);
+        let storage = Storage::new(dir.path().join("store.db"));
+        assert_eq!(storage.history_recovery_resume_start(&status), 10);
+        let segment = [Key::Meta("HISTORY_SEGMENT_V1").into_vec(), status.script.as_slice().to_vec(), vec![0]].concat();
+        StorageBackend::delete(&storage, &segment).unwrap();
+        assert_eq!(storage.history_recovery_resume_start(&status), 0, "legacy cursors cannot prove an original boundary");
+        storage.update_filter_scripts(vec![], SetScriptsCommand::All);
+        assert_eq!(storage.history_recovery_resume_start(&status), 0);
+    }
+
     #[test]
     fn bounded_read_exact_budget_is_complete_but_extra_row_and_corruption_fail() {
         let conn = Connection::open_in_memory().unwrap();
