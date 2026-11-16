@@ -128,7 +128,6 @@ impl CKBProtocolHandler for SyncProtocol {
                         .map(|b| b.hash)
                         .collect();
 
-                    self.storage.remove_matched_blocks(start_number);
                     let blocks = self.peers.clear_matched_blocks(&mut matched_blocks);
                     assert_eq!(blocks.len(), db_blocks.len());
                     info!(
@@ -137,13 +136,7 @@ impl CKBProtocolHandler for SyncProtocol {
                         blocks_count,
                         db_blocks.len()
                     );
-                    // update storage
-                    for block in blocks {
-                        assert!(db_blocks.contains(&block.header().calc_header_hash()));
-                        self.storage.filter_block(block);
-                    }
-                    self.storage
-                        .update_block_number(start_number + blocks_count - 1);
+                    self.storage.index_matched_range(start_number, blocks_count, blocks);
 
                     // send more GetBlocksProof/GetBlocks requests
                     if let Some(db_matched_blocks) = self.storage.get_earliest_matched_blocks() {

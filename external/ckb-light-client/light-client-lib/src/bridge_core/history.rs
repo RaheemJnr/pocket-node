@@ -100,6 +100,11 @@ pub(crate) fn cells_ready(storage: &Storage, cell_prefix: &[u8], chain: &ChainSn
     let conn = storage.conn.lock().map_err(|_| unavailable())?;
     let marker_prefix = [Key::Meta("CELL_REWIND_V1").into_vec(), cell_prefix.to_vec()].concat();
     let markers = prefixed(&conn, &marker_prefix, MAX_INTERACTIONS)?;
+    // A process may have indexed only part of a retained matched range.
+    // Do not expose its transient unspent set before replay settles the debt.
+    if !prefixed(&conn, &Key::Meta("MATCHED_BLOCKS").into_vec(), 0)?.is_empty() {
+        return Err(unavailable());
+    }
     if markers.is_empty() { return Ok(()); }
     let state = read(&conn, Key::Meta("LAST_STATE").into_vec())?;
     if state.get(32..) != Some(chain.anchor.as_slice()) { return Err(unavailable()); }
@@ -431,6 +436,27 @@ mod tests {
     }
 
     #[test]
+    fn discarded_unindexed_range_cannot_turn_into_complete_history_after_restart() {
+        let (storage, dir) = crate::tests::utils::new_storage("history_lost_index_debt");
+        storage.init_genesis_block(BlockBuilder::default().build().data());
+        let script = packed::Script::default();
+        storage.update_filter_scripts(vec![ScriptStatus { script: script.clone(), script_type: ScriptType::Lock, block_number: 0 }], SetScriptsCommand::All);
+        let tip = BlockBuilder::default().epoch(ckb_types::core::EpochNumberWithFraction::new(0, 0, 100).full_value()).number(12u64).build().data().header();
+        storage.update_last_state(&U256::zero(), &tip, &[]);
+        storage.update_min_filtered_block_number(12);
+        storage.add_matched_blocks(10, 3, vec![(packed::Byte32::default(), true)]);
+        // Original synchronizer's first durable mutation, then process death.
+        storage.remove_matched_blocks(10);
+        drop(storage);
+        let storage = Storage::new(dir.path().join("store.db"));
+        // The real out-of-order/unmatched filter path advances to the global cursor.
+        storage.update_block_number(storage.get_min_filtered_block_number());
+        let identity = RecoveryIdentity { genesis_hash: packed::Byte32::default(), store_generation: "store".into(), run_nonce: [1; 16] };
+        let chain = ChainSnapshot { anchor: tip };
+        assert!(snapshot(&storage, &script, &identity, &chain, "TESTNET").is_err(), "lost matched indexing debt must not certify false absence");
+    }
+
+    #[test]
     fn bounded_read_exact_budget_is_complete_but_extra_row_and_corruption_fail() {
         let conn = Connection::open_in_memory().unwrap();
         conn.execute_batch("CREATE TABLE kv(key BLOB PRIMARY KEY,value BLOB)")
@@ -589,3 +615,7 @@ mod tests {
         assert!(registry.with_chain_snapshot(|_, _| ()).is_err());
     }
 }
+
+#[cfg(test)]
+#[path = "history_crash_tests.rs"]
+mod crash_tests;

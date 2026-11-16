@@ -330,7 +330,8 @@ class SyncCoordinator(
             walletId: String,
             lockScript: Script,
             blockNumberHex: String,
-        ): List<CandidateRegistration> = pendingCandidateStatusesLocked(walletId, lockScript, blockNumberHex)
+            network: NetworkType? = null,
+        ): List<CandidateRegistration> = pendingCandidateStatusesLocked(walletId, lockScript, blockNumberHex, network)
 
         /**
          * [setScriptsAndRecord] without taking the lock. [onLanded] runs the
@@ -439,34 +440,16 @@ class SyncCoordinator(
         val registrations = statuses.zip(walletIds).toMutableList()
         val registry = if (historyRecovery != null) walletRegistry.allWallets() else emptyList()
         val generation = historyRecovery?.generation(network.name)
-        val candidateInventory = mutableListOf<Pair<com.rjnr.pocketnode.data.storage.WalletRecord, List<SubAccountCandidateRecord>>>()
         if (generation != null) {
             for (wallet in registry) {
                 val candidates = subAccountCandidateStore.getForParent(wallet.walletId)
                     .filter { it.state != SubAccountCandidateRecord.STATE_RESTORED }
-                candidateInventory += wallet to candidates
                 val ownScript = WalletDerivation.lockScriptFromAddress(wallet.testnetAddress.ifBlank { wallet.mainnetAddress })
-                for (candidate in candidates) historyRecovery?.ensureScript(wallet.walletId, network.name,
+                for (candidate in candidates) historyRecovery.ensureScript(wallet.walletId, network.name,
                     json.encodeToString(ownScript.copy(args = candidate.scriptArgs)), generation)
             }
         }
         val scriptJobs = historyRecovery?.scripts(network.name).orEmpty().filter { it.status != "COMPLETE" }.associateBy { it.scriptJson }
-        if (cmd == CMD_SET_SCRIPTS_ALL) {
-            val selectedOwners = walletIds.filter { it.isNotEmpty() }.toSet()
-            // Persist all known obligations, but select only the existing bounded
-            // discovery batch. Parent completion cannot retire the remaining queue.
-            for ((wallet, candidates) in candidateInventory) {
-                if (wallet.walletId !in selectedOwners) continue
-                val ownScript = WalletDerivation.lockScriptFromAddress(wallet.testnetAddress.ifBlank { wallet.mainnetAddress })
-                val pending = candidates.filter { json.encodeToString(ownScript.copy(args = it.scriptArgs)) in scriptJobs }
-                    .map { if (it.state == SubAccountCandidateRecord.STATE_EMPTY) it.copy(state = SubAccountCandidateRecord.STATE_PENDING) else it }
-                for (candidate in selectCandidatesForRegistration(pending, MAX_CANDIDATE_SCRIPTS_PER_PARENT)) {
-                    val script = ownScript.copy(args = candidate.scriptArgs)
-                    if (registrations.none { it.first.script == script && it.first.scriptType == "lock" })
-                        registrations += JniScriptStatus(script, "lock", "0x0") to ""
-                }
-            }
-        }
         val recoveryStatuses = registrations.map { (status, walletId) ->
             if (walletId in obligations || json.encodeToString(status.script) in scriptJobs)
                 status.copy(blockNumber = "0x0", historyRecovery = true) else status
@@ -639,20 +622,45 @@ class SyncCoordinator(
         walletId: String,
         lockScript: Script,
         blockNumberHex: String,
+        network: NetworkType?,
     ): List<CandidateRegistration> {
-        val candidates = selectCandidatesForRegistration(
-            subAccountCandidateStore.getForParent(walletId),
-            accountAxisCap = MAX_CANDIDATE_SCRIPTS_PER_PARENT,
-        )
-        val current = if (candidates.any { it.state == SubAccountCandidateRecord.STATE_FOUND }) {
-            registeredCandidateCursors()
-        } else emptyMap()
-        return candidates.map { candidate ->
+        val inventory = subAccountCandidateStore.getForParent(walletId)
+        val recoveryDao = historyRecovery
+        if (network != null && recoveryDao != null) {
+            val generation = recoveryDao.generation(network.name)
+            if (generation != null) {
+                for (candidate in inventory.filter { it.state != SubAccountCandidateRecord.STATE_RESTORED }) {
+                    recoveryDao.ensureScript(walletId, network.name,
+                        json.encodeToString(lockScript.copy(args = candidate.scriptArgs)), generation)
+                }
+            }
+        }
+        val jobs = network?.let { historyRecovery?.scripts(it.name) }.orEmpty()
+            .filter { it.parentWalletId == walletId && it.status != "COMPLETE" }.associateBy { it.scriptJson }
+        // One selection combines ordinary discovery and outstanding recovery.
+        // Old FOUND/EMPTY classifications are selection hints, not fresh proof;
+        // the source records keep their state until canonical recovery settles.
+        val candidates = selectCandidatesForRegistration(inventory.map { candidate ->
+            if (candidate.state != SubAccountCandidateRecord.STATE_RESTORED &&
+                json.encodeToString(lockScript.copy(args = candidate.scriptArgs)) in jobs)
+                candidate.copy(state = SubAccountCandidateRecord.STATE_PENDING) else candidate
+        }, accountAxisCap = MAX_CANDIDATE_SCRIPTS_PER_PARENT)
+        val originals = inventory.associateBy { it.derivationPath }
+        val ordinaryFound = candidates.any { candidate ->
+            candidate.state == SubAccountCandidateRecord.STATE_FOUND &&
+                json.encodeToString(lockScript.copy(args = candidate.scriptArgs)) !in jobs
+        }
+        val current = if (ordinaryFound) registeredCandidateCursors() else emptyMap()
+        return candidates.map { selected ->
+            val candidate = originals.getValue(selected.derivationPath)
             val script = lockScript.copy(args = candidate.scriptArgs)
-            val from = if (candidate.state == SubAccountCandidateRecord.STATE_FOUND) {
-                current[script to "lock"] ?: blockNumberHex
-            } else blockNumberHex
-            CandidateRegistration(candidate, JniScriptStatus(script, "lock", from))
+            val recovery = json.encodeToString(script) in jobs
+            val from = when {
+                recovery -> "0x0"
+                candidate.state == SubAccountCandidateRecord.STATE_FOUND -> current[script to "lock"] ?: blockNumberHex
+                else -> blockNumberHex
+            }
+            CandidateRegistration(candidate, JniScriptStatus(script, "lock", from, historyRecovery = recovery))
         }
     }
 
@@ -994,7 +1002,7 @@ class SyncCoordinator(
                         tipHeight,
                     ).toString(16)
                     val candidates =
-                        pendingCandidateStatuses(wallet.walletId, lockScript, candidateHex)
+                        pendingCandidateStatuses(wallet.walletId, lockScript, candidateHex, ctx.network)
                     Triple(wallet.walletId, own, candidates)
                 }
             }.awaitAll().filterNotNull()

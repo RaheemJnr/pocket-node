@@ -113,7 +113,7 @@ pub trait LightClientStorage: StorageBackend {
 
                 // Insert new scripts
                 for mut ss in scripts {
-                    self.rewind_after_registration(&mut ss, &mut batch);
+                    self.rewind_after_registration(&mut ss, &mut batch, None);
                     should_filter_genesis_block |= ss.block_number == 0;
                     let key = [
                         key_prefix.as_ref(),
@@ -147,7 +147,7 @@ pub trait LightClientStorage: StorageBackend {
                 should_filter_genesis_block = min_script_block_number == Some(0);
 
                 for mut ss in scripts {
-                    self.rewind_after_registration(&mut ss, &mut batch);
+                    self.rewind_after_registration(&mut ss, &mut batch, None);
                     should_filter_genesis_block |= ss.block_number == 0;
                     let key = [
                         key_prefix.as_ref(),
@@ -252,7 +252,7 @@ pub trait LightClientStorage: StorageBackend {
 
     /// Rewind cells and their undo history together to the exclusive scan start.
     /// Until rescan completes, cells represent this prefix, not latest spendability.
-    fn rewind_after_registration(&self, status: &mut ScriptStatus, batch: &mut Self::Batch) {
+    fn rewind_after_registration(&self, status: &mut ScriptStatus, batch: &mut Self::Batch, indexing_frontier: Option<u64>) {
         let pending_genesis = [Key::Meta("HISTORY_GENESIS_PENDING_V1").into_vec(), status.script.as_slice().to_vec(),
             vec![match status.script_type { ScriptType::Lock => 0, ScriptType::Type => 1 }]].concat();
         if StorageBackend::get(self, pending_genesis).expect("read pending genesis").is_some() {
@@ -288,11 +288,12 @@ pub trait LightClientStorage: StorageBackend {
             }
         }
         if let Some(first) = status.block_number.checked_add(1) {
-            if let Some(highest) = self.rollback_script_to_block(status, first, batch) {
+            let highest = self.rollback_script_to_block(status, first, batch);
+            if highest.is_some() || indexing_frontier.is_some() {
                 // Preserve corrupt metadata so availability stays fail-closed.
                 if previous.is_some() && parsed.is_none() { return; }
-                let frontier = highest.max(previous_cursor.unwrap_or(highest))
-                    .max(pending.map(|p| p.0).unwrap_or(0));
+                let frontier = highest.unwrap_or(0).max(previous_cursor.unwrap_or(0))
+                    .max(pending.map(|p| p.0).unwrap_or(0)).max(indexing_frontier.unwrap_or(0));
                 let safe_start = status.block_number.min(pending.map(|p| p.1).unwrap_or(status.block_number));
                 let value = [frontier.to_be_bytes().to_vec(), safe_start.to_be_bytes().to_vec(),
                     status.script.as_slice().to_vec()].concat();
@@ -385,11 +386,66 @@ pub trait LightClientStorage: StorageBackend {
         StorageBackend::put(self, key, value).expect("db put matched blocks should be ok");
     }
 
-    /// Remove matched blocks by start number
+    /// Discarding unindexed work must rewind its scan obligation in the same
+    /// commit. Cleanup/reorg callers cannot leave an empty queue at an advanced
+    /// global cursor and manufacture complete coverage after a restart.
     fn remove_matched_blocks(&self, start_number: u64) {
         let mut key = Key::Meta(MATCHED_FILTER_BLOCKS_KEY).into_vec();
         key.extend(start_number.to_be_bytes());
-        StorageBackend::delete(self, &key).expect("delete matched blocks");
+        let debt = match StorageBackend::get(self, key.clone()).expect("read matched blocks") {
+            Some(debt) => debt, None => return,
+        };
+        let (count, _) = parse_matched_blocks(&debt);
+        let end = start_number.checked_add(count.checked_sub(1).expect("nonempty matched range")).expect("matched range end");
+        let indexing_frontier = self.get_min_filtered_block_number().max(end);
+        let rewind_to = start_number.saturating_sub(1);
+        let mut batch = self.batch();
+        let mut filtered = self.get_min_filtered_block_number().min(rewind_to);
+        for mut status in self.get_filter_scripts() {
+            status.block_number = status.block_number.min(rewind_to);
+            self.rewind_after_registration(&mut status, &mut batch, Some(indexing_frontier));
+            filtered = filtered.min(status.block_number);
+            let cursor_key = [Key::Meta(FILTER_SCRIPTS_KEY).into_vec(), status.script.as_slice().to_vec(),
+                vec![match status.script_type { ScriptType::Lock => 0, ScriptType::Type => 1 }]].concat();
+            batch.put(&cursor_key, &status.block_number.to_be_bytes());
+        }
+        batch.put(&Key::Meta(MIN_FILTERED_BLOCK_NUMBER).into_vec(),
+            &filtered.to_le_bytes());
+        batch.delete(&key);
+        batch.commit().expect("discard matched range and rewind atomically");
+    }
+
+    /// Caller holds the matched-work write guard and has verified the bodies.
+    /// Keep durable debt through every deterministic per-block index commit.
+    /// Restart replays the entire ascending range; final cells/history are
+    /// idempotent, including inputs spending earlier outputs in this range.
+    /// Only the last batch advances cursors and acknowledges the range together.
+    fn index_matched_range(&self, start_number: u64, blocks_count: u64, mut blocks: Vec<Block>) {
+        let end = start_number.checked_add(blocks_count.checked_sub(1).expect("nonempty range"))
+            .expect("matched range overflow");
+        let mut debt_key = Key::Meta(MATCHED_FILTER_BLOCKS_KEY).into_vec();
+        debt_key.extend(start_number.to_be_bytes());
+        let debt = StorageBackend::get(self, debt_key.clone()).expect("read index debt").expect("durable index debt");
+        let (count, matched) = parse_matched_blocks(&debt);
+        let expected: HashSet<_> = matched.into_iter().map(|(hash, _)| hash).collect();
+        let actual: HashSet<_> = blocks.iter().map(|block| block.calc_header_hash()).collect();
+        assert_eq!(count, blocks_count);
+        assert_eq!(actual, expected);
+        assert_eq!(actual.len(), blocks.len());
+        assert!(blocks.iter().all(|block| {
+            let number: u64 = block.header().raw().number().unpack();
+            number >= start_number && number <= end
+        }));
+        blocks.sort_by_key(|block| Unpack::<u64>::unpack(&block.header().raw().number()));
+        for block in blocks { self.filter_block(block); }
+        let mut batch = self.batch();
+        for status in self.get_filter_scripts().into_iter().filter(|status| status.block_number < end) {
+            let cursor_key = [Key::Meta(FILTER_SCRIPTS_KEY).into_vec(), status.script.as_slice().to_vec(),
+                vec![match status.script_type { ScriptType::Lock => 0, ScriptType::Type => 1 }]].concat();
+            batch.put(&cursor_key, &end.to_be_bytes());
+        }
+        batch.delete(&debt_key);
+        batch.commit().expect("index progress and range acknowledgement commit atomically");
     }
 
     /// Cleanup invalid matched blocks

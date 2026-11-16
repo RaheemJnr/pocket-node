@@ -89,8 +89,8 @@ class HistoryRecoveryContractTest {
             every { getTipHeader() } returns tip()
             every { setScripts(any(), any()) } returns true
         }
-        val coordinator = SyncCoordinator(registry(), mockk(relaxed = true), candidates, mockk(relaxed = true), api, mockk(relaxed = true), json, NoopLogger, historyRecovery = db.historyRecovery())
-        coordinator.setScriptsAndRecord(listOf(JniScriptStatus(script, "lock", "0x1173f60")), listOf("active"), 0, NetworkType.MAINNET)
+        val coordinator = SyncCoordinator(registry(), mockk(relaxed = true), candidates, mockk(relaxed = true), api, assemblyPreferences(), json, NoopLogger, historyRecovery = db.historyRecovery())
+        coordinator.registerAllWalletScripts(assemblyContext())
         db.openHelper.writableDatabase.query("SELECT name FROM sqlite_master WHERE name='history_script_recovery_jobs'").use {
             assertTrue("Candidate obligations need independent durable script identity", it.moveToFirst())
         }
@@ -110,8 +110,8 @@ class HistoryRecoveryContractTest {
             every { getTipHeader() } returns tip()
             every { setScripts(any(), any()) } returns true
         }
-        fun coordinator() = SyncCoordinator(registry(), mockk(relaxed = true), candidates, mockk(relaxed = true), api, mockk(relaxed = true), json, NoopLogger, historyRecovery = db.historyRecovery())
-        coordinator().setScriptsAndRecord(listOf(JniScriptStatus(script, "lock", "0x14")), listOf("active"), 0, NetworkType.MAINNET)
+        fun coordinator() = SyncCoordinator(registry(), mockk(relaxed = true), candidates, mockk(relaxed = true), api, assemblyPreferences(), json, NoopLogger, historyRecovery = db.historyRecovery())
+        coordinator().registerAllWalletScripts(assemblyContext())
         val scriptJobs = db.historyRecovery().scripts("MAINNET")
         assertEquals(7, scriptJobs.size)
         assertEquals(5, scriptJobs.count { it.status == "REGISTERED" })
@@ -153,8 +153,8 @@ class HistoryRecoveryContractTest {
             every { getHistorySnapshot(any()) } returns json.encodeToString(proof().copy(script = candidateScript))
         }
         val raced = spyk(db.historyRecovery())
-        val coordinator = SyncCoordinator(registry(), mockk(relaxed = true), candidates, mockk(relaxed = true), api, mockk(relaxed = true), json, NoopLogger, historyRecovery = raced)
-        coordinator.setScriptsAndRecord(listOf(JniScriptStatus(script, "lock", "0x0")), listOf("active"), 0, NetworkType.MAINNET)
+        val coordinator = SyncCoordinator(registry(), mockk(relaxed = true), candidates, mockk(relaxed = true), api, assemblyPreferences(), json, NoopLogger, historyRecovery = raced)
+        coordinator.registerAllWalletScripts(assemblyContext())
         coEvery { raced.completeScript(any(), any(), any(), any(), any()) } coAnswers {
             db.historyRecovery().resetScripts("MAINNET", "b".repeat(32))
             db.historyRecovery().recordEpoch("MAINNET", "b".repeat(32))
@@ -186,6 +186,60 @@ class HistoryRecoveryContractTest {
         assertTrue(selected.historyRecovery && selected.blockNumber == "0x0")
         assertEquals("REGISTERED", db.historyRecovery().job("wallet5", "MAINNET")!!.status)
         assertEquals("PENDING", db.historyRecovery().job("wallet4", "MAINNET")!!.status)
+    }
+    private fun assemblyPreferences() = mockk<com.rjnr.pocketnode.core.prefs.SyncPreferences>(relaxed = true) {
+        every { getSyncStrategy() } returns com.rjnr.pocketnode.core.prefs.SyncStrategy.ALL_WALLETS
+        every { getSyncMode(any(), any()) } returns SyncMode.RECENT
+    }
+    private fun assemblyContext() = SyncCoordinator.SyncContext(network = NetworkType.MAINNET,
+        activeWalletId = "active", awaitNodeReady = { true }, getWalletSyncBlock = { 0L }, onScriptsRegistered = {})
+
+    @Test fun `real assembly selects one bounded recovery batch across old empty and pending candidates`() = runTest {
+        jobs()
+        db.subAccountCandidateDao().insertAll((1..10).map {
+            com.rjnr.pocketnode.data.database.entity.SubAccountCandidateEntity("active", "path$it", it,
+                "0x${(it + 48).toString(16)}", if (it <= 5) "EMPTY" else "PENDING", 1, 100)
+        })
+        val payloads = mutableListOf<String>()
+        val api = mockk<LightClientApi>(relaxed = true) {
+            every { getTipHeader() } returns tip()
+            every { getScripts() } returns "[]"
+            every { setScripts(capture(payloads), any()) } returns true
+        }
+        val coordinator = SyncCoordinator(registry(), mockk(relaxed = true), RoomSubAccountCandidateStore(db.subAccountCandidateDao()),
+            mockk(relaxed = true), api, assemblyPreferences(), json, NoopLogger, historyRecovery = db.historyRecovery())
+        coordinator.registerAllWalletScripts(assemblyContext())
+        val sent = json.decodeFromString<List<JniScriptStatus>>(payloads.single()).filter { it.script != script && it.script != inactiveScript }
+        assertEquals("Ordinary and recovery candidates share the same five-slot cap", 5, sent.size)
+        assertTrue(sent.all { it.historyRecovery && it.blockNumber == "0x0" })
+        assertEquals(10, db.historyRecovery().scripts("MAINNET").size)
+        assertEquals(5, db.historyRecovery().scripts("MAINNET").count { it.status == "REGISTERED" })
+        assertEquals(5, db.historyRecovery().scripts("MAINNET").count { it.status == "PENDING" })
+    }
+    @Test fun `real assembly recovers old account found without changing source until canonical proof`() = runTest {
+        jobs()
+        val candidateScript = script.copy(args = "0x77")
+        db.subAccountCandidateDao().insertAll(listOf(com.rjnr.pocketnode.data.database.entity.SubAccountCandidateEntity(
+            "active", "found-path", 1, candidateScript.args, "FOUND", 1, 100)))
+        val payloads = mutableListOf<String>()
+        val api = mockk<LightClientApi>(relaxed = true) {
+            every { getTipHeader() } returns tip()
+            every { getScripts() } returns "[]"
+            every { setScripts(capture(payloads), any()) } returns true
+            every { getHistorySnapshot(any()) } returns null
+        }
+        val coordinator = SyncCoordinator(registry(), mockk(relaxed = true), RoomSubAccountCandidateStore(db.subAccountCandidateDao()),
+            mockk(relaxed = true), api, assemblyPreferences(), json, NoopLogger, historyRecovery = db.historyRecovery())
+        coordinator.registerAllWalletScripts(assemblyContext())
+        val found = json.decodeFromString<List<JniScriptStatus>>(payloads.single()).singleOrNull { it.script == candidateScript }
+        assertNotNull("Existing account-axis FOUND obligation must be registered", found)
+        assertTrue(found!!.historyRecovery && found.blockNumber == "0x0")
+        assertEquals("FOUND", db.subAccountCandidateDao().getForParent("active").single().state)
+        assertEquals("REGISTERED", db.historyRecovery().scripts("MAINNET").single().status)
+        every { api.getHistorySnapshot(json.encodeToString(candidateScript)) } returns json.encodeToString(proof().copy(script = candidateScript))
+        assertTrue(coordinator.refreshScriptRecovery(NetworkType.MAINNET))
+        assertEquals("COMPLETE", db.historyRecovery().scripts("MAINNET").single().status)
+        assertEquals("EMPTY", db.subAccountCandidateDao().getForParent("active").single().state)
     }
     private fun proof() = CanonicalHistorySnapshot(1, true, "MAINNET", "0x" + "1".repeat(64), generation, script, "b".repeat(32), "0", "20", "0x" + "2".repeat(64), "20", emptySet(), 1)
     private suspend fun read(snapshot: CanonicalHistorySnapshot, reconciliationFails: Boolean = false, unavailableRecheck: Boolean = false) {

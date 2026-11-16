@@ -663,7 +663,7 @@ class GatewayRepository @Inject constructor(
             tipHeight,
         ).toString(16)
         val candidateRegistrations = pendingCandidateStatuses(
-            walletId, info.script, candidateHex
+            walletId, info.script, candidateHex, currentNetwork
         )
         var landed = false
         try {
