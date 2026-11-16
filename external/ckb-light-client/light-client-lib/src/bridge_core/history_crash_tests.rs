@@ -283,6 +283,12 @@ fn non_earliest_range_cannot_mutate_indexes_or_progress() {
     assert_eq!(storage.get_filter_scripts()[0].block_number, 0);
     assert!(cell(&storage, &f.script, 10).is_none());
     assert_eq!(storage.get_earliest_matched_blocks().unwrap().start_number, 10);
+    storage.add_matched_blocks(10, 1, vec![(f.blocks[2].calc_header_hash(), true)]);
+    storage.update_min_filtered_block_number(12);
+    assert!(!storage.index_matched_range(10, 1, vec![f.blocks[2].clone()]), "body height outside the debt range cannot settle it");
+    assert_eq!(storage.get_filter_scripts()[0].block_number, 0);
+    assert!(cell(&storage, &f.script, 12).is_none());
+    assert_eq!(storage.get_earliest_matched_blocks().unwrap().start_number, 10);
 }
 
 

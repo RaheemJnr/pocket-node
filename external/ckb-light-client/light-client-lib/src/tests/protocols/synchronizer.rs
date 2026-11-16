@@ -38,7 +38,12 @@ async fn test_sync_add_block() {
         .unwrap_or_default();
     let start_number = min_filtered_block_number + 1;
     let blocks_count = 1;
-    let block_view = BlockBuilder::default().build();
+    // Match the production filter -> durable debt -> body-indexing sequence.
+    // A genesis body cannot settle a range starting at block2.
+    let block_view = BlockBuilder::default()
+        .epoch(ckb_types::core::EpochNumberWithFraction::new(0, 0, 100).full_value())
+        .number(start_number).build();
+    chain.client_storage().update_min_filtered_block_number(start_number + blocks_count - 1);
     let proved_block_hash = block_view.hash();
     chain.client_storage().add_matched_blocks(
         start_number,
