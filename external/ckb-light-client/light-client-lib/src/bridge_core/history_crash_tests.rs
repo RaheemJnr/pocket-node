@@ -333,3 +333,53 @@ async fn synchronizer_drops_stale_bodies_and_reloads_only_current_earliest_debt(
         }
     }
 }
+
+#[tokio::test]
+async fn nonzero_registration_reopen_cannot_advance_past_rolled_back_spend() {
+    use crate::protocols::{FilterProtocol, Peers};
+    use crate::tests::utils::MockNetworkContext;
+    use ckb_network::{CKBProtocolHandler, PeerIndex, SupportProtocols};
+    use ckb_types::utilities::merkle_mountain_range::VerifiableHeader;
+    for partial in [false, true] {
+        for after in [false, true] {
+            let (storage, dir) = crate::tests::utils::new_storage("registration-crash");
+            let f = setup(&storage);
+            assert!(storage.index_matched_range(10, 3, f.blocks.clone()));
+            assert!(snapshot(&storage, &f.script, &f.identity, &f.chain, "TESTNET").is_ok());
+            let crashing = CrashStorage { inner: storage, commits: Arc::new(AtomicUsize::new(0)), stop: 1, after };
+            assert!(std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                crashing.update_filter_scripts(vec![ScriptStatus {
+                    script: f.script.clone(), script_type: ScriptType::Lock, block_number: 10,
+                }], if partial { SetScriptsCommand::Partial } else { SetScriptsCommand::All });
+            })).is_err());
+            drop(crashing);
+            let storage = Storage::new(dir.path().join("store.db"));
+            // Exercise the real out-of-order filter handler immediately on reopen,
+            // before any platform registration could hide an incoherent rewind.
+            let peers = Arc::new(Peers::new(1, 2000, storage.get_last_check_point(), 0));
+            let peer = PeerIndex::new(1);
+            peers.add_peer(peer);
+            peers.mock_prove_state(peer, VerifiableHeader::new(f.chain.anchor.clone().into_view(),
+                Default::default(), None, Default::default())).unwrap();
+            let mut protocol = FilterProtocol::new(storage.clone(), peers);
+            let nc = MockNetworkContext::new(SupportProtocols::Filter);
+            let message = packed::BlockFilterMessage::new_builder().set(
+                packed::BlockFilters::new_builder().start_number(100u64).build()).build();
+            protocol.received(nc.context(), peer, message.as_bytes()).await;
+            let prefix = [vec![KeyPrefix::CellLockScript as u8], extract_raw_data(&f.script)].concat();
+            if after {
+                assert!(snapshot(&storage, &f.script, &f.identity, &f.chain, "TESTNET").is_err(),
+                    "registration rollback must not certify false spend absence after filter advancement");
+                assert!(cells_ready(&storage, &prefix, &f.chain).is_err(), "restored spent output must stay fenced");
+                assert_eq!(storage.get_min_filtered_block_number(), 10);
+                assert_eq!(storage.get_filter_scripts()[0].block_number, 10);
+                assert!(cell(&storage, &f.script, 10).is_some());
+                storage.add_matched_blocks(11, 2, f.blocks[1..].iter().map(|b| (b.calc_header_hash(), true)).collect());
+                storage.update_min_filtered_block_number(12);
+                assert!(storage.index_matched_range(11, 2, f.blocks[1..].to_vec()));
+            }
+            assert!(cells_ready(&storage, &prefix, &f.chain).is_ok());
+            assert_final_and_undo(&storage, &f);
+        }
+    }
+}

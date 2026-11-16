@@ -81,6 +81,13 @@ pub trait LightClientStorage: StorageBackend {
 
     /// Update filter scripts
     fn update_filter_scripts(&self, scripts: Vec<ScriptStatus>, command: SetScriptsCommand) {
+        // Track the resulting set, including PARTIAL's untouched scripts and
+        // any conservative clamp applied while rewinding each new registration.
+        let mut resulting: HashMap<Vec<u8>, u64> = self.get_filter_scripts().into_iter().map(|ss| {
+            let key = [Key::Meta(FILTER_SCRIPTS_KEY).into_vec(), ss.script.as_slice().to_vec(),
+                vec![match ss.script_type { ScriptType::Lock => 0, ScriptType::Type => 1 }]].concat();
+            (key, ss.block_number)
+        }).collect();
         let mut should_filter_genesis_block = false;
         let mut genesis_pending = Vec::new();
         let mut batch = self.batch();
@@ -90,6 +97,7 @@ pub trait LightClientStorage: StorageBackend {
         let registration_prefix = Key::Meta("HISTORY_REGISTRATION_V1").into_vec();
         match command {
             SetScriptsCommand::All => {
+                resulting.clear();
                 should_filter_genesis_block = scripts.iter().any(|ss| ss.block_number == 0);
 
                 // Delete all existing filter scripts
@@ -124,6 +132,7 @@ pub trait LightClientStorage: StorageBackend {
                         },
                     ]
                     .concat();
+                    resulting.insert(key.clone(), ss.block_number);
                     batch.put(&key, &ss.block_number.to_be_bytes());
                     let mut registration_key = registration_prefix.clone();
                     registration_key.extend_from_slice(&key[key_prefix.len()..]);
@@ -158,6 +167,7 @@ pub trait LightClientStorage: StorageBackend {
                         },
                     ]
                     .concat();
+                    resulting.insert(key.clone(), ss.block_number);
                     batch.put(&key, &ss.block_number.to_be_bytes());
                     let mut registration_key = registration_prefix.clone();
                     registration_key.extend_from_slice(&key[key_prefix.len()..]);
@@ -188,6 +198,7 @@ pub trait LightClientStorage: StorageBackend {
                         },
                     ]
                     .concat();
+                    resulting.remove(&key);
                     batch.delete(&key);
                     let mut registration_key = registration_prefix.clone();
                     registration_key.extend_from_slice(&key[key_prefix.len()..]);
@@ -198,10 +209,19 @@ pub trait LightClientStorage: StorageBackend {
             }
         }
 
+        // The frontier and matched-work reset are part of registration's
+        // transaction. A crash must never expose rolled-back indexes under the
+        // old high frontier, which the filter handler may copy into scripts.
+        if let Some(number) = resulting.values().min() {
+            batch.put(&Key::Meta(MIN_FILTERED_BLOCK_NUMBER).into_vec(), &number.to_le_bytes());
+        }
+        let matched_prefix = Key::Meta(MATCHED_FILTER_BLOCKS_KEY).into_vec();
+        for kv in self.collect_iterator(
+            IteratorStart::From(matched_prefix.clone()), IteratorDirection::Forward,
+            Box::new(move |key| key.starts_with(&matched_prefix)),
+            Box::new(|_key, value| Some(value.to_vec())), usize::MAX,
+        ) { batch.delete(&kv.key); }
         batch.commit().expect("batch commit should be ok");
-
-        self.update_min_filtered_block_number_by_scripts();
-        self.clear_matched_blocks();
 
         if should_filter_genesis_block {
             let block = self.get_genesis_block();

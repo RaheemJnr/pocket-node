@@ -100,6 +100,19 @@ protocol SyncStatusProviding: AnyObject {
     func refreshBalance()
 }
 
+/// Node lifecycle reads used by the sync handoff and restore-hint export.
+@MainActor
+protocol SyncNodeLifecycle: AnyObject {
+    var status: NodeStatus { get }
+    var controls: NodeControls { get }
+    var tipNumber: Int { get }
+    var tipHash: String { get }
+    func start() async
+    func refresh() async
+}
+
+extension LightClientService: SyncNodeLifecycle {}
+
 /// Owns the shared chain-sync stack and the database behind it.
 ///
 /// The iOS half of `GatewayRepository`'s sync surface. Everything Kotlin lives
@@ -120,7 +133,8 @@ final class SyncService: SyncStatusProviding {
     private(set) var lastError: String?
     private(set) var balance = BalanceStatus()
 
-    private let lightClient: LightClientService
+    private let lightClient: any SyncNodeLifecycle
+    private let storageDirectory: URL?
 
     /// The blocking bridge, shared with the send path for the same reason the
     /// stores are: one `LightClientApi` per process, held by whichever object
@@ -137,6 +151,7 @@ final class SyncService: SyncStatusProviding {
     let historyRecovery: HistoryRecoveryReader
     private var isShutdown = false
     private var verificationReady = false
+    private var verificationScope: UInt64 = 0
     @ObservationIgnored private var verificationTask: Task<Bool, Never>?
 
     /// All cached UI reads and registrations share this one awaited handoff.
@@ -151,12 +166,14 @@ final class SyncService: SyncStatusProviding {
         guard !isShutdown else { return false }
         if verificationReady { return true }
         if let task = verificationTask { return await task.value }
+        let scope = verificationScope
+        let wallet = activeWallet
         let task = Task { @MainActor [weak self] () -> Bool in
             guard let self else { return false }
             do {
                 let generation = try VerificationEpoch.shared.requireGeneration(
                     envelope: self.api.callRpc(method: "get_verification_epoch"))
-                let directory = try AppDirectories.dataDirectory(network: self.network.name.lowercased())
+                let directory = try self.storageDirectory ?? AppDirectories.dataDirectory(network: self.network.name.lowercased())
                 let marker = directory.appendingPathComponent("verified-chain-generation")
                 let previous = try? String(contentsOf: marker, encoding: .utf8)
                 let recovery = HistoryRecoveryBookkeeping(dao: self.database.historyRecovery())
@@ -164,14 +181,24 @@ final class SyncService: SyncStatusProviding {
                 if previous != generation || recoveryGeneration != generation {
                     try await VerificationCacheCleanup(dao: self.database.verificationCache())
                         .invalidate(network: self.network.name, generation: generation)
+                    guard !Task.isCancelled && self.verificationScope == scope && !self.isShutdown else { return false }
                     // A failed write leaves the gate closed. Repeating cleanup is safe.
                     try Data(generation.utf8).write(to: marker, options: .atomic)
                 }
-                if let walletId = self.activeWalletId,
-                   self.preferences.getSyncModeOrNull(network: self.network, walletId: walletId) != nil {
-                    try await recovery.ensureWallet(walletId: walletId, network: self.network.name, generation: generation)
+                guard !Task.isCancelled && self.verificationScope == scope && !self.isShutdown else { return false }
+                if let wallet {
+                    let provenance = FreshSyncConfiguration(directory: directory, network: self.network.name)
+                    if self.preferences.getSyncModeOrNull(network: self.network, walletId: wallet.id) == nil {
+                        // Persist before opening the gate: mode persistence happens in
+                        // shared registration, so writing after choose would leave a crash gap.
+                        try provenance.recordUnconfigured(wallet: wallet, generation: generation)
+                    } else if !provenance.wasUnconfigured(wallet: wallet, generation: generation) {
+                        // Missing/corrupt/stale provenance conservatively repairs legacy
+                        // erased wallets even after an interrupted same-generation handoff.
+                        try await recovery.ensureWallet(walletId: wallet.id, network: self.network.name, generation: generation)
+                    }
                 }
-                guard !Task.isCancelled && !self.isShutdown else { return false }
+                guard !Task.isCancelled && self.verificationScope == scope && !self.isShutdown else { return false }
                 self.verificationReady = true
                 return true
             } catch {
@@ -181,7 +208,7 @@ final class SyncService: SyncStatusProviding {
         }
         verificationTask = task
         let ready = await task.value
-        if !ready { verificationTask = nil }
+        if !ready && verificationScope == scope { verificationTask = nil }
         return ready
     }
     private let service: SingleWalletSyncService
@@ -274,10 +301,12 @@ final class SyncService: SyncStatusProviding {
     ///   `lightClient` because that one publishes UI state on the main actor
     ///   while this one is the blocking bridge the Kotlin engine calls into.
     init(
-        lightClient: LightClientService,
+        lightClient: any SyncNodeLifecycle,
         api: any LightClientApi,
-        preferences: UserDefaultsPreferences
+        preferences: UserDefaultsPreferences,
+        storageDirectory: URL? = nil
     ) {
+        self.storageDirectory = storageDirectory
         self.lightClient = lightClient
         self.api = api
         self.preferences = preferences
@@ -291,7 +320,7 @@ final class SyncService: SyncStatusProviding {
         // `data/mainnet` and `data/testnet` stores the same way, and a shared
         // file would carry one network's checkpoints into the other.
         self.database = createIosPocketNodeCoreDatabase(
-            path: Self.databasePath(network: network),
+            path: storageDirectory?.appendingPathComponent("pocket_node.db").path ?? Self.databasePath(network: network),
             queryContext: runtime.defaultContext
         )
         self.historyRecovery = HistoryRecoveryReader(dao: database.historyRecovery())
@@ -532,6 +561,10 @@ final class SyncService: SyncStatusProviding {
     ///   ``retry()`` passes true; an ordinary appearance must not re-register.
     func activate(wallet: WalletRecord, force: Bool = false) {
         if activeWalletId != wallet.id {
+            verificationScope &+= 1
+            verificationReady = false
+            verificationTask?.cancel()
+            verificationTask = nil
             recoveryObservation?.cancel()
             recovery = nil
         }
