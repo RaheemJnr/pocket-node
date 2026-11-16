@@ -74,6 +74,7 @@ class PublishedHistoryUpgradeTest {
                 // Authoritative receipt still exists, so only the already-erased identity is shown.
                 assertEquals(if (erased) setOf("erased", "historic") else setOf("erased"), archive.keys)
                 assertNull(archive.getValue("erased").blockNumberHint)
+                assertEquals(12_000_000L, database.historyRecovery().job("inactive", "MAINNET")!!.previousLightStart)
                 assertEquals(17_000_000L, database.historyRecovery().job("inactive", "MAINNET")!!.previousSavedBlock)
                 assertNotNull(database.historyRecovery().job("empty", "MAINNET"))
                 val gate = VerificationCacheGate(context, database)
@@ -87,6 +88,9 @@ class PublishedHistoryUpgradeTest {
                 val archive = database.historyRecovery().archive("inactive", "MAINNET").associateBy { it.txHash }
                 assertEquals(if (erased) null else "0xf42400", archive.getValue("historic").blockNumberHint)
                 assertEquals(if (erased) null else "42", archive.getValue("historic").balanceChangeHint)
+                assertEquals(123L, archive.getValue("historic").timestampHint)
+                assertEquals("out", archive.getValue("historic").directionHint)
+                assertEquals(if (erased) null else "1", archive.getValue("historic").feeHint)
                 assertNull(archive.getValue("erased").timestampHint)
                 assertEquals(0L, database.historyRecovery().job("inactive", "MAINNET")!!.startBlock)
                 assertEquals(200L, database.syncProgressDao().get("inactive", "TESTNET")!!.localSavedBlockNumber)
@@ -96,7 +100,24 @@ class PublishedHistoryUpgradeTest {
                 assertEquals("0", scalar("SELECT COUNT(*) FROM dao_cells WHERE status='LOCKED'"))
                 assertEquals("1", scalar("SELECT COUNT(*) FROM dao_cells WHERE status='DEPOSITING'"))
                 for (table in listOf("pending_broadcasts", "pending_dao_withdraws", "pending_dao_unlocks")) assertEquals("1", scalar("SELECT COUNT(*) FROM $table"))
-                assertEquals(2, database.historyRecovery().daoHints("inactive", "MAINNET").size)
+                val daoHints = database.historyRecovery().daoHints("inactive", "MAINNET").associateBy { it.txHash }
+                assertEquals(setOf("dao-old", "local-pending"), daoHints.keys)
+                val oldDao = daoHints.getValue("dao-old")
+                assertEquals("inactive", oldDao.walletId)
+                assertEquals("MAINNET", oldDao.network)
+                assertEquals("0x0", oldDao.outputIndex)
+                assertEquals(16_000_000L, oldDao.depositBlockHint)
+                assertEquals(16_000_100L, oldDao.withdrawBlockHint)
+                assertEquals(100_000_000_000L, oldDao.capacityHint)
+                assertEquals("LOCKED", oldDao.statusHint)
+                assertTrue(database.historyRecovery().daoHints("active", "MAINNET").isEmpty())
+                assertEquals("inactive|MAINNET|{}|[]|BROADCASTING", scalar("SELECT walletId || '|' || network || '|' || signedTxJson || '|' || reservedInputs || '|' || state FROM pending_broadcasts WHERE txHash='local-pending'"))
+                assertEquals("inactive|MAINNET|0x0|withdraw", scalar("SELECT walletId || '|' || network || '|' || depositIndex || '|' || withdrawTxHash FROM pending_dao_withdraws WHERE depositTxHash='dao-old'"))
+                assertEquals("inactive|MAINNET|0x0|unlock", scalar("SELECT walletId || '|' || network || '|' || withdrawingIndex || '|' || unlockTxHash FROM pending_dao_unlocks WHERE withdrawingTxHash='withdraw'"))
+                val local = database.transactionDao().getByTxHash("local-pending")!!
+                assertTrue(local.isLocal)
+                assertEquals("-61", local.balanceChange)
+                assertEquals("inactive", local.walletId)
                 assertEquals("PENDING", database.transactionDao().getByTxHash("local-pending")!!.status)
                 assertEquals("synthetic-only", prefs.getString("pin-marker", null))
                 assertEquals("active", prefs.getString("activeWallet", null))
@@ -118,6 +139,6 @@ class PublishedHistoryUpgradeTest {
                 assertEquals(23_000_000L, database.historyRecovery().job("inactive", "MAINNET")!!.targetBlock)
                 assertEquals(2, database.historyRecovery().archive("inactive", "MAINNET").size)
             } finally { database.close() }
-        } finally { context.deleteDatabase(name) }
+        } finally { context.deleteDatabase(name); prefs.edit().clear().commit() }
     }
 }
