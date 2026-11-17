@@ -105,11 +105,12 @@ pub(crate) fn cells_ready(storage: &Storage, cell_prefix: &[u8], chain: &ChainSn
     if !prefixed(&conn, &Key::Meta("MATCHED_BLOCKS").into_vec(), 0)?.is_empty() {
         return Err(unavailable());
     }
-    if markers.is_empty() { return Ok(()); }
     let state = read(&conn, Key::Meta("LAST_STATE").into_vec())?;
     if state.get(32..) != Some(chain.anchor.as_slice()) { return Err(unavailable()); }
     let tip: u64 = chain.anchor.raw().number().unpack();
     if tip == 0 { return Err(unavailable()); }
+    // Fresh/reset stores have no rewind markers, but genesis is not a verified empty wallet.
+    if markers.is_empty() { return Ok(()); }
     let filtered = read(&conn, Key::Meta("MIN_FILTERED_NUMBER").into_vec())?;
     let filtered = u64::from_le_bytes(filtered.as_slice().try_into().map_err(|_| unavailable())?);
     if !prefixed(&conn, &Key::Meta("MATCHED_BLOCKS").into_vec(), 0)?.is_empty() {
@@ -269,6 +270,44 @@ mod tests {
         core::{BlockBuilder, TransactionBuilder},
         U256,
     };
+    // These are the shared availability checks used by both cells and capacity.
+    #[test]
+    fn no_marker_reset_genesis_cells_and_capacity_are_unavailable() {
+        let (storage, _dir) = crate::tests::utils::new_storage("reset-genesis-cells");
+        let genesis = BlockBuilder::default().build().data();
+        storage.init_genesis_block(genesis.clone());
+        let chain = ChainSnapshot { anchor: genesis.header() };
+        let script = packed::Script::default();
+        storage.update_filter_scripts(vec![ScriptStatus { script: script.clone(), script_type: ScriptType::Lock, block_number: 0 }], SetScriptsCommand::All);
+        for kind in [KeyPrefix::CellLockScript, KeyPrefix::CellTypeScript] {
+            let prefix = [vec![kind as u8], extract_raw_data(&script)].concat();
+            assert!(cells_ready(&storage, &prefix, &chain).is_err(), "reset genesis cannot certify an empty balance or spendable cells");
+        }
+    }
+
+    #[test]
+    fn no_marker_mismatched_canonical_state_is_unavailable() {
+        let (storage, _dir) = crate::tests::utils::new_storage("mismatched-empty-cells");
+        storage.init_genesis_block(BlockBuilder::default().build().data());
+        let tip = BlockBuilder::default().epoch(ckb_types::core::EpochNumberWithFraction::new(0, 0, 100).full_value()).number(10u64).build().data().header();
+        let chain = ChainSnapshot { anchor: tip };
+        let prefix = [vec![KeyPrefix::CellLockScript as u8], extract_raw_data(&packed::Script::default())].concat();
+        assert!(cells_ready(&storage, &prefix, &chain).is_err());
+    }
+
+    #[test]
+    fn no_marker_canonical_nonzero_empty_wallet_is_available() {
+        let (storage, _dir) = crate::tests::utils::new_storage("canonical-empty-cells");
+        storage.init_genesis_block(BlockBuilder::default().build().data());
+        let tip = BlockBuilder::default().epoch(ckb_types::core::EpochNumberWithFraction::new(0, 0, 100).full_value()).number(10u64).build().data().header();
+        storage.update_last_state(&U256::zero(), &tip, &[]);
+        let chain = ChainSnapshot { anchor: tip };
+        for kind in [KeyPrefix::CellLockScript, KeyPrefix::CellTypeScript] {
+            let prefix = [vec![kind as u8], extract_raw_data(&packed::Script::default())].concat();
+            assert!(cells_ready(&storage, &prefix, &chain).is_ok());
+        }
+    }
+
     #[test]
     fn authoritative_history_rollback_reinclusion_and_horizon() {
         let (storage, _dir) = crate::tests::utils::new_storage("history_snapshot");

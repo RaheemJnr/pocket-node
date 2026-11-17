@@ -23,6 +23,8 @@ class RoomKmpBalanceCache(
 
     override suspend fun getCachedBalance(network: String, walletId: String): BalanceResponse? = try {
         dao.getByWalletAndNetwork(walletId, network)?.toResponse()
+            // Older reset reads could persist a false zero balance at genesis.
+            ?.takeIf { (it.asOfBlock.removePrefix("0x").toULongOrNull(16) ?: 0uL) > 0uL }
     } catch (e: CancellationException) {
         throw e
     } catch (e: Exception) {
