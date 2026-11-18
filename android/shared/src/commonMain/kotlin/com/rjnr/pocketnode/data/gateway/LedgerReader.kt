@@ -817,7 +817,7 @@ class LedgerReader(
             if (snapshot != null && snapshot.validFor(myScript, network.name)) {
                 val boundJob = historyRecovery?.job(activeWalletId, network.name)
                 if (boundJob != null && boundJob.status == "REGISTERED" && boundJob.scriptJson == scriptJson &&
-                    boundJob.targetBlock == null && snapshot.durableCoverageVersion == 1 && snapshot.startHeight == "0" &&
+                    boundJob.targetBlock == null && snapshot.hasDurableCoverage && snapshot.startHeight == "0" &&
                     snapshot.storeGeneration == boundJob.generation) {
                     historyRecovery.registered(activeWalletId, network.name, boundJob.generation, snapshot.tipHeight.toLong(), scriptJson)
                 }
@@ -829,7 +829,7 @@ class LedgerReader(
                     queryHistorySnapshot(scriptJson) == snapshot
                 }
                 val recoveryJob = historyRecovery?.job(activeWalletId, network.name)
-                if (reconciled && recoveryJob != null && snapshot.durableCoverageVersion == 1 && snapshot.startHeight == "0" &&
+                if (reconciled && recoveryJob != null && snapshot.hasDurableCoverage && snapshot.startHeight == "0" &&
                     snapshot.storeGeneration == recoveryJob.generation && queryHistorySnapshot(scriptJson) == snapshot) {
                     historyRecovery.complete(activeWalletId, network.name, recoveryJob.generation, scriptJson, snapshot.tipHeight.toLong())
                 }

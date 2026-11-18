@@ -112,12 +112,24 @@ impl CKBProtocolHandler for SyncProtocol {
                     break matched_blocks;
                 };
                 self.peers.add_block(&mut matched_blocks, new_block);
+                match crate::utils::scans::settle_ready(&self.storage, &mut matched_blocks) {
+                    Ok(Some(_)) => return,
+                    Err(error) => {
+                        warn!("scoped body settlement unavailable: {}", error);
+                        return;
+                    }
+                    Ok(None) => {}
+                }
                 if !matched_blocks.is_empty()
                     && self.peers.all_matched_blocks_downloaded(&matched_blocks)
                 {
                     let blocks = self.peers.clear_matched_blocks(&mut matched_blocks);
                     if let Some(debt) = self.storage.get_earliest_matched_blocks() {
-                        if !self.storage.index_matched_range(debt.start_number, debt.blocks_count, blocks) {
+                        if !self.storage.index_matched_range(
+                            debt.start_number,
+                            debt.blocks_count,
+                            blocks,
+                        ) {
                             warn!("discarded stale or out-of-order matched bodies; reload durable debt");
                         }
                     }

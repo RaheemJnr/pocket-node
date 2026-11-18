@@ -159,7 +159,7 @@ impl<'a> BlockFilterHashesProcess<'a> {
                 );
                 return StatusCode::Ignore.with_context(errmsg);
             };
-            if end_number > next_cached_check_point_number {
+            if end_number >= next_cached_check_point_number {
                 let diff = end_number - next_cached_check_point_number;
                 let Some(index) = block_filter_hashes
                     .len()

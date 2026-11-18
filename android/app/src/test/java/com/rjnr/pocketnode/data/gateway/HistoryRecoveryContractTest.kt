@@ -280,4 +280,14 @@ class HistoryRecoveryContractTest {
         assertFalse(db.historyRecovery().prepare("MAINNET", generation))
         assertEquals("COMPLETE", db.historyRecovery().job("active", "MAINNET")!!.status)
     }
+    @Test fun `scoped native genesis coverage completes recovery without another scan`() = runTest {
+        jobs()
+        db.historyRecovery().registered("active", "MAINNET", generation, 20, json.encodeToString(script))
+        read(proof().copy(durableCoverageVersion = 3))
+        assertEquals("REGISTERED", db.historyRecovery().job("active", "MAINNET")!!.status)
+        read(proof().copy(durableCoverageVersion = 2))
+        assertEquals("COMPLETE", db.historyRecovery().job("active", "MAINNET")!!.status)
+        assertFalse(db.historyRecovery().prepare("MAINNET", generation))
+    }
+
 }

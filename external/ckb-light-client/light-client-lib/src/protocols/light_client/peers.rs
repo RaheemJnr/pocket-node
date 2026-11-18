@@ -38,6 +38,7 @@ pub struct Peers {
     // The matched block filters to download, the key is the block hash, the value is:
     //   * if the block is proved
     //   * the downloaded block
+    pub(crate) scoped_proof_turn: RwLock<Option<Vec<u8>>>,
     matched_blocks: tokio::sync::RwLock<HashMap<H256, (bool, Option<packed::Block>)>>,
 
     // Data:
@@ -678,17 +679,18 @@ impl LatestBlockFilterHashes {
         }
         // The slice is nonempty. Subtract before adding so a range ending at
         // u64::MAX is valid, and never narrow a block number to pointer width.
-        let end_number = match start_number.checked_add(block_filter_hashes.len() as BlockNumber - 1) {
-            Some(v) => v,
-            None => {
-                let errmsg = format!(
-                    "overflow computing end number: start_number ({}) + len ({}) - 1",
-                    start_number,
-                    block_filter_hashes.len()
-                );
-                return Err(StatusCode::Ignore.with_context(errmsg));
-            }
-        };
+        let end_number =
+            match start_number.checked_add(block_filter_hashes.len() as BlockNumber - 1) {
+                Some(v) => v,
+                None => {
+                    let errmsg = format!(
+                        "overflow computing end number: start_number ({}) + len ({}) - 1",
+                        start_number,
+                        block_filter_hashes.len()
+                    );
+                    return Err(StatusCode::Ignore.with_context(errmsg));
+                }
+            };
         if finalized_check_point_number >= end_number {
             let errmsg = format!(
                 "finalized check point ({}) is not less than end number ({})",
@@ -1157,6 +1159,7 @@ impl Peers {
             inner: Default::default(),
             fetching_headers: DashMap::new(),
             fetching_txs: DashMap::new(),
+            scoped_proof_turn: Default::default(),
             matched_blocks: Default::default(),
             cached_block_filter_hashes: Default::default(),
             max_outbound_peers,
@@ -1219,6 +1222,19 @@ impl Peers {
             let info = item.value();
             (info.added_ts, info.first_sent, info.missing)
         })
+    }
+    /// Keep generic fetch ownership/generation while making a scoped missing
+    /// header retryable after its old filter range has been invalidated.
+    pub(crate) fn retry_missing_headers(&self, hashes: &[Byte32]) {
+        for hash in hashes {
+            if let Some(mut info) = self.fetching_headers.get_mut(hash) {
+                if info.missing {
+                    info.missing = false;
+                    info.first_sent = 0;
+                    info.timeout = false;
+                }
+            }
+        }
     }
     pub(crate) fn mark_fetching_headers_missing(&self, block_hashes: &[Byte32]) {
         for block_hash in block_hashes {

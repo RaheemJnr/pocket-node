@@ -12,7 +12,11 @@
 //! Format 2 keeps the mobile `kv` schema. The 1 -> 2 step invalidates
 //! chain-derived evidence and records a verification identity atomically;
 //! wallet scripts are retained separately as inactive recovery metadata.
-//! Version 0 is first treated as version 1. Unknown newer layouts and corrupt
+//! Format 3 stamps a required scoped-scan migration gate; startup atomically
+//! installs per-script progress before any protocol starts. Interrupted genesis
+//! indexing remains fenced and resumes on startup. Production readers preserve
+//! unsupported/corrupt stores in place and fail closed.
+//! Version 0 is first treated as version 1. Legacy test helpers for newer layouts and corrupt
 //! files retain the existing set-aside recovery policy. Transient errors and
 //! transaction-boundary errors roll back and are retried on the next launch.
 //!
@@ -33,7 +37,7 @@ use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 /// Layout version of the store this build reads and writes.
-pub const STORE_FORMAT_VERSION: u32 = 2;
+pub const STORE_FORMAT_VERSION: u32 = 3;
 
 /// Stores written before versioning existed carry `user_version` 0 and have
 /// this layout.
@@ -51,7 +55,32 @@ pub struct UpgradeStep {
 
 /// Registered upgrade steps, in any order. Adding a layout change later means
 /// bumping [`STORE_FORMAT_VERSION`] and adding one entry here.
-const UPGRADE_STEPS: &[UpgradeStep] = &[UpgradeStep { from: 1, run: super::verification_epoch::upgrade }];
+const UPGRADE_STEPS: &[UpgradeStep] = &[
+    UpgradeStep {
+        from: 1,
+        run: super::verification_epoch::upgrade,
+    },
+    UpgradeStep {
+        from: 2,
+        run: require_scoped_migration,
+    },
+];
+
+// Stamp a durable startup gate in the same transaction as format 3. Lifecycle
+// must install scoped scan state before starting any protocol or publishing data.
+fn require_scoped_migration(conn: &Connection) -> rusqlite::Result<()> {
+    conn.execute_batch(
+        "CREATE TABLE IF NOT EXISTS kv (key BLOB PRIMARY KEY, value BLOB NOT NULL)",
+    )?;
+    conn.execute(
+        "INSERT OR REPLACE INTO kv(key,value) VALUES(?1,?2)",
+        rusqlite::params![
+            crate::storage::Key::Meta("SCAN_MIGRATION_REQUIRED_V2").into_vec(),
+            vec![1u8]
+        ],
+    )?;
+    Ok(())
+}
 
 /// What [`ensure_store_version`] did. Logged by `init`; not surfaced to the
 /// platform bridges.
@@ -80,6 +109,16 @@ pub enum StoreVersionAction {
 /// this build cannot read it. Must be called before the storage layer opens
 /// the file.
 pub fn ensure_store_version(path: &Path) -> Result<StoreVersionAction, BridgeError> {
+    if path.exists() {
+        match read_version(path)? {
+            Some(version) if version <= STORE_FORMAT_VERSION => {}
+            _ => {
+                return Err(BridgeError::Storage(
+                    "unsupported or unreadable store; preserved in place".into(),
+                ))
+            }
+        }
+    }
     ensure_store_version_with(path, STORE_FORMAT_VERSION, UPGRADE_STEPS)
 }
 
@@ -665,7 +704,7 @@ mod tests {
 
     #[test]
     fn production_registers_verification_upgrade() {
-        assert_eq!(UPGRADE_STEPS.len(), 1);
+        assert_eq!(UPGRADE_STEPS.len(), 2);
         assert_eq!(UPGRADE_STEPS[0].from, 1);
     }
 
@@ -940,5 +979,38 @@ mod tests {
             StoreVersionAction::Current
         );
         assert_eq!(row_count(&path), 2);
+    }
+    #[test]
+    fn scoped_upgrade_preserves_rows_and_stamps_required_gate() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("store.db");
+        write_store(&path, ROWS);
+        set_version(&path, 2);
+        let before = rows(&path);
+        assert_eq!(
+            ensure_store_version(&path).unwrap(),
+            StoreVersionAction::Upgraded { from: 2, to: 3 }
+        );
+        assert_eq!(user_version(&path), 3);
+        let after = rows(&path);
+        for row in before {
+            assert!(after.contains(&row));
+        }
+        assert!(after
+            .iter()
+            .any(|(key, _)| *key
+                == crate::storage::Key::Meta("SCAN_MIGRATION_REQUIRED_V2").into_vec()));
+    }
+    #[test]
+    fn production_reader_preserves_unknown_newer_store() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("store.db");
+        write_store(&path, ROWS);
+        set_version(&path, 99);
+        let before = rows(&path);
+        assert!(ensure_store_version(&path).is_err());
+        assert_eq!(user_version(&path), 99);
+        assert_eq!(rows(&path), before);
+        assert_eq!(entries(dir.path()), vec!["store.db"]);
     }
 }

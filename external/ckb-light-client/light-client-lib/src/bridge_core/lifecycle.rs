@@ -28,7 +28,6 @@
 //! app relaunches instead — see #218 for the app-side mitigation on network
 //! switch, and [`stop`] for why it no longer waits on `ckb-stop-handler` (#487).
 
-use crate::storage::LightClientStorage;
 use super::error::BridgeError;
 use super::store_version::ensure_store_version;
 use super::types::*;
@@ -36,6 +35,7 @@ use crate::protocols::{
     FilterProtocol, LightClientProtocol, Peers, PendingTxs, RelayProtocol, SyncProtocol,
     BAD_MESSAGE_ALLOWED_EACH_HOUR, CHECK_POINT_INTERVAL,
 };
+use crate::storage::LightClientStorage;
 use crate::storage::{Storage, StorageWithChainData};
 use crate::types::RunEnv;
 use crate::utils;
@@ -179,8 +179,12 @@ pub fn init(
     info!("Initializing genesis block...");
     storage.init_genesis_block(consensus.genesis_block().data());
 
-    info!("Cleaning up invalid matched blocks...");
-    storage.cleanup_invalid_matched_blocks();
+    // No network/protocol can use format-3 state until the resumable migration
+    // gate and any interrupted genesis index commit have completed.
+    use crate::storage::scan::ScanStorage;
+    storage
+        .prepare_scoped_scans()
+        .map_err(|error| BridgeError::Storage(error.to_string()))?;
 
     // Initialize network components
     info!("Initializing network state...");
@@ -775,7 +779,10 @@ mod tests {
         }
 
         assert_eq!(winners.load(std::sync::atomic::Ordering::SeqCst), 1);
-        assert_eq!(state.load(std::sync::atomic::Ordering::SeqCst), STATE_STOPPED);
+        assert_eq!(
+            state.load(std::sync::atomic::Ordering::SeqCst),
+            STATE_STOPPED
+        );
     }
 
     /// A transition from the wrong state changes nothing.

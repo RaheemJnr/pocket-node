@@ -699,6 +699,7 @@ async fn invalid_proof_with_duplicate_returned_headers() {
 
 #[derive(Default)]
 struct TestParameter {
+    scoped_missing: bool,
     last_block_number: BlockNumber,
     block_numbers: Vec<BlockNumber>,
     proved_block_numbers: Vec<BlockNumber>,
@@ -722,7 +723,7 @@ async fn test_send_blocks_proof(param: TestParameter) {
         peers.request_last_state(peer_index).unwrap();
         peers
     };
-    let mut protocol = chain.create_light_client_protocol(peers);
+    let mut protocol = chain.create_light_client_protocol(peers.clone());
 
     let num = param.last_block_number;
     chain.mine_to(num);
@@ -778,6 +779,53 @@ async fn test_send_blocks_proof(param: TestParameter) {
         protocol
             .peers()
             .update_blocks_proof_request(peer_index, Some(content), true);
+    }
+
+    if param.scoped_missing {
+        use crate::storage::{
+            scan::{ScanIdentity, ScanStorage},
+            LightClientStorage, ScriptStatus, ScriptType,
+        };
+        let storage = chain.client_storage();
+        storage.update_filter_scripts(
+            vec![
+                ScriptStatus {
+                    script: packed::Script::default(),
+                    script_type: ScriptType::Lock,
+                    block_number: 10,
+                },
+                ScriptStatus {
+                    script: packed::Script::new_builder().args(vec![1u8].pack()).build(),
+                    script_type: ScriptType::Lock,
+                    block_number: 19,
+                },
+            ],
+            Default::default(),
+        );
+        storage.update_min_filtered_block_number(19);
+        storage.prepare_scoped_scans().unwrap();
+        let id = ScanIdentity::registered(storage, &packed::Script::default(), ScriptType::Lock)
+            .unwrap();
+        let state = storage.scan_state(&id).unwrap().unwrap();
+        storage
+            .begin_scan_range(
+                &id,
+                state.epoch,
+                11,
+                20,
+                [9; 32],
+                param
+                    .missing_block_hashes
+                    .iter()
+                    .map(|h| h.as_slice().try_into().unwrap())
+                    .collect(),
+            )
+            .unwrap();
+        protocol.peers().mock_latest_block_filter_hashes(
+            peer_index,
+            0,
+            vec![packed::Byte32::default(); 20],
+        );
     }
 
     // Run the test.
@@ -915,4 +963,69 @@ async fn test_send_blocks_proof(param: TestParameter) {
             assert!(nc.sent_messages().borrow().is_empty());
         }
     }
+    if param.scoped_missing {
+        use crate::storage::{
+            scan::{ScanIdentity, ScanStorage},
+            LightClientStorage, ScriptType,
+        };
+        let storage = chain.client_storage();
+        let id = ScanIdentity::registered(storage, &packed::Script::default(), ScriptType::Lock)
+            .unwrap();
+        let mut filter = chain.create_filter_protocol(peers.clone());
+        let filter_nc = MockNetworkContext::new(SupportProtocols::Filter);
+        filter
+            .notify(
+                filter_nc.context(),
+                crate::protocols::GET_BLOCK_FILTERS_TOKEN,
+            )
+            .await;
+        assert!(
+            storage.scan_state(&id).unwrap().unwrap().pending.is_none(),
+            "missing wire response must trigger scoped refilter"
+        );
+        assert_eq!(storage.scan_state(&id).unwrap().unwrap().settled, 10);
+        filter
+            .notify(
+                filter_nc.context(),
+                crate::protocols::GET_BLOCK_FILTERS_TOKEN,
+            )
+            .await;
+        let starts: Vec<u64> = filter_nc
+            .sent_messages()
+            .borrow()
+            .iter()
+            .filter_map(|(_, _, data)| packed::BlockFilterMessageReader::from_slice(data).ok())
+            .filter_map(|m| match m.to_enum() {
+                packed::BlockFilterMessageUnionReader::GetBlockFilters(r) => {
+                    Some(r.start_number().unpack())
+                }
+                _ => None,
+            })
+            .collect();
+        assert!(starts.contains(&20), "healthy lane remains serviced");
+        assert!(
+            starts.contains(&11),
+            "missing range is refiltered without genesis reset"
+        );
+        assert_eq!(
+            storage
+                .get_filter_scripts()
+                .iter()
+                .map(|s| s.block_number)
+                .max(),
+            Some(19)
+        );
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn scoped_missing_wire_response_refilters_without_blocking_healthy_lane() {
+    test_send_blocks_proof(TestParameter {
+        scoped_missing: true,
+        last_block_number: 20,
+        missing_block_hashes: vec![h256!("0x1").pack()],
+        returned_missing_block_hashes: vec![h256!("0x1").pack()],
+        ..Default::default()
+    })
+    .await;
 }

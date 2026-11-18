@@ -584,7 +584,7 @@ class SyncCoordinator(
                 expected.copy(args = it.scriptArgs) == script && it.state != SubAccountCandidateRecord.STATE_RESTORED
             } ?: continue
             val snapshot = recoverySnapshot(job.scriptJson) ?: continue
-            if (!snapshot.validFor(script, network.name) || snapshot.durableCoverageVersion != 1 ||
+            if (!snapshot.validFor(script, network.name) || !snapshot.hasDurableCoverage ||
                 snapshot.startHeight != "0" || snapshot.storeGeneration != generation ||
                 (job.targetBlock != null && snapshot.tipHeight.toLong() < job.targetBlock)) continue
             val current = recoverySnapshot(job.scriptJson)

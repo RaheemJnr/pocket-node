@@ -22,6 +22,108 @@ fn read(conn: &Connection, key: Vec<u8>) -> Result<Vec<u8>, BridgeError> {
         .map_err(|_| unavailable())?
         .ok_or_else(unavailable)
 }
+fn optional_read(conn: &Connection, key: Vec<u8>) -> Result<Option<Vec<u8>>, BridgeError> {
+    conn.query_row("SELECT value FROM kv WHERE key=?1", [key], |row| row.get(0))
+        .optional()
+        .map_err(|_| unavailable())
+}
+fn scoped_state(
+    conn: &Connection,
+    suffix: &[u8],
+) -> Result<Option<crate::storage::scan::ScanState>, BridgeError> {
+    use crate::storage::scan::{ScanState, SCAN_EPOCH, SCAN_STATE};
+    let Some(epoch) = optional_read(conn, Key::Meta(SCAN_EPOCH).into_vec())? else {
+        return Ok(None);
+    };
+    let key = |name| [Key::Meta(name).into_vec(), suffix.to_vec()].concat();
+    let state: ScanState =
+        serde_json::from_slice(&read(conn, key(SCAN_STATE))?).map_err(|_| unavailable())?;
+    state.validate().map_err(|_| unavailable())?;
+    let registration = read(conn, key("HISTORY_REGISTRATION_V1"))?;
+    let cursor = read(conn, key("FILTER_SCRIPTS"))?;
+    if state.identity.suffix != suffix
+        || state.identity.registration != registration
+        || registration.len() != 24
+        || epoch != state.epoch
+        || cursor != state.settled.to_be_bytes()
+        || registration[..8] != state.floor.to_be_bytes()
+        || optional_read(conn, key("HISTORY_GENESIS_PENDING_V1"))?.is_some()
+    {
+        return Err(unavailable());
+    }
+    Ok(Some(state))
+}
+fn scoped_cells_ready(
+    conn: &Connection,
+    prefix: &[u8],
+    tip: u64,
+    markers: &[(Vec<u8>, Vec<u8>)],
+) -> Result<(), BridgeError> {
+    let kind = match prefix.first() {
+        Some(p) if *p == KeyPrefix::CellLockScript as u8 => 0,
+        Some(p) if *p == KeyPrefix::CellTypeScript as u8 => 1,
+        _ => return Err(unavailable()),
+    };
+    let scripts_prefix = Key::Meta("FILTER_SCRIPTS").into_vec();
+    let mut covered = Vec::new();
+    for (key, _) in prefixed(conn, &scripts_prefix, MAX_INTERACTIONS)? {
+        let suffix = key.get(scripts_prefix.len()..).ok_or_else(unavailable)?;
+        if suffix.last() != Some(&kind) {
+            continue;
+        }
+        let script =
+            packed::Script::from_slice(&suffix[..suffix.len() - 1]).map_err(|_| unavailable())?;
+        let exact = [vec![prefix[0]], extract_raw_data(&script)].concat();
+        if !exact.starts_with(prefix) && !prefix.starts_with(&exact) {
+            continue;
+        }
+        let state = scoped_state(conn, suffix)?.ok_or_else(unavailable)?;
+        if state.pending.is_some() || state.settled < tip {
+            return Err(unavailable());
+        }
+        covered.push(exact);
+    }
+    if covered.is_empty() {
+        return Err(unavailable());
+    }
+    // Retained indexes for a deleted/unregistered neighbor cannot silently enter
+    // a prefix balance. Every returned exact script needs current coverage.
+    for (key, _) in prefixed(conn, prefix, MAX_HISTORY_SCAN_ROWS)? {
+        let exact = key
+            .get(..key.len().checked_sub(16).ok_or_else(unavailable)?)
+            .ok_or_else(unavailable)?;
+        if !covered.iter().any(|p| p.as_slice() == exact) {
+            return Err(unavailable());
+        }
+    }
+    for (key, value) in markers {
+        let frontier = u64::from_be_bytes(
+            value
+                .get(..8)
+                .ok_or_else(unavailable)?
+                .try_into()
+                .map_err(|_| unavailable())?,
+        );
+        let start = u64::from_be_bytes(
+            value
+                .get(8..16)
+                .ok_or_else(unavailable)?
+                .try_into()
+                .map_err(|_| unavailable())?,
+        );
+        let script = packed::Script::from_slice(value.get(16..).ok_or_else(unavailable)?)
+            .map_err(|_| unavailable())?;
+        let exact = [vec![prefix[0]], extract_raw_data(&script)].concat();
+        if start > frontier
+            || *key != [Key::Meta("CELL_REWIND_V1").into_vec(), exact.clone()].concat()
+            || !covered.contains(&exact)
+        {
+            return Err(unavailable());
+        }
+    }
+    Ok(())
+}
+
 fn prefixed(
     conn: &Connection,
     prefix: &[u8],
@@ -58,7 +160,9 @@ fn exact_history_rows(
 ) -> Result<Vec<(Vec<u8>, Vec<u8>)>, BridgeError> {
     let exact_len = prefix.len() + 17;
     let mut upper = prefix.to_vec();
-    while upper.last() == Some(&255) { upper.pop(); }
+    while upper.last() == Some(&255) {
+        upper.pop();
+    }
     *upper.last_mut().ok_or_else(unavailable)? += 1;
     let mut lower = prefix.to_vec();
     let mut exclusive = false;
@@ -74,29 +178,50 @@ fn exact_history_rows(
             "SELECT key,CASE WHEN length(key)<=?3 THEN value END FROM kv WHERE key>=?1 AND key<?2 ORDER BY key LIMIT ?4"
         };
         let mut stmt = conn.prepare(sql).map_err(|_| unavailable())?;
-        let rows = stmt.query_map(rusqlite::params![lower, upper, exact_len as i64, limit as i64], |r| {
-            let key: Vec<u8> = r.get(0)?;
-            // Do not deserialize irrelevant neighbor values (which may be NULL/corrupt).
-            let value: Option<Vec<u8>> = if key.len() <= exact_len { Some(r.get(1)?) } else { None };
-            Ok((key, value))
-        }).map_err(|_| unavailable())?.collect::<Result<Vec<_>, _>>().map_err(|_| unavailable())?;
+        let rows = stmt
+            .query_map(
+                rusqlite::params![lower, upper, exact_len as i64, limit as i64],
+                |r| {
+                    let key: Vec<u8> = r.get(0)?;
+                    // Do not deserialize irrelevant neighbor values (which may be NULL/corrupt).
+                    let value: Option<Vec<u8>> = if key.len() <= exact_len {
+                        Some(r.get(1)?)
+                    } else {
+                        None
+                    };
+                    Ok((key, value))
+                },
+            )
+            .map_err(|_| unavailable())?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|_| unavailable())?;
         let count = rows.len();
         for (key, value) in rows {
-            if scanned == raw_cap || key.len() < exact_len { return Err(unavailable()); }
+            if scanned == raw_cap || key.len() < exact_len {
+                return Err(unavailable());
+            }
             scanned += 1;
             lower = key.clone();
             if key.len() == exact_len {
-                if selected.len() == exact_cap { return Err(unavailable()); }
+                if selected.len() == exact_cap {
+                    return Err(unavailable());
+                }
                 selected.push((key, value.ok_or_else(unavailable)?));
             }
         }
-        if count < limit { return Ok(selected); }
+        if count < limit {
+            return Ok(selected);
+        }
         exclusive = true;
     }
 }
 /// Availability only: rewound cells must not enter coin selection before rebuilding.
 /// Caller retains the matched read lock through the subsequent cells/capacity query.
-pub(crate) fn cells_ready(storage: &Storage, cell_prefix: &[u8], chain: &ChainSnapshot) -> Result<(), BridgeError> {
+pub(crate) fn cells_ready(
+    storage: &Storage,
+    cell_prefix: &[u8],
+    chain: &ChainSnapshot,
+) -> Result<(), BridgeError> {
     let conn = storage.conn.lock().map_err(|_| unavailable())?;
     let marker_prefix = [Key::Meta("CELL_REWIND_V1").into_vec(), cell_prefix.to_vec()].concat();
     let markers = prefixed(&conn, &marker_prefix, MAX_INTERACTIONS)?;
@@ -106,34 +231,79 @@ pub(crate) fn cells_ready(storage: &Storage, cell_prefix: &[u8], chain: &ChainSn
         return Err(unavailable());
     }
     let state = read(&conn, Key::Meta("LAST_STATE").into_vec())?;
-    if state.get(32..) != Some(chain.anchor.as_slice()) { return Err(unavailable()); }
+    if state.get(32..) != Some(chain.anchor.as_slice()) {
+        return Err(unavailable());
+    }
     let tip: u64 = chain.anchor.raw().number().unpack();
-    if tip == 0 { return Err(unavailable()); }
+    if tip == 0 {
+        return Err(unavailable());
+    }
+    if optional_read(
+        &conn,
+        Key::Meta(crate::storage::scan::SCAN_EPOCH).into_vec(),
+    )?
+    .is_some()
+    {
+        return scoped_cells_ready(&conn, cell_prefix, tip, &markers);
+    }
     // Fresh/reset stores have no rewind markers, but genesis is not a verified empty wallet.
-    if markers.is_empty() { return Ok(()); }
+    if markers.is_empty() {
+        return Ok(());
+    }
     let filtered = read(&conn, Key::Meta("MIN_FILTERED_NUMBER").into_vec())?;
     let filtered = u64::from_le_bytes(filtered.as_slice().try_into().map_err(|_| unavailable())?);
     if !prefixed(&conn, &Key::Meta("MATCHED_BLOCKS").into_vec(), 0)?.is_empty() {
         return Err(unavailable());
     }
     for (key, value) in markers {
-        let frontier = u64::from_be_bytes(value.get(..8).ok_or_else(unavailable)?.try_into().map_err(|_| unavailable())?);
-        let start = u64::from_be_bytes(value.get(8..16).ok_or_else(unavailable)?.try_into().map_err(|_| unavailable())?);
-        let script = packed::Script::from_slice(value.get(16..).ok_or_else(unavailable)?).map_err(|_| unavailable())?;
+        let frontier = u64::from_be_bytes(
+            value
+                .get(..8)
+                .ok_or_else(unavailable)?
+                .try_into()
+                .map_err(|_| unavailable())?,
+        );
+        let start = u64::from_be_bytes(
+            value
+                .get(8..16)
+                .ok_or_else(unavailable)?
+                .try_into()
+                .map_err(|_| unavailable())?,
+        );
+        let script = packed::Script::from_slice(value.get(16..).ok_or_else(unavailable)?)
+            .map_err(|_| unavailable())?;
         let kind = match cell_prefix.first() {
             Some(p) if *p == KeyPrefix::CellLockScript as u8 => 0,
             Some(p) if *p == KeyPrefix::CellTypeScript as u8 => 1,
             _ => return Err(unavailable()),
         };
-        let expected_key = [Key::Meta("CELL_REWIND_V1").into_vec(), vec![cell_prefix[0]], extract_raw_data(&script)].concat();
-        if key != expected_key || start > frontier { return Err(unavailable()); }
-        let cursor = read(&conn, [Key::Meta("FILTER_SCRIPTS").into_vec(), script.as_slice().to_vec(), vec![kind]].concat())?;
+        let expected_key = [
+            Key::Meta("CELL_REWIND_V1").into_vec(),
+            vec![cell_prefix[0]],
+            extract_raw_data(&script),
+        ]
+        .concat();
+        if key != expected_key || start > frontier {
+            return Err(unavailable());
+        }
+        let cursor = read(
+            &conn,
+            [
+                Key::Meta("FILTER_SCRIPTS").into_vec(),
+                script.as_slice().to_vec(),
+                vec![kind],
+            ]
+            .concat(),
+        )?;
         let cursor = u64::from_be_bytes(cursor.as_slice().try_into().map_err(|_| unavailable())?);
         let required = frontier.min(tip);
-        if cursor < required || filtered < required { return Err(unavailable()); }
+        if cursor < required || filtered < required {
+            return Err(unavailable());
+        }
         // Completion is durable: later reorgs again have a coherent undo index.
         // Clear here to avoid forcing another rewind after normal wallet switching.
-        conn.execute("DELETE FROM kv WHERE key = ?1", [key]).map_err(|_| unavailable())?;
+        conn.execute("DELETE FROM kv WHERE key = ?1", [key])
+            .map_err(|_| unavailable())?;
     }
     Ok(())
 }
@@ -158,21 +328,42 @@ pub(crate) fn snapshot(
         [Key::Meta("FILTER_SCRIPTS").into_vec(), suffix.clone()].concat(),
     )?;
     let through = u64::from_be_bytes(progress.as_slice().try_into().map_err(|_| unavailable())?);
+    let scoped = scoped_state(&conn, &suffix)?;
+    if scoped
+        .as_ref()
+        .is_some_and(|s| s.pending.is_some() || s.settled < tip)
+    {
+        return Err(unavailable());
+    }
     // Inclusive rollback removes R but leaves the script cursor at R. The global
     // filter cursor rewinds to R-1, so both cursors must cover the canonical tip.
     let filtered = read(&conn, Key::Meta("MIN_FILTERED_NUMBER").into_vec())?;
     let filtered_through =
         u64::from_le_bytes(filtered.as_slice().try_into().map_err(|_| unavailable())?);
-    if filtered_through < tip {
+    if scoped.is_none() && filtered_through < tip {
         return Err(unavailable());
     }
-    let genesis_pending: bool = conn.query_row("SELECT EXISTS(SELECT 1 FROM kv WHERE key = ?1)", [
-        [Key::Meta("HISTORY_GENESIS_PENDING_V1").into_vec(), suffix.clone()].concat()
-    ], |row| row.get(0)).map_err(|_| unavailable())?;
-    if genesis_pending { return Err(unavailable()); }
+    let genesis_pending: bool = conn
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM kv WHERE key = ?1)",
+            [[
+                Key::Meta("HISTORY_GENESIS_PENDING_V1").into_vec(),
+                suffix.clone(),
+            ]
+            .concat()],
+            |row| row.get(0),
+        )
+        .map_err(|_| unavailable())?;
+    if genesis_pending {
+        return Err(unavailable());
+    }
     let registration = read(
         &conn,
-        [Key::Meta("HISTORY_REGISTRATION_V1").into_vec(), suffix.clone()].concat(),
+        [
+            Key::Meta("HISTORY_REGISTRATION_V1").into_vec(),
+            suffix.clone(),
+        ]
+        .concat(),
     )?;
     if registration.len() != 24 || through < tip {
         return Err(unavailable());
@@ -190,7 +381,8 @@ pub(crate) fn snapshot(
     ]
     .concat();
     let mut hashes = BTreeSet::new();
-    for (key, value) in exact_history_rows(&conn, &prefix, MAX_INTERACTIONS, MAX_HISTORY_SCAN_ROWS)? {
+    for (key, value) in exact_history_rows(&conn, &prefix, MAX_INTERACTIONS, MAX_HISTORY_SCAN_ROWS)?
+    {
         if key.len() != prefix.len() + 17 {
             return Err(unavailable());
         }
@@ -219,16 +411,29 @@ pub(crate) fn snapshot(
         hashes.insert(format!("{hash:#x}"));
     }
     let hex = |bytes: &[u8]| bytes.iter().map(|b| format!("{b:02x}")).collect::<String>();
-    let segment = conn.query_row("SELECT value FROM kv WHERE key = ?1", [
-        [Key::Meta("HISTORY_SEGMENT_V1").into_vec(), suffix].concat()
-    ], |row| row.get::<_, Vec<u8>>(0)).optional().map_err(|_| unavailable())?;
-    let durable_coverage = if segment.as_deref() == Some(registration.as_slice()) { 1 } else { 0 };
-    Ok(json!({"version":1,"durableCoverageVersion":durable_coverage,"complete":true,"network":network,
+    let segment = conn
+        .query_row(
+            "SELECT value FROM kv WHERE key = ?1",
+            [[Key::Meta("HISTORY_SEGMENT_V1").into_vec(), suffix].concat()],
+            |row| row.get::<_, Vec<u8>>(0),
+        )
+        .optional()
+        .map_err(|_| unavailable())?;
+    let durable_coverage = if scoped.is_some() {
+        2
+    } else if segment.as_deref() == Some(registration.as_slice()) {
+        1
+    } else {
+        0
+    };
+    Ok(
+        json!({"version":1,"durableCoverageVersion":durable_coverage,"complete":true,"network":network,
         "genesisHash":format!("{:#x}",identity.genesis_hash),"storeGeneration":identity.store_generation,
         "script":ckb_jsonrpc_types::Script::from(script.clone()),
         "registration":hex(&registration[8..]),"startHeight":start.to_string(),
         "tipHeight":tip.to_string(),"tipHash":format!("{:#x}",chain.anchor.calc_header_hash()),
-        "processedThrough":through.to_string(),"hashes":hashes}))
+        "processedThrough":through.to_string(),"hashes":hashes}),
+    )
 }
 pub fn get_history_snapshot(script_json: &str) -> Result<String, BridgeError> {
     if !is_running() {
@@ -276,12 +481,24 @@ mod tests {
         let (storage, _dir) = crate::tests::utils::new_storage("reset-genesis-cells");
         let genesis = BlockBuilder::default().build().data();
         storage.init_genesis_block(genesis.clone());
-        let chain = ChainSnapshot { anchor: genesis.header() };
+        let chain = ChainSnapshot {
+            anchor: genesis.header(),
+        };
         let script = packed::Script::default();
-        storage.update_filter_scripts(vec![ScriptStatus { script: script.clone(), script_type: ScriptType::Lock, block_number: 0 }], SetScriptsCommand::All);
+        storage.update_filter_scripts(
+            vec![ScriptStatus {
+                script: script.clone(),
+                script_type: ScriptType::Lock,
+                block_number: 0,
+            }],
+            SetScriptsCommand::All,
+        );
         for kind in [KeyPrefix::CellLockScript, KeyPrefix::CellTypeScript] {
             let prefix = [vec![kind as u8], extract_raw_data(&script)].concat();
-            assert!(cells_ready(&storage, &prefix, &chain).is_err(), "reset genesis cannot certify an empty balance or spendable cells");
+            assert!(
+                cells_ready(&storage, &prefix, &chain).is_err(),
+                "reset genesis cannot certify an empty balance or spendable cells"
+            );
         }
     }
 
@@ -289,9 +506,18 @@ mod tests {
     fn no_marker_mismatched_canonical_state_is_unavailable() {
         let (storage, _dir) = crate::tests::utils::new_storage("mismatched-empty-cells");
         storage.init_genesis_block(BlockBuilder::default().build().data());
-        let tip = BlockBuilder::default().epoch(ckb_types::core::EpochNumberWithFraction::new(0, 0, 100).full_value()).number(10u64).build().data().header();
+        let tip = BlockBuilder::default()
+            .epoch(ckb_types::core::EpochNumberWithFraction::new(0, 0, 100).full_value())
+            .number(10u64)
+            .build()
+            .data()
+            .header();
         let chain = ChainSnapshot { anchor: tip };
-        let prefix = [vec![KeyPrefix::CellLockScript as u8], extract_raw_data(&packed::Script::default())].concat();
+        let prefix = [
+            vec![KeyPrefix::CellLockScript as u8],
+            extract_raw_data(&packed::Script::default()),
+        ]
+        .concat();
         assert!(cells_ready(&storage, &prefix, &chain).is_err());
     }
 
@@ -299,11 +525,20 @@ mod tests {
     fn no_marker_canonical_nonzero_empty_wallet_is_available() {
         let (storage, _dir) = crate::tests::utils::new_storage("canonical-empty-cells");
         storage.init_genesis_block(BlockBuilder::default().build().data());
-        let tip = BlockBuilder::default().epoch(ckb_types::core::EpochNumberWithFraction::new(0, 0, 100).full_value()).number(10u64).build().data().header();
+        let tip = BlockBuilder::default()
+            .epoch(ckb_types::core::EpochNumberWithFraction::new(0, 0, 100).full_value())
+            .number(10u64)
+            .build()
+            .data()
+            .header();
         storage.update_last_state(&U256::zero(), &tip, &[]);
         let chain = ChainSnapshot { anchor: tip };
         for kind in [KeyPrefix::CellLockScript, KeyPrefix::CellTypeScript] {
-            let prefix = [vec![kind as u8], extract_raw_data(&packed::Script::default())].concat();
+            let prefix = [
+                vec![kind as u8],
+                extract_raw_data(&packed::Script::default()),
+            ]
+            .concat();
             assert!(cells_ready(&storage, &prefix, &chain).is_ok());
         }
     }
@@ -359,7 +594,12 @@ mod tests {
         let before = snapshot(&storage, &script, &identity, &chain, "TESTNET").unwrap();
         assert_eq!(before["hashes"], json!([format!("{:#x}", tx.hash())]));
         assert_eq!(before["startHeight"], "1");
-        let pending_genesis = [Key::Meta("HISTORY_GENESIS_PENDING_V1").into_vec(), script.as_slice().to_vec(), vec![0]].concat();
+        let pending_genesis = [
+            Key::Meta("HISTORY_GENESIS_PENDING_V1").into_vec(),
+            script.as_slice().to_vec(),
+            vec![0],
+        ]
+        .concat();
         StorageBackend::put(&storage, pending_genesis.clone(), vec![1]).unwrap();
         assert!(snapshot(&storage, &script, &identity, &chain, "TESTNET").is_err());
         StorageBackend::delete(&storage, &pending_genesis).unwrap();
@@ -420,56 +660,137 @@ mod tests {
         let (storage, _dir) = crate::tests::utils::new_storage("history_partial_resume");
         storage.init_genesis_block(BlockBuilder::default().build().data());
         let script = packed::Script::default();
-        let register = |height| storage.update_filter_scripts(vec![ScriptStatus {
-            script: script.clone(), script_type: ScriptType::Lock, block_number: height,
-        }], SetScriptsCommand::All);
-        let key = [Key::Meta("HISTORY_REGISTRATION_V1").into_vec(), script.as_slice().to_vec(), vec![0]].concat();
-        let floor = || u64::from_be_bytes(StorageBackend::get(&storage, key.clone()).unwrap().unwrap()[..8].try_into().unwrap());
+        let register = |height| {
+            storage.update_filter_scripts(
+                vec![ScriptStatus {
+                    script: script.clone(),
+                    script_type: ScriptType::Lock,
+                    block_number: height,
+                }],
+                SetScriptsCommand::All,
+            )
+        };
+        let key = [
+            Key::Meta("HISTORY_REGISTRATION_V1").into_vec(),
+            script.as_slice().to_vec(),
+            vec![0],
+        ]
+        .concat();
+        let floor = || {
+            u64::from_be_bytes(
+                StorageBackend::get(&storage, key.clone()).unwrap().unwrap()[..8]
+                    .try_into()
+                    .unwrap(),
+            )
+        };
         register(0);
         storage.update_block_number(10);
         storage.update_min_filtered_block_number(10);
         // No completed-tip snapshot has ever been requested.
         register(10);
-        assert_eq!(floor(), 0, "interrupted partial recovery must retain genesis coverage");
+        assert_eq!(
+            floor(),
+            0,
+            "interrupted partial recovery must retain genesis coverage"
+        );
         register(15);
-        assert_eq!(floor(), 15, "requested forward jump must not manufacture coverage");
+        assert_eq!(
+            floor(),
+            15,
+            "requested forward jump must not manufacture coverage"
+        );
     }
 
     #[test]
     fn recovery_resume_rejects_interrupted_genesis_and_caps_unsettled_matching() {
         let (storage, _dir) = crate::tests::utils::new_storage("history_genesis_crash");
         storage.init_genesis_block(BlockBuilder::default().build().data());
-        let status = ScriptStatus { script: packed::Script::default(), script_type: ScriptType::Lock, block_number: 0 };
-        storage.update_filter_scripts(vec![ScriptStatus { script: status.script.clone(), script_type: ScriptType::Lock, block_number: 0 }], SetScriptsCommand::All);
+        let status = ScriptStatus {
+            script: packed::Script::default(),
+            script_type: ScriptType::Lock,
+            block_number: 0,
+        };
+        storage.update_filter_scripts(
+            vec![ScriptStatus {
+                script: status.script.clone(),
+                script_type: ScriptType::Lock,
+                block_number: 0,
+            }],
+            SetScriptsCommand::All,
+        );
         storage.update_block_number(10);
         storage.update_min_filtered_block_number(10);
         assert_eq!(storage.history_recovery_resume_start(&status), 10);
-        let pending = [Key::Meta("HISTORY_GENESIS_PENDING_V1").into_vec(), status.script.as_slice().to_vec(), vec![0]].concat();
+        let pending = [
+            Key::Meta("HISTORY_GENESIS_PENDING_V1").into_vec(),
+            status.script.as_slice().to_vec(),
+            vec![0],
+        ]
+        .concat();
         StorageBackend::put(&storage, pending.clone(), vec![1]).unwrap();
-        assert_eq!(storage.history_recovery_resume_start(&status), 0, "genesis commit interruption cannot be skipped");
-        storage.update_filter_scripts(vec![ScriptStatus { script: status.script.clone(), script_type: ScriptType::Lock, block_number: 10 }], SetScriptsCommand::All);
-        assert_eq!(storage.get_filter_scripts()[0].block_number, 0, "ordinary resume must settle pending genesis before advancing");
+        assert_eq!(
+            storage.history_recovery_resume_start(&status),
+            0,
+            "genesis commit interruption cannot be skipped"
+        );
+        storage.update_filter_scripts(
+            vec![ScriptStatus {
+                script: status.script.clone(),
+                script_type: ScriptType::Lock,
+                block_number: 10,
+            }],
+            SetScriptsCommand::All,
+        );
+        assert_eq!(
+            storage.get_filter_scripts()[0].block_number,
+            0,
+            "ordinary resume must settle pending genesis before advancing"
+        );
         storage.update_block_number(10);
         storage.update_min_filtered_block_number(10);
         StorageBackend::delete(&storage, &pending).unwrap();
         storage.add_matched_blocks(7, 1, vec![(packed::Byte32::default(), false)]);
-        assert_eq!(storage.history_recovery_resume_start(&status), 6, "pending matching must be rescanned");
+        assert_eq!(
+            storage.history_recovery_resume_start(&status),
+            6,
+            "pending matching must be rescanned"
+        );
     }
 
     #[test]
     fn recovery_segment_survives_restart_but_legacy_or_removed_script_does_not_resume() {
         let (storage, dir) = crate::tests::utils::new_storage("history_restart");
         storage.init_genesis_block(BlockBuilder::default().build().data());
-        let status = ScriptStatus { script: packed::Script::default(), script_type: ScriptType::Lock, block_number: 0 };
-        storage.update_filter_scripts(vec![ScriptStatus { script: status.script.clone(), script_type: ScriptType::Lock, block_number: 0 }], SetScriptsCommand::All);
+        let status = ScriptStatus {
+            script: packed::Script::default(),
+            script_type: ScriptType::Lock,
+            block_number: 0,
+        };
+        storage.update_filter_scripts(
+            vec![ScriptStatus {
+                script: status.script.clone(),
+                script_type: ScriptType::Lock,
+                block_number: 0,
+            }],
+            SetScriptsCommand::All,
+        );
         storage.update_block_number(10);
         storage.update_min_filtered_block_number(10);
         drop(storage);
         let storage = Storage::new(dir.path().join("store.db"));
         assert_eq!(storage.history_recovery_resume_start(&status), 10);
-        let segment = [Key::Meta("HISTORY_SEGMENT_V1").into_vec(), status.script.as_slice().to_vec(), vec![0]].concat();
+        let segment = [
+            Key::Meta("HISTORY_SEGMENT_V1").into_vec(),
+            status.script.as_slice().to_vec(),
+            vec![0],
+        ]
+        .concat();
         StorageBackend::delete(&storage, &segment).unwrap();
-        assert_eq!(storage.history_recovery_resume_start(&status), 0, "legacy cursors cannot prove an original boundary");
+        assert_eq!(
+            storage.history_recovery_resume_start(&status),
+            0,
+            "legacy cursors cannot prove an original boundary"
+        );
         storage.update_filter_scripts(vec![], SetScriptsCommand::All);
         assert_eq!(storage.history_recovery_resume_start(&status), 0);
     }
@@ -479,8 +800,20 @@ mod tests {
         let (storage, dir) = crate::tests::utils::new_storage("history_lost_index_debt");
         storage.init_genesis_block(BlockBuilder::default().build().data());
         let script = packed::Script::default();
-        storage.update_filter_scripts(vec![ScriptStatus { script: script.clone(), script_type: ScriptType::Lock, block_number: 0 }], SetScriptsCommand::All);
-        let tip = BlockBuilder::default().epoch(ckb_types::core::EpochNumberWithFraction::new(0, 0, 100).full_value()).number(12u64).build().data().header();
+        storage.update_filter_scripts(
+            vec![ScriptStatus {
+                script: script.clone(),
+                script_type: ScriptType::Lock,
+                block_number: 0,
+            }],
+            SetScriptsCommand::All,
+        );
+        let tip = BlockBuilder::default()
+            .epoch(ckb_types::core::EpochNumberWithFraction::new(0, 0, 100).full_value())
+            .number(12u64)
+            .build()
+            .data()
+            .header();
         storage.update_last_state(&U256::zero(), &tip, &[]);
         storage.update_min_filtered_block_number(12);
         storage.add_matched_blocks(10, 3, vec![(packed::Byte32::default(), true)]);
@@ -490,9 +823,16 @@ mod tests {
         let storage = Storage::new(dir.path().join("store.db"));
         // The real out-of-order/unmatched filter path advances to the global cursor.
         storage.update_block_number(storage.get_min_filtered_block_number());
-        let identity = RecoveryIdentity { genesis_hash: packed::Byte32::default(), store_generation: "store".into(), run_nonce: [1; 16] };
+        let identity = RecoveryIdentity {
+            genesis_hash: packed::Byte32::default(),
+            store_generation: "store".into(),
+            run_nonce: [1; 16],
+        };
         let chain = ChainSnapshot { anchor: tip };
-        assert!(snapshot(&storage, &script, &identity, &chain, "TESTNET").is_err(), "lost matched indexing debt must not certify false absence");
+        assert!(
+            snapshot(&storage, &script, &identity, &chain, "TESTNET").is_err(),
+            "lost matched indexing debt must not certify false absence"
+        );
     }
 
     #[test]
@@ -513,14 +853,33 @@ mod tests {
             .unwrap();
         assert!(prefixed(&conn, &[1], 4).is_err());
     }
-    fn ready_exact_history(scripts: &[packed::Script]) -> (Storage, tempfile::TempDir, RecoveryIdentity, ChainSnapshot) {
+    fn ready_exact_history(
+        scripts: &[packed::Script],
+    ) -> (Storage, tempfile::TempDir, RecoveryIdentity, ChainSnapshot) {
         let (storage, dir) = crate::tests::utils::new_storage("exact_history");
-        let tip = BlockBuilder::default().epoch(ckb_types::core::EpochNumberWithFraction::new(0, 0, 100).full_value()).number(100u64).build().data().header();
+        let tip = BlockBuilder::default()
+            .epoch(ckb_types::core::EpochNumberWithFraction::new(0, 0, 100).full_value())
+            .number(100u64)
+            .build()
+            .data()
+            .header();
         storage.update_last_state(&U256::zero(), &tip, &[]);
-        storage.update_filter_scripts(scripts.iter().map(|script| ScriptStatus {
-            script: script.clone(), script_type: ScriptType::Lock, block_number: 1,
-        }).collect(), SetScriptsCommand::All);
-        let identity = RecoveryIdentity { genesis_hash: packed::Byte32::default(), store_generation: "exact".into(), run_nonce: [1; 16] };
+        storage.update_filter_scripts(
+            scripts
+                .iter()
+                .map(|script| ScriptStatus {
+                    script: script.clone(),
+                    script_type: ScriptType::Lock,
+                    block_number: 1,
+                })
+                .collect(),
+            SetScriptsCommand::All,
+        );
+        let identity = RecoveryIdentity {
+            genesis_hash: packed::Byte32::default(),
+            store_generation: "exact".into(),
+            run_nonce: [1; 16],
+        };
         (storage, dir, identity, ChainSnapshot { anchor: tip })
     }
     fn finish_exact_history(storage: &Storage) {
@@ -530,21 +889,57 @@ mod tests {
     #[test]
     fn exact_history_skips_interleaved_longer_args_and_keeps_shared_transactions() {
         let script = packed::Script::default();
-        let neighbors: Vec<_> = [5u64, 15, 30].iter().map(|n|
-            script.clone().as_builder().args(n.to_be_bytes().to_vec().pack()).build()).collect();
-        let other_code = script.clone().as_builder().code_hash(packed::Byte32::new([1;32])).build();
+        let neighbors: Vec<_> = [5u64, 15, 30]
+            .iter()
+            .map(|n| {
+                script
+                    .clone()
+                    .as_builder()
+                    .args(n.to_be_bytes().to_vec().pack())
+                    .build()
+            })
+            .collect();
+        let other_code = script
+            .clone()
+            .as_builder()
+            .code_hash(packed::Byte32::new([1; 32]))
+            .build();
         let other_type = script.clone().as_builder().hash_type(1u8).build();
-        let mut scripts = vec![script.clone(), other_code.clone(), other_type.clone()]; scripts.extend(neighbors.iter().cloned());
+        let mut scripts = vec![script.clone(), other_code.clone(), other_type.clone()];
+        scripts.extend(neighbors.iter().cloned());
         let (storage, _dir, identity, chain) = ready_exact_history(&scripts);
         let mut expected = BTreeSet::new();
-        for (height, locks) in [(10, vec![script.clone()]), (20, vec![script.clone(), neighbors[1].clone()]),
-            (25, vec![neighbors[0].clone(), neighbors[2].clone(), other_code, other_type])] {
+        for (height, locks) in [
+            (10, vec![script.clone()]),
+            (20, vec![script.clone(), neighbors[1].clone()]),
+            (
+                25,
+                vec![
+                    neighbors[0].clone(),
+                    neighbors[2].clone(),
+                    other_code,
+                    other_type,
+                ],
+            ),
+        ] {
             let mut builder = TransactionBuilder::default();
-            for lock in locks { builder = builder.output(packed::CellOutput::new_builder().lock(lock).build())
-                .output_data(Vec::<u8>::new().pack()); }
+            for lock in locks {
+                builder = builder
+                    .output(packed::CellOutput::new_builder().lock(lock).build())
+                    .output_data(Vec::<u8>::new().pack());
+            }
             let tx = builder.build();
-            if height != 25 { expected.insert(format!("{:#x}", tx.hash())); }
-            storage.filter_block(BlockBuilder::default().epoch(ckb_types::core::EpochNumberWithFraction::new(0, 0, 100).full_value()).number(height as u64).transaction(tx).build().data());
+            if height != 25 {
+                expected.insert(format!("{:#x}", tx.hash()));
+            }
+            storage.filter_block(
+                BlockBuilder::default()
+                    .epoch(ckb_types::core::EpochNumberWithFraction::new(0, 0, 100).full_value())
+                    .number(height as u64)
+                    .transaction(tx)
+                    .build()
+                    .data(),
+            );
         }
         finish_exact_history(&storage);
         let actual = snapshot(&storage, &script, &identity, &chain, "TESTNET").unwrap();
@@ -554,15 +949,23 @@ mod tests {
     #[test]
     fn exact_history_empty_with_more_than_twenty_thousand_neighbor_rows_is_complete() {
         let script = packed::Script::default();
-        let neighbor = script.clone().as_builder().args(5u64.to_be_bytes().to_vec().pack()).build();
+        let neighbor = script
+            .clone()
+            .as_builder()
+            .args(5u64.to_be_bytes().to_vec().pack())
+            .build();
         let (storage, _dir, identity, chain) = ready_exact_history(&[script.clone()]);
         {
             let mut conn = storage.conn.lock().unwrap();
             let transaction = conn.transaction().unwrap();
             for index in 0..20_001u32 {
-                let key = Key::TxLockScript(&neighbor, 5, index, 0, crate::storage::CellType::Output).into_vec();
+                let key =
+                    Key::TxLockScript(&neighbor, 5, index, 0, crate::storage::CellType::Output)
+                        .into_vec();
                 // Even unreadable values outside this exact script must not be decoded.
-                transaction.execute("INSERT INTO kv VALUES (?1,NULL)", [key]).unwrap();
+                transaction
+                    .execute("INSERT INTO kv VALUES (?1,NULL)", [key])
+                    .unwrap();
             }
             transaction.commit().unwrap();
         }
@@ -571,60 +974,154 @@ mod tests {
         assert_eq!(result["hashes"], json!([]));
         assert_eq!(result["complete"], true);
         // An exact interaction after the dense neighboring range must still be read.
-        let tx = TransactionBuilder::default().output(packed::CellOutput::new_builder().lock(script.clone()).build())
-            .output_data(Vec::<u8>::new().pack()).build();
-        storage.filter_block(BlockBuilder::default().epoch(ckb_types::core::EpochNumberWithFraction::new(0, 0, 100).full_value()).number(10u64).transaction(tx.clone()).build().data());
-        assert_eq!(snapshot(&storage, &script, &identity, &chain, "TESTNET").unwrap()["hashes"], json!([format!("{:#x}",tx.hash())]));
+        let tx = TransactionBuilder::default()
+            .output(
+                packed::CellOutput::new_builder()
+                    .lock(script.clone())
+                    .build(),
+            )
+            .output_data(Vec::<u8>::new().pack())
+            .build();
+        storage.filter_block(
+            BlockBuilder::default()
+                .epoch(ckb_types::core::EpochNumberWithFraction::new(0, 0, 100).full_value())
+                .number(10u64)
+                .transaction(tx.clone())
+                .build()
+                .data(),
+        );
+        assert_eq!(
+            snapshot(&storage, &script, &identity, &chain, "TESTNET").unwrap()["hashes"],
+            json!([format!("{:#x}", tx.hash())])
+        );
     }
     #[test]
     fn exact_history_selected_cap_raw_work_cap_and_corruption_are_independent() {
         let mut conn = Connection::open_in_memory().unwrap();
-        conn.execute_batch("CREATE TABLE kv(key BLOB PRIMARY KEY,value BLOB)").unwrap();
+        conn.execute_batch("CREATE TABLE kv(key BLOB PRIMARY KEY,value BLOB)")
+            .unwrap();
         let key = |index: u32, long: bool| {
-            let mut key = vec![1u8]; key.extend_from_slice(&[0u8; 13]); key.extend_from_slice(&index.to_be_bytes());
-            if long { key.push(0); } key
+            let mut key = vec![1u8];
+            key.extend_from_slice(&[0u8; 13]);
+            key.extend_from_slice(&index.to_be_bytes());
+            if long {
+                key.push(0);
+            }
+            key
         };
         let transaction = conn.transaction().unwrap();
         for index in 0..20_000u32 {
-            transaction.execute("INSERT INTO kv VALUES (?1,?2)",rusqlite::params![key(index,false),vec![0u8;32]]).unwrap();
+            transaction
+                .execute(
+                    "INSERT INTO kv VALUES (?1,?2)",
+                    rusqlite::params![key(index, false), vec![0u8; 32]],
+                )
+                .unwrap();
         }
         transaction.commit().unwrap();
-        assert_eq!(exact_history_rows(&conn,&[1],20_000,100_000).unwrap().len(),20_000);
-        conn.execute("INSERT INTO kv VALUES (?1,?2)",rusqlite::params![key(20_000,false),vec![0u8;32]]).unwrap();
-        assert!(exact_history_rows(&conn,&[1],20_000,100_000).is_err());
-        conn.execute("DELETE FROM kv WHERE key=?1",[key(20_000,false)]).unwrap();
+        assert_eq!(
+            exact_history_rows(&conn, &[1], 20_000, 100_000)
+                .unwrap()
+                .len(),
+            20_000
+        );
+        conn.execute(
+            "INSERT INTO kv VALUES (?1,?2)",
+            rusqlite::params![key(20_000, false), vec![0u8; 32]],
+        )
+        .unwrap();
+        assert!(exact_history_rows(&conn, &[1], 20_000, 100_000).is_err());
+        conn.execute("DELETE FROM kv WHERE key=?1", [key(20_000, false)])
+            .unwrap();
         // Raw work at the exact budget is complete; one additional neighbor is not.
-        assert_eq!(exact_history_rows(&conn,&[1],20_000,20_000).unwrap().len(),20_000);
-        conn.execute("INSERT INTO kv VALUES (?1,NULL)",[key(20_000,true)]).unwrap();
-        assert!(exact_history_rows(&conn,&[1],20_000,20_000).is_err());
-        assert_eq!(exact_history_rows(&conn,&[1],20_000,20_001).unwrap().len(),20_000);
-        conn.execute("DELETE FROM kv",[]).unwrap();
+        assert_eq!(
+            exact_history_rows(&conn, &[1], 20_000, 20_000)
+                .unwrap()
+                .len(),
+            20_000
+        );
+        conn.execute("INSERT INTO kv VALUES (?1,NULL)", [key(20_000, true)])
+            .unwrap();
+        assert!(exact_history_rows(&conn, &[1], 20_000, 20_000).is_err());
+        assert_eq!(
+            exact_history_rows(&conn, &[1], 20_000, 20_001)
+                .unwrap()
+                .len(),
+            20_000
+        );
+        conn.execute("DELETE FROM kv", []).unwrap();
         // Empty exact history is not proof of an empty prefix when work ran out.
-        for index in 0..3 { conn.execute("INSERT INTO kv VALUES (?1,NULL)",[key(index,true)]).unwrap(); }
-        assert!(exact_history_rows(&conn,&[1],0,2).is_err());
-        assert!(exact_history_rows(&conn,&[1],0,3).unwrap().is_empty());
-        conn.execute("INSERT INTO kv VALUES (?1,?2)",rusqlite::params![vec![1u8,0],vec![0u8;32]]).unwrap();
-        assert!(exact_history_rows(&conn,&[1],20_000,100_000).is_err(),"short keys cannot be skipped as neighbors");
-        conn.execute("DELETE FROM kv",[]).unwrap();
-        conn.execute("INSERT INTO kv VALUES (?1,NULL)",[key(0,false)]).unwrap();
-        assert!(exact_history_rows(&conn,&[1],20_000,100_000).is_err(),"exact values remain fail-closed");
+        for index in 0..3 {
+            conn.execute("INSERT INTO kv VALUES (?1,NULL)", [key(index, true)])
+                .unwrap();
+        }
+        assert!(exact_history_rows(&conn, &[1], 0, 2).is_err());
+        assert!(exact_history_rows(&conn, &[1], 0, 3).unwrap().is_empty());
+        conn.execute(
+            "INSERT INTO kv VALUES (?1,?2)",
+            rusqlite::params![vec![1u8, 0], vec![0u8; 32]],
+        )
+        .unwrap();
+        assert!(
+            exact_history_rows(&conn, &[1], 20_000, 100_000).is_err(),
+            "short keys cannot be skipped as neighbors"
+        );
+        conn.execute("DELETE FROM kv", []).unwrap();
+        conn.execute("INSERT INTO kv VALUES (?1,NULL)", [key(0, false)])
+            .unwrap();
+        assert!(
+            exact_history_rows(&conn, &[1], 20_000, 100_000).is_err(),
+            "exact values remain fail-closed"
+        );
     }
     #[test]
     fn exact_history_keeps_a_spend_after_its_funding_output_is_consumed() {
         let script = packed::Script::default();
-        let (storage,_dir,identity,chain) = ready_exact_history(&[script.clone()]);
-        let funding = TransactionBuilder::default().output(packed::CellOutput::new_builder().lock(script.clone()).build())
-            .output_data(Vec::<u8>::new().pack()).build();
-        let spend = TransactionBuilder::default().input(packed::CellInput::new_builder()
-            .previous_output(packed::OutPoint::new_builder().tx_hash(funding.hash()).index(0u32).build()).build()).build();
-        for (height,tx) in [(10u64,funding.clone()),(20u64,spend.clone())] {
-            storage.filter_block(BlockBuilder::default().epoch(ckb_types::core::EpochNumberWithFraction::new(0,0,100).full_value())
-                .number(height).transaction(tx).build().data());
+        let (storage, _dir, identity, chain) = ready_exact_history(&[script.clone()]);
+        let funding = TransactionBuilder::default()
+            .output(
+                packed::CellOutput::new_builder()
+                    .lock(script.clone())
+                    .build(),
+            )
+            .output_data(Vec::<u8>::new().pack())
+            .build();
+        let spend = TransactionBuilder::default()
+            .input(
+                packed::CellInput::new_builder()
+                    .previous_output(
+                        packed::OutPoint::new_builder()
+                            .tx_hash(funding.hash())
+                            .index(0u32)
+                            .build(),
+                    )
+                    .build(),
+            )
+            .build();
+        for (height, tx) in [(10u64, funding.clone()), (20u64, spend.clone())] {
+            storage.filter_block(
+                BlockBuilder::default()
+                    .epoch(ckb_types::core::EpochNumberWithFraction::new(0, 0, 100).full_value())
+                    .number(height)
+                    .transaction(tx)
+                    .build()
+                    .data(),
+            );
         }
         finish_exact_history(&storage);
-        let hashes:BTreeSet<_> = [funding.hash(),spend.hash()].iter().map(|hash|format!("{hash:#x}")).collect();
-        assert_eq!(snapshot(&storage,&script,&identity,&chain,"TESTNET").unwrap()["hashes"],json!(hashes));
-        assert!(StorageBackend::get(&storage,Key::CellLockScript(&script,10,0,0).into_vec()).unwrap().is_none());
+        let hashes: BTreeSet<_> = [funding.hash(), spend.hash()]
+            .iter()
+            .map(|hash| format!("{hash:#x}"))
+            .collect();
+        assert_eq!(
+            snapshot(&storage, &script, &identity, &chain, "TESTNET").unwrap()["hashes"],
+            json!(hashes)
+        );
+        assert!(
+            StorageBackend::get(&storage, Key::CellLockScript(&script, 10, 0, 0).into_vec())
+                .unwrap()
+                .is_none()
+        );
     }
 
     #[test]

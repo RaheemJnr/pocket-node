@@ -19,6 +19,7 @@ mod backend;
 mod db;
 #[cfg(not(target_arch = "wasm32"))]
 pub use db::{Direction, IteratorMode};
+pub(crate) mod scan;
 mod storage_trait;
 
 // Re-export storage backend trait (low-level KV operations)

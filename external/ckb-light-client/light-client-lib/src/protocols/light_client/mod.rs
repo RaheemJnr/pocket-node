@@ -729,6 +729,26 @@ impl LightClientProtocol {
         let tip_header = self.storage.get_tip_header();
         let matched_blocks = self.peers.matched_blocks().read().await;
 
+        use crate::storage::scan::ScanStorage;
+        match self.storage.scan_states() {
+            Ok(Some(states)) => {
+                crate::utils::scans::service_proofs(
+                    &states,
+                    Arc::clone(&self.peers),
+                    &tip_header,
+                    &matched_blocks,
+                    Arc::clone(nc),
+                    self.init_blocks_in_transit_per_peer(),
+                )
+                .await;
+                return;
+            }
+            Err(error) => {
+                warn!("scoped proof service unavailable: {}", error);
+                return;
+            }
+            Ok(None) => {}
+        }
         prove_or_download_matched_blocks(
             Arc::clone(&self.peers),
             &tip_header,
