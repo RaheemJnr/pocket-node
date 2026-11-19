@@ -400,6 +400,25 @@ class WalletRepository @Inject constructor(
                 colorIndex = colorIndex
             )
 
+            // #623: read the candidate's live scan cursor BEFORE the wallet is
+            // committed, so a cancelled read leaves nothing half-activated.
+            // Only the live cursor of the running (active) network is used; the
+            // candidate's registeredFromBlock has no network column and may
+            // belong to the other chain. No cursor means no progress row.
+            val discoveredCursor: Long? = if (explicitIndex != null) {
+                val candidate = subAccountCandidateDao.getForParent(parentWalletId)
+                    .firstOrNull { it.derivationPath == SubAccountDiscovery.accountPath(nextIndex) }
+                candidate?.let {
+                    try {
+                        scriptCursorProbe.cursorFor(it.scriptArgs)
+                    } catch (e: kotlinx.coroutines.CancellationException) {
+                        throw e
+                    } catch (e: Exception) {
+                        null
+                    }
+                }
+            } else null
+
             val persistResult = persistKeys(Creation(entity.copy(isActive = false), expectedParent ?: parent), bundle)
             if (persistResult !is WalletKeyWriter.Result.Success) {
                 throw WalletKeyWriter.PersistException(persistResult)
@@ -437,24 +456,17 @@ class WalletRepository @Inject constructor(
                     // other chain and is not used here. With no cursor no row
                     // is copied and the child registers from the copied mode's
                     // start; the other network's row is never copied.
+                    // The cursor was read before the wallet was committed (see
+                    // discoveredCursor), so nothing below can be cancelled
+                    // half-way through activation.
+                    kotlinx.coroutines.withContext(kotlinx.coroutines.NonCancellable) {
                     try {
                         val spDao = appDatabase.syncProgressDao()
-                        val candidate = subAccountCandidateDao.getForParent(parentWalletId)
-                            .firstOrNull { it.derivationPath == SubAccountDiscovery.accountPath(nextIndex) }
-                        val cursor = candidate?.let {
-                            try {
-                                scriptCursorProbe.cursorFor(it.scriptArgs)
-                            } catch (e: kotlinx.coroutines.CancellationException) {
-                                throw e
-                            } catch (e: Exception) {
-                                null
-                            }
-                        }
                         for (net in listOf(walletPreferences.getSelectedNetwork())) {
                             spDao.get(parentWalletId, net.name)?.let { parentRow ->
                                 val start = DiscoveredProgress.childStart(
                                     parentSaved = parentRow.localSavedBlockNumber,
-                                    cursor = cursor,
+                                    cursor = discoveredCursor,
                                     registeredFromBlock = 0L,
                                 ) ?: return@let
                                 spDao.upsert(
@@ -467,21 +479,9 @@ class WalletRepository @Inject constructor(
                                 )
                             }
                         }
-                    } catch (e: kotlinx.coroutines.CancellationException) {
-                        // The wallet is already committed and active: retire the
-                        // candidate before propagating, or it stays FOUND next to
-                        // a real account and a retry fails on the existing index.
-                        kotlinx.coroutines.withContext(kotlinx.coroutines.NonCancellable) {
-                            runCatching {
-                                subAccountCandidateDao.updateState(
-                                    parentWalletId, SubAccountDiscovery.accountPath(nextIndex),
-                                    com.rjnr.pocketnode.data.database.entity.SubAccountCandidateEntity.STATE_RESTORED,
-                                )
-                            }
-                        }
-                        throw e
                     } catch (e: Exception) {
                         logger.w(TAG, "Progress inherit failed (non-fatal)", e)
+                    }
                     }
                 } else {
                     markFreshWalletSyncMode(walletId)
