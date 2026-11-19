@@ -468,6 +468,17 @@ class WalletRepository @Inject constructor(
                             }
                         }
                     } catch (e: kotlinx.coroutines.CancellationException) {
+                        // The wallet is already committed and active: retire the
+                        // candidate before propagating, or it stays FOUND next to
+                        // a real account and a retry fails on the existing index.
+                        kotlinx.coroutines.withContext(kotlinx.coroutines.NonCancellable) {
+                            runCatching {
+                                subAccountCandidateDao.updateState(
+                                    parentWalletId, SubAccountDiscovery.accountPath(nextIndex),
+                                    com.rjnr.pocketnode.data.database.entity.SubAccountCandidateEntity.STATE_RESTORED,
+                                )
+                            }
+                        }
                         throw e
                     } catch (e: Exception) {
                         logger.w(TAG, "Progress inherit failed (non-fatal)", e)
