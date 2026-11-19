@@ -47,6 +47,7 @@ class WalletRepository @Inject constructor(
     private val walletPreferences: WalletPreferences,
     private val logger: Logger,
     private val recoveryLifetime: com.rjnr.pocketnode.data.gateway.DaoRecoveryLifetime = com.rjnr.pocketnode.data.gateway.DaoRecoveryLifetime(),
+    private val scriptCursorProbe: ScriptCursorProbe = ScriptCursorProbe { null },
 ) {
     /** Operation-owned proposed metadata; only new UUID creation paths issue this context. */
     class Creation internal constructor(internal val wallet: WalletEntity, internal val expectedParent: WalletEntity? = null) {
@@ -424,13 +425,33 @@ class WalletRepository @Inject constructor(
                     // storage); without a progress row the fresh wallet
                     // registered from the window start and re-scanned ~200k
                     // blocks the device had just covered (device-test 2026-07).
+                    //
+                    // #623: never start the child above its own scan progress.
+                    // The candidate may have turned FOUND while its cursor was
+                    // still far below the parent's height, so start at the
+                    // lower of the two (see DiscoveredProgress).
                     runCatching {
                         val spDao = appDatabase.syncProgressDao()
-                        for (net in listOf(NetworkType.MAINNET, NetworkType.TESTNET)) {
+                        val candidate = subAccountCandidateDao.getForParent(parentWalletId)
+                            .firstOrNull { it.derivationPath == SubAccountDiscovery.accountPath(nextIndex) }
+                        val cursor = candidate?.let {
+                            runCatching { scriptCursorProbe.cursorFor(it.scriptArgs) }.getOrNull()
+                        }
+                        // Cursor and registeredFromBlock are heights on the ACTIVE
+                        // chain only; the other network's row is not copied, so
+                        // the child registers from its copied mode's start there.
+                        for (net in listOf(walletPreferences.getSelectedNetwork())) {
                             spDao.get(parentWalletId, net.name)?.let { parentRow ->
+                                val start = DiscoveredProgress.childStart(
+                                    parentSaved = parentRow.localSavedBlockNumber,
+                                    cursor = cursor,
+                                    registeredFromBlock = candidate?.registeredFromBlock ?: 0L,
+                                ) ?: return@let
                                 spDao.upsert(
                                     parentRow.copy(
                                         walletId = walletId,
+                                        lightStartBlockNumber = minOf(parentRow.lightStartBlockNumber, start),
+                                        localSavedBlockNumber = start,
                                         updatedAt = System.currentTimeMillis(),
                                     )
                                 )

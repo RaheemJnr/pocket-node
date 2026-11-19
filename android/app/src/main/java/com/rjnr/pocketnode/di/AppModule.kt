@@ -376,4 +376,18 @@ object AppModule {
                 page.objects.isNotEmpty()
             }.getOrNull()
         }
+
+    /** #623: live per-script scan cursor from nativeGetScripts; null when unreadable. */
+    @Provides
+    @Singleton
+    fun provideScriptCursorProbe(json: Json): com.rjnr.pocketnode.data.wallet.ScriptCursorProbe =
+        com.rjnr.pocketnode.data.wallet.ScriptCursorProbe { scriptArgs ->
+            runCatching {
+                val raw = com.nervosnetwork.ckblightclient.LightClientNative.nativeGetScripts()
+                    ?: return@runCatching null
+                json.decodeFromString<List<com.rjnr.pocketnode.data.gateway.models.JniScriptStatus>>(raw)
+                    .firstOrNull { it.script.args == scriptArgs }
+                    ?.blockNumber?.removePrefix("0x")?.toLongOrNull(16)
+            }.getOrNull()
+        }
 }

@@ -507,6 +507,77 @@ class WalletRepositoryTest {
     }
 
     /**
+     * #623: a restored candidate must start at the lower of the parent's saved
+     * height and its own scan progress, never above its own cursor.
+     */
+    private suspend fun restoreWithProgress(
+        parentSaved: Long,
+        registeredFrom: Long,
+        cursor: Long?,
+    ): com.rjnr.pocketnode.data.database.entity.SyncProgressEntity? {
+        val words = mnemonicManager.generateMnemonic(MnemonicManager.WordCount.TWELVE)
+        val parent = repo.importFromMnemonic(
+            words = words,
+            name = "Parent",
+            persistKeys = { walletId, bundle -> fakePersistV2(walletId, bundle) },
+        ).getOrThrow()
+        val path = SubAccountDiscovery.accountPath(2)
+        db.subAccountCandidateDao().updateRegisteredFrom(parent.walletId, path, registeredFrom)
+        db.subAccountCandidateDao().updateState(
+            parent.walletId, path,
+            com.rjnr.pocketnode.data.database.entity.SubAccountCandidateEntity.STATE_FOUND,
+        )
+        for (net in listOf("MAINNET", "TESTNET")) {
+            db.syncProgressDao().upsert(
+                com.rjnr.pocketnode.data.database.entity.SyncProgressEntity(
+                    parent.walletId, net, parentSaved, parentSaved, 0L,
+                )
+            )
+        }
+        walletPreferences.setSelectedNetwork(NetworkType.TESTNET)
+        val sub = newRepoWithCursor(ScriptCursorProbe { cursor }).createSubAccount(
+            parentWalletId = parent.walletId,
+            name = "Sub 2",
+            parentMnemonic = words,
+            explicitIndex = 2,
+            persistKeys = { walletId, bundle -> fakePersistV2(walletId, bundle) },
+        ).getOrThrow()
+        lastRestoredWalletId = sub.walletId
+        return db.syncProgressDao().get(sub.walletId, "TESTNET")
+    }
+
+    private var lastRestoredWalletId: String? = null
+
+    private fun newRepoWithCursor(probe: ScriptCursorProbe) = WalletRepository(
+        walletDao, keyManager, walletPreferences, walletPreferences, mnemonicManager, db,
+        db.transactionDao(), db.balanceCacheDao(), db.daoCellDao(),
+        db.pendingDaoWithdrawDao(), db.pendingDaoUnlockDao(), db.keyMaterialDao(),
+        db.subAccountCandidateDao(), SubAccountDiscovery(mnemonicManager, keyManager), walletPreferences, NoopLogger,
+        scriptCursorProbe = probe,
+    )
+
+    @Test
+    fun `restored candidate starts at its live cursor when below parent`() = runTest {
+        val row = restoreWithProgress(parentSaved = 299_000L, registeredFrom = 100_000L, cursor = 120_000L)!!
+        assertEquals(120_000L, row.localSavedBlockNumber)
+        assertEquals(120_000L, row.lightStartBlockNumber)
+        // Heights are chain-specific: the non-active network gets no row.
+        assertNull(db.syncProgressDao().get(lastRestoredWalletId!!, "MAINNET"))
+    }
+
+    @Test
+    fun `restored candidate falls back to registeredFrom when cursor unavailable`() = runTest {
+        val row = restoreWithProgress(parentSaved = 299_000L, registeredFrom = 100_000L, cursor = null)!!
+        assertEquals(100_000L, row.localSavedBlockNumber)
+        assertEquals(100_000L, row.lightStartBlockNumber)
+    }
+
+    @Test
+    fun `restored candidate copies no progress when its own progress is unknown`() = runTest {
+        assertNull(restoreWithProgress(parentSaved = 299_000L, registeredFrom = 0L, cursor = null))
+    }
+
+    /**
      * #382 Tier 2: importing a seed must also record gap-limit candidates
      * along account 0's receiving/change chains, the paths Neuron spreads
      * funds across, so the auto-scan can register them for sync.
