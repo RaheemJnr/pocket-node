@@ -429,23 +429,33 @@ class WalletRepository @Inject constructor(
                     // #623: never start the child above its own scan progress.
                     // The candidate may have turned FOUND while its cursor was
                     // still far below the parent's height, so start at the
-                    // lower of the two (see DiscoveredProgress).
-                    runCatching {
+                    // lower of the two (see DiscoveredProgress). Only the live
+                    // cursor is used, and only for the active network: it is
+                    // read from the running light client. The candidate's
+                    // registeredFromBlock has no network column (it keeps the
+                    // lowest height across networks), so it may belong to the
+                    // other chain and is not used here. With no cursor no row
+                    // is copied and the child registers from the copied mode's
+                    // start; the other network's row is never copied.
+                    try {
                         val spDao = appDatabase.syncProgressDao()
                         val candidate = subAccountCandidateDao.getForParent(parentWalletId)
                             .firstOrNull { it.derivationPath == SubAccountDiscovery.accountPath(nextIndex) }
                         val cursor = candidate?.let {
-                            runCatching { scriptCursorProbe.cursorFor(it.scriptArgs) }.getOrNull()
+                            try {
+                                scriptCursorProbe.cursorFor(it.scriptArgs)
+                            } catch (e: kotlinx.coroutines.CancellationException) {
+                                throw e
+                            } catch (e: Exception) {
+                                null
+                            }
                         }
-                        // Cursor and registeredFromBlock are heights on the ACTIVE
-                        // chain only; the other network's row is not copied, so
-                        // the child registers from its copied mode's start there.
                         for (net in listOf(walletPreferences.getSelectedNetwork())) {
                             spDao.get(parentWalletId, net.name)?.let { parentRow ->
                                 val start = DiscoveredProgress.childStart(
                                     parentSaved = parentRow.localSavedBlockNumber,
                                     cursor = cursor,
-                                    registeredFromBlock = candidate?.registeredFromBlock ?: 0L,
+                                    registeredFromBlock = 0L,
                                 ) ?: return@let
                                 spDao.upsert(
                                     parentRow.copy(
@@ -457,7 +467,11 @@ class WalletRepository @Inject constructor(
                                 )
                             }
                         }
-                    }.onFailure { logger.w(TAG, "Progress inherit failed (non-fatal)", it) }
+                    } catch (e: kotlinx.coroutines.CancellationException) {
+                        throw e
+                    } catch (e: Exception) {
+                        logger.w(TAG, "Progress inherit failed (non-fatal)", e)
+                    }
                 } else {
                     markFreshWalletSyncMode(walletId)
                 }

@@ -566,10 +566,9 @@ class WalletRepositoryTest {
     }
 
     @Test
-    fun `restored candidate falls back to registeredFrom when cursor unavailable`() = runTest {
-        val row = restoreWithProgress(parentSaved = 299_000L, registeredFrom = 100_000L, cursor = null)!!
-        assertEquals(100_000L, row.localSavedBlockNumber)
-        assertEquals(100_000L, row.lightStartBlockNumber)
+    fun `restored candidate copies no row when cursor unavailable even with registeredFrom`() = runTest {
+        // registeredFromBlock has no network column, so it is never used on its own.
+        assertNull(restoreWithProgress(parentSaved = 299_000L, registeredFrom = 100_000L, cursor = null))
     }
 
     @Test
