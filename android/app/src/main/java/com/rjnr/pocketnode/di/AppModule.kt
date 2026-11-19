@@ -385,18 +385,23 @@ object AppModule {
             // Blocking JNI read: keep it off the caller's (possibly main) dispatcher.
             kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
                 try {
+                    val wanted = scriptArgs.toSet()
                     val raw = com.nervosnetwork.ckblightclient.LightClientNative.nativeGetScripts()
-                    if (raw == null) {
-                        null
+                    if (raw == null || wanted.isEmpty()) {
+                        emptyMap()
                     } else {
                         json.decodeFromString<List<com.rjnr.pocketnode.data.gateway.models.JniScriptStatus>>(raw)
-                            .firstOrNull { it.script.args == scriptArgs }
-                            ?.blockNumber?.removePrefix("0x")?.toLongOrNull(16)
+                            .filter { it.script.args in wanted }
+                            .mapNotNull { status ->
+                                status.blockNumber.removePrefix("0x").toLongOrNull(16)
+                                    ?.let { status.script.args to it }
+                            }
+                            .toMap()
                     }
                 } catch (e: kotlinx.coroutines.CancellationException) {
                     throw e
                 } catch (e: Exception) {
-                    null
+                    emptyMap()
                 }
             }
         }

@@ -23,11 +23,23 @@ object DiscoveredProgress {
 }
 
 /**
- * Reads a script's live scan cursor from the light client (block number from
- * nativeGetScripts). Returns null when it cannot be read (node not running,
- * JNI error, script not registered); the restore path then starts the child
- * at the parent's start height, never at the parent's saved height.
+ * Reads live scan cursors from the light client (block numbers from one
+ * nativeGetScripts call). A script that cannot be read (node not running, JNI
+ * error, script not registered) is absent from the map; the restore path then
+ * copies no progress and the child registers from its copied sync mode.
  */
 fun interface ScriptCursorProbe {
-    suspend fun cursorFor(scriptArgs: String): Long?
+    suspend fun cursorsFor(scriptArgs: Collection<String>): Map<String, Long>
 }
+
+/**
+ * Candidate cursors read at one moment, with the network they were read on.
+ * A batch restore takes one snapshot before the first child is activated,
+ * because activating a child replaces the light client's script set and drops
+ * the other candidates' cursors. A cursor only moves forward, so an older
+ * snapshot can only start a child lower (more rescan), never skip blocks.
+ */
+data class CursorSnapshot(
+    val network: com.rjnr.pocketnode.data.gateway.models.NetworkType,
+    val cursors: Map<String, Long>,
+)

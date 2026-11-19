@@ -47,7 +47,7 @@ class WalletRepository @Inject constructor(
     private val walletPreferences: WalletPreferences,
     private val logger: Logger,
     private val recoveryLifetime: com.rjnr.pocketnode.data.gateway.DaoRecoveryLifetime = com.rjnr.pocketnode.data.gateway.DaoRecoveryLifetime(),
-    private val scriptCursorProbe: ScriptCursorProbe = ScriptCursorProbe { null },
+    private val scriptCursorProbe: ScriptCursorProbe = ScriptCursorProbe { emptyMap() },
 ) {
     /** Operation-owned proposed metadata; only new UUID creation paths issue this context. */
     class Creation internal constructor(internal val wallet: WalletEntity, internal val expectedParent: WalletEntity? = null) {
@@ -330,6 +330,22 @@ class WalletRepository @Inject constructor(
     }
 
     /**
+     * Reads the live scan cursors of [scriptArgs] in one light-client call and
+     * records the network they were read on. Unreadable cursors are absent.
+     */
+    suspend fun snapshotCandidateCursors(scriptArgs: Collection<String>): CursorSnapshot {
+        val network = walletPreferences.getSelectedNetwork()
+        val cursors = try {
+            scriptCursorProbe.cursorsFor(scriptArgs)
+        } catch (e: kotlinx.coroutines.CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            emptyMap()
+        }
+        return CursorSnapshot(network, cursors)
+    }
+
+    /**
      * Create a sub-account derived from a parent mnemonic wallet.
      *
      * The parent mnemonic is now a mandatory parameter, callers must
@@ -347,6 +363,7 @@ class WalletRepository @Inject constructor(
         parentMnemonic: List<String>,
         explicitIndex: Int? = null,
         expectedParent: WalletEntity? = null,
+        cursorSnapshot: CursorSnapshot? = null,
         persistKeys: suspend (walletId: Creation, bundle: WalletKeyBundle) -> WalletKeyWriter.Result,
     ): Result<WalletEntity> = runCatching {
         keyManager.walletStorage.requireOpen()
@@ -405,21 +422,17 @@ class WalletRepository @Inject constructor(
             // Only the live cursor of the running (active) network is used; the
             // candidate's registeredFromBlock has no network column and may
             // belong to the other chain. The network is recorded with the
-            // cursor so it is only ever applied to that network's row.
-            val cursorNetwork = walletPreferences.getSelectedNetwork()
-            val discoveredCursor: Long? = if (explicitIndex != null) {
-                val candidate = subAccountCandidateDao.getForParent(parentWalletId)
+            // cursor so it is only ever applied to that network's row. A batch
+            // restore passes the snapshot it took before the first activation.
+            val candidate = if (explicitIndex != null) {
+                subAccountCandidateDao.getForParent(parentWalletId)
                     .firstOrNull { it.derivationPath == SubAccountDiscovery.accountPath(nextIndex) }
-                candidate?.let {
-                    try {
-                        scriptCursorProbe.cursorFor(it.scriptArgs)
-                    } catch (e: kotlinx.coroutines.CancellationException) {
-                        throw e
-                    } catch (e: Exception) {
-                        null
-                    }
-                }
             } else null
+            val snapshot = candidate?.let {
+                cursorSnapshot ?: snapshotCandidateCursors(listOf(it.scriptArgs))
+            }
+            val cursorNetwork = snapshot?.network
+            val discoveredCursor: Long? = candidate?.let { snapshot?.cursors?.get(it.scriptArgs) }
 
             val persistResult = persistKeys(Creation(entity.copy(isActive = false), expectedParent ?: parent), bundle)
             if (persistResult !is WalletKeyWriter.Result.Success) {
@@ -455,12 +468,13 @@ class WalletRepository @Inject constructor(
                     // read from the running light client. The candidate's
                     // registeredFromBlock has no network column (it keeps the
                     // lowest height across networks), so it may belong to the
-                    // other chain and is not used here. With no usable cursor
-                    // the child starts at the parent's own start height on this
-                    // network, so it rescans the parent's whole window and can
-                    // skip nothing the parent covered. A cursor read on another
-                    // network (a switch committed in between) is not usable.
-                    // The other network's row is never copied.
+                    // other chain and is not used here. With no usable cursor no
+                    // row is copied and the child registers from the copied
+                    // mode's start (the parent's lightStartBlockNumber is the last
+                    // re-registration point, not its coverage, so it is no
+                    // fallback). A cursor read on another network (a switch
+                    // committed in between) is not usable. The other network's
+                    // row is never copied.
                     // The cursor was read before the wallet was committed (see
                     // discoveredCursor), so nothing below can be cancelled
                     // half-way through activation.
@@ -474,15 +488,7 @@ class WalletRepository @Inject constructor(
                                     parentSaved = parentRow.localSavedBlockNumber,
                                     cursor = cursor,
                                     registeredFromBlock = 0L,
-                                ) ?: parentRow.lightStartBlockNumber.takeIf { it > 0 }
-                                if (start == null) {
-                                    // The parent started at genesis. A zero row reads
-                                    // as "no progress" and every other mode registers
-                                    // above 0 (RECENT window, checkpoint), so only
-                                    // FULL_HISTORY gives the child the same start.
-                                    syncPreferences.setSyncMode(SyncMode.FULL_HISTORY, net, walletId)
-                                    return@let
-                                }
+                                ) ?: return@let
                                 spDao.upsert(
                                     parentRow.copy(
                                         walletId = walletId,

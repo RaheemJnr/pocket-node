@@ -93,7 +93,7 @@ class AddWalletViewModelTest {
             WalletKeyReader.MaterialResult.Success(key, "abandon ".repeat(11) + "about", "mnemonic", false)
         }
         vm.createSubAccount(activity); advanceUntilIdle()
-        coVerify(exactly = 0) { walletRepository.createSubAccount(any(), any(), any(), any(), any(), any()) }
+        coVerify(exactly = 0) { walletRepository.createSubAccount(any(), any(), any(), any(), any(), any(), any()) }
         assertArrayEquals(ByteArray(32), key)
         assertFalse(vm.uiState.value.isLoading)
     }
@@ -137,7 +137,7 @@ class AddWalletViewModelTest {
             walletKeyWriter.persistCreatedWallet(any(), any(), any(), any(), any(), any(), any())
         }
         coVerify(exactly = 0) {
-            walletRepository.createSubAccount(any(), any(), any(), any(), any(), any())
+            walletRepository.createSubAccount(any(), any(), any(), any(), any(), any(), any())
         }
         coVerify(exactly = 0) { gatewayRepository.onActiveWalletChanged(any()) }
         assertNull(vm.uiState.value.createdWallet)
