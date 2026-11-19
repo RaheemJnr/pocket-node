@@ -514,6 +514,8 @@ class WalletRepositoryTest {
         parentSaved: Long,
         registeredFrom: Long,
         cursor: Long?,
+        parentStart: Long = parentSaved,
+        switchTo: NetworkType? = null,
     ): com.rjnr.pocketnode.data.database.entity.SyncProgressEntity? {
         val words = mnemonicManager.generateMnemonic(MnemonicManager.WordCount.TWELVE)
         val parent = repo.importFromMnemonic(
@@ -530,12 +532,16 @@ class WalletRepositoryTest {
         for (net in listOf("MAINNET", "TESTNET")) {
             db.syncProgressDao().upsert(
                 com.rjnr.pocketnode.data.database.entity.SyncProgressEntity(
-                    parent.walletId, net, parentSaved, parentSaved, 0L,
+                    parent.walletId, net, parentStart, parentSaved, 0L,
                 )
             )
         }
         walletPreferences.setSelectedNetwork(NetworkType.TESTNET)
-        val sub = newRepoWithCursor(ScriptCursorProbe { cursor }).createSubAccount(
+        val sub = newRepoWithCursor(ScriptCursorProbe {
+            // A network switch committed between the cursor read and the write.
+            switchTo?.let { walletPreferences.setSelectedNetwork(it) }
+            cursor
+        }).createSubAccount(
             parentWalletId = parent.walletId,
             name = "Sub 2",
             parentMnemonic = words,
@@ -543,7 +549,7 @@ class WalletRepositoryTest {
             persistKeys = { walletId, bundle -> fakePersistV2(walletId, bundle) },
         ).getOrThrow()
         lastRestoredWalletId = sub.walletId
-        return db.syncProgressDao().get(sub.walletId, "TESTNET")
+        return db.syncProgressDao().get(sub.walletId, (switchTo ?: NetworkType.TESTNET).name)
     }
 
     private var lastRestoredWalletId: String? = null
@@ -566,14 +572,30 @@ class WalletRepositoryTest {
     }
 
     @Test
-    fun `restored candidate copies no row when cursor unavailable even with registeredFrom`() = runTest {
-        // registeredFromBlock has no network column, so it is never used on its own.
-        assertNull(restoreWithProgress(parentSaved = 299_000L, registeredFrom = 100_000L, cursor = null))
+    fun `restored candidate without a cursor starts at the parent's start, not registeredFrom`() = runTest {
+        // registeredFromBlock has no network column, so it is never used; the
+        // child rescans the parent's whole window instead of skipping any of it.
+        val row = restoreWithProgress(
+            parentSaved = 299_000L, registeredFrom = 100_000L, cursor = null, parentStart = 150_000L,
+        )!!
+        assertEquals(150_000L, row.localSavedBlockNumber)
+        assertEquals(150_000L, row.lightStartBlockNumber)
     }
 
     @Test
-    fun `restored candidate copies no progress when its own progress is unknown`() = runTest {
-        assertNull(restoreWithProgress(parentSaved = 299_000L, registeredFrom = 0L, cursor = null))
+    fun `restored candidate copies no progress when the parent started at genesis and no cursor`() = runTest {
+        // Start 0 needs no row: the copied mode already registers from genesis.
+        assertNull(restoreWithProgress(parentSaved = 299_000L, registeredFrom = 0L, cursor = null, parentStart = 0L))
+    }
+
+    @Test
+    fun `cursor read before a network switch is not applied to the new network`() = runTest {
+        val row = restoreWithProgress(
+            parentSaved = 299_000L, registeredFrom = 0L, cursor = 280_000L,
+            parentStart = 150_000L, switchTo = NetworkType.MAINNET,
+        )!!
+        assertEquals(150_000L, row.localSavedBlockNumber)
+        assertNull(db.syncProgressDao().get(lastRestoredWalletId!!, "TESTNET"))
     }
 
     /**

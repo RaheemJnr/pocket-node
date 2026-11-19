@@ -404,7 +404,9 @@ class WalletRepository @Inject constructor(
             // committed, so a cancelled read leaves nothing half-activated.
             // Only the live cursor of the running (active) network is used; the
             // candidate's registeredFromBlock has no network column and may
-            // belong to the other chain. No cursor means no progress row.
+            // belong to the other chain. The network is recorded with the
+            // cursor so it is only ever applied to that network's row.
+            val cursorNetwork = walletPreferences.getSelectedNetwork()
             val discoveredCursor: Long? = if (explicitIndex != null) {
                 val candidate = subAccountCandidateDao.getForParent(parentWalletId)
                     .firstOrNull { it.derivationPath == SubAccountDiscovery.accountPath(nextIndex) }
@@ -453,9 +455,12 @@ class WalletRepository @Inject constructor(
                     // read from the running light client. The candidate's
                     // registeredFromBlock has no network column (it keeps the
                     // lowest height across networks), so it may belong to the
-                    // other chain and is not used here. With no cursor no row
-                    // is copied and the child registers from the copied mode's
-                    // start; the other network's row is never copied.
+                    // other chain and is not used here. With no usable cursor
+                    // the child starts at the parent's own start height on this
+                    // network, so it rescans the parent's whole window and can
+                    // skip nothing the parent covered. A cursor read on another
+                    // network (a switch committed in between) is not usable.
+                    // The other network's row is never copied.
                     // The cursor was read before the wallet was committed (see
                     // discoveredCursor), so nothing below can be cancelled
                     // half-way through activation.
@@ -463,12 +468,14 @@ class WalletRepository @Inject constructor(
                     try {
                         val spDao = appDatabase.syncProgressDao()
                         for (net in listOf(walletPreferences.getSelectedNetwork())) {
+                            val cursor = discoveredCursor.takeIf { net == cursorNetwork }
                             spDao.get(parentWalletId, net.name)?.let { parentRow ->
                                 val start = DiscoveredProgress.childStart(
                                     parentSaved = parentRow.localSavedBlockNumber,
-                                    cursor = discoveredCursor,
+                                    cursor = cursor,
                                     registeredFromBlock = 0L,
-                                ) ?: return@let
+                                ) ?: parentRow.lightStartBlockNumber.takeIf { it > 0 }
+                                    ?: return@let
                                 spDao.upsert(
                                     parentRow.copy(
                                         walletId = walletId,

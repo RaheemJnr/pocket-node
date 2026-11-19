@@ -25,8 +25,8 @@ object DiscoveredProgress {
 /**
  * Reads a script's live scan cursor from the light client (block number from
  * nativeGetScripts). Returns null when it cannot be read (node not running,
- * JNI error, script not registered); callers then fall back to the
- * candidate's registered-from block, never to the parent height.
+ * JNI error, script not registered); the restore path then starts the child
+ * at the parent's start height, never at the parent's saved height.
  */
 fun interface ScriptCursorProbe {
     suspend fun cursorFor(scriptArgs: String): Long?
