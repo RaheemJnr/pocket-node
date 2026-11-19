@@ -583,9 +583,12 @@ class WalletRepositoryTest {
     }
 
     @Test
-    fun `restored candidate copies no progress when the parent started at genesis and no cursor`() = runTest {
-        // Start 0 needs no row: the copied mode already registers from genesis.
+    fun `restored candidate of a genesis-start RECENT parent syncs full history without a cursor`() = runTest {
+        // A zero row reads as no progress and RECENT would start at tip minus
+        // 200k, so the child gets FULL_HISTORY on that network instead.
         assertNull(restoreWithProgress(parentSaved = 299_000L, registeredFrom = 0L, cursor = null, parentStart = 0L))
+        val id = lastRestoredWalletId!!
+        assertEquals(SyncMode.FULL_HISTORY, walletPreferences.getSyncMode(NetworkType.TESTNET, id))
     }
 
     @Test

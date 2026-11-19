@@ -475,7 +475,14 @@ class WalletRepository @Inject constructor(
                                     cursor = cursor,
                                     registeredFromBlock = 0L,
                                 ) ?: parentRow.lightStartBlockNumber.takeIf { it > 0 }
-                                    ?: return@let
+                                if (start == null) {
+                                    // The parent started at genesis. A zero row reads
+                                    // as "no progress" and every other mode registers
+                                    // above 0 (RECENT window, checkpoint), so only
+                                    // FULL_HISTORY gives the child the same start.
+                                    syncPreferences.setSyncMode(SyncMode.FULL_HISTORY, net, walletId)
+                                    return@let
+                                }
                                 spDao.upsert(
                                     parentRow.copy(
                                         walletId = walletId,
