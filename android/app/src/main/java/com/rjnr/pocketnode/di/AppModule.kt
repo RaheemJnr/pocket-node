@@ -382,12 +382,22 @@ object AppModule {
     @Singleton
     fun provideScriptCursorProbe(json: Json): com.rjnr.pocketnode.data.wallet.ScriptCursorProbe =
         com.rjnr.pocketnode.data.wallet.ScriptCursorProbe { scriptArgs ->
-            runCatching {
-                val raw = com.nervosnetwork.ckblightclient.LightClientNative.nativeGetScripts()
-                    ?: return@runCatching null
-                json.decodeFromString<List<com.rjnr.pocketnode.data.gateway.models.JniScriptStatus>>(raw)
-                    .firstOrNull { it.script.args == scriptArgs }
-                    ?.blockNumber?.removePrefix("0x")?.toLongOrNull(16)
-            }.getOrNull()
+            // Blocking JNI read: keep it off the caller's (possibly main) dispatcher.
+            kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
+                try {
+                    val raw = com.nervosnetwork.ckblightclient.LightClientNative.nativeGetScripts()
+                    if (raw == null) {
+                        null
+                    } else {
+                        json.decodeFromString<List<com.rjnr.pocketnode.data.gateway.models.JniScriptStatus>>(raw)
+                            .firstOrNull { it.script.args == scriptArgs }
+                            ?.blockNumber?.removePrefix("0x")?.toLongOrNull(16)
+                    }
+                } catch (e: kotlinx.coroutines.CancellationException) {
+                    throw e
+                } catch (e: Exception) {
+                    null
+                }
+            }
         }
 }
