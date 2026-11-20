@@ -12,7 +12,11 @@
 //! Format 2 keeps the mobile `kv` schema. The 1 -> 2 step invalidates
 //! chain-derived evidence and records a verification identity atomically;
 //! wallet scripts are retained separately as inactive recovery metadata.
-//! Version 0 is first treated as version 1. Unknown newer layouts and corrupt
+//! Format 3 stamps a required scoped-scan migration gate; startup atomically
+//! installs per-script progress before any protocol starts. Interrupted genesis
+//! indexing remains fenced and resumes on startup. Production readers preserve
+//! unsupported/corrupt stores in place and fail closed.
+//! Version 0 is first treated as version 1. Legacy test helpers for newer layouts and corrupt
 //! files retain the existing set-aside recovery policy. Transient errors and
 //! transaction-boundary errors roll back and are retried on the next launch.
 //!
@@ -33,7 +37,7 @@ use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 /// Layout version of the store this build reads and writes.
-pub const STORE_FORMAT_VERSION: u32 = 2;
+pub const STORE_FORMAT_VERSION: u32 = 3;
 
 /// Stores written before versioning existed carry `user_version` 0 and have
 /// this layout.
@@ -51,7 +55,32 @@ pub struct UpgradeStep {
 
 /// Registered upgrade steps, in any order. Adding a layout change later means
 /// bumping [`STORE_FORMAT_VERSION`] and adding one entry here.
-const UPGRADE_STEPS: &[UpgradeStep] = &[UpgradeStep { from: 1, run: super::verification_epoch::upgrade }];
+const UPGRADE_STEPS: &[UpgradeStep] = &[
+    UpgradeStep {
+        from: 1,
+        run: super::verification_epoch::upgrade,
+    },
+    UpgradeStep {
+        from: 2,
+        run: require_scoped_migration,
+    },
+];
+
+// Stamp a durable startup gate in the same transaction as format 3. Lifecycle
+// must install scoped scan state before starting any protocol or publishing data.
+fn require_scoped_migration(conn: &Connection) -> rusqlite::Result<()> {
+    conn.execute_batch(
+        "CREATE TABLE IF NOT EXISTS kv (key BLOB PRIMARY KEY, value BLOB NOT NULL)",
+    )?;
+    conn.execute(
+        "INSERT OR REPLACE INTO kv(key,value) VALUES(?1,?2)",
+        rusqlite::params![
+            crate::storage::Key::Meta("SCAN_MIGRATION_REQUIRED_V2").into_vec(),
+            vec![1u8]
+        ],
+    )?;
+    Ok(())
+}
 
 /// What [`ensure_store_version`] did. Logged by `init`; not surfaced to the
 /// platform bridges.
@@ -76,21 +105,48 @@ pub enum StoreVersionAction {
     },
 }
 
-/// Bring the store at `path` to [`STORE_FORMAT_VERSION`], or set it aside if
-/// this build cannot read it. Must be called before the storage layer opens
-/// the file.
+/// Bring the store at `path` to [`STORE_FORMAT_VERSION`], preserving it in
+/// place on any unsupported format or migration failure. Must be called before
+/// the storage layer opens the file.
 pub fn ensure_store_version(path: &Path) -> Result<StoreVersionAction, BridgeError> {
-    ensure_store_version_with(path, STORE_FORMAT_VERSION, UPGRADE_STEPS)
+    if path.exists() {
+        match read_version(path)? {
+            Some(version) if version <= STORE_FORMAT_VERSION => {}
+            _ => {
+                return Err(BridgeError::Storage(
+                    "unsupported or unreadable store; preserved in place".into(),
+                ))
+            }
+        }
+    }
+    ensure_store_version_with_policy(path, STORE_FORMAT_VERSION, UPGRADE_STEPS, true)
 }
 
-/// [`ensure_store_version`] with the target version and upgrade table as
-/// parameters, so tests can exercise the upgrade path while production has no
-/// steps.
+/// Legacy recovery policy retained for format-migration fixtures.
+#[cfg(test)]
 pub(crate) fn ensure_store_version_with(
     path: &Path,
     target: u32,
     steps: &[UpgradeStep],
 ) -> Result<StoreVersionAction, BridgeError> {
+    ensure_store_version_with_policy(path, target, steps, false)
+}
+
+fn ensure_store_version_with_policy(
+    path: &Path,
+    target: u32,
+    steps: &[UpgradeStep],
+    preserve_on_failure: bool,
+) -> Result<StoreVersionAction, BridgeError> {
+    let unusable = |found| {
+        if preserve_on_failure {
+            Err(BridgeError::Storage(format!(
+                "store upgrade failed at version {found:?}; preserved in place"
+            )))
+        } else {
+            set_aside(path, found, target)
+        }
+    };
     if !path.exists() {
         create_stamped(path, target)?;
         return Ok(StoreVersionAction::Created);
@@ -98,7 +154,7 @@ pub(crate) fn ensure_store_version_with(
 
     let mut found = match read_version(path)? {
         Some(v) => v,
-        None => return set_aside(path, None, target),
+        None => return unusable(None),
     };
 
     if found == 0 {
@@ -114,7 +170,7 @@ pub(crate) fn ensure_store_version_with(
         return Ok(StoreVersionAction::Current);
     }
     if found > target {
-        return set_aside(path, Some(found), target);
+        return unusable(Some(found));
     }
 
     match upgrade(path, found, target, steps)? {
@@ -122,7 +178,7 @@ pub(crate) fn ensure_store_version_with(
             from: found,
             to: target,
         }),
-        Err(reached) => set_aside(path, Some(reached), target),
+        Err(reached) => unusable(Some(reached)),
     }
 }
 
@@ -214,7 +270,8 @@ fn stamp(path: &Path, version: u32) -> Result<(), BridgeError> {
 /// stamping or committing a step's transaction failed, or a step failed with
 /// a transient error. The inner `Err` carries the version the store reached
 /// when a step was missing or a step itself failed for another reason, which
-/// means this build cannot bring the store forward and it is set aside.
+/// means this build cannot bring the store forward. Production preserves it
+/// in place; only legacy test fixtures use the set-aside policy.
 fn upgrade(
     path: &Path,
     from: u32,
@@ -665,7 +722,7 @@ mod tests {
 
     #[test]
     fn production_registers_verification_upgrade() {
-        assert_eq!(UPGRADE_STEPS.len(), 1);
+        assert_eq!(UPGRADE_STEPS.len(), 2);
         assert_eq!(UPGRADE_STEPS[0].from, 1);
     }
 
@@ -940,5 +997,59 @@ mod tests {
             StoreVersionAction::Current
         );
         assert_eq!(row_count(&path), 2);
+    }
+    #[test]
+    fn scoped_upgrade_preserves_rows_and_stamps_required_gate() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("store.db");
+        write_store(&path, ROWS);
+        set_version(&path, 2);
+        let before = rows(&path);
+        assert_eq!(
+            ensure_store_version(&path).unwrap(),
+            StoreVersionAction::Upgraded { from: 2, to: 3 }
+        );
+        assert_eq!(user_version(&path), 3);
+        let after = rows(&path);
+        for row in before {
+            assert!(after.contains(&row));
+        }
+        assert!(after
+            .iter()
+            .any(|(key, _)| *key
+                == crate::storage::Key::Meta("SCAN_MIGRATION_REQUIRED_V2").into_vec()));
+    }
+    #[test]
+    fn production_migration_failure_preserves_original_store() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("store.db");
+        let conn = Connection::open(&path).unwrap();
+        conn.execute_batch("CREATE TABLE kv(key BLOB PRIMARY KEY); INSERT INTO kv VALUES(x'1234'); PRAGMA user_version=2;").unwrap();
+        drop(conn);
+        assert!(matches!(
+            ensure_store_version(&path),
+            Err(BridgeError::Storage(_))
+        ));
+        assert_eq!(user_version(&path), 2);
+        assert_eq!(entries(dir.path()), vec!["store.db"]);
+        let conn = Connection::open(&path).unwrap();
+        assert_eq!(
+            conn.query_row("SELECT key FROM kv", [], |row| row.get::<_, Vec<u8>>(0))
+                .unwrap(),
+            vec![0x12, 0x34]
+        );
+    }
+
+    #[test]
+    fn production_reader_preserves_unknown_newer_store() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("store.db");
+        write_store(&path, ROWS);
+        set_version(&path, 99);
+        let before = rows(&path);
+        assert!(ensure_store_version(&path).is_err());
+        assert_eq!(user_version(&path), 99);
+        assert_eq!(rows(&path), before);
+        assert_eq!(entries(dir.path()), vec!["store.db"]);
     }
 }

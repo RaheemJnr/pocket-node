@@ -738,7 +738,8 @@ final class M3ParityTests: XCTestCase {
                 args: args
             ),
             scriptType: "lock",
-            blockNumber: blockNumberHex
+            blockNumber: blockNumberHex,
+            historyRecovery: false
         )
     }
 }

@@ -32,6 +32,7 @@ import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.flatMapLatest
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.map
+import kotlinx.coroutines.flow.onStart
 import kotlinx.coroutines.flow.receiveAsFlow
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.flow.update
@@ -57,6 +58,7 @@ class ActivityViewModel @Inject constructor(
     private val appStatePreferences: AppStatePreferences,
     private val uiPreferences: UiPreferences,
     private val logger: Logger,
+    private val walletRepository: com.rjnr.pocketnode.data.wallet.WalletRepository,
     private val verificationCacheGate: com.rjnr.pocketnode.data.gateway.VerificationCacheGate,
 ) : ViewModel() {
 
@@ -64,6 +66,17 @@ class ActivityViewModel @Inject constructor(
 
     private val _uiState = MutableStateFlow(ActivityUiState())
     val uiState: StateFlow<ActivityUiState> = _uiState.asStateFlow()
+
+    private val activeScope = combine(
+        repository.network,
+        walletRepository.getActiveWallet().map { it?.walletId ?: "" }.distinctUntilChanged(),
+    ) { network, walletId -> network to walletId }.distinctUntilChanged()
+
+    @OptIn(kotlinx.coroutines.ExperimentalCoroutinesApi::class)
+    val recovery = activeScope.flatMapLatest { (network, walletId) ->
+        repository.historyRecovery.observePresentation(walletId, network.name)
+            .onStart { emit(com.rjnr.pocketnode.data.history.RecoveryPresentation()) }
+    }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000, replayExpirationMillis = 0), com.rjnr.pocketnode.data.history.RecoveryPresentation())
 
     // -- CSV export (#562) --
 
@@ -91,13 +104,13 @@ class ActivityViewModel @Inject constructor(
     @OptIn(kotlinx.coroutines.ExperimentalCoroutinesApi::class)
     val transactionPagingFlow: Flow<PagingData<TransactionRecord>> = combine(
         _uiState.map { it.filter }.distinctUntilChanged(),
-        _uiState.map { it.currentNetwork }.distinctUntilChanged(),
+        activeScope,
         verificationCacheGate.readyNetworks,
-    ) { filter, network, ready ->
-        Triple(filter, network, network.name in ready)
-    }.flatMapLatest { (filter, network, ready) ->
+    ) { filter, scope, ready ->
+        Triple(filter, scope, scope.first.name in ready)
+    }.flatMapLatest { (filter, scope, ready) ->
+        val (network, walletId) = scope
         if (!ready) return@flatMapLatest kotlinx.coroutines.flow.flowOf(PagingData.empty<TransactionRecord>())
-        val walletId = appStatePreferences.getActiveWalletId() ?: ""
         Pager(PagingConfig(pageSize = 20, enablePlaceholders = false)) {
             when (filter) {
                 Filter.ALL -> transactionDao.getTransactionsPaged(walletId, network.name)
@@ -122,11 +135,9 @@ class ActivityViewModel @Inject constructor(
      */
     @OptIn(kotlinx.coroutines.ExperimentalCoroutinesApi::class)
     val broadcastStates: StateFlow<Map<String, BroadcastInfo>> =
-        _uiState.map { it.currentNetwork }
-            .distinctUntilChanged()
-            .flatMapLatest { network ->
-                val walletId = appStatePreferences.getActiveWalletId() ?: ""
-                pendingBroadcastDao.observeAll(walletId, network.name).map { rows ->
+        activeScope
+            .flatMapLatest { (network, walletId) ->
+                pendingBroadcastDao.observeAll(walletId, network.name).onStart { emit(emptyList()) }.map { rows ->
                     rows.associate { row ->
                         row.txHash to BroadcastInfo(
                             state = row.state,

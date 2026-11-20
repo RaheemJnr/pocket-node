@@ -261,6 +261,7 @@ final class AppContainer {
             walletId: record.id,
             script: AddressUtils.shared.parseAddress(address: address),
             network: network,
+            historyRecovery: sync.historyRecovery,
             ensureVerified: { [sync] in try await sync.ensureVerifiedCache() }
         )
         return ActivityViewModel(source: service, onRetry: { [send] hash in

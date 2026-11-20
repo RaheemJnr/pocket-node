@@ -590,6 +590,10 @@ class WalletRepository @Inject constructor(
             appDatabase.walletVaultDao().deleteLegacy(walletId)
             keyMaterialDao.delete(walletId)
             walletDao.delete(walletId)
+            for (table in listOf("history_archive", "dao_history_archive", "history_recovery_jobs")) {
+                appDatabase.openHelper.writableDatabase.execSQL("DELETE FROM $table WHERE walletId = ?", arrayOf(walletId))
+            }
+            appDatabase.openHelper.writableDatabase.execSQL("DELETE FROM history_script_recovery_jobs WHERE parentWalletId = ?", arrayOf(walletId))
             for (network in listOf("MAINNET", "TESTNET")) {
                 transactionDao.deleteByWalletAndNetwork(walletId, network)
                 balanceCacheDao.deleteByWalletAndNetwork(walletId, network)
@@ -748,7 +752,7 @@ class WalletRepository @Inject constructor(
 
     private companion object {
         val SECRET_TABLES = listOf("wallets", "key_material", "wallet_vault", "wallet_vault_legacy", "wallet_passphrase_profile")
-        val RESET_TABLES = SECRET_TABLES + listOf("wallet_pending_cleanup", "transactions", "balance_cache", "dao_cells", "pending_dao_withdraws",
+        val RESET_TABLES = SECRET_TABLES + listOf("wallet_pending_cleanup", "history_archive", "dao_history_archive", "history_recovery_jobs", "history_script_recovery_jobs", "history_recovery_epochs", "transactions", "balance_cache", "dao_cells", "pending_dao_withdraws",
             "pending_dao_unlocks", "dao_recovery_guards", "dao_recovery_retry_budget", "sync_progress", "sub_account_candidates", "pending_broadcasts")
     }
 

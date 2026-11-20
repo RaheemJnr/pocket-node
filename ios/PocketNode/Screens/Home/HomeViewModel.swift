@@ -77,6 +77,8 @@ final class HomeViewModel {
     /// How far along this wallet's chain sync is.
     var syncStatus: SyncStatus { sync?.status ?? SyncStatus() }
 
+    var recovery: RecoveryPresentation? { sync?.recovery }
+
     /// The mode the user picked, or nil if they never have.
     var syncMode: SyncMode? { sync?.mode }
 

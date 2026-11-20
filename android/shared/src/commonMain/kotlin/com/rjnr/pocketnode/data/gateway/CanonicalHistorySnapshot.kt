@@ -18,12 +18,15 @@ data class CanonicalHistorySnapshot(
     val tipHash: String,
     val processedThrough: String,
     val hashes: Set<String>,
+    val durableCoverageVersion: Int = 0,
 ) {
+    val hasDurableCoverage: Boolean get() = durableCoverageVersion == 1 || durableCoverageVersion == 2
+
     fun validFor(expectedScript: Script, expectedNetwork: String): Boolean {
         val start = startHeight.toLongOrNull() ?: return false
         val tip = tipHeight.toLongOrNull() ?: return false
         val through = processedThrough.toLongOrNull() ?: return false
-        return version == 1 && complete && network == expectedNetwork && script == expectedScript &&
+        return version == 1 && durableCoverageVersion in 0..2 && complete && network == expectedNetwork && script == expectedScript &&
             start >= 0 && tip >= start && through >= tip &&
             hash(genesisHash) && hash(tipHash) && storeGeneration.isNotBlank() &&
             registration.length == 32 && registration.all { it in "0123456789abcdef" } &&

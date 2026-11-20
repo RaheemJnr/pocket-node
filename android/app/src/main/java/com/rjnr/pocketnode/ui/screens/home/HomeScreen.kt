@@ -427,7 +427,9 @@ fun HomeScreen(
                     }
                 },
                 actions = {
-                    if (uiState.isSyncing) {
+                    if (uiState.recovery.isRevalidating) {
+                        Text("Revalidating history", style = MaterialTheme.typography.labelSmall)
+                    } else if (uiState.isSyncing) {
                         SyncingChip()
                     } else {
                         SyncedChip()
@@ -685,6 +687,7 @@ fun HomeScreenUI(
             item {
                 WalletBalanceCard(
                     balanceCkb = uiState.balanceCkb,
+                    hasBalance = uiState.hasBalance,
                     fiatBalance = uiState.fiatBalance,
                     isFiatEnabled = uiState.isPriceServiceEnabled,
                     address = uiState.address,
@@ -703,6 +706,12 @@ fun HomeScreenUI(
                         }
                     }
                 )
+            }
+
+            if (uiState.recovery.isVisible) {
+                item {
+                    com.rjnr.pocketnode.ui.components.HistoryRecoveryPanel(uiState.recovery)
+                }
             }
 
             // Sync-stall warning banner (#150): syncedToBlock has not advanced
@@ -845,7 +854,7 @@ fun HomeScreenUI(
             // Transaction List (last 5)
             if (uiState.transactions.isEmpty()) {
                 item {
-                    EmptyTransactionState()
+                    EmptyTransactionState(hasRetainedHistory = uiState.recovery.isVisible)
                 }
             } else {
                 items(
@@ -1052,7 +1061,7 @@ private fun SyncedChip() {
 }
 
 @Composable
-private fun EmptyTransactionState() {
+private fun EmptyTransactionState(hasRetainedHistory: Boolean = false) {
     Card(
         modifier = Modifier.fillMaxWidth(),
         colors = CardDefaults.cardColors(
@@ -1073,13 +1082,13 @@ private fun EmptyTransactionState() {
             )
             Spacer(modifier = Modifier.height(16.dp))
             Text(
-                text = "No transactions yet",
+                text = if (hasRetainedHistory) "No verified activity to show yet" else "No transactions yet",
                 style = MaterialTheme.typography.bodyLarge,
                 color = MaterialTheme.colorScheme.onSurfaceVariant
             )
             Spacer(modifier = Modifier.height(4.dp))
             Text(
-                text = "Your transaction history will appear here",
+                text = if (hasRetainedHistory) "Retained history is listed separately until verified" else "Your transaction history will appear here",
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.7f),
                 textAlign = TextAlign.Center

@@ -1,7 +1,9 @@
 use crate::protocols::FilterProtocol;
 use crate::protocols::{Status, StatusCode};
+use crate::storage::scan::ScanStorage;
 use crate::storage::LightClientStorage;
 use crate::utils::network::prove_or_download_matched_blocks;
+use crate::{read_lock, write_lock};
 use ckb_constant::sync::INIT_BLOCKS_IN_TRANSIT_PER_PEER;
 use ckb_network::{BoxedCKBProtocolContext, PeerIndex};
 use ckb_types::core::BlockNumber;
@@ -68,28 +70,43 @@ impl<'a> BlockFiltersProcess<'a> {
             filters count: {filters_count}, blocks count: {blocks_count}."
         );
 
-        let min_filtered_block_number = self.filter.storage.get_min_filtered_block_number();
-        debug!("current min filtered block number: {min_filtered_block_number}");
-        let Some(expected_start_number) = min_filtered_block_number.checked_add(1) else {
-            info!(
-                "ignoring, min_filtered_block_number overflow: {}",
-                min_filtered_block_number
-            );
-            return Status::ok();
+        let scoped_request = match self.filter.storage.scan_states() {
+            Ok(Some(states)) => {
+                let Some(request) =
+                    read_lock!(self.filter.scheduler).binding(self.peer, start_number, &states)
+                else {
+                    return StatusCode::Ignore
+                        .with_context("unsolicited or stale scoped filter response");
+                };
+                Some(request)
+            }
+            Err(error) => return StatusCode::InternalError.with_context(error.to_string()),
+            Ok(None) => None,
         };
-        if expected_start_number != start_number {
-            info!(
+        if scoped_request.is_none() {
+            let min_filtered_block_number = self.filter.storage.get_min_filtered_block_number();
+            debug!("current min filtered block number: {min_filtered_block_number}");
+            let Some(expected_start_number) = min_filtered_block_number.checked_add(1) else {
+                info!(
+                    "ignoring, min_filtered_block_number overflow: {}",
+                    min_filtered_block_number
+                );
+                return Status::ok();
+            };
+            if expected_start_number != start_number {
+                info!(
                 "ignoring, the start_number of block_filters message {} is not continuous with min_filtered_block_number: {}",
                 start_number,
                 min_filtered_block_number
             );
-            // Get matched blocks finished, update filter scripts block number
-            if self.filter.storage.get_earliest_matched_blocks().is_none() {
-                self.filter
-                    .storage
-                    .update_block_number(min_filtered_block_number);
+                // Get matched blocks finished, update filter scripts block number
+                if self.filter.storage.get_earliest_matched_blocks().is_none() {
+                    self.filter
+                        .storage
+                        .update_block_number(min_filtered_block_number);
+                }
+                return Status::ok();
             }
-            return Status::ok();
         }
 
         if filters_count != blocks_count {
@@ -112,97 +129,120 @@ impl<'a> BlockFiltersProcess<'a> {
             .peers
             .calc_check_point_number(finalized_check_point_index);
 
-        let (mut parent_block_filter_hash, expected_block_filter_hashes) =
-            if start_number <= finalized_check_point_number {
-                // Use cached block filter hashes to check the block filters.
-                let (cached_check_point_index, mut cached_block_filter_hashes) =
-                    self.filter.peers.get_cached_block_filter_hashes().await;
-
-                let cached_check_point_number = self
-                    .filter
-                    .peers
-                    .calc_check_point_number(cached_check_point_index);
-                let next_cached_check_point_number = self
-                    .filter
-                    .peers
-                    .calc_check_point_number(cached_check_point_index + 1);
-                trace!(
-                    "check block filters (start: {}, len: {}), \
-                     with cached block filter hashes: ({},{}]",
-                    start_number,
-                    filters_count,
-                    cached_check_point_number,
-                    next_cached_check_point_number
-                );
-                if start_number <= cached_check_point_number
-                    || start_number > next_cached_check_point_number
+        let (mut parent_block_filter_hash, expected_block_filter_hashes) = if start_number
+            <= finalized_check_point_number
+        {
+            // Use cached block filter hashes to check the block filters.
+            let (cached_check_point_index, mut cached_block_filter_hashes) = if let Some(request) =
+                &scoped_request
+            {
+                let Some(window) = &request.window else {
+                    return StatusCode::Ignore.with_context("scoped checkpoint window unavailable");
+                };
+                let index =
+                    ((start_number - 1) / self.filter.peers.calc_check_point_number(1)) as u32;
+                let anchors = self.filter.storage.get_check_points(index, 2);
+                if window.epoch != request.epoch
+                    || window.index != index
+                    || anchors.as_slice() != [window.parent.clone(), window.end.clone()]
                 {
-                    let errmsg = format!(
-                        "first block filter (number: {}) could not be checked \
+                    return StatusCode::Ignore.with_context("scoped checkpoint anchors changed");
+                }
+                (index, window.hashes.clone())
+            } else {
+                self.filter.peers.get_cached_block_filter_hashes().await
+            };
+
+            let cached_check_point_number = self
+                .filter
+                .peers
+                .calc_check_point_number(cached_check_point_index);
+            let next_cached_check_point_number = self
+                .filter
+                .peers
+                .calc_check_point_number(cached_check_point_index + 1);
+            trace!(
+                "check block filters (start: {}, len: {}), \
+                     with cached block filter hashes: ({},{}]",
+                start_number,
+                filters_count,
+                cached_check_point_number,
+                next_cached_check_point_number
+            );
+            if start_number <= cached_check_point_number
+                || start_number > next_cached_check_point_number
+            {
+                let errmsg = format!(
+                    "first block filter (number: {}) could not be checked \
                          with cached block filter hashes ({},{}]",
-                        start_number, cached_check_point_number, next_cached_check_point_number
+                    start_number, cached_check_point_number, next_cached_check_point_number
+                );
+                return StatusCode::Ignore.with_context(errmsg);
+            }
+            if cached_block_filter_hashes.is_empty() {
+                let errmsg = "cached block filter hashes is empty";
+                return StatusCode::Ignore.with_context(errmsg);
+            }
+            if start_number == cached_check_point_number + 1 {
+                let Some(cached_check_point) = self
+                    .filter
+                    .storage
+                    .get_check_points(cached_check_point_index, 1)
+                    .first()
+                    .cloned()
+                else {
+                    let error_message =
+                        format!("check point at index {cached_check_point_index} is missing");
+                    return StatusCode::InternalError.with_context(error_message);
+                };
+                (cached_check_point, cached_block_filter_hashes)
+            } else {
+                let start_index = (start_number - cached_check_point_number) as usize - 2;
+                if start_index >= cached_block_filter_hashes.len() {
+                    let errmsg = format!(
+                        "cached block filter hashes index {start_index} out of bounds, \
+                             len: {}",
+                        cached_block_filter_hashes.len()
                     );
                     return StatusCode::Ignore.with_context(errmsg);
                 }
-                if cached_block_filter_hashes.is_empty() {
-                    let errmsg = "cached block filter hashes is empty";
-                    return StatusCode::Ignore.with_context(errmsg);
-                }
-                if start_number == cached_check_point_number + 1 {
-                    let Some(cached_check_point) = self
-                        .filter
-                        .storage
-                        .get_check_points(cached_check_point_index, 1)
-                        .first()
-                        .cloned()
-                    else {
-                        let error_message =
-                            format!("check point at index {cached_check_point_index} is missing");
-                        return StatusCode::InternalError.with_context(error_message);
-                    };
-                    (cached_check_point, cached_block_filter_hashes)
-                } else {
-                    let start_index = (start_number - cached_check_point_number) as usize - 2;
-                    if start_index >= cached_block_filter_hashes.len() {
-                        let errmsg = format!(
-                            "cached block filter hashes index {start_index} out of bounds, \
-                             len: {}",
-                            cached_block_filter_hashes.len()
-                        );
-                        return StatusCode::Ignore.with_context(errmsg);
-                    }
-                    let parent_hash = cached_block_filter_hashes[start_index].clone();
-                    cached_block_filter_hashes.drain(..=start_index);
-                    (parent_hash, cached_block_filter_hashes)
-                }
+                let parent_hash = cached_block_filter_hashes[start_index].clone();
+                cached_block_filter_hashes.drain(..=start_index);
+                (parent_hash, cached_block_filter_hashes)
+            }
+        } else {
+            // Use latest block filter hashes to check the block filters.
+            let mut latest_block_filter_hashes = self
+                .filter
+                .peers
+                .get_latest_block_filter_hashes(finalized_check_point_index);
+            if start_number == finalized_check_point_number + 1 {
+                (finalized_check_point_hash, latest_block_filter_hashes)
             } else {
-                // Use latest block filter hashes to check the block filters.
-                let mut latest_block_filter_hashes = self
-                    .filter
-                    .peers
-                    .get_latest_block_filter_hashes(finalized_check_point_index);
-                if start_number == finalized_check_point_number + 1 {
-                    (finalized_check_point_hash, latest_block_filter_hashes)
-                } else {
-                    let start_index = (start_number - finalized_check_point_number) as usize - 2;
-                    if start_index >= latest_block_filter_hashes.len() {
-                        info!(
-                            "ignoring, no enough data for block filter hashes, \
+                let start_index = (start_number - finalized_check_point_number) as usize - 2;
+                if start_index >= latest_block_filter_hashes.len() {
+                    info!(
+                        "ignoring, no enough data for block filter hashes, \
                             finalized number: {finalized_check_point_number}, \
                             finalized index: {finalized_check_point_index}, \
                             start number: {start_number}, start index: {start_index}, \
                             filter hashes length {}",
-                            latest_block_filter_hashes.len()
-                        );
-                        return Status::ok();
-                    }
-                    let parent_hash = latest_block_filter_hashes[start_index].clone();
-                    latest_block_filter_hashes.drain(..=start_index);
-                    (parent_hash, latest_block_filter_hashes)
+                        latest_block_filter_hashes.len()
+                    );
+                    return Status::ok();
                 }
-            };
+                let parent_hash = latest_block_filter_hashes[start_index].clone();
+                latest_block_filter_hashes.drain(..=start_index);
+                (parent_hash, latest_block_filter_hashes)
+            }
+        };
 
         let limit = cmp::min(filters_count, expected_block_filter_hashes.len());
+        let limit = if scoped_request.is_some() {
+            limit.min(1000)
+        } else {
+            limit
+        };
 
         for (index, (filter, expected_hash)) in block_filters
             .filters()
@@ -225,8 +265,26 @@ impl<'a> BlockFiltersProcess<'a> {
             parent_block_filter_hash = current_hash;
         }
 
-        let possible_match_blocks =
-            return_if_failed!(self.filter.check_filters_data(block_filters, limit));
+        if limit == 0 {
+            return StatusCode::Ignore.with_context("no authenticated filter coverage");
+        }
+        let possible_match_blocks = if let Some(request) = &scoped_request {
+            let script = match packed::Script::from_slice(
+                &request.identity.suffix[..request.identity.suffix.len() - 1],
+            ) {
+                Ok(script) => script,
+                Err(_) => {
+                    return StatusCode::InternalError.with_context("invalid registered scan script")
+                }
+            };
+            return_if_failed!(self.filter.check_filters_for_hashes(
+                block_filters,
+                limit,
+                &[script.calc_script_hash()]
+            ))
+        } else {
+            return_if_failed!(self.filter.check_filters_data(block_filters, limit))
+        };
         let possible_match_blocks_len = possible_match_blocks.len();
         trace!(
             "peer {}, matched blocks: {}",
@@ -245,6 +303,38 @@ impl<'a> BlockFiltersProcess<'a> {
             );
             return StatusCode::Ignore.with_context(errmsg);
         };
+
+        if let Some(request) = scoped_request {
+            let hashes = possible_match_blocks
+                .iter()
+                .map(|h| h.as_slice().try_into().expect("hash length"))
+                .collect();
+            if let Err(error) = self.filter.storage.begin_scan_range(
+                &request.identity,
+                request.epoch,
+                start_number,
+                filtered_block_number,
+                tip_header
+                    .calc_header_hash()
+                    .as_slice()
+                    .try_into()
+                    .expect("hash length"),
+                hashes,
+            ) {
+                return StatusCode::Ignore.with_context(error.to_string());
+            }
+            // Keep already validated bodies when different scan ranges share a hash.
+            for hash in possible_match_blocks {
+                matched_blocks
+                    .entry(hash.unpack())
+                    .or_insert((hash == prove_state_block_hash, None));
+            }
+            write_lock!(self.filter.scheduler).completed(&request);
+            // The fair service loop handles proof requests after this guard is released.
+            drop(matched_blocks);
+            self.filter.try_send_get_block_filters(self.nc, true).await;
+            return Status::ok();
+        }
 
         if possible_match_blocks_len != 0 {
             let blocks = possible_match_blocks

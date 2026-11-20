@@ -6,7 +6,7 @@ import androidx.room.Transaction
 
 /** Chain evidence only. Pending broadcasts, user settings and keys are never touched. */
 @Dao
-interface VerificationCacheRoomDao {
+interface VerificationCacheRoomDao : HistoryRecoveryRoomDao {
     @Query("DELETE FROM sync_progress WHERE network = :network")
     suspend fun clearProgress(network: String)
 
@@ -18,7 +18,8 @@ interface VerificationCacheRoomDao {
 
     @Throws(Exception::class)
     @Transaction
-    suspend fun invalidate(network: String) {
+    suspend fun invalidate(network: String, generation: String = "") {
+        prepare(network, generation)
         clearProgress(network)
         clearBalances(network)
         quarantineHistory(network)

@@ -61,4 +61,12 @@ class CanonicalHistoryTest {
             assertEquals(row(), dao.rows.single { it.txHash == hash })
         }
     }
+    @Test fun `scoped durable coverage is supported but future versions fail closed`() {
+        assertTrue(proof().copy(durableCoverageVersion = 1).hasDurableCoverage)
+        assertTrue(proof().copy(durableCoverageVersion = 2).hasDurableCoverage)
+        assertFalse(proof().copy(durableCoverageVersion = 0).hasDurableCoverage)
+        assertFalse(proof().copy(durableCoverageVersion = 3).hasDurableCoverage)
+        assertFalse(proof().copy(durableCoverageVersion = 3).validFor(script, "TESTNET"))
+    }
+
 }

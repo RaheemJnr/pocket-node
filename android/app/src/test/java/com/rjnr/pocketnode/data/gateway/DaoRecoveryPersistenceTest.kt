@@ -35,7 +35,7 @@ class DaoRecoveryPersistenceTest {
                 }).build())
         helper.writableDatabase; helper.close()
         fun open() = Room.databaseBuilder(context, AppDatabase::class.java, name)
-            .addMigrations(com.rjnr.pocketnode.data.database.MIGRATION_19_20).build()
+            .addMigrations(com.rjnr.pocketnode.data.database.MIGRATION_19_20, com.rjnr.pocketnode.data.database.MIGRATION_20_21).build()
         val guard = com.rjnr.pocketnode.data.database.entity.DaoRecoveryEntity("kept", "TESTNET", "genesis", "hash", 16,
             1000, 100, "script", 200, "block", "store", "run", 1)
         val budget = com.rjnr.pocketnode.data.database.entity.DaoRecoveryRetryEntity("kept", "TESTNET", "genesis", "hash", 16,

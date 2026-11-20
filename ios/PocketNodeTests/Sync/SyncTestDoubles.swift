@@ -14,6 +14,7 @@ final class FakeSyncStatusProvider: SyncStatusProviding {
     var mode: SyncMode?
     var isRegistered: Bool
     var lastError: String?
+    var recovery: RecoveryPresentation?
     var balance: BalanceStatus
 
     /// How many times ``refreshBalance()`` was called.

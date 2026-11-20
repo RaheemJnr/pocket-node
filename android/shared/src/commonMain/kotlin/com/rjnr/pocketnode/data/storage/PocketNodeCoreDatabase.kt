@@ -25,16 +25,18 @@ import androidx.room.RoomDatabaseConstructor
  */
 @Database(
     entities = [
+        HistoryArchiveRow::class, DaoHistoryArchiveRow::class, HistoryRecoveryJob::class, HistoryRecoveryEpoch::class, HistoryScriptRecoveryJob::class,
         SyncProgressRow::class,
         TransactionRow::class,
         PendingBroadcastRow::class,
         BalanceCacheRow::class,
     ],
-    version = 2,
-    autoMigrations = [AutoMigration(from = 1, to = 2)],
+    version = 3,
+    autoMigrations = [AutoMigration(from = 1, to = 2), AutoMigration(from = 2, to = 3)],
 )
 @ConstructedBy(PocketNodeCoreDatabaseConstructor::class)
 abstract class PocketNodeCoreDatabase : RoomDatabase() {
+    abstract fun historyRecovery(): HistoryRecoveryRoomDao
     abstract fun verificationCache(): VerificationCacheRoomDao
     abstract fun syncProgress(): SyncProgressRoomDao
     abstract fun transactions(): TransactionRoomDao

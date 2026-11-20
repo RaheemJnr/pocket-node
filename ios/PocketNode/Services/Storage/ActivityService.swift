@@ -13,6 +13,7 @@ protocol ActivityPaging: AnyObject {
     /// The network the rows belong to. The detail sheet builds its explorer
     /// link from it.
     var network: NetworkType { get }
+    var recovery: RecoveryPresentation? { get }
 
     /// Walk the wallet's history from the light client and cache it. Throws
     /// what the shared read path threw.
@@ -24,6 +25,10 @@ protocol ActivityPaging: AnyObject {
     /// Called whenever a broadcast row changes, so the list can re-read the
     /// pages it is showing and a row can move Broadcasting to Pending in place.
     func onBroadcastsChanged(_ handler: @escaping @MainActor () -> Void)
+}
+
+extension ActivityPaging {
+    var recovery: RecoveryPresentation? { nil }
 }
 
 /// The activity list's data source: the shared `ActivityFeed`, bound to the
@@ -38,6 +43,7 @@ protocol ActivityPaging: AnyObject {
 final class ActivityService: ActivityPaging {
 
     let network: NetworkType
+    private(set) var recovery: RecoveryPresentation?
 
     private let feed: ActivityFeed
     private let walletId: String
@@ -49,18 +55,29 @@ final class ActivityService: ActivityPaging {
     private let script: Script?
     private let logger = Logger(subsystem: "com.rjnr.pocketnode", category: "ActivityService")
 
+    @ObservationIgnored private nonisolated(unsafe) var recoveryObservation: Task<Void, Never>?
     @ObservationIgnored private nonisolated(unsafe) var broadcastObservation: Task<Void, Never>?
     @ObservationIgnored private var broadcastHandler: (@MainActor () -> Void)?
 
-    init(feed: ActivityFeed, walletId: String, script: Script?, network: NetworkType, ensureVerified: @escaping @MainActor () async throws -> Void) {
+    init(feed: ActivityFeed, walletId: String, script: Script?, network: NetworkType, historyRecovery: HistoryRecoveryReader? = nil, ensureVerified: @escaping @MainActor () async throws -> Void) {
         self.ensureVerified = ensureVerified
         self.feed = feed
         self.walletId = walletId
         self.script = script
         self.network = network
+        if let historyRecovery {
+            let flow = historyRecovery.observePresentation(walletId: walletId, network: network.name)
+            recoveryObservation = Task { @MainActor [weak self] in
+                for await snapshot in flow {
+                    guard !Task.isCancelled, let self else { return }
+                    self.recovery = snapshot
+                }
+            }
+        }
     }
 
     deinit {
+        recoveryObservation?.cancel()
         broadcastObservation?.cancel()
     }
 

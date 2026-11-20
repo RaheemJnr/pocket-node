@@ -1,4 +1,3 @@
-use std::collections::HashSet;
 use std::sync::Arc;
 
 use ckb_constant::sync::INIT_BLOCKS_IN_TRANSIT_PER_PEER;
@@ -113,37 +112,29 @@ impl CKBProtocolHandler for SyncProtocol {
                     break matched_blocks;
                 };
                 self.peers.add_block(&mut matched_blocks, new_block);
+                match crate::utils::scans::settle_ready(&self.storage, &mut matched_blocks) {
+                    Ok(Some(_)) => return,
+                    Err(error) => {
+                        warn!("scoped body settlement unavailable: {}", error);
+                        return;
+                    }
+                    Ok(None) => {}
+                }
                 if !matched_blocks.is_empty()
                     && self.peers.all_matched_blocks_downloaded(&matched_blocks)
                 {
-                    let matched_blocks_data = self
-                        .storage
-                        .get_earliest_matched_blocks()
-                        .expect("get matched blocks from storage");
-                    let start_number = matched_blocks_data.start_number;
-                    let blocks_count = matched_blocks_data.blocks_count;
-                    let db_blocks: HashSet<_> = matched_blocks_data
-                        .blocks
-                        .into_iter()
-                        .map(|b| b.hash)
-                        .collect();
-
-                    self.storage.remove_matched_blocks(start_number);
                     let blocks = self.peers.clear_matched_blocks(&mut matched_blocks);
-                    assert_eq!(blocks.len(), db_blocks.len());
-                    info!(
-                        "all matched blocks downloaded, start_number={}, blocks_count={}, matched_count={}",
-                        start_number,
-                        blocks_count,
-                        db_blocks.len()
-                    );
-                    // update storage
-                    for block in blocks {
-                        assert!(db_blocks.contains(&block.header().calc_header_hash()));
-                        self.storage.filter_block(block);
+                    if let Some(debt) = self.storage.get_earliest_matched_blocks() {
+                        if !self.storage.index_matched_range(
+                            debt.start_number,
+                            debt.blocks_count,
+                            blocks,
+                        ) {
+                            warn!("discarded stale or out-of-order matched bodies; reload durable debt");
+                        }
                     }
-                    self.storage
-                        .update_block_number(start_number + blocks_count - 1);
+                    // Stale in-memory bodies are cleared even if their durable
+                    // range was invalidated. Reload only the current earliest debt.
 
                     // send more GetBlocksProof/GetBlocks requests
                     if let Some(db_matched_blocks) = self.storage.get_earliest_matched_blocks() {

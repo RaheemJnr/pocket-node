@@ -319,7 +319,7 @@ class DaoRecoveryCoordinatorTest {
             assertNotNull(recovery.validateGuard(network, point, "wallet"))
             coEvery { repository.getTransactions(any()) } coAnswers { kotlinx.coroutines.awaitCancellation() }
             val activity = com.rjnr.pocketnode.ui.screens.activity.ActivityViewModel(repository, db.transactionDao(), db.pendingBroadcastDao(),
-                mockk(relaxed = true), mockk(relaxed = true), com.rjnr.pocketnode.core.log.NoopLogger, gate)
+                mockk(relaxed = true), mockk(relaxed = true), com.rjnr.pocketnode.core.log.NoopLogger, mockk(relaxed = true), gate)
             store.put("activity", activity)
             activity.retryFailedTransaction(hash)
             assertTrue(retried.receive().isSuccess)

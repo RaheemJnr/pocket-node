@@ -32,6 +32,9 @@ class VerificationCacheIosTest {
         val pending = PendingBroadcastRow("local", "inactive", "MAINNET", "{}", "[]", "BROADCAST", 100, 0, 1, 1)
         db.pendingBroadcasts().insert(pending)
         repeat(2) { db.verificationCache().invalidate("MAINNET") }
+        assertEquals(0L, db.historyRecovery().job("inactive", "MAINNET")!!.startBlock)
+        assertEquals(200L, db.historyRecovery().job("inactive", "MAINNET")!!.previousSavedBlock)
+        assertEquals("123", db.historyRecovery().archive("inactive", "MAINNET").single().balanceChangeHint)
         assertNull(db.syncProgress().get("active", "MAINNET"))
         assertNull(db.syncProgress().get("inactive", "MAINNET"))
         assertNotNull(db.syncProgress().get("inactive", "TESTNET"))

@@ -83,7 +83,8 @@ data class JniFetchTransactionResponse(
 data class JniScriptStatus(
     val script: Script,
     @SerialName("script_type") val scriptType: String = "lock",
-    @SerialName("block_number") val blockNumber: String
+    @SerialName("block_number") val blockNumber: String,
+    @SerialName("history_recovery") val historyRecovery: Boolean = false,
 )
 
 @Serializable

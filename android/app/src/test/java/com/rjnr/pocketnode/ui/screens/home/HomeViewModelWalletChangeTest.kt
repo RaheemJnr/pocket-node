@@ -33,6 +33,7 @@ import io.mockk.coEvery
 import io.mockk.every
 import io.mockk.mockk
 import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.runBlocking
@@ -74,7 +75,9 @@ class HomeViewModelWalletChangeTest {
     private lateinit var gateway: GatewayRepository
     private lateinit var walletRepository: WalletRepository
     private val seedAuthorizer = mockk<com.rjnr.pocketnode.data.wallet.SeedPhraseAuthorizer>()
+    private var afterBalanceCacheRead: suspend () -> Unit = {}
     private val refreshes = AtomicInteger()
+    private val recoveryLifetime = com.rjnr.pocketnode.data.gateway.DaoRecoveryLifetime()
 
     private fun script(byte: String) = Script(
         codeHash = "0x9bd7e06f3ecf4be0f2fcd2188b23f1b9fcc88e5d4b65a8637b17723bbda3cce8",
@@ -128,13 +131,21 @@ class HomeViewModelWalletChangeTest {
         every { coordinator.registeredActiveWalletId } returns null
         val syncEngine = mockk<SyncEngine>(relaxed = true)
         every { syncEngine.syncProgress } returns MutableStateFlow(SyncProgress())
+        val realCache = com.rjnr.pocketnode.data.gateway.CacheManager(db.transactionDao(), db.balanceCacheDao(), NoopLogger, com.rjnr.pocketnode.data.gateway.readyVerificationGate())
         gateway = testGatewayRepository(
-            db = db, walletPreferences = prefs, nodeLifecycle = nodeLifecycle, keyManager = keyManager,
+            db = db, appDatabase = db, walletPreferences = prefs, recoveryLifetime = recoveryLifetime,
+            cacheManager = realCache, nodeLifecycle = nodeLifecycle, keyManager = keyManager,
             syncCoordinator = coordinator, syncEngine = syncEngine,
             // A real reader over relaxed stores: its reads fail into a real
             // Result.failure, which a MockK stub cannot return.
             ledgerReader = LedgerReader(
-                mockk(relaxed = true), mockk(relaxed = true), mockk(relaxed = true), mockk(relaxed = true),
+                mockk(relaxed = true), object : com.rjnr.pocketnode.data.storage.BalanceCache by com.rjnr.pocketnode.data.storage.RoomBalanceCache(realCache) {
+                    override suspend fun getCachedBalance(network: String, walletId: String): com.rjnr.pocketnode.data.gateway.models.BalanceResponse? {
+                        val cached = realCache.getCachedBalance(network, walletId)
+                        afterBalanceCacheRead()
+                        return cached
+                    }
+                }, mockk(relaxed = true), mockk(relaxed = true),
                 mockk(relaxed = true), mockk(relaxed = true), prefs, prefs, Json, NoopLogger,
             ),
         )
@@ -277,6 +288,93 @@ class HomeViewModelWalletChangeTest {
         }
 
         settle { vm.broadcastHashes() == setOf("0xb1") }
+    }
+
+    @Test
+    fun `retained history reacts to wallet and network and completes without hiding unreconfirmed rows`() {
+        fun seed(wallet: String, network: String, hash: String) {
+            db.openHelper.writableDatabase.execSQL("INSERT INTO history_archive VALUES (?, ?, ?, NULL,NULL,NULL,'out',NULL)", arrayOf(wallet, network, hash))
+            runBlocking { db.historyRecovery().ensureWallet(wallet, network, "g") }
+        }
+        seed("A", "TESTNET", "a-history")
+        seed("B", "TESTNET", "b-history")
+        seed("B", "MAINNET", "main-history")
+        val activity = com.rjnr.pocketnode.ui.screens.activity.ActivityViewModel(gateway, db.transactionDao(), db.pendingBroadcastDao(),
+            prefs, prefs, NoopLogger, walletRepository, com.rjnr.pocketnode.data.gateway.readyVerificationGate())
+        val observation = kotlinx.coroutines.CoroutineScope(testDispatcher).launch { activity.recovery.collect { } }
+        val vm = newViewModel(); vm.started()
+        settle { vm.uiState.value.recovery.transactions.singleOrNull()?.identity == "a-history" &&
+            activity.recovery.value.transactions.singleOrNull()?.identity == "a-history" }
+        assertTrue(vm.uiState.value.recovery.isRevalidating)
+        assertTrue(!vm.uiState.value.hasBalance)
+        vm.switchWallet("B")
+        settle { vm.uiState.value.recovery.transactions.singleOrNull()?.identity == "b-history" &&
+            activity.recovery.value.transactions.singleOrNull()?.identity == "b-history" }
+        runBlocking {
+            db.historyRecovery().registered("B", "TESTNET", "g", 10, "script")
+            db.historyRecovery().complete("B", "TESTNET", "g", "script", 10)
+        }
+        settle { !vm.uiState.value.recovery.isRevalidating }
+        assertEquals("b-history", vm.uiState.value.recovery.transactions.single().identity)
+        (gateway.network as MutableStateFlow).value = NetworkType.MAINNET
+        settle { vm.uiState.value.recovery.transactions.singleOrNull()?.identity == "main-history" &&
+            activity.recovery.value.transactions.singleOrNull()?.identity == "main-history" }
+        db.openHelper.writableDatabase.execSQL("INSERT INTO history_archive VALUES ('A','TESTNET','late-old-wallet',NULL,NULL,NULL,NULL,NULL)")
+        settle()
+        assertEquals(listOf("main-history"), vm.uiState.value.recovery.transactions.map { it.identity })
+        assertEquals(listOf("main-history"), activity.recovery.value.transactions.map { it.identity })
+        observation.cancel()
+        androidx.lifecycle.ViewModelStore().apply { put("test", vm); put("activity", activity); clear() }
+        scheduler.runCurrent()
+    }
+
+    @Test
+    fun `balance read suspended across invalidation cannot republish cached amount`() = runBlocking {
+        db.balanceCacheDao().upsert(com.rjnr.pocketnode.data.database.entity.BalanceCacheEntity(
+            "A", "TESTNET", "address", "100000000", "1", "0x10", System.currentTimeMillis()))
+        gateway.onActiveWalletChanged(db.walletDao().getById("A")!!)
+        val readStarted = CompletableDeferred<Unit>()
+        val resumeRead = CompletableDeferred<Unit>()
+        val reads = AtomicInteger()
+        afterBalanceCacheRead = { reads.incrementAndGet(); readStarted.complete(Unit); resumeRead.await() }
+        val read = launch { gateway.refreshBalance() }
+        withTimeout(10_000) { readStarted.await() }
+        val nextRead = launch { gateway.refreshBalance() }
+        kotlinx.coroutines.yield()
+        assertEquals("Balance reads and cache writes must be serialized", 1, reads.get())
+        recoveryLifetime.invalidate()
+        resumeRead.complete(Unit)
+        read.join()
+        nextRead.join()
+        assertEquals(2, reads.get())
+        assertEquals(null, gateway.balance.value)
+    }
+
+    @Test
+    fun `coverage invalidation removes published cached balance`() {
+        runBlocking {
+            db.balanceCacheDao().upsert(com.rjnr.pocketnode.data.database.entity.BalanceCacheEntity(
+                "A", "TESTNET", "address", "100000000", "1", "0x10", System.currentTimeMillis()))
+            gateway.onActiveWalletChanged(db.walletDao().getById("A")!!)
+        }
+        assertEquals("1", gateway.balance.value?.capacityCkb)
+        recoveryLifetime.invalidate()
+        assertEquals(null, gateway.balance.value)
+        // A new read after revocation must not repaint old cached coverage.
+        runBlocking { gateway.refreshBalance() }
+        assertEquals(null, gateway.balance.value)
+    }
+
+    @Test
+    fun `failed wallet switch retains current wallet history`() {
+        db.openHelper.writableDatabase.execSQL("INSERT INTO history_archive VALUES ('A','TESTNET','a-history',NULL,NULL,NULL,'out',NULL)")
+        val vm = newViewModel(); vm.started()
+        settle { vm.uiState.value.recovery.transactions.singleOrNull()?.identity == "a-history" }
+        vm.switchWallet("missing-wallet")
+        settle { vm.uiState.value.error != null }
+        assertEquals("a-history", vm.uiState.value.recovery.transactions.single().identity)
+        androidx.lifecycle.ViewModelStore().apply { put("test", vm); clear() }
+        scheduler.runCurrent()
     }
 
     @Test

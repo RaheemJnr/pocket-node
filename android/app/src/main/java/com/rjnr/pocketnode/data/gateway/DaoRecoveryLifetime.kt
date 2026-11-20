@@ -26,6 +26,12 @@ class DaoRecoveryLifetime @Inject constructor() {
         invalidators.forEach { it() }
     }
 
+    @Synchronized internal fun currentRevision(): Long = revision
+    /** Publication and invalidation share the lock, including suspended read results. */
+    @Synchronized internal fun ifCurrent(ticket: Long, publish: () -> Unit) {
+        if (revision == ticket) publish()
+    }
+
     @Synchronized internal fun observeInvalidation(invalidate: () -> Unit) { invalidators += invalidate }
     @Synchronized internal fun capture(): Long { check(foreground) { "App is not foreground" }; return revision }
     @Synchronized internal fun requireCurrent(ticket: Long) {
