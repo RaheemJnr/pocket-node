@@ -13,12 +13,31 @@ pub(crate) fn prove_or_download_matched_blocks(
     nc: &dyn CKBProtocolContext,
     init_blocks_in_transit_per_peer: usize,
 ) -> bool {
+    prove_or_download_matched_blocks_budgeted(
+        peers,
+        best_tip,
+        matched_blocks,
+        nc,
+        init_blocks_in_transit_per_peer,
+        usize::MAX,
+    )
+}
+
+/// Bound each independent class of network slots, so callers can share both.
+pub(crate) fn prove_or_download_matched_blocks_budgeted(
+    peers: Arc<Peers>,
+    best_tip: &packed::Header,
+    matched_blocks: &HashMap<H256, (bool, Option<packed::Block>)>,
+    nc: &dyn CKBProtocolContext,
+    init_blocks_in_transit_per_peer: usize,
+    budget: usize,
+) -> bool {
     let mut queued = false;
     info!("in prove_or_download-matched blocks");
     let best_peers: Vec<_> = peers.get_best_proved_peers(best_tip);
     let last_hash = best_tip.calc_header_hash();
 
-    loop {
+    for _ in 0..budget {
         if let Some(peer_index) = best_peers
             .iter()
             .filter(|peer_index| {
@@ -68,7 +87,7 @@ pub(crate) fn prove_or_download_matched_blocks(
         }
     }
 
-    loop {
+    for _ in 0..budget {
         if let Some(peer_index) = best_peers
             .iter()
             .filter(|peer_index| {

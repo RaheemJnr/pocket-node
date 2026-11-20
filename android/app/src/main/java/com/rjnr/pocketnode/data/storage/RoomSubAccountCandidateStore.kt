@@ -23,6 +23,9 @@ class RoomSubAccountCandidateStore @Inject constructor(
     override suspend fun updateRecoveryState(parentId: String, derivationPath: String, state: String, network: String, generation: String, scriptJson: String, scriptArgs: String) =
         dao.applyRecoveryState(parentId, derivationPath, state, network, generation, scriptJson, scriptArgs)
 
+    override suspend fun completeRecoveryState(parentId: String, derivationPath: String, state: String, network: String, generation: String, scriptJson: String, scriptArgs: String, tip: Long) =
+        dao.completeRecoveryState(parentId, derivationPath, state, network, generation, scriptJson, scriptArgs, tip)
+
     override suspend fun allScriptArgs(): List<String> = dao.getAllScriptArgs()
 }
 

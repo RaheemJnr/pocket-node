@@ -102,10 +102,11 @@ class HistoryRecoveryContractTest {
         jobs()
         db.historyRecovery().registered("active", "MAINNET", generation, 20, json.encodeToString(script))
         db.historyRecovery().complete("active", "MAINNET", generation, json.encodeToString(script), 20)
-        val inventory = (1..7).map { SubAccountCandidateRecord("active", "path$it", it, "0x${(it + 16).toString(16)}") }
-        val candidates = mockk<SubAccountCandidateStore>(relaxed = true)
-        coEvery { candidates.getForParent("active") } returns inventory
-        coEvery { candidates.getForParent("inactive") } returns emptyList()
+        db.subAccountCandidateDao().insertAll((1..7).map {
+            com.rjnr.pocketnode.data.database.entity.SubAccountCandidateEntity("active", "path$it", it,
+                "0x${(it + 16).toString(16)}", "PENDING", 1)
+        })
+        val candidates = spyk(RoomSubAccountCandidateStore(db.subAccountCandidateDao()))
         val api = mockk<LightClientApi>(relaxed = true) {
             every { getTipHeader() } returns tip()
             every { setScripts(any(), any()) } returns true
@@ -146,16 +147,15 @@ class HistoryRecoveryContractTest {
         val candidateScript = script.copy(args = "0x03")
         db.subAccountCandidateDao().insertAll(listOf(com.rjnr.pocketnode.data.database.entity.SubAccountCandidateEntity(
             parentWalletId = "active", derivationPath = "path1", accountIndex = 1, scriptArgs = candidateScript.args, createdAt = 1)))
-        val candidates = RoomSubAccountCandidateStore(db.subAccountCandidateDao())
+        val candidates = spyk(RoomSubAccountCandidateStore(db.subAccountCandidateDao()))
         val api = mockk<LightClientApi>(relaxed = true) {
             every { getTipHeader() } returns tip()
             every { setScripts(any(), any()) } returns true
             every { getHistorySnapshot(any()) } returns json.encodeToString(proof().copy(script = candidateScript))
         }
-        val raced = spyk(db.historyRecovery())
-        val coordinator = SyncCoordinator(registry(), mockk(relaxed = true), candidates, mockk(relaxed = true), api, assemblyPreferences(), json, NoopLogger, historyRecovery = raced)
+        val coordinator = SyncCoordinator(registry(), mockk(relaxed = true), candidates, mockk(relaxed = true), api, assemblyPreferences(), json, NoopLogger, historyRecovery = db.historyRecovery())
         coordinator.registerAllWalletScripts(assemblyContext())
-        coEvery { raced.completeScript(any(), any(), any(), any(), any()) } coAnswers {
+        coEvery { candidates.completeRecoveryState(any(), any(), any(), any(), any(), any(), any(), any()) } coAnswers {
             db.historyRecovery().resetScripts("MAINNET", "b".repeat(32))
             db.historyRecovery().recordEpoch("MAINNET", "b".repeat(32))
             callOriginal()
@@ -241,6 +241,59 @@ class HistoryRecoveryContractTest {
         assertEquals("COMPLETE", db.historyRecovery().scripts("MAINNET").single().status)
         assertEquals("EMPTY", db.subAccountCandidateDao().getForParent("active").single().state)
     }
+    @Test fun `candidate write failure rolls back recovery completion`() = runTest {
+        jobs()
+        val candidateScript = script.copy(args = "0x77")
+        db.subAccountCandidateDao().insertAll(listOf(com.rjnr.pocketnode.data.database.entity.SubAccountCandidateEntity(
+            "active", "found-path", 1, candidateScript.args, "FOUND", 1, 100)))
+        val api = mockk<LightClientApi>(relaxed = true) {
+            every { getTipHeader() } returns tip()
+            every { getScripts() } returns "[]"
+            every { setScripts(any(), any()) } returns true
+            every { getHistorySnapshot(any()) } returns json.encodeToString(proof().copy(script = candidateScript))
+        }
+        val coordinator = SyncCoordinator(registry(), mockk(relaxed = true), RoomSubAccountCandidateStore(db.subAccountCandidateDao()),
+            mockk(relaxed = true), api, assemblyPreferences(), json, NoopLogger, historyRecovery = db.historyRecovery())
+        coordinator.registerAllWalletScripts(assemblyContext())
+        db.openHelper.writableDatabase.execSQL("CREATE TRIGGER reject_candidate BEFORE UPDATE ON sub_account_candidates BEGIN SELECT RAISE(ABORT, 'injected'); END")
+        assertTrue(runCatching { coordinator.refreshScriptRecovery(NetworkType.MAINNET) }.isFailure)
+        assertEquals("REGISTERED", db.historyRecovery().scripts("MAINNET").single().status)
+        assertEquals("FOUND", db.subAccountCandidateDao().getForParent("active").single().state)
+        db.openHelper.writableDatabase.execSQL("DROP TRIGGER reject_candidate")
+        val restarted = SyncCoordinator(registry(), mockk(relaxed = true), RoomSubAccountCandidateStore(db.subAccountCandidateDao()),
+            mockk(relaxed = true), api, assemblyPreferences(), json, NoopLogger, historyRecovery = db.historyRecovery())
+        assertTrue(restarted.refreshScriptRecovery(NetworkType.MAINNET))
+        assertEquals("COMPLETE", db.historyRecovery().scripts("MAINNET").single().status)
+        assertEquals("EMPTY", db.subAccountCandidateDao().getForParent("active").single().state)
+    }
+
+    @Test fun `recovery cannot overwrite a concurrently restored candidate`() = runTest {
+        jobs()
+        val encoded = json.encodeToString(script)
+        db.subAccountCandidateDao().insertAll(listOf(com.rjnr.pocketnode.data.database.entity.SubAccountCandidateEntity(
+            "active", "path", 1, script.args, "RESTORED", 1, 100)))
+        db.historyRecovery().ensureScript("active", "MAINNET", encoded, generation)
+        db.historyRecovery().registerScript("active", "MAINNET", encoded, generation, 20)
+        db.historyRecovery().completeScript("active", "MAINNET", encoded, generation, 20)
+        db.subAccountCandidateDao().applyRecoveryState("active", "path", "EMPTY", "MAINNET", generation, encoded, script.args)
+        assertEquals("RESTORED", db.subAccountCandidateDao().getForParent("active").single().state)
+    }
+
+    @Test fun `malformed unrelated wallet does not prevent recovery registration`() = runTest {
+        jobs()
+        val wallets = registry().allWallets() + WalletRecord("broken", "", "", 0)
+        val registry = object : WalletRegistry { override suspend fun allWallets() = wallets }
+        val api = mockk<LightClientApi>(relaxed = true) {
+            every { getScripts() } returns "[]"
+            every { getTipHeader() } returns tip()
+            every { setScripts(any(), any()) } returns true
+        }
+        val coordinator = SyncCoordinator(registry, mockk(relaxed = true), RoomSubAccountCandidateStore(db.subAccountCandidateDao()),
+            mockk(relaxed = true), api, assemblyPreferences(), json, NoopLogger, historyRecovery = db.historyRecovery())
+        assertTrue(coordinator.setScriptsAndRecord(listOf(JniScriptStatus(script, "lock", "0x0")), listOf("active"), 0, NetworkType.MAINNET))
+        assertEquals("REGISTERED", db.historyRecovery().job("active", "MAINNET")!!.status)
+    }
+
     private fun proof() = CanonicalHistorySnapshot(1, true, "MAINNET", "0x" + "1".repeat(64), generation, script, "b".repeat(32), "0", "20", "0x" + "2".repeat(64), "20", emptySet(), 1)
     private suspend fun read(snapshot: CanonicalHistorySnapshot, reconciliationFails: Boolean = false, unavailableRecheck: Boolean = false) {
         val api = mockk<LightClientApi>(relaxed = true) {

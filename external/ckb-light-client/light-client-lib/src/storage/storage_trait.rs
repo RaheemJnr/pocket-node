@@ -82,6 +82,28 @@ pub trait LightClientStorage: StorageBackend {
 
     /// Update filter scripts
     fn update_filter_scripts(&self, scripts: Vec<ScriptStatus>, command: SetScriptsCommand) {
+        // Collapse duplicates before staging any state. The lowest requested
+        // floor preserves every caller's requested coverage, independent of order,
+        // and prevents a later duplicate from stranding a genesis marker.
+        let mut positions: HashMap<(Vec<u8>, u8), usize> = HashMap::new();
+        let mut effective = Vec::<ScriptStatus>::new();
+        for status in scripts {
+            let key = (
+                status.script.as_slice().to_vec(),
+                match status.script_type {
+                    ScriptType::Lock => 0,
+                    ScriptType::Type => 1,
+                },
+            );
+            if let Some(&index) = positions.get(&key) {
+                effective[index].block_number =
+                    effective[index].block_number.min(status.block_number);
+            } else {
+                positions.insert(key, effective.len());
+                effective.push(status);
+            }
+        }
+        let scripts = effective;
         // Track the resulting set, including PARTIAL's untouched scripts and
         // any conservative clamp applied while rewinding each new registration.
         let mut resulting: HashMap<Vec<u8>, u64> = self

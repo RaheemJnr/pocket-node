@@ -106,7 +106,7 @@ class VerificationCacheGate @Inject constructor(
                         "INSERT OR IGNORE INTO history_recovery_jobs SELECT DISTINCT walletId, network, '', 0, NULL, NULL, NULL, NULL, 'PENDING' FROM dao_cells WHERE network = ?", arrayOf(network.name))
                     database.historyRecovery().prepare(network.name, generation)
                     val db = database.openHelper.writableDatabase
-                    db.execSQL("INSERT OR IGNORE INTO dao_history_archive SELECT walletId, network, txHash, `index`, depositBlockNumber, withdrawBlockNumber, capacity, status FROM dao_cells WHERE network = ?", arrayOf(network.name))
+                    db.execSQL("INSERT OR REPLACE INTO dao_history_archive SELECT c.walletId, c.network, c.txHash, c.`index`, c.depositBlockNumber, COALESCE(c.withdrawBlockNumber, a.withdrawBlockHint), c.capacity, c.status FROM dao_cells c LEFT JOIN dao_history_archive a ON a.walletId = c.walletId AND a.network = c.network AND a.txHash = c.txHash AND a.outputIndex = c.`index` WHERE c.network = ?", arrayOf(network.name))
                     for (table in listOf("sync_progress", "balance_cache", "header_cache")) {
                         db.execSQL("DELETE FROM $table WHERE network = ?", arrayOf(network.name))
                     }

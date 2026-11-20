@@ -178,6 +178,7 @@ final class SyncService: SyncStatusProviding {
                 let previous = try? String(contentsOf: marker, encoding: .utf8)
                 let recovery = HistoryRecoveryBookkeeping(dao: self.database.historyRecovery())
                 let recoveryGeneration = try await recovery.generation(network: self.network.name)
+                guard !Task.isCancelled && self.verificationScope == scope && !self.isShutdown else { return false }
                 if previous != generation || recoveryGeneration != generation {
                     try await VerificationCacheCleanup(dao: self.database.verificationCache())
                         .invalidate(network: self.network.name, generation: generation)

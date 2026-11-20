@@ -94,7 +94,7 @@ interface HistoryRecoveryRoomDao {
     @Query("SELECT generation FROM history_recovery_epochs WHERE network = :network")
     suspend fun generation(network: String): String?
 
-    @Query("INSERT OR IGNORE INTO history_archive SELECT walletId, network, txHash, CASE WHEN status = 'UNVERIFIED' THEN NULL ELSE blockNumber END, CASE WHEN timestamp > 0 THEN timestamp ELSE NULL END, CASE WHEN status = 'UNVERIFIED' THEN NULL ELSE balanceChange END, NULLIF(direction, ''), CASE WHEN status = 'UNVERIFIED' THEN NULL ELSE fee END FROM transactions WHERE network = :network AND NOT (isLocal = 1 AND status IN ('PENDING', 'FAILED'))")
+    @Query("INSERT OR REPLACE INTO history_archive SELECT t.walletId, t.network, t.txHash, COALESCE(CASE WHEN t.status = 'UNVERIFIED' THEN NULL ELSE t.blockNumber END, a.blockNumberHint), COALESCE(CASE WHEN t.timestamp > 0 THEN t.timestamp ELSE NULL END, a.timestampHint), COALESCE(CASE WHEN t.status = 'UNVERIFIED' THEN NULL ELSE t.balanceChange END, a.balanceChangeHint), COALESCE(NULLIF(t.direction, ''), a.directionHint), COALESCE(CASE WHEN t.status = 'UNVERIFIED' THEN NULL ELSE t.fee END, a.feeHint) FROM transactions t LEFT JOIN history_archive a ON a.walletId = t.walletId AND a.network = t.network AND a.txHash = t.txHash WHERE t.network = :network AND NOT (t.isLocal = 1 AND t.status IN ('PENDING', 'FAILED'))")
     suspend fun captureArchive(network: String)
 
     @Query("INSERT OR IGNORE INTO history_recovery_jobs SELECT walletId, network, '', 0, lightStartBlockNumber, localSavedBlockNumber, NULL, NULL, 'PENDING' FROM sync_progress WHERE network = :network")

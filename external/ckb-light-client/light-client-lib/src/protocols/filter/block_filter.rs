@@ -30,6 +30,7 @@ pub struct FilterProtocol {
     pub(crate) storage: Storage,
     pub(crate) peers: Arc<Peers>,
     pub(crate) windows: RwLock<super::windows::FilterWindows>,
+    hash_downloads: RwLock<super::windows::HashDownloads>,
     pub(crate) scheduler: RwLock<super::scheduler::ScanScheduler>,
     pub(crate) last_ask_time: Arc<RwLock<Option<Instant>>>,
 }
@@ -40,6 +41,7 @@ impl FilterProtocol {
             storage,
             peers,
             windows: Default::default(),
+            hash_downloads: Default::default(),
             scheduler: Default::default(),
             last_ask_time: Arc::new(Default::default()),
         }
@@ -144,12 +146,11 @@ impl FilterProtocol {
             Ok(Some(states)) => {
                 // Each script has its own contiguous cursor and outstanding
                 // request. Historical proof debt must not hold this selection.
-                let Some((peer, proof)) = self
-                    .peers
-                    .get_all_prove_states()
-                    .into_iter()
-                    .max_by_key(|(_, state)| state.get_last_header().total_difficulty())
-                else {
+                let mut proved = self.peers.get_all_prove_states();
+                proved.sort_by_key(|(_, state)| {
+                    std::cmp::Reverse(state.get_last_header().total_difficulty())
+                });
+                let Some((_, proof)) = proved.first() else {
                     return;
                 };
                 let tip = proof.get_last_header().header().number();
@@ -173,6 +174,17 @@ impl FilterProtocol {
                     if !ready {
                         continue;
                     }
+                    let eligible: Vec<_> = proved
+                        .iter()
+                        .filter(|(_, state)| {
+                            state.get_last_header().header().number() >= request.start
+                        })
+                        .map(|(peer, _)| *peer)
+                        .collect();
+                    let Some(peer) = read_lock!(self.scheduler).choose_peer(&request, &eligible)
+                    else {
+                        continue;
+                    };
                     write_lock!(self.scheduler).sent(&request, peer, now);
                     self.send_get_block_filters(Arc::clone(&nc), peer, request.start);
                     break;
@@ -243,67 +255,26 @@ impl FilterProtocol {
                     db_matched_blocks.blocks_count,
                     matched_blocks.len(),
                 );
-                let option = matched_blocks.is_empty();
-
-                if option {
-                    debug!("matched_blocks is empty");
-
-                    // Filter out blocks already marked as missing (e.g., uncle blocks)
-                    let filtered_blocks: Vec<_> = db_matched_blocks
+                if db_matched_blocks.blocks.iter().any(|block| {
+                    self.peers
+                        .get_header_fetch_info(&block.hash)
+                        .is_some_and(|(_, _, missing)| missing)
+                }) {
+                    // A surviving in-memory subset cannot settle this durable identity.
+                    self.storage
+                        .remove_matched_blocks(db_matched_blocks.start_number);
+                    for block in &db_matched_blocks.blocks {
+                        self.peers.remove_fetching_header(&block.hash);
+                    }
+                    matched_blocks.clear();
+                    return;
+                }
+                if matched_blocks.is_empty() {
+                    let filtered_blocks = db_matched_blocks
                         .blocks
                         .iter()
-                        .filter(|b| {
-                            if let Some((_added_ts, _first_sent, missing)) =
-                                self.peers.get_header_fetch_info(&b.hash)
-                            {
-                                debug!(
-                                    "header fetch info for block {:#x}:added_ts={}, first_sent={}, missing={}",
-                                    b.hash,
-                                    _added_ts,
-                                    _first_sent,
-                                    missing
-                                );
-                                if missing {
-                                    debug!(
-                                        "Skipping block {:#x} from DB - marked as missing",
-                                        b.hash
-                                    );
-                                    return false;
-                                }
-                            } else {
-                                trace!("not found header fetch info for block {:#x}", b.hash);
-                            }
-                            true
-                        })
                         .map(|b| (b.hash.clone(), b.proved))
                         .collect();
-
-                    if filtered_blocks.len() != db_matched_blocks.blocks.len() {
-                        // A subset cannot settle the durable range identity. Refilter
-                        // the whole range and its dependent suffix under this guard.
-                        info!(
-                            "Missing member in DB range of {} blocks at {}, discarding suffix",
-                            db_matched_blocks.blocks.len(),
-                            db_matched_blocks.start_number
-                        );
-                        self.storage
-                            .remove_matched_blocks(db_matched_blocks.start_number);
-
-                        // Also remove these blocks from fetching_headers to prevent memory leak
-                        for block in &db_matched_blocks.blocks {
-                            self.peers.remove_fetching_header(&block.hash);
-                        }
-
-                        // No later queued range can leap over the rewind gap.
-                        matched_blocks.clear();
-                        return;
-                    } else {
-                        debug!(
-                            "add filtered blocks into matched_blocks, count={}",
-                            filtered_blocks.len()
-                        );
-                    }
-
                     // recover matched blocks from storage (only non-missing ones)
                     self.peers
                         .add_matched_blocks(&mut matched_blocks, filtered_blocks);
@@ -374,26 +345,54 @@ impl FilterProtocol {
         };
         let finalized = self.storage.get_last_check_point().0;
         let finalized_number = self.peers.calc_check_point_number(finalized);
-        let (active, _) = self.peers.get_cached_block_filter_hashes().await;
-        let from = self.peers.calc_check_point_number(active);
-        let to = self.peers.calc_check_point_number(active + 1);
-        // Preserve a partially filled historical window until it completes, while
-        // requesting live-tail hashes independently on every service cycle.
-        let mut active_needed = false;
+        let (active, hashes) = self.peers.get_cached_block_filter_hashes().await;
+        let now = ckb_systemtime::unix_time_as_millis();
+        let interval = self.peers.calc_check_point_number(1);
+        let anchors = self.storage.get_check_points(active, 2);
+        if anchors.len() == 2 {
+            write_lock!(self.hash_downloads).remember(super::windows::Window {
+                epoch: first.epoch,
+                index: active,
+                parent: anchors[0].clone(),
+                end: anchors[1].clone(),
+                hashes: hashes.clone(),
+            });
+        }
         let mut missing = Vec::new();
-        for state in states
-            .iter()
-            .filter(|s| s.pending.is_none() && s.settled < finalized_number)
-        {
-            let start = state.settled + 1;
-            if self.scoped_window(start, first.epoch).await.is_none() {
-                active_needed |= start > from && start <= to;
-                missing.push(state.settled);
+        let mut needed = Vec::new();
+        for state in states.iter().filter(|s| s.settled < finalized_number) {
+            let Ok(index) = u32::try_from(state.settled / interval) else {
+                continue;
+            };
+            let anchors = self.storage.get_check_points(index, 2);
+            if anchors.len() == 2 {
+                needed.push((index, anchors[0].clone(), anchors[1].clone()));
+            }
+            if state.pending.is_none()
+                && self
+                    .scoped_window(state.settled + 1, first.epoch)
+                    .await
+                    .is_none()
+            {
+                missing.push(index);
             }
         }
-        if !active_needed {
-            if let Some(cursor) = missing.into_iter().max() {
-                self.peers.update_min_filtered_block_number(cursor).await;
+        write_lock!(self.hash_downloads).retain(first.epoch, &needed);
+        let next = write_lock!(self.hash_downloads).next(active, hashes.len(), &missing, now);
+        if let Some(next) = next {
+            let anchors = self.storage.get_check_points(next, 2);
+            if anchors.len() == 2 {
+                let hashes = write_lock!(self.hash_downloads).restore(
+                    first.epoch,
+                    next,
+                    &anchors[0],
+                    &anchors[1],
+                    now,
+                );
+                self.peers
+                    .update_min_filtered_block_number(self.peers.calc_check_point_number(next))
+                    .await;
+                self.peers.update_cached_block_filter_hashes(hashes).await;
             }
         }
         if let Some(start) = self

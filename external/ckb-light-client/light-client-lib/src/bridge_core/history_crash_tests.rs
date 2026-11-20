@@ -16,6 +16,20 @@ struct CrashStorage {
     stop: usize,
     after: bool,
 }
+impl CrashStorage {
+    fn assert_interrupted(&self, action: impl FnOnce()) {
+        let payload = std::panic::catch_unwind(std::panic::AssertUnwindSafe(action))
+            .expect_err("expected injected commit interruption");
+        let message = payload
+            .downcast_ref::<String>()
+            .map(String::as_str)
+            .or_else(|| payload.downcast_ref::<&str>().copied());
+        let boundary = if self.after { "after" } else { "before" };
+        let expected = format!("interrupted {boundary} commit {}", self.stop);
+        assert_eq!(message, Some(expected.as_str()), "unexpected panic payload");
+        assert_eq!(self.commits.load(Ordering::SeqCst), self.stop);
+    }
+}
 struct CrashBatch {
     inner: <Storage as StorageBackend>::Batch,
     commits: Arc<AtomicUsize>,
@@ -217,10 +231,9 @@ fn range_reopens_before_and_after_each_index_and_final_ack_commit() {
             };
             let mut blocks = f.blocks.clone();
             blocks.reverse();
-            assert!(std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            crashing.assert_interrupted(|| {
                 crashing.index_matched_range(10, 3, blocks);
-            }))
-            .is_err());
+            });
             drop(crashing);
             let storage = Storage::new(dir.path().join("store.db"));
             if stop == 4 && after {
@@ -261,10 +274,7 @@ fn discarded_ranges_reopen_with_coherent_rewind_before_and_after_commit() {
             stop: 1,
             after,
         };
-        assert!(std::panic::catch_unwind(std::panic::AssertUnwindSafe(
-            || crashing.remove_matched_blocks(10)
-        ))
-        .is_err());
+        crashing.assert_interrupted(|| crashing.remove_matched_blocks(10));
         drop(crashing);
         let storage = Storage::new(dir.path().join("store.db"));
         assert!(snapshot(&storage, &f.script, &f.identity, &f.chain, "TESTNET").is_err());
@@ -649,7 +659,7 @@ async fn nonzero_registration_reopen_cannot_advance_past_rolled_back_spend() {
                 stop: 1,
                 after,
             };
-            assert!(std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            crashing.assert_interrupted(|| {
                 crashing.update_filter_scripts(
                     vec![ScriptStatus {
                         script: f.script.clone(),
@@ -662,8 +672,7 @@ async fn nonzero_registration_reopen_cannot_advance_past_rolled_back_spend() {
                         SetScriptsCommand::All
                     },
                 );
-            }))
-            .is_err());
+            });
             drop(crashing);
             let storage = Storage::new(dir.path().join("store.db"));
             // Exercise the real out-of-order filter handler immediately on reopen,
@@ -756,12 +765,11 @@ fn scoped_range_reopens_at_every_index_commit_without_losing_debt() {
                 stop,
                 after,
             };
-            assert!(std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            crashing.assert_interrupted(|| {
                 crashing
                     .index_scan_range(&id, [7; 16], range.id, f.blocks.clone())
                     .unwrap();
-            }))
-            .is_err());
+            });
             drop(crashing);
             let storage = Storage::new(dir.path().join("store.db"));
             let state = storage.scan_state(&id).unwrap().unwrap();
@@ -858,20 +866,91 @@ fn scoped_migration_reopens_before_and_after_atomic_state_commit() {
         let (storage, dir) = crate::tests::utils::new_storage("scoped-migration-crash");
         let f = setup(&storage);
         storage.filter_block(f.blocks[0].clone());
+        let original_id = ScanIdentity::registered(&storage, &f.script, ScriptType::Lock).unwrap();
+        StorageBackend::put(
+            &storage,
+            Key::Meta("SCAN_MIGRATION_REQUIRED_V2").into_vec(),
+            vec![1],
+        )
+        .unwrap();
         let crashing = CrashStorage {
             inner: storage,
             commits: Arc::new(AtomicUsize::new(0)),
             stop: 1,
             after,
         };
-        assert!(
-            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| crashing
-                .prepare_scoped_scans()
-                .unwrap()))
-            .is_err()
-        );
+        crashing.assert_interrupted(|| crashing.prepare_scoped_scans().unwrap());
         drop(crashing);
         let storage = Storage::new(dir.path().join("store.db"));
+        // Inspect the persisted boundary before startup can repair anything.
+        let epoch = StorageBackend::get(
+            &storage,
+            Key::Meta(crate::storage::scan::SCAN_EPOCH).into_vec(),
+        )
+        .unwrap();
+        assert_eq!(epoch.is_some(), after);
+        assert_eq!(
+            StorageBackend::get(&storage, Key::Meta("SCAN_MIGRATION_REQUIRED_V2").into_vec())
+                .unwrap()
+                .is_none(),
+            after
+        );
+        if !after {
+            assert_eq!(
+                ScanIdentity::registered(&storage, &f.script, ScriptType::Lock).unwrap(),
+                original_id
+            );
+            assert!(StorageBackend::get(
+                &storage,
+                [
+                    Key::Meta(crate::storage::scan::SCAN_STATE).into_vec(),
+                    original_id.suffix
+                ]
+                .concat()
+            )
+            .unwrap()
+            .is_none());
+        }
+        assert_eq!(cell(&storage, &f.script, 10).is_none(), after);
+        assert_eq!(storage.get_earliest_matched_blocks().is_none(), after);
+        assert_eq!(
+            storage.get_min_filtered_block_number(),
+            if after { 0 } else { 12 }
+        );
+        if after {
+            let suffix = [f.script.as_slice(), &[0]].concat();
+            let raw = StorageBackend::get(
+                &storage,
+                [
+                    Key::Meta(crate::storage::scan::SCAN_STATE).into_vec(),
+                    suffix.clone(),
+                ]
+                .concat(),
+            )
+            .unwrap()
+            .unwrap();
+            let state: crate::storage::scan::ScanState = serde_json::from_slice(&raw).unwrap();
+            assert_eq!(state.floor, 0);
+            assert_eq!(state.settled, 0);
+            assert!(state.pending.is_none());
+            assert_eq!(Some(state.epoch.to_vec()), epoch);
+            assert_eq!(
+                StorageBackend::get(
+                    &storage,
+                    [Key::Meta("FILTER_SCRIPTS").into_vec(), suffix.clone()].concat()
+                )
+                .unwrap(),
+                Some(0u64.to_be_bytes().to_vec())
+            );
+            assert_eq!(
+                StorageBackend::get(
+                    &storage,
+                    [Key::Meta("HISTORY_REGISTRATION_V1").into_vec(), suffix].concat()
+                )
+                .unwrap(),
+                Some(state.identity.registration)
+            );
+        }
         storage.prepare_scoped_scans().unwrap();
         let id = ScanIdentity::registered(&storage, &f.script, ScriptType::Lock).unwrap();
         let state = storage.scan_state(&id).unwrap().unwrap();
@@ -915,12 +994,11 @@ fn scoped_missing_invalidation_reopens_atomically_and_fences_old_ack() {
             stop: 1,
             after,
         };
-        assert!(std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        crashing.assert_interrupted(|| {
             crashing
                 .invalidate_scan_range(&id, [7; 16], range.id)
                 .unwrap();
-        }))
-        .is_err());
+        });
         drop(crashing);
         let storage = Storage::new(dir.path().join("store.db"));
         let state = storage.scan_state(&id).unwrap().unwrap();

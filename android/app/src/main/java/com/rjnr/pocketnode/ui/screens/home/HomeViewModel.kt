@@ -809,7 +809,7 @@ class HomeViewModel @Inject constructor(
             try {
                 syncStallDetector.reset()
                 stallBannerDismissed = false
-                _uiState.update { it.copy(isSwitchingWallet = true, recovery = com.rjnr.pocketnode.data.history.RecoveryPresentation(), showSyncStallBanner = false, syncStallMinutes = 0L, showGapLimitBanner = false) }
+                _uiState.update { it.copy(isSwitchingWallet = true, showSyncStallBanner = false, syncStallMinutes = 0L, showGapLimitBanner = false) }
                 walletRepository.switchActiveWallet(walletId)
                 val wallet = walletRepository.getById(walletId) ?: return@launch
                 repository.onActiveWalletChanged(wallet)
@@ -860,7 +860,6 @@ class HomeViewModel @Inject constructor(
                 it.copy(
                     balanceCkb = 0.0,
                     hasBalance = false,
-                    recovery = com.rjnr.pocketnode.data.history.RecoveryPresentation(),
                     fiatBalance = null,
                     ckbUsdPrice = null,
                     transactions = emptyList(),

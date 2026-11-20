@@ -138,6 +138,12 @@ final class SyncServiceRecoveryLifecycleTests: XCTestCase {
             try await service.ensureVerifiedCache()
             try await waitForRegistration(fixture.api)
             XCTAssertEqual(fixture.api.lastStart, 0)
+            // Native registration precedes the durable Room commit.
+            for _ in 0..<200 {
+                let job = try await probe.job(walletId: wallet.id)
+                if job?.generation == fixture.api.generationToken.get(), job?.status == "REGISTERED" { break }
+                try await Task.sleep(for: .milliseconds(10))
+            }
             let job = try await probe.job(walletId: wallet.id)
             XCTAssertEqual(job?.generation, fixture.api.generationToken.get())
             XCTAssertEqual(job?.status, "REGISTERED")

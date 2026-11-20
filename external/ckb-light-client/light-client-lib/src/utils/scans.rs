@@ -109,28 +109,35 @@ pub(crate) async fn service_proofs(
         let length = pending.len();
         pending.rotate_left((index + 1) % length);
     }
-    for state in pending {
-        let hashes: HashSet<_> = state
-            .pending
-            .as_ref()
-            .expect("pending state")
-            .matches
-            .iter()
-            .map(|h| H256::from(*h))
-            .collect();
-        let subset: HashMap<_, _> = matched
-            .iter()
-            .filter(|(h, _)| hashes.contains(*h))
-            .map(|(h, v)| (h.clone(), v.clone()))
-            .collect();
-        if super::network::prove_or_download_matched_blocks(
-            peers.clone(),
-            tip,
-            &subset,
-            nc.as_ref(),
-            limit,
-        ) {
-            *write_lock!(peers.scoped_proof_turn) = Some(state.identity.suffix.clone());
+    loop {
+        let mut queued = false;
+        for state in &pending {
+            let hashes: HashSet<_> = state
+                .pending
+                .as_ref()
+                .expect("pending state")
+                .matches
+                .iter()
+                .map(|h| H256::from(*h))
+                .collect();
+            let subset: HashMap<_, _> = matched
+                .iter()
+                .filter(|(h, _)| hashes.contains(*h))
+                .map(|(h, v)| (h.clone(), v.clone()))
+                .collect();
+            if super::network::prove_or_download_matched_blocks_budgeted(
+                peers.clone(),
+                tip,
+                &subset,
+                nc.as_ref(),
+                limit,
+                1,
+            ) {
+                *write_lock!(peers.scoped_proof_turn) = Some(state.identity.suffix.clone());
+                queued = true;
+            }
+        }
+        if !queued {
             break;
         }
     }

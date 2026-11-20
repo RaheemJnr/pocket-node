@@ -105,9 +105,9 @@ pub enum StoreVersionAction {
     },
 }
 
-/// Bring the store at `path` to [`STORE_FORMAT_VERSION`], or set it aside if
-/// this build cannot read it. Must be called before the storage layer opens
-/// the file.
+/// Bring the store at `path` to [`STORE_FORMAT_VERSION`], preserving it in
+/// place on any unsupported format or migration failure. Must be called before
+/// the storage layer opens the file.
 pub fn ensure_store_version(path: &Path) -> Result<StoreVersionAction, BridgeError> {
     if path.exists() {
         match read_version(path)? {
@@ -119,17 +119,34 @@ pub fn ensure_store_version(path: &Path) -> Result<StoreVersionAction, BridgeErr
             }
         }
     }
-    ensure_store_version_with(path, STORE_FORMAT_VERSION, UPGRADE_STEPS)
+    ensure_store_version_with_policy(path, STORE_FORMAT_VERSION, UPGRADE_STEPS, true)
 }
 
-/// [`ensure_store_version`] with the target version and upgrade table as
-/// parameters, so tests can exercise the upgrade path while production has no
-/// steps.
+/// Legacy recovery policy retained for format-migration fixtures.
+#[cfg(test)]
 pub(crate) fn ensure_store_version_with(
     path: &Path,
     target: u32,
     steps: &[UpgradeStep],
 ) -> Result<StoreVersionAction, BridgeError> {
+    ensure_store_version_with_policy(path, target, steps, false)
+}
+
+fn ensure_store_version_with_policy(
+    path: &Path,
+    target: u32,
+    steps: &[UpgradeStep],
+    preserve_on_failure: bool,
+) -> Result<StoreVersionAction, BridgeError> {
+    let unusable = |found| {
+        if preserve_on_failure {
+            Err(BridgeError::Storage(format!(
+                "store upgrade failed at version {found:?}; preserved in place"
+            )))
+        } else {
+            set_aside(path, found, target)
+        }
+    };
     if !path.exists() {
         create_stamped(path, target)?;
         return Ok(StoreVersionAction::Created);
@@ -137,7 +154,7 @@ pub(crate) fn ensure_store_version_with(
 
     let mut found = match read_version(path)? {
         Some(v) => v,
-        None => return set_aside(path, None, target),
+        None => return unusable(None),
     };
 
     if found == 0 {
@@ -153,7 +170,7 @@ pub(crate) fn ensure_store_version_with(
         return Ok(StoreVersionAction::Current);
     }
     if found > target {
-        return set_aside(path, Some(found), target);
+        return unusable(Some(found));
     }
 
     match upgrade(path, found, target, steps)? {
@@ -161,7 +178,7 @@ pub(crate) fn ensure_store_version_with(
             from: found,
             to: target,
         }),
-        Err(reached) => set_aside(path, Some(reached), target),
+        Err(reached) => unusable(Some(reached)),
     }
 }
 
@@ -253,7 +270,8 @@ fn stamp(path: &Path, version: u32) -> Result<(), BridgeError> {
 /// stamping or committing a step's transaction failed, or a step failed with
 /// a transient error. The inner `Err` carries the version the store reached
 /// when a step was missing or a step itself failed for another reason, which
-/// means this build cannot bring the store forward and it is set aside.
+/// means this build cannot bring the store forward. Production preserves it
+/// in place; only legacy test fixtures use the set-aside policy.
 fn upgrade(
     path: &Path,
     from: u32,
@@ -1001,6 +1019,27 @@ mod tests {
             .any(|(key, _)| *key
                 == crate::storage::Key::Meta("SCAN_MIGRATION_REQUIRED_V2").into_vec()));
     }
+    #[test]
+    fn production_migration_failure_preserves_original_store() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("store.db");
+        let conn = Connection::open(&path).unwrap();
+        conn.execute_batch("CREATE TABLE kv(key BLOB PRIMARY KEY); INSERT INTO kv VALUES(x'1234'); PRAGMA user_version=2;").unwrap();
+        drop(conn);
+        assert!(matches!(
+            ensure_store_version(&path),
+            Err(BridgeError::Storage(_))
+        ));
+        assert_eq!(user_version(&path), 2);
+        assert_eq!(entries(dir.path()), vec!["store.db"]);
+        let conn = Connection::open(&path).unwrap();
+        assert_eq!(
+            conn.query_row("SELECT key FROM kv", [], |row| row.get::<_, Vec<u8>>(0))
+                .unwrap(),
+            vec![0x12, 0x34]
+        );
+    }
+
     #[test]
     fn production_reader_preserves_unknown_newer_store() {
         let dir = TempDir::new().unwrap();

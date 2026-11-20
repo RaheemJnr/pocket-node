@@ -356,7 +356,10 @@ pub(crate) trait ScanStorage: LightClientStorage {
         for state in states {
             state.validate()?;
             state.identity.validate(self)?;
-            if state.epoch != epoch || !seen.insert(state.identity.suffix.clone()) {
+            if state.floor.to_be_bytes() != state.identity.registration[..8]
+                || state.epoch != epoch
+                || !seen.insert(state.identity.suffix.clone())
+            {
                 return Err(invalid());
             }
             let cursor = self
@@ -393,6 +396,7 @@ pub(crate) trait ScanStorage: LightClientStorage {
         let state: ScanState = serde_json::from_slice(&raw).map_err(Error::runtime)?;
         state.validate()?;
         if state.identity != *identity
+            || state.identity.registration[..8] != state.floor.to_be_bytes()
             || self.get(Key::Meta(SCAN_EPOCH).into_vec())?.as_deref()
                 != Some(state.epoch.as_slice())
         {

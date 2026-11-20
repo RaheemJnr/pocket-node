@@ -444,7 +444,7 @@ class SyncCoordinator(
             for (wallet in registry) {
                 val candidates = subAccountCandidateStore.getForParent(wallet.walletId)
                     .filter { it.state != SubAccountCandidateRecord.STATE_RESTORED }
-                val ownScript = WalletDerivation.lockScriptFromAddress(wallet.testnetAddress.ifBlank { wallet.mainnetAddress })
+                val ownScript = runCatching { WalletDerivation.lockScriptFromAddress(wallet.testnetAddress.ifBlank { wallet.mainnetAddress }) }.getOrNull() ?: continue
                 for (candidate in candidates) historyRecovery.ensureScript(wallet.walletId, network.name,
                     json.encodeToString(ownScript.copy(args = candidate.scriptArgs)), generation)
             }
@@ -578,7 +578,7 @@ class SyncCoordinator(
         var completed = false
         for (job in dao.scripts(network.name).filter { it.status == "REGISTERED" && it.generation == generation }) {
             val owner = owners[job.parentWalletId] ?: continue
-            val expected = WalletDerivation.lockScriptFromAddress(owner.testnetAddress.ifBlank { owner.mainnetAddress })
+            val expected = runCatching { WalletDerivation.lockScriptFromAddress(owner.testnetAddress.ifBlank { owner.mainnetAddress }) }.getOrNull() ?: continue
             val script = runCatching { json.decodeFromString<Script>(job.scriptJson) }.getOrNull() ?: continue
             val candidate = subAccountCandidateStore.getForParent(owner.walletId).firstOrNull {
                 expected.copy(args = it.scriptArgs) == script && it.state != SubAccountCandidateRecord.STATE_RESTORED
@@ -590,10 +590,9 @@ class SyncCoordinator(
             val current = recoverySnapshot(job.scriptJson)
             if (current != snapshot || dao.generation(network.name) != generation) continue
             if (job.targetBlock == null) dao.registerScript(owner.walletId, network.name, job.scriptJson, generation, snapshot.tipHeight.toLong())
-            if (dao.completeScript(owner.walletId, network.name, job.scriptJson, generation, snapshot.tipHeight.toLong()) != 1) continue
-            subAccountCandidateStore.updateRecoveryState(owner.walletId, candidate.derivationPath,
+            if (!subAccountCandidateStore.completeRecoveryState(owner.walletId, candidate.derivationPath,
                 if (snapshot.hashes.isEmpty()) SubAccountCandidateRecord.STATE_EMPTY else SubAccountCandidateRecord.STATE_FOUND,
-                network.name, generation, job.scriptJson, candidate.scriptArgs)
+                network.name, generation, job.scriptJson, candidate.scriptArgs, snapshot.tipHeight.toLong())) continue
             completed = true
         }
         return completed

@@ -65,7 +65,7 @@ fn scoped_cells_ready(
         _ => return Err(unavailable()),
     };
     let scripts_prefix = Key::Meta("FILTER_SCRIPTS").into_vec();
-    let mut covered = Vec::new();
+    let mut covered = BTreeSet::new();
     for (key, _) in prefixed(conn, &scripts_prefix, MAX_INTERACTIONS)? {
         let suffix = key.get(scripts_prefix.len()..).ok_or_else(unavailable)?;
         if suffix.last() != Some(&kind) {
@@ -78,24 +78,57 @@ fn scoped_cells_ready(
             continue;
         }
         let state = scoped_state(conn, suffix)?.ok_or_else(unavailable)?;
-        if state.pending.is_some() || state.settled < tip {
+        if state.floor > tip || state.pending.is_some() || state.settled < tip {
             return Err(unavailable());
         }
-        covered.push(exact);
+        covered.insert(exact);
     }
     if covered.is_empty() {
         return Err(unavailable());
     }
     // Retained indexes for a deleted/unregistered neighbor cannot silently enter
     // a prefix balance. Every returned exact script needs current coverage.
-    for (key, _) in prefixed(conn, prefix, MAX_HISTORY_SCAN_ROWS)? {
-        let exact = key
-            .get(..key.len().checked_sub(16).ok_or_else(unavailable)?)
-            .ok_or_else(unavailable)?;
-        if !covered.iter().any(|p| p.as_slice() == exact) {
-            return Err(unavailable());
-        }
+    // Walk keys in bounded chunks, without imposing the history interaction
+    // budget on a wallet's live-cell count or loading cell values into memory.
+    let mut upper = prefix.to_vec();
+    while upper.last() == Some(&255) {
+        upper.pop();
     }
+    *upper.last_mut().ok_or_else(unavailable)? += 1;
+    let mut lower = prefix.to_vec();
+    let mut exclusive = false;
+    loop {
+        let sql = if exclusive {
+            "SELECT key FROM kv WHERE key>?1 AND key<?2 ORDER BY key LIMIT ?3"
+        } else {
+            "SELECT key FROM kv WHERE key>=?1 AND key<?2 ORDER BY key LIMIT ?3"
+        };
+        let mut stmt = conn.prepare(sql).map_err(|_| unavailable())?;
+        let keys = stmt
+            .query_map(
+                rusqlite::params![lower, upper, HISTORY_SCAN_CHUNK as i64],
+                |row| row.get::<_, Vec<u8>>(0),
+            )
+            .map_err(|_| unavailable())?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|_| unavailable())?;
+        let count = keys.len();
+        for key in keys {
+            let exact = key
+                .get(..key.len().checked_sub(16).ok_or_else(unavailable)?)
+                .ok_or_else(unavailable)?;
+            if !covered.contains(exact) {
+                return Err(unavailable());
+            }
+            lower = key;
+        }
+        if count < HISTORY_SCAN_CHUNK {
+            break;
+        }
+        exclusive = true;
+    }
+    // A deleted neighbor's valid marker is harmless when it has no retained
+    // cells. The key walk above still rejects any cells lacking coverage.
     for (key, value) in markers {
         let frontier = u64::from_be_bytes(
             value
@@ -114,10 +147,7 @@ fn scoped_cells_ready(
         let script = packed::Script::from_slice(value.get(16..).ok_or_else(unavailable)?)
             .map_err(|_| unavailable())?;
         let exact = [vec![prefix[0]], extract_raw_data(&script)].concat();
-        if start > frontier
-            || *key != [Key::Meta("CELL_REWIND_V1").into_vec(), exact.clone()].concat()
-            || !covered.contains(&exact)
-        {
+        if start > frontier || *key != [Key::Meta("CELL_REWIND_V1").into_vec(), exact].concat() {
             return Err(unavailable());
         }
     }
@@ -475,6 +505,116 @@ mod tests {
         core::{BlockBuilder, TransactionBuilder},
         U256,
     };
+    fn scoped_cell_fixture(floor: u64) -> (Connection, Vec<u8>) {
+        use crate::storage::scan::{ScanIdentity, ScanState, SCAN_EPOCH, SCAN_STATE};
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch("CREATE TABLE kv(key BLOB PRIMARY KEY, value BLOB NOT NULL)")
+            .unwrap();
+        let script = packed::Script::new_builder().args(vec![1u8].pack()).build();
+        let suffix = [script.as_slice(), &[0]].concat();
+        let registration = [floor.to_be_bytes().to_vec(), vec![7; 16]].concat();
+        let state = ScanState::settled(
+            ScanIdentity {
+                suffix: suffix.clone(),
+                registration: registration.clone(),
+            },
+            [7; 16],
+            floor,
+            floor,
+        );
+        for (key, value) in [
+            (Key::Meta(SCAN_EPOCH).into_vec(), vec![7; 16]),
+            (
+                [Key::Meta("FILTER_SCRIPTS").into_vec(), suffix.clone()].concat(),
+                floor.to_be_bytes().to_vec(),
+            ),
+            (
+                [
+                    Key::Meta("HISTORY_REGISTRATION_V1").into_vec(),
+                    suffix.clone(),
+                ]
+                .concat(),
+                registration,
+            ),
+            (
+                [Key::Meta(SCAN_STATE).into_vec(), suffix].concat(),
+                serde_json::to_vec(&state).unwrap(),
+            ),
+        ] {
+            conn.execute(
+                "INSERT INTO kv VALUES(?1,?2)",
+                rusqlite::params![key, value],
+            )
+            .unwrap();
+        }
+        (
+            conn,
+            [
+                vec![KeyPrefix::CellLockScript as u8],
+                extract_raw_data(&script),
+            ]
+            .concat(),
+        )
+    }
+
+    #[test]
+    fn scoped_cells_reject_floor_above_tip() {
+        let (conn, prefix) = scoped_cell_fixture(20);
+        assert!(scoped_cells_ready(&conn, &prefix, 10, &[]).is_err());
+        assert!(scoped_cells_ready(&conn, &prefix, 20, &[]).is_ok());
+    }
+
+    #[test]
+    fn scoped_cells_accept_dense_covered_prefix_and_reject_uncovered_neighbor() {
+        let (mut conn, prefix) = scoped_cell_fixture(10);
+        let tx = conn.transaction().unwrap();
+        {
+            let mut insert = tx.prepare("INSERT INTO kv VALUES(?1,?2)").unwrap();
+            for index in 0..=MAX_HISTORY_SCAN_ROWS {
+                let key = [prefix.clone(), (index as u128).to_be_bytes().to_vec()].concat();
+                insert.execute(rusqlite::params![key, vec![0u8]]).unwrap();
+            }
+        }
+        tx.commit().unwrap();
+        assert!(scoped_cells_ready(&conn, &prefix, 10, &[]).is_ok());
+        let key = [prefix.clone(), vec![2], vec![0; 16]].concat();
+        conn.execute(
+            "INSERT INTO kv VALUES(?1,?2)",
+            rusqlite::params![key, vec![0u8]],
+        )
+        .unwrap();
+        assert!(scoped_cells_ready(&conn, &prefix, 10, &[]).is_err());
+    }
+
+    #[test]
+    fn scoped_cells_ignore_valid_deleted_neighbor_marker_without_cells() {
+        let (conn, prefix) = scoped_cell_fixture(10);
+        let neighbor = packed::Script::new_builder()
+            .args(vec![1u8, 2].pack())
+            .build();
+        let exact = [
+            vec![KeyPrefix::CellLockScript as u8],
+            extract_raw_data(&neighbor),
+        ]
+        .concat();
+        let marker = (
+            [Key::Meta("CELL_REWIND_V1").into_vec(), exact.clone()].concat(),
+            [
+                20u64.to_be_bytes().as_slice(),
+                10u64.to_be_bytes().as_slice(),
+                neighbor.as_slice(),
+            ]
+            .concat(),
+        );
+        assert!(scoped_cells_ready(&conn, &prefix, 10, &[marker.clone()]).is_ok());
+        conn.execute(
+            "INSERT INTO kv VALUES(?1,?2)",
+            rusqlite::params![[exact, vec![0; 16]].concat(), vec![0u8]],
+        )
+        .unwrap();
+        assert!(scoped_cells_ready(&conn, &prefix, 10, &[marker]).is_err());
+    }
+
     // These are the shared availability checks used by both cells and capacity.
     #[test]
     fn no_marker_reset_genesis_cells_and_capacity_are_unavailable() {

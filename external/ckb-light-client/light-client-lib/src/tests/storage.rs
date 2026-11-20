@@ -161,6 +161,80 @@ fn scoped_scan_debt_survives_reopen_without_publishing_progress() {
 }
 
 #[test]
+fn scoped_scan_rejects_registration_floor_mismatch() {
+    use crate::storage::scan::{ScanIdentity, ScanState, ScanStorage, SCAN_STATE};
+    use crate::storage::{Key, ScriptStatus, ScriptType, StorageBackend};
+    let (store, _dir) = new_storage("scoped_floor_mismatch");
+    let script = Script::default();
+    store.update_filter_scripts(
+        vec![ScriptStatus {
+            script: script.clone(),
+            script_type: ScriptType::Lock,
+            block_number: 10,
+        }],
+        Default::default(),
+    );
+    let id = ScanIdentity::registered(&store, &script, ScriptType::Lock).unwrap();
+    let invalid = ScanState::settled(id.clone(), [7; 16], 1, 10);
+    assert!(store
+        .install_scan_states([7; 16], vec![invalid.clone()])
+        .is_err());
+    store
+        .install_scan_states(
+            [7; 16],
+            vec![ScanState::settled(id.clone(), [7; 16], 10, 10)],
+        )
+        .unwrap();
+    StorageBackend::put(
+        &store,
+        [Key::Meta(SCAN_STATE).into_vec(), id.suffix.clone()].concat(),
+        serde_json::to_vec(&invalid).unwrap(),
+    )
+    .unwrap();
+    assert!(store.scan_state(&id).is_err());
+}
+
+#[test]
+fn duplicate_registration_uses_lowest_floor_and_settles_genesis() {
+    use crate::storage::scan::{ScanIdentity, ScanStorage};
+    use crate::storage::{ScriptStatus, ScriptType, SetScriptsCommand};
+    use ckb_types::core::BlockBuilder;
+    for partial in [false, true] {
+        for reverse in [false, true] {
+            let (store, _dir) = new_storage("duplicate_registration");
+            store.init_genesis_block(BlockBuilder::default().build().data());
+            store.prepare_scoped_scans().unwrap();
+            let script = Script::default();
+            let mut scripts = vec![0, 10]
+                .into_iter()
+                .map(|block_number| ScriptStatus {
+                    script: script.clone(),
+                    script_type: ScriptType::Lock,
+                    block_number,
+                })
+                .collect::<Vec<_>>();
+            if reverse {
+                scripts.reverse();
+            }
+            store.update_filter_scripts(
+                scripts,
+                if partial {
+                    SetScriptsCommand::Partial
+                } else {
+                    SetScriptsCommand::All
+                },
+            );
+            store.prepare_scoped_scans().unwrap();
+            let id = ScanIdentity::registered(&store, &script, ScriptType::Lock).unwrap();
+            let state = store.scan_state(&id).unwrap().unwrap();
+            assert_eq!(state.floor, 0);
+            assert_eq!(state.settled, 0);
+            assert_eq!(store.get_filter_scripts().len(), 1);
+        }
+    }
+}
+
+#[test]
 fn scoped_history_index_does_not_resurrect_other_wallet_spent_output() {
     use crate::storage::scan::{ScanIdentity, ScanState, ScanStorage};
     use crate::storage::{Key, ScriptStatus, ScriptType, StorageBackend};
@@ -173,18 +247,11 @@ fn scoped_history_index_does_not_resurrect_other_wallet_spent_output() {
     let live = Script::new_builder().args(vec![1u8].pack()).build();
     let old = Script::new_builder().args(vec![2u8].pack()).build();
     store.update_filter_scripts(
-        vec![
-            ScriptStatus {
-                script: live.clone(),
-                script_type: ScriptType::Lock,
-                block_number: 1,
-            },
-            ScriptStatus {
-                script: old.clone(),
-                script_type: ScriptType::Lock,
-                block_number: 1,
-            },
-        ],
+        vec![ScriptStatus {
+            script: live.clone(),
+            script_type: ScriptType::Lock,
+            block_number: 1,
+        }],
         Default::default(),
     );
     let tx = TransactionBuilder::default()
@@ -226,6 +293,20 @@ fn scoped_history_index_does_not_resurrect_other_wallet_spent_output() {
     );
     store.update_block_number(100);
     store.update_min_filtered_block_number(100);
+    store.update_filter_scripts(
+        vec![ScriptStatus {
+            script: old.clone(),
+            script_type: ScriptType::Lock,
+            block_number: 1,
+        }],
+        crate::storage::SetScriptsCommand::Partial,
+    );
+    assert!(
+        StorageBackend::get(&store, Key::CellLockScript(&old, 10, 0, 1).into_vec())
+            .unwrap()
+            .is_none(),
+        "historical cell must be absent before scoped replay"
+    );
     let live_id = ScanIdentity::registered(&store, &live, ScriptType::Lock).unwrap();
     let old_id = ScanIdentity::registered(&store, &old, ScriptType::Lock).unwrap();
     store

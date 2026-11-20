@@ -14,7 +14,7 @@ Mobile compatibility patches retain:
 * SQLite's existing `store.db` file and `kv(key BLOB PRIMARY KEY, value BLOB)`
   schema, parent-directory creation, existing cache settings, and legacy mobile
   iterator adapter. The upstream shared storage/service implementation is used.
-* rusqlite 0.29, the mobile bridge dependencies, and the library-only Cargo
+* rusqlite 0.41 with bundled SQLite, the mobile bridge dependencies, and the library-only Cargo
   workspace. Rust is pinned to upstream's 1.95.0. The Cargo lock is a mobile
   overlay; it also includes compatible advisory fixes beyond the upstream pin.
 * Source-based tests using temporary SQLite files. No regression test uses a
@@ -65,7 +65,7 @@ Do not upload local diagnostic logs or private regression material in CI.
 
 ## Cache compatibility
 
-Store format 2 retains the `kv` layout. The transactional 1-to-2 upgrade removes
+Store format 3 retains the `kv` layout. The transactional 1-to-2 upgrade removes
 chain-derived transaction/cell/header/filter evidence, saves only old script
 metadata in an inactive table, and writes a random verification generation.
 Unknown metadata is preserved. Both apps read `get_verification_epoch` through
@@ -76,12 +76,17 @@ Local pending/failed transaction records and pending broadcast/DAO reconciliatio
 records survive. Wallet keys, birth settings, sync modes and custom horizons are
 outside this operation. Registration recomputes the start using existing settings.
 
+The 2-to-3 upgrade preserves verified evidence and the verification generation,
+and atomically stamps a required scoped-scan migration gate. Startup installs
+per-script progress before protocols run; interrupted genesis indexing remains
+fenced until resumed. Unsupported or unreadable production stores are preserved
+in place and startup fails closed.
+
 A failed database transaction rolls back. A failed applied-generation write keeps
 the UI/registration gate closed and retries cleanup on the next attempt. This is
 a two-store handoff, not a cross-database transaction.
 
-Downgrading native integrations is unsupported. The preceding format-1 binary
-sets a format-2 store aside under its existing recovery policy. Returning to this
-build creates a new generation and repeats the app handoff; a previous applied
-marker cannot authorize the recreated store. No set-aside file is automatically
-restored as verified chain evidence.
+Downgrading native integrations is unsupported. Older binaries may set a newer
+store aside under their recovery policy. No set-aside file is automatically
+restored as verified chain evidence, and a previous applied marker cannot
+authorize a recreated store with a new verification generation.

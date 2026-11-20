@@ -29,10 +29,15 @@ impl ScanScheduler {
     pub fn select(&mut self, states: &[ScanState], tip: u64, now_ms: u64) -> Option<ScanRequest> {
         self.queue
             .retain(|id| states.iter().any(|s| s.identity == *id));
-        self.in_flight.retain(|f| {
-            now_ms.saturating_sub(f.sent_ms) < REQUEST_TIMEOUT_MS
-                && states.iter().any(|s| Self::current(&f.request, s))
-        });
+        self.in_flight
+            .retain(|f| states.iter().any(|s| Self::current(&f.request, s)));
+        // Retain only the retry routing metadata after expiry, not a pinned
+        // full checkpoint window for every stalled registration.
+        for flight in &mut self.in_flight {
+            if now_ms.saturating_sub(flight.sent_ms) >= REQUEST_TIMEOUT_MS {
+                flight.request.window = None;
+            }
+        }
         let mut new: Vec<_> = states
             .iter()
             .filter(|s| !self.queue.contains(&s.identity))
@@ -44,7 +49,13 @@ impl ScanScheduler {
         });
         self.queue
             .extend(new.into_iter().map(|s| s.identity.clone()));
-        if self.in_flight.len() >= MAX_OUTSTANDING {
+        if self
+            .in_flight
+            .iter()
+            .filter(|f| now_ms.saturating_sub(f.sent_ms) < REQUEST_TIMEOUT_MS)
+            .count()
+            >= MAX_OUTSTANDING
+        {
             return None;
         }
         for _ in 0..self.queue.len() {
@@ -55,7 +66,10 @@ impl ScanScheduler {
             };
             if state.pending.is_some()
                 || state.settled >= tip
-                || self.in_flight.iter().any(|f| f.request.identity == id)
+                || self.in_flight.iter().any(|f| {
+                    f.request.identity == id
+                        && now_ms.saturating_sub(f.sent_ms) < REQUEST_TIMEOUT_MS
+                })
             {
                 continue;
             }
@@ -76,6 +90,18 @@ impl ScanScheduler {
             && request.epoch == state.epoch
             && state.pending.is_none()
             && state.settled.checked_add(1) == Some(request.start)
+    }
+    pub fn choose_peer(&self, request: &ScanRequest, eligible: &[PeerIndex]) -> Option<PeerIndex> {
+        let previous = self
+            .in_flight
+            .iter()
+            .find(|f| f.request.identity == request.identity)
+            .map(|f| f.peer);
+        eligible
+            .iter()
+            .copied()
+            .find(|peer| Some(*peer) != previous)
+            .or_else(|| eligible.first().copied())
     }
     pub fn sent(&mut self, request: &ScanRequest, peer: PeerIndex, now_ms: u64) {
         self.completed(request);
@@ -111,7 +137,8 @@ impl ScanScheduler {
             .map(|f| f.request.clone())
     }
     pub fn completed(&mut self, request: &ScanRequest) {
-        self.in_flight.retain(|f| f.request != *request);
+        self.in_flight
+            .retain(|f| f.request.identity != request.identity);
     }
 }
 
@@ -129,6 +156,24 @@ mod tests {
             0,
             height,
         )
+    }
+    #[test]
+    fn timed_out_request_prefers_another_eligible_peer() {
+        let mut scheduler = ScanScheduler::default();
+        let states = vec![state(1, 10)];
+        let best = PeerIndex::new(3);
+        let other = PeerIndex::new(4);
+        let request = scheduler.select(&states, 100, 0).unwrap();
+        assert_eq!(scheduler.choose_peer(&request, &[best, other]), Some(best));
+        scheduler.sent(&request, best, 0);
+        let retry = scheduler.select(&states, 100, REQUEST_TIMEOUT_MS).unwrap();
+        assert_eq!(scheduler.choose_peer(&retry, &[best, other]), Some(other));
+        assert_eq!(scheduler.choose_peer(&retry, &[best]), Some(best));
+        scheduler.sent(&retry, other, REQUEST_TIMEOUT_MS);
+        let again = scheduler
+            .select(&states, 100, REQUEST_TIMEOUT_MS * 2)
+            .unwrap();
+        assert_eq!(scheduler.choose_peer(&again, &[best, other]), Some(best));
     }
     #[test]
     fn newest_first_then_round_robin_despite_timeout() {

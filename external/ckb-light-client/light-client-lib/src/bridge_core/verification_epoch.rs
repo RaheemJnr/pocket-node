@@ -22,13 +22,15 @@ pub(crate) fn upgrade(conn: &Connection) -> rusqlite::Result<()> {
          CREATE TABLE pocket_verification (id INTEGER PRIMARY KEY CHECK(id = 1), version INTEGER NOT NULL, generation TEXT NOT NULL);",
     )?;
     let scripts = Key::Meta("FILTER_SCRIPTS").into_vec();
+    let scripts_len = i64::try_from(scripts.len())
+        .map_err(|err| rusqlite::Error::ToSqlConversionFailure(Box::new(err)))?;
     conn.execute(
         "INSERT INTO pocket_previous_scripts SELECT key, value FROM kv WHERE substr(key, 1, ?1) = ?2",
-        params![scripts.len(), &scripts],
+        params![scripts_len, &scripts],
     )?;
     conn.execute(
         "DELETE FROM kv WHERE substr(key, 1, ?1) = ?2",
-        params![scripts.len(), &scripts],
+        params![scripts_len, &scripts],
     )?;
     for prefix in [
         KeyPrefix::TxHash,
@@ -58,9 +60,11 @@ pub(crate) fn upgrade(conn: &Connection) -> rusqlite::Result<()> {
         )?;
     }
     let matched = Key::Meta("MATCHED_BLOCKS").into_vec();
+    let matched_len = i64::try_from(matched.len())
+        .map_err(|err| rusqlite::Error::ToSqlConversionFailure(Box::new(err)))?;
     conn.execute(
         "DELETE FROM kv WHERE substr(key, 1, ?1) = ?2",
-        params![matched.len(), matched],
+        params![matched_len, matched],
     )?;
     let generation: String = rand::random::<[u8; 16]>()
         .iter()

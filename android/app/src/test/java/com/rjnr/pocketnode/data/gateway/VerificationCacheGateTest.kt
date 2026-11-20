@@ -42,6 +42,33 @@ class VerificationCacheGateTest {
             db.transactionDao().insert(TransactionEntity(hash, "0x384", "old-block", 1, "100", "out", "2", 10, "0x1", "MAINNET", status, local, 1, "active", 2))
         }
     }
+    @Test fun `later verified hints refresh archive and survive repeated quarantine`() = runTest {
+        seed()
+        val gate = VerificationCacheGate(context, db)
+        gate.reconcile(client(), NetworkType.MAINNET)
+        db.openHelper.writableDatabase.execSQL("UPDATE transactions SET status='CONFIRMED', blockNumber='0x999', balanceChange='123', fee='9' WHERE txHash='confirmed'")
+        gate.reconcile(client("b".repeat(32)), NetworkType.MAINNET)
+        gate.reconcile(client("c".repeat(32)), NetworkType.MAINNET)
+        val row = db.historyRecovery().archive("active", "MAINNET").single { it.txHash == "confirmed" }
+        assertEquals("0x999", row.blockNumberHint)
+        assertEquals("123", row.balanceChangeHint)
+        assertEquals("9", row.feeHint)
+    }
+
+    @Test fun `later withdrawal refreshes existing DAO archive locator`() = runTest {
+        val cell = com.rjnr.pocketnode.data.database.entity.DaoCellEntity(
+            txHash = "deposit", index = "0x0", capacity = 1000, status = "DEPOSITED",
+            depositBlockNumber = 10, depositBlockHash = "deposit-block", depositEpochHex = null,
+            withdrawBlockNumber = null, withdrawBlockHash = null, withdrawEpochHex = null,
+            compensation = 0, unlockEpochHex = null, depositTimestamp = 1, network = "MAINNET", lastUpdatedAt = 1, walletId = "active")
+        db.daoCellDao().upsert(cell)
+        val gate = VerificationCacheGate(context, db)
+        gate.reconcile(client(), NetworkType.MAINNET)
+        db.daoCellDao().upsert(cell.copy(withdrawBlockNumber = 20, status = "WITHDRAWING"))
+        gate.reconcile(client("b".repeat(32)), NetworkType.MAINNET)
+        assertEquals(20L, db.historyRecovery().daoHints("active", "MAINNET").single().withdrawBlockHint)
+    }
+
     @Test fun `pre checkpoint history and inactive recovery survive verification erasure`() = runTest {
         seed()
         db.transactionDao().insert(TransactionEntity("historic", "0x1036640", "old", 123, "42", "in", "1", 9, "0x7b", "MAINNET", "CONFIRMED", false, 1, "inactive"))
