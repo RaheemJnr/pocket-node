@@ -376,4 +376,33 @@ object AppModule {
                 page.objects.isNotEmpty()
             }.getOrNull()
         }
+
+    /** #623: live per-script scan cursor from nativeGetScripts; null when unreadable. */
+    @Provides
+    @Singleton
+    fun provideScriptCursorProbe(json: Json): com.rjnr.pocketnode.data.wallet.ScriptCursorProbe =
+        com.rjnr.pocketnode.data.wallet.ScriptCursorProbe { scriptArgs ->
+            // Blocking JNI read: keep it off the caller's (possibly main) dispatcher.
+            kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
+                try {
+                    val wanted = scriptArgs.toSet()
+                    val raw = com.nervosnetwork.ckblightclient.LightClientNative.nativeGetScripts()
+                    if (raw == null || wanted.isEmpty()) {
+                        emptyMap()
+                    } else {
+                        json.decodeFromString<List<com.rjnr.pocketnode.data.gateway.models.JniScriptStatus>>(raw)
+                            .filter { it.script.args in wanted }
+                            .mapNotNull { status ->
+                                status.blockNumber.removePrefix("0x").toLongOrNull(16)
+                                    ?.let { status.script.args to it }
+                            }
+                            .toMap()
+                    }
+                } catch (e: kotlinx.coroutines.CancellationException) {
+                    throw e
+                } catch (e: Exception) {
+                    emptyMap()
+                }
+            }
+        }
 }

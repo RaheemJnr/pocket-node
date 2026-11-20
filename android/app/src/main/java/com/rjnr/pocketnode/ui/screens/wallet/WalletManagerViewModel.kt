@@ -75,6 +75,10 @@ class WalletManagerViewModel @Inject constructor(
             com.rjnr.pocketnode.data.vault.VaultOperationSession.run(activity) owned@ {
                 try {
                     var restored = 0
+                    // Read every candidate's cursor now: activating the first
+                    // restored child replaces the light client's script set and
+                    // drops the other candidates' cursors.
+                    val cursors = walletRepository.snapshotCandidateCursors(found.map { it.scriptArgs })
                     found.groupBy { it.parentWalletId }.forEach { (parentId, candidates) ->
                         val expectedParent = walletRepository.getById(parentId) ?: return@forEach
                         val lock = com.rjnr.pocketnode.ui.screens.auth.ReauthLockEvents.locks.value
@@ -100,6 +104,7 @@ class WalletManagerViewModel @Inject constructor(
                                 parentMnemonic = words,
                                 explicitIndex = candidate.accountIndex,
                                 expectedParent = expectedParent,
+                                cursorSnapshot = cursors,
                                 persistKeys = { newWalletId, bundle ->
                                     session.persist {
 
