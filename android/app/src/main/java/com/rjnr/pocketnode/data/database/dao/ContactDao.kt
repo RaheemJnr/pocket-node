@@ -54,12 +54,16 @@ interface ContactDao {
      * already include `%` wildcards on both sides — the caller controls
      * the match shape (prefix-only, infix, etc.). Capped at 20 results
      * to keep dropdown UIs responsive.
+     *
+     * Never-used contacts sort last via `lastUsedAt IS NULL`, not
+     * a nulls-last clause: that syntax needs SQLite 3.30, and Android 8 to 10
+     * ship older versions, where the query throws.
      */
     @Query(
         "SELECT * FROM contacts " +
             "WHERE (walletId = :walletId OR walletId IS NULL) " +
             "AND (name LIKE :q OR address LIKE :q) " +
-            "ORDER BY lastUsedAt DESC NULLS LAST " +
+            "ORDER BY lastUsedAt IS NULL, lastUsedAt DESC " +
             "LIMIT 20"
     )
     suspend fun search(walletId: String, q: String): List<ContactEntity>
