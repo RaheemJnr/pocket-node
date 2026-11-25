@@ -28,7 +28,10 @@ concurrency:
 jobs:
   ios:
     runs-on: macos-15
-    timeout-minutes: 45
+    # A Cargo.lock or toolchain change misses the Cargo cache, and a job that
+    # times out never saves one, so every retry is cold: the xcframework build
+    # alone then takes about 19 minutes. Leave room for one cold run.
+    timeout-minutes: 75
 
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
