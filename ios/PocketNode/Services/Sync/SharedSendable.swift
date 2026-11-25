@@ -117,3 +117,14 @@ extension SyncProgressRecord: @retroactive @unchecked Sendable {}
 
 /// ReviewedTransfer owns defensive recipient copies and otherwise immutable values.
 extension ReviewedTransfer: @retroactive @unchecked Sendable {}
+
+/// The history recovery panel's model, on the same terms.
+///
+/// - `RecoveryPresentation` and `RecoveryHint` are Kotlin `data class`es with
+///   `val` properties only (a Boolean, Strings and read-only lists of
+///   `RecoveryHint`); every other member is a computed `String`. They are the
+///   element type of `HistoryRecoveryReader.observePresentation`, which
+///   `ActivityService` and `SyncService` mirror onto the main actor with
+///   `for await`, the same hand-over `SyncProgress` needed for Xcode 16.
+extension RecoveryPresentation: @retroactive @unchecked Sendable {}
+extension RecoveryHint: @retroactive @unchecked Sendable {}
