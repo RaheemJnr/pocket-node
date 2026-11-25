@@ -507,6 +507,138 @@ class WalletRepositoryTest {
     }
 
     /**
+     * #623: a restored candidate must start at the lower of the parent's saved
+     * height and its own scan progress, never above its own cursor.
+     */
+    private suspend fun restoreWithProgress(
+        parentSaved: Long,
+        registeredFrom: Long,
+        cursor: Long?,
+        parentStart: Long = parentSaved,
+        switchTo: NetworkType? = null,
+        snapshot: CursorSnapshot? = null,
+    ): com.rjnr.pocketnode.data.database.entity.SyncProgressEntity? {
+        val words = mnemonicManager.generateMnemonic(MnemonicManager.WordCount.TWELVE)
+        val parent = repo.importFromMnemonic(
+            words = words,
+            name = "Parent",
+            persistKeys = { walletId, bundle -> fakePersistV2(walletId, bundle) },
+        ).getOrThrow()
+        val path = SubAccountDiscovery.accountPath(2)
+        db.subAccountCandidateDao().updateRegisteredFrom(parent.walletId, path, registeredFrom)
+        db.subAccountCandidateDao().updateState(
+            parent.walletId, path,
+            com.rjnr.pocketnode.data.database.entity.SubAccountCandidateEntity.STATE_FOUND,
+        )
+        lastCandidateArgs = db.subAccountCandidateDao().getForParent(parent.walletId)
+            .first { it.derivationPath == path }.scriptArgs
+        for (net in listOf("MAINNET", "TESTNET")) {
+            db.syncProgressDao().upsert(
+                com.rjnr.pocketnode.data.database.entity.SyncProgressEntity(
+                    parent.walletId, net, parentStart, parentSaved, 0L,
+                )
+            )
+        }
+        walletPreferences.setSelectedNetwork(NetworkType.TESTNET)
+        val sub = newRepoWithCursor(ScriptCursorProbe { args ->
+            // A network switch committed between the cursor read and the write.
+            switchTo?.let { walletPreferences.setSelectedNetwork(it) }
+            if (cursor == null) emptyMap() else args.associateWith { cursor }
+        }).createSubAccount(
+            parentWalletId = parent.walletId,
+            name = "Sub 2",
+            parentMnemonic = words,
+            explicitIndex = 2,
+            cursorSnapshot = snapshot?.let { it.copy(cursors = it.cursors.mapKeys { lastCandidateArgs!! }) },
+            persistKeys = { walletId, bundle -> fakePersistV2(walletId, bundle) },
+        ).getOrThrow()
+        lastRestoredWalletId = sub.walletId
+        return db.syncProgressDao().get(sub.walletId, (switchTo ?: NetworkType.TESTNET).name)
+    }
+
+    private var lastRestoredWalletId: String? = null
+    private var lastCandidateArgs: String? = null
+
+    private fun newRepoWithCursor(probe: ScriptCursorProbe) = WalletRepository(
+        walletDao, keyManager, walletPreferences, walletPreferences, mnemonicManager, db,
+        db.transactionDao(), db.balanceCacheDao(), db.daoCellDao(),
+        db.pendingDaoWithdrawDao(), db.pendingDaoUnlockDao(), db.keyMaterialDao(),
+        db.subAccountCandidateDao(), SubAccountDiscovery(mnemonicManager, keyManager), walletPreferences, NoopLogger,
+        scriptCursorProbe = probe,
+    )
+
+    @Test
+    fun `restored candidate starts at its live cursor when below parent`() = runTest {
+        val row = restoreWithProgress(parentSaved = 299_000L, registeredFrom = 100_000L, cursor = 120_000L)!!
+        assertEquals(120_000L, row.localSavedBlockNumber)
+        assertEquals(120_000L, row.lightStartBlockNumber)
+        // Heights are chain-specific: the non-active network gets no row.
+        assertNull(db.syncProgressDao().get(lastRestoredWalletId!!, "MAINNET"))
+    }
+
+    @Test
+    fun `restored candidate copies no row when cursor unavailable`() = runTest {
+        // registeredFromBlock has no network column and the parent's
+        // lightStartBlockNumber is its last re-registration point, not its
+        // coverage, so neither is a fallback.
+        assertNull(
+            restoreWithProgress(
+                parentSaved = 299_000L, registeredFrom = 100_000L, cursor = null, parentStart = 150_000L,
+            )
+        )
+    }
+
+    @Test
+    fun `cursor read before a network switch is not applied to the new network`() = runTest {
+        assertNull(
+            restoreWithProgress(
+                parentSaved = 299_000L, registeredFrom = 0L, cursor = 280_000L,
+                parentStart = 150_000L, switchTo = NetworkType.MAINNET,
+            )
+        )
+        assertNull(db.syncProgressDao().get(lastRestoredWalletId!!, "TESTNET"))
+    }
+
+    @Test
+    fun `batch restore uses the snapshot taken before the first activation`() = runTest {
+        // The live probe no longer sees the candidate (the first restored child
+        // replaced the script set); the snapshot still carries its cursor.
+        val row = restoreWithProgress(
+            parentSaved = 299_000L, registeredFrom = 0L, cursor = null,
+            snapshot = CursorSnapshot(NetworkType.TESTNET, mapOf("any" to 130_000L)),
+        )!!
+        assertEquals(130_000L, row.localSavedBlockNumber)
+        assertEquals(130_000L, row.lightStartBlockNumber)
+    }
+
+    @Test
+    fun `snapshot read on another network is not applied`() = runTest {
+        assertNull(
+            restoreWithProgress(
+                parentSaved = 299_000L, registeredFrom = 0L, cursor = 280_000L,
+                snapshot = CursorSnapshot(NetworkType.MAINNET, mapOf("any" to 130_000L)),
+            )
+        )
+    }
+
+    @Test
+    fun `snapshotCandidateCursors reads all scripts in one call and records the network`() = runTest {
+        walletPreferences.setSelectedNetwork(NetworkType.TESTNET)
+        var calls = 0
+        val snap = newRepoWithCursor(ScriptCursorProbe { args ->
+            calls++
+            args.filter { it != "0xcc" }.associateWith { 7L }
+        }).snapshotCandidateCursors(listOf("0xaa", "0xbb", "0xcc"))
+        assertEquals(1, calls)
+        assertEquals(NetworkType.TESTNET, snap.network)
+        assertEquals(mapOf("0xaa" to 7L, "0xbb" to 7L), snap.cursors)
+
+        val failed = newRepoWithCursor(ScriptCursorProbe { error("jni") })
+            .snapshotCandidateCursors(listOf("0xaa"))
+        assertTrue(failed.cursors.isEmpty())
+    }
+
+    /**
      * #382 Tier 2: importing a seed must also record gap-limit candidates
      * along account 0's receiving/change chains, the paths Neuron spreads
      * funds across, so the auto-scan can register them for sync.

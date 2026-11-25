@@ -152,4 +152,30 @@ class ContactDaoTest {
         dao.delete(c)
         assertNull(dao.getById(c.id))
     }
+
+    @Test
+    fun `search lists used contacts by recency and never-used ones last`() = runTest {
+        dao.insert(contact(name = "Ann never", address = "ckt1_a1"))
+        dao.insert(contact(name = "Ann old", address = "ckt1_a2", useCount = 1, lastUsedAt = 100L))
+        dao.insert(contact(name = "Ann new", address = "ckt1_a3", useCount = 1, lastUsedAt = 200L))
+        val names = dao.search("wallet-1", "%Ann%").map { it.name }
+        assertEquals(listOf("Ann new", "Ann old", "Ann never"), names)
+    }
+
+    /**
+     * `NULLS LAST` / `NULLS FIRST` need SQLite 3.30. Android 8 to 10 ship
+     * older SQLite and throw at query time, which Robolectric's newer
+     * SQLite cannot reproduce, so this guards the source instead.
+     */
+    @Test
+    fun `no Room query uses NULLS LAST or NULLS FIRST`() {
+        val root = java.io.File("src/main")
+        assertTrue("run from android/app", root.isDirectory)
+        val offenders = root.walkTopDown()
+            .filter { it.isFile && it.extension == "kt" }
+            .filter { Regex("""NULLS\s+(LAST|FIRST)""", RegexOption.IGNORE_CASE).containsMatchIn(it.readText()) }
+            .map { it.path }
+            .toList()
+        assertEquals(emptyList<String>(), offenders)
+    }
 }

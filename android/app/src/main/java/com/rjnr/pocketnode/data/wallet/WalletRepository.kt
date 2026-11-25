@@ -47,6 +47,7 @@ class WalletRepository @Inject constructor(
     private val walletPreferences: WalletPreferences,
     private val logger: Logger,
     private val recoveryLifetime: com.rjnr.pocketnode.data.gateway.DaoRecoveryLifetime = com.rjnr.pocketnode.data.gateway.DaoRecoveryLifetime(),
+    private val scriptCursorProbe: ScriptCursorProbe = ScriptCursorProbe { emptyMap() },
 ) {
     /** Operation-owned proposed metadata; only new UUID creation paths issue this context. */
     class Creation internal constructor(internal val wallet: WalletEntity, internal val expectedParent: WalletEntity? = null) {
@@ -329,6 +330,22 @@ class WalletRepository @Inject constructor(
     }
 
     /**
+     * Reads the live scan cursors of [scriptArgs] in one light-client call and
+     * records the network they were read on. Unreadable cursors are absent.
+     */
+    suspend fun snapshotCandidateCursors(scriptArgs: Collection<String>): CursorSnapshot {
+        val network = walletPreferences.getSelectedNetwork()
+        val cursors = try {
+            scriptCursorProbe.cursorsFor(scriptArgs)
+        } catch (e: kotlinx.coroutines.CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            emptyMap()
+        }
+        return CursorSnapshot(network, cursors)
+    }
+
+    /**
      * Create a sub-account derived from a parent mnemonic wallet.
      *
      * The parent mnemonic is now a mandatory parameter, callers must
@@ -346,6 +363,7 @@ class WalletRepository @Inject constructor(
         parentMnemonic: List<String>,
         explicitIndex: Int? = null,
         expectedParent: WalletEntity? = null,
+        cursorSnapshot: CursorSnapshot? = null,
         persistKeys: suspend (walletId: Creation, bundle: WalletKeyBundle) -> WalletKeyWriter.Result,
     ): Result<WalletEntity> = runCatching {
         keyManager.walletStorage.requireOpen()
@@ -399,6 +417,23 @@ class WalletRepository @Inject constructor(
                 colorIndex = colorIndex
             )
 
+            // #623: read the candidate's live scan cursor BEFORE the wallet is
+            // committed, so a cancelled read leaves nothing half-activated.
+            // Only the live cursor of the running (active) network is used; the
+            // candidate's registeredFromBlock has no network column and may
+            // belong to the other chain. The network is recorded with the
+            // cursor so it is only ever applied to that network's row. A batch
+            // restore passes the snapshot it took before the first activation.
+            val candidate = if (explicitIndex != null) {
+                subAccountCandidateDao.getForParent(parentWalletId)
+                    .firstOrNull { it.derivationPath == SubAccountDiscovery.accountPath(nextIndex) }
+            } else null
+            val snapshot = candidate?.let {
+                cursorSnapshot ?: snapshotCandidateCursors(listOf(it.scriptArgs))
+            }
+            val cursorNetwork = snapshot?.network
+            val discoveredCursor: Long? = candidate?.let { snapshot?.cursors?.get(it.scriptArgs) }
+
             val persistResult = persistKeys(Creation(entity.copy(isActive = false), expectedParent ?: parent), bundle)
             if (persistResult !is WalletKeyWriter.Result.Success) {
                 throw WalletKeyWriter.PersistException(persistResult)
@@ -424,19 +459,50 @@ class WalletRepository @Inject constructor(
                     // storage); without a progress row the fresh wallet
                     // registered from the window start and re-scanned ~200k
                     // blocks the device had just covered (device-test 2026-07).
-                    runCatching {
+                    //
+                    // #623: never start the child above its own scan progress.
+                    // The candidate may have turned FOUND while its cursor was
+                    // still far below the parent's height, so start at the
+                    // lower of the two (see DiscoveredProgress). Only the live
+                    // cursor is used, and only for the active network: it is
+                    // read from the running light client. The candidate's
+                    // registeredFromBlock has no network column (it keeps the
+                    // lowest height across networks), so it may belong to the
+                    // other chain and is not used here. With no usable cursor no
+                    // row is copied and the child registers from the copied
+                    // mode's start (the parent's lightStartBlockNumber is the last
+                    // re-registration point, not its coverage, so it is no
+                    // fallback). A cursor read on another network (a switch
+                    // committed in between) is not usable. The other network's
+                    // row is never copied.
+                    // The cursor was read before the wallet was committed (see
+                    // discoveredCursor), so nothing below can be cancelled
+                    // half-way through activation.
+                    kotlinx.coroutines.withContext(kotlinx.coroutines.NonCancellable) {
+                    try {
                         val spDao = appDatabase.syncProgressDao()
-                        for (net in listOf(NetworkType.MAINNET, NetworkType.TESTNET)) {
+                        for (net in listOf(walletPreferences.getSelectedNetwork())) {
+                            val cursor = discoveredCursor.takeIf { net == cursorNetwork }
                             spDao.get(parentWalletId, net.name)?.let { parentRow ->
+                                val start = DiscoveredProgress.childStart(
+                                    parentSaved = parentRow.localSavedBlockNumber,
+                                    cursor = cursor,
+                                    registeredFromBlock = 0L,
+                                ) ?: return@let
                                 spDao.upsert(
                                     parentRow.copy(
                                         walletId = walletId,
+                                        lightStartBlockNumber = minOf(parentRow.lightStartBlockNumber, start),
+                                        localSavedBlockNumber = start,
                                         updatedAt = System.currentTimeMillis(),
                                     )
                                 )
                             }
                         }
-                    }.onFailure { logger.w(TAG, "Progress inherit failed (non-fatal)", it) }
+                    } catch (e: Exception) {
+                        logger.w(TAG, "Progress inherit failed (non-fatal)", e)
+                    }
+                    }
                 } else {
                     markFreshWalletSyncMode(walletId)
                 }
