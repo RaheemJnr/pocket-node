@@ -342,7 +342,9 @@ object AppModule {
         syncEngine: com.rjnr.pocketnode.data.sync.SyncEngine,
         startupReconciler: com.rjnr.pocketnode.data.gateway.StartupReconciler,
         logger: Logger,
-    ): GatewayRepository = GatewayRepository(keyManager, walletPreferences, json, cacheManager, walletMigrationHelper, walletDao, appDatabase, syncProgressDao, sendPipeline, syncCoordinator, daoGateway, gapLimitGateway, lightClient, ledgerReader, subAccountReconciler, syncServiceCommands, nodeLifecycle, syncEngine, startupReconciler, logger)
+        // The Hilt singleton that VerificationCacheGate and WalletRepository invalidate.
+        recoveryLifetime: com.rjnr.pocketnode.data.gateway.DaoRecoveryLifetime,
+    ): GatewayRepository = GatewayRepository(keyManager, walletPreferences, json, cacheManager, walletMigrationHelper, walletDao, appDatabase, syncProgressDao, sendPipeline, syncCoordinator, daoGateway, gapLimitGateway, lightClient, ledgerReader, subAccountReconciler, syncServiceCommands, nodeLifecycle, syncEngine, startupReconciler, logger, recoveryLifetime)
 
     /**
      * Production activity probe for sub-account discovery (#82 phase 2):

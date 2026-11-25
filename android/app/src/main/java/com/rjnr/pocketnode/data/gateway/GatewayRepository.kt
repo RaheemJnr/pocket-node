@@ -78,7 +78,9 @@ class GatewayRepository @Inject constructor(
     private val syncEngine: SyncEngine,
     private val startupReconciler: StartupReconciler,
     private val logger: Logger,
-    private val recoveryLifetime: DaoRecoveryLifetime = DaoRecoveryLifetime(),
+    // No default: a private instance would never see the app singleton's
+    // invalidations (VerificationCacheGate, WalletRepository).
+    private val recoveryLifetime: DaoRecoveryLifetime,
 ) : TipSource, SyncPollSource {
 
     /** Read-only unverified history and durable revalidation state for presentation. */
@@ -956,8 +958,7 @@ class GatewayRepository @Inject constructor(
         ).getOrThrow()
 
         check(recoveryLifetime.currentRevision() == balanceRevision) { "Balance coverage was invalidated" }
-        cacheManager.cacheBalance(resp, network.name, walletId = wId)
-        check(recoveryLifetime.currentRevision() == balanceRevision) { "Balance coverage was invalidated" }
+        cacheBalanceIfCurrent(resp, network, wId, balanceRevision)
         recoveryLifetime.ifCurrent(balanceRevision) {
             if (activeWalletId == wId && currentNetwork == network) {
                 balanceCacheUsable = true
@@ -989,10 +990,26 @@ class GatewayRepository @Inject constructor(
         val network = currentNetwork
         val resp = ledgerReader.readBalanceForWallet(walletId, address, network).getOrThrow()
         check(recoveryLifetime.currentRevision() == balanceRevision) { "Balance coverage was invalidated" }
-        cacheManager.cacheBalance(resp, network.name, walletId = walletId)
-        check(recoveryLifetime.currentRevision() == balanceRevision) { "Balance coverage was invalidated" }
+        cacheBalanceIfCurrent(resp, network, walletId, balanceRevision)
         resp
     } }
+
+    /**
+     * Writes [resp] to the balance cache, then re-checks the coverage revision.
+     * The write is a suspending Room call, so an invalidation can land while it
+     * runs, after the caller's own check. Writing first and removing the row on
+     * a revision change keeps a balance read under old coverage out of the
+     * cache. An invalidation after the re-check is ordered after the write, so
+     * the invalidator's own cache cleanup covers it. Callers hold
+     * [balanceRefreshMutex], so no newer write for the same key can be removed.
+     */
+    private suspend fun cacheBalanceIfCurrent(resp: BalanceResponse, network: NetworkType, walletId: String, balanceRevision: Long) {
+        cacheManager.cacheBalance(resp, network.name, walletId = walletId)
+        if (recoveryLifetime.currentRevision() != balanceRevision) {
+            withContext(NonCancellable) { cacheManager.deleteBalance(network.name, walletId = walletId) }
+            throw IllegalStateException("Balance coverage was invalidated")
+        }
+    }
 
     // Simplified Account Status - JNI doesn't give sync progress easily
     private var scriptRecoveryRegistrationPending = false
