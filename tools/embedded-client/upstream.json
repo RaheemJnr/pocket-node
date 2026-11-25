@@ -2,7 +2,7 @@
   "upstream_repository": "nervosnetwork/ckb-light-client",
   "upstream_commit": "9ce5fc6507ce1379dd8bd4b947426078bb2062e8",
   "archive_sha256": "24cb4a3043a96b42de717e8db4f60dcc6b5b2056265102960a97a9a3cad85f0f",
-  "mobile_patch_sha256": "0a860f3b861183fcd175498188029d4abb051bdc79da5dad26e1d8af346627ae",
+  "mobile_patch_sha256": "529ffd0731e451cfdd3a983f5d0a0c41822472521bb29dd7c88aa98025056d87",
   "upstream_files": {
     ".github/codecov.yaml": "35efb16290fe39a272f173155117104119f4de0d46725bf21a4fcb201f873abe",
     ".github/workflows/ci.yaml": "28eb6793d401496217141e70079ad646d23766aadd16e8ea63a63f813eef3399",
@@ -129,7 +129,7 @@
     ".cargo/audit.toml": "cc91a608ccbbf42ea3e54e9cc4b7d808f4ca9ffaebe2c419b3012a011f02c28a",
     ".cargo/config.toml": "33353ac257db007afc0f109c5d5d8f91bcbbe71e2b8bdfc422f6c9ff0bb14ecc",
     ".gitignore": "8d1cd8356702739cf5d6f6da84015ae13d95df30cdfa25200fc91d2b15a05acb",
-    "Cargo.lock": "7d8a3511cb958dec282799ff02cb7f9b3fa1d4cdb1b58e24dc05e15adb560bbf",
+    "Cargo.lock": "512828ce6ce059d700894e1d4c3438d0478f87a02728818610c383af115dc3f9",
     "Cargo.toml": "9816b0b945547466a4b974398f89b13e7391b5818999d5716455ffe171abd3ea",
     "LICENSE": "958ae737b5f5dbcf47c1b01ffc8393b239fb3d95ed75a9151669f99e56ab3970",
     "README.md": "9525172fe0a15091e3ce3ed4862c618225fe431e3356e3331587cd5168be4390",

@@ -597,7 +597,7 @@ index d9d7f0a2c4c030fbdd25931fa77b04ccbace5871..00000000000000000000000000000000
 -- Steps: Format check, Clippy, Native tests, Wasm tests, Code coverage
 -- All warnings treated as errors with `RUSTFLAGS: -D warnings`
 diff --git a/Cargo.lock b/Cargo.lock
-index 2fcddca8971bf079cc31b8488366b1cea51aa2d5..bdf4045c158d5384b0e399863597baf0e84a286b 100644
+index 2fcddca8971bf079cc31b8488366b1cea51aa2d5..bdea02e6f351c6268b3e6cb7a29d16adee44c263 100644
 --- a/Cargo.lock
 +++ b/Cargo.lock
 @@ -2,15 +2,6 @@
@@ -1475,7 +1475,16 @@ index 2fcddca8971bf079cc31b8488366b1cea51aa2d5..bdf4045c158d5384b0e399863597baf0
  [[package]]
  name = "foreign-types"
  version = "0.3.2"
-@@ -1997,6 +1974,15 @@ dependencies = [
+@@ -1990,13 +1967,22 @@ checksum = "00b0228411908ca8685dba7fc2cdd70ec9990a6e753e89b6ac91a84c40fbaf4b"
+ 
+ [[package]]
+ name = "form_urlencoded"
+-version = "1.2.1"
++version = "1.2.3"
+ source = "registry+https://github.com/rust-lang/crates.io-index"
+-checksum = "e13624c2627564efccf4934284bdd98cbaa14e79b0b5a141218e507b3a823456"
++checksum = "afa489199eaffb1211795df1c6236ce1ad0d41a6fa45250add73e3b02420f06e"
+ dependencies = [
   "percent-encoding",
  ]
  
@@ -1908,7 +1917,7 @@ index 2fcddca8971bf079cc31b8488366b1cea51aa2d5..bdf4045c158d5384b0e399863597baf0
  ]
  
  [[package]]
-@@ -2679,12 +2595,6 @@ dependencies = [
+@@ -2679,17 +2595,11 @@ dependencies = [
   "web-sys",
  ]
  
@@ -1920,7 +1929,14 @@ index 2fcddca8971bf079cc31b8488366b1cea51aa2d5..bdf4045c158d5384b0e399863597baf0
 -
  [[package]]
  name = "idna"
- version = "1.0.3"
+-version = "1.0.3"
++version = "1.1.0"
+ source = "registry+https://github.com/rust-lang/crates.io-index"
+-checksum = "686f825264d630750a544639377bae737628043f20d38bbc029e8f29ea968a7e"
++checksum = "3b0875f23caa03898994f6ddc501886a45c7d3d62d04d2d90788d47be1b1e4de"
+ dependencies = [
+  "idna_adapter",
+  "smallvec",
 @@ -2714,7 +2624,7 @@ checksum = "76b0d7d4541def58a37bf8efc559683f21edce7c82f0d866c93ac21f7e098f93"
  dependencies = [
   "attohttpc",
@@ -2375,6 +2391,18 @@ index 2fcddca8971bf079cc31b8488366b1cea51aa2d5..bdf4045c158d5384b0e399863597baf0
   "libc",
   "redox_syscall 0.5.8",
   "smallvec",
+@@ -3443,9 +3267,9 @@ checksum = "19b17cddbe7ec3f8bc800887bab5e717348c95ea2ca0b1bf0837fb964dc67099"
+ 
+ [[package]]
+ name = "percent-encoding"
+-version = "2.3.1"
++version = "2.3.2"
+ source = "registry+https://github.com/rust-lang/crates.io-index"
+-checksum = "e3148f5046208a5d56bcfc03053e3ca6334e51da8dfb19b6cdc8b306fae3283e"
++checksum = "9b4f627cb1b25917193a259e49bdad08f671f8d9708acfd5fe0a8c1455d87220"
+ 
+ [[package]]
+ name = "phf"
 @@ -3507,7 +3331,7 @@ dependencies = [
   "phf_shared 0.12.1",
   "proc-macro2",
@@ -2813,7 +2841,8 @@ index 2fcddca8971bf079cc31b8488366b1cea51aa2d5..bdf4045c158d5384b0e399863597baf0
  name = "syn"
 -version = "2.0.96"
 +version = "2.0.119"
-+source = "registry+https://github.com/rust-lang/crates.io-index"
+ source = "registry+https://github.com/rust-lang/crates.io-index"
+-checksum = "d5d0adab1ae378d7f53bdebc67a39f1f151407ef230f0ce2883572f5d8985c80"
 +checksum = "872831b642d1a07999a962a351ed35b955ea2cfc8f3862091e2a240a84f17297"
 +dependencies = [
 + "proc-macro2",
@@ -2824,8 +2853,7 @@ index 2fcddca8971bf079cc31b8488366b1cea51aa2d5..bdf4045c158d5384b0e399863597baf0
 +[[package]]
 +name = "syn"
 +version = "3.0.5"
- source = "registry+https://github.com/rust-lang/crates.io-index"
--checksum = "d5d0adab1ae378d7f53bdebc67a39f1f151407ef230f0ce2883572f5d8985c80"
++source = "registry+https://github.com/rust-lang/crates.io-index"
 +checksum = "12df2e0110f65b775f769bb17ef989067a1d931b2eb822bd4346631eeada89f9"
  dependencies = [
   "proc-macro2",
@@ -3270,7 +3298,25 @@ index 2fcddca8971bf079cc31b8488366b1cea51aa2d5..bdf4045c158d5384b0e399863597baf0
  [[package]]
  name = "universal-hash"
  version = "0.5.1"
-@@ -4856,43 +4781,6 @@ version = "0.2.15"
+@@ -4816,14 +4741,15 @@ checksum = "8ecb6da28b8a351d773b68d5825ac39017e680750f980f3a1a85cd8dd28a47c1"
+ 
+ [[package]]
+ name = "url"
+-version = "2.5.4"
++version = "2.5.9"
+ source = "registry+https://github.com/rust-lang/crates.io-index"
+-checksum = "32f8b686cadd1473f4bd0117a5d28d36b1ade384ea9b5069a1c40aefed7fda60"
++checksum = "f00cd2407bb42c0ef17be88d4cf020f5cceffd121665bac9b8b9493a369b3b1a"
+ dependencies = [
+  "form_urlencoded",
+  "idna",
+  "percent-encoding",
+  "serde",
++ "serde_derive",
+ ]
+ 
+ [[package]]
+@@ -4856,43 +4782,6 @@ version = "0.2.15"
  source = "registry+https://github.com/rust-lang/crates.io-index"
  checksum = "accd4ea62f7bb7a82fe23066fb0957d48ef677f6eeb8215f372f52e48bb32426"
  
@@ -3314,7 +3360,7 @@ index 2fcddca8971bf079cc31b8488366b1cea51aa2d5..bdf4045c158d5384b0e399863597baf0
  [[package]]
  name = "version_check"
  version = "0.9.5"
-@@ -4945,7 +4833,7 @@ version = "0.2.100"
+@@ -4945,7 +4834,7 @@ version = "0.2.100"
  source = "registry+https://github.com/rust-lang/crates.io-index"
  checksum = "1edc8929d7499fc4e8f0be2262a241556cfc54a0bea223790e71446f2aab1ef5"
  dependencies = [
@@ -3323,7 +3369,7 @@ index 2fcddca8971bf079cc31b8488366b1cea51aa2d5..bdf4045c158d5384b0e399863597baf0
   "once_cell",
   "rustversion",
   "wasm-bindgen-macro",
-@@ -4961,7 +4849,7 @@ dependencies = [
+@@ -4961,7 +4850,7 @@ dependencies = [
   "log",
   "proc-macro2",
   "quote",
@@ -3332,7 +3378,7 @@ index 2fcddca8971bf079cc31b8488366b1cea51aa2d5..bdf4045c158d5384b0e399863597baf0
   "wasm-bindgen-shared",
  ]
  
-@@ -4971,7 +4859,7 @@ version = "0.4.50"
+@@ -4971,7 +4860,7 @@ version = "0.4.50"
  source = "registry+https://github.com/rust-lang/crates.io-index"
  checksum = "555d470ec0bc3bb57890405e5d4322cc9ea83cebb085523ced7be4144dac1e61"
  dependencies = [
@@ -3341,7 +3387,7 @@ index 2fcddca8971bf079cc31b8488366b1cea51aa2d5..bdf4045c158d5384b0e399863597baf0
   "js-sys",
   "once_cell",
   "wasm-bindgen",
-@@ -4996,7 +4884,7 @@ checksum = "8ae87ea40c9f689fc23f209965b6fb8a99ad69aeeb0231408be24920604395de"
+@@ -4996,7 +4885,7 @@ checksum = "8ae87ea40c9f689fc23f209965b6fb8a99ad69aeeb0231408be24920604395de"
  dependencies = [
   "proc-macro2",
   "quote",
@@ -3350,7 +3396,7 @@ index 2fcddca8971bf079cc31b8488366b1cea51aa2d5..bdf4045c158d5384b0e399863597baf0
   "wasm-bindgen-backend",
   "wasm-bindgen-shared",
  ]
-@@ -5031,18 +4919,7 @@ checksum = "17d5042cc5fa009658f9a7333ef24291b1291a25b6382dd68862a7f3b969f69b"
+@@ -5031,18 +4920,7 @@ checksum = "17d5042cc5fa009658f9a7333ef24291b1291a25b6382dd68862a7f3b969f69b"
  dependencies = [
   "proc-macro2",
   "quote",
@@ -3370,7 +3416,7 @@ index 2fcddca8971bf079cc31b8488366b1cea51aa2d5..bdf4045c158d5384b0e399863597baf0
  ]
  
  [[package]]
-@@ -5065,6 +4942,15 @@ dependencies = [
+@@ -5065,6 +4943,15 @@ dependencies = [
   "wasm-bindgen",
  ]
  
@@ -3386,7 +3432,7 @@ index 2fcddca8971bf079cc31b8488366b1cea51aa2d5..bdf4045c158d5384b0e399863597baf0
  [[package]]
  name = "which"
  version = "4.4.2"
-@@ -5139,7 +5025,7 @@ checksum = "83577b051e2f49a058c308f17f273b570a6a758386fc291b5f6a934dd84e48c1"
+@@ -5139,7 +5026,7 @@ checksum = "83577b051e2f49a058c308f17f273b570a6a758386fc291b5f6a934dd84e48c1"
  dependencies = [
   "proc-macro2",
   "quote",
@@ -3395,7 +3441,7 @@ index 2fcddca8971bf079cc31b8488366b1cea51aa2d5..bdf4045c158d5384b0e399863597baf0
  ]
  
  [[package]]
-@@ -5150,7 +5036,7 @@ checksum = "cb26fd936d991781ea39e87c3a27285081e3c0da5ca0fcbc02d368cc6f52ff01"
+@@ -5150,7 +5037,7 @@ checksum = "cb26fd936d991781ea39e87c3a27285081e3c0da5ca0fcbc02d368cc6f52ff01"
  dependencies = [
   "proc-macro2",
   "quote",
@@ -3404,7 +3450,7 @@ index 2fcddca8971bf079cc31b8488366b1cea51aa2d5..bdf4045c158d5384b0e399863597baf0
  ]
  
  [[package]]
-@@ -5177,6 +5063,15 @@ dependencies = [
+@@ -5177,6 +5064,15 @@ dependencies = [
   "windows-targets 0.53.0",
  ]
  
@@ -3420,7 +3466,7 @@ index 2fcddca8971bf079cc31b8488366b1cea51aa2d5..bdf4045c158d5384b0e399863597baf0
  [[package]]
  name = "windows-sys"
  version = "0.52.0"
-@@ -5195,6 +5090,30 @@ dependencies = [
+@@ -5195,6 +5091,30 @@ dependencies = [
   "windows-targets 0.52.6",
  ]
  
@@ -3451,7 +3497,7 @@ index 2fcddca8971bf079cc31b8488366b1cea51aa2d5..bdf4045c158d5384b0e399863597baf0
  [[package]]
  name = "windows-targets"
  version = "0.52.6"
-@@ -5227,6 +5146,12 @@ dependencies = [
+@@ -5227,6 +5147,12 @@ dependencies = [
   "windows_x86_64_msvc 0.53.0",
  ]
  
@@ -3464,7 +3510,7 @@ index 2fcddca8971bf079cc31b8488366b1cea51aa2d5..bdf4045c158d5384b0e399863597baf0
  [[package]]
  name = "windows_aarch64_gnullvm"
  version = "0.52.6"
-@@ -5239,6 +5164,12 @@ version = "0.53.0"
+@@ -5239,6 +5165,12 @@ version = "0.53.0"
  source = "registry+https://github.com/rust-lang/crates.io-index"
  checksum = "86b8d5f90ddd19cb4a147a5fa63ca848db3df085e25fee3cc10b39b6eebae764"
  
@@ -3477,7 +3523,7 @@ index 2fcddca8971bf079cc31b8488366b1cea51aa2d5..bdf4045c158d5384b0e399863597baf0
  [[package]]
  name = "windows_aarch64_msvc"
  version = "0.52.6"
-@@ -5251,6 +5182,12 @@ version = "0.53.0"
+@@ -5251,6 +5183,12 @@ version = "0.53.0"
  source = "registry+https://github.com/rust-lang/crates.io-index"
  checksum = "c7651a1f62a11b8cbd5e0d42526e55f2c99886c77e007179efff86c2b137e66c"
  
@@ -3490,7 +3536,7 @@ index 2fcddca8971bf079cc31b8488366b1cea51aa2d5..bdf4045c158d5384b0e399863597baf0
  [[package]]
  name = "windows_i686_gnu"
  version = "0.52.6"
-@@ -5275,6 +5212,12 @@ version = "0.53.0"
+@@ -5275,6 +5213,12 @@ version = "0.53.0"
  source = "registry+https://github.com/rust-lang/crates.io-index"
  checksum = "9ce6ccbdedbf6d6354471319e781c0dfef054c81fbc7cf83f338a4296c0cae11"
  
@@ -3503,7 +3549,7 @@ index 2fcddca8971bf079cc31b8488366b1cea51aa2d5..bdf4045c158d5384b0e399863597baf0
  [[package]]
  name = "windows_i686_msvc"
  version = "0.52.6"
-@@ -5287,6 +5230,12 @@ version = "0.53.0"
+@@ -5287,6 +5231,12 @@ version = "0.53.0"
  source = "registry+https://github.com/rust-lang/crates.io-index"
  checksum = "581fee95406bb13382d2f65cd4a908ca7b1e4c2f1917f143ba16efe98a589b5d"
  
@@ -3516,7 +3562,7 @@ index 2fcddca8971bf079cc31b8488366b1cea51aa2d5..bdf4045c158d5384b0e399863597baf0
  [[package]]
  name = "windows_x86_64_gnu"
  version = "0.52.6"
-@@ -5299,6 +5248,12 @@ version = "0.53.0"
+@@ -5299,6 +5249,12 @@ version = "0.53.0"
  source = "registry+https://github.com/rust-lang/crates.io-index"
  checksum = "2e55b5ac9ea33f2fc1716d1742db15574fd6fc8dadc51caab1c16a3d3b4190ba"
  
@@ -3529,7 +3575,7 @@ index 2fcddca8971bf079cc31b8488366b1cea51aa2d5..bdf4045c158d5384b0e399863597baf0
  [[package]]
  name = "windows_x86_64_gnullvm"
  version = "0.52.6"
-@@ -5311,6 +5266,12 @@ version = "0.53.0"
+@@ -5311,6 +5267,12 @@ version = "0.53.0"
  source = "registry+https://github.com/rust-lang/crates.io-index"
  checksum = "0a6e035dd0599267ce1ee132e51c27dd29437f63325753051e71dd9e42406c57"
  
@@ -3542,7 +3588,7 @@ index 2fcddca8971bf079cc31b8488366b1cea51aa2d5..bdf4045c158d5384b0e399863597baf0
  [[package]]
  name = "windows_x86_64_msvc"
  version = "0.52.6"
-@@ -5325,9 +5286,15 @@ checksum = "271414315aff87387382ec3d271b52d7ae78726f5d44ac98b4f4030c91880486"
+@@ -5325,9 +5287,15 @@ checksum = "271414315aff87387382ec3d271b52d7ae78726f5d44ac98b4f4030c91880486"
  
  [[package]]
  name = "winnow"
@@ -3560,7 +3606,7 @@ index 2fcddca8971bf079cc31b8488366b1cea51aa2d5..bdf4045c158d5384b0e399863597baf0
  dependencies = [
   "memchr",
  ]
-@@ -5406,7 +5373,7 @@ checksum = "2380878cad4ac9aac1e2435f3eb4020e8374b5f13c296cb75b4620ff8e229154"
+@@ -5406,7 +5374,7 @@ checksum = "2380878cad4ac9aac1e2435f3eb4020e8374b5f13c296cb75b4620ff8e229154"
  dependencies = [
   "proc-macro2",
   "quote",
@@ -3569,7 +3615,7 @@ index 2fcddca8971bf079cc31b8488366b1cea51aa2d5..bdf4045c158d5384b0e399863597baf0
   "synstructure",
  ]
  
-@@ -5428,7 +5395,7 @@ checksum = "fa4f8080344d4671fb4e831a13ad1e68092748387dfc4f55e356242fae12ce3e"
+@@ -5428,7 +5396,7 @@ checksum = "fa4f8080344d4671fb4e831a13ad1e68092748387dfc4f55e356242fae12ce3e"
  dependencies = [
   "proc-macro2",
   "quote",
@@ -3578,7 +3624,7 @@ index 2fcddca8971bf079cc31b8488366b1cea51aa2d5..bdf4045c158d5384b0e399863597baf0
  ]
  
  [[package]]
-@@ -5448,7 +5415,7 @@ checksum = "595eed982f7d355beb85837f651fa22e90b3c044842dc7f2c2842c086f295808"
+@@ -5448,7 +5416,7 @@ checksum = "595eed982f7d355beb85837f651fa22e90b3c044842dc7f2c2842c086f295808"
  dependencies = [
   "proc-macro2",
   "quote",
@@ -3587,7 +3633,7 @@ index 2fcddca8971bf079cc31b8488366b1cea51aa2d5..bdf4045c158d5384b0e399863597baf0
   "synstructure",
  ]
  
-@@ -5469,7 +5436,7 @@ checksum = "ce36e65b0d2999d2aafac989fb249189a141aee1f53c612c1f37d72631959f69"
+@@ -5469,7 +5437,7 @@ checksum = "ce36e65b0d2999d2aafac989fb249189a141aee1f53c612c1f37d72631959f69"
  dependencies = [
   "proc-macro2",
   "quote",
@@ -3596,7 +3642,7 @@ index 2fcddca8971bf079cc31b8488366b1cea51aa2d5..bdf4045c158d5384b0e399863597baf0
  ]
  
  [[package]]
-@@ -5491,5 +5458,11 @@ checksum = "6eafa6dfb17584ea3e2bd6e76e0cc15ad7af12b09abdd1ca55961bed9b1063c6"
+@@ -5491,5 +5459,11 @@ checksum = "6eafa6dfb17584ea3e2bd6e76e0cc15ad7af12b09abdd1ca55961bed9b1063c6"
  dependencies = [
   "proc-macro2",
   "quote",
