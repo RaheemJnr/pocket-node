@@ -279,3 +279,9 @@ private final class LifecycleFixture {
         try? FileManager.default.removeItem(at: directory)
     }
 }
+
+/// `HistoryRecoveryJob` is a Kotlin `data class` (a Room row) with `val`
+/// properties only: Strings, Longs and nullable Longs/Strings. The probe above
+/// returns it from a nonisolated async call into these main-actor tests, which
+/// Xcode 16 rejects for a non-`Sendable` result. Only the tests hand it across.
+extension HistoryRecoveryJob: @retroactive @unchecked Sendable {}
