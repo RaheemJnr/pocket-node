@@ -126,6 +126,36 @@ class VerificationCacheGateTest {
         gate.reconcile(client("b".repeat(32)), NetworkType.MAINNET)
         assertNull(db.syncProgressDao().get("inactive", "MAINNET"))
     }
+    /**
+     * The light client sets aside a store it cannot use and starts a fresh one,
+     * which gets a new verification generation. The next reconcile must treat
+     * that as a handoff: verified balances go, and every wallet's history
+     * recovery is due again even if it had completed on the old store.
+     */
+    @Test fun `fresh store generation after a set aside re-fences caches and recreates recovery`() = runTest {
+        db.walletDao().insert(com.rjnr.pocketnode.data.database.entity.WalletEntity(
+            walletId = "active", name = "active", type = "mnemonic", derivationPath = "m/44'/309'/0'/0/0",
+            parentWalletId = null, accountIndex = 0, mainnetAddress = "ckb1a", testnetAddress = "ckt1a",
+            isActive = true, createdAt = 0L, lastActiveAt = 0L))
+        val gate = VerificationCacheGate(context, db)
+        gate.reconcile(client("a".repeat(32)), NetworkType.MAINNET)
+        val sql = db.openHelper.writableDatabase
+        sql.execSQL("UPDATE history_recovery_jobs SET status = 'COMPLETE', targetBlock = 20 WHERE walletId = 'active' AND network = 'MAINNET'")
+        db.balanceCacheDao().upsert(com.rjnr.pocketnode.data.database.entity.BalanceCacheEntity(
+            "active", "MAINNET", "ckb1a", "100000000", "1", "0x10", 1L))
+        db.syncProgressDao().upsert(SyncProgressEntity("active", "MAINNET", 100, 900, 1))
+
+        gate.reconcile(client("f".repeat(32)), NetworkType.MAINNET)
+
+        assertTrue(gate.isReady("MAINNET"))
+        assertNull(db.balanceCacheDao().getByWalletAndNetwork("active", "MAINNET"))
+        assertNull(db.syncProgressDao().get("active", "MAINNET"))
+        val job = db.historyRecovery().job("active", "MAINNET")!!
+        assertEquals("PENDING", job.status)
+        assertEquals("f".repeat(32), job.generation)
+        assertNull(job.targetBlock)
+        assertEquals("f".repeat(32), db.historyRecovery().generation("MAINNET"))
+    }
     @Test fun `malformed epoch leaves gate closed and data untouched`() = runTest {
         seed()
         val gate = VerificationCacheGate(context, db)

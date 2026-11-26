@@ -343,4 +343,63 @@ class HistoryRecoveryContractTest {
         assertFalse(db.historyRecovery().prepare("MAINNET", generation))
     }
 
+    private val childScript = script.copy(args = "0x" + "ab".repeat(20))
+    private val siblingScript = script.copy(args = "0x" + "cd".repeat(20))
+
+    /** A FOUND candidate for the child and a PENDING sibling, each with a discovery job on both networks. */
+    private suspend fun candidatesWithJobs() {
+        db.subAccountCandidateDao().insertAll(listOf(
+            com.rjnr.pocketnode.data.database.entity.SubAccountCandidateEntity("active", "m/44'/309'/1'/0/0", 1, childScript.args, "FOUND", 1),
+            com.rjnr.pocketnode.data.database.entity.SubAccountCandidateEntity("active", "m/44'/309'/2'/0/0", 2, siblingScript.args, "PENDING", 1),
+        ))
+        for (network in listOf("MAINNET", "TESTNET")) {
+            db.historyRecovery().ensureScript("active", network, json.encodeToString(childScript), generation)
+            db.historyRecovery().ensureScript("active", network, json.encodeToString(siblingScript), generation)
+        }
+    }
+
+    private suspend fun scriptJobs(network: String) = db.historyRecovery().scripts(network).map { it.scriptJson }.toSet()
+
+    @Test fun `restoring a candidate retires its recovery job so the child registers from its seeded start`() = runTest {
+        jobs()
+        candidatesWithJobs()
+
+        db.subAccountCandidateDao().markRestored("active", "m/44'/309'/1'/0/0")
+
+        assertEquals("RESTORED", db.subAccountCandidateDao().getForParent("active").first { it.accountIndex == 1 }.state)
+        for (network in listOf("MAINNET", "TESTNET")) {
+            assertEquals("Only the restored candidate's job is retired", setOf(json.encodeToString(siblingScript)), scriptJobs(network))
+        }
+
+        // The restored child is a wallet now; its seeded start (#624) applies.
+        val payloads = mutableListOf<String>()
+        val api = mockk<LightClientApi>(relaxed = true) {
+            every { getTipHeader() } returns tip()
+            every { setScripts(capture(payloads), any()) } returns true
+        }
+        val coordinator = SyncCoordinator(registry(), mockk(relaxed = true), RoomSubAccountCandidateStore(db.subAccountCandidateDao()),
+            mockk(relaxed = true), api, mockk(relaxed = true), json, NoopLogger, historyRecovery = db.historyRecovery())
+        assertTrue(coordinator.setScriptsAndRecord(listOf(JniScriptStatus(childScript, "lock", "0x2710")), listOf("child"),
+            SyncCoordinator.CMD_SET_SCRIPTS_ALL, NetworkType.MAINNET))
+        val sent = json.decodeFromString<List<JniScriptStatus>>(payloads.single()).single { it.script == childScript }
+        assertEquals("0x2710", sent.blockNumber)
+        assertFalse(sent.historyRecovery)
+        // Registration must not re-create the retired job.
+        assertFalse(json.encodeToString(childScript) in scriptJobs("MAINNET"))
+    }
+
+    @Test fun `startup repair retires jobs of candidates already restored`() = runTest {
+        jobs()
+        candidatesWithJobs()
+        // An older build marked the child RESTORED without retiring its job.
+        db.subAccountCandidateDao().updateState("active", "m/44'/309'/1'/0/0", "RESTORED")
+        assertTrue(json.encodeToString(childScript) in scriptJobs("MAINNET"))
+
+        assertEquals(2, db.subAccountCandidateDao().retireRestoredRecoveryJobs())
+
+        for (network in listOf("MAINNET", "TESTNET")) {
+            assertEquals(setOf(json.encodeToString(siblingScript)), scriptJobs(network))
+        }
+        assertEquals(0, db.subAccountCandidateDao().retireRestoredRecoveryJobs())
+    }
 }

@@ -514,11 +514,9 @@ class WalletRepository @Inject constructor(
             // Retire the discovery candidate at this index if one exists (any
             // creation at index N supersedes the candidate row; IGNORE-on-insert
             // means a plain no-candidate create is a harmless 0-row update).
+            // Its discovery recovery job is retired in the same transaction.
             runCatching {
-                subAccountCandidateDao.updateState(
-                    parentWalletId, SubAccountDiscovery.accountPath(nextIndex),
-                    com.rjnr.pocketnode.data.database.entity.SubAccountCandidateEntity.STATE_RESTORED,
-                )
+                subAccountCandidateDao.markRestored(parentWalletId, SubAccountDiscovery.accountPath(nextIndex))
             }
 
             logger.d(TAG, "Created sub-account: $walletId (parent: $parentWalletId, index: $nextIndex)")

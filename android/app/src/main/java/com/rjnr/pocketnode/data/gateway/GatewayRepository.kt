@@ -187,6 +187,12 @@ class GatewayRepository @Inject constructor(
                 // Delete ESP files after successful migration
                 keyManager.deleteEspFilesIfSafe()
                 reassignActiveWallet(walletPreferences.getActiveWalletId() ?: "")
+                // A candidate restored by an older build kept its discovery
+                // recovery job, which pins the restored child to genesis
+                // recovery. Retire those before the first registration.
+                runCatching { appDatabase.subAccountCandidateDao().retireRestoredRecoveryJobs() }
+                    .onSuccess { if (it > 0) logger.i(TAG, "Retired $it recovery jobs of restored sub-accounts") }
+                    .onFailure { logger.w(TAG, "Restored recovery job repair failed (non-fatal)", it) }
 
                 // Periodic VACUUM (~monthly) to reclaim fragmented space from
                 // tombstoned tx/cell rows. Throttled so it doesn't run on
