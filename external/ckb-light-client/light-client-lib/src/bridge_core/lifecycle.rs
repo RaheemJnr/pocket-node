@@ -146,8 +146,13 @@ pub fn init(
     })?;
 
     // Check the store's format version before the storage layer opens it. A
-    // store this build cannot read is set aside (renamed, never deleted) and a
-    // fresh one is created, so init carries on either way.
+    // store this build cannot read (corrupt, newer, or an old RocksDB
+    // directory) is set aside (renamed, never deleted) and a fresh one is
+    // created; initialize_fresh below then gives it a new verification
+    // generation, so the apps re-fence their caches. Transient I/O and lock
+    // errors fail this init with the store kept in place. A failing upgrade
+    // step also fails init, until the same step has failed on
+    // UPGRADE_FAILURE_LAUNCHES consecutive launches; then it is set aside.
     let store_action = ensure_store_version(&run_env.store.path).map_err(|e| {
         error!("Failed to check store format version: {}", e);
         e

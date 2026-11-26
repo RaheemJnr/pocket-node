@@ -79,8 +79,15 @@ outside this operation. Registration recomputes the start using existing setting
 The 2-to-3 upgrade preserves verified evidence and the verification generation,
 and atomically stamps a required scoped-scan migration gate. Startup installs
 per-script progress before protocols run; interrupted genesis indexing remains
-fenced until resumed. Unsupported or unreadable production stores are preserved
-in place and startup fails closed.
+fenced until resumed. A store this build cannot read (corrupt or non-SQLite, a
+newer format, or an old RocksDB directory) is renamed aside, never deleted, and
+replaced by an empty store with a new verification generation, so both apps
+re-fence their caches and recreate history recovery. Every set-aside copy is
+kept; nothing caps or removes them. Transient I/O and lock errors fail startup
+with the store in place. A failing upgrade step also fails startup, until the
+same step has failed on 3 consecutive launches (counted in
+`store.db.upgrade-failures` next to the store, reset on success); the store is
+then set aside.
 
 A failed database transaction rolls back. A failed applied-generation write keeps
 the UI/registration gate closed and retries cleanup on the next attempt. This is
