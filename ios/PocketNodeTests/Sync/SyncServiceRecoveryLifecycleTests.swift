@@ -165,6 +165,36 @@ final class SyncServiceRecoveryLifecycleTests: XCTestCase {
         service.shutdown()
     }
 
+    /// Codex P2: a wallet whose stored address does not parse must not close
+    /// the verified gate or clear the recovery state of the wallet that stays
+    /// active.
+    func testUnreadableAddressLeavesThePreviousWalletVerified() async throws {
+        let fixture = try LifecycleFixture()
+        defer { fixture.close() }
+        let probe = RecoveryLifecycleDatabase(directory: fixture.directory)
+        try await probe.prepare()
+        try await probe.seedPending(walletId: wallet.id)
+        try fixture.writeGeneration()
+        probe.close()
+        let service = fixture.service()
+        service.activate(wallet: wallet)
+        try await service.ensureVerifiedCache()
+        for _ in 0..<200 where service.recovery == nil { try await Task.sleep(for: .milliseconds(10)) }
+        XCTAssertNotNil(service.recovery)
+        let reads = fixture.api.verificationReads
+
+        let broken = WalletRecord(id: "broken-wallet", name: "Broken", type: WalletCreator.typeMnemonic,
+            derivationPath: "m/44'/309'/0'/0/0", mainnetAddress: "not-an-address",
+            testnetAddress: "not-an-address", mnemonicBackedUp: true, createdAt: 2)
+        service.activate(wallet: broken)
+
+        XCTAssertNotNil(service.lastError)
+        XCTAssertNotNil(service.recovery, "the active wallet's recovery state stays")
+        try await service.ensureVerifiedCache()
+        XCTAssertEqual(fixture.api.verificationReads, reads, "the active wallet's gate stayed open")
+        service.shutdown()
+    }
+
     private func waitForRegistration(_ api: RecoveryLifecycleApi) async throws {
         for _ in 0..<200 where api.lastStart == nil { try await Task.sleep(for: .milliseconds(10)) }
         XCTAssertNotNil(api.lastStart)
@@ -210,6 +240,9 @@ private final class RecoveryLifecycleApi: NSObject, LightClientApi, @unchecked S
     private let lock = NSLock()
     private var scripts = "[]"
     private var requests: [String] = []
+    private var rpcCalls = 0
+    /// How many times the verification epoch was read: one per gate reconcile.
+    var verificationReads: Int { lock.withLock { rpcCalls } }
     var lastStart: Int64? { lock.withLock {
         guard let raw = requests.last, let data = raw.data(using: .utf8),
               let rows = try? JSONSerialization.jsonObject(with: data) as? [[String: Any]],
@@ -221,7 +254,10 @@ private final class RecoveryLifecycleApi: NSObject, LightClientApi, @unchecked S
         lock.withLock { scripts = scriptsJson; requests.append(scriptsJson) }; return true
     }
     func getScripts() -> String? { lock.withLock { scripts } }
-    func callRpc(method: String) -> String? { "{\"result\":{\"version\":1,\"generation\":\"\(generationToken.get())\"}}" }
+    func callRpc(method: String) -> String? {
+        lock.withLock { rpcCalls += 1 }
+        return "{\"result\":{\"version\":1,\"generation\":\"\(generationToken.get())\"}}"
+    }
     func getTipHeader() -> String? {
         "{\"hash\":\"0x\(String(repeating: "a", count: 64))\",\"number\":\"0x7a120\",\"epoch\":\"0x0\",\"timestamp\":\"0x0\",\"parent_hash\":\"0x0\",\"transactions_root\":\"0x0\",\"proposals_hash\":\"0x0\",\"extra_hash\":\"0x0\",\"dao\":\"0x0\",\"nonce\":\"0x0\"}"
     }

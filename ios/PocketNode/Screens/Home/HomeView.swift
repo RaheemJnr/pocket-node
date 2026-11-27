@@ -26,6 +26,14 @@ struct HomeView: View {
             VStack(spacing: 16) {
                 walletCard
 
+                if let notice = model.storeResetNotice {
+                    Text(notice)
+                        .font(.footnote)
+                        .foregroundStyle(.secondary)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .accessibilityIdentifier("home.storeResetNotice")
+                }
+
                 if let recovery = model.recovery, recovery.isVisible {
                     HistoryRecoveryView(model: recovery, theme: theme)
                 }

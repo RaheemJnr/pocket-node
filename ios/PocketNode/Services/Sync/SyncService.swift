@@ -81,6 +81,8 @@ struct BalanceStatus: Equatable {
 @MainActor
 protocol SyncStatusProviding: AnyObject {
     var recovery: RecoveryPresentation? { get }
+    /// One-time notice that the light client set its unreadable store aside.
+    var storeResetNotice: String? { get }
     var status: SyncStatus { get }
     var mode: SyncMode? { get }
     var isRegistered: Bool { get }
@@ -98,6 +100,10 @@ protocol SyncStatusProviding: AnyObject {
     /// Re-read the balance. Home calls it on appear; the poll loop calls it
     /// after every reading that moved.
     func refreshBalance()
+}
+
+extension SyncStatusProviding {
+    var storeResetNotice: String? { nil }
 }
 
 /// Node lifecycle reads used by the sync handoff and restore-hint export.
@@ -127,6 +133,8 @@ extension LightClientService: SyncNodeLifecycle {}
 @Observable
 final class SyncService: SyncStatusProviding {
     private(set) var recovery: RecoveryPresentation?
+    /// Set once, for this launch, when the light client left a reset notice.
+    private(set) var storeResetNotice: String?
     private(set) var status = SyncStatus()
     private(set) var isRegistered = false
     private(set) var mode: SyncMode?
@@ -175,11 +183,21 @@ final class SyncService: SyncStatusProviding {
                     envelope: self.api.callRpc(method: "get_verification_epoch"))
                 let directory = try self.storageDirectory ?? AppDirectories.dataDirectory(network: self.network.name.lowercased())
                 let marker = directory.appendingPathComponent("verified-chain-generation")
+                // The light client set an unreadable store aside and started fresh:
+                // say so once. The file is the native RESET_NOTICE_SUFFIX marker.
+                let resetNotice = directory.appendingPathComponent("store.db.reset-notice")
+                if FileManager.default.fileExists(atPath: resetNotice.path) {
+                    self.storeResetNotice = "Light client data was reset because it could not be read. Your history is being rebuilt."
+                    try? FileManager.default.removeItem(at: resetNotice)
+                }
                 let previous = try? String(contentsOf: marker, encoding: .utf8)
                 let recovery = HistoryRecoveryBookkeeping(dao: self.database.historyRecovery())
                 let recoveryGeneration = try await recovery.generation(network: self.network.name)
                 guard !Task.isCancelled && self.verificationScope == scope && !self.isShutdown else { return false }
                 if previous != generation || recoveryGeneration != generation {
+                    // A balance read in flight described the old store: it must
+                    // not be cached, nor survive the cleanup below.
+                    self.activity.revokeCachedBalances()
                     try await VerificationCacheCleanup(dao: self.database.verificationCache())
                         .invalidate(network: self.network.name, generation: generation)
                     guard !Task.isCancelled && self.verificationScope == scope && !self.isShutdown else { return false }
@@ -561,6 +579,17 @@ final class SyncService: SyncStatusProviding {
     /// - Parameter force: run even for the wallet already activated. Only
     ///   ``retry()`` passes true; an ordinary appearance must not re-register.
     func activate(wallet: WalletRecord, force: Bool = false) {
+        let address = network == .mainnet ? wallet.mainnetAddress : wallet.testnetAddress
+        guard let script = AddressUtils.shared.parseAddress(address: address) else {
+            lastError = "This wallet's address could not be read."
+            logger.error("activate: address does not decode to a lock script")
+            // Deliberately before `activeWalletId` is claimed, so the Retry on
+            // the sync card can run this again. Claiming it first would make
+            // the failure permanent for the launch. Also before the gate is
+            // closed below: the previous wallet stays active, so its verified
+            // gate and recovery state must stay as they were.
+            return
+        }
         if activeWalletId != wallet.id {
             verificationScope &+= 1
             verificationReady = false
@@ -568,15 +597,6 @@ final class SyncService: SyncStatusProviding {
             verificationTask = nil
             recoveryObservation?.cancel()
             recovery = nil
-        }
-        let address = network == .mainnet ? wallet.mainnetAddress : wallet.testnetAddress
-        guard let script = AddressUtils.shared.parseAddress(address: address) else {
-            lastError = "This wallet's address could not be read."
-            logger.error("activate: address does not decode to a lock script")
-            // Deliberately before `activeWalletId` is claimed, so the Retry on
-            // the sync card can run this again. Claiming it first would make
-            // the failure permanent for the launch.
-            return
         }
         guard force || activeWalletId != wallet.id else { return }
         activeWalletId = wallet.id

@@ -102,6 +102,9 @@ final class HomeViewModel {
     /// The last sync failure worth telling the user about.
     var syncError: String? { sync?.lastError }
 
+    /// Shown once after the light client set an unreadable store aside.
+    var storeResetNotice: String? { sync?.storeResetNotice }
+
     // MARK: - Balance
 
     /// The wallet's spendable balance, cached-first.
