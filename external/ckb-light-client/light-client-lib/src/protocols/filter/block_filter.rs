@@ -1,5 +1,6 @@
 use super::{components, BAD_MESSAGE_BAN_TIME};
 use crate::protocols::{Peers, Status, StatusCode};
+use crate::storage::scan::{ScanState, ScanStorage};
 use crate::storage::{LightClientStorage, Storage};
 use crate::types::{Duration, Instant, RwLock};
 use crate::utils::network::prove_or_download_matched_blocks;
@@ -28,6 +29,9 @@ const GET_BLOCK_FILTERS_TIMEOUT: Duration = Duration::from_secs(15);
 pub struct FilterProtocol {
     pub(crate) storage: Storage,
     pub(crate) peers: Arc<Peers>,
+    pub(crate) windows: RwLock<super::windows::FilterWindows>,
+    hash_downloads: RwLock<super::windows::HashDownloads>,
+    pub(crate) scheduler: RwLock<super::scheduler::ScanScheduler>,
     pub(crate) last_ask_time: Arc<RwLock<Option<Instant>>>,
 }
 
@@ -36,6 +40,9 @@ impl FilterProtocol {
         Self {
             storage,
             peers,
+            windows: Default::default(),
+            hash_downloads: Default::default(),
+            scheduler: Default::default(),
             last_ask_time: Arc::new(Default::default()),
         }
     }
@@ -46,10 +53,19 @@ impl FilterProtocol {
         limit: usize,
     ) -> Result<Vec<packed::Byte32>, Status> {
         let start_number: BlockNumber = block_filters.start_number().unpack();
-        let reader = GCSFilterReader::new(SipHasher24Builder::new(0, 0), M, P);
         let script_hashes = self
             .storage
             .get_scripts_hash(start_number + limit as BlockNumber);
+        self.check_filters_for_hashes(block_filters, limit, &script_hashes)
+    }
+
+    pub(crate) fn check_filters_for_hashes(
+        &self,
+        block_filters: packed::BlockFilters,
+        limit: usize,
+        script_hashes: &[packed::Byte32],
+    ) -> Result<Vec<packed::Byte32>, Status> {
+        let reader = GCSFilterReader::new(SipHasher24Builder::new(0, 0), M, P);
         let mut matched = Vec::new();
         for (index, block_filter) in block_filters.filters().into_iter().take(limit).enumerate() {
             let mut input = Cursor::new(block_filter.raw_data());
@@ -109,6 +125,82 @@ impl FilterProtocol {
         nc: BoxedCKBProtocolContext,
         immediately: bool,
     ) {
+        let scan_states = {
+            let mut matched = self.peers.matched_blocks().write().await;
+            let result = crate::utils::scans::retry_missing(&self.storage, &self.peers)
+                .and_then(|()| crate::utils::scans::settle_ready(&self.storage, &mut matched));
+            if let Ok(Some(states)) = &result {
+                crate::utils::scans::service_proofs(
+                    states,
+                    Arc::clone(&self.peers),
+                    &self.storage.get_tip_header(),
+                    &matched,
+                    Arc::clone(&nc),
+                    INIT_BLOCKS_IN_TRANSIT_PER_PEER,
+                )
+                .await;
+            }
+            result
+        };
+        match scan_states {
+            Ok(Some(states)) => {
+                // Each script has its own contiguous cursor and outstanding
+                // request. Historical proof debt must not hold this selection.
+                let mut proved = self.peers.get_all_prove_states();
+                proved.sort_by_key(|(_, state)| {
+                    std::cmp::Reverse(state.get_last_header().total_difficulty())
+                });
+                let Some((_, proof)) = proved.first() else {
+                    return;
+                };
+                let tip = proof.get_last_header().header().number();
+                let now = ckb_systemtime::unix_time_as_millis();
+                let (checkpoint, _) = self.storage.get_last_check_point();
+                for _ in 0..states.len() {
+                    let selected = write_lock!(self.scheduler).select(&states, tip, now);
+                    let Some(mut request) = selected else {
+                        break;
+                    };
+                    let ready = if request.start <= self.peers.calc_check_point_number(checkpoint) {
+                        {
+                            request.window = self.scoped_window(request.start, request.epoch).await;
+                            request.window.is_some()
+                        }
+                    } else {
+                        self.peers
+                            .could_request_more_block_filters(checkpoint, request.start - 1)
+                            .await
+                    };
+                    if !ready {
+                        continue;
+                    }
+                    let eligible: Vec<_> = proved
+                        .iter()
+                        .filter(|(_, state)| {
+                            state.get_last_header().header().number() >= request.start
+                        })
+                        .map(|(peer, _)| *peer)
+                        .collect();
+                    let Some(peer) = read_lock!(self.scheduler).choose_peer(&request, &eligible)
+                    else {
+                        continue;
+                    };
+                    write_lock!(self.scheduler).sent(&request, peer, now);
+                    self.send_get_block_filters(Arc::clone(&nc), peer, request.start);
+                    break;
+                }
+                self.request_scoped_hashes(&states, nc).await;
+                return;
+            }
+            Err(error) => {
+                warn!(
+                    "scoped scan metadata unavailable; refusing unscoped fallback: {}",
+                    error
+                );
+                return;
+            }
+            Ok(None) => {}
+        }
         let min_filtered_block_number = self.storage.get_min_filtered_block_number();
         let start_number = min_filtered_block_number + 1;
         let (finalized_check_point_index, _) = self.storage.get_last_check_point();
@@ -163,65 +255,26 @@ impl FilterProtocol {
                     db_matched_blocks.blocks_count,
                     matched_blocks.len(),
                 );
-                let option = matched_blocks.is_empty();
-
-                if option {
-                    debug!("matched_blocks is empty");
-
-                    // Filter out blocks already marked as missing (e.g., uncle blocks)
-                    let filtered_blocks: Vec<_> = db_matched_blocks
+                if db_matched_blocks.blocks.iter().any(|block| {
+                    self.peers
+                        .get_header_fetch_info(&block.hash)
+                        .is_some_and(|(_, _, missing)| missing)
+                }) {
+                    // A surviving in-memory subset cannot settle this durable identity.
+                    self.storage
+                        .remove_matched_blocks(db_matched_blocks.start_number);
+                    for block in &db_matched_blocks.blocks {
+                        self.peers.remove_fetching_header(&block.hash);
+                    }
+                    matched_blocks.clear();
+                    return;
+                }
+                if matched_blocks.is_empty() {
+                    let filtered_blocks = db_matched_blocks
                         .blocks
                         .iter()
-                        .filter(|b| {
-                            if let Some((_added_ts, _first_sent, missing)) =
-                                self.peers.get_header_fetch_info(&b.hash)
-                            {
-                                debug!(
-                                    "header fetch info for block {:#x}:added_ts={}, first_sent={}, missing={}",
-                                    b.hash,
-                                    _added_ts,
-                                    _first_sent,
-                                    missing
-                                );
-                                if missing {
-                                    debug!(
-                                        "Skipping block {:#x} from DB - marked as missing",
-                                        b.hash
-                                    );
-                                    return false;
-                                }
-                            } else {
-                                trace!("not found header fetch info for block {:#x}", b.hash);
-                            }
-                            true
-                        })
                         .map(|b| (b.hash.clone(), b.proved))
                         .collect();
-
-                    if filtered_blocks.is_empty() {
-                        // All blocks in this DB range are missing - remove it and load next
-                        info!(
-                            "All {} blocks in DB range {} are missing (uncle blocks), removing",
-                            db_matched_blocks.blocks.len(),
-                            db_matched_blocks.start_number
-                        );
-                        self.storage
-                            .remove_matched_blocks(db_matched_blocks.start_number);
-
-                        // Also remove these blocks from fetching_headers to prevent memory leak
-                        for block in &db_matched_blocks.blocks {
-                            self.peers.remove_fetching_header(&block.hash);
-                        }
-
-                        // Will load next range on next iteration
-                        return;
-                    } else {
-                        debug!(
-                            "add filtered blocks into matched_blocks, count={}",
-                            filtered_blocks.len()
-                        );
-                    }
-
                     // recover matched blocks from storage (only non-missing ones)
                     self.peers
                         .add_matched_blocks(&mut matched_blocks, filtered_blocks);
@@ -260,7 +313,122 @@ impl FilterProtocol {
         }
     }
 
+    pub(crate) async fn scoped_window(
+        &self,
+        start: u64,
+        epoch: [u8; 16],
+    ) -> Option<Arc<super::windows::Window>> {
+        let interval = self.peers.calc_check_point_number(1);
+        let wanted = u32::try_from(start.checked_sub(1)? / interval).ok()?;
+        let (active, hashes) = self.peers.get_cached_block_filter_hashes().await;
+        let anchors = self.storage.get_check_points(active, 2);
+        if anchors.len() == 2 {
+            write_lock!(self.windows).insert(
+                epoch,
+                active,
+                anchors[0].clone(),
+                anchors[1].clone(),
+                hashes,
+                interval as usize,
+            );
+        }
+        let anchors = self.storage.get_check_points(wanted, 2);
+        if anchors.len() != 2 {
+            return None;
+        }
+        read_lock!(self.windows).get(epoch, wanted, &anchors[0], &anchors[1])
+    }
+
+    async fn request_scoped_hashes(&self, states: &[ScanState], nc: BoxedCKBProtocolContext) {
+        let Some(first) = states.first() else {
+            return;
+        };
+        let finalized = self.storage.get_last_check_point().0;
+        let finalized_number = self.peers.calc_check_point_number(finalized);
+        let (active, hashes) = self.peers.get_cached_block_filter_hashes().await;
+        let now = ckb_systemtime::unix_time_as_millis();
+        let interval = self.peers.calc_check_point_number(1);
+        let anchors = self.storage.get_check_points(active, 2);
+        if anchors.len() == 2 {
+            write_lock!(self.hash_downloads).remember(super::windows::Window {
+                epoch: first.epoch,
+                index: active,
+                parent: anchors[0].clone(),
+                end: anchors[1].clone(),
+                hashes: hashes.clone(),
+            });
+        }
+        let mut missing = Vec::new();
+        let mut needed = Vec::new();
+        for state in states.iter().filter(|s| s.settled < finalized_number) {
+            let Ok(index) = u32::try_from(state.settled / interval) else {
+                continue;
+            };
+            let anchors = self.storage.get_check_points(index, 2);
+            if anchors.len() == 2 {
+                needed.push((index, anchors[0].clone(), anchors[1].clone()));
+            }
+            if state.pending.is_none()
+                && self
+                    .scoped_window(state.settled + 1, first.epoch)
+                    .await
+                    .is_none()
+            {
+                missing.push(index);
+            }
+        }
+        write_lock!(self.hash_downloads).retain(first.epoch, &needed);
+        let next = write_lock!(self.hash_downloads).next(active, hashes.len(), &missing, now);
+        if let Some(next) = next {
+            let anchors = self.storage.get_check_points(next, 2);
+            if anchors.len() == 2 {
+                let hashes = write_lock!(self.hash_downloads).restore(
+                    first.epoch,
+                    next,
+                    &anchors[0],
+                    &anchors[1],
+                    now,
+                );
+                self.peers
+                    .update_min_filtered_block_number(self.peers.calc_check_point_number(next))
+                    .await;
+                self.peers.update_cached_block_filter_hashes(hashes).await;
+            }
+        }
+        if let Some(start) = self
+            .peers
+            .if_cached_block_filter_hashes_require_update(finalized)
+            .await
+        {
+            if let Some((peer, _)) = self
+                .peers
+                .get_all_proved_check_points()
+                .into_iter()
+                .find(|(_, (index, _))| *index >= finalized)
+            {
+                self.send_get_block_filter_hashes(Arc::clone(&nc), peer, start);
+            }
+        }
+        for (peer, start) in self
+            .peers
+            .get_peers_which_require_more_latest_block_filter_hashes(finalized)
+        {
+            self.send_get_block_filter_hashes(Arc::clone(&nc), peer, start);
+        }
+    }
+
     pub(crate) async fn try_send_get_block_filter_hashes(&self, nc: BoxedCKBProtocolContext) {
+        match self.storage.scan_states() {
+            Ok(Some(states)) => {
+                self.request_scoped_hashes(&states, nc).await;
+                return;
+            }
+            Err(error) => {
+                warn!("scoped hashes unavailable: {}", error);
+                return;
+            }
+            Ok(None) => {}
+        }
         let min_filtered_block_number = self.storage.get_min_filtered_block_number();
         self.peers
             .update_min_filtered_block_number(min_filtered_block_number)

@@ -25,6 +25,8 @@ class CacheManager @Inject constructor(
         if (!verificationCacheGate.isReady(network)) return null
         return try {
             balanceCacheDao.getByWalletAndNetwork(walletId, network)?.toBalanceResponse()
+                // Older reset reads could persist a false zero balance at genesis.
+                ?.takeIf { (it.asOfBlock.removePrefix("0x").toULongOrNull(16) ?: 0uL) > 0uL }
                 ?.takeIf { verificationCacheGate.isReady(network) && verificationCacheGate.currentRevision() == revision }
         } catch (e: CancellationException) {
             throw e
@@ -43,6 +45,25 @@ class CacheManager @Inject constructor(
             logger.w(TAG, "Failed to write balance cache", e)
         }
     }
+
+    /**
+     * Removes one wallet's cached balance, e.g. one written across a chain-cache
+     * handoff. Returns false, after logging, when the delete failed.
+     */
+    suspend fun deleteBalance(network: String, walletId: String = ""): Boolean {
+        return try {
+            balanceCacheDao.deleteByWalletAndNetwork(walletId, network)
+            true
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            logger.e(TAG, "Failed to delete balance cache", e)
+            false
+        }
+    }
+
+    /** Changes only when the verification gate closes for a chain-cache handoff. */
+    fun handoffTicket(): Long = verificationCacheGate.lifecycleRevision()
 
     // --- Transaction cache ---
 

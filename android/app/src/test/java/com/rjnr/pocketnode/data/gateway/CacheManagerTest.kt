@@ -39,6 +39,18 @@ class CacheManagerTest {
     }
 
     @Test
+    fun `legacy genesis cached balances are unavailable but nonzero empty balances survive`() = runTest {
+        for (height in listOf("0x0", "0", "0x00", "-1")) {
+            val response = BalanceResponse("addr", "0x0", "0.0", height)
+            db.balanceCacheDao().upsert(com.rjnr.pocketnode.data.database.entity.BalanceCacheEntity.from(response, "TESTNET", "wallet"))
+            assertNull("Invalid cached height $height", cacheManager.getCachedBalance("TESTNET", "wallet"))
+        }
+        val valid = BalanceResponse("addr", "0x0", "0.0", "0xa")
+        cacheManager.cacheBalance(valid, "TESTNET", "wallet")
+        assertEquals(valid, cacheManager.getCachedBalance("TESTNET", "wallet"))
+    }
+
+    @Test
     fun `cacheBalance and getCachedBalance round-trip`() = runTest {
         val response = BalanceResponse(
             address = "ckt1qz...",

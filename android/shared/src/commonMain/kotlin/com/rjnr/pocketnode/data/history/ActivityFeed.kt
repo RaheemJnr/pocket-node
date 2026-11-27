@@ -16,12 +16,15 @@ import com.rjnr.pocketnode.data.sync.SyncEngine
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
+import kotlin.concurrent.Volatile
 import kotlin.coroutines.CoroutineContext
 
 /**
@@ -224,6 +227,7 @@ class ActivityFeed(
         network: NetworkType,
         walletId: String,
     ): BalanceResponse {
+        val coverage = balanceCoverage
         val response = ledger.readBalance(
             address = address,
             script = script,
@@ -243,8 +247,36 @@ class ActivityFeed(
             },
         ).getOrThrow()
 
+        // A chain-cache handoff while the read ran means it may describe a
+        // store that no longer exists: neither cache nor return it. The write
+        // suspends, so check again after it and remove a row that landed
+        // across a handoff (the cleanup's own delete may already have run).
+        check(balanceCoverage == coverage) { "Balance coverage was invalidated" }
         balanceCache.cacheBalance(response, network.name, walletId = walletId)
+        if (balanceCoverage != coverage) {
+            withContext(NonCancellable) { balanceCache.deleteBalance(network.name, walletId = walletId) }
+            throw IllegalStateException("Balance coverage was invalidated")
+        }
         return response
+    }
+
+    /**
+     * Bumped by [revokeCachedBalances]. Written only from the caller's one
+     * thread (the iOS main actor), read from the read's coroutine, so a
+     * volatile counter is enough.
+     */
+    @Volatile
+    private var balanceCoverage = 0L
+
+    /**
+     * Revokes balance reads in flight: a read that started before this call is
+     * not cached, and one that cached across it is removed. Call before a
+     * chain-cache handoff clears the database. A wallet switch does not need
+     * it: the chain has not changed, so the read's row is still that wallet's
+     * last good balance. Call from one thread only.
+     */
+    fun revokeCachedBalances() {
+        balanceCoverage += 1
     }
 
     /**

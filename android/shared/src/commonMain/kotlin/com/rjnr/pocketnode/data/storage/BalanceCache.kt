@@ -21,4 +21,10 @@ interface BalanceCache {
 
     /** Insert or replace the cached balance for the wallet. */
     suspend fun cacheBalance(response: BalanceResponse, network: String, walletId: String)
+
+    /**
+     * Remove the wallet's cached balance, e.g. one written across a chain-cache
+     * handoff. Returns false, after logging, when the delete failed.
+     */
+    suspend fun deleteBalance(network: String, walletId: String): Boolean
 }

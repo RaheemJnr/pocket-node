@@ -181,6 +181,20 @@ class RegistrationLockTest {
         walletPreferences.setSyncMode(SyncMode.RECENT, walletId = THIRD)
     }
 
+    @Test
+    fun `failed next recovery batch registration retries without another completion`() = runBlocking {
+        build(decorateCoordinator = { io.mockk.spyk(it) })
+        coEvery { coordinator.refreshScriptRecovery(network) } returnsMany listOf(true, false, false)
+        bridge.setScriptsCalls.clear()
+        bridge.results.add(false)
+        repository.getAccountStatus().getOrThrow()
+        assertEquals(1, bridge.setScriptsCalls.size)
+        repository.getAccountStatus().getOrThrow()
+        assertEquals("Retry must not depend on another completed job", 2, bridge.setScriptsCalls.size)
+        repository.getAccountStatus().getOrThrow()
+        assertEquals("Successful retry clears registration demand", 2, bridge.setScriptsCalls.size)
+    }
+
     @After
     fun tearDown() {
         db.close()
@@ -196,8 +210,9 @@ class RegistrationLockTest {
         repositoryDao: SyncProgressDao = db.syncProgressDao(),
         walletMigrationHelper: WalletMigrationHelper = mockk(relaxed = true),
         awaitStartup: Boolean = true,
+        decorateCoordinator: (SyncCoordinator) -> SyncCoordinator = { it },
     ): CompletableDeferred<Unit> {
-        coordinator = newCoordinator(RoomSyncProgressStore(coordinatorDao), coordinatorLogger)
+        coordinator = decorateCoordinator(newCoordinator(RoomSyncProgressStore(coordinatorDao), coordinatorLogger))
         val startupReachedNode = CompletableDeferred<Unit>()
         coEvery { nodeLifecycle.initializeNode(any(), any()) } answers { startupReachedNode.complete(Unit) }
         repository = testGatewayRepository(

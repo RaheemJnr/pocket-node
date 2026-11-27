@@ -44,6 +44,19 @@ final class HomeBalanceTests: XCTestCase {
         HomeViewModel(walletStore: walletStore, preferences: preferences, sync: sync)
     }
 
+    func testRecoveryStaysDistinctFromCaughtUpNodeAndKeepsUnconfirmedHistoricalHints() {
+        let sync = FakeSyncStatusProvider()
+        sync.recovery = RecoveryPresentation(isRevalidating: true, transactions: [], daoHints: [])
+        sync.status = SyncStatus(isSyncing: false, syncedToBlock: 100, tipBlockNumber: 100, percentage: 100)
+        let model = model(sync)
+        XCTAssertTrue(model.recovery?.isRevalidating == true)
+        XCTAssertFalse(model.hasBalance)
+        sync.recovery = RecoveryPresentation(isRevalidating: false,
+            transactions: [RecoveryHint(identity: "hash", details: "Amount unknown · unverified")], daoHints: [])
+        XCTAssertFalse(model.recovery!.isRevalidating)
+        XCTAssertEqual(model.recovery?.transactions.first?.identity, "hash")
+    }
+
     // MARK: - Formatting
 
     func testTheBalanceIsFormattedByTheSharedCoreFromShannons() {

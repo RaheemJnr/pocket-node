@@ -26,4 +26,7 @@ class RoomBalanceCache @Inject constructor(
         network: String,
         walletId: String,
     ) = cacheManager.cacheBalance(response, network, walletId = walletId)
+
+    override suspend fun deleteBalance(network: String, walletId: String): Boolean =
+        cacheManager.deleteBalance(network, walletId = walletId)
 }

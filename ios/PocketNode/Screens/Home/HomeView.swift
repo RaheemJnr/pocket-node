@@ -22,22 +22,36 @@ struct HomeView: View {
     @State private var isApplyingRestoreHint = false
 
     var body: some View {
-        VStack(spacing: 16) {
-            walletCard
+        ScrollView {
+            VStack(spacing: 16) {
+                walletCard
 
-            if model.showsSync {
-                syncCard
+                if let notice = model.storeResetNotice {
+                    Text(notice)
+                        .font(.footnote)
+                        .foregroundStyle(.secondary)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .accessibilityIdentifier("home.storeResetNotice")
+                }
+
+                if let recovery = model.recovery, recovery.isVisible {
+                    HistoryRecoveryView(model: recovery, theme: theme)
+                }
+
+                if model.showsSync {
+                    syncCard
+                }
+
+                if model.needsBackup {
+                    backupBanner
+                }
+
+                actionButtons
+
+                Spacer(minLength: 0)
             }
-
-            if model.needsBackup {
-                backupBanner
-            }
-
-            actionButtons
-
-            Spacer(minLength: 0)
+            .padding()
         }
-        .padding()
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
         .background(theme.background)
         // Covers both the first draw and returning from a pushed screen, so a
@@ -123,7 +137,7 @@ struct HomeView: View {
     private var syncCard: some View {
         VStack(alignment: .leading, spacing: 10) {
             HStack {
-                Text("Sync")
+                Text(model.recovery?.isRevalidating == true ? "Node sync" : "Sync")
                     .font(.headline)
 
                 Spacer(minLength: 0)
@@ -301,7 +315,7 @@ struct HomeView: View {
         HStack(spacing: 6) {
             Image(systemName: "checkmark.circle.fill")
                 .foregroundStyle(theme.primary)
-            Text("Synced")
+            Text(model.recovery?.isRevalidating == true ? "Node caught up" : "Synced")
                 .font(.subheadline)
         }
         .accessibilityIdentifier("home.syncSynced")

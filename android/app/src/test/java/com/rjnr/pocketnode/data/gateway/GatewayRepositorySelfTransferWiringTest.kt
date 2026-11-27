@@ -162,6 +162,7 @@ class GatewayRepositorySelfTransferWiringTest {
             syncEngine = mockk(relaxed = true),
             startupReconciler = mockk(relaxed = true),
             logger = NoopLogger,
+            recoveryLifetime = DaoRecoveryLifetime(),
         )
 
         runBlocking {

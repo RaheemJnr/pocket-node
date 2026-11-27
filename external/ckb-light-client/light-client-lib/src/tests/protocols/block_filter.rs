@@ -25,6 +25,204 @@ use crate::{
     },
 };
 
+// Regression: selecting only the minimum freezes a caught-up wallet until a
+// different script has replayed its entire history (849 minutes in the fixture).
+#[tokio::test]
+async fn live_wallet_is_serviced_while_history_lags() {
+    let chain = MockChain::new_with_dummy_pow("fair-live-and-history");
+    let live = Script::new_builder()
+        .args(Bytes::from_static(b"live").pack())
+        .build();
+    let historical = Script::new_builder()
+        .args(Bytes::from_static(b"history").pack())
+        .build();
+    chain.client_storage().update_filter_scripts(
+        vec![
+            ScriptStatus {
+                script: historical,
+                script_type: ScriptType::Lock,
+                block_number: 10,
+            },
+            ScriptStatus {
+                script: live,
+                script_type: ScriptType::Lock,
+                block_number: 100,
+            },
+        ],
+        SetScriptsCommand::All,
+    );
+    use crate::storage::scan::{ScanIdentity, ScanState, ScanStorage};
+    let storage = chain.client_storage();
+    let states = storage
+        .get_filter_scripts()
+        .into_iter()
+        .map(|status| {
+            let id = ScanIdentity::registered(storage, &status.script, status.script_type).unwrap();
+            ScanState::settled(id, [7; 16], status.block_number, status.block_number)
+        })
+        .collect();
+    storage.install_scan_states([7; 16], states).unwrap();
+    let peer = PeerIndex::new(3);
+    let peers = chain.create_peers();
+    peers.add_peer(peer);
+    peers
+        .mock_prove_state(
+            peer,
+            VerifiableHeader::new(
+                HeaderBuilder::default()
+                    .epoch(EpochNumberWithFraction::new(0, 0, 1000).full_value())
+                    .number(101u64)
+                    .build(),
+                Default::default(),
+                None,
+                Default::default(),
+            ),
+        )
+        .unwrap();
+    let mut filter_data = Vec::new();
+    golomb_coded_set::GCSFilterWriter::new(
+        &mut filter_data,
+        golomb_coded_set::SipHasher24Builder::new(0, 0),
+        golomb_coded_set::M,
+        golomb_coded_set::P,
+    )
+    .finish()
+    .unwrap();
+    let filter_data = Bytes::from(filter_data).pack();
+    let mut parent = storage.get_last_check_point().1;
+    let hashes: Vec<packed::Byte32> = (0..103)
+        .map(|_| {
+            parent = ckb_types::utilities::calc_filter_hash(&parent, &filter_data).pack();
+            parent.clone()
+        })
+        .collect();
+    peers.mock_latest_block_filter_hashes(peer, 0, hashes[..101].to_vec());
+    let nc = MockNetworkContext::new(SupportProtocols::Filter);
+    let mut protocol = chain.create_filter_protocol(peers.clone());
+    protocol.notify(nc.context(), GET_BLOCK_FILTERS_TOKEN).await;
+    let requests: Vec<u64> = nc
+        .sent_messages()
+        .borrow()
+        .iter()
+        .filter_map(|(_, _, data)| {
+            match packed::BlockFilterMessageReader::from_slice(data)
+                .ok()?
+                .to_enum()
+            {
+                packed::BlockFilterMessageUnionReader::GetBlockFilters(req) => {
+                    Some(req.start_number().unpack())
+                }
+                _ => None,
+            }
+        })
+        .collect();
+    assert!(
+        requests.contains(&101),
+        "live wallet must be serviced before historical catch-up; requested {requests:?}"
+    );
+    protocol.notify(nc.context(), GET_BLOCK_FILTERS_TOKEN).await;
+    let requests: Vec<u64> = nc
+        .sent_messages()
+        .borrow()
+        .iter()
+        .filter_map(|(_, _, data)| {
+            match packed::BlockFilterMessageReader::from_slice(data)
+                .ok()?
+                .to_enum()
+            {
+                packed::BlockFilterMessageUnionReader::GetBlockFilters(req) => {
+                    Some(req.start_number().unpack())
+                }
+                _ => None,
+            }
+        })
+        .collect();
+    assert_eq!(
+        requests,
+        vec![101, 11],
+        "pending live response must not block historical service"
+    );
+    assert_eq!(
+        chain
+            .client_storage()
+            .get_filter_scripts()
+            .iter()
+            .map(|s| s.block_number)
+            .min(),
+        Some(10),
+        "requesting the live range must not promote historical coverage"
+    );
+    for height in 101u64..=103 {
+        if height > 101 {
+            peers
+                .mock_prove_state(
+                    peer,
+                    VerifiableHeader::new(
+                        HeaderBuilder::default()
+                            .epoch(EpochNumberWithFraction::new(0, 0, 1000).full_value())
+                            .number(height)
+                            .build(),
+                        Default::default(),
+                        None,
+                        Default::default(),
+                    ),
+                )
+                .unwrap();
+            peers.mock_latest_block_filter_hashes(peer, 0, hashes[..height as usize].to_vec());
+            protocol.notify(nc.context(), GET_BLOCK_FILTERS_TOKEN).await;
+        }
+        let response = packed::BlockFilters::new_builder()
+            .start_number(height)
+            .block_hashes(vec![packed::Byte32::default()])
+            .filters(vec![filter_data.clone()])
+            .build();
+        protocol
+            .received(
+                nc.context(),
+                peer,
+                packed::BlockFilterMessage::new_builder()
+                    .set(response)
+                    .build()
+                    .as_bytes(),
+            )
+            .await;
+        let cursors = storage.get_filter_scripts();
+        assert_eq!(cursors.iter().map(|s| s.block_number).max(), Some(height));
+        assert_eq!(cursors.iter().map(|s| s.block_number).min(), Some(10));
+    }
+    let response = packed::BlockFilters::new_builder()
+        .start_number(11u64)
+        .block_hashes(vec![packed::Byte32::default(); 10])
+        .filters(vec![filter_data; 10])
+        .build();
+    protocol
+        .received(
+            nc.context(),
+            peer,
+            packed::BlockFilterMessage::new_builder()
+                .set(response)
+                .build()
+                .as_bytes(),
+        )
+        .await;
+    assert_eq!(
+        storage
+            .get_filter_scripts()
+            .iter()
+            .map(|s| s.block_number)
+            .min(),
+        Some(20)
+    );
+    assert_eq!(
+        storage
+            .get_filter_scripts()
+            .iter()
+            .map(|s| s.block_number)
+            .max(),
+        Some(103)
+    );
+}
+
 #[tokio::test]
 async fn shorter_finalized_filter_reply_preserves_cache_and_next_request() {
     check_finalized_filter_reply(10, 3, false, 10, Some(11)).await;
@@ -989,45 +1187,673 @@ async fn test_block_filter_without_enough_hashes() {
     assert!(nc.sent_messages().borrow().is_empty());
 }
 
-
 #[test]
 fn truncated_gcs_filter_returns_protocol_error_without_advancing_progress() {
     let chain = MockChain::new_with_dummy_pow("truncated-gcs");
-    chain.client_storage().update_filter_scripts(vec![ScriptStatus {
-        script: Script::default(), script_type: ScriptType::Lock, block_number: 0,
-    }], Default::default());
+    chain.client_storage().update_filter_scripts(
+        vec![ScriptStatus {
+            script: Script::default(),
+            script_type: ScriptType::Lock,
+            block_number: 0,
+        }],
+        Default::default(),
+    );
     let protocol = chain.create_filter_protocol(chain.create_peers());
     // A valid Molecule envelope containing a truncated Golomb-coded set.
-    let filters = packed::BlockFilters::new_builder().start_number(1u64)
+    let filters = packed::BlockFilters::new_builder()
+        .start_number(1u64)
         .block_hashes(vec![packed::Byte32::default()])
-        .filters(vec![Bytes::from(1u64.to_le_bytes().to_vec()).pack()]).build();
+        .filters(vec![Bytes::from(1u64.to_le_bytes().to_vec()).pack()])
+        .build();
     let error = protocol.check_filters_data(filters, 1).unwrap_err();
-    assert_eq!(error.code(), crate::protocols::StatusCode::MalformedProtocolMessage);
+    assert_eq!(
+        error.code(),
+        crate::protocols::StatusCode::MalformedProtocolMessage
+    );
     assert_eq!(chain.client_storage().get_min_filtered_block_number(), 0);
-    assert!(chain.client_storage().get_earliest_matched_blocks().is_none());
+    assert!(chain
+        .client_storage()
+        .get_earliest_matched_blocks()
+        .is_none());
 }
 
 #[tokio::test]
 async fn exhausted_filter_height_does_not_wrap_or_advance() {
     let chain = MockChain::new_with_dummy_pow("filter-height-boundary");
-    chain.client_storage().update_filter_scripts(vec![ScriptStatus {
-        script: Script::default(), script_type: ScriptType::Lock, block_number: u64::MAX,
-    }], Default::default());
+    chain.client_storage().update_filter_scripts(
+        vec![ScriptStatus {
+            script: Script::default(),
+            script_type: ScriptType::Lock,
+            block_number: u64::MAX,
+        }],
+        Default::default(),
+    );
     let peer = PeerIndex::new(3);
     let peers = chain.create_peers();
     peers.add_peer(peer);
-    peers.mock_prove_state(peer, VerifiableHeader::new(
-        HeaderBuilder::default().epoch(EpochNumberWithFraction::new(0, 0, 100).full_value())
-            .number(u64::MAX).build(), Default::default(), None, Default::default(),
-    )).unwrap();
+    peers
+        .mock_prove_state(
+            peer,
+            VerifiableHeader::new(
+                HeaderBuilder::default()
+                    .epoch(EpochNumberWithFraction::new(0, 0, 100).full_value())
+                    .number(u64::MAX)
+                    .build(),
+                Default::default(),
+                None,
+                Default::default(),
+            ),
+        )
+        .unwrap();
     let mut protocol = chain.create_filter_protocol(peers);
     let nc = MockNetworkContext::new(SupportProtocols::Filter);
-    let content = packed::BlockFilters::new_builder().start_number(0u64)
+    let content = packed::BlockFilters::new_builder()
+        .start_number(0u64)
         .block_hashes(vec![packed::Byte32::default()])
-        .filters(vec![Bytes::from_static(&[0]).pack()]).build();
-    let message = packed::BlockFilterMessage::new_builder().set(content).build();
-    protocol.received(nc.context(), peer, message.as_bytes()).await;
-    assert_eq!(chain.client_storage().get_min_filtered_block_number(), u64::MAX);
-    assert!(chain.client_storage().get_earliest_matched_blocks().is_none());
+        .filters(vec![Bytes::from_static(&[0]).pack()])
+        .build();
+    let message = packed::BlockFilterMessage::new_builder()
+        .set(content)
+        .build();
+    protocol
+        .received(nc.context(), peer, message.as_bytes())
+        .await;
+    assert_eq!(
+        chain.client_storage().get_min_filtered_block_number(),
+        u64::MAX
+    );
+    assert!(chain
+        .client_storage()
+        .get_earliest_matched_blocks()
+        .is_none());
     assert!(nc.sent_messages().borrow().is_empty());
+}
+
+#[tokio::test]
+async fn partially_missing_range_discards_suffix_before_reloading_work() {
+    for in_memory in [false, true] {
+        let chain = MockChain::new_with_dummy_pow("partial-missing-range");
+        let storage = chain.client_storage();
+        storage.update_filter_scripts(
+            vec![ScriptStatus {
+                script: Script::default(),
+                script_type: ScriptType::Lock,
+                block_number: 0,
+            }],
+            SetScriptsCommand::All,
+        );
+        let tip = VerifiableHeader::new(
+            HeaderBuilder::default()
+                .epoch(EpochNumberWithFraction::new(0, 0, 10000).full_value())
+                .number(5000u64)
+                .build(),
+            Default::default(),
+            None,
+            Default::default(),
+        );
+        storage.update_last_state(&U256::one(), &tip.header().data(), &[]);
+        storage.update_min_filtered_block_number(5000);
+        let peers = chain.create_peers();
+        let peer = PeerIndex::new(3);
+        peers.add_peer(peer);
+        peers.mock_prove_state(peer, tip).unwrap();
+        let missing = packed::Byte32::new([1; 32]);
+        let present = packed::Byte32::new([2; 32]);
+        storage.add_matched_blocks(
+            10,
+            3,
+            vec![(missing.clone(), false), (present.clone(), true)],
+        );
+        storage.add_matched_blocks(5000, 1, vec![(packed::Byte32::new([3; 32]), false)]);
+        peers.mark_fetching_headers_missing(&[missing]);
+        if in_memory {
+            peers
+                .matched_blocks()
+                .write()
+                .await
+                .insert(present.unpack(), (true, None));
+        }
+        let mut protocol = chain.create_filter_protocol(peers.clone());
+        let nc = MockNetworkContext::new(SupportProtocols::Filter);
+        protocol.notify(nc.context(), GET_BLOCK_FILTERS_TOKEN).await;
+        assert!(
+            storage.get_earliest_matched_blocks().is_none(),
+            "partial missing range cannot replay only its surviving subset"
+        );
+        assert!(peers.matched_blocks().read().await.is_empty());
+        assert!(storage.get_min_filtered_block_number() < 10);
+        assert!(storage
+            .get_scripts_hash(11)
+            .contains(&Script::default().calc_script_hash()));
+    }
+}
+
+#[tokio::test]
+async fn filter_hash_window_rejects_wrong_exact_checkpoint_endpoint() {
+    let chain = MockChain::new_with_dummy_pow("exact-checkpoint-endpoint");
+    let storage = chain.client_storage();
+    let checkpoint = storage.get_last_check_point().1;
+    storage.update_check_points(1, &[packed::Byte32::default()]);
+    storage.update_max_check_point_index(1);
+    let peer = PeerIndex::new(3);
+    let peers = chain.create_peers();
+    peers.add_peer(peer);
+    peers
+        .mock_prove_state(
+            peer,
+            VerifiableHeader::new(
+                HeaderBuilder::default()
+                    .epoch(EpochNumberWithFraction::new(0, 0, 100).full_value())
+                    .number(CHECK_POINT_INTERVAL * 2)
+                    .build(),
+                Default::default(),
+                None,
+                Default::default(),
+            ),
+        )
+        .unwrap();
+    let nc = MockNetworkContext::new(SupportProtocols::Filter);
+    let mut hashes = vec![packed::Byte32::default(); CHECK_POINT_INTERVAL as usize];
+    *hashes.last_mut().unwrap() = packed::Byte32::from_slice(&[1; 32]).unwrap();
+    let response = packed::BlockFilterHashes::new_builder()
+        .start_number(1u64)
+        .parent_block_filter_hash(checkpoint)
+        .block_filter_hashes(hashes)
+        .build();
+    let mut protocol = chain.create_filter_protocol(peers.clone());
+    protocol
+        .received(
+            nc.context(),
+            peer,
+            packed::BlockFilterMessage::new_builder()
+                .set(response)
+                .build()
+                .as_bytes(),
+        )
+        .await;
+    assert!(
+        peers.get_cached_block_filter_hashes().await.1.is_empty(),
+        "wrong checkpoint endpoint must not enter cache"
+    );
+}
+
+#[tokio::test]
+async fn scoped_proof_service_rotates_after_busy_peer_releases_request() {
+    use crate::storage::scan::{ScanIdentity, ScanRange, ScanState};
+    let chain = MockChain::new_with_dummy_pow("scoped-proof-turns");
+    let peer = PeerIndex::new(3);
+    let peers = chain.create_peers();
+    peers.add_peer(peer);
+    let header = HeaderBuilder::default()
+        .epoch(EpochNumberWithFraction::new(0, 0, 1000).full_value())
+        .number(101u64)
+        .build();
+    peers
+        .mock_prove_state(
+            peer,
+            VerifiableHeader::new(header.clone(), Default::default(), None, Default::default()),
+        )
+        .unwrap();
+    let states: Vec<_> = [(1u8, 100), (2u8, 10)]
+        .into_iter()
+        .map(|(id, height)| {
+            let mut state = ScanState::settled(
+                ScanIdentity {
+                    suffix: vec![id],
+                    registration: vec![id; 24],
+                },
+                [7; 16],
+                0,
+                height,
+            );
+            state.pending = Some(ScanRange {
+                id: [id; 16],
+                start: height + 1,
+                end: height + 1,
+                anchor: [9; 32],
+                matches: vec![[id; 32]],
+            });
+            state
+        })
+        .collect();
+    let matched = std::collections::HashMap::from([
+        (H256::from([1; 32]), (false, None)),
+        (H256::from([2; 32]), (false, None)),
+    ]);
+    let nc = MockNetworkContext::new(SupportProtocols::Filter);
+    for expected in [1u8, 2, 1] {
+        crate::utils::scans::service_proofs(
+            &states,
+            peers.clone(),
+            &header.data(),
+            &matched,
+            nc.context(),
+            16,
+        )
+        .await;
+        let messages = nc.sent_messages().borrow();
+        let requests: Vec<_> = messages
+            .iter()
+            .filter_map(|(_, _, data)| packed::LightClientMessageReader::from_slice(data).ok())
+            .filter_map(|m| match m.to_enum() {
+                packed::LightClientMessageUnionReader::GetBlocksProof(p) => Some(p.to_entity()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            requests.last().unwrap().block_hashes().get(0).unwrap(),
+            packed::Byte32::from_slice(&[expected; 32]).unwrap()
+        );
+        let count = requests.len();
+        drop(messages);
+        crate::utils::scans::service_proofs(
+            &states,
+            peers.clone(),
+            &header.data(),
+            &matched,
+            nc.context(),
+            16,
+        )
+        .await;
+        assert_eq!(
+            nc.sent_messages().borrow().len(),
+            count,
+            "busy peer must not consume next scan turn"
+        );
+        peers.update_blocks_proof_request(peer, None, true);
+    }
+}
+
+#[tokio::test]
+async fn scoped_delayed_response_retains_window_beyond_cache_capacity() {
+    use crate::storage::scan::{ScanIdentity, ScanState, ScanStorage};
+    let chain = MockChain::new_with_dummy_pow("pinned-window-response");
+    let storage = chain.client_storage();
+    let interval = CHECK_POINT_INTERVAL as usize;
+    let scripts: Vec<_> = (0..9)
+        .map(|n| ScriptStatus {
+            script: Script::new_builder().args(vec![n as u8].pack()).build(),
+            script_type: ScriptType::Lock,
+            block_number: (n * interval) as u64,
+        })
+        .collect();
+    storage.update_filter_scripts(scripts, SetScriptsCommand::All);
+    let states = storage
+        .get_filter_scripts()
+        .into_iter()
+        .map(|s| {
+            ScanState::settled(
+                ScanIdentity::registered(storage, &s.script, s.script_type).unwrap(),
+                [7; 16],
+                s.block_number,
+                s.block_number,
+            )
+        })
+        .collect();
+    storage.install_scan_states([7; 16], states).unwrap();
+    let mut data = Vec::new();
+    golomb_coded_set::GCSFilterWriter::new(
+        &mut data,
+        golomb_coded_set::SipHasher24Builder::new(0, 0),
+        golomb_coded_set::M,
+        golomb_coded_set::P,
+    )
+    .finish()
+    .unwrap();
+    let data = Bytes::from(data).pack();
+    let genesis = storage.get_last_check_point().1;
+    let mut parent = genesis.clone();
+    let hashes: Vec<packed::Byte32> = (0..9 * interval)
+        .map(|_| {
+            parent = ckb_types::utilities::calc_filter_hash(&parent, &data).pack();
+            parent.clone()
+        })
+        .collect();
+    let cps: Vec<_> = (1..=9).map(|n| hashes[n * interval - 1].clone()).collect();
+    storage.update_check_points(1, &cps);
+    storage.update_max_check_point_index(9);
+    let peer = PeerIndex::new(3);
+    let peers = chain.create_peers();
+    peers.add_peer(peer);
+    peers
+        .mock_prove_state(
+            peer,
+            VerifiableHeader::new(
+                HeaderBuilder::default()
+                    .epoch(EpochNumberWithFraction::new(0, 0, 1000).full_value())
+                    .number((9 * interval + 1) as u64)
+                    .build(),
+                Default::default(),
+                None,
+                Default::default(),
+            ),
+        )
+        .unwrap();
+    let nc = MockNetworkContext::new(SupportProtocols::Filter);
+    let mut protocol = chain.create_filter_protocol(peers);
+    for n in (0..9).rev() {
+        let parent = if n == 0 {
+            genesis.clone()
+        } else {
+            cps[n - 1].clone()
+        };
+        assert!(protocol.windows.write().unwrap().insert(
+            [7; 16],
+            n as u32,
+            parent,
+            cps[n].clone(),
+            hashes[n * interval..(n + 1) * interval].to_vec(),
+            interval
+        ));
+        protocol.notify(nc.context(), GET_BLOCK_FILTERS_TOKEN).await;
+    }
+    let start = (8 * interval + 1) as u64;
+    let response = packed::BlockFilters::new_builder()
+        .start_number(start)
+        .block_hashes(vec![packed::Byte32::default()])
+        .filters(vec![data])
+        .build();
+    protocol
+        .received(
+            nc.context(),
+            peer,
+            packed::BlockFilterMessage::new_builder()
+                .set(response)
+                .build()
+                .as_bytes(),
+        )
+        .await;
+    assert_eq!(
+        storage
+            .get_filter_scripts()
+            .iter()
+            .map(|s| s.block_number)
+            .max(),
+        Some(start),
+        "valid delayed response survives unrelated cache churn"
+    );
+}
+
+#[tokio::test]
+async fn scoped_wire_reply_is_rejected_after_registration_or_epoch_changes() {
+    use crate::storage::scan::{ScanIdentity, ScanState, ScanStorage};
+    for reorg in [false, true] {
+        let chain = MockChain::new_with_dummy_pow("stale-scoped-wire");
+        let storage = chain.client_storage();
+        let script = Script::default();
+        let status = ScriptStatus {
+            script: script.clone(),
+            script_type: ScriptType::Lock,
+            block_number: 10,
+        };
+        storage.update_filter_scripts(
+            vec![ScriptStatus {
+                script: script.clone(),
+                script_type: ScriptType::Lock,
+                block_number: 10,
+            }],
+            SetScriptsCommand::All,
+        );
+        let id = ScanIdentity::registered(storage, &script, ScriptType::Lock).unwrap();
+        storage
+            .install_scan_states([7; 16], vec![ScanState::settled(id, [7; 16], 10, 10)])
+            .unwrap();
+        let peer = PeerIndex::new(3);
+        let peers = chain.create_peers();
+        peers.add_peer(peer);
+        peers
+            .mock_prove_state(
+                peer,
+                VerifiableHeader::new(
+                    HeaderBuilder::default()
+                        .epoch(EpochNumberWithFraction::new(0, 0, 1000).full_value())
+                        .number(11u64)
+                        .build(),
+                    Default::default(),
+                    None,
+                    Default::default(),
+                ),
+            )
+            .unwrap();
+        let mut data = Vec::new();
+        golomb_coded_set::GCSFilterWriter::new(
+            &mut data,
+            golomb_coded_set::SipHasher24Builder::new(0, 0),
+            golomb_coded_set::M,
+            golomb_coded_set::P,
+        )
+        .finish()
+        .unwrap();
+        let data = Bytes::from(data).pack();
+        let mut parent = storage.get_last_check_point().1;
+        let hashes: Vec<packed::Byte32> = (0..11)
+            .map(|_| {
+                parent = ckb_types::utilities::calc_filter_hash(&parent, &data).pack();
+                parent.clone()
+            })
+            .collect();
+        peers.mock_latest_block_filter_hashes(peer, 0, hashes);
+        let nc = MockNetworkContext::new(SupportProtocols::Filter);
+        let mut protocol = chain.create_filter_protocol(peers);
+        protocol.notify(nc.context(), GET_BLOCK_FILTERS_TOKEN).await;
+        if reorg {
+            storage.rollback_to_block(11);
+        } else {
+            storage.update_filter_scripts(vec![status], SetScriptsCommand::All);
+        }
+        let response = packed::BlockFilters::new_builder()
+            .start_number(11u64)
+            .block_hashes(vec![packed::Byte32::default()])
+            .filters(vec![data])
+            .build();
+        protocol
+            .received(
+                nc.context(),
+                peer,
+                packed::BlockFilterMessage::new_builder()
+                    .set(response)
+                    .build()
+                    .as_bytes(),
+            )
+            .await;
+        let states = storage.scan_states().unwrap().unwrap();
+        assert_eq!(
+            states[0].settled, 10,
+            "stale wire response cannot settle replacement or reorg epoch"
+        );
+        assert!(states[0].pending.is_none());
+    }
+}
+
+#[tokio::test]
+async fn scoped_capacity_is_shared_between_scopes_for_proofs_and_bodies() {
+    use crate::storage::scan::{ScanIdentity, ScanRange, ScanState};
+    for proved in [false, true] {
+        let chain = MockChain::new_with_dummy_pow("scoped-capacity-budget");
+        let peers = chain.create_peers();
+        let header = HeaderBuilder::default()
+            .epoch(EpochNumberWithFraction::new(0, 0, 1000).full_value())
+            .number(101u64)
+            .build();
+        for id in [3, 4] {
+            let peer = PeerIndex::new(id);
+            peers.add_peer(peer);
+            peers
+                .mock_prove_state(
+                    peer,
+                    VerifiableHeader::new(
+                        header.clone(),
+                        Default::default(),
+                        None,
+                        Default::default(),
+                    ),
+                )
+                .unwrap();
+        }
+        let mut matched = std::collections::HashMap::new();
+        let states: Vec<_> = [(1u8, 100), (2u8, 10)]
+            .into_iter()
+            .map(|(id, height)| {
+                let hashes: Vec<_> = (0..crate::protocols::GET_BLOCKS_PROOF_LIMIT * 2 + 1)
+                    .map(|n| {
+                        let mut hash = [id; 32];
+                        hash[..8].copy_from_slice(&(n as u64).to_be_bytes());
+                        matched.insert(H256::from(hash), (proved, None));
+                        hash
+                    })
+                    .collect();
+                let mut state = ScanState::settled(
+                    ScanIdentity {
+                        suffix: vec![id],
+                        registration: vec![id; 24],
+                    },
+                    [7; 16],
+                    0,
+                    height,
+                );
+                state.pending = Some(ScanRange {
+                    id: [id; 16],
+                    start: height + 1,
+                    end: height + 1,
+                    anchor: [9; 32],
+                    matches: hashes,
+                });
+                state
+            })
+            .collect();
+        // Put recovery first, as happens after the active scope's previous turn.
+        *peers.scoped_proof_turn.write().unwrap() = Some(vec![1]);
+        let nc = MockNetworkContext::new(SupportProtocols::Filter);
+        crate::utils::scans::service_proofs(
+            &states,
+            peers.clone(),
+            &header.data(),
+            &matched,
+            nc.context(),
+            16,
+        )
+        .await;
+        let mut owners: Vec<_> = nc
+            .sent_messages()
+            .borrow()
+            .iter()
+            .map(|(_, _, data)| {
+                let hash = if proved {
+                    match packed::SyncMessageReader::from_slice(data)
+                        .unwrap()
+                        .to_enum()
+                    {
+                        packed::SyncMessageUnionReader::GetBlocks(p) => {
+                            p.to_entity().block_hashes().get(0).unwrap()
+                        }
+                        _ => panic!("expected body request"),
+                    }
+                } else {
+                    match packed::LightClientMessageReader::from_slice(data)
+                        .unwrap()
+                        .to_enum()
+                    {
+                        packed::LightClientMessageUnionReader::GetBlocksProof(p) => {
+                            p.to_entity().block_hashes().get(0).unwrap()
+                        }
+                        _ => panic!("expected proof request"),
+                    }
+                };
+                hash.as_slice()[31]
+            })
+            .collect();
+        owners.sort();
+        assert_eq!(
+            owners,
+            vec![1, 2],
+            "one scope must not consume both idle slots"
+        );
+        for id in [3, 4] {
+            let peer = PeerIndex::new(id);
+            peers.update_blocks_proof_request(peer, None, true);
+            peers.update_blocks_request(peer, None);
+        }
+        nc.sent_messages().borrow_mut().clear();
+        crate::utils::scans::service_proofs(
+            &states[..1],
+            peers.clone(),
+            &header.data(),
+            &matched,
+            nc.context(),
+            16,
+        )
+        .await;
+        assert_eq!(
+            nc.sent_messages().borrow().len(),
+            2,
+            "one eligible scope should fill spare capacity"
+        );
+    }
+}
+
+#[tokio::test]
+async fn stalled_historical_hash_window_rotates_and_restores_partial_hashes() {
+    use crate::storage::scan::{ScanIdentity, ScanState, ScanStorage};
+    let chain = MockChain::new_with_dummy_pow("stalled-hash-window");
+    let storage = chain.client_storage();
+    let registrations: Vec<_> = [10, CHECK_POINT_INTERVAL + 10]
+        .into_iter()
+        .enumerate()
+        .map(|(id, block_number)| ScriptStatus {
+            script: Script::new_builder()
+                .args(Bytes::from(vec![id as u8]).pack())
+                .build(),
+            script_type: ScriptType::Lock,
+            block_number,
+        })
+        .collect();
+    storage.update_filter_scripts(registrations, SetScriptsCommand::All);
+    let registrations = storage.get_filter_scripts();
+    let states = registrations
+        .into_iter()
+        .map(|s| {
+            ScanState::settled(
+                ScanIdentity::registered(storage, &s.script, s.script_type).unwrap(),
+                [7; 16],
+                s.block_number,
+                s.block_number,
+            )
+        })
+        .collect();
+    storage.install_scan_states([7; 16], states).unwrap();
+    storage.update_check_points(
+        1,
+        &[packed::Byte32::new([1; 32]), packed::Byte32::new([2; 32])],
+    );
+    storage.update_max_check_point_index(2);
+    let peers = chain.create_peers();
+    let partial = vec![packed::Byte32::new([9; 32]); 20];
+    peers
+        .update_cached_block_filter_hashes(partial.clone())
+        .await;
+    let mut protocol = chain.create_filter_protocol(peers.clone());
+    let nc = MockNetworkContext::new(SupportProtocols::Filter);
+    let clock = ckb_systemtime::faketime();
+    clock.set_faketime(100_000);
+    protocol
+        .notify(nc.context(), GET_BLOCK_FILTER_HASHES_TOKEN)
+        .await;
+    assert_eq!(
+        peers.get_cached_block_filter_hashes().await,
+        (0, partial.clone())
+    );
+    clock.set_faketime(116_000);
+    protocol
+        .notify(nc.context(), GET_BLOCK_FILTER_HASHES_TOKEN)
+        .await;
+    assert_eq!(
+        peers.get_cached_block_filter_hashes().await.0,
+        1,
+        "stalled history cannot hold the active finalized window"
+    );
+    clock.set_faketime(132_000);
+    protocol
+        .notify(nc.context(), GET_BLOCK_FILTER_HASHES_TOKEN)
+        .await;
+    assert_eq!(peers.get_cached_block_filter_hashes().await, (0, partial));
 }

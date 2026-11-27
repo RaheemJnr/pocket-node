@@ -67,7 +67,7 @@ class WalletRepositoryTest {
             walletDao, keyManager, walletPreferences, walletPreferences, mnemonicManager, db,
             db.transactionDao(), db.balanceCacheDao(), db.daoCellDao(),
             db.pendingDaoWithdrawDao(), db.pendingDaoUnlockDao(), db.keyMaterialDao(),
-            db.subAccountCandidateDao(), SubAccountDiscovery(mnemonicManager, keyManager), walletPreferences, NoopLogger
+            db.subAccountCandidateDao(), SubAccountDiscovery(mnemonicManager, keyManager), walletPreferences, NoopLogger, com.rjnr.pocketnode.data.gateway.DaoRecoveryLifetime()
         )
     }
 
@@ -80,7 +80,7 @@ class WalletRepositoryTest {
         dao, km, walletPreferences, walletPreferences, mnemonics, db,
         db.transactionDao(), db.balanceCacheDao(), db.daoCellDao(),
         db.pendingDaoWithdrawDao(), db.pendingDaoUnlockDao(), keys,
-        db.subAccountCandidateDao(), SubAccountDiscovery(mnemonics, km), housekeepingPrefs, NoopLogger
+        db.subAccountCandidateDao(), SubAccountDiscovery(mnemonics, km), housekeepingPrefs, NoopLogger, com.rjnr.pocketnode.data.gateway.DaoRecoveryLifetime()
     )
 
     @Test
@@ -563,7 +563,7 @@ class WalletRepositoryTest {
         walletDao, keyManager, walletPreferences, walletPreferences, mnemonicManager, db,
         db.transactionDao(), db.balanceCacheDao(), db.daoCellDao(),
         db.pendingDaoWithdrawDao(), db.pendingDaoUnlockDao(), db.keyMaterialDao(),
-        db.subAccountCandidateDao(), SubAccountDiscovery(mnemonicManager, keyManager), walletPreferences, NoopLogger,
+        db.subAccountCandidateDao(), SubAccountDiscovery(mnemonicManager, keyManager), walletPreferences, NoopLogger, com.rjnr.pocketnode.data.gateway.DaoRecoveryLifetime(),
         scriptCursorProbe = probe,
     )
 
@@ -619,6 +619,81 @@ class WalletRepositoryTest {
                 snapshot = CursorSnapshot(NetworkType.MAINNET, mapOf("any" to 130_000L)),
             )
         )
+    }
+
+    /**
+     * Review r2 L2: restoring a candidate through createSubAccount retires its
+     * discovery recovery job, and the restored child then registers from the
+     * start #624 seeded, not from genesis with historyRecovery.
+     */
+    @Test
+    fun `createSubAccount retires the candidate recovery job and the child registers at its seeded start`() = runTest {
+        val json = kotlinx.serialization.json.Json { ignoreUnknownKeys = true; encodeDefaults = true }
+        val words = mnemonicManager.generateMnemonic(MnemonicManager.WordCount.TWELVE)
+        val parent = repo.importFromMnemonic(
+            words = words,
+            name = "Parent",
+            persistKeys = { walletId, bundle -> fakePersistV2(walletId, bundle) },
+        ).getOrThrow()
+        val path = SubAccountDiscovery.accountPath(2)
+        db.subAccountCandidateDao().updateState(
+            parent.walletId, path, com.rjnr.pocketnode.data.database.entity.SubAccountCandidateEntity.STATE_FOUND,
+        )
+        val args = db.subAccountCandidateDao().getForParent(parent.walletId).first { it.derivationPath == path }.scriptArgs
+        val childScript = keyManager.deriveLockScriptFromAddress(parent.testnetAddress).copy(args = args)
+        val childScriptJson = json.encodeToString(com.rjnr.pocketnode.data.gateway.models.Script.serializer(), childScript)
+        val generation = "a".repeat(32)
+        db.historyRecovery().recordEpoch("TESTNET", generation)
+        db.historyRecovery().ensureScript(parent.walletId, "TESTNET", childScriptJson, generation)
+        db.syncProgressDao().upsert(
+            com.rjnr.pocketnode.data.database.entity.SyncProgressEntity(parent.walletId, "TESTNET", 299_000L, 299_000L, 0L)
+        )
+        walletPreferences.setSelectedNetwork(NetworkType.TESTNET)
+
+        val child = newRepoWithCursor(ScriptCursorProbe { a -> a.associateWith { 120_000L } }).createSubAccount(
+            parentWalletId = parent.walletId,
+            name = "Sub 2",
+            parentMnemonic = words,
+            explicitIndex = 2,
+            persistKeys = { walletId, bundle -> fakePersistV2(walletId, bundle) },
+        ).getOrThrow()
+
+        assertTrue("The job is retired", db.historyRecovery().scripts("TESTNET").none { it.scriptJson == childScriptJson })
+        assertEquals(
+            com.rjnr.pocketnode.data.database.entity.SubAccountCandidateEntity.STATE_RESTORED,
+            db.subAccountCandidateDao().getForParent(parent.walletId).first { it.derivationPath == path }.state,
+        )
+        val seeded = db.syncProgressDao().get(child.walletId, "TESTNET")!!.localSavedBlockNumber
+        assertEquals(120_000L, seeded)
+
+        val payloads = mutableListOf<String>()
+        val api = io.mockk.mockk<com.rjnr.pocketnode.data.gateway.LightClientApi>(relaxed = true) {
+            io.mockk.every { setScripts(capture(payloads), any()) } returns true
+        }
+        val registry = object : com.rjnr.pocketnode.data.storage.WalletRegistry {
+            override suspend fun allWallets() = listOf(
+                com.rjnr.pocketnode.data.storage.WalletRecord(parent.walletId, parent.mainnetAddress, parent.testnetAddress, 1),
+                com.rjnr.pocketnode.data.storage.WalletRecord(child.walletId, child.mainnetAddress, child.testnetAddress, 2),
+            )
+        }
+        val coordinator = com.rjnr.pocketnode.data.gateway.SyncCoordinator(
+            registry, io.mockk.mockk(relaxed = true),
+            com.rjnr.pocketnode.data.storage.RoomSubAccountCandidateStore(db.subAccountCandidateDao()),
+            io.mockk.mockk(relaxed = true), api, io.mockk.mockk(relaxed = true), json, NoopLogger,
+            historyRecovery = db.historyRecovery(),
+        )
+        assertTrue(coordinator.setScriptsAndRecord(
+            listOf(com.rjnr.pocketnode.data.gateway.models.JniScriptStatus(childScript, "lock", "0x" + seeded.toString(16))),
+            listOf(child.walletId),
+            com.rjnr.pocketnode.data.gateway.SyncCoordinator.CMD_SET_SCRIPTS_ALL,
+            NetworkType.TESTNET,
+        ))
+        val sent = json.decodeFromString(
+            kotlinx.serialization.builtins.ListSerializer(com.rjnr.pocketnode.data.gateway.models.JniScriptStatus.serializer()),
+            payloads.single(),
+        ).single { it.script == childScript }
+        assertEquals("0x" + seeded.toString(16), sent.blockNumber)
+        assertFalse(sent.historyRecovery)
     }
 
     @Test

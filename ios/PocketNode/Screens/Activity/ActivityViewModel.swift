@@ -130,6 +130,7 @@ final class ActivityViewModel {
     var retryCandidate: ActivityItem?
 
     var network: NetworkType { source.network }
+    var recovery: RecoveryPresentation? { source.recovery }
 
     /// Re-sending a failed transaction. Nil until the send path lands, and
     /// the detail sheet says so rather than offering a button that does nothing.

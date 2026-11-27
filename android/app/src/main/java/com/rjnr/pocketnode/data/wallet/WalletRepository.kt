@@ -46,7 +46,7 @@ class WalletRepository @Inject constructor(
     private val subAccountDiscovery: SubAccountDiscovery,
     private val walletPreferences: WalletPreferences,
     private val logger: Logger,
-    private val recoveryLifetime: com.rjnr.pocketnode.data.gateway.DaoRecoveryLifetime = com.rjnr.pocketnode.data.gateway.DaoRecoveryLifetime(),
+    private val recoveryLifetime: com.rjnr.pocketnode.data.gateway.DaoRecoveryLifetime,
     private val scriptCursorProbe: ScriptCursorProbe = ScriptCursorProbe { emptyMap() },
 ) {
     /** Operation-owned proposed metadata; only new UUID creation paths issue this context. */
@@ -514,11 +514,31 @@ class WalletRepository @Inject constructor(
             // Retire the discovery candidate at this index if one exists (any
             // creation at index N supersedes the candidate row; IGNORE-on-insert
             // means a plain no-candidate create is a harmless 0-row update).
-            runCatching {
-                subAccountCandidateDao.updateState(
-                    parentWalletId, SubAccountDiscovery.accountPath(nextIndex),
-                    com.rjnr.pocketnode.data.database.entity.SubAccountCandidateEntity.STATE_RESTORED,
-                )
+            // Its discovery recovery job is retired in the same transaction.
+            //
+            // This runs after the child is committed and active, and that is
+            // safe: a job applies only to candidate registrations, never to the
+            // child's own (SyncCoordinator), so a registration in between still
+            // uses the seeded start. A failure is not fatal to the create (the
+            // wallet exists and is active; failing now would report a wallet
+            // that was made as not made), so it is retried, then logged, and
+            // the startup repair finishes it on the next launch.
+            kotlinx.coroutines.withContext(kotlinx.coroutines.NonCancellable) {
+                val path = SubAccountDiscovery.accountPath(nextIndex)
+                var lastFailure: Exception? = null
+                for (attempt in 1..RESTORE_MARK_ATTEMPTS) {
+                    try {
+                        subAccountCandidateDao.markRestored(parentWalletId, path)
+                        lastFailure = null
+                        break
+                    } catch (e: Exception) {
+                        lastFailure = e
+                        logger.w(TAG, "Marking candidate $path restored failed (attempt $attempt)", e)
+                    }
+                }
+                lastFailure?.let {
+                    logger.e(TAG, "Candidate $path of $parentWalletId left unrestored; startup repair will retire it", it)
+                }
             }
 
             logger.d(TAG, "Created sub-account: $walletId (parent: $parentWalletId, index: $nextIndex)")
@@ -590,6 +610,10 @@ class WalletRepository @Inject constructor(
             appDatabase.walletVaultDao().deleteLegacy(walletId)
             keyMaterialDao.delete(walletId)
             walletDao.delete(walletId)
+            for (table in listOf("history_archive", "dao_history_archive", "history_recovery_jobs")) {
+                appDatabase.openHelper.writableDatabase.execSQL("DELETE FROM $table WHERE walletId = ?", arrayOf(walletId))
+            }
+            appDatabase.openHelper.writableDatabase.execSQL("DELETE FROM history_script_recovery_jobs WHERE parentWalletId = ?", arrayOf(walletId))
             for (network in listOf("MAINNET", "TESTNET")) {
                 transactionDao.deleteByWalletAndNetwork(walletId, network)
                 balanceCacheDao.deleteByWalletAndNetwork(walletId, network)
@@ -747,8 +771,9 @@ class WalletRepository @Inject constructor(
     internal val resetBoundary get() = keyManager.walletStorage
 
     private companion object {
+        const val RESTORE_MARK_ATTEMPTS = 3
         val SECRET_TABLES = listOf("wallets", "key_material", "wallet_vault", "wallet_vault_legacy", "wallet_passphrase_profile")
-        val RESET_TABLES = SECRET_TABLES + listOf("wallet_pending_cleanup", "transactions", "balance_cache", "dao_cells", "pending_dao_withdraws",
+        val RESET_TABLES = SECRET_TABLES + listOf("wallet_pending_cleanup", "history_archive", "dao_history_archive", "history_recovery_jobs", "history_script_recovery_jobs", "history_recovery_epochs", "transactions", "balance_cache", "dao_cells", "pending_dao_withdraws",
             "pending_dao_unlocks", "dao_recovery_guards", "dao_recovery_retry_budget", "sync_progress", "sub_account_candidates", "pending_broadcasts")
     }
 

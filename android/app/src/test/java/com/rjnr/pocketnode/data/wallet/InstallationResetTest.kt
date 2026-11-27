@@ -44,7 +44,7 @@ class InstallationResetTest {
         val repo = WalletRepository(db.walletDao(), keys, preferences, preferences, mnemonic, db,
             db.transactionDao(), db.balanceCacheDao(), db.daoCellDao(), db.pendingDaoWithdrawDao(),
             db.pendingDaoUnlockDao(), db.keyMaterialDao(), db.subAccountCandidateDao(),
-            SubAccountDiscovery(mnemonic, keys), preferences, NoopLogger)
+            SubAccountDiscovery(mnemonic, keys), preferences, NoopLogger, com.rjnr.pocketnode.data.gateway.DaoRecoveryLifetime())
         val pin = PinManager(context, com.rjnr.pocketnode.data.crypto.Blake2b(), NoopLogger).apply {
             testPrefs = context.getSharedPreferences("reset_test_pin", 0)
             argon2Iterations = 1; argon2MemoryKb = 8; argon2Parallelism = 1
@@ -75,7 +75,15 @@ class InstallationResetTest {
                 assertFalse(app.pin.verifyPin("000000"))
             }
             assertTrue(app.pin.isPermanentlyLocked())
+            app.db.historyRecovery().ensureWallet("historic", "MAINNET", "old")
+            app.db.historyRecovery().ensureScript("historic", "MAINNET", "{}", "old")
+            app.db.openHelper.writableDatabase.execSQL("INSERT INTO history_archive VALUES ('historic', 'MAINNET', 'hash', NULL, NULL, NULL, NULL, NULL)")
+            app.db.openHelper.writableDatabase.execSQL("INSERT INTO dao_history_archive VALUES ('historic', 'MAINNET', 'hash', '0x0', NULL, NULL, NULL, NULL)")
             app.reset.removeAllWalletsAndPin()
+            assertNull(app.db.historyRecovery().job("historic", "MAINNET"))
+            assertTrue(app.db.historyRecovery().archive("historic", "MAINNET").isEmpty())
+            assertTrue(app.db.historyRecovery().daoHints("historic", "MAINNET").isEmpty())
+            assertTrue(app.db.historyRecovery().scripts("MAINNET").isEmpty())
             assertEquals(5, app.pin.getRemainingAttempts())
             assertFalse(app.pin.isLockedOut()); assertFalse(app.pin.isPermanentlyLocked())
             assertFalse(app.pin.testPrefs!!.contains("failed_attempts"))

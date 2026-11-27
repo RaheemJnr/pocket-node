@@ -4,6 +4,7 @@ import androidx.room.Dao
 import androidx.room.Insert
 import androidx.room.OnConflictStrategy
 import androidx.room.Query
+import androidx.room.Transaction
 import com.rjnr.pocketnode.data.database.entity.SubAccountCandidateEntity
 
 @Dao
@@ -32,6 +33,67 @@ interface SubAccountCandidateDao {
             "WHERE parentWalletId = :parentId AND derivationPath = :derivationPath"
     )
     suspend fun updateState(parentId: String, derivationPath: String, state: String)
+
+    /**
+     * Drops the parent's discovery recovery jobs for [scriptArgs] on every
+     * network. A job matches on the quoted args inside its script JSON; the
+     * code hash and hash type are the same for every candidate of a parent.
+     */
+    @Query("DELETE FROM history_script_recovery_jobs WHERE parentWalletId = :parentId AND instr(scriptJson, '\"' || :scriptArgs || '\"') > 0")
+    suspend fun deleteRecoveryJobsForScript(parentId: String, scriptArgs: String)
+
+    /**
+     * Marks the candidate at [derivationPath] RESTORED and retires its
+     * discovery recovery job in one transaction. The restored child is a
+     * wallet now and registers from its own seeded start (#624); a job left
+     * behind could never complete (recovery skips RESTORED candidates) and
+     * would force the child's script to genesis recovery on every
+     * registration. Deleting rather than completing it keeps a later
+     * generation handoff (resetScripts) from re-arming it.
+     */
+    @Transaction
+    suspend fun markRestored(parentId: String, derivationPath: String) {
+        val candidate = getForParent(parentId).firstOrNull { it.derivationPath == derivationPath }
+        updateState(parentId, derivationPath, SubAccountCandidateEntity.STATE_RESTORED)
+        if (candidate != null) deleteRecoveryJobsForScript(parentId, candidate.scriptArgs)
+    }
+
+    /**
+     * Startup repair for rows left by builds that marked a candidate RESTORED
+     * without retiring its job. Returns the number of jobs removed.
+     */
+    @Query("DELETE FROM history_script_recovery_jobs WHERE EXISTS (SELECT 1 FROM sub_account_candidates c WHERE c.parentWalletId = history_script_recovery_jobs.parentWalletId AND c.state = 'RESTORED' AND instr(history_script_recovery_jobs.scriptJson, '\"' || c.scriptArgs || '\"') > 0)")
+    suspend fun retireRestoredRecoveryJobs(): Int
+
+    /**
+     * Startup repair for a restore whose [markRestored] failed after the child
+     * wallet was committed: a sub-account wallet at the candidate's path
+     * supersedes the candidate, exactly as the create would have recorded.
+     */
+    @Query("UPDATE sub_account_candidates SET state = 'RESTORED' WHERE state != 'RESTORED' AND EXISTS (SELECT 1 FROM wallets w WHERE w.parentWalletId = sub_account_candidates.parentWalletId AND w.derivationPath = sub_account_candidates.derivationPath)")
+    suspend fun restoreCandidatesWithWallets(): Int
+
+    /** Both startup repairs, in order, in one transaction. Returns jobs retired. */
+    @Transaction
+    suspend fun repairRestored(): Int {
+        restoreCandidatesWithWallets()
+        return retireRestoredRecoveryJobs()
+    }
+
+    /** Source state and recovery authorization are checked by the same SQL write. */
+    @Query("UPDATE sub_account_candidates SET state = :state WHERE parentWalletId = :parentId AND derivationPath = :derivationPath AND scriptArgs = :scriptArgs AND state != 'RESTORED' AND EXISTS (SELECT 1 FROM history_script_recovery_jobs WHERE parentWalletId = :parentId AND network = :network AND scriptJson = :scriptJson AND generation = :generation AND status = 'COMPLETE' AND generation = (SELECT generation FROM history_recovery_epochs WHERE network = :network))")
+    suspend fun applyRecoveryState(parentId: String, derivationPath: String, state: String, network: String, generation: String, scriptJson: String, scriptArgs: String)
+
+    @Query("UPDATE history_script_recovery_jobs SET status = 'COMPLETE' WHERE parentWalletId = :parentId AND network = :network AND scriptJson = :scriptJson AND generation = :generation AND targetBlock IS NOT NULL AND targetBlock <= :tip AND status = 'REGISTERED' AND generation = (SELECT generation FROM history_recovery_epochs WHERE network = :network)")
+    suspend fun completeRecoveryJob(parentId: String, network: String, scriptJson: String, generation: String, tip: Long): Int
+
+    @Transaction
+    suspend fun completeRecoveryState(parentId: String, derivationPath: String, state: String, network: String, generation: String, scriptJson: String, scriptArgs: String, tip: Long): Boolean {
+        if (completeRecoveryJob(parentId, network, scriptJson, generation, tip) != 1) return false
+        // A write failure rolls back completion, so a future poll can retry.
+        applyRecoveryState(parentId, derivationPath, state, network, generation, scriptJson, scriptArgs)
+        return true
+    }
 
     /**
      * Record the scan start for a registration, keeping the LOWEST block ever

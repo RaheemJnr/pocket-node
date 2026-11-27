@@ -52,6 +52,24 @@ class NodeLifecycle @Inject constructor(
     private val _nodeStatus = MutableStateFlow("Stopped")
     val nodeStatus: StateFlow<String> = _nodeStatus.asStateFlow()
 
+    private val _storeReset = MutableStateFlow(false)
+    private var storeResetNotice: File? = null
+
+    /**
+     * True when the light client could not use its store, set it aside
+     * (renamed, never deleted) and started a fresh one, until the user has
+     * seen the notice ([acknowledgeStoreReset]).
+     */
+    val storeReset: StateFlow<Boolean> = _storeReset.asStateFlow()
+
+    /** The notice was shown: drop the marker so it shows once. */
+    fun acknowledgeStoreReset() {
+        _storeReset.value = false
+        storeResetNotice?.let { notice ->
+            if (notice.exists() && !notice.delete()) logger.w(TAG, "Could not delete ${notice.name}")
+        }
+    }
+
     private val _network = MutableStateFlow(networkPreferences.getSelectedNetwork())
     val network: StateFlow<NetworkType> = _network.asStateFlow()
     val currentNetwork: NetworkType get() = _network.value
@@ -198,6 +216,11 @@ class NodeLifecycle @Inject constructor(
                     return
                 }
 
+                // The light client set its store aside and started a fresh one
+                // (it left this file behind): tell the user once.
+                storeResetNotice = File(dataDir, "store.db" + STORE_RESET_NOTICE_SUFFIX)
+                if (storeResetNotice?.exists() == true) _storeReset.value = true
+
                 verificationCacheGate.reconcile(lightClient, targetNetwork)
                 val startResult = lightClient.start()
                 if (startResult) {
@@ -286,5 +309,8 @@ class NodeLifecycle @Inject constructor(
 
     companion object {
         private const val TAG = "NodeLifecycle"
+
+        /** Native `store_version::RESET_NOTICE_SUFFIX`. */
+        const val STORE_RESET_NOTICE_SUFFIX = ".reset-notice"
     }
 }

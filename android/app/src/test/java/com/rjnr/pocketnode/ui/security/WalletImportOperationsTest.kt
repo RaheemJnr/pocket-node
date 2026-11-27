@@ -25,7 +25,7 @@ class WalletImportOperationsTest {
                 val wallets = WalletRepository(db.walletDao(), f.keyManager, prefs, prefs, mm, db,
                     db.transactionDao(), db.balanceCacheDao(), db.daoCellDao(), db.pendingDaoWithdrawDao(),
                     db.pendingDaoUnlockDao(), db.keyMaterialDao(), db.subAccountCandidateDao(),
-                    SubAccountDiscovery(mm, f.keyManager), prefs, NoopLogger)
+                    SubAccountDiscovery(mm, f.keyManager), prefs, NoopLogger, com.rjnr.pocketnode.data.gateway.DaoRecoveryLifetime())
                 val chars = ("abandon ".repeat(11) + "about").toCharArray()
                 val input = mockk<RecoverySecretDialog>()
                 coEvery { input.requestImport(any(), false) } returns chars

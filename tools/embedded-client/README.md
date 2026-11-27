@@ -14,7 +14,7 @@ Mobile compatibility patches retain:
 * SQLite's existing `store.db` file and `kv(key BLOB PRIMARY KEY, value BLOB)`
   schema, parent-directory creation, existing cache settings, and legacy mobile
   iterator adapter. The upstream shared storage/service implementation is used.
-* rusqlite 0.29, the mobile bridge dependencies, and the library-only Cargo
+* rusqlite 0.41 with bundled SQLite, the mobile bridge dependencies, and the library-only Cargo
   workspace. Rust is pinned to upstream's 1.95.0. The Cargo lock is a mobile
   overlay; it also includes compatible advisory fixes beyond the upstream pin.
 * Source-based tests using temporary SQLite files. No regression test uses a
@@ -65,7 +65,7 @@ Do not upload local diagnostic logs or private regression material in CI.
 
 ## Cache compatibility
 
-Store format 2 retains the `kv` layout. The transactional 1-to-2 upgrade removes
+Store format 3 retains the `kv` layout. The transactional 1-to-2 upgrade removes
 chain-derived transaction/cell/header/filter evidence, saves only old script
 metadata in an inactive table, and writes a random verification generation.
 Unknown metadata is preserved. Both apps read `get_verification_epoch` through
@@ -76,12 +76,28 @@ Local pending/failed transaction records and pending broadcast/DAO reconciliatio
 records survive. Wallet keys, birth settings, sync modes and custom horizons are
 outside this operation. Registration recomputes the start using existing settings.
 
+The 2-to-3 upgrade preserves verified evidence and the verification generation,
+and atomically stamps a required scoped-scan migration gate. Startup installs
+per-script progress before protocols run; interrupted genesis indexing remains
+fenced until resumed. A store this build cannot read (corrupt or non-SQLite, a
+newer format, or an old RocksDB directory) is renamed aside, never deleted, and
+replaced by an empty store with a new verification generation, so both apps
+re-fence their caches and recreate history recovery. A one-time
+`store.db.reset-notice` tells the app to say so. After a successful init only
+the 2 newest set-aside copies are kept; older ones are deleted. A store whose
+header reads but whose body is corrupt fails init; `PRAGMA quick_check(1)` then
+counts it (in `store.db.integrity-failures`) and it is set aside on the 3rd
+consecutive launch that finds it corrupt. Transient I/O and lock errors fail startup
+with the store in place. A failing upgrade step also fails startup, until the
+same step has failed on 3 consecutive launches (counted in
+`store.db.upgrade-failures` next to the store, reset on success); the store is
+then set aside.
+
 A failed database transaction rolls back. A failed applied-generation write keeps
 the UI/registration gate closed and retries cleanup on the next attempt. This is
 a two-store handoff, not a cross-database transaction.
 
-Downgrading native integrations is unsupported. The preceding format-1 binary
-sets a format-2 store aside under its existing recovery policy. Returning to this
-build creates a new generation and repeats the app handoff; a previous applied
-marker cannot authorize the recreated store. No set-aside file is automatically
-restored as verified chain evidence.
+Downgrading native integrations is unsupported. Older binaries may set a newer
+store aside under their recovery policy. No set-aside file is automatically
+restored as verified chain evidence, and a previous applied marker cannot
+authorize a recreated store with a new verification generation.

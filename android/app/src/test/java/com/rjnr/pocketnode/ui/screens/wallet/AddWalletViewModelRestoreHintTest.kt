@@ -94,7 +94,7 @@ class AddWalletViewModelRestoreHintTest {
             db.walletDao(), keyManager, prefs, prefs, mm, db,
             db.transactionDao(), db.balanceCacheDao(), db.daoCellDao(),
             db.pendingDaoWithdrawDao(), db.pendingDaoUnlockDao(), db.keyMaterialDao(),
-            db.subAccountCandidateDao(), discovery, prefs, NoopLogger,
+            db.subAccountCandidateDao(), discovery, prefs, NoopLogger, com.rjnr.pocketnode.data.gateway.DaoRecoveryLifetime(),
         )
         importer = RestoreHintImporter(db.subAccountCandidateDao(), discovery, prefs, NoopLogger)
         importer.computeDispatcher = Dispatchers.Unconfined

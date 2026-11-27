@@ -45,15 +45,15 @@ class SubAccountReconciler @Inject constructor(
      * per-script scanned height from nativeGetScripts; [tipHeight] the
      * current chain tip (0 = unknown, EMPTY never declared).
      */
-    suspend fun reconcile(scannedByArgs: Map<String, Long>, tipHeight: Long) {
+    suspend fun reconcile(scannedByArgs: Map<String, Long>, tipHeight: Long, recoveryByCandidate: Map<Pair<String, String>, Boolean> = emptyMap()) {
         val now = System.currentTimeMillis()
         if (now - lastRunAt < RUN_INTERVAL_MS) return
         lastRunAt = now
-        reconcileNow(scannedByArgs, tipHeight)
+        reconcileNow(scannedByArgs, tipHeight, recoveryByCandidate)
     }
 
     /** Un-throttled core — direct target for unit tests. */
-    suspend fun reconcileNow(scannedByArgs: Map<String, Long>, tipHeight: Long) {
+    suspend fun reconcileNow(scannedByArgs: Map<String, Long>, tipHeight: Long, recoveryByCandidate: Map<Pair<String, String>, Boolean> = emptyMap()) {
         val pending = candidateDao.getByState(SubAccountCandidateEntity.STATE_PENDING)
         if (pending.isEmpty()) return
 
@@ -73,9 +73,10 @@ class SubAccountReconciler @Inject constructor(
                         SubAccountCandidateEntity.STATE_FOUND,
                     )
                 }
-                tipHeight > 0 && scanned >= tipHeight - NEAR_TIP_MARGIN &&
+                recoveryByCandidate[candidate.parentWalletId to candidate.scriptArgs] == true ||
+                    (recoveryByCandidate[candidate.parentWalletId to candidate.scriptArgs] == null && tipHeight > 0 && scanned >= tipHeight - NEAR_TIP_MARGIN &&
                     candidate.registeredFromBlock > 0 &&
-                    scanned - candidate.registeredFromBlock >= MIN_COVERED_BLOCKS -> {
+                    scanned - candidate.registeredFromBlock >= MIN_COVERED_BLOCKS) -> {
                     candidateDao.updateState(
                         candidate.parentWalletId,
                         candidate.derivationPath,

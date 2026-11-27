@@ -94,7 +94,7 @@ class DaoGatewayUnlockTest {
         db = Room.inMemoryDatabaseBuilder(context, AppDatabase::class.java)
             .allowMainThreadQueries()
             .build()
-        verificationGate = VerificationCacheGate(context, db)
+        verificationGate = VerificationCacheGate(context, db, com.rjnr.pocketnode.data.gateway.DaoRecoveryLifetime())
         runBlocking { verificationGate.reconcile(epochClient("a"), network) }
         daoSyncManager = DaoSyncManager(
             db.headerCacheDao(),

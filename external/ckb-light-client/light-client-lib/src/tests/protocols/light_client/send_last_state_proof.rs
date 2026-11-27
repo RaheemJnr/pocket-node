@@ -2138,7 +2138,7 @@ async fn test_with_reorg_blocks(param: ReorgTestParameter) {
         // If `last_number == prev_last_number`, the rollback will not be applied since total
         // difficulties are the same,
 
-        let min_filtered_block_number = if rollback_blocks_count == 0 {
+        let fork_filtered_block_number = if rollback_blocks_count == 0 {
             if last_number == prev_last_number {
                 prev_last_number
             } else {
@@ -2147,6 +2147,13 @@ async fn test_with_reorg_blocks(param: ReorgTestParameter) {
         } else {
             prev_last_number - rollback_blocks_count
         };
+        // Discarding a crossing range now invalidates its entire suffix and
+        // refilters from that range's start, even if this precedes the fork.
+        let no_reorg = (rollback_blocks_count == 0) && (last_number == prev_last_number);
+        let first_discarded = earliest_matched_number.max(fork_filtered_block_number.saturating_sub(2)).max(1);
+        let min_filtered_block_number = if !no_reorg && first_discarded <= prev_last_number {
+            fork_filtered_block_number.min(first_discarded - 1)
+        } else { fork_filtered_block_number };
         assert_eq!(
             storage.get_min_filtered_block_number(),
             min_filtered_block_number
@@ -2178,7 +2185,7 @@ async fn test_with_reorg_blocks(param: ReorgTestParameter) {
             );
         } else {
             // Reorg happened, calculate which matched blocks were removed
-            let to_number = min_filtered_block_number;
+            let to_number = fork_filtered_block_number;
             let blocks_count = 4u64;
             let latest_kept_matched_block = if to_number >= blocks_count - 1 {
                 to_number - (blocks_count - 1)

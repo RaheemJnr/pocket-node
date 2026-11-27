@@ -155,6 +155,23 @@ class HomeViewModel @Inject constructor(
         }
     }
 
+    @OptIn(kotlinx.coroutines.ExperimentalCoroutinesApi::class)
+    private fun observeRecovery() {
+        viewModelScope.launch {
+            combine(
+                repository.network,
+                walletRepository.getActiveWallet().map { it?.walletId ?: "" }.distinctUntilChanged(),
+            ) { network, walletId -> network to walletId }
+                .distinctUntilChanged()
+                .flatMapLatest { (network, walletId) ->
+                    repository.historyRecovery.observePresentation(walletId, network.name)
+                        .onStart { emit(com.rjnr.pocketnode.data.history.RecoveryPresentation()) }
+                }
+                .catch { e -> logger.w(TAG, "History display unavailable", e) }
+                .collect { recovery -> _uiState.update { it.copy(recovery = recovery) } }
+        }
+    }
+
     private fun formatFiat(ckb: Double, price: Double): String =
         String.format(Locale.US, "≈ $%.2f USD", ckb * price)
 
@@ -202,6 +219,11 @@ class HomeViewModel @Inject constructor(
             }
         }
         viewModelScope.launch {
+            repository.lightClientReset.collect { reset ->
+                _uiState.update { it.copy(lightClientReset = reset) }
+            }
+        }
+        viewModelScope.launch {
             walletPreferences.priceServiceEnabledFlow.drop(1).collect { enabled ->
                 if (enabled) {
                     fetchPrice()
@@ -242,6 +264,7 @@ class HomeViewModel @Inject constructor(
                     val fiat = if (price != null) formatFiat(ckb, price) else null
                     current.copy(
                         balanceCkb = ckb,
+                        hasBalance = balance != null,
                         fiatBalance = fiat ?: current.fiatBalance
                     )
                 }
@@ -255,6 +278,7 @@ class HomeViewModel @Inject constructor(
         }
 
         observeBroadcastStates()
+        observeRecovery()
 
         viewModelScope.launch {
             repository.isSwitchingNetwork.collect { switching ->
@@ -601,6 +625,11 @@ class HomeViewModel @Inject constructor(
         _uiState.update { it.copy(error = null) }
     }
 
+    /** The one-time light client reset notice was shown. */
+    fun acknowledgeLightClientReset() {
+        repository.acknowledgeLightClientReset()
+    }
+
     /**
      * Handles a tap on the Failed chip in the activity list. Re-broadcasts the
      * original signed transaction (#316) — reusing its exact inputs so the
@@ -840,6 +869,7 @@ class HomeViewModel @Inject constructor(
             _uiState.update {
                 it.copy(
                     balanceCkb = 0.0,
+                    hasBalance = false,
                     fiatBalance = null,
                     ckbUsdPrice = null,
                     transactions = emptyList(),
@@ -1259,6 +1289,10 @@ class HomeViewModel @Inject constructor(
 }
 
 data class HomeUiState(
+    // The light client set its unreadable store aside and started fresh; shown once.
+    val lightClientReset: Boolean = false,
+    val recovery: com.rjnr.pocketnode.data.history.RecoveryPresentation = com.rjnr.pocketnode.data.history.RecoveryPresentation(),
+    val hasBalance: Boolean = false,
     val isLoading: Boolean = false,
     val isRefreshing: Boolean = false,
     val isSyncing: Boolean = false,

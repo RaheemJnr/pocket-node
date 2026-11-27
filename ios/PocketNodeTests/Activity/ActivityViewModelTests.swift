@@ -7,6 +7,18 @@ import XCTest
 /// switch throws away, and when it stops asking for more.
 @MainActor
 final class ActivityViewModelTests: XCTestCase {
+    func testArchivedHintsStayOutsideActionableActivityRowsAfterRecoveryCompletes() {
+        let source = FakeActivityPaging()
+        source.recovery = RecoveryPresentation(isRevalidating: false,
+            transactions: [RecoveryHint(identity: "archive", details: "Amount unknown · unverified")], daoHints: [])
+        let model = ActivityViewModel(source: source)
+        XCTAssertTrue(model.isEmpty)
+        XCTAssertTrue(model.rows.isEmpty)
+        XCTAssertEqual(model.recovery?.transactions.first?.identity, "archive")
+        XCTAssertNil(model.selected)
+        XCTAssertFalse(model.recovery!.isRevalidating)
+    }
+
 
     private func items(_ count: Int, prefix: String = "0x") -> [ActivityItem] {
         (0..<count).map { ActivityFixtures.item(record: ActivityFixtures.record(txHash: "\(prefix)\($0)")) }

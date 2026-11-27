@@ -52,6 +52,13 @@ interface SubAccountCandidateStore {
         fromBlock: Long,
     )
 
+    /** Set only after a current canonical recovery snapshot proves this result. */
+    suspend fun updateRecoveryState(parentId: String, derivationPath: String, state: String, network: String, generation: String, scriptJson: String, scriptArgs: String) = Unit
+
+    /** Commit the candidate verdict and recovery job completion in one transaction.
+     * Candidate-capable stores must implement this; empty platform stores never call it. */
+    suspend fun completeRecoveryState(parentId: String, derivationPath: String, state: String, network: String, generation: String, scriptJson: String, scriptArgs: String, tip: Long): Boolean = error("Atomic candidate recovery completion is not supported by this store")
+
     /**
      * Lock-script args of every candidate on record, across all parents and
      * all lifecycle states. The gap-limit signature check treats them

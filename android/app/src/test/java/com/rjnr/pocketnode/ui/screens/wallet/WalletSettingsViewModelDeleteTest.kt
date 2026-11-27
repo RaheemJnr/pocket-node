@@ -122,7 +122,7 @@ class WalletSettingsViewModelDeleteTest {
             db.walletDao(), keyManager, walletPreferences, walletPreferences, mnemonicManager, db,
             db.transactionDao(), db.balanceCacheDao(), db.daoCellDao(),
             db.pendingDaoWithdrawDao(), db.pendingDaoUnlockDao(), db.keyMaterialDao(),
-            db.subAccountCandidateDao(), SubAccountDiscovery(mnemonicManager, keyManager), walletPreferences, NoopLogger,
+            db.subAccountCandidateDao(), SubAccountDiscovery(mnemonicManager, keyManager), walletPreferences, NoopLogger, com.rjnr.pocketnode.data.gateway.DaoRecoveryLifetime(),
         )
 
         syncCoordinator = mockk(relaxed = true)

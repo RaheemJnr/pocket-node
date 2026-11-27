@@ -311,22 +311,30 @@ pub fn set_scripts(scripts_str: &str, command: i32) -> Result<(), BridgeError> {
         return Err(BridgeError::NotInitialized);
     }
 
-    let scripts_json: Vec<ScriptStatus> = serde_json::from_str(scripts_str).map_err(|e| {
+    #[derive(serde::Deserialize)]
+    struct Registration {
+        #[serde(flatten)]
+        status: ScriptStatus,
+        #[serde(default)]
+        history_recovery: bool,
+    }
+    let scripts_json: Vec<Registration> = serde_json::from_str(scripts_str).map_err(|e| {
         error!("Failed to parse scripts JSON: {}", e);
         BridgeError::Internal(format!("failed to parse scripts JSON: {}", e))
     })?;
 
     // Convert service::ScriptStatus to storage::ScriptStatus
-    let scripts: Vec<storage::ScriptStatus> = scripts_json
+    let recovery: Vec<bool> = scripts_json.iter().map(|s| s.history_recovery).collect();
+    let mut scripts: Vec<storage::ScriptStatus> = scripts_json
         .into_iter()
-        .map(|s| storage::ScriptStatus {
+        .map(|registration| { let s = registration.status; storage::ScriptStatus {
             script: s.script.into(),
             script_type: match s.script_type {
                 ScriptType::Lock => storage::ScriptType::Lock,
                 ScriptType::Type => storage::ScriptType::Type,
             },
             block_number: s.block_number.into(),
-        })
+        }})
         .collect();
 
     let cmd = match command {
@@ -354,7 +362,14 @@ pub fn set_scripts(scripts_str: &str, command: i32) -> Result<(), BridgeError> {
                 BridgeError::Network("peers not initialized".to_owned())
             })
         },
-        || swc.storage().update_filter_scripts(scripts, cmd.into()),
+        || {
+            for (status, recovery) in scripts.iter_mut().zip(recovery) {
+                if recovery {
+                    status.block_number = swc.storage().history_recovery_resume_start(status);
+                }
+            }
+            swc.storage().update_filter_scripts(scripts, cmd.into())
+        },
     )
 }
 

@@ -19,15 +19,16 @@ interface TransactionDao {
 
     /** One atomic scoped pass. Pending ownership and a concurrently advanced receipt win. */
     @Transaction
-    suspend fun reconcileCanonicalHistory(snapshot: com.rjnr.pocketnode.data.gateway.CanonicalHistorySnapshot, walletId: String, network: String, isCurrent: suspend () -> Boolean = { true }) {
-        if (!snapshot.validFor(snapshot.script, network) || walletId.isBlank()) return
+    suspend fun reconcileCanonicalHistory(snapshot: com.rjnr.pocketnode.data.gateway.CanonicalHistorySnapshot, walletId: String, network: String, isCurrent: suspend () -> Boolean = { true }): Boolean {
+        if (!snapshot.validFor(snapshot.script, network) || walletId.isBlank()) return false
         val candidates = canonicalCandidates(walletId, network)
-        if (candidates.isEmpty() || !isCurrent()) return
+        if (!isCurrent()) return false
         for (row in candidates) {
             if (snapshot.provesAbsent(row.txHash, row.blockNumber)) {
                 deleteCanonicalOrphan(row.txHash, walletId, network, row.blockNumber, row.blockHash, row.cachedAt)
             }
         }
+        return true
     }
 
 

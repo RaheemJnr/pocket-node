@@ -43,6 +43,8 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.decodeFromJsonElement
 import javax.inject.Inject
@@ -76,7 +78,13 @@ class GatewayRepository @Inject constructor(
     private val syncEngine: SyncEngine,
     private val startupReconciler: StartupReconciler,
     private val logger: Logger,
+    // No default: a private instance would never see the app singleton's
+    // invalidations (VerificationCacheGate, WalletRepository).
+    private val recoveryLifetime: DaoRecoveryLifetime,
 ) : TipSource, SyncPollSource {
+
+    /** Read-only unverified history and durable revalidation state for presentation. */
+    val historyRecovery by lazy { com.rjnr.pocketnode.data.storage.HistoryRecoveryReader(appDatabase.historyRecovery()) }
 
     /**
      * Sender identity for one send, snapshotted here and handed to
@@ -116,6 +124,7 @@ class GatewayRepository @Inject constructor(
     private val _walletInfo = MutableStateFlow<WalletInfo?>(null)
     val walletInfo: StateFlow<WalletInfo?> = _walletInfo.asStateFlow()
 
+    private var balanceCacheUsable = true
     private val _balance = MutableStateFlow<BalanceResponse?>(null)
     val balance: StateFlow<BalanceResponse?> = _balance.asStateFlow()
 
@@ -129,6 +138,12 @@ class GatewayRepository @Inject constructor(
     // selection and the restart-based switch) lives on [NodeLifecycle] (#460).
     // These forward so the repository's public surface is unchanged.
     val network: StateFlow<NetworkType> get() = nodeLifecycle.network
+
+    /** @see NodeLifecycle.storeReset */
+    val lightClientReset: StateFlow<Boolean> get() = nodeLifecycle.storeReset
+
+    /** @see NodeLifecycle.acknowledgeStoreReset */
+    fun acknowledgeLightClientReset() = nodeLifecycle.acknowledgeStoreReset()
     val currentNetwork: NetworkType get() = nodeLifecycle.currentNetwork
     val isSwitchingNetwork: StateFlow<Boolean> get() = nodeLifecycle.isSwitchingNetwork
 
@@ -160,6 +175,7 @@ class GatewayRepository @Inject constructor(
     val syncProgress: StateFlow<SyncProgress> get() = syncEngine.syncProgress
 
     init {
+        recoveryLifetime.observeInvalidation { balanceCacheUsable = false; _balance.value = null }
         // Migrate old flat data/ directory to data/mainnet/ on first run
         nodeLifecycle.migrateDataDirectoryIfNeeded()
 
@@ -177,6 +193,12 @@ class GatewayRepository @Inject constructor(
                 // Delete ESP files after successful migration
                 keyManager.deleteEspFilesIfSafe()
                 reassignActiveWallet(walletPreferences.getActiveWalletId() ?: "")
+                // A candidate restored by an older build kept its discovery
+                // recovery job, which pins the restored child to genesis
+                // recovery. Retire those before the first registration.
+                runCatching { appDatabase.subAccountCandidateDao().repairRestored() }
+                    .onSuccess { if (it > 0) logger.i(TAG, "Retired $it recovery jobs of restored sub-accounts") }
+                    .onFailure { logger.w(TAG, "Restored recovery job repair failed (non-fatal)", it) }
 
                 // Periodic VACUUM (~monthly) to reclaim fragmented space from
                 // tombstoned tx/cell rows. Throttled so it doesn't run on
@@ -247,6 +269,7 @@ class GatewayRepository @Inject constructor(
      * the configured sync strategy.
      */
     suspend fun onActiveWalletChanged(wallet: WalletEntity) {
+        val balanceRevision = recoveryLifetime.currentRevision()
         activeWalletId = wallet.walletId
         activeWalletType = wallet.type
         // Address-only derivation: avoids a BiometricPrompt for V2 wallets
@@ -319,8 +342,10 @@ class GatewayRepository @Inject constructor(
         }
 
         // Emit cached data immediately
-        cacheManager.getCachedBalance(currentNetwork.name, walletId = activeWalletId)?.let {
-            _balance.value = it
+        cacheManager.getCachedBalance(currentNetwork.name, walletId = activeWalletId)?.let { cached ->
+            recoveryLifetime.ifCurrent(balanceRevision) {
+                if (balanceCacheUsable && activeWalletId == wallet.walletId) _balance.value = cached
+            }
         }
     }
 
@@ -660,7 +685,7 @@ class GatewayRepository @Inject constructor(
             tipHeight,
         ).toString(16)
         val candidateRegistrations = pendingCandidateStatuses(
-            walletId, info.script, candidateHex
+            walletId, info.script, candidateHex, currentNetwork
         )
         var landed = false
         try {
@@ -909,7 +934,11 @@ class GatewayRepository @Inject constructor(
         gapLimitGateway.sweepGapLimitFunds(gapLimitContext(), words)
 
 
-    suspend fun refreshBalance(address: String? = null): Result<BalanceResponse> = runCatching {
+    private val balanceRefreshMutex = Mutex()
+
+    suspend fun refreshBalance(address: String? = null): Result<BalanceResponse> = runCatching { balanceRefreshMutex.withLock {
+        val balanceRevision = recoveryLifetime.currentRevision()
+        val handoff = cacheManager.handoffTicket()
         val addr = address ?: getCurrentAddress() ?: throw Exception("Wallet not initialized")
         // One snapshot of the mutable wallet state for the whole read, so a
         // wallet switch mid-walk cannot cache the new wallet's id against the
@@ -928,7 +957,9 @@ class GatewayRepository @Inject constructor(
             rescanAttempted = balanceRescanAttempted,
             // The cached balance paints the UI before the walk finishes; the
             // stream itself stays repository-owned.
-            emitCached = { cached -> _balance.value = cached },
+            emitCached = { cached -> recoveryLifetime.ifCurrent(balanceRevision) {
+                if (balanceCacheUsable && activeWalletId == wId && currentNetwork == network) _balance.value = cached
+            } },
             requestPartialRescan = { statuses ->
                 setScriptsAndRecord(
                     statuses,
@@ -939,13 +970,17 @@ class GatewayRepository @Inject constructor(
             },
         ).getOrThrow()
 
-        _balance.value = resp
-
-        // --- Cache write ---
-        cacheManager.cacheBalance(resp, network.name, walletId = wId)
+        check(recoveryLifetime.currentRevision() == balanceRevision) { "Balance coverage was invalidated" }
+        cacheBalanceIfCurrent(resp, network, wId, balanceRevision, handoff)
+        recoveryLifetime.ifCurrent(balanceRevision) {
+            if (activeWalletId == wId && currentNetwork == network) {
+                balanceCacheUsable = true
+                _balance.value = resp
+            }
+        }
 
         resp
-    }
+    } }
 
     /**
      * #435: recompute and cache the spendable balance for a wallet OTHER than
@@ -963,13 +998,50 @@ class GatewayRepository @Inject constructor(
      * (that stream belongs to the active wallet) and does NOT run the zero-cell
      * rescue rescan (an active-wallet-only recovery that rewinds the script).
      */
-    suspend fun refreshBalanceForWallet(walletId: String, address: String): Result<BalanceResponse> = runCatching {
-        val resp = ledgerReader.readBalanceForWallet(walletId, address, currentNetwork).getOrThrow()
-        cacheManager.cacheBalance(resp, currentNetwork.name, walletId = walletId)
+    suspend fun refreshBalanceForWallet(walletId: String, address: String): Result<BalanceResponse> = runCatching { balanceRefreshMutex.withLock {
+        val balanceRevision = recoveryLifetime.currentRevision()
+        val handoff = cacheManager.handoffTicket()
+        val network = currentNetwork
+        val resp = ledgerReader.readBalanceForWallet(walletId, address, network).getOrThrow()
+        check(recoveryLifetime.currentRevision() == balanceRevision) { "Balance coverage was invalidated" }
+        cacheBalanceIfCurrent(resp, network, walletId, balanceRevision, handoff)
         resp
+    } }
+
+    /**
+     * Writes [resp] to the balance cache, then re-checks the coverage revision.
+     * The write is a suspending Room call, so an invalidation can land while it
+     * runs, after the caller's own check. The read then fails, so nothing is
+     * published, and what happens to the row depends on what invalidated it:
+     *
+     * - A chain-cache handoff (the verification gate closed after [handoff] was
+     *   taken): the row may describe coverage the new store does not have, so
+     *   it is removed. The gate's reconcile deletes balance_cache itself, but
+     *   a write that lands after that delete would otherwise survive it.
+     * - A wallet switch or the app leaving the foreground: the chain has not
+     *   changed, the row is this wallet's last good balance, and it is kept so
+     *   the next start can still paint a number.
+     *
+     * An invalidation after the re-check is ordered after the write and falls
+     * under the same two cases: a handoff's reconcile clears the network's
+     * balance_cache when the generation changed, and any other invalidation
+     * leaves a valid row. Callers hold [balanceRefreshMutex], so no newer write
+     * for the same key can be removed.
+     */
+    private suspend fun cacheBalanceIfCurrent(resp: BalanceResponse, network: NetworkType, walletId: String, balanceRevision: Long, handoff: Long) {
+        cacheManager.cacheBalance(resp, network.name, walletId = walletId)
+        if (recoveryLifetime.currentRevision() != balanceRevision) {
+            if (cacheManager.handoffTicket() != handoff) {
+                val deleted = withContext(NonCancellable) { cacheManager.deleteBalance(network.name, walletId = walletId) }
+                if (!deleted) logger.e(TAG, "Balance written across a chain-cache handoff could not be removed for $walletId")
+            }
+            throw IllegalStateException("Balance coverage was invalidated")
+        }
     }
 
     // Simplified Account Status - JNI doesn't give sync progress easily
+    private var scriptRecoveryRegistrationPending = false
+
     override suspend fun getAccountStatus(): Result<AccountStatusResponse> = runCatching {
         val addr = getCurrentAddress() ?: throw Exception("No wallet")
 
@@ -1039,7 +1111,14 @@ class GatewayRepository @Inject constructor(
             // internally; never allowed to break the status poll. Skipped
             // with the progress writes while a registration is in flight.
             runCatching {
+                if (syncCoordinator.refreshScriptRecovery(currentNetwork)) scriptRecoveryRegistrationPending = true
+                if (scriptRecoveryRegistrationPending) {
+                    registerAccountWithStrategy(walletPreferences.getSyncMode(walletId = activeWalletId),
+                        walletPreferences.getCustomBlockHeight(walletId = activeWalletId), savePreference = false).getOrThrow()
+                    scriptRecoveryRegistrationPending = false
+                }
                 subAccountReconciler.reconcile(
+                    recoveryByCandidate = syncCoordinator.candidateRecoveryStates(currentNetwork),
                     scannedByArgs = scripts.associate { s ->
                         s.script.args to (s.blockNumber.removePrefix("0x").toLongOrNull(16) ?: 0L)
                     },

@@ -28,7 +28,7 @@ interface TransactionStore {
      * A store without this capability retains receipts. [snapshot] is trusted only
      * after validation against the requested script/network at the read boundary.
      */
-    suspend fun reconcileCanonicalHistory(snapshot: com.rjnr.pocketnode.data.gateway.CanonicalHistorySnapshot, walletId: String, network: String, isCurrent: suspend () -> Boolean = { true }) = Unit
+    suspend fun reconcileCanonicalHistory(snapshot: com.rjnr.pocketnode.data.gateway.CanonicalHistorySnapshot, walletId: String, network: String, isCurrent: suspend () -> Boolean = { true }): Boolean = false
 
 
     /**

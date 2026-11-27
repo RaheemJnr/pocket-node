@@ -26,6 +26,7 @@ import com.rjnr.pocketnode.data.database.MIGRATION_14_15
 import com.rjnr.pocketnode.data.database.MIGRATION_15_16
 import com.rjnr.pocketnode.data.database.MIGRATION_16_17
 import com.rjnr.pocketnode.data.database.MIGRATION_17_18
+import com.rjnr.pocketnode.data.database.MIGRATION_20_21
 import com.rjnr.pocketnode.data.database.MIGRATION_19_20
 import com.rjnr.pocketnode.data.database.MIGRATION_18_19
 import com.rjnr.pocketnode.data.database.dao.BalanceCacheDao
@@ -165,7 +166,7 @@ object AppModule {
     fun provideAppDatabase(@ApplicationContext context: Context): AppDatabase =
         Room.databaseBuilder(context, AppDatabase::class.java, "pocket_node.db")
             .setJournalMode(RoomDatabase.JournalMode.WRITE_AHEAD_LOGGING)
-            .addMigrations(MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4, MIGRATION_4_5, MIGRATION_5_6, MIGRATION_6_7, MIGRATION_7_8, MIGRATION_8_9, MIGRATION_9_10, MIGRATION_10_11, MIGRATION_11_12, MIGRATION_12_13, MIGRATION_13_14, MIGRATION_14_15, MIGRATION_15_16, MIGRATION_16_17, MIGRATION_17_18, MIGRATION_18_19, MIGRATION_19_20)
+            .addMigrations(MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4, MIGRATION_4_5, MIGRATION_5_6, MIGRATION_6_7, MIGRATION_7_8, MIGRATION_8_9, MIGRATION_9_10, MIGRATION_10_11, MIGRATION_11_12, MIGRATION_12_13, MIGRATION_13_14, MIGRATION_14_15, MIGRATION_15_16, MIGRATION_16_17, MIGRATION_17_18, MIGRATION_18_19, MIGRATION_19_20, MIGRATION_20_21)
             .build()
 
     @Provides
@@ -341,7 +342,9 @@ object AppModule {
         syncEngine: com.rjnr.pocketnode.data.sync.SyncEngine,
         startupReconciler: com.rjnr.pocketnode.data.gateway.StartupReconciler,
         logger: Logger,
-    ): GatewayRepository = GatewayRepository(keyManager, walletPreferences, json, cacheManager, walletMigrationHelper, walletDao, appDatabase, syncProgressDao, sendPipeline, syncCoordinator, daoGateway, gapLimitGateway, lightClient, ledgerReader, subAccountReconciler, syncServiceCommands, nodeLifecycle, syncEngine, startupReconciler, logger)
+        // The Hilt singleton that VerificationCacheGate and WalletRepository invalidate.
+        recoveryLifetime: com.rjnr.pocketnode.data.gateway.DaoRecoveryLifetime,
+    ): GatewayRepository = GatewayRepository(keyManager, walletPreferences, json, cacheManager, walletMigrationHelper, walletDao, appDatabase, syncProgressDao, sendPipeline, syncCoordinator, daoGateway, gapLimitGateway, lightClient, ledgerReader, subAccountReconciler, syncServiceCommands, nodeLifecycle, syncEngine, startupReconciler, logger, recoveryLifetime)
 
     /**
      * Production activity probe for sub-account discovery (#82 phase 2):

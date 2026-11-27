@@ -35,6 +35,7 @@ import kotlinx.coroutines.test.runTest
 import kotlinx.serialization.json.Json
 import kotlin.test.Test
 import kotlin.test.assertEquals
+import kotlin.test.assertFailsWith
 import kotlin.test.assertNotNull
 import kotlin.test.assertNull
 import kotlin.test.assertTrue
@@ -307,6 +308,39 @@ class ActivityFeedTest {
         assertEquals(cached, feed.primeCachedBalance(WALLET, NETWORK))
         assertEquals(cached, feed.cachedBalance.value)
         assertTrue(api.calls.isEmpty(), "no bridge call was made")
+    }
+
+    private fun balanceApi() = FakeLightClientApi()
+        .enqueue("getCellsCapacity", LightClientFixtures.CELLS_CAPACITY)
+        .enqueue("getCells", LightClientFixtures.GET_CELLS_PAGE)
+        .enqueue("getTransactions", LightClientFixtures.GET_TRANSACTIONS_PAGE)
+
+    @Test
+    fun `a handoff during the read leaves the cache untouched and fails the read`() = runTest {
+        val feed = feedOver(balanceApi())
+        // The cache is read first, before the walk: revoke there, mid-read.
+        balanceCache.afterRead = { feed.revokeCachedBalances() }
+
+        assertFailsWith<IllegalStateException> { feed.refreshBalance(ADDRESS, script, NETWORK, WALLET) }
+        assertNull(balanceCache.rows[WALLET to NETWORK.name])
+    }
+
+    @Test
+    fun `a handoff landing during the cache write removes the row`() = runTest {
+        val feed = feedOver(balanceApi())
+        balanceCache.afterWrite = { feed.revokeCachedBalances() }
+
+        assertFailsWith<IllegalStateException> { feed.refreshBalance(ADDRESS, script, NETWORK, WALLET) }
+        assertNull(balanceCache.rows[WALLET to NETWORK.name], "a row written across the handoff must not survive it")
+    }
+
+    @Test
+    fun `a read started after a handoff caches normally`() = runTest {
+        val feed = feedOver(balanceApi())
+        feed.revokeCachedBalances()
+
+        val response = feed.refreshBalance(ADDRESS, script, NETWORK, WALLET)
+        assertEquals(response, balanceCache.rows[WALLET to NETWORK.name])
     }
 
     @Test

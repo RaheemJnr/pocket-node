@@ -42,11 +42,68 @@ class VerificationCacheGateTest {
             db.transactionDao().insert(TransactionEntity(hash, "0x384", "old-block", 1, "100", "out", "2", 10, "0x1", "MAINNET", status, local, 1, "active", 2))
         }
     }
+    @Test fun `later verified hints refresh archive and survive repeated quarantine`() = runTest {
+        seed()
+        val gate = VerificationCacheGate(context, db, com.rjnr.pocketnode.data.gateway.DaoRecoveryLifetime())
+        gate.reconcile(client(), NetworkType.MAINNET)
+        db.openHelper.writableDatabase.execSQL("UPDATE transactions SET status='CONFIRMED', blockNumber='0x999', balanceChange='123', fee='9' WHERE txHash='confirmed'")
+        gate.reconcile(client("b".repeat(32)), NetworkType.MAINNET)
+        gate.reconcile(client("c".repeat(32)), NetworkType.MAINNET)
+        val row = db.historyRecovery().archive("active", "MAINNET").single { it.txHash == "confirmed" }
+        assertEquals("0x999", row.blockNumberHint)
+        assertEquals("123", row.balanceChangeHint)
+        assertEquals("9", row.feeHint)
+    }
+
+    @Test fun `later withdrawal refreshes existing DAO archive locator`() = runTest {
+        val cell = com.rjnr.pocketnode.data.database.entity.DaoCellEntity(
+            txHash = "deposit", index = "0x0", capacity = 1000, status = "DEPOSITED",
+            depositBlockNumber = 10, depositBlockHash = "deposit-block", depositEpochHex = null,
+            withdrawBlockNumber = null, withdrawBlockHash = null, withdrawEpochHex = null,
+            compensation = 0, unlockEpochHex = null, depositTimestamp = 1, network = "MAINNET", lastUpdatedAt = 1, walletId = "active")
+        db.daoCellDao().upsert(cell)
+        val gate = VerificationCacheGate(context, db, com.rjnr.pocketnode.data.gateway.DaoRecoveryLifetime())
+        gate.reconcile(client(), NetworkType.MAINNET)
+        db.daoCellDao().upsert(cell.copy(withdrawBlockNumber = 20, status = "WITHDRAWING"))
+        gate.reconcile(client("b".repeat(32)), NetworkType.MAINNET)
+        assertEquals(20L, db.historyRecovery().daoHints("active", "MAINNET").single().withdrawBlockHint)
+    }
+
+    @Test fun `pre checkpoint history and inactive recovery survive verification erasure`() = runTest {
+        seed()
+        db.transactionDao().insert(TransactionEntity("historic", "0x1036640", "old", 123, "42", "in", "1", 9, "0x7b", "MAINNET", "CONFIRMED", false, 1, "inactive"))
+        VerificationCacheGate(context, db, com.rjnr.pocketnode.data.gateway.DaoRecoveryLifetime()).reconcile(client(), NetworkType.MAINNET)
+        val sql = db.openHelper.writableDatabase
+        sql.query("SELECT name FROM sqlite_master WHERE type='table' AND name='history_archive'").use {
+            assertTrue("Verification erases pre-18.3M history without a durable archive", it.moveToFirst())
+        }
+        sql.query("SELECT blockNumberHint, balanceChangeHint FROM history_archive WHERE txHash='historic'").use {
+            assertTrue(it.moveToFirst()); assertEquals("0x1036640", it.getString(0)); assertEquals("42", it.getString(1))
+        }
+        sql.query("SELECT startBlock, previousSavedBlock FROM history_recovery_jobs WHERE walletId='inactive' AND network='MAINNET'").use {
+            assertTrue(it.moveToFirst()); assertEquals(0L, it.getLong(0)); assertEquals(900L, it.getLong(1))
+        }
+        assertEquals("UNVERIFIED", db.transactionDao().getByTxHash("historic")!!.status)
+    }
+    @Test fun `already erased same generation identities retain unknown hints and receive recovery`() = runTest {
+        seed()
+        val generation = "a".repeat(32)
+        context.getSharedPreferences("verified_chain_cache", Context.MODE_PRIVATE).edit().putString("MAINNET", generation).commit()
+        db.openHelper.writableDatabase.execSQL("UPDATE transactions SET status='UNVERIFIED', blockNumber='0x0', balanceChange='0', blockTimestampHex=NULL")
+        VerificationCacheGate(context, db, com.rjnr.pocketnode.data.gateway.DaoRecoveryLifetime()).reconcile(client(), NetworkType.MAINNET)
+        val sql = db.openHelper.writableDatabase
+        sql.query("SELECT name FROM sqlite_master WHERE name='history_archive'").use { assertTrue("Same verifier generation still needs archive repair", it.moveToFirst()) }
+        sql.query("SELECT blockNumberHint, balanceChangeHint, timestampHint, directionHint FROM history_archive WHERE txHash='confirmed'").use {
+            assertTrue(it.moveToFirst()); assertTrue(it.isNull(0)); assertTrue(it.isNull(1))
+            assertEquals(1L, it.getLong(2)); assertEquals("out", it.getString(3))
+        }
+        sql.query("SELECT startBlock FROM history_recovery_jobs WHERE walletId='inactive' AND network='MAINNET'").use { assertTrue(it.moveToFirst()); assertEquals(0L, it.getLong(0)) }
+    }
     @Test fun `handoff covers inactive wallets preserves settings and local outgoing records`() = runTest {
         seed()
         val prefs = context.getSharedPreferences("wallet_prefs", Context.MODE_PRIVATE)
         prefs.edit().putString("sync_mode", "CUSTOM").putLong("custom_height", 100).commit()
-        val gate = VerificationCacheGate(context, db)
+        val gate = VerificationCacheGate(context, db, com.rjnr.pocketnode.data.gateway.DaoRecoveryLifetime())
         assertFalse(gate.isReady("MAINNET"))
         gate.reconcile(client(), NetworkType.MAINNET)
         assertTrue(gate.isReady("MAINNET"))
@@ -61,7 +118,7 @@ class VerificationCacheGateTest {
         assertFalse(gate.isReady("MAINNET"))
     }
     @Test fun `same generation is idempotent but new generation invalidates again`() = runTest {
-        val gate = VerificationCacheGate(context, db)
+        val gate = VerificationCacheGate(context, db, com.rjnr.pocketnode.data.gateway.DaoRecoveryLifetime())
         gate.reconcile(client(), NetworkType.MAINNET)
         db.syncProgressDao().upsert(SyncProgressEntity("inactive", "MAINNET", 100, 400, 1))
         gate.reconcile(client(), NetworkType.MAINNET)
@@ -69,9 +126,39 @@ class VerificationCacheGateTest {
         gate.reconcile(client("b".repeat(32)), NetworkType.MAINNET)
         assertNull(db.syncProgressDao().get("inactive", "MAINNET"))
     }
+    /**
+     * The light client sets aside a store it cannot use and starts a fresh one,
+     * which gets a new verification generation. The next reconcile must treat
+     * that as a handoff: verified balances go, and every wallet's history
+     * recovery is due again even if it had completed on the old store.
+     */
+    @Test fun `fresh store generation after a set aside re-fences caches and recreates recovery`() = runTest {
+        db.walletDao().insert(com.rjnr.pocketnode.data.database.entity.WalletEntity(
+            walletId = "active", name = "active", type = "mnemonic", derivationPath = "m/44'/309'/0'/0/0",
+            parentWalletId = null, accountIndex = 0, mainnetAddress = "ckb1a", testnetAddress = "ckt1a",
+            isActive = true, createdAt = 0L, lastActiveAt = 0L))
+        val gate = VerificationCacheGate(context, db, com.rjnr.pocketnode.data.gateway.DaoRecoveryLifetime())
+        gate.reconcile(client("a".repeat(32)), NetworkType.MAINNET)
+        val sql = db.openHelper.writableDatabase
+        sql.execSQL("UPDATE history_recovery_jobs SET status = 'COMPLETE', targetBlock = 20 WHERE walletId = 'active' AND network = 'MAINNET'")
+        db.balanceCacheDao().upsert(com.rjnr.pocketnode.data.database.entity.BalanceCacheEntity(
+            "active", "MAINNET", "ckb1a", "100000000", "1", "0x10", 1L))
+        db.syncProgressDao().upsert(SyncProgressEntity("active", "MAINNET", 100, 900, 1))
+
+        gate.reconcile(client("f".repeat(32)), NetworkType.MAINNET)
+
+        assertTrue(gate.isReady("MAINNET"))
+        assertNull(db.balanceCacheDao().getByWalletAndNetwork("active", "MAINNET"))
+        assertNull(db.syncProgressDao().get("active", "MAINNET"))
+        val job = db.historyRecovery().job("active", "MAINNET")!!
+        assertEquals("PENDING", job.status)
+        assertEquals("f".repeat(32), job.generation)
+        assertNull(job.targetBlock)
+        assertEquals("f".repeat(32), db.historyRecovery().generation("MAINNET"))
+    }
     @Test fun `malformed epoch leaves gate closed and data untouched`() = runTest {
         seed()
-        val gate = VerificationCacheGate(context, db)
+        val gate = VerificationCacheGate(context, db, com.rjnr.pocketnode.data.gateway.DaoRecoveryLifetime())
         try { gate.reconcile(client("bad"), NetworkType.MAINNET); fail("accepted bad epoch") } catch (_: IllegalArgumentException) { }
         assertFalse(gate.isReady("MAINNET"))
         assertEquals(2, db.syncProgressDao().getAllForNetwork("MAINNET").size)
@@ -79,7 +166,7 @@ class VerificationCacheGateTest {
     }
     @Test fun `failed marker commit keeps gate closed and cleanup repeats before retry opens it`() = runTest {
         seed()
-        val gate = VerificationCacheGate(context, db)
+        val gate = VerificationCacheGate(context, db, com.rjnr.pocketnode.data.gateway.DaoRecoveryLifetime())
         val commit = gate.writeGeneration
         gate.writeGeneration = { _, _ -> false }
         try { gate.reconcile(client(), NetworkType.MAINNET); fail("accepted failed commit") } catch (_: IllegalStateException) { }
@@ -92,7 +179,7 @@ class VerificationCacheGateTest {
         assertTrue(db.syncProgressDao().getAllForNetwork("MAINNET").isEmpty())
     }
     @Test fun `network switch during reconciliation cannot reopen stale gate`() = runTest {
-        val gate = VerificationCacheGate(context, db)
+        val gate = VerificationCacheGate(context, db, com.rjnr.pocketnode.data.gateway.DaoRecoveryLifetime())
         val commit = gate.writeGeneration
         gate.writeGeneration = { network, generation ->
             val saved = commit(network, generation)
@@ -117,7 +204,7 @@ class VerificationCacheGateTest {
             writer.insertPendingDeposit(hash, 100, "MAINNET", walletId = "active")
             assertEquals("DEPOSITING", db.daoCellDao().getByOutPoint(hash, "0x0")!!.status)
         }
-        VerificationCacheGate(context, db).reconcile(client(), NetworkType.MAINNET)
+        VerificationCacheGate(context, db, com.rjnr.pocketnode.data.gateway.DaoRecoveryLifetime()).reconcile(client(), NetworkType.MAINNET)
         assertNotNull(db.daoCellDao().getByOutPoint("outgoing", "0x0"))
         assertNull(db.daoCellDao().getByOutPoint("remote-pending", "0x0"))
         assertNull(db.daoCellDao().getByOutPoint("other-network", "0x0"))
@@ -126,7 +213,7 @@ class VerificationCacheGateTest {
     }
 
     @Test fun `failed marker after memory publication retries until a checked durable write succeeds`() = runTest {
-        val gate = VerificationCacheGate(context, db)
+        val gate = VerificationCacheGate(context, db, com.rjnr.pocketnode.data.gateway.DaoRecoveryLifetime())
         val preferences = context.getSharedPreferences("verified_chain_cache", Context.MODE_PRIVATE)
         var attempts = 0
         gate.writeGeneration = { network, generation ->
@@ -148,7 +235,7 @@ class VerificationCacheGateTest {
     }
 
     @Test fun `close serializes with transaction commit and superseded mutations are rejected`() = runTest {
-        val gate = VerificationCacheGate(context, db)
+        val gate = VerificationCacheGate(context, db, com.rjnr.pocketnode.data.gateway.DaoRecoveryLifetime())
         gate.reconcile(client(), NetworkType.MAINNET)
         val ticket = gate.requireReadyRevision("MAINNET")
         val entered = CompletableDeferred<Unit>()
@@ -184,7 +271,7 @@ class VerificationCacheGateTest {
     }
 
     @Test fun `mutation failure rolls back the whole staged transaction`() = runTest {
-        val gate = VerificationCacheGate(context, db)
+        val gate = VerificationCacheGate(context, db, com.rjnr.pocketnode.data.gateway.DaoRecoveryLifetime())
         gate.reconcile(client(), NetworkType.MAINNET)
         val ticket = gate.requireReadyRevision("MAINNET")
         try {

@@ -12,9 +12,15 @@
 //! Format 2 keeps the mobile `kv` schema. The 1 -> 2 step invalidates
 //! chain-derived evidence and records a verification identity atomically;
 //! wallet scripts are retained separately as inactive recovery metadata.
-//! Version 0 is first treated as version 1. Unknown newer layouts and corrupt
-//! files retain the existing set-aside recovery policy. Transient errors and
-//! transaction-boundary errors roll back and are retried on the next launch.
+//! Format 3 stamps a required scoped-scan migration gate; startup atomically
+//! installs per-script progress before any protocol starts. Interrupted genesis
+//! indexing remains fenced and resumes on startup.
+//! Version 0 is first treated as version 1. A newer layout, a corrupt or
+//! non-SQLite file, or a directory is set aside at once. A failing upgrade
+//! step keeps the store in place and is set aside only after
+//! [`UPGRADE_FAILURE_LAUNCHES`] consecutive launches fail at that step.
+//! Transient errors and transaction-boundary errors roll back and are retried
+//! on the next launch, never set aside. Set-aside copies are all kept.
 //!
 //! "Set aside" renames `store.db` (and its `-wal` / `-shm` siblings, if any)
 //! to `store.db.incompatible-<version>-<unix seconds>`; nothing is deleted.
@@ -30,10 +36,11 @@ use rusqlite::{Connection, ErrorCode};
 use std::fs;
 use std::io::Read;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 /// Layout version of the store this build reads and writes.
-pub const STORE_FORMAT_VERSION: u32 = 2;
+pub const STORE_FORMAT_VERSION: u32 = 3;
 
 /// Stores written before versioning existed carry `user_version` 0 and have
 /// this layout.
@@ -51,7 +58,32 @@ pub struct UpgradeStep {
 
 /// Registered upgrade steps, in any order. Adding a layout change later means
 /// bumping [`STORE_FORMAT_VERSION`] and adding one entry here.
-const UPGRADE_STEPS: &[UpgradeStep] = &[UpgradeStep { from: 1, run: super::verification_epoch::upgrade }];
+const UPGRADE_STEPS: &[UpgradeStep] = &[
+    UpgradeStep {
+        from: 1,
+        run: super::verification_epoch::upgrade,
+    },
+    UpgradeStep {
+        from: 2,
+        run: require_scoped_migration,
+    },
+];
+
+// Stamp a durable startup gate in the same transaction as format 3. Lifecycle
+// must install scoped scan state before starting any protocol or publishing data.
+fn require_scoped_migration(conn: &Connection) -> rusqlite::Result<()> {
+    conn.execute_batch(
+        "CREATE TABLE IF NOT EXISTS kv (key BLOB PRIMARY KEY, value BLOB NOT NULL)",
+    )?;
+    conn.execute(
+        "INSERT OR REPLACE INTO kv(key,value) VALUES(?1,?2)",
+        rusqlite::params![
+            crate::storage::Key::Meta("SCAN_MIGRATION_REQUIRED_V2").into_vec(),
+            vec![1u8]
+        ],
+    )?;
+    Ok(())
+}
 
 /// What [`ensure_store_version`] did. Logged by `init`; not surfaced to the
 /// platform bridges.
@@ -76,20 +108,81 @@ pub enum StoreVersionAction {
     },
 }
 
-/// Bring the store at `path` to [`STORE_FORMAT_VERSION`], or set it aside if
-/// this build cannot read it. Must be called before the storage layer opens
-/// the file.
-pub fn ensure_store_version(path: &Path) -> Result<StoreVersionAction, BridgeError> {
-    ensure_store_version_with(path, STORE_FORMAT_VERSION, UPGRADE_STEPS)
+/// Launches that must fail at the same upgrade step, in a row, before a store
+/// on a supported version is set aside. Three consecutive launches failing at
+/// the same step will not succeed on the fourth.
+pub const UPGRADE_FAILURE_LAUNCHES: u32 = 3;
+
+/// A process counts at most one failed launch: the platform bridges retry
+/// `init` within one launch, and those retries are not separate launches.
+static FAILURE_COUNTED_THIS_PROCESS: AtomicBool = AtomicBool::new(false);
+
+/// What to do with a store whose upgrade step fails.
+enum Policy<'a> {
+    /// Legacy fixtures: set the store aside at once.
+    #[cfg(test)]
+    SetAsideNow,
+    /// Production: keep the store in place and set it aside only once
+    /// [`UPGRADE_FAILURE_LAUNCHES`] consecutive launches have failed at that
+    /// same step, counted in `counter` (a file next to the store, never inside
+    /// it). `counted` limits the count to once a process.
+    SetAsideAfterRepeatedFailures {
+        counter: PathBuf,
+        counted: &'a AtomicBool,
+    },
 }
 
-/// [`ensure_store_version`] with the target version and upgrade table as
-/// parameters, so tests can exercise the upgrade path while production has no
-/// steps.
+/// Bring the store at `path` to [`STORE_FORMAT_VERSION`]. Must be called
+/// before the storage layer opens the file.
+///
+/// A store this build cannot read (unreadable or corrupt, a newer format, or
+/// a directory left by an old RocksDB build) is set aside: renamed next to
+/// the store, never deleted, and replaced by an empty current store. The
+/// storage layer gives the empty store a new verification generation, so the
+/// apps re-fence their caches. Transient I/O and lock errors keep the store in
+/// place and fail this launch; the next one retries. A failing upgrade step is
+/// retried on later launches and set aside after [`UPGRADE_FAILURE_LAUNCHES`].
+pub fn ensure_store_version(path: &Path) -> Result<StoreVersionAction, BridgeError> {
+    ensure_store_version_with_policy(
+        path,
+        STORE_FORMAT_VERSION,
+        UPGRADE_STEPS,
+        Policy::SetAsideAfterRepeatedFailures {
+            counter: failure_counter_path(path)?,
+            counted: &FAILURE_COUNTED_THIS_PROCESS,
+        },
+    )
+}
+
+/// Legacy recovery policy retained for format-migration fixtures.
+#[cfg(test)]
 pub(crate) fn ensure_store_version_with(
     path: &Path,
     target: u32,
     steps: &[UpgradeStep],
+) -> Result<StoreVersionAction, BridgeError> {
+    ensure_store_version_with_policy(path, target, steps, Policy::SetAsideNow)
+}
+
+fn ensure_store_version_with_policy(
+    path: &Path,
+    target: u32,
+    steps: &[UpgradeStep],
+    policy: Policy,
+) -> Result<StoreVersionAction, BridgeError> {
+    let result = check_and_upgrade(path, target, steps, &policy);
+    if let (Ok(_), Policy::SetAsideAfterRepeatedFailures { counter, .. }) = (&result, &policy) {
+        // Any usable outcome ends a run of failed launches.
+        reset_failures(counter);
+    }
+    result
+}
+
+fn check_and_upgrade(
+    path: &Path,
+    target: u32,
+    steps: &[UpgradeStep],
+    policy: &Policy,
 ) -> Result<StoreVersionAction, BridgeError> {
     if !path.exists() {
         create_stamped(path, target)?;
@@ -122,7 +215,85 @@ pub(crate) fn ensure_store_version_with(
             from: found,
             to: target,
         }),
-        Err(reached) => set_aside(path, Some(reached), target),
+        Err(reached) => match policy {
+            #[cfg(test)]
+            Policy::SetAsideNow => set_aside(path, Some(reached), target),
+            Policy::SetAsideAfterRepeatedFailures { counter, counted } => {
+                let launches = record_failed_launch(counter, reached, counted)?;
+                if launches >= UPGRADE_FAILURE_LAUNCHES {
+                    warn!(
+                        "Light client store upgrade from version {} failed on {} consecutive launches; setting it aside",
+                        reached, launches
+                    );
+                    set_aside(path, Some(reached), target)
+                } else {
+                    Err(BridgeError::Storage(format!(
+                        "store upgrade failed at version {reached} ({launches} of {UPGRADE_FAILURE_LAUNCHES} launches); preserved in place"
+                    )))
+                }
+            }
+        },
+    }
+}
+
+/// `store.db` -> `store.db.upgrade-failures`, next to the store.
+fn failure_counter_path(path: &Path) -> Result<PathBuf, BridgeError> {
+    let file_name = path
+        .file_name()
+        .and_then(|n| n.to_str())
+        .ok_or_else(|| BridgeError::Storage("store path has no file name".to_owned()))?;
+    Ok(sibling(path, &format!("{}.upgrade-failures", file_name)))
+}
+
+/// Reads `"<version> <launches>"`. A missing or unreadable counter is no
+/// failures: it can only delay a set-aside, never cause one.
+fn read_failures(counter: &Path) -> Option<(u32, u32)> {
+    let text = fs::read_to_string(counter).ok()?;
+    let mut parts = text.split_whitespace();
+    let version = parts.next()?.parse().ok()?;
+    let launches = parts.next()?.parse().ok()?;
+    Some((version, launches))
+}
+
+/// Counts this launch's failure at `version` and returns the run length. A
+/// failure at another version starts a new run. A retry in the same process
+/// does not count again. A counter that cannot be written fails the launch
+/// with the store kept in place.
+fn record_failed_launch(
+    counter: &Path,
+    version: u32,
+    counted: &AtomicBool,
+) -> Result<u32, BridgeError> {
+    let previous = match read_failures(counter) {
+        Some((v, n)) if v == version => n,
+        _ => 0,
+    };
+    if counted.load(Ordering::SeqCst) {
+        return Ok(previous.max(1));
+    }
+    let launches = previous.saturating_add(1);
+    let tmp = sibling(
+        counter,
+        &format!(
+            "{}.tmp",
+            counter
+                .file_name()
+                .and_then(|n| n.to_str())
+                .unwrap_or("upgrade-failures")
+        ),
+    );
+    fs::write(&tmp, format!("{} {}\n", version, launches))
+        .and_then(|_| fs::rename(&tmp, counter))
+        .map_err(storage_err)?;
+    counted.store(true, Ordering::SeqCst);
+    Ok(launches)
+}
+
+fn reset_failures(counter: &Path) {
+    match fs::remove_file(counter) {
+        Ok(()) => info!("Light client store usable again; cleared the upgrade failure count"),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        Err(e) => warn!("Could not clear the store upgrade failure count: {}", e),
     }
 }
 
@@ -214,7 +385,8 @@ fn stamp(path: &Path, version: u32) -> Result<(), BridgeError> {
 /// stamping or committing a step's transaction failed, or a step failed with
 /// a transient error. The inner `Err` carries the version the store reached
 /// when a step was missing or a step itself failed for another reason, which
-/// means this build cannot bring the store forward and it is set aside.
+/// means this build cannot bring the store forward. Production keeps it in
+/// place until the same step has failed on consecutive launches.
 fn upgrade(
     path: &Path,
     from: u32,
@@ -334,10 +506,158 @@ fn set_aside(
     );
 
     create_stamped(path, target)?;
+    // Tell the app once that its chain data was reset. Best effort: losing the
+    // notice only loses the message, never data.
+    if let Err(e) = fs::write(
+        sibling(path, &format!("{}{}", file_name, RESET_NOTICE_SUFFIX)),
+        &base,
+    ) {
+        warn!("Could not record the store reset notice: {}", e);
+    }
     Ok(StoreVersionAction::SetAside {
         found,
         renamed_to: base,
     })
+}
+
+/// Written next to the store when it is set aside: `store.db.reset-notice`,
+/// holding the set-aside name. The app shows a one-time notice and deletes it.
+pub const RESET_NOTICE_SUFFIX: &str = ".reset-notice";
+
+/// Set-aside copies kept after a successful init; older ones are deleted.
+pub const KEEP_SET_ASIDE_COPIES: usize = 2;
+
+/// Counter key for a store whose body failed an integrity check, kept in its
+/// own file because every Current launch resets the upgrade counter.
+const INTEGRITY_FAILURE: u32 = u32::MAX;
+
+/// Called when init could not open a store that passed
+/// [`ensure_store_version`] (for example a store classed Current whose
+/// interior pages are corrupt: its header still reads). Runs
+/// `PRAGMA quick_check(1)`. A corrupt store is counted like a failing upgrade
+/// step and set aside only once [`UPGRADE_FAILURE_LAUNCHES`] consecutive
+/// launches have found it corrupt: the failed init is one signal, the
+/// integrity check a second, and the launch count a third. Returns the
+/// set-aside when it happened; `Ok(None)` keeps the store in place and the
+/// caller reports its original error. An I/O or lock error during the check
+/// is not a signal of corruption and is returned as an error.
+pub fn recover_after_init_failure(path: &Path) -> Result<Option<StoreVersionAction>, BridgeError> {
+    recover_after_init_failure_with(path, &FAILURE_COUNTED_THIS_PROCESS)
+}
+
+fn recover_after_init_failure_with(
+    path: &Path,
+    counted: &AtomicBool,
+) -> Result<Option<StoreVersionAction>, BridgeError> {
+    if !path.is_file() || !body_is_corrupt(path)? {
+        return Ok(None);
+    }
+    let counter = integrity_counter_path(path)?;
+    let launches = record_failed_launch(&counter, INTEGRITY_FAILURE, counted)?;
+    if launches < UPGRADE_FAILURE_LAUNCHES {
+        warn!(
+            "Light client store failed its integrity check ({} of {} launches); kept in place",
+            launches, UPGRADE_FAILURE_LAUNCHES
+        );
+        return Ok(None);
+    }
+    warn!(
+        "Light client store failed its integrity check on {} consecutive launches; setting it aside",
+        launches
+    );
+    let action = set_aside(path, None, STORE_FORMAT_VERSION)?;
+    reset_failures(&counter);
+    Ok(Some(action))
+}
+
+/// `PRAGMA quick_check(1)` on a short-lived connection. `Ok(true)` only for
+/// a definite corruption report; anything transient is an error.
+fn body_is_corrupt(path: &Path) -> Result<bool, BridgeError> {
+    let conn = Connection::open(path).map_err(sqlite_err)?;
+    let result = conn.query_row("PRAGMA quick_check(1)", [], |row| row.get::<_, String>(0));
+    drop(conn);
+    match result {
+        Ok(report) => Ok(report != "ok"),
+        Err(e) if is_unreadable(&e) => Ok(true),
+        Err(e) => Err(sqlite_err(e)),
+    }
+}
+
+/// `store.db` -> `store.db.integrity-failures`, next to the store.
+fn integrity_counter_path(path: &Path) -> Result<PathBuf, BridgeError> {
+    let file_name = path
+        .file_name()
+        .and_then(|n| n.to_str())
+        .ok_or_else(|| BridgeError::Storage("store path has no file name".to_owned()))?;
+    Ok(sibling(path, &format!("{}.integrity-failures", file_name)))
+}
+
+/// Housekeeping once init has opened the store successfully: the integrity
+/// count resets, stray counter temp files from a failed write are removed,
+/// and only the [`KEEP_SET_ASIDE_COPIES`] newest set-aside copies are kept.
+/// A successful init of the current store is the second signal that makes
+/// deleting older copies safe. Failures are logged, never returned.
+pub fn after_successful_open(path: &Path) {
+    let Some(file_name) = path.file_name().and_then(|n| n.to_str()) else {
+        return;
+    };
+    if let Ok(counter) = integrity_counter_path(path) {
+        reset_failures(&counter);
+    }
+    for stray in [
+        format!("{}.upgrade-failures.tmp", file_name),
+        format!("{}.integrity-failures.tmp", file_name),
+    ] {
+        match fs::remove_file(sibling(path, &stray)) {
+            Ok(()) => info!("Removed stray {}", stray),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => warn!("Could not remove stray {}: {}", stray, e),
+        }
+    }
+    prune_set_aside_copies(path, file_name);
+}
+
+/// Deletes set-aside copies older than the [`KEEP_SET_ASIDE_COPIES`] newest,
+/// with their -wal / -shm siblings. Ordered by the set-aside timestamp in
+/// the name, then the collision suffix.
+fn prune_set_aside_copies(path: &Path, file_name: &str) {
+    let Some(dir) = path.parent() else { return };
+    let prefix = format!("{}.incompatible-", file_name);
+    let Ok(entries) = fs::read_dir(dir) else {
+        return;
+    };
+    let mut bases: Vec<((u64, u64), String)> = entries
+        .filter_map(|e| e.ok()?.file_name().into_string().ok())
+        .filter(|n| n.starts_with(&prefix) && !n.ends_with("-wal") && !n.ends_with("-shm"))
+        .filter_map(|n| {
+            let mut parts = n[prefix.len()..].split('-');
+            let _tag = parts.next()?;
+            let ts: u64 = parts.next()?.parse().ok()?;
+            let seq: u64 = parts.next().map_or(Some(0), |p| p.parse().ok())?;
+            Some(((ts, seq), n))
+        })
+        .collect();
+    bases.sort();
+    let excess = bases.len().saturating_sub(KEEP_SET_ASIDE_COPIES);
+    for (_, base) in bases.into_iter().take(excess) {
+        for name in [
+            base.clone(),
+            format!("{}-wal", base),
+            format!("{}-shm", base),
+        ] {
+            let target = dir.join(&name);
+            let removed = if target.is_dir() {
+                fs::remove_dir_all(&target)
+            } else {
+                fs::remove_file(&target)
+            };
+            match removed {
+                Ok(()) => info!("Deleted old set-aside light client store {}", name),
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+                Err(e) => warn!("Could not delete old set-aside store {}: {}", name, e),
+            }
+        }
+    }
 }
 
 fn sibling(path: &Path, name: &str) -> PathBuf {
@@ -665,7 +985,7 @@ mod tests {
 
     #[test]
     fn production_registers_verification_upgrade() {
-        assert_eq!(UPGRADE_STEPS.len(), 1);
+        assert_eq!(UPGRADE_STEPS.len(), 2);
         assert_eq!(UPGRADE_STEPS[0].from, 1);
     }
 
@@ -940,5 +1260,435 @@ mod tests {
             StoreVersionAction::Current
         );
         assert_eq!(row_count(&path), 2);
+    }
+    #[test]
+    fn scoped_upgrade_preserves_rows_and_stamps_required_gate() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("store.db");
+        write_store(&path, ROWS);
+        set_version(&path, 2);
+        let before = rows(&path);
+        assert_eq!(
+            ensure_store_version(&path).unwrap(),
+            StoreVersionAction::Upgraded { from: 2, to: 3 }
+        );
+        assert_eq!(user_version(&path), 3);
+        let after = rows(&path);
+        for row in before {
+            assert!(after.contains(&row));
+        }
+        assert!(after
+            .iter()
+            .any(|(key, _)| *key
+                == crate::storage::Key::Meta("SCAN_MIGRATION_REQUIRED_V2").into_vec()));
+    }
+    /// One launch under the production policy, with its own per-process flag.
+    fn launch(
+        path: &Path,
+        target: u32,
+        steps: &[UpgradeStep],
+    ) -> Result<StoreVersionAction, BridgeError> {
+        let counted = AtomicBool::new(false);
+        ensure_store_version_with_policy(
+            path,
+            target,
+            steps,
+            Policy::SetAsideAfterRepeatedFailures {
+                counter: failure_counter_path(path).unwrap(),
+                counted: &counted,
+            },
+        )
+    }
+
+    fn counter_text(path: &Path) -> Option<String> {
+        fs::read_to_string(failure_counter_path(path).unwrap()).ok()
+    }
+
+    /// A v2 store whose `kv` table lacks the `value` column, so the real
+    /// 2 -> 3 step fails with a non-transient error.
+    fn broken_v2_store(dir: &TempDir) -> PathBuf {
+        let path = dir.path().join("store.db");
+        let conn = Connection::open(&path).unwrap();
+        conn.execute_batch("CREATE TABLE kv(key BLOB PRIMARY KEY); INSERT INTO kv VALUES(x'1234'); PRAGMA user_version=2;").unwrap();
+        drop(conn);
+        path
+    }
+
+    /// A real current store: opened by the storage layer with its own
+    /// verification generation. Returns that generation.
+    fn initialized_store(path: &Path) -> String {
+        assert!(matches!(
+            launch(path, STORE_FORMAT_VERSION, UPGRADE_STEPS),
+            Ok(StoreVersionAction::Created | StoreVersionAction::Current)
+        ));
+        let storage = Storage::new(path);
+        super::super::verification_epoch::initialize_fresh(&storage).unwrap();
+        let generation = super::super::verification_epoch::read(&storage)
+            .unwrap()
+            .generation;
+        drop(storage);
+        generation
+    }
+
+    fn assert_set_aside_to_fresh_generation(
+        dir: &TempDir,
+        path: &Path,
+        old_generation: Option<&str>,
+    ) {
+        let action = ensure_store_version(path).unwrap();
+        let StoreVersionAction::SetAside { renamed_to, .. } = action else {
+            panic!("expected SetAside, got {:?}", action);
+        };
+        assert!(
+            dir.path().join(&renamed_to).exists(),
+            "the old store is kept"
+        );
+        assert_eq!(user_version(path), STORE_FORMAT_VERSION);
+        // What lifecycle::init does next: the fresh store gets its own
+        // verification generation, which is what makes the apps re-fence.
+        let storage = Storage::new(path);
+        super::super::verification_epoch::initialize_fresh(&storage).unwrap();
+        let fresh = super::super::verification_epoch::read(&storage)
+            .unwrap()
+            .generation;
+        assert!(!fresh.is_empty());
+        if let Some(old) = old_generation {
+            assert_ne!(fresh, old, "a set-aside store must not keep its generation");
+        }
+    }
+
+    #[test]
+    fn production_sets_aside_newer_store_and_fresh_store_gets_new_generation() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("store.db");
+        let old = initialized_store(&path);
+        set_version(&path, 99);
+        assert_set_aside_to_fresh_generation(&dir, &path, Some(&old));
+        let aside = entries(dir.path())
+            .into_iter()
+            .find(|n| {
+                n.starts_with("store.db.incompatible-99-")
+                    && !n.ends_with("-wal")
+                    && !n.ends_with("-shm")
+            })
+            .expect("set-aside copy named with version and timestamp");
+        assert_eq!(user_version(&dir.path().join(aside)), 99);
+    }
+
+    #[test]
+    fn production_sets_aside_corrupt_store() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("store.db");
+        let mut bytes = b"SQLite format 3\0".to_vec();
+        bytes.extend(std::iter::repeat_n(0xAB, 4096));
+        fs::write(&path, &bytes).unwrap();
+        assert_set_aside_to_fresh_generation(&dir, &path, None);
+        let junk: &[u8] = b"not a database";
+        fs::write(&path, junk).unwrap();
+        assert_set_aside_to_fresh_generation(&dir, &path, None);
+    }
+
+    #[test]
+    fn production_sets_aside_legacy_directory_store() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("store.db");
+        fs::create_dir(&path).unwrap();
+        fs::write(path.join("CURRENT"), b"MANIFEST-000001").unwrap();
+        assert_set_aside_to_fresh_generation(&dir, &path, None);
+        assert!(path.is_file());
+    }
+
+    #[test]
+    fn production_transient_step_error_stays_closed_on_every_launch() {
+        let dir = TempDir::new().unwrap();
+        let path = v1_store(&dir);
+        let before = rows(&path);
+        let steps = [UpgradeStep {
+            from: 1,
+            run: busy_step,
+        }];
+        for _ in 0..(UPGRADE_FAILURE_LAUNCHES + 1) {
+            assert!(matches!(
+                launch(&path, 2, &steps),
+                Err(BridgeError::Storage(_))
+            ));
+            assert_left_in_place_at_v1(&dir, &path, &before);
+            assert_eq!(
+                counter_text(&path),
+                None,
+                "transient errors are not counted"
+            );
+        }
+    }
+
+    #[test]
+    fn production_upgrade_failure_is_set_aside_on_the_third_consecutive_launch() {
+        let dir = TempDir::new().unwrap();
+        let path = broken_v2_store(&dir);
+        for n in 1..UPGRADE_FAILURE_LAUNCHES {
+            assert!(matches!(
+                launch(&path, STORE_FORMAT_VERSION, UPGRADE_STEPS),
+                Err(BridgeError::Storage(_))
+            ));
+            assert_eq!(user_version(&path), 2);
+            assert_eq!(
+                counter_text(&path).as_deref(),
+                Some(format!("2 {}\n", n).as_str())
+            );
+            let conn = Connection::open(&path).unwrap();
+            assert_eq!(
+                conn.query_row("SELECT key FROM kv", [], |row| row.get::<_, Vec<u8>>(0))
+                    .unwrap(),
+                vec![0x12, 0x34]
+            );
+        }
+        let action = launch(&path, STORE_FORMAT_VERSION, UPGRADE_STEPS).unwrap();
+        let StoreVersionAction::SetAside { found, renamed_to } = action else {
+            panic!("expected SetAside, got {:?}", action);
+        };
+        assert_eq!(found, Some(2));
+        assert_eq!(user_version(&dir.path().join(renamed_to)), 2);
+        assert_eq!(user_version(&path), STORE_FORMAT_VERSION);
+        assert_eq!(
+            counter_text(&path),
+            None,
+            "the count resets once the store is usable"
+        );
+    }
+
+    #[test]
+    fn retries_within_one_launch_count_once() {
+        let dir = TempDir::new().unwrap();
+        let path = broken_v2_store(&dir);
+        let counted = AtomicBool::new(false);
+        for _ in 0..5 {
+            let result = ensure_store_version_with_policy(
+                &path,
+                STORE_FORMAT_VERSION,
+                UPGRADE_STEPS,
+                Policy::SetAsideAfterRepeatedFailures {
+                    counter: failure_counter_path(&path).unwrap(),
+                    counted: &counted,
+                },
+            );
+            assert!(result.is_err());
+        }
+        assert_eq!(counter_text(&path).as_deref(), Some("2 1\n"));
+        assert_eq!(user_version(&path), 2);
+    }
+
+    #[test]
+    fn success_or_a_different_failing_step_restarts_the_run() {
+        let dir = TempDir::new().unwrap();
+        let path = v1_store(&dir);
+        let counter = failure_counter_path(&path).unwrap();
+        // Two earlier failures at another version do not count toward this one.
+        fs::write(&counter, "7 2\n").unwrap();
+        let failing = [UpgradeStep {
+            from: 1,
+            run: constraint_step,
+        }];
+        assert!(launch(&path, 2, &failing).is_err());
+        assert_eq!(counter_text(&path).as_deref(), Some("1 1\n"));
+        // A successful upgrade clears the run.
+        let ok = [UpgradeStep {
+            from: 1,
+            run: add_marker_table,
+        }];
+        assert_eq!(
+            launch(&path, 2, &ok).unwrap(),
+            StoreVersionAction::Upgraded { from: 1, to: 2 }
+        );
+        assert_eq!(counter_text(&path), None);
+    }
+
+    #[test]
+    fn unreadable_counter_never_causes_a_set_aside() {
+        let dir = TempDir::new().unwrap();
+        let path = broken_v2_store(&dir);
+        fs::write(failure_counter_path(&path).unwrap(), "garbage").unwrap();
+        assert!(launch(&path, STORE_FORMAT_VERSION, UPGRADE_STEPS).is_err());
+        assert_eq!(counter_text(&path).as_deref(), Some("2 1\n"));
+        assert_eq!(user_version(&path), 2);
+    }
+
+    /// A real store of [`STORE_FORMAT_VERSION`] whose header still reads but
+    /// whose interior pages are garbage. DELETE journal so the bytes on disk
+    /// are the whole database.
+    fn body_corrupt_store(dir: &TempDir) -> PathBuf {
+        let path = dir.path().join("store.db");
+        let conn = Connection::open(&path).unwrap();
+        conn.execute_batch(
+            "PRAGMA journal_mode=DELETE; CREATE TABLE kv (key BLOB PRIMARY KEY, value BLOB);",
+        )
+        .unwrap();
+        for i in 0..2000u32 {
+            conn.execute(
+                "INSERT INTO kv(key, value) VALUES (?1, ?2)",
+                rusqlite::params![i.to_be_bytes().to_vec(), vec![7u8; 64]],
+            )
+            .unwrap();
+        }
+        conn.pragma_update(None, "user_version", STORE_FORMAT_VERSION)
+            .unwrap();
+        drop(conn);
+        let mut bytes = fs::read(&path).unwrap();
+        for b in bytes.iter_mut().skip(4096) {
+            *b = 0xA5;
+        }
+        fs::write(&path, &bytes).unwrap();
+        path
+    }
+
+    #[test]
+    fn body_corruption_passes_the_version_check_but_fails_quick_check() {
+        let dir = TempDir::new().unwrap();
+        let path = body_corrupt_store(&dir);
+        assert_eq!(
+            launch(&path, STORE_FORMAT_VERSION, UPGRADE_STEPS).unwrap(),
+            StoreVersionAction::Current
+        );
+        assert!(body_is_corrupt(&path).unwrap());
+    }
+
+    #[test]
+    fn body_corruption_is_set_aside_on_the_third_consecutive_failed_init() {
+        let dir = TempDir::new().unwrap();
+        let path = body_corrupt_store(&dir);
+        let original = fs::read(&path).unwrap();
+        let counter = integrity_counter_path(&path).unwrap();
+        for n in 1..UPGRADE_FAILURE_LAUNCHES {
+            let counted = AtomicBool::new(false);
+            assert_eq!(
+                recover_after_init_failure_with(&path, &counted).unwrap(),
+                None
+            );
+            assert_eq!(
+                fs::read(&path).unwrap(),
+                original,
+                "kept in place on launch {n}"
+            );
+            assert_eq!(
+                fs::read_to_string(&counter).unwrap(),
+                format!("{} {}\n", INTEGRITY_FAILURE, n)
+            );
+            // A Current store passing the version check must not reset it.
+            assert_eq!(
+                launch(&path, STORE_FORMAT_VERSION, UPGRADE_STEPS).unwrap(),
+                StoreVersionAction::Current
+            );
+        }
+        let counted = AtomicBool::new(false);
+        let action = recover_after_init_failure_with(&path, &counted).unwrap();
+        let Some(StoreVersionAction::SetAside { renamed_to, .. }) = action else {
+            panic!("expected SetAside, got {:?}", action);
+        };
+        assert_eq!(fs::read(dir.path().join(&renamed_to)).unwrap(), original);
+        assert_eq!(user_version(&path), STORE_FORMAT_VERSION);
+        assert!(!counter.exists());
+        // The fresh store opens and gets its own generation.
+        let storage = Storage::new(&path);
+        super::super::verification_epoch::initialize_fresh(&storage).unwrap();
+    }
+
+    #[test]
+    fn a_healthy_store_is_never_counted_after_an_init_failure() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("store.db");
+        initialized_store(&path);
+        for _ in 0..(UPGRADE_FAILURE_LAUNCHES + 1) {
+            let counted = AtomicBool::new(false);
+            assert_eq!(
+                recover_after_init_failure_with(&path, &counted).unwrap(),
+                None
+            );
+        }
+        assert!(!integrity_counter_path(&path).unwrap().exists());
+        assert!(path.is_file());
+    }
+
+    #[test]
+    fn set_aside_leaves_a_one_time_reset_notice() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("store.db");
+        fs::write(&path, b"not a database").unwrap();
+        let StoreVersionAction::SetAside { renamed_to, .. } = ensure_store_version(&path).unwrap()
+        else {
+            panic!("expected SetAside");
+        };
+        assert_eq!(
+            fs::read_to_string(dir.path().join(format!("store.db{}", RESET_NOTICE_SUFFIX)))
+                .unwrap(),
+            renamed_to
+        );
+    }
+
+    #[test]
+    fn successful_open_keeps_the_two_newest_set_aside_copies() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("store.db");
+        initialized_store(&path);
+        for name in [
+            "store.db.incompatible-unreadable-100",
+            "store.db.incompatible-unreadable-100-wal",
+            "store.db.incompatible-4-200",
+            "store.db.incompatible-99-300",
+            "store.db.incompatible-99-300-1",
+            "store.db.incompatible-99-300-1-shm",
+        ] {
+            fs::write(dir.path().join(name), name).unwrap();
+        }
+        fs::create_dir(dir.path().join("store.db.incompatible-unreadable-50")).unwrap();
+        fs::write(
+            dir.path()
+                .join("store.db.incompatible-unreadable-50")
+                .join("CURRENT"),
+            b"x",
+        )
+        .unwrap();
+        fs::write(dir.path().join("store.db.upgrade-failures.tmp"), b"2 1\n").unwrap();
+        fs::write(
+            dir.path().join("store.db.integrity-failures"),
+            b"4294967295 2\n",
+        )
+        .unwrap();
+
+        after_successful_open(&path);
+
+        let left = entries(dir.path());
+        assert!(left.contains(&"store.db.incompatible-99-300".to_string()));
+        assert!(left.contains(&"store.db.incompatible-99-300-1".to_string()));
+        assert!(left.contains(&"store.db.incompatible-99-300-1-shm".to_string()));
+        for gone in [
+            "store.db.incompatible-unreadable-50",
+            "store.db.incompatible-unreadable-100",
+            "store.db.incompatible-unreadable-100-wal",
+            "store.db.incompatible-4-200",
+            "store.db.upgrade-failures.tmp",
+            "store.db.integrity-failures",
+        ] {
+            assert!(
+                !left.contains(&gone.to_string()),
+                "{gone} should be gone, left {left:?}"
+            );
+        }
+        assert!(path.is_file());
+    }
+
+    #[test]
+    fn successful_open_with_few_copies_deletes_nothing() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("store.db");
+        initialized_store(&path);
+        fs::write(
+            dir.path().join("store.db.incompatible-unreadable-100"),
+            b"a",
+        )
+        .unwrap();
+        fs::write(dir.path().join("store.db.incompatible-4-200"), b"b").unwrap();
+        after_successful_open(&path);
+        let left = entries(dir.path());
+        assert!(left.contains(&"store.db.incompatible-unreadable-100".to_string()));
+        assert!(left.contains(&"store.db.incompatible-4-200".to_string()));
     }
 }

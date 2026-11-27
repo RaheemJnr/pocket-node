@@ -101,7 +101,7 @@ class MissingWalletRemoverTest {
         val keys = com.rjnr.pocketnode.data.wallet.KeyManager(context, mnemonics, NoopLogger)
         val realRepository = WalletRepository(db.walletDao(), keys, preferences, preferences, mnemonics, db,
             db.transactionDao(), db.balanceCacheDao(), db.daoCellDao(), db.pendingDaoWithdrawDao(), db.pendingDaoUnlockDao(),
-            db.keyMaterialDao(), db.subAccountCandidateDao(), com.rjnr.pocketnode.data.wallet.SubAccountDiscovery(mnemonics, keys), preferences, NoopLogger)
+            db.keyMaterialDao(), db.subAccountCandidateDao(), com.rjnr.pocketnode.data.wallet.SubAccountDiscovery(mnemonics, keys), preferences, NoopLogger, com.rjnr.pocketnode.data.gateway.DaoRecoveryLifetime())
         val realState = RecoveryStateStore(context)
         realState.addUnverified("lost"); realState.addUnverified("ok")
         val realRemover = MissingWalletRemover(realRepository, gateway, restorer, realState, NoopLogger)

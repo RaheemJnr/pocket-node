@@ -59,6 +59,15 @@ class SubAccountReconcilerTest {
     private suspend fun stateOf(index: Int): String =
         dao.getForParent(parent).first { it.accountIndex == index }.state
 
+    @Test fun `durable recovery prevents near tip empty until genesis explicitly completes`() = runTest {
+        seed(1, "0xaa", registeredFrom = 100_000L)
+        val r = SubAccountReconciler(dao, NoopLogger) { false }
+        r.reconcileNow(mapOf("0xaa" to 200_000L), 200_000L, mapOf((parent to "0xaa") to false))
+        assertEquals(SubAccountCandidateEntity.STATE_PENDING, stateOf(1))
+        r.reconcileNow(mapOf("0xaa" to 200_000L), 200_000L, mapOf((parent to "0xaa") to true))
+        assertEquals(SubAccountCandidateEntity.STATE_EMPTY, stateOf(1))
+    }
+
     @Test
     fun `history flips PENDING to FOUND`() = runTest {
         seed(1, "0xaa")

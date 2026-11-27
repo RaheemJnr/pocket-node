@@ -103,6 +103,7 @@ class ActivityViewModelExportTest {
         pendingBroadcastDao = pendingBroadcastDao,
         appStatePreferences = appStatePreferences,
         uiPreferences = uiPreferences,
+        walletRepository = mockk(relaxed = true),
         logger = NoopLogger, verificationCacheGate = com.rjnr.pocketnode.data.gateway.readyVerificationGate()).also { it.exportIo = Dispatchers.Unconfined }
 
     @Test

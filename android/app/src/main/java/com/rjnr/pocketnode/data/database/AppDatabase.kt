@@ -32,6 +32,11 @@ import com.rjnr.pocketnode.data.database.entity.WalletEntity
 
 @Database(
     entities = [
+        com.rjnr.pocketnode.data.storage.HistoryArchiveRow::class,
+        com.rjnr.pocketnode.data.storage.DaoHistoryArchiveRow::class,
+        com.rjnr.pocketnode.data.storage.HistoryRecoveryJob::class,
+        com.rjnr.pocketnode.data.storage.HistoryRecoveryEpoch::class,
+        com.rjnr.pocketnode.data.storage.HistoryScriptRecoveryJob::class,
         com.rjnr.pocketnode.data.database.entity.WalletPendingCleanupEntity::class,
         WalletVaultEntity::class,
         WalletPassphraseProfileEntity::class,
@@ -99,7 +104,7 @@ import com.rjnr.pocketnode.data.database.entity.WalletEntity
     // Version 18 adds verified wallet envelopes, the installation passphrase profile,
     // and retained legacy ciphertext. No existing row is converted by the SQL migration.
     // Version 19 records retryable file cleanup atomically with ordinary wallet deletion.
-    version = 20,
+    version = 21,
     // Schema export re-enabled (#149). It was OFF because Room 2.8.4's
     // bundled kotlinx-serialization-core crashed KSP with an AbstractMethodError
     // against the project's kotlinx-serialization-json:1.8.0. Verified clean
@@ -120,6 +125,7 @@ abstract class AppDatabase : RoomDatabase() {
         walletStorage = com.rjnr.pocketnode.data.wallet.WalletStorageBoundary(configuration.context)
     }
 
+    abstract fun historyRecovery(): com.rjnr.pocketnode.data.database.dao.AndroidHistoryRecoveryDao
     abstract fun walletPendingCleanupDao(): com.rjnr.pocketnode.data.database.dao.WalletPendingCleanupDao
     abstract fun walletVaultDao(): WalletVaultDao
     abstract fun transactionDao(): TransactionDao

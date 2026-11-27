@@ -172,6 +172,7 @@ object SharedModule {
         uiPreferences: UiPreferences,
         json: Json,
         logger: Logger,
+        database: com.rjnr.pocketnode.data.database.AppDatabase,
     ): LedgerReader = LedgerReader(
         lightClient,
         balanceCache,
@@ -184,6 +185,7 @@ object SharedModule {
         json,
         logger,
         queryContext = Dispatchers.IO,
+        historyRecovery = database.historyRecovery(),
     )
 
     /**
@@ -283,6 +285,7 @@ object SharedModule {
         syncPreferences: SyncPreferences,
         json: Json,
         logger: Logger,
+        database: com.rjnr.pocketnode.data.database.AppDatabase,
     ): SyncCoordinator = SyncCoordinator(
         walletRegistry,
         syncProgressStore,
@@ -293,6 +296,7 @@ object SharedModule {
         json,
         logger,
         queryContext = Dispatchers.IO,
+        historyRecovery = database.historyRecovery(),
     )
 
     // --- Preference domains (#461) ---

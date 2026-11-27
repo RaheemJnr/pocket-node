@@ -28,7 +28,6 @@
 //! app relaunches instead — see #218 for the app-side mitigation on network
 //! switch, and [`stop`] for why it no longer waits on `ckb-stop-handler` (#487).
 
-use crate::storage::LightClientStorage;
 use super::error::BridgeError;
 use super::store_version::ensure_store_version;
 use super::types::*;
@@ -36,6 +35,7 @@ use crate::protocols::{
     FilterProtocol, LightClientProtocol, Peers, PendingTxs, RelayProtocol, SyncProtocol,
     BAD_MESSAGE_ALLOWED_EACH_HOUR, CHECK_POINT_INTERVAL,
 };
+use crate::storage::LightClientStorage;
 use crate::storage::{Storage, StorageWithChainData};
 use crate::types::RunEnv;
 use crate::utils;
@@ -146,18 +146,38 @@ pub fn init(
     })?;
 
     // Check the store's format version before the storage layer opens it. A
-    // store this build cannot read is set aside (renamed, never deleted) and a
-    // fresh one is created, so init carries on either way.
+    // store this build cannot read (corrupt, newer, or an old RocksDB
+    // directory) is set aside (renamed, never deleted) and a fresh one is
+    // created; initialize_fresh below then gives it a new verification
+    // generation, so the apps re-fence their caches. Transient I/O and lock
+    // errors fail this init with the store kept in place. A failing upgrade
+    // step also fails init, until the same step has failed on
+    // UPGRADE_FAILURE_LAUNCHES consecutive launches; then it is set aside.
     let store_action = ensure_store_version(&run_env.store.path).map_err(|e| {
         error!("Failed to check store format version: {}", e);
         e
     })?;
     info!("Store format version check: {:?}", store_action);
 
-    // Initialize storage
+    // Initialize storage. A store whose header reads but whose body is
+    // corrupt passes the version check and fails here; it goes through the
+    // same repeated-launch policy (integrity check, then three consecutive
+    // launches) before it is set aside and a fresh store is opened.
     info!("Initializing storage...");
-    let storage = Storage::new(&run_env.store.path);
-    super::verification_epoch::initialize_fresh(&storage)?;
+    let storage = match open_store(&run_env.store.path) {
+        Ok(storage) => storage,
+        Err(open_error) => {
+            error!("Failed to open the light client store: {}", open_error);
+            match super::store_version::recover_after_init_failure(&run_env.store.path)? {
+                Some(action) => {
+                    warn!("Store recovered after a failed init: {:?}", action);
+                    open_store(&run_env.store.path)?
+                }
+                None => return Err(open_error),
+            }
+        }
+    };
+    super::store_version::after_successful_open(&run_env.store.path);
 
     // Load chain spec
     info!("Loading chain spec for: {}", run_env.chain);
@@ -179,8 +199,12 @@ pub fn init(
     info!("Initializing genesis block...");
     storage.init_genesis_block(consensus.genesis_block().data());
 
-    info!("Cleaning up invalid matched blocks...");
-    storage.cleanup_invalid_matched_blocks();
+    // No network/protocol can use format-3 state until the resumable migration
+    // gate and any interrupted genesis index commit have completed.
+    use crate::storage::scan::ScanStorage;
+    storage
+        .prepare_scoped_scans()
+        .map_err(|error| BridgeError::Storage(error.to_string()))?;
 
     // Initialize network components
     info!("Initializing network state...");
@@ -355,6 +379,17 @@ pub fn init(
     // The "initialized" notification is emitted by the platform bridge, which
     // only finishes wiring its own callback handles after `init` returns Ok.
     Ok(())
+}
+
+/// Opens the store and makes sure it carries a verification identity. The
+/// storage layer panics on a store it cannot open or initialize; that panic is
+/// caught here so the caller can run the integrity check instead of failing
+/// the same way on every launch.
+fn open_store(path: &std::path::Path) -> Result<Storage, BridgeError> {
+    let storage = std::panic::catch_unwind(|| Storage::new(path))
+        .map_err(|_| BridgeError::Storage("light client store could not be opened".into()))?;
+    super::verification_epoch::initialize_fresh(&storage)?;
+    Ok(storage)
 }
 
 /// Load config from TOML file
@@ -775,7 +810,10 @@ mod tests {
         }
 
         assert_eq!(winners.load(std::sync::atomic::Ordering::SeqCst), 1);
-        assert_eq!(state.load(std::sync::atomic::Ordering::SeqCst), STATE_STOPPED);
+        assert_eq!(
+            state.load(std::sync::atomic::Ordering::SeqCst),
+            STATE_STOPPED
+        );
     }
 
     /// A transition from the wrong state changes nothing.
