@@ -60,6 +60,8 @@ class GatewayRepositoryRecoveryLifetimeTest {
     private lateinit var prefs: WalletPreferences
     private lateinit var cacheManager: CacheManager
     private val lifetime = DaoRecoveryLifetime()
+    /** The verification gate's handoff counter; bumped when the gate closes. */
+    @Volatile private var gateLifecycle = 0L
     private val json = Json { ignoreUnknownKeys = true; encodeDefaults = true }
     private val script = Script(
         codeHash = Script.SECP256K1_CODE_HASH,
@@ -86,7 +88,7 @@ class GatewayRepositoryRecoveryLifetimeTest {
         prefs.setSyncStrategy(SyncStrategy.ALL_WALLETS)
         prefs.setActiveWalletId("A")
         runBlocking { db.walletDao().insert(wallet) }
-        cacheManager = spyk(CacheManager(db.transactionDao(), db.balanceCacheDao(), NoopLogger, readyVerificationGate()))
+        cacheManager = spyk(CacheManager(db.transactionDao(), db.balanceCacheDao(), NoopLogger, readyVerificationGate { gateLifecycle }))
     }
 
     @After
@@ -171,12 +173,14 @@ class GatewayRepositoryRecoveryLifetimeTest {
     }
 
     @Test
-    fun `balance written while coverage is invalidated does not stay cached`() {
+    fun `balance written across a chain-cache handoff does not stay cached`() {
         val repository = provided()
         coEvery { cacheManager.cacheBalance(any(), any(), any()) } coAnswers {
             callOriginal()
-            // An invalidation landing while the cache write runs, after the
-            // repository's own pre-write revision check.
+            // A handoff landing while the cache write runs, after the
+            // repository's own pre-write revision check: the gate closes
+            // (its lifecycle moves) and invalidates the lifetime.
+            gateLifecycle += 1
             lifetime.invalidate()
         }
 
@@ -184,7 +188,25 @@ class GatewayRepositoryRecoveryLifetimeTest {
 
         assertTrue("Read under revoked coverage must fail", result.isFailure)
         assertNull(
-            "Balance from revoked coverage must not persist",
+            "Balance from a replaced store must not persist",
+            runBlocking { db.balanceCacheDao().getByWalletAndNetwork("A", "TESTNET") },
+        )
+    }
+
+    @Test
+    fun `wallet switch or backgrounding mid write keeps the last good cached balance`() {
+        val repository = provided()
+        coEvery { cacheManager.cacheBalance(any(), any(), any()) } coAnswers {
+            callOriginal()
+            // A wallet switch or onStopped: the lifetime moves, the gate does not.
+            lifetime.invalidate()
+        }
+
+        val result = runBlocking { repository.refreshBalanceForWallet("A", testnetAddress) }
+
+        assertTrue("The read is not published under revoked coverage", result.isFailure)
+        assertNotNull(
+            "The chain did not change, so the cached balance stays",
             runBlocking { db.balanceCacheDao().getByWalletAndNetwork("A", "TESTNET") },
         )
     }

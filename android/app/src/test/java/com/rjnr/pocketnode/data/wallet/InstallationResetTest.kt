@@ -44,7 +44,7 @@ class InstallationResetTest {
         val repo = WalletRepository(db.walletDao(), keys, preferences, preferences, mnemonic, db,
             db.transactionDao(), db.balanceCacheDao(), db.daoCellDao(), db.pendingDaoWithdrawDao(),
             db.pendingDaoUnlockDao(), db.keyMaterialDao(), db.subAccountCandidateDao(),
-            SubAccountDiscovery(mnemonic, keys), preferences, NoopLogger)
+            SubAccountDiscovery(mnemonic, keys), preferences, NoopLogger, com.rjnr.pocketnode.data.gateway.DaoRecoveryLifetime())
         val pin = PinManager(context, com.rjnr.pocketnode.data.crypto.Blake2b(), NoopLogger).apply {
             testPrefs = context.getSharedPreferences("reset_test_pin", 0)
             argon2Iterations = 1; argon2MemoryKb = 8; argon2Parallelism = 1

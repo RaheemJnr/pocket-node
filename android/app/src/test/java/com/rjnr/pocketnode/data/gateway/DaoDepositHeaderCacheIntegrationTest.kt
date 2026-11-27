@@ -60,7 +60,7 @@ class DaoDepositHeaderCacheIntegrationTest {
         resetNative()
         db = Room.inMemoryDatabaseBuilder(ApplicationProvider.getApplicationContext<Context>(), AppDatabase::class.java)
             .allowMainThreadQueries().build()
-        gate = VerificationCacheGate(ApplicationProvider.getApplicationContext(), db)
+        gate = VerificationCacheGate(ApplicationProvider.getApplicationContext(), db, com.rjnr.pocketnode.data.gateway.DaoRecoveryLifetime())
         api = mockk<LightClientApi>(relaxed = true)
         every { api.callRpc("get_verification_epoch") } returns
             """{"result":{"version":1,"generation":"${"e".repeat(32)}"}}"""

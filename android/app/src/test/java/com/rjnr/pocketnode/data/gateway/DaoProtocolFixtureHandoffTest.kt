@@ -51,7 +51,7 @@ class DaoProtocolFixtureHandoffTest {
         every { api.getHeaderByNumber("0x17") } returns fixture.getValue("old_header").toString()
         every { api.getHeaderByNumber("0x19") } returns json.encodeToString(DaoRecoveryHeader.serializer(), receipt.header)
         try {
-            var gate = VerificationCacheGate(context, db)
+            var gate = VerificationCacheGate(context, db, com.rjnr.pocketnode.data.gateway.DaoRecoveryLifetime())
             gate.reconcile(api, network)
             db.walletDao().insert(WalletEntity("fixture-wallet", "Synthetic", "raw_key", null, null, isActive = true))
             db.daoCellDao().upsert(row("0x0"))
@@ -92,7 +92,7 @@ class DaoProtocolFixtureHandoffTest {
             }
             db.close()
             db = open()
-            gate = VerificationCacheGate(context, db)
+            gate = VerificationCacheGate(context, db, com.rjnr.pocketnode.data.gateway.DaoRecoveryLifetime())
             gate.reconcile(api, network)
             recovery = DaoRecoveryCoordinator(db, gate, api, json, DaoRecoveryLifetime().apply { onStarted() })
             assertEquals(1, recovery.guards(network, point).size)
@@ -115,7 +115,7 @@ class DaoProtocolFixtureHandoffTest {
         every { api.pollDaoRecovery(receipt.requestId) } returns envelope("expired_poll")
         every { api.validateDaoRecovery(receipt.requestId, receipt.receiptId) } returns envelope("expired_validate")
         try {
-            val gate = VerificationCacheGate(context, db); gate.reconcile(api, network)
+            val gate = VerificationCacheGate(context, db, com.rjnr.pocketnode.data.gateway.DaoRecoveryLifetime()); gate.reconcile(api, network)
             db.walletDao().insert(WalletEntity("fixture-wallet", "Synthetic", "raw_key", null, null, isActive = true))
             db.daoCellDao().upsert(row("0x0"))
             val recovery = DaoRecoveryCoordinator(db, gate, api, json, DaoRecoveryLifetime().apply { onStarted() })

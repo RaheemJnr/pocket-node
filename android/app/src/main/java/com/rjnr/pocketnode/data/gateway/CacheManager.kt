@@ -46,16 +46,24 @@ class CacheManager @Inject constructor(
         }
     }
 
-    /** Removes one wallet's cached balance, e.g. one written under revoked coverage. */
-    suspend fun deleteBalance(network: String, walletId: String = "") {
-        try {
+    /**
+     * Removes one wallet's cached balance, e.g. one written across a chain-cache
+     * handoff. Returns false, after logging, when the delete failed.
+     */
+    suspend fun deleteBalance(network: String, walletId: String = ""): Boolean {
+        return try {
             balanceCacheDao.deleteByWalletAndNetwork(walletId, network)
+            true
         } catch (e: CancellationException) {
             throw e
         } catch (e: Exception) {
-            logger.w(TAG, "Failed to delete balance cache", e)
+            logger.e(TAG, "Failed to delete balance cache", e)
+            false
         }
     }
+
+    /** Changes only when the verification gate closes for a chain-cache handoff. */
+    fun handoffTicket(): Long = verificationCacheGate.lifecycleRevision()
 
     // --- Transaction cache ---
 

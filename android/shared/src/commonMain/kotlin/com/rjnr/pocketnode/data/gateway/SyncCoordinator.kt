@@ -450,8 +450,12 @@ class SyncCoordinator(
             }
         }
         val scriptJobs = historyRecovery?.scripts(network.name).orEmpty().filter { it.status != "COMPLETE" }.associateBy { it.scriptJson }
+        // Script jobs are discovery obligations: they apply only to candidate
+        // registrations (no wallet id). A restored child wallet registers the
+        // same script under its own id and keeps its seeded start even before
+        // its candidate's job is retired.
         val recoveryStatuses = registrations.map { (status, walletId) ->
-            if (walletId in obligations || json.encodeToString(status.script) in scriptJobs)
+            if (walletId in obligations || (walletId.isEmpty() && json.encodeToString(status.script) in scriptJobs))
                 status.copy(blockNumber = "0x0", historyRecovery = true) else status
         }
         val effectiveWalletIds = registrations.map { it.second }
@@ -525,7 +529,7 @@ class SyncCoordinator(
                 val scriptJson = json.encodeToString(status.script)
                 val job = obligations[walletId]
                 if (job != null) historyRecovery?.registered(walletId, network.name, job.generation, target, scriptJson)
-                val scriptJob = scriptJobs[scriptJson]
+                val scriptJob = if (walletId.isEmpty()) scriptJobs[scriptJson] else null
                 if (scriptJob != null) historyRecovery?.registerScript(scriptJob.parentWalletId, network.name, scriptJson, scriptJob.generation, target)
             }
         }

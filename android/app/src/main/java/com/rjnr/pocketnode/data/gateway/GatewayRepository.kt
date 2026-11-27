@@ -138,6 +138,12 @@ class GatewayRepository @Inject constructor(
     // selection and the restart-based switch) lives on [NodeLifecycle] (#460).
     // These forward so the repository's public surface is unchanged.
     val network: StateFlow<NetworkType> get() = nodeLifecycle.network
+
+    /** @see NodeLifecycle.storeReset */
+    val lightClientReset: StateFlow<Boolean> get() = nodeLifecycle.storeReset
+
+    /** @see NodeLifecycle.acknowledgeStoreReset */
+    fun acknowledgeLightClientReset() = nodeLifecycle.acknowledgeStoreReset()
     val currentNetwork: NetworkType get() = nodeLifecycle.currentNetwork
     val isSwitchingNetwork: StateFlow<Boolean> get() = nodeLifecycle.isSwitchingNetwork
 
@@ -190,7 +196,7 @@ class GatewayRepository @Inject constructor(
                 // A candidate restored by an older build kept its discovery
                 // recovery job, which pins the restored child to genesis
                 // recovery. Retire those before the first registration.
-                runCatching { appDatabase.subAccountCandidateDao().retireRestoredRecoveryJobs() }
+                runCatching { appDatabase.subAccountCandidateDao().repairRestored() }
                     .onSuccess { if (it > 0) logger.i(TAG, "Retired $it recovery jobs of restored sub-accounts") }
                     .onFailure { logger.w(TAG, "Restored recovery job repair failed (non-fatal)", it) }
 
@@ -932,6 +938,7 @@ class GatewayRepository @Inject constructor(
 
     suspend fun refreshBalance(address: String? = null): Result<BalanceResponse> = runCatching { balanceRefreshMutex.withLock {
         val balanceRevision = recoveryLifetime.currentRevision()
+        val handoff = cacheManager.handoffTicket()
         val addr = address ?: getCurrentAddress() ?: throw Exception("Wallet not initialized")
         // One snapshot of the mutable wallet state for the whole read, so a
         // wallet switch mid-walk cannot cache the new wallet's id against the
@@ -964,7 +971,7 @@ class GatewayRepository @Inject constructor(
         ).getOrThrow()
 
         check(recoveryLifetime.currentRevision() == balanceRevision) { "Balance coverage was invalidated" }
-        cacheBalanceIfCurrent(resp, network, wId, balanceRevision)
+        cacheBalanceIfCurrent(resp, network, wId, balanceRevision, handoff)
         recoveryLifetime.ifCurrent(balanceRevision) {
             if (activeWalletId == wId && currentNetwork == network) {
                 balanceCacheUsable = true
@@ -993,26 +1000,41 @@ class GatewayRepository @Inject constructor(
      */
     suspend fun refreshBalanceForWallet(walletId: String, address: String): Result<BalanceResponse> = runCatching { balanceRefreshMutex.withLock {
         val balanceRevision = recoveryLifetime.currentRevision()
+        val handoff = cacheManager.handoffTicket()
         val network = currentNetwork
         val resp = ledgerReader.readBalanceForWallet(walletId, address, network).getOrThrow()
         check(recoveryLifetime.currentRevision() == balanceRevision) { "Balance coverage was invalidated" }
-        cacheBalanceIfCurrent(resp, network, walletId, balanceRevision)
+        cacheBalanceIfCurrent(resp, network, walletId, balanceRevision, handoff)
         resp
     } }
 
     /**
      * Writes [resp] to the balance cache, then re-checks the coverage revision.
      * The write is a suspending Room call, so an invalidation can land while it
-     * runs, after the caller's own check. Writing first and removing the row on
-     * a revision change keeps a balance read under old coverage out of the
-     * cache. An invalidation after the re-check is ordered after the write, so
-     * the invalidator's own cache cleanup covers it. Callers hold
-     * [balanceRefreshMutex], so no newer write for the same key can be removed.
+     * runs, after the caller's own check. The read then fails, so nothing is
+     * published, and what happens to the row depends on what invalidated it:
+     *
+     * - A chain-cache handoff (the verification gate closed after [handoff] was
+     *   taken): the row may describe coverage the new store does not have, so
+     *   it is removed. The gate's reconcile deletes balance_cache itself, but
+     *   a write that lands after that delete would otherwise survive it.
+     * - A wallet switch or the app leaving the foreground: the chain has not
+     *   changed, the row is this wallet's last good balance, and it is kept so
+     *   the next start can still paint a number.
+     *
+     * An invalidation after the re-check is ordered after the write and falls
+     * under the same two cases: a handoff's reconcile clears the network's
+     * balance_cache when the generation changed, and any other invalidation
+     * leaves a valid row. Callers hold [balanceRefreshMutex], so no newer write
+     * for the same key can be removed.
      */
-    private suspend fun cacheBalanceIfCurrent(resp: BalanceResponse, network: NetworkType, walletId: String, balanceRevision: Long) {
+    private suspend fun cacheBalanceIfCurrent(resp: BalanceResponse, network: NetworkType, walletId: String, balanceRevision: Long, handoff: Long) {
         cacheManager.cacheBalance(resp, network.name, walletId = walletId)
         if (recoveryLifetime.currentRevision() != balanceRevision) {
-            withContext(NonCancellable) { cacheManager.deleteBalance(network.name, walletId = walletId) }
+            if (cacheManager.handoffTicket() != handoff) {
+                val deleted = withContext(NonCancellable) { cacheManager.deleteBalance(network.name, walletId = walletId) }
+                if (!deleted) logger.e(TAG, "Balance written across a chain-cache handoff could not be removed for $walletId")
+            }
             throw IllegalStateException("Balance coverage was invalidated")
         }
     }

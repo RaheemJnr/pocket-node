@@ -20,7 +20,7 @@ import javax.inject.Singleton
 class VerificationCacheGate @Inject constructor(
     @ApplicationContext context: Context,
     private val database: AppDatabase,
-    private val recoveryLifetime: DaoRecoveryLifetime = DaoRecoveryLifetime(),
+    private val recoveryLifetime: DaoRecoveryLifetime,
 ) {
     private val applied = context.getSharedPreferences("verified_chain_cache", Context.MODE_PRIVATE)
     internal var writeGeneration: suspend (String, String) -> Boolean = { network, generation ->

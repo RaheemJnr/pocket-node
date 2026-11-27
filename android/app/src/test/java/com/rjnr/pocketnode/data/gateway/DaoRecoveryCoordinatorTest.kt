@@ -601,7 +601,7 @@ class DaoRecoveryCoordinatorTest {
         val isolated = Room.inMemoryDatabaseBuilder(ApplicationProvider.getApplicationContext<Context>(), AppDatabase::class.java)
             .setTransactionExecutor { task -> executor.execute { task.run(); afterTransaction?.invoke() } }.build()
         try {
-            val isolatedGate = VerificationCacheGate(ApplicationProvider.getApplicationContext(), isolated)
+            val isolatedGate = VerificationCacheGate(ApplicationProvider.getApplicationContext(), isolated, com.rjnr.pocketnode.data.gateway.DaoRecoveryLifetime())
             isolatedGate.reconcile(api, network)
             val ticket = isolatedGate.requireReadyRevision(network.name)
             val operation = async(start = kotlinx.coroutines.CoroutineStart.LAZY) {

@@ -219,6 +219,11 @@ class HomeViewModel @Inject constructor(
             }
         }
         viewModelScope.launch {
+            repository.lightClientReset.collect { reset ->
+                _uiState.update { it.copy(lightClientReset = reset) }
+            }
+        }
+        viewModelScope.launch {
             walletPreferences.priceServiceEnabledFlow.drop(1).collect { enabled ->
                 if (enabled) {
                     fetchPrice()
@@ -618,6 +623,11 @@ class HomeViewModel @Inject constructor(
 
     fun clearError() {
         _uiState.update { it.copy(error = null) }
+    }
+
+    /** The one-time light client reset notice was shown. */
+    fun acknowledgeLightClientReset() {
+        repository.acknowledgeLightClientReset()
     }
 
     /**
@@ -1279,6 +1289,8 @@ class HomeViewModel @Inject constructor(
 }
 
 data class HomeUiState(
+    // The light client set its unreadable store aside and started fresh; shown once.
+    val lightClientReset: Boolean = false,
     val recovery: com.rjnr.pocketnode.data.history.RecoveryPresentation = com.rjnr.pocketnode.data.history.RecoveryPresentation(),
     val hasBalance: Boolean = false,
     val isLoading: Boolean = false,

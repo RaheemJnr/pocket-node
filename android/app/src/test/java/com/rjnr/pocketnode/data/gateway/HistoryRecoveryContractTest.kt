@@ -402,4 +402,48 @@ class HistoryRecoveryContractTest {
         }
         assertEquals(0, db.subAccountCandidateDao().retireRestoredRecoveryJobs())
     }
+
+    @Test fun `a pending discovery job never forces a wallet's own registration`() = runTest {
+        jobs()
+        candidatesWithJobs()
+        // The child is committed but its candidate is not RESTORED yet (or the
+        // mark failed): its job is still pending.
+        val payloads = mutableListOf<String>()
+        val api = mockk<LightClientApi>(relaxed = true) {
+            every { getTipHeader() } returns tip()
+            every { setScripts(capture(payloads), any()) } returns true
+        }
+        val coordinator = SyncCoordinator(registry(), mockk(relaxed = true), RoomSubAccountCandidateStore(db.subAccountCandidateDao()),
+            mockk(relaxed = true), api, mockk(relaxed = true), json, NoopLogger, historyRecovery = db.historyRecovery())
+        assertTrue(coordinator.setScriptsAndRecord(
+            listOf(JniScriptStatus(childScript, "lock", "0x2710"), JniScriptStatus(siblingScript, "lock", "0x2710")),
+            listOf("child", ""), SyncCoordinator.CMD_SET_SCRIPTS_ALL, NetworkType.MAINNET))
+        val sent = json.decodeFromString<List<JniScriptStatus>>(payloads.single())
+        val own = sent.single { it.script == childScript }
+        assertEquals("0x2710", own.blockNumber)
+        assertFalse(own.historyRecovery)
+        val candidate = sent.single { it.script == siblingScript }
+        assertEquals("A candidate registration still honours its job", "0x0", candidate.blockNumber)
+        assertTrue(candidate.historyRecovery)
+        assertEquals("PENDING", db.historyRecovery().scripts("MAINNET").single { it.scriptJson == json.encodeToString(childScript) }.status)
+    }
+
+    @Test fun `startup repair restores a candidate whose child wallet exists and retires its job`() = runTest {
+        jobs()
+        candidatesWithJobs()
+        // createSubAccount committed the child but markRestored failed.
+        db.walletDao().insert(com.rjnr.pocketnode.data.database.entity.WalletEntity(
+            walletId = "child", name = "child", type = "mnemonic", derivationPath = "m/44'/309'/1'/0/0",
+            parentWalletId = "active", accountIndex = 1, mainnetAddress = "ckb1c", testnetAddress = "ckt1c",
+            isActive = false, createdAt = 0L, lastActiveAt = 0L))
+
+        assertEquals(2, db.subAccountCandidateDao().repairRestored())
+
+        val states = db.subAccountCandidateDao().getForParent("active").associate { it.accountIndex to it.state }
+        assertEquals("RESTORED", states[1])
+        assertEquals("PENDING", states[2])
+        for (network in listOf("MAINNET", "TESTNET")) {
+            assertEquals(setOf(json.encodeToString(siblingScript)), scriptJobs(network))
+        }
+    }
 }

@@ -4,8 +4,9 @@ import io.mockk.every
 import io.mockk.mockk
 import kotlinx.coroutines.flow.MutableStateFlow
 
-fun readyVerificationGate(): VerificationCacheGate = mockk {
+fun readyVerificationGate(lifecycle: () -> Long = { 0L }): VerificationCacheGate = mockk {
     every { isReady(any()) } returns true
     every { currentRevision() } returns 0L
+    every { lifecycleRevision() } answers { lifecycle() }
     every { readyNetworks } returns MutableStateFlow(setOf("MAINNET", "TESTNET"))
 }

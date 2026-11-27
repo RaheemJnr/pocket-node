@@ -31,7 +31,7 @@ import org.robolectric.annotation.Config
 class NodeLifecycleSwitchTest {
     private val base = ApplicationProvider.getApplicationContext<Context>()
     private val db = Room.inMemoryDatabaseBuilder(base, AppDatabase::class.java).allowMainThreadQueries().build()
-    private val gate = VerificationCacheGate(base, db)
+    private val gate = VerificationCacheGate(base, db, com.rjnr.pocketnode.data.gateway.DaoRecoveryLifetime())
     private var epoch = "a".repeat(32)
     private var handshakes = 0
     private val client = mockk<LightClientApi>(relaxed = true).apply {

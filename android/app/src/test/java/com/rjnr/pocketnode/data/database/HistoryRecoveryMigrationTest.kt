@@ -58,14 +58,14 @@ class HistoryRecoveryMigrationTest {
                 assertEquals(setOf("erased"), archive.keys)
                 assertNull(archive.getValue("erased").blockNumberHint)
                 assertEquals(17_000_000L, database.historyRecovery().job("inactive", "MAINNET")!!.previousSavedBlock)
-                val gate = VerificationCacheGate(context, database)
+                val gate = VerificationCacheGate(context, database, com.rjnr.pocketnode.data.gateway.DaoRecoveryLifetime())
                 gate.writeGeneration = { _, _ -> false }
                 try { gate.reconcile(client, NetworkType.MAINNET); fail("accepted failed marker") } catch (_: IllegalStateException) { }
                 assertFalse(gate.isReady("MAINNET"))
             } finally { database.close() }
             database = open()
             try {
-                VerificationCacheGate(context, database).reconcile(client, NetworkType.MAINNET)
+                VerificationCacheGate(context, database, com.rjnr.pocketnode.data.gateway.DaoRecoveryLifetime()).reconcile(client, NetworkType.MAINNET)
                 val archive = database.historyRecovery().archive("inactive", "MAINNET").associateBy { it.txHash }
                 assertEquals("0xf42400", archive.getValue("historic").blockNumberHint)
                 assertEquals("42", archive.getValue("historic").balanceChangeHint)

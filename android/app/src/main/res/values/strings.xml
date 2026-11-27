@@ -285,6 +285,7 @@
     <string name="home_switch_network_title">Switch to %1$s?</string>
     <string name="home_switch_restart">Switch &amp; Restart</string>
     <string name="home_cancel">Cancel</string>
+    <string name="home_light_client_reset">Light client data was reset because it could not be read. Your history is being rebuilt.</string>
     <string name="home_retry_dialog_title">Retry transaction?</string>
     <string name="home_retry_dialog_body">This transaction may not have reached the network. Retry?</string>
     <string name="home_retry">Retry</string>

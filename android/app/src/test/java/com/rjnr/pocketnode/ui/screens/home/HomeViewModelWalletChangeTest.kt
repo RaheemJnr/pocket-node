@@ -124,6 +124,7 @@ class HomeViewModelWalletChangeTest {
         every { nodeLifecycle.currentNetwork } returns NetworkType.TESTNET
         every { nodeLifecycle.network } returns MutableStateFlow(NetworkType.TESTNET)
         every { nodeLifecycle.isSwitchingNetwork } returns MutableStateFlow(false)
+        every { nodeLifecycle.storeReset } returns MutableStateFlow(false)
         coEvery { nodeLifecycle.awaitNodeReady() } returns true
         val startupReachedNode = CompletableDeferred<Unit>()
         coEvery { nodeLifecycle.initializeNode(any(), any()) } answers { startupReachedNode.complete(Unit) }
@@ -156,7 +157,7 @@ class HomeViewModelWalletChangeTest {
             db.walletDao(), keyManager, prefs, prefs, mm, db,
             db.transactionDao(), db.balanceCacheDao(), db.daoCellDao(),
             db.pendingDaoWithdrawDao(), db.pendingDaoUnlockDao(), db.keyMaterialDao(),
-            db.subAccountCandidateDao(), SubAccountDiscovery(mm, keyManager), prefs, NoopLogger,
+            db.subAccountCandidateDao(), SubAccountDiscovery(mm, keyManager), prefs, NoopLogger, recoveryLifetime,
         )
     }
 

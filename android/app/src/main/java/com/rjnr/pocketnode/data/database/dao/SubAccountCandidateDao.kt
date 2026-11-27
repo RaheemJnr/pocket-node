@@ -65,6 +65,21 @@ interface SubAccountCandidateDao {
     @Query("DELETE FROM history_script_recovery_jobs WHERE EXISTS (SELECT 1 FROM sub_account_candidates c WHERE c.parentWalletId = history_script_recovery_jobs.parentWalletId AND c.state = 'RESTORED' AND instr(history_script_recovery_jobs.scriptJson, '\"' || c.scriptArgs || '\"') > 0)")
     suspend fun retireRestoredRecoveryJobs(): Int
 
+    /**
+     * Startup repair for a restore whose [markRestored] failed after the child
+     * wallet was committed: a sub-account wallet at the candidate's path
+     * supersedes the candidate, exactly as the create would have recorded.
+     */
+    @Query("UPDATE sub_account_candidates SET state = 'RESTORED' WHERE state != 'RESTORED' AND EXISTS (SELECT 1 FROM wallets w WHERE w.parentWalletId = sub_account_candidates.parentWalletId AND w.derivationPath = sub_account_candidates.derivationPath)")
+    suspend fun restoreCandidatesWithWallets(): Int
+
+    /** Both startup repairs, in order, in one transaction. Returns jobs retired. */
+    @Transaction
+    suspend fun repairRestored(): Int {
+        restoreCandidatesWithWallets()
+        return retireRestoredRecoveryJobs()
+    }
+
     /** Source state and recovery authorization are checked by the same SQL write. */
     @Query("UPDATE sub_account_candidates SET state = :state WHERE parentWalletId = :parentId AND derivationPath = :derivationPath AND scriptArgs = :scriptArgs AND state != 'RESTORED' AND EXISTS (SELECT 1 FROM history_script_recovery_jobs WHERE parentWalletId = :parentId AND network = :network AND scriptJson = :scriptJson AND generation = :generation AND status = 'COMPLETE' AND generation = (SELECT generation FROM history_recovery_epochs WHERE network = :network))")
     suspend fun applyRecoveryState(parentId: String, derivationPath: String, state: String, network: String, generation: String, scriptJson: String, scriptArgs: String)

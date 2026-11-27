@@ -46,6 +46,16 @@ class RoomKmpBalanceCache(
         }
     }
 
+    override suspend fun deleteBalance(network: String, walletId: String): Boolean = try {
+        dao.deleteByWalletAndNetwork(walletId, network)
+        true
+    } catch (e: CancellationException) {
+        throw e
+    } catch (e: Exception) {
+        logger.e(TAG, "Failed to delete balance cache", e)
+        false
+    }
+
     private companion object {
         const val TAG = "RoomKmpBalanceCache"
     }

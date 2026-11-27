@@ -317,6 +317,16 @@ fun HomeScreen(
         )
     }
 
+    // Once, after the light client set an unreadable store aside: the
+    // balance and history are rebuilt from scratch, so say why.
+    val lightClientResetMessage = stringResource(R.string.home_light_client_reset)
+    LaunchedEffect(uiState.lightClientReset) {
+        if (uiState.lightClientReset) {
+            snackbarHostState.showSnackbar(lightClientResetMessage, duration = SnackbarDuration.Long)
+            viewModel.acknowledgeLightClientReset()
+        }
+    }
+
     LaunchedEffect(uiState.error) {
         uiState.error?.let { error ->
             val resolved = error.resolveString(context)

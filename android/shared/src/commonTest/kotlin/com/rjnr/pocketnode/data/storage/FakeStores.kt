@@ -186,7 +186,10 @@ class FakeBalanceCache(
 ) : BalanceCache {
 
     override suspend fun getCachedBalance(network: String, walletId: String): BalanceResponse? =
-        rows[walletId to network]
+        rows[walletId to network].also { afterRead() }
+
+    /** Runs after each read; a test can revoke coverage here. */
+    var afterRead: () -> Unit = {}
 
     override suspend fun cacheBalance(
         response: BalanceResponse,
@@ -194,6 +197,15 @@ class FakeBalanceCache(
         walletId: String,
     ) {
         rows[walletId to network] = response
+        afterWrite()
+    }
+
+    /** Runs after each write; a test can revoke coverage here. */
+    var afterWrite: () -> Unit = {}
+
+    override suspend fun deleteBalance(network: String, walletId: String): Boolean {
+        rows.remove(walletId to network)
+        return true
     }
 }
 

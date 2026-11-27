@@ -77,14 +77,14 @@ class PublishedHistoryUpgradeTest {
                 assertEquals(12_000_000L, database.historyRecovery().job("inactive", "MAINNET")!!.previousLightStart)
                 assertEquals(17_000_000L, database.historyRecovery().job("inactive", "MAINNET")!!.previousSavedBlock)
                 assertNotNull(database.historyRecovery().job("empty", "MAINNET"))
-                val gate = VerificationCacheGate(context, database)
+                val gate = VerificationCacheGate(context, database, com.rjnr.pocketnode.data.gateway.DaoRecoveryLifetime())
                 gate.writeGeneration = { _, _ -> false }
                 try { gate.reconcile(client, NetworkType.MAINNET); fail("accepted failed marker") } catch (_: IllegalStateException) { }
                 assertFalse(gate.isReady("MAINNET"))
             } finally { database.close() }
             database = open()
             try {
-                VerificationCacheGate(context, database).reconcile(client, NetworkType.MAINNET)
+                VerificationCacheGate(context, database, com.rjnr.pocketnode.data.gateway.DaoRecoveryLifetime()).reconcile(client, NetworkType.MAINNET)
                 val archive = database.historyRecovery().archive("inactive", "MAINNET").associateBy { it.txHash }
                 assertEquals(if (erased) null else "0xf42400", archive.getValue("historic").blockNumberHint)
                 assertEquals(if (erased) null else "42", archive.getValue("historic").balanceChangeHint)
@@ -132,7 +132,7 @@ class PublishedHistoryUpgradeTest {
             } finally { database.close() }
             database = open()
             try {
-                val freshGate = VerificationCacheGate(context, database)
+                val freshGate = VerificationCacheGate(context, database, com.rjnr.pocketnode.data.gateway.DaoRecoveryLifetime())
                 assertFalse(freshGate.isReady("MAINNET"))
                 freshGate.reconcile(client, NetworkType.MAINNET)
                 assertEquals("REGISTERED", database.historyRecovery().job("inactive", "MAINNET")!!.status)

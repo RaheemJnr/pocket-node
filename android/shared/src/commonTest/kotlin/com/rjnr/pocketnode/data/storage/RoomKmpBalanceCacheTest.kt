@@ -13,6 +13,7 @@ class RoomKmpBalanceCacheTest {
         val dao = object : BalanceCacheRoomDao {
             override suspend fun upsert(row: BalanceCacheRow) { stored = row }
             override suspend fun getByWalletAndNetwork(walletId: String, network: String) = stored
+            override suspend fun deleteByWalletAndNetwork(walletId: String, network: String) { stored = null }
         }
         val cache = RoomKmpBalanceCache(dao)
         for (height in listOf("0x0", "0", "0x00", "-1")) {
