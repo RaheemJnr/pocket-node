@@ -159,10 +159,25 @@ pub fn init(
     })?;
     info!("Store format version check: {:?}", store_action);
 
-    // Initialize storage
+    // Initialize storage. A store whose header reads but whose body is
+    // corrupt passes the version check and fails here; it goes through the
+    // same repeated-launch policy (integrity check, then three consecutive
+    // launches) before it is set aside and a fresh store is opened.
     info!("Initializing storage...");
-    let storage = Storage::new(&run_env.store.path);
-    super::verification_epoch::initialize_fresh(&storage)?;
+    let storage = match open_store(&run_env.store.path) {
+        Ok(storage) => storage,
+        Err(open_error) => {
+            error!("Failed to open the light client store: {}", open_error);
+            match super::store_version::recover_after_init_failure(&run_env.store.path)? {
+                Some(action) => {
+                    warn!("Store recovered after a failed init: {:?}", action);
+                    open_store(&run_env.store.path)?
+                }
+                None => return Err(open_error),
+            }
+        }
+    };
+    super::store_version::after_successful_open(&run_env.store.path);
 
     // Load chain spec
     info!("Loading chain spec for: {}", run_env.chain);
@@ -364,6 +379,17 @@ pub fn init(
     // The "initialized" notification is emitted by the platform bridge, which
     // only finishes wiring its own callback handles after `init` returns Ok.
     Ok(())
+}
+
+/// Opens the store and makes sure it carries a verification identity. The
+/// storage layer panics on a store it cannot open or initialize; that panic is
+/// caught here so the caller can run the integrity check instead of failing
+/// the same way on every launch.
+fn open_store(path: &std::path::Path) -> Result<Storage, BridgeError> {
+    let storage = std::panic::catch_unwind(|| Storage::new(path))
+        .map_err(|_| BridgeError::Storage("light client store could not be opened".into()))?;
+    super::verification_epoch::initialize_fresh(&storage)?;
+    Ok(storage)
 }
 
 /// Load config from TOML file

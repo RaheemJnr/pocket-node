@@ -82,8 +82,12 @@ per-script progress before protocols run; interrupted genesis indexing remains
 fenced until resumed. A store this build cannot read (corrupt or non-SQLite, a
 newer format, or an old RocksDB directory) is renamed aside, never deleted, and
 replaced by an empty store with a new verification generation, so both apps
-re-fence their caches and recreate history recovery. Every set-aside copy is
-kept; nothing caps or removes them. Transient I/O and lock errors fail startup
+re-fence their caches and recreate history recovery. A one-time
+`store.db.reset-notice` tells the app to say so. After a successful init only
+the 2 newest set-aside copies are kept; older ones are deleted. A store whose
+header reads but whose body is corrupt fails init; `PRAGMA quick_check(1)` then
+counts it (in `store.db.integrity-failures`) and it is set aside on the 3rd
+consecutive launch that finds it corrupt. Transient I/O and lock errors fail startup
 with the store in place. A failing upgrade step also fails startup, until the
 same step has failed on 3 consecutive launches (counted in
 `store.db.upgrade-failures` next to the store, reset on success); the store is

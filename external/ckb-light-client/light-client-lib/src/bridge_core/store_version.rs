@@ -506,10 +506,158 @@ fn set_aside(
     );
 
     create_stamped(path, target)?;
+    // Tell the app once that its chain data was reset. Best effort: losing the
+    // notice only loses the message, never data.
+    if let Err(e) = fs::write(
+        sibling(path, &format!("{}{}", file_name, RESET_NOTICE_SUFFIX)),
+        &base,
+    ) {
+        warn!("Could not record the store reset notice: {}", e);
+    }
     Ok(StoreVersionAction::SetAside {
         found,
         renamed_to: base,
     })
+}
+
+/// Written next to the store when it is set aside: `store.db.reset-notice`,
+/// holding the set-aside name. The app shows a one-time notice and deletes it.
+pub const RESET_NOTICE_SUFFIX: &str = ".reset-notice";
+
+/// Set-aside copies kept after a successful init; older ones are deleted.
+pub const KEEP_SET_ASIDE_COPIES: usize = 2;
+
+/// Counter key for a store whose body failed an integrity check, kept in its
+/// own file because every Current launch resets the upgrade counter.
+const INTEGRITY_FAILURE: u32 = u32::MAX;
+
+/// Called when init could not open a store that passed
+/// [`ensure_store_version`] (for example a store classed Current whose
+/// interior pages are corrupt: its header still reads). Runs
+/// `PRAGMA quick_check(1)`. A corrupt store is counted like a failing upgrade
+/// step and set aside only once [`UPGRADE_FAILURE_LAUNCHES`] consecutive
+/// launches have found it corrupt: the failed init is one signal, the
+/// integrity check a second, and the launch count a third. Returns the
+/// set-aside when it happened; `Ok(None)` keeps the store in place and the
+/// caller reports its original error. An I/O or lock error during the check
+/// is not a signal of corruption and is returned as an error.
+pub fn recover_after_init_failure(path: &Path) -> Result<Option<StoreVersionAction>, BridgeError> {
+    recover_after_init_failure_with(path, &FAILURE_COUNTED_THIS_PROCESS)
+}
+
+fn recover_after_init_failure_with(
+    path: &Path,
+    counted: &AtomicBool,
+) -> Result<Option<StoreVersionAction>, BridgeError> {
+    if !path.is_file() || !body_is_corrupt(path)? {
+        return Ok(None);
+    }
+    let counter = integrity_counter_path(path)?;
+    let launches = record_failed_launch(&counter, INTEGRITY_FAILURE, counted)?;
+    if launches < UPGRADE_FAILURE_LAUNCHES {
+        warn!(
+            "Light client store failed its integrity check ({} of {} launches); kept in place",
+            launches, UPGRADE_FAILURE_LAUNCHES
+        );
+        return Ok(None);
+    }
+    warn!(
+        "Light client store failed its integrity check on {} consecutive launches; setting it aside",
+        launches
+    );
+    let action = set_aside(path, None, STORE_FORMAT_VERSION)?;
+    reset_failures(&counter);
+    Ok(Some(action))
+}
+
+/// `PRAGMA quick_check(1)` on a short-lived connection. `Ok(true)` only for
+/// a definite corruption report; anything transient is an error.
+fn body_is_corrupt(path: &Path) -> Result<bool, BridgeError> {
+    let conn = Connection::open(path).map_err(sqlite_err)?;
+    let result = conn.query_row("PRAGMA quick_check(1)", [], |row| row.get::<_, String>(0));
+    drop(conn);
+    match result {
+        Ok(report) => Ok(report != "ok"),
+        Err(e) if is_unreadable(&e) => Ok(true),
+        Err(e) => Err(sqlite_err(e)),
+    }
+}
+
+/// `store.db` -> `store.db.integrity-failures`, next to the store.
+fn integrity_counter_path(path: &Path) -> Result<PathBuf, BridgeError> {
+    let file_name = path
+        .file_name()
+        .and_then(|n| n.to_str())
+        .ok_or_else(|| BridgeError::Storage("store path has no file name".to_owned()))?;
+    Ok(sibling(path, &format!("{}.integrity-failures", file_name)))
+}
+
+/// Housekeeping once init has opened the store successfully: the integrity
+/// count resets, stray counter temp files from a failed write are removed,
+/// and only the [`KEEP_SET_ASIDE_COPIES`] newest set-aside copies are kept.
+/// A successful init of the current store is the second signal that makes
+/// deleting older copies safe. Failures are logged, never returned.
+pub fn after_successful_open(path: &Path) {
+    let Some(file_name) = path.file_name().and_then(|n| n.to_str()) else {
+        return;
+    };
+    if let Ok(counter) = integrity_counter_path(path) {
+        reset_failures(&counter);
+    }
+    for stray in [
+        format!("{}.upgrade-failures.tmp", file_name),
+        format!("{}.integrity-failures.tmp", file_name),
+    ] {
+        match fs::remove_file(sibling(path, &stray)) {
+            Ok(()) => info!("Removed stray {}", stray),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => warn!("Could not remove stray {}: {}", stray, e),
+        }
+    }
+    prune_set_aside_copies(path, file_name);
+}
+
+/// Deletes set-aside copies older than the [`KEEP_SET_ASIDE_COPIES`] newest,
+/// with their -wal / -shm siblings. Ordered by the set-aside timestamp in
+/// the name, then the collision suffix.
+fn prune_set_aside_copies(path: &Path, file_name: &str) {
+    let Some(dir) = path.parent() else { return };
+    let prefix = format!("{}.incompatible-", file_name);
+    let Ok(entries) = fs::read_dir(dir) else {
+        return;
+    };
+    let mut bases: Vec<((u64, u64), String)> = entries
+        .filter_map(|e| e.ok()?.file_name().into_string().ok())
+        .filter(|n| n.starts_with(&prefix) && !n.ends_with("-wal") && !n.ends_with("-shm"))
+        .filter_map(|n| {
+            let mut parts = n[prefix.len()..].split('-');
+            let _tag = parts.next()?;
+            let ts: u64 = parts.next()?.parse().ok()?;
+            let seq: u64 = parts.next().map_or(Some(0), |p| p.parse().ok())?;
+            Some(((ts, seq), n))
+        })
+        .collect();
+    bases.sort();
+    let excess = bases.len().saturating_sub(KEEP_SET_ASIDE_COPIES);
+    for (_, base) in bases.into_iter().take(excess) {
+        for name in [
+            base.clone(),
+            format!("{}-wal", base),
+            format!("{}-shm", base),
+        ] {
+            let target = dir.join(&name);
+            let removed = if target.is_dir() {
+                fs::remove_dir_all(&target)
+            } else {
+                fs::remove_file(&target)
+            };
+            match removed {
+                Ok(()) => info!("Deleted old set-aside light client store {}", name),
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+                Err(e) => warn!("Could not delete old set-aside store {}: {}", name, e),
+            }
+        }
+    }
 }
 
 fn sibling(path: &Path, name: &str) -> PathBuf {
@@ -1362,5 +1510,185 @@ mod tests {
         assert!(launch(&path, STORE_FORMAT_VERSION, UPGRADE_STEPS).is_err());
         assert_eq!(counter_text(&path).as_deref(), Some("2 1\n"));
         assert_eq!(user_version(&path), 2);
+    }
+
+    /// A real store of [`STORE_FORMAT_VERSION`] whose header still reads but
+    /// whose interior pages are garbage. DELETE journal so the bytes on disk
+    /// are the whole database.
+    fn body_corrupt_store(dir: &TempDir) -> PathBuf {
+        let path = dir.path().join("store.db");
+        let conn = Connection::open(&path).unwrap();
+        conn.execute_batch(
+            "PRAGMA journal_mode=DELETE; CREATE TABLE kv (key BLOB PRIMARY KEY, value BLOB);",
+        )
+        .unwrap();
+        for i in 0..2000u32 {
+            conn.execute(
+                "INSERT INTO kv(key, value) VALUES (?1, ?2)",
+                rusqlite::params![i.to_be_bytes().to_vec(), vec![7u8; 64]],
+            )
+            .unwrap();
+        }
+        conn.pragma_update(None, "user_version", STORE_FORMAT_VERSION)
+            .unwrap();
+        drop(conn);
+        let mut bytes = fs::read(&path).unwrap();
+        for b in bytes.iter_mut().skip(4096) {
+            *b = 0xA5;
+        }
+        fs::write(&path, &bytes).unwrap();
+        path
+    }
+
+    #[test]
+    fn body_corruption_passes_the_version_check_but_fails_quick_check() {
+        let dir = TempDir::new().unwrap();
+        let path = body_corrupt_store(&dir);
+        assert_eq!(
+            launch(&path, STORE_FORMAT_VERSION, UPGRADE_STEPS).unwrap(),
+            StoreVersionAction::Current
+        );
+        assert!(body_is_corrupt(&path).unwrap());
+    }
+
+    #[test]
+    fn body_corruption_is_set_aside_on_the_third_consecutive_failed_init() {
+        let dir = TempDir::new().unwrap();
+        let path = body_corrupt_store(&dir);
+        let original = fs::read(&path).unwrap();
+        let counter = integrity_counter_path(&path).unwrap();
+        for n in 1..UPGRADE_FAILURE_LAUNCHES {
+            let counted = AtomicBool::new(false);
+            assert_eq!(
+                recover_after_init_failure_with(&path, &counted).unwrap(),
+                None
+            );
+            assert_eq!(
+                fs::read(&path).unwrap(),
+                original,
+                "kept in place on launch {n}"
+            );
+            assert_eq!(
+                fs::read_to_string(&counter).unwrap(),
+                format!("{} {}\n", INTEGRITY_FAILURE, n)
+            );
+            // A Current store passing the version check must not reset it.
+            assert_eq!(
+                launch(&path, STORE_FORMAT_VERSION, UPGRADE_STEPS).unwrap(),
+                StoreVersionAction::Current
+            );
+        }
+        let counted = AtomicBool::new(false);
+        let action = recover_after_init_failure_with(&path, &counted).unwrap();
+        let Some(StoreVersionAction::SetAside { renamed_to, .. }) = action else {
+            panic!("expected SetAside, got {:?}", action);
+        };
+        assert_eq!(fs::read(dir.path().join(&renamed_to)).unwrap(), original);
+        assert_eq!(user_version(&path), STORE_FORMAT_VERSION);
+        assert!(!counter.exists());
+        // The fresh store opens and gets its own generation.
+        let storage = Storage::new(&path);
+        super::super::verification_epoch::initialize_fresh(&storage).unwrap();
+    }
+
+    #[test]
+    fn a_healthy_store_is_never_counted_after_an_init_failure() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("store.db");
+        initialized_store(&path);
+        for _ in 0..(UPGRADE_FAILURE_LAUNCHES + 1) {
+            let counted = AtomicBool::new(false);
+            assert_eq!(
+                recover_after_init_failure_with(&path, &counted).unwrap(),
+                None
+            );
+        }
+        assert!(!integrity_counter_path(&path).unwrap().exists());
+        assert!(path.is_file());
+    }
+
+    #[test]
+    fn set_aside_leaves_a_one_time_reset_notice() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("store.db");
+        fs::write(&path, b"not a database").unwrap();
+        let StoreVersionAction::SetAside { renamed_to, .. } = ensure_store_version(&path).unwrap()
+        else {
+            panic!("expected SetAside");
+        };
+        assert_eq!(
+            fs::read_to_string(dir.path().join(format!("store.db{}", RESET_NOTICE_SUFFIX)))
+                .unwrap(),
+            renamed_to
+        );
+    }
+
+    #[test]
+    fn successful_open_keeps_the_two_newest_set_aside_copies() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("store.db");
+        initialized_store(&path);
+        for name in [
+            "store.db.incompatible-unreadable-100",
+            "store.db.incompatible-unreadable-100-wal",
+            "store.db.incompatible-4-200",
+            "store.db.incompatible-99-300",
+            "store.db.incompatible-99-300-1",
+            "store.db.incompatible-99-300-1-shm",
+        ] {
+            fs::write(dir.path().join(name), name).unwrap();
+        }
+        fs::create_dir(dir.path().join("store.db.incompatible-unreadable-50")).unwrap();
+        fs::write(
+            dir.path()
+                .join("store.db.incompatible-unreadable-50")
+                .join("CURRENT"),
+            b"x",
+        )
+        .unwrap();
+        fs::write(dir.path().join("store.db.upgrade-failures.tmp"), b"2 1\n").unwrap();
+        fs::write(
+            dir.path().join("store.db.integrity-failures"),
+            b"4294967295 2\n",
+        )
+        .unwrap();
+
+        after_successful_open(&path);
+
+        let left = entries(dir.path());
+        assert!(left.contains(&"store.db.incompatible-99-300".to_string()));
+        assert!(left.contains(&"store.db.incompatible-99-300-1".to_string()));
+        assert!(left.contains(&"store.db.incompatible-99-300-1-shm".to_string()));
+        for gone in [
+            "store.db.incompatible-unreadable-50",
+            "store.db.incompatible-unreadable-100",
+            "store.db.incompatible-unreadable-100-wal",
+            "store.db.incompatible-4-200",
+            "store.db.upgrade-failures.tmp",
+            "store.db.integrity-failures",
+        ] {
+            assert!(
+                !left.contains(&gone.to_string()),
+                "{gone} should be gone, left {left:?}"
+            );
+        }
+        assert!(path.is_file());
+    }
+
+    #[test]
+    fn successful_open_with_few_copies_deletes_nothing() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("store.db");
+        initialized_store(&path);
+        fs::write(
+            dir.path().join("store.db.incompatible-unreadable-100"),
+            b"a",
+        )
+        .unwrap();
+        fs::write(dir.path().join("store.db.incompatible-4-200"), b"b").unwrap();
+        after_successful_open(&path);
+        let left = entries(dir.path());
+        assert!(left.contains(&"store.db.incompatible-unreadable-100".to_string()));
+        assert!(left.contains(&"store.db.incompatible-4-200".to_string()));
     }
 }
