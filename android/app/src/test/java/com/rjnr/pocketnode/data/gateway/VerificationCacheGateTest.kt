@@ -50,7 +50,10 @@ class VerificationCacheGateTest {
         assertFalse(gate.isReady("MAINNET"))
         gate.reconcile(client(), NetworkType.MAINNET)
         assertTrue(gate.isReady("MAINNET"))
-        assertTrue(db.syncProgressDao().getAllForNetwork("MAINNET").isEmpty())
+        // 1.8.7.1: progress is kept at each wallet's own start, not dropped.
+        // active: earliest tx 900 - 1000 floors at 0, stored as 1 (0 reads as "no progress").
+        assertEquals(1L, db.syncProgressDao().get("active", "MAINNET")!!.localSavedBlockNumber)
+        assertEquals(100L, db.syncProgressDao().get("inactive", "MAINNET")!!.localSavedBlockNumber)
         assertEquals(800L, db.syncProgressDao().get("other", "TESTNET")!!.localSavedBlockNumber)
         assertEquals("UNVERIFIED", db.transactionDao().getByTxHash("confirmed")!!.status)
         assertEquals("UNVERIFIED", db.transactionDao().getByTxHash("remote-pending")!!.status)
@@ -67,7 +70,8 @@ class VerificationCacheGateTest {
         gate.reconcile(client(), NetworkType.MAINNET)
         assertEquals(400L, db.syncProgressDao().get("inactive", "MAINNET")!!.localSavedBlockNumber)
         gate.reconcile(client("b".repeat(32)), NetworkType.MAINNET)
-        assertNull(db.syncProgressDao().get("inactive", "MAINNET"))
+        // Reset to its own start (the start it was registered from), not dropped.
+        assertEquals(100L, db.syncProgressDao().get("inactive", "MAINNET")!!.localSavedBlockNumber)
     }
     @Test fun `malformed epoch leaves gate closed and data untouched`() = runTest {
         seed()
@@ -84,12 +88,13 @@ class VerificationCacheGateTest {
         gate.writeGeneration = { _, _ -> false }
         try { gate.reconcile(client(), NetworkType.MAINNET); fail("accepted failed commit") } catch (_: IllegalStateException) { }
         assertFalse(gate.isReady("MAINNET"))
-        assertTrue(db.syncProgressDao().getAllForNetwork("MAINNET").isEmpty())
+        assertEquals(100L, db.syncProgressDao().get("inactive", "MAINNET")!!.localSavedBlockNumber)
         db.syncProgressDao().upsert(SyncProgressEntity("inactive", "MAINNET", 100, 400, 1))
         gate.writeGeneration = commit
         gate.reconcile(client(), NetworkType.MAINNET)
         assertTrue(gate.isReady("MAINNET"))
-        assertTrue(db.syncProgressDao().getAllForNetwork("MAINNET").isEmpty())
+        // The cleanup repeated: progress is back at the own start.
+        assertEquals(100L, db.syncProgressDao().get("inactive", "MAINNET")!!.localSavedBlockNumber)
     }
     @Test fun `network switch during reconciliation cannot reopen stale gate`() = runTest {
         val gate = VerificationCacheGate(context, db)
@@ -140,7 +145,7 @@ class VerificationCacheGateTest {
             catch (_: IllegalStateException) { }
             assertFalse(gate.isReady("MAINNET"))
             assertEquals("a".repeat(32), preferences.getString("MAINNET", null))
-            assertTrue(db.syncProgressDao().getAllForNetwork("MAINNET").isEmpty())
+            assertEquals(100L, db.syncProgressDao().get("inactive", "MAINNET")!!.localSavedBlockNumber)
         }
         gate.reconcile(client(), NetworkType.MAINNET)
         assertEquals(3, attempts)

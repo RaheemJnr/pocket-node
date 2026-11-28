@@ -341,7 +341,8 @@ object AppModule {
         syncEngine: com.rjnr.pocketnode.data.sync.SyncEngine,
         startupReconciler: com.rjnr.pocketnode.data.gateway.StartupReconciler,
         logger: Logger,
-    ): GatewayRepository = GatewayRepository(keyManager, walletPreferences, json, cacheManager, walletMigrationHelper, walletDao, appDatabase, syncProgressDao, sendPipeline, syncCoordinator, daoGateway, gapLimitGateway, lightClient, ledgerReader, subAccountReconciler, syncServiceCommands, nodeLifecycle, syncEngine, startupReconciler, logger)
+        upgradeRescan: com.rjnr.pocketnode.data.gateway.UpgradeRescanAdvisor,
+    ): GatewayRepository = GatewayRepository(keyManager, walletPreferences, json, cacheManager, walletMigrationHelper, walletDao, appDatabase, syncProgressDao, sendPipeline, syncCoordinator, daoGateway, gapLimitGateway, lightClient, ledgerReader, subAccountReconciler, syncServiceCommands, nodeLifecycle, syncEngine, startupReconciler, logger, upgradeRescan)
 
     /**
      * Production activity probe for sub-account discovery (#82 phase 2):

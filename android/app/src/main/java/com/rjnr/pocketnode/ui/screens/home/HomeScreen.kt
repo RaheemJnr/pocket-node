@@ -98,6 +98,7 @@ import com.rjnr.pocketnode.ui.components.BgSyncStaleBanner
 import com.rjnr.pocketnode.ui.components.FoundFundsCard
 import com.rjnr.pocketnode.ui.components.GapLimitBanner
 import com.rjnr.pocketnode.ui.components.SyncStallBanner
+import com.rjnr.pocketnode.ui.components.UpgradeRescanBanner
 import com.rjnr.pocketnode.ui.components.SyncOptionsSheet
 import com.rjnr.pocketnode.ui.components.UpdateDialog
 import com.rjnr.pocketnode.ui.components.AccountSelectorSheet
@@ -509,6 +510,8 @@ fun HomeScreen(
                     onGapLimitDismiss = { viewModel.dismissGapLimitBanner() },
                     onGapLimitScanNow = { (context as? FragmentActivity)?.let { viewModel.runGapLimitScan(it) } },
                     onGapLimitSweep = { viewModel.requestGapLimitSweep() },
+                    onUpgradeRescan = { viewModel.startUpgradeRescan() },
+                    onUpgradeRescanDismiss = { viewModel.dismissUpgradeRescan() },
                 )
                 if (uiState.isSwitchingWallet) {
                     LinearProgressIndicator(
@@ -621,6 +624,8 @@ fun HomeScreenUI(
     onGapLimitDismiss: () -> Unit = {},
     onGapLimitScanNow: () -> Unit = {},
     onGapLimitSweep: () -> Unit = {},
+    onUpgradeRescan: () -> Unit = {},
+    onUpgradeRescanDismiss: () -> Unit = {},
 ) {
     val homeContentHaptic = LocalHapticFeedback.current
 
@@ -713,6 +718,18 @@ fun HomeScreenUI(
                         minutesStalled = uiState.syncStallMinutes,
                         onSwitchToRecent = onSyncStallSwitchToRecent,
                         onDismiss = onSyncStallDismiss,
+                    )
+                }
+            }
+
+            // 1.8.7.1: older history the 1.8.6 -> 1.8.7 upgrade left out of
+            // this wallet's scan range. One tap starts a CUSTOM resync.
+            uiState.upgradeRescanFromBlock?.let { fromBlock ->
+                item {
+                    UpgradeRescanBanner(
+                        fromBlock = fromBlock,
+                        onScan = onUpgradeRescan,
+                        onDismiss = onUpgradeRescanDismiss,
                     )
                 }
             }
