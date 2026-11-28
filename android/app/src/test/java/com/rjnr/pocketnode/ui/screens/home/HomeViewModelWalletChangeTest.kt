@@ -75,6 +75,8 @@ class HomeViewModelWalletChangeTest {
     private lateinit var walletRepository: WalletRepository
     private val seedAuthorizer = mockk<com.rjnr.pocketnode.data.wallet.SeedPhraseAuthorizer>()
     private val refreshes = AtomicInteger()
+    private val upgradeRescan = mockk<com.rjnr.pocketnode.data.gateway.UpgradeRescanAdvisor>(relaxed = true)
+    private val gatewayLight = mockk<LightClientReadOnly>(relaxed = true)
 
     private fun script(byte: String) = Script(
         codeHash = "0x9bd7e06f3ecf4be0f2fcd2188b23f1b9fcc88e5d4b65a8637b17723bbda3cce8",
@@ -124,6 +126,7 @@ class HomeViewModelWalletChangeTest {
         coEvery { nodeLifecycle.awaitNodeReady() } returns true
         val startupReachedNode = CompletableDeferred<Unit>()
         coEvery { nodeLifecycle.initializeNode(any(), any()) } answers { startupReachedNode.complete(Unit) }
+        coEvery { upgradeRescan.offer(any(), any(), any(), any()) } returns null
         val coordinator = mockk<SyncCoordinator>(relaxed = true)
         every { coordinator.registeredActiveWalletId } returns null
         val syncEngine = mockk<SyncEngine>(relaxed = true)
@@ -131,6 +134,7 @@ class HomeViewModelWalletChangeTest {
         gateway = testGatewayRepository(
             db = db, walletPreferences = prefs, nodeLifecycle = nodeLifecycle, keyManager = keyManager,
             syncCoordinator = coordinator, syncEngine = syncEngine,
+            lightClient = gatewayLight, upgradeRescan = upgradeRescan,
             // A real reader over relaxed stores: its reads fail into a real
             // Result.failure, which a MockK stub cannot return.
             ledgerReader = LedgerReader(
@@ -222,6 +226,41 @@ class HomeViewModelWalletChangeTest {
      * read the active wallet id once, so after a wallet change Home kept the
      * old wallet's in-flight sends and never showed the new wallet's.
      */
+    private val TIP_HEADER = """{"hash":"0x1","number":"0x2000","epoch":"0x0","timestamp":"0x1000",
+        |"parent_hash":"0x0","transactions_root":"0x0","proposals_hash":"0x0","extra_hash":"0x0",
+        |"dao":"0x0","nonce":"0x0"}""".trimMargin()
+
+    /** 1.8.7.1: the banner's Scan is the CUSTOM resync from the offered block. */
+    @Test
+    fun `upgrade scan banner action resyncs the wallet with CUSTOM from the offered block`() {
+        coEvery { gatewayLight.getTipHeader() } returns TIP_HEADER
+        coEvery { upgradeRescan.offer("A", NetworkType.TESTNET, 0x2000L, 0x1000L) } returns 4_242L
+        val vm = newViewModel()
+        vm.started()
+        settle { vm.uiState.value.upgradeRescanFromBlock == 4_242L }
+        vm.startUpgradeRescan()
+        assertEquals(null, vm.uiState.value.upgradeRescanFromBlock)
+        settle {
+            runCatching {
+                io.mockk.verify { upgradeRescan.recordResync("A", NetworkType.TESTNET, SyncMode.CUSTOM, 4_242L) }
+            }.isSuccess
+        }
+        assertEquals(SyncMode.CUSTOM, vm.uiState.value.currentSyncMode)
+        assertEquals(4_242L, vm.uiState.value.savedCustomBlockHeight)
+    }
+
+    @Test
+    fun `upgrade scan banner not now hides it for this launch`() {
+        coEvery { gatewayLight.getTipHeader() } returns TIP_HEADER
+        coEvery { upgradeRescan.offer("A", NetworkType.TESTNET, any(), any()) } returns 4_242L
+        val vm = newViewModel()
+        vm.started()
+        settle { vm.uiState.value.upgradeRescanFromBlock == 4_242L }
+        vm.dismissUpgradeRescan()
+        assertEquals(null, vm.uiState.value.upgradeRescanFromBlock)
+        io.mockk.verify { upgradeRescan.dismissForLaunch("A", NetworkType.TESTNET) }
+    }
+
     @Test
     fun `scan and sweep require authenticated seed even without V2 metadata`() {
         coEvery { seedAuthorizer.authorize(any(), "A", any(), any()) } returns

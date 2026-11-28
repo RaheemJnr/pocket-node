@@ -34,6 +34,7 @@ internal fun testGatewayRepository(
     json: Json = Json { ignoreUnknownKeys = true; encodeDefaults = true },
     syncProgressDao: SyncProgressDao = db.syncProgressDao(),
     walletMigrationHelper: WalletMigrationHelper = mockk(relaxed = true),
+    upgradeRescan: UpgradeRescanAdvisor? = null,
 ): GatewayRepository = GatewayRepository(
     keyManager = keyManager,
     walletPreferences = walletPreferences,
@@ -55,4 +56,5 @@ internal fun testGatewayRepository(
     syncEngine = syncEngine,
     startupReconciler = mockk(relaxed = true),
     logger = NoopLogger,
+    upgradeRescan = upgradeRescan,
 )

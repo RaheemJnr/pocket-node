@@ -578,6 +578,10 @@
     <string name="sync_stall_banner_body">If this wallet has years of history, scanning from that far back is slow. Switch to Recent activity to catch up faster.</string>
     <string name="sync_stall_banner_action_switch_recent">Use Recent</string>
     <string name="sync_stall_banner_action_dismiss">Dismiss</string>
+    <string name="upgrade_rescan_banner_title">Some older transactions are hidden</string>
+    <string name="upgrade_rescan_banner_body">Some of your older transactions are not shown after the last update. Scan from block %1$s to bring them back. Your funds are safe.</string>
+    <string name="upgrade_rescan_banner_action_scan">Scan</string>
+    <string name="upgrade_rescan_banner_action_dismiss">Not now</string>
     <string name="gap_limit_banner_title">Funds may be on other addresses</string>
     <string name="gap_limit_banner_body">A past transaction sent change to an address from your recovery phrase that this app does not scan yet. This happens when the same phrase was used in another wallet app, such as Neuron. Your funds are safe. Run a deeper scan to find them.</string>
     <string name="gap_limit_banner_body_scanning">Scanning the extra addresses from your recovery phrase. This runs with normal sync and can take a few minutes. Your funds are safe.</string>

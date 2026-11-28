@@ -592,6 +592,10 @@ class HomeViewModel @Inject constructor(
                         }
                     }
                 }
+            // 1.8.7.1: older history the 1.8.6 -> 1.8.7 upgrade left outside
+            // this wallet's scan range. An offer only, never an automatic scan.
+            val upgradeRescanFrom = repository.upgradeRescanOffer()
+            _uiState.update { it.copy(upgradeRescanFromBlock = upgradeRescanFrom) }
         } finally {
             txRefreshMutex.unlock()
         }
@@ -768,6 +772,7 @@ class HomeViewModel @Inject constructor(
                 showSyncStallBanner = false,
                 syncStallMinutes = 0L,
                 showGapLimitBanner = false,
+                upgradeRescanFromBlock = null,
                 transactions = emptyList(),
                 currentSyncMode = repository.getSavedSyncMode(),
                 savedCustomBlockHeight = repository.getSavedCustomBlockHeight(),
@@ -790,7 +795,7 @@ class HomeViewModel @Inject constructor(
             try {
                 syncStallDetector.reset()
                 stallBannerDismissed = false
-                _uiState.update { it.copy(isSwitchingWallet = true, showSyncStallBanner = false, syncStallMinutes = 0L, showGapLimitBanner = false) }
+                _uiState.update { it.copy(isSwitchingWallet = true, showSyncStallBanner = false, syncStallMinutes = 0L, showGapLimitBanner = false, upgradeRescanFromBlock = null) }
                 walletRepository.switchActiveWallet(walletId)
                 val wallet = walletRepository.getById(walletId) ?: return@launch
                 repository.onActiveWalletChanged(wallet)
@@ -989,6 +994,23 @@ class HomeViewModel @Inject constructor(
     fun dismissSyncStallBanner() {
         stallBannerDismissed = true
         _uiState.update { it.copy(showSyncStallBanner = false) }
+    }
+
+    /** 1.8.7.1 upgrade-scan banner, "Not now": hidden until the next launch. */
+    fun dismissUpgradeRescan() {
+        repository.dismissUpgradeRescan()
+        _uiState.update { it.copy(upgradeRescanFromBlock = null) }
+    }
+
+    /**
+     * 1.8.7.1 upgrade-scan banner, "Scan": the same CUSTOM resync the sync
+     * options sheet runs. The done flag is written by the repository once
+     * the resync lands.
+     */
+    fun startUpgradeRescan() {
+        val fromBlock = _uiState.value.upgradeRescanFromBlock ?: return
+        _uiState.update { it.copy(upgradeRescanFromBlock = null) }
+        changeSyncMode(SyncMode.CUSTOM, fromBlock)
     }
 
     /** #382 banner: per-wallet permanent dismissal; the Tier 2 deep scan will re-surface via its own flow. */
@@ -1311,6 +1333,8 @@ data class HomeUiState(
     val showBgSyncStalePill: Boolean = false,
     // #382: history shows change that left to addresses this app never derived
     val showGapLimitBanner: Boolean = false,
+    /** 1.8.7.1: block the upgrade-scan banner offers to scan from; null hides it. */
+    val upgradeRescanFromBlock: Long? = null,
     // #382 Tier 2: chain-axis scan state for the active wallet
     val gapLimitScanAvailable: Boolean = false,
     val gapLimitScanning: Boolean = false,

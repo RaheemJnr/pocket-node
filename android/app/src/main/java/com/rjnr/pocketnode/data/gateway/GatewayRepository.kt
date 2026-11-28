@@ -76,6 +76,8 @@ class GatewayRepository @Inject constructor(
     private val syncEngine: SyncEngine,
     private val startupReconciler: StartupReconciler,
     private val logger: Logger,
+    // 1.8.7.1: Home's one-time scan offer for funds the 1.8.7 upgrade hid.
+    private val upgradeRescan: UpgradeRescanAdvisor? = null,
 ) : TipSource, SyncPollSource {
 
     /**
@@ -739,6 +741,7 @@ class GatewayRepository @Inject constructor(
         // deliberately asking us to look again (knmo).
         walletPreferences.clearZeroCellRescanDone(walletId)
         balanceRescanAttempted.remove(walletId)
+        val network = currentNetwork
         return when (walletPreferences.getSyncStrategy()) {
             // registerAccount issues CMD_SET_SCRIPTS_ALL with only the active
             // wallet's scripts, which under ALL_WALLETS / BALANCED unregistered
@@ -837,7 +840,40 @@ class GatewayRepository @Inject constructor(
                     },
                 )
             }
+        }.onSuccess {
+            upgradeRescan?.recordResync(walletId, network, syncMode, customBlockHeight)
         }
+    }
+
+    /**
+     * 1.8.7.1: the block Home offers to scan from for the active wallet when
+     * the 1.8.6 -> 1.8.7 upgrade left older history out of its scan range,
+     * or null. Read-only: the scan itself only starts from the banner, through
+     * [resyncAccount] with CUSTOM. See [UpgradeRescanAdvisor].
+     */
+    suspend fun upgradeRescanOffer(): Long? {
+        val advisor = upgradeRescan ?: return null
+        val walletId = activeWalletId
+        val network = currentNetwork
+        return try {
+            withContext(Dispatchers.IO) {
+                val tip = lightClient.getTipHeader()?.let { json.decodeFromString<JniHeaderView>(it) }
+                    ?: return@withContext null
+                val number = tip.number.removePrefix("0x").toLongOrNull(16) ?: return@withContext null
+                val timestampMs = tip.timestamp.removePrefix("0x").toLongOrNull(16) ?: return@withContext null
+                advisor.offer(walletId, network, number, timestampMs)
+            }
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            logger.w(TAG, "upgradeRescanOffer failed", e)
+            null
+        }
+    }
+
+    /** "Not now" on the upgrade-scan banner: hidden for this launch only. */
+    fun dismissUpgradeRescan() {
+        upgradeRescan?.dismissForLaunch(activeWalletId, currentNetwork)
     }
 
     /**
